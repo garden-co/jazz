@@ -1019,7 +1019,10 @@ describe("cli migrations", () => {
     await rm(externalLock, { recursive: true });
     const results = await resultsPromise;
 
-    expect(results.map((result) => result.code)).toEqual([0, 0, 0, 0]);
+    expect(
+      results.map((result) => result.code),
+      JSON.stringify(results, null, 2),
+    ).toEqual([0, 0, 0, 0]);
     expect(
       results.filter((result) => result.stdout.includes("Wrote initial schema snapshot:")),
     ).toHaveLength(1);
@@ -1042,13 +1045,37 @@ describe("cli migrations", () => {
     await waitForCrashMarker(marker, child);
     await killChild(child);
 
-    const result = await createCatalogueMigration({ schemaDir: root, migrationsDir });
-    expect(result.status).toBe("initial-snapshot");
+    const results = await Promise.all([
+      createCatalogueMigration({ schemaDir: root, migrationsDir }),
+      createCatalogueMigration({ schemaDir: root, migrationsDir }),
+    ]);
+    expect(results.map((result) => result.status).sort()).toEqual([
+      "initial-snapshot",
+      "unchanged",
+    ]);
     expect(
       (await readdir(join(migrationsDir, "snapshots"))).filter((name) => name.endsWith(".json")),
     ).toHaveLength(1);
     await expect(access(join(migrationsDir, ".jazz-create-migration.lock"))).rejects.toThrow();
   });
+
+  it.each([false, true])(
+    "fails closed for an unknown lock owner (nonempty=%s)",
+    async (nonempty) => {
+      const { root } = await createWorkspace();
+      const migrationsDir = join(root, "migrations");
+      const lockDir = join(migrationsDir, ".jazz-create-migration.lock");
+      await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+      await mkdir(lockDir, { recursive: true });
+      if (nonempty) await writeFile(join(lockDir, "unknown"), "unknown\n");
+
+      await expect(createCatalogueMigration({ schemaDir: root, migrationsDir })).rejects.toThrow(
+        "owner metadata is missing, invalid, or unsafe",
+      );
+      expect(await fileExists(lockDir)).toBe(true);
+      expect(await fileExists(join(migrationsDir, "snapshots"))).toBe(false);
+    },
+  );
 
   it("recovers a killed migration between publishing its paired outputs", async () => {
     const { root } = await createWorkspace();
@@ -1077,6 +1104,59 @@ describe("cli migrations", () => {
     expect(await fileExists(join(migrationsDir, ".jazz-create-migration-stage"))).toBe(false);
     expect(await fileExists(join(migrationsDir, ".jazz-create-migration.lock"))).toBe(false);
   });
+
+  it.each(["contents", "symlink"])(
+    "rejects a %s-tampered published prefix even when its staged copy is gone",
+    async (tamperKind) => {
+      const { root } = await createWorkspace();
+      const migrationsDir = join(root, "migrations");
+      const marker = join(root, "between-publications.marker");
+      await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+      await createCatalogueMigration({ schemaDir: root, migrationsDir });
+      await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
+      const child = spawnMigrationCreate(root, migrationsDir, "between-publications", marker);
+      await waitForCrashMarker(marker, child);
+      await killChild(child);
+      const migration = (await readdir(migrationsDir)).find((name) => name.endsWith(".ts"));
+      expect(migration).toBeDefined();
+      const migrationPath = join(migrationsDir, migration!);
+      if (tamperKind === "contents") {
+        await writeFile(migrationPath, "tampered\n");
+      } else {
+        const outside = join(root, "outside-migration.ts");
+        await writeFile(outside, "tampered\n");
+        await rm(migrationPath);
+        await symlink(outside, migrationPath, "file");
+      }
+
+      await expect(createCatalogueMigration({ schemaDir: root, migrationsDir })).rejects.toThrow(
+        tamperKind === "contents"
+          ? "does not match its journal"
+          : "must not contain a symlink or junction",
+      );
+      expect(await fileExists(join(migrationsDir, ".jazz-create-migration.journal.json"))).toBe(
+        true,
+      );
+    },
+  );
+
+  it.each(["snapshots", ".jazz-create-migration-stage"])(
+    "rejects a symlinked migration publication path: %s",
+    async (linkedName) => {
+      const { root } = await createWorkspace();
+      const migrationsDir = join(root, "migrations");
+      const outside = join(root, "outside");
+      await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+      await mkdir(migrationsDir);
+      await mkdir(outside);
+      await symlink(outside, join(migrationsDir, linkedName), "dir");
+
+      await expect(createCatalogueMigration({ schemaDir: root, migrationsDir })).rejects.toThrow(
+        "must not contain a symlink or junction",
+      );
+      expect(await readdir(outside)).toEqual([]);
+    },
+  );
 
   it("writes an initial committed snapshot on first run", async () => {
     const { root } = await createWorkspace();

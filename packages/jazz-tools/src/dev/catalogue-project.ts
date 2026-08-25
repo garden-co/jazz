@@ -7,10 +7,20 @@
  * Prefer using {@link catalogue.ts} utils whenever possible.
  */
 
-import { access, mkdir, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import {
+  access,
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
 import { hostname } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import type { WasmSchema } from "../drivers/types.js";
@@ -709,12 +719,50 @@ interface MigrationPublicationFile {
 }
 
 interface MigrationPublicationJournal {
-  version: 1;
-  files: Array<{ stagedName: string; finalRelativePath: string }>;
+  version: 2;
+  files: Array<{
+    stagedName: string;
+    finalRelativePath: string;
+    size: number;
+    sha256: string;
+  }>;
 }
 
 const MIGRATION_STAGE_DIR = ".jazz-create-migration-stage";
 const MIGRATION_JOURNAL = ".jazz-create-migration.journal.json";
+
+function contentIdentity(contents: string | Buffer): { size: number; sha256: string } {
+  const bytes = Buffer.isBuffer(contents) ? contents : Buffer.from(contents);
+  return { size: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex") };
+}
+
+async function assertNoSymlinkComponents(path: string, allowMissingTail = false): Promise<void> {
+  const absolute = resolve(path);
+  const parsedRoot = parse(absolute).root;
+  const components = absolute.slice(parsedRoot.length).split(sep).filter(Boolean);
+  let current = parsedRoot;
+  for (const component of components) {
+    current = join(current, component);
+    try {
+      const stat = await lstat(current);
+      if (stat.isSymbolicLink()) {
+        throw new Error(`Migration path must not contain a symlink or junction: ${current}`);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" && allowMissingTail) return;
+      throw error;
+    }
+  }
+}
+
+async function verifiedContents(path: string, expectedSize: number, expectedSha256: string) {
+  await assertNoSymlinkComponents(path);
+  const contents = await readFile(path);
+  const actual = contentIdentity(contents);
+  if (actual.size !== expectedSize || actual.sha256 !== expectedSha256) {
+    throw new Error(`Migration publication content does not match its journal: ${path}`);
+  }
+}
 
 function relativePublicationPath(migrationsDir: string, finalPath: string): string {
   const relativePath = relative(resolve(migrationsDir), resolve(finalPath));
@@ -750,9 +798,12 @@ async function syncDirectory(path: string): Promise<void> {
 }
 
 async function recoverMigrationPublication(migrationsDir: string): Promise<void> {
+  await assertNoSymlinkComponents(migrationsDir);
   const journalPath = join(migrationsDir, MIGRATION_JOURNAL);
   if (!(await pathExists(journalPath))) {
-    await rm(join(migrationsDir, MIGRATION_STAGE_DIR), { recursive: true, force: true });
+    const stageDir = join(migrationsDir, MIGRATION_STAGE_DIR);
+    await assertNoSymlinkComponents(stageDir, true);
+    await rm(stageDir, { recursive: true, force: true });
     for (const entry of await readdir(migrationsDir)) {
       if (entry.startsWith(`${MIGRATION_JOURNAL}.`) && entry.endsWith(".tmp")) {
         await rm(join(migrationsDir, entry), { force: true });
@@ -760,8 +811,9 @@ async function recoverMigrationPublication(migrationsDir: string): Promise<void>
     }
     return;
   }
+  await assertNoSymlinkComponents(journalPath);
   const journal = JSON.parse(await readFile(journalPath, "utf8")) as MigrationPublicationJournal;
-  if (journal.version !== 1 || !Array.isArray(journal.files) || journal.files.length === 0) {
+  if (journal.version !== 2 || !Array.isArray(journal.files) || journal.files.length === 0) {
     throw new Error(`Invalid interrupted migration publication journal: ${journalPath}`);
   }
   for (const file of journal.files) {
@@ -773,15 +825,14 @@ async function recoverMigrationPublication(migrationsDir: string): Promise<void>
     if (relativePublicationPath(migrationsDir, finalPath) !== file.finalRelativePath) {
       throw new Error(`Invalid migration publication path in ${journalPath}`);
     }
+    if (!Number.isSafeInteger(file.size) || file.size < 0 || !/^[0-9a-f]{64}$/.test(file.sha256)) {
+      throw new Error(`Invalid migration publication identity in ${journalPath}`);
+    }
+    await assertNoSymlinkComponents(dirname(finalPath), true);
+    await assertNoSymlinkComponents(finalPath, true);
+    await assertNoSymlinkComponents(stagedPath, true);
     if (await pathExists(finalPath)) {
-      if (await pathExists(stagedPath)) {
-        const [published, staged] = await Promise.all([readFile(finalPath), readFile(stagedPath)]);
-        if (!published.equals(staged)) {
-          throw new Error(
-            `Cannot recover interrupted migration publication: ${finalPath} does not match its staged output`,
-          );
-        }
-      }
+      await verifiedContents(finalPath, file.size, file.sha256);
       continue;
     }
     if (!(await pathExists(stagedPath))) {
@@ -790,7 +841,10 @@ async function recoverMigrationPublication(migrationsDir: string): Promise<void>
       );
     }
     await mkdir(dirname(finalPath), { recursive: true });
+    await assertNoSymlinkComponents(dirname(finalPath));
+    await verifiedContents(stagedPath, file.size, file.sha256);
     await rename(stagedPath, finalPath);
+    await verifiedContents(finalPath, file.size, file.sha256);
     await syncDirectory(dirname(finalPath));
   }
   await rm(journalPath, { force: true });
@@ -821,22 +875,31 @@ async function publishMigrationFilesRecoverably(
   files: MigrationPublicationFile[],
 ): Promise<void> {
   if (files.length === 0) return;
+  await assertNoSymlinkComponents(migrationsDir);
   const stageDir = join(migrationsDir, MIGRATION_STAGE_DIR);
+  const journalPath = join(migrationsDir, MIGRATION_JOURNAL);
+  await assertNoSymlinkComponents(journalPath, true);
   await mkdir(stageDir, { recursive: true });
-  const journal: MigrationPublicationJournal = { version: 1, files: [] };
+  await assertNoSymlinkComponents(stageDir);
+  const journal: MigrationPublicationJournal = { version: 2, files: [] };
   for (const [index, file] of files.entries()) {
+    await assertNoSymlinkComponents(dirname(file.finalPath), true);
+    await assertNoSymlinkComponents(file.finalPath, true);
     if (await pathExists(file.finalPath)) {
       throw new Error(`Migration output already exists: ${file.finalPath}`);
     }
     const stagedName = `${randomUUID()}-${index}`;
-    await syncFile(join(stageDir, stagedName), file.contents);
+    const stagedPath = join(stageDir, stagedName);
+    await syncFile(stagedPath, file.contents);
+    const identity = contentIdentity(file.contents);
+    await verifiedContents(stagedPath, identity.size, identity.sha256);
     journal.files.push({
       stagedName,
       finalRelativePath: relativePublicationPath(migrationsDir, file.finalPath),
+      ...identity,
     });
   }
   await syncDirectory(stageDir);
-  const journalPath = join(migrationsDir, MIGRATION_JOURNAL);
   const journalTemp = `${journalPath}.${randomUUID()}.tmp`;
   await syncFile(journalTemp, `${JSON.stringify(journal)}\n`);
   await rename(journalTemp, journalPath);
@@ -844,8 +907,13 @@ async function publishMigrationFilesRecoverably(
   await pauseMigrationPublicationForTest("journaled");
   for (const [index, file] of journal.files.entries()) {
     const finalPath = resolve(migrationsDir, file.finalRelativePath);
+    await assertNoSymlinkComponents(dirname(finalPath), true);
     await mkdir(dirname(finalPath), { recursive: true });
-    await rename(join(stageDir, file.stagedName), finalPath);
+    await assertNoSymlinkComponents(dirname(finalPath));
+    const stagedPath = join(stageDir, file.stagedName);
+    await verifiedContents(stagedPath, file.size, file.sha256);
+    await rename(stagedPath, finalPath);
+    await verifiedContents(finalPath, file.size, file.sha256);
     await syncDirectory(dirname(finalPath));
     if (index === 0 && journal.files.length > 1) {
       await pauseMigrationPublicationForTest("between-publications");
@@ -1034,44 +1102,53 @@ async function withMigrationDirectoryLock<T>(
   migrationsDir: string,
   operation: () => Promise<T>,
 ): Promise<T> {
+  await assertNoSymlinkComponents(migrationsDir);
   const lockDir = join(migrationsDir, ".jazz-create-migration.lock");
   const ownerPath = join(lockDir, "owner.json");
   const owner = { version: 1, pid: process.pid, hostname: hostname(), token: randomUUID() };
-  const candidateDir = `${lockDir}.${owner.token}.candidate`;
-  await mkdir(candidateDir);
-  await syncFile(join(candidateDir, "owner.json"), `${JSON.stringify(owner)}\n`);
-  await syncDirectory(candidateDir);
-  await syncDirectory(migrationsDir);
   const deadline = Date.now() + 10_000;
+  let unknownOwnerSince: number | null = null;
   for (;;) {
     try {
-      // Renaming a fully prepared owner directory is the cross-process
-      // compare-and-set. There is no acquired-lock window with missing owner
-      // metadata, even if the process dies at any instruction boundary.
-      await rename(candidateDir, lockDir);
+      // mkdir is the no-replace cross-process compare-and-set. A process that
+      // observes the short owner-write window fails closed rather than ever
+      // treating an unknown lock as stale.
+      await mkdir(lockDir);
+      await syncFile(ownerPath, `${JSON.stringify(owner)}\n`);
+      await syncDirectory(lockDir);
       await syncDirectory(migrationsDir);
       await pauseMigrationPublicationForTest("lock-held");
       break;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      const contention =
-        code === "EEXIST" ||
-        code === "ENOTEMPTY" ||
-        // Windows commonly reports EPERM when renaming over an existing,
-        // non-empty directory. Only interpret it as contention after proving
-        // the destination exists; otherwise preserve the real filesystem error.
-        (code === "EPERM" && (await pathExists(lockDir)));
-      if (!contention) {
-        await rm(candidateDir, { recursive: true, force: true });
-        throw error;
+      if (code !== "EEXIST") throw error;
+      try {
+        await assertNoSymlinkComponents(lockDir);
+      } catch (validationError) {
+        if ((validationError as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw validationError;
       }
       let existing: typeof owner | null = null;
+      let existingText = "";
       try {
-        existing = JSON.parse(await readFile(ownerPath, "utf8")) as typeof owner;
+        await assertNoSymlinkComponents(ownerPath);
+        existingText = await readFile(ownerPath, "utf8");
+        existing = JSON.parse(existingText) as typeof owner;
       } catch {
-        // A missing or malformed owner cannot safely be stolen: its creator
-        // may still be between mkdir and publishing metadata.
+        if (!(await pathExists(lockDir))) continue;
+        unknownOwnerSince ??= Date.now();
+        // A freshly created lock has a necessarily brief mkdir→owner-write
+        // window. Wait for that owner, but never steal the lock if it remains
+        // unknown: fail closed with the directory intact.
+        if (Date.now() - unknownOwnerSince >= 500) {
+          throw new Error(
+            `Cannot safely acquire migration lock ${lockDir}; owner metadata is missing, invalid, or unsafe`,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        continue;
       }
+      unknownOwnerSince = null;
       if (
         existing?.version === 1 &&
         existing.hostname === hostname() &&
@@ -1079,18 +1156,34 @@ async function withMigrationDirectoryLock<T>(
         existing.pid > 0 &&
         !processIsAlive(existing.pid)
       ) {
-        const unchanged = await readFile(ownerPath, "utf8").catch(() => "");
-        if (unchanged === `${JSON.stringify(existing)}\n`) {
-          await rm(lockDir, { recursive: true, force: true });
-          await syncDirectory(migrationsDir);
+        const recoveryDir = join(lockDir, ".recovery");
+        try {
+          await mkdir(recoveryDir);
+        } catch (claimError) {
+          if ((claimError as NodeJS.ErrnoException).code !== "EEXIST") throw claimError;
+          await new Promise((resolve) => setTimeout(resolve, 10));
           continue;
         }
+        const unchanged = await readFile(ownerPath, "utf8").catch(() => "");
+        if (unchanged !== existingText) {
+          throw new Error(`Migration lock owner changed during stale recovery: ${lockDir}`);
+        }
+        const quarantine = `${lockDir}.recovery-${owner.token}`;
+        await rename(lockDir, quarantine);
+        await assertNoSymlinkComponents(quarantine);
+        await assertNoSymlinkComponents(join(quarantine, "owner.json"));
+        const quarantinedOwner = await readFile(join(quarantine, "owner.json"), "utf8");
+        if (quarantinedOwner !== existingText) {
+          throw new Error(`Quarantined migration lock owner did not match: ${quarantine}`);
+        }
+        await rm(quarantine, { recursive: true });
+        await syncDirectory(migrationsDir);
+        continue;
       }
       if (Date.now() >= deadline) {
         const detail = existing
           ? `owner pid=${existing.pid} host=${existing.hostname}`
           : "owner metadata is missing or invalid";
-        await rm(candidateDir, { recursive: true, force: true });
         throw new Error(
           `Timed out waiting for another migration generator to release ${lockDir}; ${detail}`,
         );
