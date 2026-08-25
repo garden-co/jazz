@@ -250,6 +250,12 @@ where
             ));
         }
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
+        let permission_subject = self
+            .node
+            .node
+            .lock()
+            .await
+            .mergeable_transaction_permission_subject(tx_id)?;
         let head_cells = self
             .node
             .node
@@ -257,6 +263,49 @@ where
             .await
             .visible_current_cells_in_branch(table, &head, row)
             .await?;
+        if let Some(identity) = permission_subject {
+            let mut cells = self
+                .visible_branch_view_cells_for_identity(table, &head, base.as_ref(), row, identity)
+                .await?
+                .unwrap_or_default();
+            let authored_columns = patch.keys().cloned().collect();
+            cells.extend(patch);
+            if head_cells.is_some() {
+                self.node
+                    .node
+                    .lock()
+                    .await
+                    .tx_materialized_patch_mergeable_in_schema_and_branch(
+                        tx_id,
+                        self.schema_version_id,
+                        table,
+                        row,
+                        cells,
+                        authored_columns,
+                        now_ms,
+                        head,
+                    )
+                    .await?;
+                return Ok(());
+            }
+            if self
+                .node
+                .node
+                .lock()
+                .await
+                .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)
+                .await?
+                .is_none()
+            {
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    format!("row is not visible in branch view: {}", row.0),
+                ));
+            }
+            return self
+                .stage_mergeable_insert_in_branch(tx_id, table, head, row, cells, now_ms)
+                .await;
+        }
         if head_cells.is_some() {
             self.node
                 .node

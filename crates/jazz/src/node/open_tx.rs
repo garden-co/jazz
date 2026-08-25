@@ -84,6 +84,21 @@ where
         }
     }
 
+    /// Return the policy identity bound to an open mergeable transaction.
+    pub(crate) fn mergeable_transaction_permission_subject(
+        &self,
+        id: OpenTransactionId,
+    ) -> Result<Option<AuthorSubject>, Error> {
+        match self.open_tx(id)?.kind {
+            OpenTransactionKind::Mergeable {
+                permission_subject, ..
+            } => Ok(permission_subject),
+            OpenTransactionKind::Exclusive { .. } => Err(Error::InvalidMergeableCommit(
+                "open transaction is not mergeable",
+            )),
+        }
+    }
+
     async fn open_transaction(
         &mut self,
         id: OpenTransactionId,
@@ -632,6 +647,7 @@ where
             match &write.cells {
                 PendingCells::Replace(cells) => staged_cells = cells.clone(),
                 PendingCells::Patch(patch) => staged_cells.extend(patch.clone()),
+                PendingCells::MaterializedPatch { cells, .. } => staged_cells = cells.clone(),
             }
         }
         staged_cells.extend(patch.clone());
@@ -648,6 +664,53 @@ where
                 cells: PendingCells::Patch(patch),
                 deletion: None,
                 parents: Vec::new(),
+                now_ms,
+                refresh_parents_at_commit: false,
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn tx_materialized_patch_mergeable_in_schema_and_branch(
+        &mut self,
+        tx_id: OpenTransactionId,
+        write_schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+        cells: BTreeMap<String, Value>,
+        authored_columns: BTreeSet<String>,
+        now_ms: Option<u64>,
+        branch: BranchSelector,
+    ) -> Result<(), Error> {
+        if !matches!(
+            self.open_tx(tx_id)?.kind,
+            OpenTransactionKind::Mergeable { .. }
+        ) {
+            return Err(Error::InvalidMergeableCommit(
+                "open transaction is not mergeable",
+            ));
+        }
+        validate_mergeable_write_shape(cells.is_empty(), false)?;
+        let table_schema = self.table_in_schema(table, write_schema_version)?;
+        positional_cells_from_map(&table_schema, &cells)?;
+        let parents = self
+            .local_content_winner_tx_id_in_branch(table, &branch, row_uuid)
+            .await?
+            .into_iter()
+            .collect();
+        self.stage_mergeable_write(
+            tx_id,
+            PendingWrite {
+                table: table.to_owned(),
+                row_uuid,
+                schema_version: write_schema_version,
+                branch,
+                cells: PendingCells::MaterializedPatch {
+                    cells,
+                    authored_columns,
+                },
+                deletion: None,
+                parents,
                 now_ms,
                 refresh_parents_at_commit: false,
             },
@@ -676,10 +739,69 @@ where
                         cells.extend(patch.clone());
                         PendingCells::Replace(cells)
                     }
+                    (
+                        PendingCells::Replace(existing),
+                        PendingCells::MaterializedPatch { cells: patch, .. },
+                    ) => {
+                        let mut cells = existing.clone();
+                        cells.extend(patch.clone());
+                        PendingCells::Replace(cells)
+                    }
                     (PendingCells::Patch(existing), PendingCells::Patch(patch)) => {
                         let mut cells = existing.clone();
                         cells.extend(patch.clone());
                         PendingCells::Patch(cells)
+                    }
+                    (
+                        PendingCells::Patch(existing),
+                        PendingCells::MaterializedPatch {
+                            cells: patch,
+                            authored_columns,
+                        },
+                    ) => {
+                        let mut cells = patch.clone();
+                        cells.extend(existing.clone());
+                        let mut authored_columns = authored_columns.clone();
+                        authored_columns.extend(existing.keys().cloned());
+                        PendingCells::MaterializedPatch {
+                            cells,
+                            authored_columns,
+                        }
+                    }
+                    (
+                        PendingCells::MaterializedPatch {
+                            cells: existing,
+                            authored_columns,
+                        },
+                        PendingCells::Patch(patch),
+                    ) => {
+                        let mut cells = existing.clone();
+                        cells.extend(patch.clone());
+                        let mut authored_columns = authored_columns.clone();
+                        authored_columns.extend(patch.keys().cloned());
+                        PendingCells::MaterializedPatch {
+                            cells,
+                            authored_columns,
+                        }
+                    }
+                    (
+                        PendingCells::MaterializedPatch {
+                            cells: existing_cells,
+                            authored_columns: existing_authored,
+                        },
+                        PendingCells::MaterializedPatch {
+                            cells: patch_cells,
+                            authored_columns: patch_authored,
+                        },
+                    ) => {
+                        let mut cells = existing_cells.clone();
+                        cells.extend(patch_cells.clone());
+                        let mut authored_columns = existing_authored.clone();
+                        authored_columns.extend(patch_authored.clone());
+                        PendingCells::MaterializedPatch {
+                            cells,
+                            authored_columns,
+                        }
                     }
                     (_, PendingCells::Replace(cells)) => PendingCells::Replace(cells.clone()),
                 };
@@ -990,6 +1112,10 @@ where
                     cells.extend(patch);
                     (cells, Some(authored_columns))
                 }
+                PendingCells::MaterializedPatch {
+                    cells,
+                    authored_columns,
+                } => (cells, Some(authored_columns)),
             };
             let mut commit = MergeableCommit::new(
                 &write.table,
@@ -1294,6 +1420,12 @@ where
                 PendingCells::Patch(patch) => {
                     cells.get_or_insert_default().extend(patch.clone());
                 }
+                PendingCells::MaterializedPatch {
+                    cells: replacement, ..
+                } if !replacement.is_empty() => {
+                    cells = Some(replacement.clone());
+                }
+                PendingCells::MaterializedPatch { .. } => {}
                 PendingCells::Replace(_) => {}
             }
             match write.deletion {
@@ -1343,6 +1475,10 @@ pub(super) struct OpenTransaction {
 enum PendingCells {
     Replace(BTreeMap<String, Value>),
     Patch(BTreeMap<String, Value>),
+    MaterializedPatch {
+        cells: BTreeMap<String, Value>,
+        authored_columns: BTreeSet<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1356,7 +1492,7 @@ pub(super) struct PendingWrite {
     pub(super) schema_version: SchemaVersionId,
     /// Exact branch coordinate of this row branch-local row.
     pub(super) branch: BranchSelector,
-    /// Replacement cells or an update patch resolved when the transaction commits.
+    /// Replacement cells, a patch resolved at commit, or a policy-filtered materialized patch.
     cells: PendingCells,
     /// Deletion-register event, if any.
     pub(super) deletion: Option<DeletionEvent>,

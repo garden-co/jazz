@@ -957,8 +957,21 @@ where
                     .chain(std::iter::once(column.to_owned()))
                     .collect();
                 if let Some(head) = head.as_ref() {
+                    let visible_to_identity = match identity {
+                        Some(identity) => {
+                            self.visible_branch_view_cells_for_identity(
+                                table,
+                                head,
+                                base.as_ref(),
+                                row,
+                                identity,
+                            )
+                            .await?
+                        }
+                        None => None,
+                    };
                     let mut node = self.node.node.lock().await;
-                    if let Some(mut current) = node
+                    if let Some(current) = node
                         .visible_current_cells_in_branch(table, head, row)
                         .await?
                     {
@@ -966,10 +979,14 @@ where
                             .local_content_winner_tx_id_in_branch(table, head, row)
                             .await?;
                         drop(node);
+                        let mut current = match identity {
+                            Some(_) => visible_to_identity.unwrap_or_default(),
+                            None => current,
+                        };
                         current.extend(cells);
                         (current, parent.into_iter().collect(), Some(authored), false)
                     } else {
-                        let Some(mut inherited) = node
+                        let Some(inherited) = node
                             .visible_current_cells_in_branch_view(table, head, base.as_ref(), row)
                             .await?
                         else {
@@ -979,6 +996,10 @@ where
                             ));
                         };
                         drop(node);
+                        let mut inherited = match identity {
+                            Some(_) => visible_to_identity.unwrap_or_default(),
+                            None => inherited,
+                        };
                         inherited.extend(cells);
                         (inherited, Vec::new(), Some(authored), true)
                     }
@@ -999,8 +1020,21 @@ where
                     .chain(std::iter::once(column.to_owned()))
                     .collect();
                 if let Some(head) = head.as_ref() {
+                    let visible_to_identity = match identity {
+                        Some(identity) => {
+                            self.visible_branch_view_cells_for_identity(
+                                table,
+                                head,
+                                base.as_ref(),
+                                row,
+                                identity,
+                            )
+                            .await?
+                        }
+                        None => None,
+                    };
                     let mut node = self.node.node.lock().await;
-                    if let Some(mut current) = node
+                    if let Some(current) = node
                         .visible_current_cells_in_branch(table, head, row)
                         .await?
                     {
@@ -1008,13 +1042,21 @@ where
                             .local_content_winner_tx_id_in_branch(table, head, row)
                             .await?;
                         drop(node);
+                        let mut current = match identity {
+                            Some(_) => visible_to_identity.unwrap_or_default(),
+                            None => current,
+                        };
                         current.extend(cells);
                         (current, parent.into_iter().collect(), Some(authored), false)
-                    } else if let Some(mut inherited) = node
+                    } else if let Some(inherited) = node
                         .visible_current_cells_in_branch_view(table, head, base.as_ref(), row)
                         .await?
                     {
                         drop(node);
+                        let mut inherited = match identity {
+                            Some(_) => visible_to_identity.unwrap_or_default(),
+                            None => inherited,
+                        };
                         inherited.extend(cells);
                         (inherited, Vec::new(), Some(authored), true)
                     } else {
@@ -2157,7 +2199,7 @@ where
             .find(|candidate| candidate.row_uuid() == row))
     }
 
-    async fn visible_branch_view_cells_for_identity(
+    pub(super) async fn visible_branch_view_cells_for_identity(
         &self,
         table: &str,
         head: &BranchSelector,

@@ -227,6 +227,175 @@ fn session_branch_update_does_not_copy_read_hidden_cells_when_write_policy_allow
 }
 
 #[test]
+fn session_transaction_branch_update_does_not_copy_read_hidden_cells_when_write_policy_allows() {
+    let schema = branch_update_read_policy_schema();
+    let writer = AuthorSubject::for_test_bytes([0x7d; 16]);
+    let branch = BranchSelector::new([("branch", Value::String("draft".to_owned()))]);
+    let row_id = row(0x7e);
+    let db = block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(&schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0x7c; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0x7c))),
+    }))
+    .expect("open history-complete authority");
+    db.set_identity_claims(writer, test_provider_claims(writer));
+
+    let seed = block_on(db.insert(
+        "todos",
+        BTreeMap::from([
+            ("owner".to_owned(), Value::Uuid(writer.test_uuid())),
+            ("published".to_owned(), Value::Bool(false)),
+            (
+                "secret".to_owned(),
+                Value::String("read-hidden source".to_owned()),
+            ),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(row_id),
+            target: crate::db::ExactWriteTarget::Branch(branch.clone()),
+            ..Default::default()
+        },
+    ))
+    .expect("seed hidden branch row");
+    db.finalize_local_mergeable_commit_for_test(seed.mergeable_tx_id())
+        .expect("settle seed row");
+
+    let prepared = db
+        .prepare_query(&db.table("todos"))
+        .expect("prepare branch query");
+    let read_opts = ReadOpts {
+        propagation: Propagation::LocalOnly,
+        ..ReadOpts::default()
+    }
+    .branch_view(branch.clone(), None);
+    assert!(
+        block_on(db.all_for_identity(&prepared, read_opts.clone(), writer))
+            .expect("read hidden branch as writer")
+            .is_empty()
+    );
+
+    let (_, update) = block_on(db.transaction_for_identity(writer, async |tx| {
+        tx.update(
+            "todos",
+            row_id,
+            BTreeMap::from([("published".to_owned(), Value::Bool(true))]),
+            crate::db::UpdateOptions {
+                target: crate::db::WriteTarget::BranchView {
+                    head: branch,
+                    base: None,
+                },
+                ..Default::default()
+            },
+        )
+        .await
+    }))
+    .expect("stage write-authorised update");
+    db.finalize_local_mergeable_commit_for_test(update)
+        .expect("authoritative owner policy accepts the read-hidden update");
+
+    let table = &schema.tables[0];
+    let writer_rows = block_on(db.all_for_identity(&prepared, read_opts.clone(), writer))
+        .expect("read published branch as writer");
+    assert_eq!(writer_rows.len(), 1);
+    assert_eq!(
+        writer_rows[0].cell(table, "published"),
+        Some(Value::Bool(true))
+    );
+    assert_eq!(writer_rows[0].cell(table, "secret"), None);
+
+    let authority_rows = block_on(db.all_for_identity(&prepared, read_opts, AuthorSubject::SYSTEM))
+        .expect("read branch as authority");
+    assert_eq!(authority_rows.len(), 1);
+    assert_eq!(authority_rows[0].cell(table, "secret"), None);
+}
+
+#[test]
+fn internal_transaction_branch_update_preserves_source_cells() {
+    let schema = branch_update_read_policy_schema();
+    let branch = BranchSelector::new([("branch", Value::String("draft".to_owned()))]);
+    let row_id = row(0x80);
+    let db = block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(&schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0x7f; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0x7f))),
+    }))
+    .expect("open history-complete authority");
+
+    let seed = block_on(db.insert(
+        "todos",
+        BTreeMap::from([
+            (
+                "owner".to_owned(),
+                Value::Uuid(AuthorSubject::for_test_bytes([0x81; 16]).test_uuid()),
+            ),
+            ("published".to_owned(), Value::Bool(false)),
+            (
+                "secret".to_owned(),
+                Value::String("trusted source".to_owned()),
+            ),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(row_id),
+            target: crate::db::ExactWriteTarget::Branch(branch.clone()),
+            ..Default::default()
+        },
+    ))
+    .expect("seed branch row");
+    db.finalize_local_mergeable_commit_for_test(seed.mergeable_tx_id())
+        .expect("settle seed row");
+
+    let (_, update) = block_on(db.transaction(async |tx| {
+        tx.update(
+            "todos",
+            row_id,
+            BTreeMap::from([("published".to_owned(), Value::Bool(true))]),
+            crate::db::UpdateOptions {
+                target: crate::db::WriteTarget::BranchView {
+                    head: branch.clone(),
+                    base: None,
+                },
+                ..Default::default()
+            },
+        )
+        .await
+    }))
+    .expect("stage trusted update");
+    db.finalize_local_mergeable_commit_for_test(update)
+        .expect("trusted update succeeds");
+
+    let prepared = db
+        .prepare_query(&db.table("todos"))
+        .expect("prepare branch query");
+    let rows = block_on(
+        db.all_for_identity(
+            &prepared,
+            ReadOpts {
+                propagation: Propagation::LocalOnly,
+                ..ReadOpts::default()
+            }
+            .branch_view(branch, None),
+            AuthorSubject::SYSTEM,
+        ),
+    )
+    .expect("read branch as authority");
+    let table = &schema.tables[0];
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].cell(table, "published"), Some(Value::Bool(true)));
+    assert_eq!(
+        rows[0].cell(table, "secret"),
+        Some(Value::String("trusted source".to_owned()))
+    );
+}
+
+#[test]
 fn db_facade_mutation_lifecycle_writes_reads_deletes_and_restores() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let query = db.table("todos");
