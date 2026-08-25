@@ -32,35 +32,6 @@ export interface WasmRow {
 
 export type FFIRow = WasmRow;
 
-export type RowAdded = 0;
-export type RowRemoved = 1;
-export type RowUpdated = 2;
-export type RowChangeKind = RowAdded | RowRemoved | RowUpdated;
-
-export interface WireRowDeltaAdded {
-  kind: RowAdded;
-  id: string;
-  index: number;
-  row: WasmRow;
-}
-
-export interface WireRowDeltaRemoved {
-  kind: RowRemoved;
-  id: string;
-  index: number;
-}
-
-export interface WireRowDeltaUpdated {
-  kind: RowUpdated;
-  id: string;
-  index: number;
-  row?: WasmRow | null;
-}
-
-export type WireRowChange = WireRowDeltaAdded | WireRowDeltaRemoved | WireRowDeltaUpdated;
-
-export type RowDelta = WireRowChange[];
-
 export type NativeTerminalPathSegment = { Collection: string } | { Key: number[] };
 export type NativeTerminalEdit =
   | { Insert: { index: number; key: number[]; value: number[] } }
@@ -90,7 +61,6 @@ export interface NativeTerminalOperation {
 }
 
 export interface NativeRowDelta {
-  __jazzNativeRowDelta: true;
   reset?: boolean;
   added: Uint8Array;
   removed: Uint8Array;
@@ -104,8 +74,6 @@ export interface NativeRowDelta {
   terminalLayouts?: NativeTerminalRootLayout[];
   terminalOperations?: NativeTerminalOperation[];
 }
-
-export type SubscriptionWireDelta = RowDelta | NativeRowDelta;
 
 export type ColumnType =
   | { type: "Integer" }

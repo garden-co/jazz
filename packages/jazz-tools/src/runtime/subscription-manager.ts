@@ -9,10 +9,8 @@ import type {
   ColumnDescriptor,
   NativeRowDelta,
   NativeTerminalOperation,
-  SubscriptionWireDelta,
   Value,
   WasmRow,
-  RowDelta as WireRowDelta,
 } from "../drivers/types.js";
 import { HIDDEN_INCLUDE_COLUMN_PREFIX } from "./select-projection.js";
 import {
@@ -35,6 +33,11 @@ export type RowDelta<T> =
   | { kind: RowChangeKind["Added"]; id: string; index: number; item: T }
   | { kind: RowChangeKind["Removed"]; id: string; index: number }
   | { kind: RowChangeKind["Updated"]; id: string; index: number; item?: T };
+
+type DecodedRowDelta =
+  | { kind: RowChangeKind["Added"]; id: string; index: number; row: WasmRow }
+  | { kind: RowChangeKind["Removed"]; id: string; index: number }
+  | { kind: RowChangeKind["Updated"]; id: string; index: number; row?: WasmRow | null };
 
 export type SubscriptionDelta<T> =
   | {
@@ -265,97 +268,93 @@ export class SubscriptionManager<T extends { id: string }> {
   /**
    * Process a row delta and return typed object delta.
    *
-   * @param delta Raw row delta from WASM runtime
+   * @param delta Packed row delta from the native runtime
    * @param transform Function to convert WasmRow to typed object T
    * @returns Typed delta with full state and changes
    */
   handleDelta(
-    delta: SubscriptionWireDelta,
+    delta: NativeRowDelta,
     transform: (row: WasmRow) => T,
     nativeColumns?: readonly ColumnDescriptor[],
   ): SubscriptionDelta<T> {
-    if (isNativeRowDelta(delta)) {
-      const reset = delta.reset === true;
-      if (!nativeColumns) {
-        throw new Error("Native subscription delta requires output columns for decoding");
-      }
-      const snapshot = this.snapshot(nativeColumns);
-      try {
-        if (reset) {
-          this.clearRows();
-          this.deferredTerminalOperations = [];
-        }
-        for (const key of [
-          ...(delta.addedOccurrenceKeys ?? []),
-          ...(delta.updatedOccurrenceKeys ?? []),
-          ...(delta.removedOccurrenceKeys ?? []),
-        ]) {
-          const orderedKey = orderedTerminalKeyForTypedOccurrence(key);
-          if (orderedKey) {
-            this.registerTerminalOccurrenceAddress(orderedKey, publicResultKey(key));
-          } else if (key[0] === 2) {
-            throw new Error("malformed or noncanonical typed terminal occurrence key");
-          }
-        }
-        // Packed row deltas have already been normalized to the public logical
-        // record layout. Only Groove terminal edit payloads retain the outer
-        // sparse current-row carrier described by `sparse`.
-        const decoded = decodeNativeDelta(delta, logicalStorageColumns(nativeColumns));
-        // Packed row removals are applied before terminal operations. Keep their
-        // full public occurrence identities so a later descendant teardown in
-        // this frame can be recognized as subsumed by its root removal.
-        const packedRemovedRoots = new Set<string>();
-        for (const [index, change] of decoded
-          .filter((change) => change.kind === RowChangeKind.Removed)
-          .entries()) {
-          packedRemovedRoots.add(change.id);
-          const terminalKey = terminalKeyForPackedOccurrence(delta.removedOccurrenceKeys?.[index]);
-          if (!terminalKey) continue;
-          const rootId = this.terminalAddress(Array.from(terminalKey));
-          packedRemovedRoots.add(rootId);
-          change.id = rootId;
-        }
-        for (const change of decoded) {
-          if (change.kind === RowChangeKind.Removed) {
-            for (const rootId of packedRemovedRoots) this.terminalRows.delete(rootId);
-          } else if (change.row) {
-            // The plain native decoder exposes both positional values and a
-            // name map, but decodes them independently. Terminal edits mutate
-            // the positional tree, so normalize the retained terminal copy to
-            // one shared value graph before accepting descendant operations.
-            this.terminalRows.set(change.id, cloneTerminalRow(change.row, nativeColumns));
-          }
-        }
-        const packedMaterializedRoots = new Set(
-          decoded
-            .filter((change) => change.kind !== RowChangeKind.Removed)
-            .map((change) => change.id),
-        );
-        const wireResult = this.handleWireDelta(decoded, transform, reset);
-        const terminalOperations = this.readyTerminalOperations(
-          delta.terminalOperations ?? [],
-          packedRemovedRoots,
-          packedMaterializedRoots,
-        );
-        if (terminalOperations.length > 0) {
-          const terminalResult = this.handleTerminalOperations(
-            terminalOperations,
-            transform,
-            nativeColumns,
-          );
-          const combined = normalizeRowDelta([...wireResult.delta, ...terminalResult.delta]);
-          return reset
-            ? { delta: combined, all: this.all(), reset: true }
-            : { delta: combined, all: this.all() };
-        }
-        return wireResult;
-      } catch (error) {
-        this.restore(snapshot);
-        throw error;
-      }
+    const reset = delta.reset === true;
+    if (!nativeColumns) {
+      throw new Error("Native subscription delta requires output columns for decoding");
     }
-
-    return this.handleWireDelta(delta, transform);
+    const snapshot = this.snapshot(nativeColumns);
+    try {
+      if (reset) {
+        this.clearRows();
+        this.deferredTerminalOperations = [];
+      }
+      for (const key of [
+        ...(delta.addedOccurrenceKeys ?? []),
+        ...(delta.updatedOccurrenceKeys ?? []),
+        ...(delta.removedOccurrenceKeys ?? []),
+      ]) {
+        const orderedKey = orderedTerminalKeyForTypedOccurrence(key);
+        if (orderedKey) {
+          this.registerTerminalOccurrenceAddress(orderedKey, publicResultKey(key));
+        } else if (key[0] === 2) {
+          throw new Error("malformed or noncanonical typed terminal occurrence key");
+        }
+      }
+      // Packed row deltas have already been normalized to the public logical
+      // record layout. Only Groove terminal edit payloads retain the outer
+      // sparse current-row carrier described by `sparse`.
+      const decoded = decodeNativeDelta(delta, logicalStorageColumns(nativeColumns));
+      // Packed row removals are applied before terminal operations. Keep their
+      // full public occurrence identities so a later descendant teardown in
+      // this frame can be recognized as subsumed by its root removal.
+      const packedRemovedRoots = new Set<string>();
+      for (const [index, change] of decoded
+        .filter((change) => change.kind === RowChangeKind.Removed)
+        .entries()) {
+        packedRemovedRoots.add(change.id);
+        const terminalKey = terminalKeyForPackedOccurrence(delta.removedOccurrenceKeys?.[index]);
+        if (!terminalKey) continue;
+        const rootId = this.terminalAddress(Array.from(terminalKey));
+        packedRemovedRoots.add(rootId);
+        change.id = rootId;
+      }
+      for (const change of decoded) {
+        if (change.kind === RowChangeKind.Removed) {
+          for (const rootId of packedRemovedRoots) this.terminalRows.delete(rootId);
+        } else if (change.row) {
+          // The plain native decoder exposes both positional values and a
+          // name map, but decodes them independently. Terminal edits mutate
+          // the positional tree, so normalize the retained terminal copy to
+          // one shared value graph before accepting descendant operations.
+          this.terminalRows.set(change.id, cloneTerminalRow(change.row, nativeColumns));
+        }
+      }
+      const packedMaterializedRoots = new Set(
+        decoded
+          .filter((change) => change.kind !== RowChangeKind.Removed)
+          .map((change) => change.id),
+      );
+      const wireResult = this.handleDecodedDelta(decoded, transform, reset);
+      const terminalOperations = this.readyTerminalOperations(
+        delta.terminalOperations ?? [],
+        packedRemovedRoots,
+        packedMaterializedRoots,
+      );
+      if (terminalOperations.length > 0) {
+        const terminalResult = this.handleTerminalOperations(
+          terminalOperations,
+          transform,
+          nativeColumns,
+        );
+        const combined = normalizeRowDelta([...wireResult.delta, ...terminalResult.delta]);
+        return reset
+          ? { delta: combined, all: this.all(), reset: true }
+          : { delta: combined, all: this.all() };
+      }
+      return wireResult;
+    } catch (error) {
+      this.restore(snapshot);
+      throw error;
+    }
   }
 
   private snapshot(columns: readonly ColumnDescriptor[]): SubscriptionManagerSnapshot<T> {
@@ -506,8 +505,8 @@ export class SubscriptionManager<T extends { id: string }> {
     );
   }
 
-  private handleWireDelta(
-    delta: WireRowDelta,
+  private handleDecodedDelta(
+    delta: DecodedRowDelta[],
     transform: (row: WasmRow) => T,
     reset = false,
   ): SubscriptionDelta<T> {
@@ -671,10 +670,6 @@ export class SubscriptionManager<T extends { id: string }> {
   get size(): number {
     return this.currentResults.size;
   }
-}
-
-export function isNativeRowDelta(delta: SubscriptionWireDelta): delta is NativeRowDelta {
-  return !Array.isArray(delta) && delta.__jazzNativeRowDelta === true;
 }
 
 /**
@@ -915,8 +910,8 @@ function readUuid(bytes: Uint8Array, offset: number): string {
 export function decodeNativeDelta(
   native: NativeRowDelta,
   columns: readonly ColumnDescriptor[],
-): WireRowDelta {
-  const delta: WireRowDelta = [];
+): DecodedRowDelta[] {
+  const delta: DecodedRowDelta[] = [];
 
   {
     const bytes = native.updated;

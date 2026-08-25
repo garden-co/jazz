@@ -6,7 +6,7 @@
  */
 
 import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
-import type { InsertValues, Value, SubscriptionWireDelta, WasmSchema } from "../drivers/types.js";
+import type { InsertValues, NativeRowDelta, Value, WasmSchema } from "../drivers/types.js";
 import { normalizeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { AuthFailureReason } from "./auth-state.js";
 import {
@@ -495,7 +495,7 @@ interface WriteContextPayload {
 /**
  * Subscription callback type.
  */
-export type SubscriptionCallback = (delta: SubscriptionWireDelta) => void;
+export type SubscriptionCallback = (delta: NativeRowDelta) => void;
 
 export interface ConnectRuntimeOptions {
   onAuthFailure?: (reason: AuthFailureReason) => void;
@@ -613,17 +613,17 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
 
 function normalizeSubscriptionCallbackArgs(
   args: unknown[],
-): Error | SubscriptionWireDelta | string | undefined {
+): Error | NativeRowDelta | string | undefined {
   if (args.length === 2 && args[0] instanceof Error) {
     return args[0];
   }
 
   if (args.length === 1) {
-    return args[0] as SubscriptionWireDelta | string;
+    return args[0] as NativeRowDelta | string;
   }
 
   if (args.length === 2 && args[0] == null) {
-    return args[1] as SubscriptionWireDelta | string | undefined;
+    return args[1] as NativeRowDelta | string | undefined;
   }
 
   console.error("Invalid subscription callback arguments", args);
@@ -1584,7 +1584,7 @@ export class JazzClient {
           throw deltaJsonOrObject;
         }
 
-        const delta: SubscriptionWireDelta =
+        const delta: NativeRowDelta =
           typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
         callback(delta);
       });

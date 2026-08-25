@@ -5581,7 +5581,6 @@ function nativeResetDeltaFromBatches(
     }
   }
   return {
-    __jazzNativeRowDelta: true,
     added: concatBytes(chunks),
     removed: new Uint8Array(),
     updated: new Uint8Array(),
@@ -5772,7 +5771,6 @@ function nativeDeltaFromChanges(
   outputColumns: SubscriptionOutputColumns | null = null,
 ): NativeRowDelta {
   return {
-    __jazzNativeRowDelta: true,
     added: encodeNativeRows(added, rowIndexByKey, schema, false, outputColumns),
     removed: encodeNativeRemoves(removed),
     updated: encodeNativeRows(updated, rowIndexByKey, schema, true, outputColumns),

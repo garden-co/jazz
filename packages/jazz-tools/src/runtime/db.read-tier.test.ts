@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ReadTier, type JazzClient } from "./client.js";
 import { createDbWithRuntimeSource, type Db, type DbConfig, type QueryBuilder } from "./db.js";
 import { RuntimeSource, type RuntimeClientContext } from "./runtime-source.js";
-import type { SubscriptionWireDelta, WasmSchema } from "../drivers/types.js";
+import type { NativeRowDelta, WasmSchema } from "../drivers/types.js";
 
 const schema: WasmSchema = {
   todos: {
@@ -31,13 +31,13 @@ class TestRuntimeSource extends RuntimeSource<DbConfig> {
 
 function makeClient() {
   let nextSubscription = 1;
-  const subscriptionCallbacks = new Map<number, (delta: SubscriptionWireDelta) => void>();
+  const subscriptionCallbacks = new Map<number, (delta: NativeRowDelta) => void>();
   return {
     connectTransport: vi.fn(),
     disconnectTransport: vi.fn(async () => undefined),
     onMutationError: vi.fn(),
     query: vi.fn(async () => []),
-    subscribe: vi.fn((_query, callback: (delta: SubscriptionWireDelta) => void) => {
+    subscribe: vi.fn((_query, callback: (delta: NativeRowDelta) => void) => {
       const id = nextSubscription++;
       subscriptionCallbacks.set(id, callback);
       return id;
@@ -51,7 +51,7 @@ function makeClient() {
     query: ReturnType<typeof vi.fn>;
     subscribe: ReturnType<typeof vi.fn>;
     unsubscribe: ReturnType<typeof vi.fn>;
-    subscriptionCallbacks: Map<number, (delta: SubscriptionWireDelta) => void>;
+    subscriptionCallbacks: Map<number, (delta: NativeRowDelta) => void>;
   };
 }
 
@@ -65,15 +65,24 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function added(id: string, title: string): SubscriptionWireDelta {
-  return [
-    {
-      kind: 0,
-      id,
-      index: 0,
-      row: { id, values: [{ type: "Text", value: title }] },
-    },
-  ];
+function added(id: string, title: string): NativeRowDelta {
+  const rowId = new Uint8Array(16);
+  rowId.set(new TextEncoder().encode(id).subarray(0, rowId.length));
+  const raw = Uint8Array.from([0, ...new TextEncoder().encode(title)]);
+  const added = new Uint8Array(16 + 4 + 4 + raw.byteLength);
+  added.set(rowId);
+  const view = new DataView(added.buffer);
+  view.setUint32(16, 0, true);
+  view.setUint32(20, raw.byteLength, true);
+  added.set(raw, 24);
+  return {
+    added,
+    removed: new Uint8Array(),
+    updated: new Uint8Array(),
+    addedCount: 1,
+    removedCount: 0,
+    updatedCount: 0,
+  };
 }
 
 function publicationTitles(delta: { all?: Array<{ title: string }> }): string[] {

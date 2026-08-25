@@ -3,13 +3,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type {
-  ColumnDescriptor,
-  NativeRowDelta,
-  RowDelta,
-  Value,
-  WasmRow,
-} from "../drivers/types.js";
+import type { ColumnDescriptor, NativeRowDelta, Value, WasmRow } from "../drivers/types.js";
 import { applySubscriptionDelta, SubscriptionManager } from "./subscription-manager.js";
 import type { SubscriptionDelta } from "./subscription-manager.js";
 
@@ -17,6 +11,27 @@ interface TestItem {
   id: string;
   name: string;
   count: number;
+}
+
+type DecodedRowDelta = Array<
+  | { kind: 0; id: string; index: number; row: WasmRow }
+  | { kind: 1; id: string; index: number }
+  | { kind: 2; id: string; index: number; row?: WasmRow | null }
+>;
+
+function handleDecodedDelta<T extends { id: string }>(
+  manager: SubscriptionManager<T>,
+  delta: DecodedRowDelta,
+  transformRow: (row: WasmRow) => T,
+): SubscriptionDelta<T> {
+  return (
+    manager as unknown as {
+      handleDecodedDelta(
+        delta: DecodedRowDelta,
+        transform: (row: WasmRow) => T,
+      ): SubscriptionDelta<T>;
+    }
+  ).handleDecodedDelta(delta, transformRow);
 }
 
 const nativeColumns: ColumnDescriptor[] = [
@@ -125,7 +140,6 @@ function terminalTextChild(id: string, name: string): Uint8Array {
 
 function emptyNativeDelta(overrides: Partial<NativeRowDelta> = {}): NativeRowDelta {
   return {
-    __jazzNativeRowDelta: true,
     added: new Uint8Array(),
     removed: new Uint8Array(),
     updated: new Uint8Array(),
@@ -176,9 +190,9 @@ function transformIncluded(row: WasmRow): IncludedRoot {
 describe("SubscriptionManager", () => {
   it("transforms wire deltas into typed deltas", () => {
     const manager = new SubscriptionManager<TestItem>();
-    const input: RowDelta = [{ kind: 0, id: "1", index: 0, row: makeRow("1", "item1", 10) }];
+    const input: DecodedRowDelta = [{ kind: 0, id: "1", index: 0, row: makeRow("1", "item1", 10) }];
 
-    const result = manager.handleDelta(input, transform);
+    const result = handleDecodedDelta(manager, input, transform);
 
     expect(result.delta).toEqual([
       { kind: 0, id: "1", index: 0, item: { id: "1", name: "item1", count: 10 } },
@@ -188,7 +202,8 @@ describe("SubscriptionManager", () => {
 
   it("tracks additions", () => {
     const manager = new SubscriptionManager<TestItem>();
-    const result = manager.handleDelta(
+    const result = handleDecodedDelta(
+      manager,
       [
         { kind: 0, id: "1", index: 0, row: makeRow("1", "item1", 10) },
         { kind: 0, id: "2", index: 1, row: makeRow("2", "item2", 20) },
@@ -210,7 +225,8 @@ describe("SubscriptionManager", () => {
       bytes: Uint8Array.of(7, 8),
       nan: Number.NaN,
     });
-    manager.handleDelta(
+    handleDecodedDelta(
+      manager,
       [
         { kind: 0, id: "A", index: 0, row: makeRow("A", "A", 1) },
         { kind: 0, id: "B", index: 1, row: makeRow("B", "B", 2) },
@@ -218,7 +234,8 @@ describe("SubscriptionManager", () => {
       transformEdge,
     );
 
-    const result = manager.handleDelta(
+    const result = handleDecodedDelta(
+      manager,
       [{ kind: 2, id: "B", index: 0, row: makeRow("B", "B", 2) }],
       transformEdge,
     );
@@ -229,7 +246,8 @@ describe("SubscriptionManager", () => {
 
   it("reports an identical update at its final index after same-frame inserts", () => {
     const manager = new SubscriptionManager<TestItem>();
-    manager.handleDelta(
+    handleDecodedDelta(
+      manager,
       [
         { kind: 0, id: "A", index: 0, row: makeRow("A", "A", 1) },
         { kind: 0, id: "B", index: 1, row: makeRow("B", "B", 2) },
@@ -237,7 +255,8 @@ describe("SubscriptionManager", () => {
       transform,
     );
 
-    const result = manager.handleDelta(
+    const result = handleDecodedDelta(
+      manager,
       [
         { kind: 0, id: "C", index: 0, row: makeRow("C", "C", 3) },
         { kind: 2, id: "B", index: 2, row: makeRow("B", "B", 2) },
@@ -551,11 +570,13 @@ describe("SubscriptionManager", () => {
 
   it("tracks content updates", () => {
     const manager = new SubscriptionManager<TestItem>();
-    const initial = manager.handleDelta(
+    const initial = handleDecodedDelta(
+      manager,
       [{ kind: 0, id: "1", index: 0, row: makeRow("1", "item1", 10) }],
       transform,
     );
-    const result = manager.handleDelta(
+    const result = handleDecodedDelta(
+      manager,
       [{ kind: 2, id: "1", index: 0, row: makeRow("1", "item1", 15) }],
       transform,
     );
@@ -571,7 +592,8 @@ describe("SubscriptionManager", () => {
 
   it("handles move-only updates without row payload", () => {
     const manager = new SubscriptionManager<TestItem>();
-    const initial = manager.handleDelta(
+    const initial = handleDecodedDelta(
+      manager,
       [
         { kind: 0, id: "a", index: 0, row: makeRow("a", "A", 1) },
         { kind: 0, id: "b", index: 1, row: makeRow("b", "B", 2) },
@@ -579,7 +601,7 @@ describe("SubscriptionManager", () => {
       ],
       transform,
     );
-    const result = manager.handleDelta([{ kind: 2, id: "c", index: 0 }], transform);
+    const result = handleDecodedDelta(manager, [{ kind: 2, id: "c", index: 0 }], transform);
 
     expect(result.delta).toEqual([{ kind: 2, id: "c", index: 0 }]);
     expect(reduceDeltas(initial, result).map((item) => item.id)).toEqual(["c", "a", "b"]);
@@ -587,7 +609,8 @@ describe("SubscriptionManager", () => {
 
   it("tracks removals and shifts", () => {
     const manager = new SubscriptionManager<TestItem>();
-    const initial = manager.handleDelta(
+    const initial = handleDecodedDelta(
+      manager,
       [
         { kind: 0, id: "1", index: 0, row: makeRow("1", "item1", 10) },
         { kind: 0, id: "2", index: 1, row: makeRow("2", "item2", 20) },
@@ -595,7 +618,7 @@ describe("SubscriptionManager", () => {
       ],
       transform,
     );
-    const result = manager.handleDelta([{ kind: 1, id: "2", index: 1 }], transform);
+    const result = handleDecodedDelta(manager, [{ kind: 1, id: "2", index: 1 }], transform);
 
     expect(result.delta).toEqual([{ kind: 1, id: "2", index: 1 }]);
     expect(reduceDeltas(initial, result).map((item) => item.id)).toEqual(["1", "3"]);
@@ -603,7 +626,8 @@ describe("SubscriptionManager", () => {
 
   it("handles mixed indexed changes in one delta", () => {
     const manager = new SubscriptionManager<TestItem>();
-    const initial = manager.handleDelta(
+    const initial = handleDecodedDelta(
+      manager,
       [
         { kind: 0, id: "A", index: 0, row: makeRow("A", "A", 1) },
         { kind: 0, id: "B", index: 1, row: makeRow("B", "B", 2) },
@@ -612,7 +636,8 @@ describe("SubscriptionManager", () => {
       ],
       transform,
     );
-    const result = manager.handleDelta(
+    const result = handleDecodedDelta(
+      manager,
       [
         { kind: 1, id: "B", index: 1 },
         { kind: 2, id: "D", index: 1, row: makeRow("D", "D*", 40) },
@@ -629,7 +654,8 @@ describe("SubscriptionManager", () => {
 
   it("clears state", () => {
     const manager = new SubscriptionManager<TestItem>();
-    manager.handleDelta(
+    handleDecodedDelta(
+      manager,
       [{ kind: 0, id: "1", index: 0, row: makeRow("1", "item1", 10) }],
       transform,
     );
@@ -637,7 +663,8 @@ describe("SubscriptionManager", () => {
     manager.clear();
     expect(manager.size).toBe(0);
 
-    const result = manager.handleDelta(
+    const result = handleDecodedDelta(
+      manager,
       [{ kind: 0, id: "2", index: 0, row: makeRow("2", "item2", 20) }],
       transform,
     );

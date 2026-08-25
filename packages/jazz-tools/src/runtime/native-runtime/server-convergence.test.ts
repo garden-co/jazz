@@ -9,8 +9,8 @@ import { startLocalJazzServer, type LocalJazzServerHandle } from "../../testing/
 import { JazzClient } from "../client.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "../testing/wasm-runtime-test-utils.js";
 import { encodeSchema } from "./native-runtime-adapter.js";
-import { decodeNativeDelta, isNativeRowDelta } from "../subscription-manager.js";
-import type { SubscriptionWireDelta } from "../../drivers/types.js";
+import { decodeNativeDelta } from "../subscription-manager.js";
+import type { NativeRowDelta } from "../../drivers/types.js";
 
 const maybeIt = hasJazzWasmBuild() ? it : it.skip;
 const previousWebSocket = globalThis.WebSocket;
@@ -24,13 +24,10 @@ const schema = {
   },
 } satisfies WasmSchema;
 
-function normalizeTestDelta(delta: SubscriptionWireDelta, testSchema: WasmSchema) {
-  if (isNativeRowDelta(delta)) {
-    const columns = testSchema.todos?.columns ?? testSchema.arrays?.columns;
-    if (!columns) throw new Error("test schema has no decodable subscription table");
-    return decodeNativeDelta(delta, columns);
-  }
-  return delta;
+function normalizeTestDelta(delta: NativeRowDelta, testSchema: WasmSchema) {
+  const columns = testSchema.todos?.columns ?? testSchema.arrays?.columns;
+  if (!columns) throw new Error("test schema has no decodable subscription table");
+  return decodeNativeDelta(delta, columns);
 }
 
 const writableTodoSchema = {

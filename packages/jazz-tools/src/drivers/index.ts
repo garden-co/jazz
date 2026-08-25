@@ -8,7 +8,5 @@ export type {
   TableSchema,
   WasmSchema,
   WasmRow,
-  RowDelta as WireRowDelta,
   NativeRowDelta,
-  SubscriptionWireDelta,
 } from "./types.js";
