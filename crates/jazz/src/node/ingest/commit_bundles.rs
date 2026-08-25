@@ -132,7 +132,7 @@ where
         tx: Transaction,
         versions: Vec<VersionRecord>,
         now_ms: u64,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error>
     where
         S: ReopenableStorage,

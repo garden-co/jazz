@@ -5,21 +5,28 @@ use super::*;
 #[test]
 fn local_subscription_emits_removed_row_for_fire_and_forget_delete() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0x31; 16]);
+    let owner = AuthorSubject::for_test_bytes([0x31; 16]);
     let db = open_db(0x31, owner, &schema);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     let row_id = row(0x31);
-    db.insert_with_id("todos", row_id, cells("delete me", false, owner))
-        .unwrap();
+    db.insert(
+        "todos",
+        cells("delete me", false, owner),
+        crate::db::InsertOptions {
+            row_id: Some(row_id),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert_eq!(row_ids(&added), vec![row_id]);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
 
-    db.delete("todos", row_id).unwrap();
+    db.delete("todos", row_id, Default::default()).unwrap();
     let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert!(added.is_empty());
     assert!(updated.is_empty());
@@ -35,16 +42,15 @@ fn local_subscription_emits_removed_row_for_fire_and_forget_delete() {
 #[test]
 fn one_shot_and_subscription_rows_keep_identical_record_descriptors() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0x32; 16]);
+    let owner = AuthorSubject::for_test_bytes([0x32; 16]);
     let db = open_db(0x32, owner, &schema);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
     let _ = block_on(subscription.next_raw()).unwrap();
 
     let row_id = row(0x32);
-    db.insert_with_id(
+    db.insert(
         "todos",
-        row_id,
         BTreeMap::from([
             (
                 "title".to_owned(),
@@ -52,6 +58,10 @@ fn one_shot_and_subscription_rows_keep_identical_record_descriptors() {
             ),
             ("done".to_owned(), Value::Bool(false)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row_id),
+            ..Default::default()
+        },
     )
     .unwrap();
     let (added, _, _) = delta_rows(block_on(subscription.next_raw()).unwrap());
@@ -70,8 +80,8 @@ fn one_shot_and_subscription_rows_keep_identical_record_descriptors() {
 #[test]
 fn session_scoped_subscription_emits_removed_row_for_owned_delete() {
     let schema = owner_id_public_schema();
-    let author = AuthorId::from_bytes([0x32; 16]);
-    let db = open_db(0x32, AuthorId::SYSTEM, &schema);
+    let author = AuthorSubject::for_test_bytes([0x32; 16]);
+    let db = open_db(0x32, AuthorSubject::SYSTEM, &schema);
     let user_id = "local-first-user";
     db.set_identity_claims(
         author,
@@ -84,14 +94,17 @@ fn session_scoped_subscription_emits_removed_row_for_owned_delete() {
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     let row_id = row(0x32);
-    db.insert_with_id_for_identity(
-        author,
+    db.insert(
         "messages",
-        row_id,
         BTreeMap::from([
             ("body".to_owned(), Value::String("delete me".to_owned())),
             ("owner_id".to_owned(), Value::String(user_id.to_owned())),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row_id),
+            identity: crate::db::WriteIdentity::Session(author),
+            ..Default::default()
+        },
     )
     .unwrap();
     let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
@@ -99,7 +112,15 @@ fn session_scoped_subscription_emits_removed_row_for_owned_delete() {
     assert!(updated.is_empty());
     assert!(removed.is_empty());
 
-    db.delete_for_identity(author, "messages", row_id).unwrap();
+    db.delete(
+        "messages",
+        row_id,
+        crate::db::DeleteOptions {
+            identity: crate::db::WriteIdentity::Session(author),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert!(added.is_empty());
     assert!(updated.is_empty());
@@ -115,7 +136,7 @@ fn session_scoped_subscription_emits_removed_row_for_owned_delete() {
 #[test]
 fn subscription_retains_a_plan_from_its_selected_authorization_mode() {
     let schema = owner_id_public_schema();
-    let author = AuthorId::from_bytes([0x33; 16]);
+    let author = AuthorSubject::for_test_bytes([0x33; 16]);
     let db = open_db(0x33, author, &schema);
     db.set_identity_claims(
         author,

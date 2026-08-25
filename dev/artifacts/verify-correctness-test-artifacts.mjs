@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { verifyManifest } from "./provenance.mjs";
+import { verifyWasmGlueAbi } from "./wasm-glue-abi.mjs";
 
 const root = resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
 
@@ -94,6 +95,34 @@ export function verifyCorrectnessTestArtifacts(rootDir = root) {
         failures.push(
           `WASM ABI drift for WasmDb.${method}: consumer=${sourceArity}, d.ts=${typeArity}, glue=${glueArity}`,
         );
+    }
+    const expectedTransport = classBody(
+      text("packages/jazz-tools/src/types/jazz-wasm.d.ts", rootDir),
+      "WasmTransport",
+    );
+    const generatedTransportTypes = classBody(
+      text("crates/jazz-wasm/pkg/jazz_wasm.d.ts", rootDir),
+      "WasmTransport",
+    );
+    const generatedTransportGlue = classBody(
+      text("crates/jazz-wasm/pkg/jazz_wasm.js", rootDir),
+      "WasmTransport",
+    );
+    const transportMethod = "recvAuxiliaryWireFrames";
+    const sourceArity = arityFromDeclaration(expectedTransport, transportMethod);
+    const typeArity = arityFromDeclaration(generatedTransportTypes, transportMethod);
+    const glueArity = arityFromGlue(generatedTransportGlue, transportMethod);
+    if (sourceArity !== typeArity || sourceArity !== glueArity)
+      failures.push(
+        `WASM ABI drift for WasmTransport.${transportMethod}: consumer=${sourceArity}, d.ts=${typeArity}, glue=${glueArity}`,
+      );
+    const workerWasm = resolve(rootDir, "packages/jazz-tools/dist/worker/jazz_wasm_bg.wasm");
+    const workerGlue = resolve(rootDir, "packages/jazz-tools/dist/worker/jazz-broker-worker.js");
+    if (!existsSync(workerWasm) || !existsSync(workerGlue)) {
+      failures.push("browser worker artifacts are missing");
+    } else {
+      const problem = verifyWasmGlueAbi(readFileSync(workerWasm), readFileSync(workerGlue, "utf8"));
+      if (problem) failures.push(`broker worker ${problem}`);
     }
     const rust = text("crates/jazz/src/wire.rs", rootDir);
     const ts = text("packages/jazz-tools/src/runtime/native-runtime/websocket.ts", rootDir);

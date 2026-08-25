@@ -27,7 +27,7 @@ impl TestRocksOpen for RocksDbStorage {
 }
 
 use super::*;
-use crate::ids::{AuthorId, NodeUuid};
+use crate::ids::{AuthorSubject, NodeUuid};
 use crate::legacy_test_future::{
     FutureResolveExt as _, OptionFutureExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
 };
@@ -40,7 +40,7 @@ use crate::protocol::{
 };
 use crate::protocol_limits::{
     MAX_FETCH_ROW_VERSIONS, MAX_INFLIGHT_LOGICAL_MESSAGES, MAX_KNOWN_STATE_EXACT_REFS,
-    MAX_LOGICAL_MESSAGE_BYTES, MAX_SHAPE_AST_BYTES, MAX_WIRE_FRAME_BYTES,
+    MAX_LOGICAL_MESSAGE_BYTES, MAX_SHAPE_REGISTRATION_BYTES, MAX_WIRE_FRAME_BYTES,
 };
 use crate::query::{
     ArraySubquery, BindingId, Include, JoinMode, OrderDirection, Predicate, RelationOrderBy,

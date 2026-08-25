@@ -17,7 +17,7 @@ use jazz::tools::{
 use jazz_storage_rocksdb::RocksDbStorage;
 use serde_json::json;
 
-fn verify_jwt_and_extract_claims(_token: &str) -> (String, serde_json::Value) {
+fn verify_jwt_and_extract_claims(_token: &str) -> (String, String, serde_json::Value) {
     // Replace with your auth provider's JWT verification logic.
     ("replace-with-verified-sub".to_string(), json!({}))
 }
@@ -48,8 +48,8 @@ pub fn requester_session_from_headers(headers: &HeaderMap) -> Result<Session, St
         .strip_prefix("Bearer ")
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let (user_id, claims) = verify_jwt_and_extract_claims(token);
-    Ok(Session::new(user_id).with_claims(claims))
+    let (issuer, user_id, claims) = verify_jwt_and_extract_claims(token);
+    Ok(Session::new(issuer, user_id).with_claims(claims))
 }
 // #endregion backend-request-session-rust
 

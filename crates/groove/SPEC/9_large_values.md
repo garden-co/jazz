@@ -49,10 +49,18 @@ LargeValueRef {
 
 `logical_hash` is deterministic content identity. `object_hash` authenticates
 the exact encoded node, including the child locators that it reveals, and
-`locator` is an opaque random storage key interpreted only by
-Groove's chunk subsystem. Groove treats object hashes and locators as non-semantic:
+`locator` is an opaque random 256-bit capability interpreted only by
+Groove's chunk subsystem. Storage adapters derive any backend-specific or
+prefixed key internally; such keys never cross the retrieval protocol. Groove
+treats object hashes and locators as non-semantic:
 changing only the retrieval graph cannot change logical equality, ordering,
 grouping, an IVM node id, an index key, or query output.
+
+Groove allocates every new locator internally from 32 unmodified bytes supplied
+by the operating system CSPRNG. Production construction, streaming,
+consolidation, append, and edit APIs do not accept locator allocators from
+callers; tests may inject deterministic allocators only through crate-private
+test helpers.
 
 Small logical values remain inline. Above a versioned threshold, Groove emits a
 large descriptor and immutable chunks. Once indirect, a value may remain
@@ -392,6 +400,10 @@ tree. Completion is derived from an empty validated frontier rather than a
 sender finalization assertion. Partial uploads and completed timestamped
 retainer claims carry persisted creation/accounting metadata so host-driven
 expiry can reclaim abandoned uploads without consulting Jazz row history.
+Those timestamps are GC and resource-management metadata, not synchronous
+admission deadlines: while a journal or receipt remains present, chunk pushes,
+finalization, and publication may proceed regardless of wall-clock age. Once
+maintenance evicts it, stale handles fail by absence and cannot recreate it.
 Frontier collection itself stops at the negotiated batch bound; it does not
 allocate an unbounded list and truncate it after returning. A stale frontier
 response racing another uploader is accepted only when its redundant nodes

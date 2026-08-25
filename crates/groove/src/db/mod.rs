@@ -346,6 +346,7 @@ impl AppliedBatch {
             },
             receipt: PersistenceReceipt {
                 lifecycle: Rc::clone(&self.lifecycle),
+                order: Rc::clone(&self.order),
                 abandoned_application: Rc::clone(&self.abandoned_application),
             },
         }
@@ -392,6 +393,7 @@ pub struct PersistedBatch {
 
 struct PersistenceReceipt {
     lifecycle: Rc<Cell<AppliedBatchLifecycle>>,
+    order: Rc<RefCell<PersistenceOrder>>,
     abandoned_application: Rc<Cell<bool>>,
 }
 
@@ -455,6 +457,8 @@ pub enum Error {
     InvalidPersistedIndex(String),
     #[error("invalid persisted large-value metadata: {0}")]
     InvalidLargeValueMetadata(String),
+    #[error("pending large-value upload limit reached: {limit}")]
+    PendingLargeValueUploadLimitExceeded { limit: usize },
     #[error("index key arity mismatch for {index}: expected at most {expected}, got {actual}")]
     IndexKeyArity {
         index: String,
@@ -499,6 +503,8 @@ pub enum Error {
     TableFieldDefinitionMismatch { table: String, field: String },
     #[error("index definition does not match the live catalogue: {table}.{index}")]
     TableIndexDefinitionMismatch { table: String, index: String },
+    #[error("cannot register index {table}.{index} while database publications remain resident")]
+    TableIndexRegistrationWhilePublicationsResident { table: String, index: String },
     #[error("index {table}.{index} references unknown field {field}")]
     TableIndexFieldNotFound {
         table: String,

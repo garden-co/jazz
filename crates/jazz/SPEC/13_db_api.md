@@ -36,7 +36,7 @@ Invariant digest:
 - `INV-API-32`: `ReadOpts.tier` selects the sufficient materialized knowledge and first-result gate; `Propagation` only controls whether evaluation or coverage may be forwarded upstream and MUST NOT change local-tier result semantics. Thus a `Local` read resolves from current local materialized state even with `Propagation::Full`: a locally committed pending write is returned, while a row written remotely but not yet delivered locally is absent. `LocalOnly` prevents upstream routing; it is not what makes a `Local` read local.
 - `INV-API-19`: Upstream announcement of a subscription MUST make its query definition available before the subscription that uses it, without re-announcing the same definition for that connection.
 - `INV-API-20`: An upstream connection MUST upload each locally-authored transaction at most once.
-- `INV-API-21`: A subscriber `PeerConnection::tick` MUST serve subscriptions under the `AuthorId` passed to `Node::accept_subscriber`, not under the serving node's own identity.
+- `INV-API-21`: A subscriber `PeerConnection::tick` MUST serve subscriptions under the `AuthorSubject` passed to `Node::accept_subscriber`, not under the serving node's own identity.
 - `INV-API-22`: Db::tick() MUST service every registered connection exactly once.
 - `INV-API-23`: A client binding tick driver MUST classify `Db::tick()` failures. A recoverable protocol condition MUST NOT terminate the driver; the driver MUST continue through its documented repair or reconnect path with bounded backoff. A fatal failure, or exhausted recovery, MUST stop the driver and be surfaced to the caller as an error rather than appearing as a stalled sync operation.
 - `INV-API-24`: The query builder exposed through Db::table MUST expose the schema-validated query construction capabilities defined in ch. 6.
@@ -63,7 +63,7 @@ read, and subscribe — is shown here using the `todos` example:
 use std::collections::BTreeMap;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, RowCells, SeededRowIdSource};
 use jazz::groove::{records::Value, storage::MemoryStorage};
-use jazz::ids::{AuthorId, NodeUuid};
+use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
@@ -88,7 +88,7 @@ let db = jazz::block_on(Db::open(DbConfig {
     schema, storage,
     identity: DbIdentity {
         node: NodeUuid::from_bytes([0x11; 16]),
-        author: AuthorId::from_bytes([0xa1; 16]),
+        author: AuthorSubject::for_test_bytes([0xa1; 16]),
     },
     id_source: Some(Box::new(SeededRowIdSource::new(0x1111))),
 }))?;
@@ -398,7 +398,7 @@ Facade errors carry an `ErrorCode` plus a message:
 **Callable today:** `Db::open`; the mutation methods (§13.4), including
 `mergeable_tx`, `exclusive_tx`, attributed writes, and `can_*` dry-runs; `table` /
 `read` / `one` / `all` / `subscribe` (§13.3); and the binding sync surface
-(§13.5). Read policies evaluate `claim("sub")` plus admission/session-provided
+(§13.5). Read policies evaluate `claim("author")` plus admission/session-provided
 runtime claims (ch. 7); client query bindings never supply policy claims.
 `Db::open_history_complete` and `Db::at` provide history-complete facade reads;
 ordinary client facades remain history-incomplete (`crates/jazz/src/db.rs:383`,

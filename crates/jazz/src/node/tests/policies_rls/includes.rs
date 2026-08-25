@@ -15,7 +15,7 @@ fn required_include_rls_schema() -> JazzSchema {
                     .policies(
                         PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
                             "owner",
-                            vec!["claims".to_owned(), "sub".to_owned()],
+                            vec!["user_id".to_owned()],
                         )),
                     ),
             ),
@@ -61,7 +61,7 @@ fn parent_ref_join_matches_a_declared_id_column_instead_of_the_physical_row_uuid
         .join_via_column("chats", "id", "chat", [])
         .validate(&core.catalogue.schema)
         .unwrap();
-    let rows = required_include_rows(&mut core, &shape, AuthorId::SYSTEM);
+    let rows = required_include_rows(&mut core, &shape, AuthorSubject::SYSTEM);
     assert_eq!(
         rows.into_iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
         vec![membership]
@@ -91,13 +91,17 @@ fn point_read_authorization_keeps_using_physical_row_uuid_with_declared_id() {
             ),
     ));
     let (_core_dir, mut core) = open_node_with_schema(node(0xa9), schema);
+    core.set_session_claims(
+        alice,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(alice.test_uuid()))]),
+    );
     let physical_row = row(0xc1);
     let declared_id = row(0xd1);
     let tx = core
         .commit_mergeable_unit_settled(
             MergeableCommit::new("documents", physical_row, 10).cells(BTreeMap::from([
                 ("id".to_owned(), Value::Uuid(declared_id.0)),
-                ("owner".to_owned(), Value::Uuid(alice.0)),
+                ("owner".to_owned(), Value::Uuid(alice.test_uuid())),
             ])),
         )
         .unwrap();
@@ -129,14 +133,27 @@ fn required_include_shape(core: &NodeState<RocksDbStorage>, include: Include) ->
 fn required_include_rows(
     core: &mut NodeState<RocksDbStorage>,
     shape: &ValidatedQuery,
-    identity: AuthorId,
+    identity: AuthorSubject,
 ) -> Vec<CurrentRow> {
     let binding = shape.bind(BTreeMap::new()).unwrap();
+    if matches!(identity, AuthorSubject::Authenticated(_)) {
+        core.set_session_claims(
+            identity,
+            BTreeMap::from([("user_id".to_owned(), Value::Uuid(identity.test_uuid()))]),
+        );
+    }
     core.query_rows_for_link(shape, &binding, DurabilityTier::Global, identity)
         .unwrap()
 }
 
-fn seed_required_include_fixture(core: &mut NodeState<RocksDbStorage>, readable_owner: AuthorId) {
+fn seed_required_include_fixture(core: &mut NodeState<RocksDbStorage>, readable_owner: AuthorSubject) {
+    core.set_session_claims(
+        readable_owner,
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::Uuid(readable_owner.test_uuid()),
+        )]),
+    );
     let unreadable_owner = user(0xb2);
     let target_tx = core
         .commit_mergeable_many_settled(vec![
@@ -175,7 +192,7 @@ fn seed_missing_required_include_fixture(core: &mut NodeState<RocksDbStorage>) {
                 ("target".to_owned(), Value::Uuid(row(0xc2).0)),
             ])),
             MergeableCommit::new("targets", row(0xc2), 10)
-                .cells(owner_cells(AuthorId::SYSTEM, "existing target")),
+                .cells(owner_cells(user(0xc2), "existing target")),
         ])
         .unwrap();
     core.accept_global_for_test(root_tx).unwrap();
@@ -191,7 +208,7 @@ fn seed_null_required_include_fixture(core: &mut NodeState<RocksDbStorage>) {
                 ("target".to_owned(), Value::Uuid(row(0xc2).0)),
             ])),
             MergeableCommit::new("targets", row(0xc2), 10)
-                .cells(owner_cells(AuthorId::SYSTEM, "existing target")),
+                .cells(owner_cells(user(0xc2), "existing target")),
         ])
         .unwrap();
     core.accept_global_for_test(root_tx).unwrap();
@@ -217,7 +234,7 @@ fn multi_segment_required_include_rls_schema() -> JazzSchema {
                     .policies(
                         PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
                             "owner",
-                            vec!["claims".to_owned(), "sub".to_owned()],
+                            vec!["user_id".to_owned()],
                         )),
                     ),
             ),
@@ -226,8 +243,15 @@ fn multi_segment_required_include_rls_schema() -> JazzSchema {
 
 fn seed_multi_segment_include_fixture(
     core: &mut NodeState<RocksDbStorage>,
-    readable_owner: AuthorId,
+    readable_owner: AuthorSubject,
 ) {
+    core.set_session_claims(
+        readable_owner,
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::Uuid(readable_owner.test_uuid()),
+        )]),
+    );
     let unreadable_owner = user(0xb2);
     let tx = core
         .commit_mergeable_many_settled(vec![
@@ -265,11 +289,11 @@ fn seed_multi_segment_include_fixture(
 }
 
 fn canonical_view_update_rows(update: &SyncMessage) -> (Vec<ResultRowEntry>, Vec<ResultRowEntry>) {
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -456,9 +480,9 @@ fn prepared_subscription_multi_segment_forward_include_keeps_root_delta() {
     core.accept_global_for_test(update_tx).unwrap();
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds, ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -604,7 +628,7 @@ fn inner_include_missing_target_drops_parent() {
     seed_missing_required_include_fixture(&mut core);
     let shape = required_include_shape(&core, Include::new("target"));
 
-    let rows = required_include_rows(&mut core, &shape, AuthorId::SYSTEM);
+    let rows = required_include_rows(&mut core, &shape, AuthorSubject::SYSTEM);
     assert_eq!(
         rows.into_iter()
             .map(|row| row.row_uuid())
@@ -620,7 +644,7 @@ fn inner_include_null_target_drops_parent() {
     seed_null_required_include_fixture(&mut core);
     let shape = required_include_shape(&core, Include::new("target"));
 
-    let rows = required_include_rows(&mut core, &shape, AuthorId::SYSTEM);
+    let rows = required_include_rows(&mut core, &shape, AuthorSubject::SYSTEM);
     assert_eq!(
         rows.into_iter()
             .map(|row| row.row_uuid())
@@ -636,7 +660,7 @@ fn holes_include_missing_target_keeps_parent() {
     seed_missing_required_include_fixture(&mut core);
     let shape = required_include_shape(&core, Include::new("target").join_mode(JoinMode::Holes));
 
-    let rows = required_include_rows(&mut core, &shape, AuthorId::SYSTEM);
+    let rows = required_include_rows(&mut core, &shape, AuthorSubject::SYSTEM);
     assert_eq!(
         rows.into_iter()
             .map(|row| row.row_uuid())
@@ -652,7 +676,7 @@ fn holes_include_keeps_parent_without_root_membership_filtering() {
     seed_missing_required_include_fixture(&mut core);
     let shape = required_include_shape(&core, Include::new("target").join_mode(JoinMode::Holes));
 
-    let rows = required_include_rows(&mut core, &shape, AuthorId::SYSTEM);
+    let rows = required_include_rows(&mut core, &shape, AuthorSubject::SYSTEM);
     assert_eq!(
         rows.into_iter()
             .map(|row| row.row_uuid())
@@ -706,7 +730,7 @@ fn system_identity_required_include_uses_existence_only_resolvability() {
     seed_required_include_fixture(&mut core, user(0xa1));
     let shape = required_include_shape(&core, Include::new("target").require_includes());
 
-    let rows = required_include_rows(&mut core, &shape, AuthorId::SYSTEM);
+    let rows = required_include_rows(&mut core, &shape, AuthorSubject::SYSTEM);
     assert_eq!(
         rows.into_iter()
             .map(|row| row.row_uuid())

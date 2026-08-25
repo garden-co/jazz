@@ -31,7 +31,11 @@ where
     /// assert!(reset);
     /// assert!(added.is_empty());
     ///
-    /// block_on(db.insert("todos", todo_cells("notify subscribers", false)))?;
+    /// block_on(db.insert(
+    ///     "todos",
+    ///     todo_cells("notify subscribers", false),
+    ///     Default::default(),
+    /// ))?;
     /// let changed = block_on(subscription.next_event()).unwrap();
     /// let SubscriptionEvent::Delta { added, updated, removed, .. } = changed else {
     ///     panic!("expected subscription delta");
@@ -60,7 +64,7 @@ where
         &self,
         prepared: &PreparedQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<SubscriptionStream, Error> {
         self.open_subscription(
             prepared,
@@ -91,7 +95,7 @@ where
         &self,
         query: &RelationQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<SubscriptionStream, Error> {
         self.open_relation_subscription(query, opts, author, QueryAuthorizationMode::TrustedServing)
             .await
@@ -126,7 +130,7 @@ where
         &self,
         prepared: &PreparedQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<QueryAttachment, Error> {
         ensure_supported_read_view(&opts)?;
         let upstream_opts = self.node.upstream_register_shape_options(
@@ -149,7 +153,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         upstream_opts: RegisterShapeOptions,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<QueryAttachment, Error> {
         let requires_current_authority_receipt = upstream_opts.tier >= DurabilityTier::Edge;
         let binding_view = BindingViewKey::new(
@@ -266,7 +270,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         opts: RegisterShapeOptions,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<SubscriptionKey, Error> {
         let subscription = self.node.next_subscription_key(shape, opts.read_view_key());
         self.node
@@ -403,7 +407,7 @@ where
         &self,
         prepared: &PreparedQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        author: AuthorSubject,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<SubscriptionStream, Error> {
         ensure_supported_subscription_read_opts(&opts)?;
@@ -694,7 +698,7 @@ where
         &self,
         query: &RelationQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        author: AuthorSubject,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<SubscriptionStream, Error> {
         ensure_supported_subscription_read_opts(&opts)?;
@@ -709,7 +713,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         opts: RegisterShapeOptions,
-        identity: AuthorId,
+        identity: AuthorSubject,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<OpenedUpstreamCoverage, Error> {
         super::block_on(

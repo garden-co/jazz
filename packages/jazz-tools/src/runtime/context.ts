@@ -42,6 +42,8 @@ export type AuthMode = "external" | "local-first" | "anonymous";
  * Session context for policy evaluation.
  */
 export interface Session {
+  /** Validated JWT issuer (`iss`). */
+  issuer: string;
   /** User identifier */
   user_id: string;
   /** User-defined claims (roles, teams, etc.) */
@@ -88,6 +90,9 @@ export interface AppContext {
    * an HttpOnly cookie instead of a JS-readable bearer token.
    */
   cookieSession?: Session;
+
+  /** @internal Session produced by a first-party reserved-issuer auth flow. */
+  trustedReservedSession?: Session;
 
   /**
    * Backend secret for session impersonation.

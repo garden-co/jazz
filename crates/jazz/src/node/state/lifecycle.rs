@@ -706,7 +706,7 @@ where
     /// Attach process-local auth claims to an accepted subscriber identity.
     pub(crate) fn set_session_claims(
         &mut self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) {
         if self.session_claims.get(&identity) == Some(&claims) {
@@ -721,8 +721,21 @@ where
         self.query.policy_authorization_graph_cache.clear();
     }
 
+    /// Install claims through the same local-admission path used by a trusted
+    /// subscriber connection. This exists only for synthetic topology tests
+    /// that exercise `NodeState`/`PeerState` directly and therefore have no
+    /// serving transport on which to perform normal session admission.
+    #[cfg(feature = "testing")]
+    pub fn admit_test_session_claims(
+        &mut self,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) {
+        self.set_session_claims(identity, claims);
+    }
+
     /// Return the revision of process-local claims for `identity`.
-    pub(crate) fn session_claim_revision(&self, identity: AuthorId) -> u64 {
+    pub(crate) fn session_claim_revision(&self, identity: AuthorSubject) -> u64 {
         self.session_claim_revisions
             .get(&identity)
             .copied()
@@ -735,7 +748,7 @@ where
     /// reached that particular connection.
     pub(crate) fn session_claims_with_revisions(
         &self,
-    ) -> Vec<(AuthorId, BTreeMap<String, Value>, u64)> {
+    ) -> Vec<(AuthorSubject, BTreeMap<String, Value>, u64)> {
         self.session_claims
             .iter()
             .map(|(identity, claims)| {
@@ -786,7 +799,7 @@ where
     /// fallback. Peer forwarding uses this to avoid recursive request loops.
     pub async fn local_chunk(
         &self,
-        locator: Vec<u8>,
+        locator: groove::large_values::Locator,
         expected_hash: groove::large_values::ContentHash,
     ) -> Result<bytes::Bytes, groove::chunks::ChunkStorageError> {
         self.local_chunk_reader.get(locator, expected_hash).await
@@ -794,21 +807,6 @@ where
 
     pub(crate) fn local_chunk_reader_handle(&self) -> groove::chunks::LocalChunkReader {
         self.local_chunk_reader.clone()
-    }
-
-    /// Stage the immutable chunks from a Groove preparation. This does not
-    /// publish an owning Jazz row; normal commit authorization and publication
-    /// remain a separate boundary.
-    pub async fn stage_large_value(
-        &self,
-        prepared: &groove::large_values::PreparedLargeValue,
-    ) -> Result<groove::large_values::StagedLargeValue, Error> {
-        let staged = self
-            .database
-            .stage_large_value_preparation(prepared.clone())
-            .await?;
-        self.enforce_large_value_staging_policy(&staged).await?;
-        Ok(staged)
     }
 
     /// Replace Jazz's policy for unpublished Groove staging receipts.
@@ -823,26 +821,6 @@ where
         if !self.admit_large_value_ingress(newest.accounting.encoded_bytes) {
             self.database.evict_staged_large_value(newest.id).await?;
             return Err(Error::LargeValueIngressRateLimited);
-        }
-        self.evict_expired_large_value_stages_except(newest.id).await
-    }
-
-    async fn evict_expired_large_value_stages_except(
-        &self,
-        retained_id: groove::large_values::StagedLargeValueId,
-    ) -> Result<(), Error> {
-        let now_ms: u64 = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            .try_into()
-            .unwrap_or(u64::MAX);
-        for staged in self.database.staged_large_values().await? {
-            let expired = now_ms.saturating_sub(staged.created_at_ms)
-                > self.large_value_staging_policy.max_age_ms;
-            if expired && staged.id != retained_id {
-                self.database.evict_staged_large_value(staged.id).await?;
-            }
         }
         Ok(())
     }
@@ -877,12 +855,6 @@ where
         if ids.is_empty() {
             return Ok(());
         }
-        let now_ms: u64 = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            .try_into()
-            .unwrap_or(u64::MAX);
         let staged = self
             .database
             .staged_large_values()
@@ -891,13 +863,7 @@ where
             .map(|staged| (staged.id, staged))
             .collect::<BTreeMap<_, _>>();
         for id in ids {
-            let Some(receipt) = staged.get(id) else {
-                return Err(Error::LargeValueStageExpired);
-            };
-            if now_ms.saturating_sub(receipt.created_at_ms)
-                > self.large_value_staging_policy.max_age_ms
-            {
-                self.database.evict_staged_large_value(*id).await?;
+            if !staged.contains_key(id) {
                 return Err(Error::LargeValueStageExpired);
             }
         }
@@ -912,27 +878,12 @@ where
         if descriptors.is_empty() {
             return Ok(Vec::new());
         }
-        let now_ms: u64 = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            .try_into()
-            .unwrap_or(u64::MAX);
         let staged = self.database.staged_large_values().await?;
         let mut ids = Vec::new();
         for descriptor in descriptors {
-            if let Some(expired) = staged.iter().find(|receipt| {
-                &receipt.value_ref == descriptor
-                    && now_ms.saturating_sub(receipt.created_at_ms)
-                        > self.large_value_staging_policy.max_age_ms
-            }) {
-                self.database.evict_staged_large_value(expired.id).await?;
-            }
-            let receipt = staged.iter().find(|receipt| {
-                &receipt.value_ref == descriptor
-                    && now_ms.saturating_sub(receipt.created_at_ms)
-                        <= self.large_value_staging_policy.max_age_ms
-            });
+            let receipt = staged
+                .iter()
+                .find(|receipt| &receipt.value_ref == descriptor);
             if let Some(receipt) = receipt {
                 ids.push(receipt.id);
             } else if require_every_descriptor {
@@ -953,8 +904,8 @@ where
     }
 
     /// Evict unpublished Groove staging roots older than the configured Jazz
-    /// policy. Hosts may call this from their ordinary maintenance cadence;
-    /// row acceptance independently performs the same freshness check.
+    /// policy. TTL is maintenance and resource-management policy only; normal
+    /// operations continue any journal or receipt that remains present.
     pub async fn evict_expired_staged_large_values(&self) -> Result<usize, Error> {
         let max_age_ms = self.large_value_staging_policy.max_age_ms;
         let now_ms: u64 = web_time::SystemTime::now()
@@ -1011,10 +962,31 @@ where
             self.database.evict_staged_large_value(upload_id).await?;
             return Err(Error::LargeValueIngressRateLimited);
         }
-        Ok(self
+        let staged = self
             .database
-            .stage_large_value_chunk_batch(upload_id, kind, chunks)
-            .await?)
+            .stage_large_value_chunk_batch_if_current(
+                upload_id,
+                kind,
+                chunks,
+            )
+            .await?;
+        if !staged {
+            return Err(Error::LargeValueStageExpired);
+        }
+        Ok(())
+    }
+
+    /// Establish the one pending journal that later local stream operations
+    /// must continue. Only this initialization path may create it.
+    pub(crate) async fn begin_streaming_large_value_upload(
+        &self,
+        upload_id: groove::large_values::StagedLargeValueId,
+        kind: groove::large_values::LargeValueKind,
+    ) -> Result<(), Error> {
+        self.database
+            .stage_large_value_chunk_batch(upload_id, kind, Vec::new())
+            .await?;
+        Ok(())
     }
 
     pub(crate) async fn evict_pending_large_value_upload(
@@ -1032,34 +1004,43 @@ where
         upload_id: groove::large_values::StagedLargeValueId,
         value_ref: groove::large_values::LargeValueRef,
     ) -> Result<groove::large_values::StagedLargeValue, Error> {
-        let staged = self
+        // Presence is the semantic boundary: maintenance may evict an old
+        // journal, but wall-clock age alone cannot reject an active upload.
+        let Some(staged) = self
             .database
-            .finalize_large_value_upload(upload_id, value_ref)
-            .await?;
-        // Push uploads were charged batch-by-batch before persistence. Do not
-        // charge the completed tree a second time at root registration.
-        self.evict_expired_large_value_stages_except(staged.id)
-            .await?;
+            .finalize_large_value_upload_if_current(
+                upload_id,
+                value_ref,
+            )
+            .await?
+        else {
+            return Err(Error::LargeValueStageExpired);
+        };
         Ok(staged)
     }
 
-    /// Stage one Groove-owned preparation and attach its physical descriptor
-    /// to an otherwise ordinary authorized Jazz commit. The private marker is
-    /// admission provenance, not canonical row state.
-    pub async fn attach_prepared_large_cell(
+    /// Test helper exercising the same internally allocated admission path as
+    /// production writes.
+    #[cfg(test)]
+    pub(crate) async fn attach_large_cell_for_test(
         &self,
         mut commit: MergeableCommit,
         column: impl Into<String>,
-        prepared: &groove::large_values::PreparedLargeValue,
-    ) -> Result<MergeableCommit, Error> {
-        let staged = self.stage_large_value(prepared).await?;
+        kind: groove::large_values::LargeValueKind,
+        bytes: &[u8],
+    ) -> Result<(MergeableCommit, groove::large_values::LargeValueRef), Error> {
+        let staged = self
+            .database
+            .prepare_and_stage_large_value(kind, bytes)
+            .await?;
+        self.enforce_large_value_staging_policy(&staged).await?;
         let column = column.into();
         commit
             .cells
-            .insert(column.clone(), Value::Large(prepared.value_ref.clone()));
+            .insert(column.clone(), Value::Large(staged.value_ref.clone()));
         commit.prepared_large_columns.insert(column);
         commit.staged_large_values.push(staged.id);
-        Ok(commit)
+        Ok((commit, staged.value_ref))
     }
 
     /// Consolidate through Groove-owned storage. Jazz receives only the
@@ -1143,25 +1124,11 @@ where
         &self,
         cells: &mut BTreeMap<String, Value>,
     ) -> Result<(), Error> {
-        self.hydrate_large_value_values(cells.values_mut()).await
-    }
-
-    pub(crate) async fn hydrate_current_rows(&self, rows: &mut [CurrentRow]) -> Result<(), Error> {
-        for row in rows {
-            let descriptor = row.record.descriptor().clone();
-            let mut values = row.record.to_values()?;
-            self.hydrate_large_value_values(values.iter_mut()).await?;
-            row.record =
-                std::sync::Arc::new(OwnedRecord::new(descriptor.create(&values)?, descriptor));
-        }
-        Ok(())
-    }
-
-    async fn hydrate_large_value_values<'a>(
-        &self,
-        values: impl IntoIterator<Item = &'a mut Value>,
-    ) -> Result<(), Error> {
-        for value in values {
+        // Transaction cells are application scalars today; their schema is
+        // not carried through this internal helper. Binding records, which may
+        // contain collected nested records, use the descriptor-directed walker
+        // below instead.
+        for value in cells.values_mut() {
             let target = match value {
                 Value::Nullable(Some(inner)) => inner.as_mut(),
                 value => value,
@@ -1169,21 +1136,202 @@ where
             let Value::Large(value_ref) = target else {
                 continue;
             };
-            let bytes = self
-                .database
-                .read_large_value_range(value_ref, 0..value_ref.byte_length)
-                .await?;
-            let logical = match value_ref.kind {
-                groove::large_values::LargeValueKind::Bytes => Value::Bytes(bytes),
-                groove::large_values::LargeValueKind::String
-                | groove::large_values::LargeValueKind::Json => Value::String(
-                    String::from_utf8(bytes)
-                        .map_err(|_| Error::InvalidStoredValue("large text is not valid UTF-8"))?,
-                ),
-            };
-            *target = logical;
+            *target = self.materialize_large_value(value_ref).await?;
         }
         Ok(())
+    }
+
+    pub(crate) async fn hydrate_current_rows(&self, rows: &mut [CurrentRow]) -> Result<(), Error> {
+        for row in rows {
+            let descriptor = row.record.descriptor().clone();
+            let mut values = row.record.to_values()?;
+            self.hydrate_record_values(&mut values, &descriptor).await?;
+            row.record =
+                std::sync::Arc::new(OwnedRecord::new(descriptor.create(&values)?, descriptor));
+        }
+        Ok(())
+    }
+
+    /// Materialize physical indirect scalars in one encoded record before a
+    /// language binding exposes that record outside Jazz.
+    pub(crate) async fn hydrate_encoded_record(
+        &self,
+        descriptor: &groove::records::RecordDescriptor,
+        raw: &mut Vec<u8>,
+    ) -> Result<(), Error> {
+        let mut values = descriptor.bind(raw).to_values()?;
+        self.hydrate_record_values(&mut values, descriptor).await?;
+        *raw = descriptor.create(&values)?;
+        Ok(())
+    }
+
+    /// Hydrate every physical indirect scalar in a descriptor-owned record.
+    ///
+    /// Values are decoded into a temporary tree and re-encoded only after the
+    /// full walk succeeds. In particular, a retryable missing chunk leaves the
+    /// retained subscription event byte-identical for the next attempt.
+    async fn hydrate_record_values(
+        &self,
+        values: &mut [Value],
+        descriptor: &records::RecordDescriptor,
+    ) -> Result<(), Error> {
+        if values.len() != descriptor.fields().len() {
+            return Err(Error::InvalidStoredValue(
+                "binding record has a descriptor/value arity mismatch",
+            ));
+        }
+        for (value, field) in values.iter_mut().zip(descriptor.fields()) {
+            self.hydrate_value_for_binding(value, &field.value_type).await?;
+        }
+        Ok(())
+    }
+
+    fn hydrate_value_for_binding<'a>(
+        &'a self,
+        value: &'a mut Value,
+        value_type: &'a records::ValueType,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + 'a>> {
+        use records::ValueType;
+
+        Box::pin(async move {
+            match value_type {
+                ValueType::String => match value {
+                    Value::String(_) => Ok(()),
+                    Value::Large(value_ref)
+                        if matches!(
+                            value_ref.kind,
+                            groove::large_values::LargeValueKind::String
+                                | groove::large_values::LargeValueKind::Json
+                        ) => {
+                        *value = self.materialize_large_value(value_ref).await?;
+                        Ok(())
+                    }
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding string value does not match its descriptor",
+                    )),
+                },
+                ValueType::Bytes => match value {
+                    Value::Bytes(_) => Ok(()),
+                    Value::Large(value_ref)
+                        if value_ref.kind == groove::large_values::LargeValueKind::Bytes =>
+                    {
+                        *value = self.materialize_large_value(value_ref).await?;
+                        Ok(())
+                    }
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding bytes value does not match its descriptor",
+                    )),
+                },
+                ValueType::Nullable(inner) => match value {
+                    Value::Nullable(None) => Ok(()),
+                    Value::Nullable(Some(value)) => {
+                        self.hydrate_value_for_binding(value, inner).await
+                    }
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding nullable value does not match its descriptor",
+                    )),
+                },
+                ValueType::Array(element_type) => match value {
+                    Value::Array(values) => {
+                        for value in values {
+                            self.hydrate_value_for_binding(value, element_type).await?;
+                        }
+                        Ok(())
+                    }
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding array value does not match its descriptor",
+                    )),
+                },
+                ValueType::Tuple(member_types) => match value {
+                    Value::Tuple(values) if values.len() == member_types.len() => {
+                        for (value, member_type) in values.iter_mut().zip(member_types) {
+                            self.hydrate_value_for_binding(value, member_type).await?;
+                        }
+                        Ok(())
+                    }
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding tuple value does not match its descriptor",
+                    )),
+                },
+                ValueType::Record(descriptor) => match value {
+                    Value::Record(record) if record.descriptor() == descriptor.as_ref() => {
+                        let mut values = record.to_values()?;
+                        self.hydrate_record_values(&mut values, descriptor).await?;
+                        *record = OwnedRecord::new(descriptor.create(&values)?, **descriptor);
+                        Ok(())
+                    }
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding nested record does not match its descriptor",
+                    )),
+                },
+                ValueType::Enum(schema) => match value {
+                    Value::Enum(enum_value) => {
+                        let tag = enum_value.tag();
+                        let case = schema.case(tag)?;
+                        if enum_value.record().descriptor() != &case.payload {
+                            return Err(Error::InvalidStoredValue(
+                                "binding enum payload does not match its descriptor",
+                            ));
+                        }
+                        let mut values = enum_value.record().to_values()?;
+                        self.hydrate_record_values(&mut values, &case.payload).await?;
+                        *enum_value = records::EnumValue::new(
+                            tag,
+                            OwnedRecord::new(
+                                case.payload.create(&values)?,
+                                case.payload,
+                            ),
+                        );
+                        Ok(())
+                    }
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding enum value does not match its descriptor",
+                    )),
+                },
+                ValueType::U8 if matches!(value, Value::U8(_)) => Ok(()),
+                ValueType::U16 if matches!(value, Value::U16(_)) => Ok(()),
+                ValueType::U32 if matches!(value, Value::U32(_)) => Ok(()),
+                ValueType::U64 if matches!(value, Value::U64(_)) => Ok(()),
+                ValueType::I32 if matches!(value, Value::I32(_)) => Ok(()),
+                ValueType::I64 if matches!(value, Value::I64(_)) => Ok(()),
+                ValueType::Bool if matches!(value, Value::Bool(_)) => Ok(()),
+                ValueType::Uuid if matches!(value, Value::Uuid(_)) => Ok(()),
+                ValueType::F64 => match value {
+                    Value::F64(value) if !value.is_nan() => Ok(()),
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding float value does not match its descriptor",
+                    )),
+                },
+                ValueType::EnumTag(schema) => match value {
+                    Value::EnumTag(value) => schema.variant(*value).map(|_| ()).map_err(Into::into),
+                    Value::String(value) => schema.discriminant(value).map(|_| ()).map_err(Into::into),
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding enum tag value does not match its descriptor",
+                    )),
+                },
+                _ => Err(Error::InvalidStoredValue(
+                    "binding value does not match its descriptor",
+                )),
+            }
+        })
+    }
+
+    async fn materialize_large_value(
+        &self,
+        value_ref: &groove::large_values::LargeValueRef,
+    ) -> Result<Value, Error> {
+        let bytes = self
+            .database
+            .read_large_value_range(value_ref, 0..value_ref.byte_length)
+            .await?;
+        match value_ref.kind {
+            groove::large_values::LargeValueKind::Bytes => Ok(Value::Bytes(bytes)),
+            groove::large_values::LargeValueKind::String
+            | groove::large_values::LargeValueKind::Json => Ok(Value::String(
+                String::from_utf8(bytes)
+                    .map_err(|_| Error::InvalidStoredValue("large text is not valid UTF-8"))?,
+            )),
+        }
     }
 
     async fn rebuild_database_slot(&mut self) -> Result<(), Error> {

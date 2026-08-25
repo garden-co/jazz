@@ -18,7 +18,7 @@ fn reverse_table_lens_projects_membership_and_content_version_sources() {
     let evolved_payload = SchemaVersion::new(evolved);
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xa2; 16]), base.clone());
     node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         catalogue_seq: 1,
         publication: Box::new(SchemaLineagePublication::new(
             evolved_payload.clone(),
@@ -40,7 +40,7 @@ fn reverse_table_lens_projects_membership_and_content_version_sources() {
     })
     .unwrap();
     node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved_payload.id,
@@ -55,7 +55,7 @@ fn reverse_table_lens_projects_membership_and_content_version_sources() {
             &shape,
             &binding,
             DurabilityTier::Global,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             CurrentQueryProgramOutput::MaintainedView,
             &ReadViewSpec::default(),
             None,
@@ -244,7 +244,7 @@ fn denormalized_current_content_witness_matches_history_payload_bytes() {
         BTreeMap::from([
             ("title".to_owned(), Value::String("first".to_owned())),
             ("state".to_owned(), Value::String("open".to_owned())),
-            ("assignee".to_owned(), Value::Uuid(author(1).0)),
+            ("assignee".to_owned(), Value::Uuid(author(1).test_uuid())),
             ("priority".to_owned(), Value::U64(1)),
         ]),
         1_000,
@@ -253,12 +253,12 @@ fn denormalized_current_content_witness_matches_history_payload_bytes() {
     let second = node
         .commit_mergeable_settled(
             MergeableCommit::new("issues", row(11), 1_100)
-                .made_by(AuthorId::SYSTEM)
+                .made_by(AuthorSubject::SYSTEM)
                 .parents(vec![first])
                 .cells(BTreeMap::from([
                     ("title".to_owned(), Value::String("second".to_owned())),
                     ("state".to_owned(), Value::String("closed".to_owned())),
-                    ("assignee".to_owned(), Value::Uuid(author(2).0)),
+                    ("assignee".to_owned(), Value::Uuid(author(2).test_uuid())),
                     ("priority".to_owned(), Value::U64(2)),
                 ])),
         )

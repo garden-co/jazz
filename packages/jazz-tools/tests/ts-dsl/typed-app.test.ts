@@ -320,20 +320,40 @@ describe("typed app prototype", () => {
     expectTypeOf(streamedTitleUpdate.title).toEqualTypeOf<ReadableStream<string>>();
 
     expectTypeOf<TodoWhere["project"]>().branded.toEqualTypeOf<
-      string | { eq?: string; ne?: string; in?: string[] } | undefined
+      string | { eq?: string; ne?: string; in?: string[]; notIn?: string[] } | undefined
     >();
     expectTypeOf<TodoWhere["owner"]>().branded.toEqualTypeOf<
       | string
       | null
-      | { eq?: string | null; ne?: string | null; in?: string[]; isNull?: boolean }
+      | {
+          eq?: string | null;
+          ne?: string | null;
+          in?: string[];
+          notIn?: string[];
+          isNull?: boolean;
+        }
       | undefined
     >();
     expectTypeOf<TodoWhere["tags"]>().branded.toEqualTypeOf<
-      string[] | { eq?: string[]; ne?: string[]; contains?: string; in?: string[][] } | undefined
+      | string[]
+      | { eq?: string[]; ne?: string[]; contains?: string; in?: string[][]; notIn?: string[][] }
+      | undefined
     >();
     expectTypeOf<TodoWhere["attachment"]>().branded.toEqualTypeOf<
-      Uint8Array | { eq?: Uint8Array; ne?: Uint8Array; in?: (Uint8Array | number[])[] } | undefined
+      | Uint8Array
+      | {
+          eq?: Uint8Array;
+          ne?: Uint8Array;
+          in?: (Uint8Array | number[])[];
+          notIn?: (Uint8Array | number[])[];
+        }
+      | undefined
     >();
+
+    // Membership is deliberately non-nullable. Express null handling with
+    // isNull/isNotNull rather than SQL-style null membership semantics.
+    // @ts-expect-error null is not a valid membership value
+    app.todos.where({ owner: { notIn: [null] } });
 
     const projectRecord: ProjectRecord | null = todoWithProject.project;
     expectTypeOf(todoWithProject.owner).toEqualTypeOf<string | null>();
@@ -443,6 +463,7 @@ describe("typed app prototype", () => {
           eq?: boolean;
           ne?: boolean;
           in?: boolean[];
+          notIn?: boolean[];
         }
       | undefined
     >();
@@ -453,6 +474,7 @@ describe("typed app prototype", () => {
           ne?: string[];
           contains?: string;
           in?: string[][];
+          notIn?: string[][];
         }
       | undefined
     >();
@@ -462,6 +484,7 @@ describe("typed app prototype", () => {
           eq?: Uint8Array;
           ne?: Uint8Array;
           in?: (Uint8Array | number[])[];
+          notIn?: (Uint8Array | number[])[];
         }
       | undefined
     >();
@@ -487,6 +510,7 @@ describe("typed app prototype", () => {
           lt?: number;
           lte?: number;
           in?: number[];
+          notIn?: number[];
         }
       | undefined
     >();

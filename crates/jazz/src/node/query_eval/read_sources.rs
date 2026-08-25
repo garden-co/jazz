@@ -2727,9 +2727,9 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch(
             (user_column_field(&column.name), value_type)
         }))
         .chain([
-            ("$createdBy".to_owned(), ValueType::Uuid),
+            ("$createdBy".to_owned(), ValueType::String),
             ("$createdAt".to_owned(), ValueType::U64),
-            ("$updatedBy".to_owned(), ValueType::Uuid),
+            ("$updatedBy".to_owned(), ValueType::String),
             ("$updatedAt".to_owned(), ValueType::U64),
             ("tx_time".to_owned(), ValueType::U64),
             ("tx_node_id".to_owned(), ValueType::U64),
@@ -2751,9 +2751,9 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch(
                 "authored_columns".to_owned(),
                 ValueType::Nullable(Box::new(ValueType::Bytes)),
             ),
-            ("created_by".to_owned(), ValueType::Uuid),
+            ("created_by".to_owned(), ValueType::String),
             ("created_at".to_owned(), ValueType::U64),
-            ("updated_by".to_owned(), ValueType::Uuid),
+            ("updated_by".to_owned(), ValueType::String),
             ("updated_at".to_owned(), ValueType::U64),
         ]);
         if let Some(SourceMetadataFields::VersionWitnesses {
@@ -3265,9 +3265,9 @@ fn current_row_descriptor(table: &TableSchema) -> RecordDescriptor {
                 )
             }))
             .chain([
-                ("$createdBy".to_owned(), ValueType::Uuid),
+                ("$createdBy".to_owned(), ValueType::String),
                 ("$createdAt".to_owned(), ValueType::U64),
-                ("$updatedBy".to_owned(), ValueType::Uuid),
+                ("$updatedBy".to_owned(), ValueType::String),
                 ("$updatedAt".to_owned(), ValueType::U64),
                 ("tx_time".to_owned(), ValueType::U64),
                 ("tx_node_id".to_owned(), ValueType::U64),
@@ -3293,14 +3293,14 @@ fn inline_current_record(
         values.push(Value::Nullable(row.cell(table, &column.name).map(Box::new)));
     }
     if let Some(provenance) = row.provenance()? {
-        values.push(Value::Uuid(provenance.created_by.0));
+        values.push(Value::String(provenance.created_by.canonical().to_owned()));
         values.push(Value::U64(provenance.created_at.0));
-        values.push(Value::Uuid(provenance.updated_by.0));
+        values.push(Value::String(provenance.updated_by.canonical().to_owned()));
         values.push(Value::U64(provenance.updated_at.0));
     } else {
-        values.push(Value::Uuid(AuthorId::SYSTEM.0));
+        values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
         values.push(Value::U64(0));
-        values.push(Value::Uuid(AuthorId::SYSTEM.0));
+        values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
         values.push(Value::U64(0));
     }
     let (tx_time, tx_node_alias) = row
@@ -3453,15 +3453,15 @@ fn inline_current_record_with_source_metadata(
         }
     }
     let provenance = row.provenance()?.unwrap_or(RowProvenance {
-        created_by: AuthorId::SYSTEM,
+        created_by: AuthorSubject::SYSTEM,
         created_at: TxTime(0),
-        updated_by: AuthorId::SYSTEM,
+        updated_by: AuthorSubject::SYSTEM,
         updated_at: TxTime(0),
     });
     values.extend([
-        Value::Uuid(provenance.created_by.0),
+        Value::String(provenance.created_by.canonical().to_owned()),
         Value::U64(provenance.created_at.0),
-        Value::Uuid(provenance.updated_by.0),
+        Value::String(provenance.updated_by.canonical().to_owned()),
         Value::U64(provenance.updated_at.0),
     ]);
     let (tx_time, tx_node_alias) = row
@@ -3475,9 +3475,9 @@ fn inline_current_record_with_source_metadata(
             Value::U64(schema_version_alias.0),
             Value::Array(Vec::new()),
             Value::Nullable(None),
-            Value::Uuid(provenance.created_by.0),
+            Value::String(provenance.created_by.canonical().to_owned()),
             Value::U64(provenance.created_at.0),
-            Value::Uuid(provenance.updated_by.0),
+            Value::String(provenance.updated_by.canonical().to_owned()),
             Value::U64(provenance.updated_at.0),
         ]);
     }
@@ -3506,14 +3506,14 @@ fn inline_snapshot_include_deleted_current_graph(
             values.push(Value::Nullable(row.cell(table, &column.name).map(Box::new)));
         }
         if let Some(provenance) = row.provenance()? {
-            values.push(Value::Uuid(provenance.created_by.0));
+            values.push(Value::String(provenance.created_by.canonical().to_owned()));
             values.push(Value::U64(provenance.created_at.0));
-            values.push(Value::Uuid(provenance.updated_by.0));
+            values.push(Value::String(provenance.updated_by.canonical().to_owned()));
             values.push(Value::U64(provenance.updated_at.0));
         } else {
-            values.push(Value::Uuid(AuthorId::SYSTEM.0));
+            values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
             values.push(Value::U64(0));
-            values.push(Value::Uuid(AuthorId::SYSTEM.0));
+            values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
             values.push(Value::U64(0));
         }
         let (tx_time, tx_node_alias) = row
@@ -3648,9 +3648,9 @@ fn include_deleted_current_row_descriptor(table: &TableSchema) -> RecordDescript
                 )
             }))
             .chain([
-                ("$createdBy".to_owned(), ValueType::Uuid),
+                ("$createdBy".to_owned(), ValueType::String),
                 ("$createdAt".to_owned(), ValueType::U64),
-                ("$updatedBy".to_owned(), ValueType::Uuid),
+                ("$updatedBy".to_owned(), ValueType::String),
                 ("$updatedAt".to_owned(), ValueType::U64),
                 ("tx_time".to_owned(), ValueType::U64),
                 ("tx_node_id".to_owned(), ValueType::U64),

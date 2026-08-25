@@ -161,5 +161,17 @@ name = "legacy_benchmark_smoke"
 required-features = ["testing"]
 
 [[test]]
+name = "four_tier"
+required-features = ["testing"]
+
+[[test]]
+name = "threaded_four_tier"
+required-features = ["testing"]
+
+[[test]]
 name = "edge_fate_authority"
+required-features = ["runtime"]
+
+[[test]]
+name = "auth_admission"
 required-features = ["runtime"]

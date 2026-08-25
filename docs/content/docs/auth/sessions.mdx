@@ -143,7 +143,10 @@ field really has one of those names, mark that one field explicitly with
 See [Queries](/docs/reading/queries#edit-metadata-columns) for how to select and filter on these
 columns.
 
-On clients, writes are automatically attributed to the current session user. On backends,
+Provider session fields and claims, including `iss`, `sub`, and `user_id`, retain their admitted
+values. Jazz separately derives the reserved logical `session.author` from the exact `[iss, sub]`
+pair. Its portable value is canonical JSON and is used for transaction authorship, `$createdBy`,
+`$updatedBy`, and provenance policies; it is interned only inside a running core. On backends,
 `await context.forRequest(...)` and `context.forSession(...)` both run as that user for permissions and
 also stamp authorship as that user.
 
@@ -152,7 +155,7 @@ also stamp authorship as that user.
 Sometimes backend code should keep backend-level permissions but still record a user's identity in
 edit metadata. Use the attribution helpers for this:
 
-- `context.withAttribution(userId)`&hairsp;—&hairsp;stamps writes as the given user ID
+- `context.withAttribution(issuer, userId)`&hairsp;—&hairsp;stamps writes as the exact issuer/user pair
 - `context.withAttributionForSession(session)`&hairsp;—&hairsp;derives authorship from a resolved session
 - `await context.withAttributionForRequest(req)`&hairsp;—&hairsp;derives authorship from an authenticated request
 

@@ -5,10 +5,10 @@
 
 use std::collections::BTreeMap;
 
-use jazz::db::{Db, DbConfig, DbIdentity, PreparedQuery, block_on};
+use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, PreparedQuery, block_on};
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -195,7 +195,7 @@ fn open_db() -> (BenchDb, TableSchema) {
         MemoryStorage::new(&family_refs),
         DbIdentity {
             node: NodeUuid::from_bytes([0xb1; 16]),
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
         },
     )))
     .expect("open BigLabel benchmark database");
@@ -215,7 +215,15 @@ fn open_db() -> (BenchDb, TableSchema) {
 }
 
 fn insert(db: &BenchDb, table: &str, id: RowUuid, cells: BTreeMap<String, Value>) {
-    let write = block_on(db.insert_with_id(table, id, cells)).expect("insert BigLabel fixture row");
+    let write = block_on(db.insert(
+        table,
+        cells,
+        InsertOptions {
+            row_id: Some(id),
+            ..Default::default()
+        },
+    ))
+    .expect("insert BigLabel fixture row");
     block_on(write.wait(DurabilityTier::Local)).expect("fixture row reaches local durability");
 }
 

@@ -87,7 +87,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
 
         return {
           column,
-          op: condition.operator,
+          op: condition.operator === "not_in" ? "notIn" : condition.operator,
           value: condition.value,
         };
       };

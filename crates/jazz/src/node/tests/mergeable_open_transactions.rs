@@ -292,7 +292,7 @@ fn abandoning_mergeable_open_transaction_discards_its_only_staged_representation
     let (_temp_dir, mut core) = open_node();
     let staged = row(0x31);
     let open_tx = OpenTransactionId::new();
-    core.open_mergeable(open_tx, AuthorId::SYSTEM, None).unwrap();
+    core.open_mergeable(open_tx, AuthorSubject::SYSTEM, None).unwrap();
     core.tx_write_mergeable(
         open_tx,
         "todos",

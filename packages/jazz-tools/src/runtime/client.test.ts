@@ -213,6 +213,7 @@ describe("JazzClient.updateCookieSession", () => {
           subject: "alice-subject",
           issuer: "https://issuer.example",
         },
+        issuer: "https://issuer.example",
         authMode: "external",
       },
     });
@@ -225,6 +226,7 @@ describe("JazzClient.updateCookieSession", () => {
         subject: "alice-subject",
         issuer: "https://issuer.example",
       },
+      issuer: "https://issuer.example",
       authMode: "external",
     });
 
@@ -242,11 +244,13 @@ describe("JazzClient.updateCookieSession", () => {
       cookieSession: {
         user_id: "00000000-0000-0000-0000-000000000001",
         claims: { role: "reader" },
+        issuer: "https://issuer.example",
         authMode: "external",
       },
     });
 
     const refreshed = {
+      issuer: "https://issuer.example",
       user_id: "00000000-0000-0000-0000-000000000001",
       claims: { role: "writer" },
       authMode: "external" as const,

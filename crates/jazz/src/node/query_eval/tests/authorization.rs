@@ -1,6 +1,69 @@
 //! authorization query-evaluation tests.
 
 use super::*;
+use crate::node::query_eval::authorization::permission_scope_claim_values;
+
+#[test]
+fn permission_advice_scope_preserves_provider_sub_and_injects_canonical_author() {
+    let author = AuthorSubject::authenticated("https://issuer.example", "opaque-subject").unwrap();
+    let claims = BTreeMap::from([("sub".to_owned(), Value::String("spoofed".to_owned()))]);
+
+    let values = permission_scope_claim_values(author, Some(&claims));
+
+    assert_eq!(
+        values.get("sub"),
+        Some(&Value::String("spoofed".to_owned()))
+    );
+    assert_eq!(
+        values.get("author"),
+        Some(&Value::String(author.canonical().to_owned()))
+    );
+}
+
+#[test]
+fn negated_null_membership_policy_does_not_authorize_null_rows() {
+    let mut schema = public_query_eval_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("documents")
+                .nullable_column("classification", PublicColumnType::Text)
+                .nullable_column("null_option", PublicColumnType::Text),
+        ),
+    );
+    schema.runtime_mut_for_testing().tables[0].read_policy = Some(Query::from("documents").filter(
+        crate::query::not(in_list(col("classification"), [col("null_option")])),
+    ));
+    let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0x98; 16]), schema.clone());
+    for (id, timestamp, classification) in [
+        (row(1), 1_001, Value::Nullable(None)),
+        (
+            row(2),
+            1_002,
+            Value::Nullable(Some(Box::new(Value::String("public".to_owned())))),
+        ),
+    ] {
+        node.commit_mergeable_unit_settled(
+            MergeableCommit::new("documents", id, timestamp)
+                .made_by(AuthorSubject::SYSTEM)
+                .cells(BTreeMap::from([
+                    ("classification".to_owned(), classification),
+                    ("null_option".to_owned(), Value::Nullable(None)),
+                ])),
+        )
+        .unwrap();
+    }
+
+    let reader = author(9);
+    let shape = Query::from("documents").validate_runtime(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let visible = node
+        .query_rows_for_link(&shape, &binding, DurabilityTier::Local, reader)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(visible, BTreeSet::from([row(2)]));
+}
 
 #[test]
 fn nested_read_policy_claim_slots_do_not_cross_validated_types() {
@@ -224,7 +287,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
                 ("isPublic".to_owned(), Value::Bool(false)),
                 (
                     "createdBy".to_owned(),
-                    Value::String(identity.0.to_string()),
+                    Value::String(identity.test_uuid().to_string()),
                 ),
                 (
                     "joinCode".to_owned(),
@@ -244,7 +307,10 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     let profile_tx = node
         .commit_mergeable_settled(MergeableCommit::new("profiles", profile, 11).cells(
             BTreeMap::from([
-                ("userId".to_owned(), Value::String(identity.0.to_string())),
+                (
+                    "userId".to_owned(),
+                    Value::String(identity.test_uuid().to_string()),
+                ),
                 ("name".to_owned(), Value::String("Alice".to_owned())),
                 ("avatar".to_owned(), Value::Nullable(None)),
             ]),
@@ -384,7 +450,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
             &shape,
             &server_binding,
             DurabilityTier::Edge,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             CurrentQueryProgramOutput::MaintainedView,
             &ReadViewSpec::default(),
         )
@@ -392,6 +458,74 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     assert!(
         system_program.request.input.binding.claim_params.is_empty(),
         "System/asBackend prepared descriptors cannot retain session claim slots"
+    );
+    assert!(
+        system_program
+            .request
+            .input
+            .shape
+            .nodes
+            .keys()
+            .all(|node| !node.0.starts_with("policy_branch:")),
+        "System/asBackend reads must remove linked policy branches before normalization, not merely clear their claim bindings"
+    );
+    // The ordinary current-query path above strips System claim slots before
+    // it constructs the binding. Exercise the nested authorization builders
+    // too: a policy claim route must not leave an identity-scoped descriptor
+    // behind when the served identity is System.
+    let system_members_policy = node
+        .table_read_policy_authorization_request(
+            shape.schema_version(),
+            "chatMembers",
+            AuthorSubject::SYSTEM,
+            ParamBindingMode::RetainAllParams,
+            DurabilityTier::Edge,
+            program.request.input.binding.source_shape.clone(),
+            program.request.input.binding.extra_user_params.clone(),
+            program.request.input.binding.claim_params.clone(),
+        )
+        .expect("System nested policy compilation must not retain session claim slots");
+    assert!(
+        system_members_policy.input.binding.claim_params.is_empty(),
+        "System nested policy descriptors must not retain outer session claim slots"
+    );
+    assert_eq!(
+        system_members_policy.input.binding.source_shape,
+        query_binding_source_shape_for_parts_if_needed(
+            &system_members_policy.input.binding.param_types,
+            &BTreeMap::new(),
+        ),
+        "System nested policy descriptors must be keyed without session claim slots"
+    );
+    node.policy_authorization_row_id_graph(system_members_policy)
+        .expect("System nested policy graph must bind against its claim-free descriptor");
+    let system_members_policy_at = node
+        .table_read_policy_authorization_request_at(
+            shape.schema_version(),
+            "chatMembers",
+            AuthorSubject::SYSTEM,
+            ParamBindingMode::RetainAllParams,
+            GlobalTime(0),
+            program.request.input.binding.source_shape.clone(),
+            program.request.input.binding.extra_user_params.clone(),
+            program.request.input.binding.claim_params.clone(),
+        )
+        .expect("System historical nested policy compilation must not retain session claim slots");
+    assert!(
+        system_members_policy_at
+            .input
+            .binding
+            .claim_params
+            .is_empty(),
+        "System historical policy descriptors must not retain outer session claim slots"
+    );
+    assert!(
+        binding_claim_params_for_shape(
+            &system_members_policy_at.input.shape,
+            &system_members_policy_at.input.binding.param_types,
+        )
+        .is_empty(),
+        "System historical policy inputs must not retain policy claim operands"
     );
     for terminal in &program.lowered.terminals {
         let expected_routes = match &terminal.output {
@@ -470,7 +604,10 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         .commit_mergeable_settled(MergeableCommit::new("chatMembers", row(0xab), 11).cells(
             BTreeMap::from([
                 ("chatId".to_owned(), Value::Uuid(chat.0)),
-                ("userId".to_owned(), Value::String(identity.0.to_string())),
+                (
+                    "userId".to_owned(),
+                    Value::String(identity.test_uuid().to_string()),
+                ),
                 (
                     "joinCode".to_owned(),
                     Value::Nullable(Some(Box::new(Value::String("invite-123".to_owned())))),
@@ -496,7 +633,10 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     // membership itself.
     node.set_session_claims(
         identity,
-        BTreeMap::from([("user_id".to_owned(), Value::String(identity.0.to_string()))]),
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::String(identity.test_uuid().to_string()),
+        )]),
     );
     let message_shape = Query::from("messages")
         .filter(eq(col("chatId"), param("chat_id")))
@@ -539,7 +679,10 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         open_node_with_uuid(NodeUuid::from_bytes([0xae; 16]), schema.clone());
     normal_client.set_session_claims(
         identity,
-        BTreeMap::from([("user_id".to_owned(), Value::String(identity.0.to_string()))]),
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::String(identity.test_uuid().to_string()),
+        )]),
     );
     let mut normal_membership_peer = PeerState::edge_client(identity);
     normal_client
@@ -627,9 +770,9 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     let normal_versions = normal_update
         .expand_version_carriers_for_receive()
         .expect("expand normal-member message include/order payloads");
-    if let SyncMessage::ViewUpdate {
+    if let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         version_bundles, ..
-    } = &normal_versions
+    }) = &normal_versions
     {
         let (profile_bundle, profile_version) = version_bundles
             .iter()
@@ -651,7 +794,9 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
                 .borrowed()
                 .get_idx(7)
                 .expect("decode sender wire userId"),
-            Value::Nullable(Some(Box::new(Value::String(identity.0.to_string())))),
+            Value::Nullable(Some(Box::new(Value::String(
+                identity.test_uuid().to_string()
+            )))),
             "the relation sender version ships userId content"
         );
     } else {
@@ -708,7 +853,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
             .into_iter()
             .next()
             .and_then(|row| row.cell(normal_client.table("profiles").unwrap(), "userId")),
-        Some(Value::String(identity.0.to_string())),
+        Some(Value::String(identity.test_uuid().to_string())),
         "the delivered sender version retains its required userId"
     );
     let (local_shape, local_binding, local_plan) = normal_client
@@ -802,7 +947,7 @@ fn missing_policy_relation_seed_claim_fails_closed_without_breaking_prepared_bin
         row(0xc6),
         BTreeMap::from([
             ("team".to_owned(), Value::Uuid(team.0)),
-            ("user".to_owned(), Value::Uuid(reader.0)),
+            ("user".to_owned(), Value::Uuid(reader.test_uuid())),
         ]),
         3,
         3,
@@ -841,7 +986,7 @@ fn missing_policy_relation_seed_claim_fails_closed_without_breaking_prepared_bin
 
     node.set_session_claims(
         reader,
-        BTreeMap::from([("session_id".to_owned(), Value::Uuid(reader.0))]),
+        BTreeMap::from([("session_id".to_owned(), Value::Uuid(reader.test_uuid()))]),
     );
     let allowed_rows = node
         .query_rows_for_link(&shape, &binding, DurabilityTier::Global, reader)
@@ -879,11 +1024,11 @@ fn declared_id_point_read_prepares_claim_policy_bindings() {
 
     node.set_session_claims(
         alice,
-        BTreeMap::from([("user_id".to_owned(), Value::Uuid(alice.0))]),
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(alice.test_uuid()))]),
     );
     node.set_session_claims(
         bob,
-        BTreeMap::from([("user_id".to_owned(), Value::Uuid(bob.0))]),
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(bob.test_uuid()))]),
     );
     commit_global_cells(
         &mut node,
@@ -891,7 +1036,7 @@ fn declared_id_point_read_prepares_claim_policy_bindings() {
         document,
         BTreeMap::from([
             ("id".to_owned(), Value::Uuid(row(0xd5).0)),
-            ("owner".to_owned(), Value::Uuid(alice.0)),
+            ("owner".to_owned(), Value::Uuid(alice.test_uuid())),
             ("title".to_owned(), Value::String("private".to_owned())),
         ]),
         1,
@@ -923,7 +1068,7 @@ fn declared_id_point_read_prepares_claim_policy_bindings() {
         &mut node,
         "documents",
         document,
-        BTreeMap::from([("owner".to_owned(), Value::Uuid(bob.0))]),
+        BTreeMap::from([("owner".to_owned(), Value::Uuid(bob.test_uuid()))]),
         2,
         2,
     );
@@ -985,7 +1130,7 @@ fn missing_policy_seed_claim_denies_authorization_support_rehydration() {
         row(0xcc),
         BTreeMap::from([
             ("team".to_owned(), Value::Uuid(team.0)),
-            ("user".to_owned(), Value::Uuid(writer.0)),
+            ("user".to_owned(), Value::Uuid(writer.test_uuid())),
         ]),
         3,
         3,
@@ -1013,13 +1158,24 @@ fn missing_policy_seed_claim_denies_authorization_support_rehydration() {
     assert!(matches!(ordinary_error, Error::InvalidStoredValue(_)));
 
     let update = peer
-        .rehydrate_authorization_support_query(&mut node, &shape, &binding, options)
+        .rehydrate_authorization_support_query_for_identity(
+            &mut node,
+            writer,
+            SubscriptionKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+                read_view: options.read_view_key(),
+            },
+            &shape,
+            &binding,
+            options,
+        )
         .expect("missing policy seed claim must hydrate as an empty authorization proof");
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("authorization support must return a settled view update");
     };
@@ -1057,7 +1213,7 @@ fn policy_claim_array_string_ids_bind_as_uuid_array() {
         reader,
         BTreeMap::from([(
             "team_ids".to_owned(),
-            Value::Array(vec![Value::String(alice.0.to_string())]),
+            Value::Array(vec![Value::String(alice.test_uuid().to_string())]),
         )]),
     );
     let shape = Query::from("issues").validate_runtime(&schema).unwrap();
@@ -1106,13 +1262,16 @@ fn prepared_policy_plan_is_recompiled_after_same_identity_claim_revision_changes
 
     node.set_session_claims(
         identity,
-        BTreeMap::from([("selected_assignee".to_owned(), Value::Uuid(alice.0))]),
+        BTreeMap::from([(
+            "selected_assignee".to_owned(),
+            Value::Uuid(alice.test_uuid()),
+        )]),
     );
     assert_eq!(visible_for(&mut node), BTreeSet::from([row(1)]));
 
     node.set_session_claims(
         identity,
-        BTreeMap::from([("selected_assignee".to_owned(), Value::Uuid(bob.0))]),
+        BTreeMap::from([("selected_assignee".to_owned(), Value::Uuid(bob.test_uuid()))]),
     );
     assert_eq!(
         visible_for(&mut node),

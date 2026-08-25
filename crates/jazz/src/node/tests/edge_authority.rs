@@ -91,6 +91,8 @@ fn edge_accepted_mergeable_promotes_to_global_without_revalidating_write_policy(
     let (_edge_dir, mut edge) = open_node_with_schema(node(0xe2), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(0xe3), schema.clone());
     let (_reader_dir, mut reader) = open_node_with_schema(node(0xe4), schema);
+    install_test_uuid_sub_claim(&mut writer, owner);
+    install_test_uuid_sub_claim(&mut edge, owner);
 
     let unit = writer
         .commit_mergeable_unit_settled(
@@ -237,7 +239,7 @@ fn edge_authority_rejects_exclusive_and_catalogue_writes_loudly() {
         tx_id: TxId::new(TxTime::from(10), node(0xee)),
         kind: TxKind::Exclusive,
         n_total_writes: 1,
-        made_by: AuthorId::SYSTEM,
+        made_by: AuthorSubject::SYSTEM,
         permission_subject: None,
         base_snapshot: None,
         row_read_set: None,
@@ -289,7 +291,7 @@ fn edge_authority_rejects_exclusive_and_catalogue_writes_loudly() {
         Err(Error::UnauthorizedCatalogueUpdate)
     ));
     edge.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         catalogue_seq: 1,
         publication: Box::new(publication),
     })

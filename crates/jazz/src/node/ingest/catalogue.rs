@@ -1,3 +1,6 @@
+// Global restart-persistent metadata ceiling across every connected peer.
+const MAX_PENDING_LARGE_VALUE_UPLOADS: usize = 1024;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CatalogueActivationMode {
     ColdOpen,
@@ -44,7 +47,7 @@ where
         self.apply_sync_message_with_ingest_context(
             message,
             Some(CommitUnitIngestContext {
-                identity: AuthorId::SYSTEM,
+                identity: AuthorSubject::SYSTEM,
                 trust: CommitUnitTrust::TrustedBackend,
                 edge_authority: false,
             }),
@@ -78,12 +81,35 @@ where
                 .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
             match message {
                 SyncMessage::ChunkUploadStart(start) => {
+                    if !self.admit_large_value_ingress(
+                        super::LARGE_VALUE_UPLOAD_START_INGRESS_CHARGE_BYTES,
+                    ) {
+                        return Ok(PublicationOutcome::settled(vec![
+                            SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                                value_ref: start.value_ref,
+                                status: crate::protocol::ChunkUploadStatus::RateLimited,
+                            }),
+                        ]));
+                    }
                     let progress = match self
                         .database
-                        .begin_large_value_upload(start.value_ref.clone())
+                        .begin_large_value_upload_with_pending_limit(
+                            start.value_ref.clone(),
+                            MAX_PENDING_LARGE_VALUE_UPLOADS,
+                        )
                         .await
                     {
                         Ok(progress) => progress,
+                        Err(groove::db::Error::PendingLargeValueUploadLimitExceeded { .. }) => {
+                            return Ok(PublicationOutcome::settled(vec![
+                                SyncMessage::ChunkUploadResult(
+                                    crate::protocol::ChunkUploadResult {
+                                        value_ref: start.value_ref,
+                                        status: crate::protocol::ChunkUploadStatus::RateLimited,
+                                    },
+                                ),
+                            ]));
+                        }
                         Err(error) if large_value_upload_is_rejected(&error) => {
                             return Ok(PublicationOutcome::settled(vec![
                                 SyncMessage::ChunkUploadResult(
@@ -113,6 +139,20 @@ where
                     ]))
                 }
                 SyncMessage::ChunkUploadNodes(batch) => {
+                    let upload_exists = self
+                        .database
+                        .pending_large_value_uploads()
+                        .await?
+                        .into_iter()
+                        .any(|upload| upload.descriptor.as_ref() == Some(&batch.value_ref));
+                    if !upload_exists {
+                        return Ok(PublicationOutcome::settled(vec![
+                            SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                                value_ref: batch.value_ref,
+                                status: crate::protocol::ChunkUploadStatus::Rejected,
+                            }),
+                        ]));
+                    }
                     let accounting = batch.chunks.iter().try_fold(
                         groove::large_values::StagedLargeValueAccounting::default(),
                         |mut total, chunk| {
@@ -140,10 +180,23 @@ where
                     }
                     let progress = match self
                         .database
-                        .continue_large_value_upload(batch.value_ref.clone(), batch.chunks)
+                        .continue_large_value_upload_if_current(
+                            batch.value_ref.clone(),
+                            batch.chunks,
+                        )
                         .await
                     {
-                        Ok(progress) => progress,
+                        Ok(Some(progress)) => progress,
+                        Ok(None) => {
+                            return Ok(PublicationOutcome::settled(vec![
+                                SyncMessage::ChunkUploadResult(
+                                    crate::protocol::ChunkUploadResult {
+                                        value_ref: batch.value_ref,
+                                        status: crate::protocol::ChunkUploadStatus::Rejected,
+                                    },
+                                ),
+                            ]));
+                        }
                         Err(error) if large_value_upload_is_rejected(&error) => {
                             return Ok(PublicationOutcome::settled(vec![
                                 SyncMessage::ChunkUploadResult(
@@ -219,7 +272,7 @@ where
                         .await?;
                     self.drain_parked_commit_units().await
                 }
-                SyncMessage::ViewUpdate {
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
                     settled_through,
                     reset_result_set,
@@ -231,7 +284,7 @@ where
                     terminal_operations,
                     program_fact_adds,
                     program_fact_removes,
-                } => {
+                }) => {
                     self.apply_view_update(ViewUpdateParts {
                         subscription,
                         settled_through,
@@ -254,10 +307,10 @@ where
                 SyncMessage::RegisterShape {
                     shape_id,
                     ast,
-                    opts: _,
+                    opts,
                 } => {
-                    validate_shape_ast_size(&ast).map_err(|_| {
-                        Error::UnsupportedSyncMessage("shape AST exceeds byte limit")
+                    validate_shape_registration_size(&ast, &opts).map_err(|_| {
+                        Error::UnsupportedSyncMessage("shape registration exceeds byte limit")
                     })?;
                     self.register_shape(shape_id, ast)?;
                     Ok(PublicationOutcome::settled(Vec::new()))
@@ -333,7 +386,7 @@ where
 
     async fn apply_publish_schema(
         &mut self,
-        author: AuthorId,
+        author: AuthorSubject,
         ingest_context: Option<CommitUnitIngestContext>,
         schema: SchemaVersion,
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error>
@@ -394,7 +447,7 @@ where
 
     async fn apply_publish_schema_with_lens(
         &mut self,
-        author: AuthorId,
+        author: AuthorSubject,
         ingest_context: Option<CommitUnitIngestContext>,
         catalogue_seq: u64,
         publication: SchemaLineagePublication,
@@ -736,7 +789,7 @@ where
 
     async fn apply_publish_lens(
         &mut self,
-        author: AuthorId,
+        author: AuthorSubject,
         ingest_context: Option<CommitUnitIngestContext>,
         lens: MigrationLens,
     ) -> Result<Vec<SyncMessage>, Error>
@@ -794,7 +847,7 @@ where
 
     async fn apply_set_current_write_schema(
         &mut self,
-        author: AuthorId,
+        author: AuthorSubject,
         ingest_context: Option<CommitUnitIngestContext>,
         pointer: CurrentWriteSchema,
     ) -> Result<Vec<SyncMessage>, Error>
@@ -887,13 +940,13 @@ where
 
     fn require_catalogue_admin(
         &self,
-        _claimed_author: AuthorId,
+        _claimed_author: AuthorSubject,
         ingest_context: Option<CommitUnitIngestContext>,
     ) -> Result<(), Error> {
         if matches!(
             ingest_context,
             Some(context)
-                if context.identity == AuthorId::SYSTEM
+                if context.identity == AuthorSubject::SYSTEM
                     && context.trust == CommitUnitTrust::TrustedBackend
         ) {
             Ok(())

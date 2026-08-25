@@ -1,6 +1,7 @@
 import type { WasmSchema } from "../../drivers/types.js";
 import type { RuntimeSourcesConfig } from "../context.js";
 import type { MutationErrorEvent } from "../client.js";
+import type { NativeSelfSignedClientProof } from "./native-codec.js";
 
 export interface BrowserWorkerInitOptions {
   runtimeSources?: RuntimeSourcesConfig;
@@ -8,6 +9,7 @@ export interface BrowserWorkerInitOptions {
   dbName: string;
   node: Uint8Array;
   author: Uint8Array;
+  selfSignedClientProof?: NativeSelfSignedClientProof;
   initialSyncFlushEvery: number;
   appId: string;
   authSessionKey: string;
