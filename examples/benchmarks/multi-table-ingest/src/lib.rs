@@ -7,7 +7,9 @@ use jazz::groove::records::Value;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::schema::JazzSchema;
-use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tools::{
+    CmpOp, ColumnType, PolicyExpr, PolicyValue, SchemaBuilder, TablePolicies, TableSchemaBuilder,
+};
 use jazz::tx::DurabilityTier;
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use tempfile::TempDir;
@@ -30,8 +32,15 @@ impl IngestFixture<MemoryStorage> {
         Self::memory_with_attribution(existing_jobs, true)
     }
 
+    pub fn memory_attributed_with_exists_policy(existing_jobs: usize) -> Self {
+        let schema = schema(true);
+        let families = schema.column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        Self::new(schema, MemoryStorage::new(&refs), existing_jobs, true)
+    }
+
     fn memory_with_attribution(existing_jobs: usize, attributed: bool) -> Self {
-        let schema = schema();
+        let schema = schema(false);
         let families = schema.column_families();
         let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         Self::new(schema, MemoryStorage::new(&refs), existing_jobs, attributed)
@@ -40,7 +49,7 @@ impl IngestFixture<MemoryStorage> {
 
 impl IngestFixture<RocksDbStorage> {
     pub fn rocksdb(existing_jobs: usize) -> (TempDir, Self) {
-        let schema = schema();
+        let schema = schema(false);
         let families = schema.column_families();
         let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         let dir = tempfile::tempdir().expect("create ingest benchmark directory");
@@ -168,6 +177,10 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> IngestFixture<S> {
             let mut cells = BTreeMap::from([
                 ("tenant".to_owned(), tenant(job)),
                 (
+                    "group_id".to_owned(),
+                    Value::Uuid(row_id(1, job % GROUPS).0),
+                ),
+                (
                     "status".to_owned(),
                     Value::String(["OPEN", "ASSIGNED", "DONE", "VERIFIED"][job % 4].into()),
                 ),
@@ -205,7 +218,22 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> IngestFixture<S> {
     }
 }
 
-fn schema() -> JazzSchema {
+fn schema(with_exists_policy: bool) -> JazzSchema {
+    let jobs_policies = if with_exists_policy {
+        TablePolicies::new().with_insert(PolicyExpr::Exists {
+            table: "groups".to_owned(),
+            condition: Box::new(PolicyExpr::Cmp {
+                column: "id".to_owned(),
+                op: CmpOp::Eq,
+                value: PolicyValue::SessionRef(vec![
+                    "__jazz_outer_row".to_owned(),
+                    "group_id".to_owned(),
+                ]),
+            }),
+        })
+    } else {
+        TablePolicies::new()
+    };
     let public = SchemaBuilder::new()
         .table(
             TableSchemaBuilder::new("groups")
@@ -240,6 +268,7 @@ fn schema() -> JazzSchema {
         .table(
             TableSchemaBuilder::new("jobs")
                 .column("tenant", ColumnType::Text)
+                .fk_column("group_id", "groups")
                 .nullable_fk_column("resource_id", "resources")
                 .column(
                     "status",
@@ -248,7 +277,8 @@ fn schema() -> JazzSchema {
                 .column("title", ColumnType::Text)
                 .column("reward", ColumnType::Integer)
                 .column("external_key", ColumnType::Text)
-                .index_only(["tenant", "status", "resource_id"]),
+                .index_only(["tenant", "group_id", "status", "resource_id"])
+                .policies(jobs_policies),
         )
         .table(
             TableSchemaBuilder::new("sessions")
