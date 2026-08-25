@@ -50,6 +50,11 @@ export interface RunningServer extends TodoServer {
   baseUrl: string;
 }
 
+export interface TodoServerOptions {
+  /** URL of the external issuer's JWKS endpoint for HTTP request authentication. */
+  jwksUrl?: string;
+}
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -60,7 +65,10 @@ export interface RunningServer extends TodoServer {
  * @param dataPath Optional path to local Fjall database file. If omitted, uses a temp directory.
  * @returns TodoServer with the Express app, administrative database handle, and lifecycle functions
  */
-export async function createServer(dataPath?: string): Promise<TodoServer> {
+export async function createServer(
+  dataPath?: string,
+  options: TodoServerOptions = {},
+): Promise<TodoServer> {
   const dbPath = dataPath ?? join(mkdtempSync(join(tmpdir(), "jazz-todo-")), "jazz.db");
   const appId = process.env.JAZZ_APP_ID ?? "019d4349-244c-74d4-8573-8e1b24cf21e2";
 
@@ -70,7 +78,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     permissions,
     driver: { type: "persistent", dataPath: dbPath },
     env: "dev",
-    jwksUrl: process.env.JAZZ_JWKS_URL,
+    jwksUrl: options.jwksUrl ?? process.env.JAZZ_JWKS_URL,
     jwtPublicKey: process.env.JAZZ_JWT_PUBLIC_KEY,
   });
   // Preserve the programmatic administrative handle for embedding and tests.
