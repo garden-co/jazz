@@ -3,6 +3,11 @@ name: Rust throughput shadow
 on:
   workflow_dispatch:
   pull_request:
+    # Opting a PR into the shadow after it already exists must launch the
+    # measurement immediately; a later push must not be required.
+    # An unlabel event re-evaluates the jobs as skipped and cancels any queued
+    # or running opt-in shadow in this workflow's concurrency group.
+    types: [opened, reopened, synchronize, labeled, unlabeled]
   push:
     branches: [main]
 
