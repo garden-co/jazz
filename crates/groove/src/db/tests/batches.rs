@@ -1321,6 +1321,118 @@ async fn pipelined_applied_batches_compose_large_value_root_references() {
     assert!(references.node_active);
 }
 
+/// Verifies Alice's last-root deletion retains lifecycle ownership while Bob's
+/// resolver installs the missing root, so no descendant reference leaks.
+///
+/// alice ──apply delete──► pending publication ──persist──► durable metadata
+/// bob ──get root────────► resolver observer ──wait────────► install metadata
+#[futures_test::test]
+async fn last_root_publication_blocks_descendant_install_until_its_refcount_write_is_durable() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(chunks.clone());
+    let prepared = crate::large_values::repeated_child_dag_fixture(1, 4);
+    let root_chunk = prepared
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref == prepared.value_ref.root)
+        .unwrap()
+        .clone();
+    let child = prepared
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref != prepared.value_ref.root)
+        .unwrap()
+        .node_ref
+        .clone();
+    let staged = database
+        .stage_large_value_preparation(prepared.clone())
+        .await
+        .unwrap();
+    let mut insert = database.open_batch();
+    insert.insert(
+        "objects",
+        vec![Value::U64(1), Value::Large(staged.value_ref.clone())],
+    );
+    insert.accept_large_value(staged.id);
+    database.commit_batch(insert).await.unwrap();
+
+    database
+        .storage
+        .write_many(vec![
+            OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: large_value_node_key(&prepared.value_ref.root).unwrap(),
+                value: postcard::to_allocvec(&LargeValueNodeReferences {
+                    references: 1,
+                    upload_references: 0,
+                    children: Vec::new(),
+                })
+                .unwrap(),
+            },
+            OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: large_value_node_key(&child).unwrap(),
+                value: postcard::to_allocvec(&LargeValueNodeReferences::default()).unwrap(),
+            },
+        ])
+        .await
+        .unwrap();
+    crate::chunks::ChunkStorage::delete(
+        &*chunks,
+        root_chunk.node_ref.locator,
+        root_chunk.node_ref.object_hash,
+    )
+    .await
+    .unwrap();
+    database.set_missing_chunk_resolver(Rc::new(FixtureChunkResolver {
+        chunks: Rc::new(std::collections::BTreeMap::from([(
+            crate::chunks::ChunkRequest {
+                object_hash: root_chunk.node_ref.object_hash.0,
+                locator: root_chunk.node_ref.locator,
+            },
+            Bytes::from(root_chunk.encoded.clone()),
+        )])),
+    }));
+
+    let mut delete = database.open_batch();
+    delete.delete("objects", PrimaryKeyValue::U64(1));
+    let applied = database.apply_batch(delete).await.unwrap();
+
+    let provider = database.owned_chunk_provider();
+    let request = crate::chunks::ChunkRequest {
+        object_hash: root_chunk.node_ref.object_hash.0,
+        locator: root_chunk.node_ref.locator,
+    };
+    let mut installation = Box::pin(provider.get(request));
+    assert!(futures::poll!(installation.as_mut()).is_pending());
+
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted).unwrap();
+    installation.await.unwrap();
+
+    let encoded = database
+        .storage
+        .get(
+            LARGE_VALUE_METADATA_CF.to_owned(),
+            large_value_node_key(&child).unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let metadata: LargeValueNodeReferences = postcard::from_bytes(&encoded).unwrap();
+    assert_eq!(metadata.references, 0);
+}
+
 #[futures_test::test]
 async fn root_first_upload_requests_only_authenticated_missing_frontier() {
     let schema = DatabaseSchema::new([TableSchema::new(

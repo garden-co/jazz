@@ -227,72 +227,6 @@ impl Database {
             .chain(accepted_roots.keys())
             .cloned()
             .collect::<BTreeSet<_>>();
-        let mut node_transitions = Vec::<(crate::large_values::NodeRef, i8)>::new();
-        for root in roots {
-            let key = large_value_root_key(&root)?;
-            let mut references = match overlay
-                .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
-                .await?
-            {
-                Some(encoded) => postcard::from_bytes(&encoded).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot decode root references: {error}"
-                    ))
-                })?,
-                None => LargeValueRootReferences::default(),
-            };
-            let previous_total = references.durable.saturating_add(references.staged);
-            let durable_delta = durable_root_deltas.get(&root).copied().unwrap_or_default();
-            references.durable = if durable_delta >= 0 {
-                references.durable.checked_add(durable_delta as u64)
-            } else {
-                references.durable.checked_sub(durable_delta.unsigned_abs())
-            }
-            .ok_or_else(|| {
-                Error::InvalidLargeValueMetadata("durable root count overflow/underflow".to_owned())
-            })?;
-            references.staged = references
-                .staged
-                .checked_sub(accepted_roots.get(&root).copied().unwrap_or_default())
-                .ok_or_else(|| {
-                    Error::InvalidLargeValueMetadata("staged root count underflow".to_owned())
-                })?;
-            let next_total = references.durable.saturating_add(references.staged);
-            if previous_total == 0 && next_total > 0 && !references.node_active {
-                if overlay
-                    .get(
-                        LARGE_VALUE_METADATA_CF.to_owned(),
-                        large_value_node_key(&root)?,
-                    )
-                    .await?
-                    .is_some()
-                {
-                    references.node_active = true;
-                    node_transitions.push((root.clone(), 1));
-                }
-            } else if previous_total > 0 && next_total == 0 && references.node_active {
-                references.node_active = false;
-                node_transitions.push((root.clone(), -1));
-            }
-            staged_operations.push(OwnedWriteOperation::Set {
-                cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                key,
-                value: postcard::to_allocvec(&references).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot encode root references: {error}"
-                    ))
-                })?,
-            });
-        }
-        staged_operations.extend(
-            large_value_node_transition_operations(
-                &overlay,
-                BTreeMap::new(),
-                node_transitions,
-                false,
-            )
-            .await?,
-        );
         let resident_overlay = Rc::new(StagedWriteOverlay::new_owned(
             Rc::clone(&self.storage),
             Rc::clone(&self.resident_writes),
@@ -321,6 +255,90 @@ impl Database {
                 return Err(Error::IvmRuntime(error));
             }
         };
+        // Chunk resolution during the tick can invoke the install observer,
+        // which takes this mutex itself. Acquire only after ticking, then keep
+        // the guard on the database until every resident lifecycle transition
+        // reaches the durable frontier. This admits pipelined batches while
+        // preventing an observer from interleaving with their overlay-derived
+        // metadata snapshots.
+        let lifecycle_guard =
+            if roots.is_empty() || self.large_value_publication_lifecycle_guard.is_some() {
+                None
+            } else {
+                Some(self.large_value_lifecycle.clone().lock_owned().await)
+            };
+        if !roots.is_empty() {
+            let mut node_transitions = Vec::<(crate::large_values::NodeRef, i8)>::new();
+            let mut lifecycle_operations = Vec::new();
+            for root in &roots {
+                let key = large_value_root_key(root)?;
+                let mut references = match overlay
+                    .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
+                    .await?
+                {
+                    Some(encoded) => postcard::from_bytes(&encoded).map_err(|error| {
+                        Error::InvalidLargeValueMetadata(format!(
+                            "cannot decode root references: {error}"
+                        ))
+                    })?,
+                    None => LargeValueRootReferences::default(),
+                };
+                let previous_total = references.durable.saturating_add(references.staged);
+                let durable_delta = durable_root_deltas.get(root).copied().unwrap_or_default();
+                references.durable = if durable_delta >= 0 {
+                    references.durable.checked_add(durable_delta as u64)
+                } else {
+                    references.durable.checked_sub(durable_delta.unsigned_abs())
+                }
+                .ok_or_else(|| {
+                    Error::InvalidLargeValueMetadata(
+                        "durable root count overflow/underflow".to_owned(),
+                    )
+                })?;
+                references.staged = references
+                    .staged
+                    .checked_sub(accepted_roots.get(root).copied().unwrap_or_default())
+                    .ok_or_else(|| {
+                        Error::InvalidLargeValueMetadata("staged root count underflow".to_owned())
+                    })?;
+                let next_total = references.durable.saturating_add(references.staged);
+                if previous_total == 0 && next_total > 0 && !references.node_active {
+                    if overlay
+                        .get(
+                            LARGE_VALUE_METADATA_CF.to_owned(),
+                            large_value_node_key(root)?,
+                        )
+                        .await?
+                        .is_some()
+                    {
+                        references.node_active = true;
+                        node_transitions.push((root.clone(), 1));
+                    }
+                } else if previous_total > 0 && next_total == 0 && references.node_active {
+                    references.node_active = false;
+                    node_transitions.push((root.clone(), -1));
+                }
+                lifecycle_operations.push(OwnedWriteOperation::Set {
+                    cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                    key,
+                    value: postcard::to_allocvec(&references).map_err(|error| {
+                        Error::InvalidLargeValueMetadata(format!(
+                            "cannot encode root references: {error}"
+                        ))
+                    })?,
+                });
+            }
+            lifecycle_operations.extend(
+                large_value_node_transition_operations(
+                    &overlay,
+                    BTreeMap::new(),
+                    node_transitions,
+                    false,
+                )
+                .await?,
+            );
+            staged_state.borrow_mut().extend(lifecycle_operations);
+        }
         let ivm_tick_time = tick_start.elapsed();
         let staged_operations = std::mem::take(&mut *staged_state.borrow_mut()).into_operations();
         let operations = staged_operations
@@ -334,6 +352,12 @@ impl Database {
             .extend(staged_operations.iter().cloned());
         self.resident_publications
             .insert(publication, staged_operations.clone());
+        if !roots.is_empty() {
+            if let Some(guard) = lifecycle_guard {
+                self.large_value_publication_lifecycle_guard = Some(guard);
+            }
+            self.large_value_lifecycle_publications.insert(publication);
+        }
         Ok(AppliedBatch {
             publication,
             storage: Rc::clone(&self.storage),
@@ -380,8 +404,13 @@ impl Database {
             .map_or(1, |publication| publication.0.saturating_add(1));
         while self.persisted_publications.remove(&PublicationId(frontier)) {
             self.resident_publications.remove(&PublicationId(frontier));
+            self.large_value_lifecycle_publications
+                .remove(&PublicationId(frontier));
             self.durable_publication_frontier = Some(PublicationId(frontier));
             frontier = frontier.saturating_add(1);
+        }
+        if self.large_value_lifecycle_publications.is_empty() {
+            self.large_value_publication_lifecycle_guard.take();
         }
         let mut resident_writes = StagedWriteState::default();
         for operations in self.resident_publications.values() {

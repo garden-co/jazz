@@ -103,6 +103,8 @@ impl Database {
                 failure: None,
             })),
             large_value_lifecycle,
+            large_value_publication_lifecycle_guard: None,
+            large_value_lifecycle_publications: BTreeSet::new(),
             abandoned_application: Rc::new(Cell::new(false)),
             poisoned: false,
         })

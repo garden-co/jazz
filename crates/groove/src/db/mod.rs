@@ -350,6 +350,13 @@ pub struct Database {
     /// from metadata storage, so this boundary prevents both intent eviction
     /// during an in-flight put and lost reference-count updates across uploads.
     large_value_lifecycle: Arc<AsyncMutex<()>>,
+    /// Retains the lifecycle mutex while resident publications contain a
+    /// root/node transition that has not crossed the durable frontier. Later
+    /// resident publications can join the same protected sequence without
+    /// waiting for themselves to persist; independent chunk installation is
+    /// held outside it until every such transition is durable.
+    large_value_publication_lifecycle_guard: Option<futures::lock::OwnedMutexGuard<()>>,
+    large_value_lifecycle_publications: BTreeSet<PublicationId>,
     abandoned_application: Rc<Cell<bool>>,
     poisoned: bool,
 }
