@@ -227,135 +227,6 @@ impl Database {
             .chain(accepted_roots.keys())
             .cloned()
             .collect::<BTreeSet<_>>();
-        let mut node_transitions = Vec::<(crate::large_values::NodeRef, i8)>::new();
-        for root in roots {
-            let key = large_value_root_key(&root)?;
-            let mut references = match self
-                .storage
-                .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
-                .await?
-            {
-                Some(encoded) => postcard::from_bytes(&encoded).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot decode root references: {error}"
-                    ))
-                })?,
-                None => LargeValueRootReferences::default(),
-            };
-            let previous_total = references.durable.saturating_add(references.staged);
-            let durable_delta = durable_root_deltas.get(&root).copied().unwrap_or_default();
-            references.durable = if durable_delta >= 0 {
-                references.durable.checked_add(durable_delta as u64)
-            } else {
-                references.durable.checked_sub(durable_delta.unsigned_abs())
-            }
-            .ok_or_else(|| {
-                Error::InvalidLargeValueMetadata("durable root count overflow/underflow".to_owned())
-            })?;
-            references.staged = references
-                .staged
-                .checked_sub(accepted_roots.get(&root).copied().unwrap_or_default())
-                .ok_or_else(|| {
-                    Error::InvalidLargeValueMetadata("staged root count underflow".to_owned())
-                })?;
-            let next_total = references.durable.saturating_add(references.staged);
-            if previous_total == 0 && next_total > 0 && !references.node_active {
-                if self
-                    .storage
-                    .get(
-                        LARGE_VALUE_METADATA_CF.to_owned(),
-                        large_value_node_key(&root)?,
-                    )
-                    .await?
-                    .is_some()
-                {
-                    references.node_active = true;
-                    node_transitions.push((root.clone(), 1));
-                }
-            } else if previous_total > 0 && next_total == 0 && references.node_active {
-                references.node_active = false;
-                node_transitions.push((root.clone(), -1));
-            }
-            staged_operations.push(OwnedWriteOperation::Set {
-                cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                key,
-                value: postcard::to_allocvec(&references).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot encode root references: {error}"
-                    ))
-                })?,
-            });
-        }
-        let mut node_updates =
-            BTreeMap::<crate::large_values::NodeRef, LargeValueNodeReferences>::new();
-        let mut pending = node_transitions;
-        while let Some((node_ref, delta)) = pending.pop() {
-            let mut metadata = if let Some(metadata) = node_updates.remove(&node_ref) {
-                metadata
-            } else {
-                let encoded = self
-                    .storage
-                    .get(
-                        LARGE_VALUE_METADATA_CF.to_owned(),
-                        large_value_node_key(&node_ref)?,
-                    )
-                    .await?
-                    .ok_or_else(|| {
-                        Error::InvalidLargeValueMetadata(
-                            "active node reference metadata is missing".to_owned(),
-                        )
-                    })?;
-                postcard::from_bytes(&encoded).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot decode node references: {error}"
-                    ))
-                })?
-            };
-            let crossed_zero = if delta > 0 {
-                let crossed = metadata.references == 0;
-                metadata.references = metadata.references.checked_add(1).ok_or_else(|| {
-                    Error::InvalidLargeValueMetadata("node reference count overflow".to_owned())
-                })?;
-                crossed
-            } else {
-                metadata.references = metadata.references.checked_sub(1).ok_or_else(|| {
-                    Error::InvalidLargeValueMetadata("node reference count underflow".to_owned())
-                })?;
-                metadata.references == 0
-            };
-            if crossed_zero {
-                pending.extend(
-                    metadata
-                        .children
-                        .iter()
-                        .cloned()
-                        .map(|child| (child, delta)),
-                );
-            }
-            node_updates.insert(node_ref, metadata);
-        }
-        for (node_ref, metadata) in node_updates {
-            staged_operations.push(OwnedWriteOperation::Set {
-                cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                key: large_value_node_key(&node_ref)?,
-                value: postcard::to_allocvec(&metadata).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot encode node references: {error}"
-                    ))
-                })?,
-            });
-            if metadata.references == 0 {
-                staged_operations.push(OwnedWriteOperation::Set {
-                    cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                    key: large_value_reclaim_key(&node_ref)?,
-                    value: postcard::to_allocvec(&node_ref).map_err(|error| {
-                        Error::InvalidLargeValueMetadata(format!(
-                            "cannot encode reclaim entry: {error}"
-                        ))
-                    })?,
-                });
-            }
-        }
         let resident_overlay = Rc::new(StagedWriteOverlay::new_owned(
             Rc::clone(&self.storage),
             Rc::clone(&self.resident_writes),
@@ -384,6 +255,88 @@ impl Database {
                 return Err(Error::IvmRuntime(error));
             }
         };
+        // The tick may request missing chunks, which can install metadata via
+        // the same lifecycle. Only acquire it after ticking, then retain the
+        // owned guard in AppliedBatch until this publication's ordered write
+        // commits the root/node transition snapshot.
+        let large_value_lifecycle_guard = if roots.is_empty() {
+            None
+        } else {
+            let guard = self.large_value_lifecycle.clone().lock_owned().await;
+            let mut node_transitions = Vec::<(crate::large_values::NodeRef, i8)>::new();
+            let mut lifecycle_operations = Vec::new();
+            for root in roots {
+                let key = large_value_root_key(&root)?;
+                let mut references = match self
+                    .storage
+                    .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
+                    .await?
+                {
+                    Some(encoded) => postcard::from_bytes(&encoded).map_err(|error| {
+                        Error::InvalidLargeValueMetadata(format!(
+                            "cannot decode root references: {error}"
+                        ))
+                    })?,
+                    None => LargeValueRootReferences::default(),
+                };
+                let previous_total = references.durable.saturating_add(references.staged);
+                let durable_delta = durable_root_deltas.get(&root).copied().unwrap_or_default();
+                references.durable = if durable_delta >= 0 {
+                    references.durable.checked_add(durable_delta as u64)
+                } else {
+                    references.durable.checked_sub(durable_delta.unsigned_abs())
+                }
+                .ok_or_else(|| {
+                    Error::InvalidLargeValueMetadata(
+                        "durable root count overflow/underflow".to_owned(),
+                    )
+                })?;
+                references.staged = references
+                    .staged
+                    .checked_sub(accepted_roots.get(&root).copied().unwrap_or_default())
+                    .ok_or_else(|| {
+                        Error::InvalidLargeValueMetadata("staged root count underflow".to_owned())
+                    })?;
+                let next_total = references.durable.saturating_add(references.staged);
+                if previous_total == 0 && next_total > 0 && !references.node_active {
+                    if self
+                        .storage
+                        .get(
+                            LARGE_VALUE_METADATA_CF.to_owned(),
+                            large_value_node_key(&root)?,
+                        )
+                        .await?
+                        .is_some()
+                    {
+                        references.node_active = true;
+                        node_transitions.push((root.clone(), 1));
+                    }
+                } else if previous_total > 0 && next_total == 0 && references.node_active {
+                    references.node_active = false;
+                    node_transitions.push((root.clone(), -1));
+                }
+                lifecycle_operations.push(OwnedWriteOperation::Set {
+                    cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                    key,
+                    value: postcard::to_allocvec(&references).map_err(|error| {
+                        Error::InvalidLargeValueMetadata(format!(
+                            "cannot encode root references: {error}"
+                        ))
+                    })?,
+                });
+            }
+            lifecycle_operations.extend(
+                large_value_node_transition_operations(
+                    &self.storage,
+                    BTreeMap::new(),
+                    node_transitions,
+                    false,
+                )
+                .await?,
+            );
+            staged_state.borrow_mut().extend(lifecycle_operations);
+            Some(guard)
+        };
         let ivm_tick_time = tick_start.elapsed();
         let staged_operations = std::mem::take(&mut *staged_state.borrow_mut()).into_operations();
         let operations = staged_operations
@@ -407,6 +360,7 @@ impl Database {
             tick,
             notifications_deferred: defer_notifications_until_durable,
             lifecycle: Rc::new(Cell::new(AppliedBatchLifecycle::Applied)),
+            large_value_lifecycle_guard: Rc::new(RefCell::new(large_value_lifecycle_guard)),
             abandoned_application: Rc::clone(&self.abandoned_application),
         })
     }
@@ -462,20 +416,23 @@ impl Database {
         &self,
         batch: DatabaseBatch,
     ) -> Result<Vec<PendingTableWrite>, Error> {
-        self.pending_writes_from_operations(&batch.operations)
+        let mut pending_writes = Vec::with_capacity(batch.operations.len());
+        for operation in batch.operations {
+            pending_writes.push(self.pending_write_from_owned_operation(operation)?);
+        }
+        Ok(pending_writes)
     }
 
+    #[cfg(any(test, feature = "test"))]
+    #[allow(dead_code)] // Used by the lib-test batch overlay helper, not non-test builds.
     pub(super) fn pending_writes_from_operations(
         &self,
         operations: &[BatchOperation],
     ) -> Result<Vec<PendingTableWrite>, Error> {
-        let mut pending_writes = Vec::with_capacity(operations.len());
-
-        for operation in operations {
-            pending_writes.push(self.pending_write_from_operation(operation)?);
-        }
-
-        Ok(pending_writes)
+        operations
+            .iter()
+            .map(|operation| self.pending_write_from_operation(operation))
+            .collect()
     }
 
     pub(super) fn ensure_batch_storage_txn(&self, batch: &DatabaseBatch) -> Result<(), Error> {
@@ -515,7 +472,9 @@ impl Database {
         match operation {
             BatchOperation::Insert { table, record } => {
                 let table_schema = self.table(table)?;
-                let (variant_tag, descriptor, record) = resolve_record_input(table_schema, record)?;
+                let descriptor = self.record_descriptor_for_input(table, record)?;
+                let (variant_tag, descriptor, record) =
+                    resolve_record_input(table_schema, record, descriptor)?;
                 let key = primary_key_bytes(table_schema, variant_tag, descriptor, &record)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Insert,
@@ -528,8 +487,9 @@ impl Database {
             }
             BatchOperation::InsertRaw { table, key, record } => {
                 let table_schema = self.table(table)?;
+                let descriptor = self.record_descriptor_for_raw_input(table, record)?;
                 let (variant_tag, descriptor, record) =
-                    resolve_raw_record_input(table_schema, record)?;
+                    resolve_raw_record_input(table_schema, record, descriptor)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Insert,
                     table: table.clone(),
@@ -541,8 +501,9 @@ impl Database {
             }
             BatchOperation::InsertRawFresh { table, key, record } => {
                 let table_schema = self.table(table)?;
+                let descriptor = self.record_descriptor_for_raw_input(table, record)?;
                 let (variant_tag, descriptor, record) =
-                    resolve_raw_record_input(table_schema, record)?;
+                    resolve_raw_record_input(table_schema, record, descriptor)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::InsertFresh,
                     table: table.clone(),
@@ -554,7 +515,9 @@ impl Database {
             }
             BatchOperation::Update { table, record } => {
                 let table_schema = self.table(table)?;
-                let (variant_tag, descriptor, record) = resolve_record_input(table_schema, record)?;
+                let descriptor = self.record_descriptor_for_input(table, record)?;
+                let (variant_tag, descriptor, record) =
+                    resolve_record_input(table_schema, record, descriptor)?;
                 let key = primary_key_bytes(table_schema, variant_tag, descriptor, &record)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Update,
@@ -567,8 +530,9 @@ impl Database {
             }
             BatchOperation::UpdateRaw { table, key, record } => {
                 let table_schema = self.table(table)?;
+                let descriptor = self.record_descriptor_for_raw_input(table, record)?;
                 let (variant_tag, descriptor, record) =
-                    resolve_raw_record_input(table_schema, record)?;
+                    resolve_raw_record_input(table_schema, record, descriptor)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Update,
                     table: table.clone(),
@@ -587,6 +551,142 @@ impl Database {
                 })
             }
         }
+    }
+
+    fn pending_write_from_owned_operation(
+        &self,
+        operation: BatchOperation,
+    ) -> Result<PendingTableWrite, Error> {
+        match operation {
+            BatchOperation::Insert { table, record } => {
+                let table_schema = self.table(&table)?;
+                let descriptor = self.record_descriptor_for_input(&table, &record)?;
+                let (variant_tag, descriptor, record) =
+                    resolve_owned_record_input(table_schema, record, descriptor)?;
+                let key = primary_key_bytes(table_schema, variant_tag, descriptor, &record)?;
+                Ok(PendingTableWrite::Set {
+                    mode: WriteMode::Insert,
+                    table,
+                    key,
+                    variant_tag,
+                    descriptor,
+                    record,
+                })
+            }
+            BatchOperation::InsertRaw { table, key, record } => {
+                let table_schema = self.table(&table)?;
+                let descriptor = self.record_descriptor_for_raw_input(&table, &record)?;
+                let (variant_tag, descriptor, record) =
+                    resolve_owned_raw_record_input(table_schema, record, descriptor)?;
+                Ok(PendingTableWrite::Set {
+                    mode: WriteMode::Insert,
+                    table,
+                    key: key.into_bytes(),
+                    variant_tag,
+                    descriptor,
+                    record,
+                })
+            }
+            BatchOperation::InsertRawFresh { table, key, record } => {
+                let table_schema = self.table(&table)?;
+                let descriptor = self.record_descriptor_for_raw_input(&table, &record)?;
+                let (variant_tag, descriptor, record) =
+                    resolve_owned_raw_record_input(table_schema, record, descriptor)?;
+                Ok(PendingTableWrite::Set {
+                    mode: WriteMode::InsertFresh,
+                    table,
+                    key: key.into_bytes(),
+                    variant_tag,
+                    descriptor,
+                    record,
+                })
+            }
+            BatchOperation::Update { table, record } => {
+                let table_schema = self.table(&table)?;
+                let descriptor = self.record_descriptor_for_input(&table, &record)?;
+                let (variant_tag, descriptor, record) =
+                    resolve_owned_record_input(table_schema, record, descriptor)?;
+                let key = primary_key_bytes(table_schema, variant_tag, descriptor, &record)?;
+                Ok(PendingTableWrite::Set {
+                    mode: WriteMode::Update,
+                    table,
+                    key,
+                    variant_tag,
+                    descriptor,
+                    record,
+                })
+            }
+            BatchOperation::UpdateRaw { table, key, record } => {
+                let table_schema = self.table(&table)?;
+                let descriptor = self.record_descriptor_for_raw_input(&table, &record)?;
+                let (variant_tag, descriptor, record) =
+                    resolve_owned_raw_record_input(table_schema, record, descriptor)?;
+                Ok(PendingTableWrite::Set {
+                    mode: WriteMode::Update,
+                    table,
+                    key: key.into_bytes(),
+                    variant_tag,
+                    descriptor,
+                    record,
+                })
+            }
+            BatchOperation::Delete { table, key } => {
+                let descriptor = self.table(&table)?.record_schema();
+                Ok(PendingTableWrite::Delete {
+                    table,
+                    key: key.into_bytes(),
+                    descriptor,
+                })
+            }
+        }
+    }
+
+    fn record_descriptor_for_input(
+        &self,
+        table: &str,
+        record: &RecordInput,
+    ) -> Result<RecordDescriptor, Error> {
+        let variant_tag = match record {
+            RecordInput::Values(_) => 0,
+            RecordInput::Record(record) => record.variant_tag(),
+        };
+        self.record_descriptor(table, variant_tag)
+    }
+
+    fn record_descriptor_for_raw_input(
+        &self,
+        table: &str,
+        record: &RawRecordInput,
+    ) -> Result<RecordDescriptor, Error> {
+        let variant_tag = match record {
+            RawRecordInput::Payload(_) => 0,
+            RawRecordInput::Record(record) => record.variant_tag(),
+            RawRecordInput::ValidatedRecord(record) => record.variant_tag(),
+        };
+        self.record_descriptor(table, variant_tag)
+    }
+
+    fn record_descriptor(&self, table: &str, variant_tag: u32) -> Result<RecordDescriptor, Error> {
+        if let Some(descriptor) = self
+            .ivm_runtime
+            .record_descriptor(table, variant_tag)
+            .copied()
+        {
+            return Ok(descriptor);
+        }
+        self.table(table)?
+            .record_schema_for_variant(variant_tag)
+            .ok_or_else(|| Error::UnknownTableVariant {
+                table: table.to_owned(),
+                version: u64::from(variant_tag),
+            })
+    }
+
+    pub(super) fn table_storage_descriptor(&self, table: &str) -> Result<RecordDescriptor, Error> {
+        self.ivm_runtime
+            .table_storage_descriptor(table)
+            .copied()
+            .ok_or_else(|| Error::TableNotFound(table.to_owned()))
     }
 
     pub(super) fn table(&self, table: &str) -> Result<&TableSchema, Error> {

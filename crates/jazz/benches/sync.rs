@@ -487,8 +487,8 @@ fn current_rows(
                 .columns
                 .iter()
                 .filter_map(|column| {
-                    row.cell(table, &column.name)
-                        .map(|value| (column.name.clone(), value))
+                    row.cell(table, column.name())
+                        .map(|value| (column.name().to_owned(), value))
                 })
                 .collect();
             (row.row_uuid(), cells)

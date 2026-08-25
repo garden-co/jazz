@@ -1,7 +1,12 @@
 import type { ReactNode } from "react";
+import { useOutletContext } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { useLocalStorageState } from "../../utility/use-local-storage-state.js";
-import { OVERLAY_HIDE_LAUNCHER_STORAGE_KEY, isBoolean } from "../../utility/overlay-settings.js";
+import {
+  DETACH_SHORTCUT_KEYS,
+  OVERLAY_HIDE_LAUNCHER_STORAGE_KEY,
+  isBoolean,
+} from "../../utility/overlay-settings.js";
 import styles from "./index.module.css";
 
 // macOS spells the shortcut with glyphs; everything else uses words. Computed
@@ -29,15 +34,21 @@ interface Shortcut {
   overlayOnly?: boolean;
 }
 
-// Mirrors the bindings wired in the overlay loader (Alt+Shift+J / Esc) and the
+// Mirrors the bindings wired in the overlay loader (Alt+Shift+J / Alt+Shift+D / Esc) and the
 // data grid (double-click / Del / Shift-click). Keep in sync if those change.
 const SHORTCUTS: Shortcut[] = [
   { keys: OPEN_SHORTCUT_KEYS, label: "Open or close the inspector", overlayOnly: true },
+  { keys: DETACH_SHORTCUT_KEYS, label: "Open in a separate window", overlayOnly: true },
   { keys: ["Esc"], label: "Close the inspector", overlayOnly: true },
   { keys: ["Double-click"], label: "Edit a cell" },
   { keys: ["Del"], label: "Delete the focused row" },
   { keys: ["Shift", "Click"], label: "Select a range of rows" },
 ];
+
+interface SettingsOutletContext {
+  showDetachButton: boolean;
+  setShowDetachButton: (show: boolean) => void;
+}
 
 interface ToggleRowProps {
   id: string;
@@ -80,6 +91,7 @@ function ToggleRow({ id, label, description, checked, onChange }: ToggleRowProps
 export function SettingsPage() {
   const { runtime } = useDevtoolsContext();
   const isOverlay = runtime === "overlay";
+  const { showDetachButton, setShowDetachButton } = useOutletContext<SettingsOutletContext>();
   const [hideLauncher, setHideLauncher] = useLocalStorageState<boolean>(
     OVERLAY_HIDE_LAUNCHER_STORAGE_KEY,
     false,
@@ -108,6 +120,18 @@ export function SettingsPage() {
                 }
                 checked={hideLauncher}
                 onChange={setHideLauncher}
+              />
+              <ToggleRow
+                id="show-detach-button"
+                label="Show the detach button"
+                description={
+                  <>
+                    Display the separate-window action in the inspector toolbar. You can always use{" "}
+                    <KeyCombo keys={DETACH_SHORTCUT_KEYS} />.
+                  </>
+                }
+                checked={showDetachButton}
+                onChange={setShowDetachButton}
               />
             </div>
           </section>

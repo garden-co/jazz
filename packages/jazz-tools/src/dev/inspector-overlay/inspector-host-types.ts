@@ -19,6 +19,8 @@ export interface JazzInspectorHost {
   getWasmSchema(): WasmSchema;
   /** Current active subscriptions, without JS stacks. */
   getActiveSubscriptions(): InspectorSubscription[];
+  registerInspectorWindow(target: Window): void;
+  unregisterInspectorWindow(target: Window): void;
 }
 
 export const INSPECTOR_HOST_GLOBAL = "__jazzInspectorHost" as const;

@@ -18,7 +18,7 @@ use jazz::query::Query;
 use jazz::row_input;
 use jazz::tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, SchemaBuilder, SubscriptionStream,
-    SubscriptionStreamItem, TableSchema, Value,
+    SubscriptionStreamItem, TableSchema, Value, WriteContext,
 };
 use jazz_server::JazzServer;
 use support::{TestingClient, has_added_id, wait_for_query, wait_for_subscription_update};
@@ -411,7 +411,13 @@ async fn same_value_write_still_advances_visible_row_metadata_impl() {
         panic!("$updatedAt should decode as timestamp");
     };
 
+    // Write contexts and public query provenance both use physical Unix
+    // milliseconds. Inject a distinct timestamp so this metadata-only delivery
+    // remains observable through `$updatedAt`, regardless of the client's
+    // synthetic HLC counter.
+    let explicit_updated_at = 1_700_000_000_001;
     alice
+        .with_write_context(WriteContext::default().with_updated_at(explicit_updated_at))
         .update(
             task_id,
             vec![("status".to_string(), Value::Text("status-0".to_string()))],
@@ -427,6 +433,10 @@ async fn same_value_write_still_advances_visible_row_metadata_impl() {
         if rows.len() == 1 {
             if let Value::Timestamp(updated_at) = rows[0].1[0] {
                 if updated_at > initial_updated_at {
+                    assert_eq!(
+                        updated_at, explicit_updated_at,
+                        "$updatedAt exposes the requested physical Unix millisecond"
+                    );
                     break;
                 }
             }
