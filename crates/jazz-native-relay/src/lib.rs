@@ -512,7 +512,7 @@ impl NativeRelayHost {
     }
 }
 
-fn client_identity(handle: u64, author: jazz::ids::AuthorId) -> DbIdentity {
+fn client_identity(handle: u64, author: jazz::ids::AuthorSubject) -> DbIdentity {
     let mut node = [0_u8; 16];
     node[..8].copy_from_slice(b"JAZZRN\0\0");
     node[8..].copy_from_slice(&handle.to_be_bytes());
@@ -1562,7 +1562,7 @@ mod tests {
     // store per UI runtime or share it across explicit auth scopes.
     use super::*;
     use jazz::db::InsertOptions;
-    use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+    use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
     use jazz::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES;
     use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
     use jazz::tx::DurabilityTier;
@@ -1591,10 +1591,25 @@ mod tests {
             schema: schema(),
             identity: DbIdentity {
                 node: NodeUuid::from_bytes([0xa1; 16]),
-                author: AuthorId::from_bytes([0xa2; 16]),
+                author: AuthorSubject::for_test_bytes([0xa2; 16]),
             },
             thread_start_counter: None,
         }
+    }
+
+    #[test]
+    fn attached_client_identity_preserves_the_admitted_canonical_author() {
+        let admitted = AuthorSubject::authenticated("https://issuer.example", "opaque-subject")
+            .expect("fixture issuer and subject are valid");
+
+        let client = client_identity(42, admitted);
+
+        assert_eq!(client.author, admitted);
+        assert_eq!(
+            client.author.canonical(),
+            r#"["https://issuer.example","opaque-subject"]"#
+        );
+        assert_ne!(client.author, AuthorSubject::SYSTEM);
     }
 
     #[test]
@@ -1619,7 +1634,7 @@ mod tests {
         let mut wrong_identity = config(directory.path().join("alice.sqlite"), Some("alice"));
         wrong_identity.identity = DbIdentity {
             node: NodeUuid::from_bytes([0xe1; 16]),
-            author: AuthorId::from_bytes([0xe2; 16]),
+            author: AuthorSubject::for_test_bytes([0xe2; 16]),
         };
         assert!(matches!(
             registry.open(wrong_identity),
@@ -1641,7 +1656,7 @@ mod tests {
             .attach_client(
                 DbIdentity {
                     node: NodeUuid::from_bytes([0xb1; 16]),
-                    author: AuthorId::from_bytes([0xb2; 16]),
+                    author: AuthorSubject::for_test_bytes([0xb2; 16]),
                 },
                 BTreeMap::new(),
             )
@@ -1650,7 +1665,7 @@ mod tests {
             .attach_client(
                 DbIdentity {
                     node: NodeUuid::from_bytes([0xc1; 16]),
-                    author: AuthorId::from_bytes([0xc2; 16]),
+                    author: AuthorSubject::for_test_bytes([0xc2; 16]),
                 },
                 BTreeMap::new(),
             )
@@ -1692,7 +1707,7 @@ mod tests {
         // forward either commit. Core must retain the unsent protocol state on
         // `TransportError::Backpressure`, then retry it after the host drains.
         let filler = SyncMessage::SessionClaims {
-            identity: AuthorId::SYSTEM,
+            identity: AuthorSubject::SYSTEM,
             claims: BTreeMap::new(),
         };
         while first.wire().queue_depths().unwrap().1 < NATIVE_RELAY_QUEUE_MAX_MESSAGES {
@@ -1831,7 +1846,7 @@ mod tests {
     fn encoded_peer_messages_use_the_shared_postcard_contract() {
         let wire = NativeRelayWire::default();
         let message = SyncMessage::SessionClaims {
-            identity: AuthorId::SYSTEM,
+            identity: AuthorSubject::SYSTEM,
             claims: BTreeMap::from([("role".to_owned(), Value::String("member".to_owned()))]),
         };
         let bytes = encode_sync_message(&message).unwrap();
@@ -1850,7 +1865,7 @@ mod tests {
         assert_eq!(
             decode_sync_message(&encoded[0]).unwrap(),
             SyncMessage::SessionClaims {
-                identity: AuthorId::SYSTEM,
+                identity: AuthorSubject::SYSTEM,
                 claims: BTreeMap::from([("role".to_owned(), Value::String("member".to_owned()))]),
             }
         );
@@ -1866,13 +1881,13 @@ mod tests {
             .attach_client(
                 DbIdentity {
                     node: NodeUuid::from_bytes([0x91; 16]),
-                    author: AuthorId::from_bytes([0x92; 16]),
+                    author: AuthorSubject::for_test_bytes([0x92; 16]),
                 },
                 BTreeMap::new(),
             )
             .unwrap();
         let frame = encode_sync_message(&SyncMessage::SessionClaims {
-            identity: AuthorId::SYSTEM,
+            identity: AuthorSubject::SYSTEM,
             claims: BTreeMap::new(),
         })
         .unwrap();
@@ -1904,7 +1919,7 @@ mod tests {
     #[test]
     fn native_queue_applies_count_backpressure_without_losing_admitted_messages() {
         let message = SyncMessage::SessionClaims {
-            identity: AuthorId::SYSTEM,
+            identity: AuthorSubject::SYSTEM,
             claims: BTreeMap::new(),
         };
         let wire = NativeRelayWire::default();
@@ -1933,7 +1948,7 @@ mod tests {
                 .unwrap()
                 .push(
                     SyncMessage::SessionClaims {
-                        identity: AuthorId::SYSTEM,
+                        identity: AuthorSubject::SYSTEM,
                         claims: BTreeMap::new(),
                     },
                     "test outbound",
@@ -1967,7 +1982,7 @@ mod tests {
         assert!(!host.is_null());
         let identity = DbIdentity {
             node: NodeUuid::from_bytes([0x71; 16]),
-            author: AuthorId::from_bytes([0x72; 16]),
+            author: AuthorSubject::for_test_bytes([0x72; 16]),
         };
         let admission = RelayScopeAdmissionRequest {
             scope: RelayScopeRequest {
@@ -2118,7 +2133,7 @@ mod tests {
                     schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
                     identity: DbIdentity {
                         node: NodeUuid::from_bytes([0x81; 16]),
-                        author: AuthorId::from_bytes([0x82; 16]),
+                        author: AuthorSubject::for_test_bytes([0x82; 16]),
                     },
                     claims: BTreeMap::new(),
                 })
@@ -2193,7 +2208,7 @@ mod tests {
             schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
             identity: DbIdentity {
                 node: NodeUuid::from_bytes([byte; 16]),
-                author: AuthorId::from_bytes([byte.wrapping_add(1); 16]),
+                author: AuthorSubject::for_test_bytes([byte.wrapping_add(1); 16]),
             },
             claims: BTreeMap::from([("sub".to_owned(), Value::String(name.to_owned()))]),
         };
