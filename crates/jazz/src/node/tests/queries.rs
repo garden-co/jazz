@@ -418,14 +418,15 @@ fn one_shot_filtered_read_uses_primary_key_scan_for_id_equality() {
 
     let (selected, selected_metrics) =
         query_rows_by_uuid(&mut core, query.clone(), DurabilityTier::Global);
-    let (forced_full, forced_metrics) = query_rows_by_uuid(&mut core, query, DurabilityTier::Local);
+    let (local, local_metrics) = query_rows_by_uuid(&mut core, query, DurabilityTier::Local);
 
-    assert_eq!(selected, forced_full);
+    assert_eq!(selected, local);
     assert_eq!(selected, vec![first]);
     assert_eq!(selected_metrics.source_primary_key_scans, 1);
     assert_eq!(selected_metrics.source_index_probes, 0);
     assert_eq!(selected_metrics.source_full_scans, 0);
-    assert_eq!(forced_metrics.source_full_scans, 1);
+    assert_eq!(local_metrics.source_primary_key_scans, 1);
+    assert_eq!(local_metrics.source_full_scans, 0);
 }
 
 #[test]
@@ -623,14 +624,15 @@ fn one_shot_filtered_read_uses_declared_index_for_indexed_column_equality() {
 
     let (selected, selected_metrics) =
         query_rows_by_uuid(&mut core, query.clone(), DurabilityTier::Global);
-    let (forced_full, forced_metrics) = query_rows_by_uuid(&mut core, query, DurabilityTier::Local);
+    let (local, local_metrics) = query_rows_by_uuid(&mut core, query, DurabilityTier::Local);
 
-    assert_eq!(selected, forced_full);
+    assert_eq!(selected, local);
     assert_eq!(selected, vec![first]);
     assert_eq!(selected_metrics.source_primary_key_scans, 0);
     assert_eq!(selected_metrics.source_index_probes, 1);
     assert_eq!(selected_metrics.source_full_scans, 0);
-    assert_eq!(forced_metrics.source_full_scans, 1);
+    assert_eq!(local_metrics.source_index_probes, 1);
+    assert_eq!(local_metrics.source_full_scans, 0);
 }
 
 #[test]
@@ -864,12 +866,14 @@ fn one_shot_filtered_read_keeps_residual_filters_after_pushdown() {
 
     let (selected, selected_metrics) =
         query_rows_by_uuid(&mut core, query.clone(), DurabilityTier::Global);
-    let (forced_full, _forced_metrics) = query_rows_by_uuid(&mut core, query, DurabilityTier::Local);
+    let (local, local_metrics) = query_rows_by_uuid(&mut core, query, DurabilityTier::Local);
 
-    assert_eq!(selected, forced_full);
+    assert_eq!(selected, local);
     assert_eq!(selected, vec![first]);
     assert_eq!(selected_metrics.source_index_probes, 1);
     assert_eq!(selected_metrics.source_full_scans, 0);
+    assert_eq!(local_metrics.source_index_probes, 1);
+    assert_eq!(local_metrics.source_full_scans, 0);
 }
 
 #[test]

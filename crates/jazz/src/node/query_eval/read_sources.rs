@@ -1766,10 +1766,9 @@ where
                 column,
                 prefix,
                 source_limit,
-            }) if tier == DurabilityTier::Global => {
-                // A Global index already selects from the canonical settled
-                // winner relation. Project those raw physical rows first, then
-                // apply the compatibility boundary below.
+            }) => {
+                // Select settled candidates before combining them with the
+                // corresponding Local ahead candidates below.
                 let source_limit = (!exclude_deleted).then_some(*source_limit).flatten();
                 self.node.query_engine_read_metrics.source_index_probes += 1;
                 self.node
@@ -1810,6 +1809,18 @@ where
                         projection_target.clone(),
                         static_scan_for_prefix(prefix.clone(), 3),
                     ),
+                Some(CurrentAccessPath::Index {
+                    column,
+                    prefix,
+                    source_limit,
+                }) => self.node.physical_ahead_current_source_for_index_scan(
+                    read_table,
+                    self.read_view.read_schema,
+                    column,
+                    prefix,
+                    (!exclude_deleted).then_some(*source_limit).flatten(),
+                    &projection_target,
+                ),
                 _ => self
                     .node
                     .physical_current_source_graph_with_projection_target(
@@ -2828,6 +2839,7 @@ where
             &request.input,
             &request.reads.primary,
             &request.policy,
+            false,
         )
     }
 
@@ -2836,6 +2848,7 @@ where
         input: &RowSetProgramInput,
         read_view: &ReadView<RequestedSourceStage>,
         policy: &PolicyContext,
+        allow_local: bool,
     ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
         let mut equalities_by_source = BTreeMap::new();
         // This deliberately small access-path selector only recognizes a
@@ -2866,10 +2879,10 @@ where
             let Some(path) = select_current_access_path(&table, &equalities) else {
                 continue;
             };
-            // All automatically derived paths are Global-only. Local and Edge
-            // reads include ahead rows, so retaining their ordinary source
-            // preserves complete tier semantics.
-            if tier == DurabilityTier::Global {
+            // Generic maintained programs remain Global-only. A one-shot Local
+            // caller opts in only after arranging equivalent index scans over
+            // both the settled and ahead physical sources.
+            if tier == DurabilityTier::Global || (allow_local && tier == DurabilityTier::Local) {
                 paths.insert(source, path);
             }
         }
@@ -2882,7 +2895,7 @@ where
         binding: &Binding,
         tier: DurabilityTier,
     ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
-        if tier != DurabilityTier::Global {
+        if !matches!(tier, DurabilityTier::Local | DurabilityTier::Global) {
             return Ok(BTreeMap::new());
         }
         let normalized = self.normalized_row_set_shape(shape, binding)?;
@@ -2904,8 +2917,12 @@ where
             None,
             false,
         );
-        let mut paths =
-            self.normalized_program_access_paths(&input, &reads.primary, &PolicyContext::System)?;
+        let mut paths = self.normalized_program_access_paths(
+            &input,
+            &reads.primary,
+            &PolicyContext::System,
+            true,
+        )?;
 
         // A source cap is stronger than an index access path: it is only safe
         // when the source is itself the final result prefix. In particular,
@@ -3071,6 +3088,46 @@ where
         let storage_table = physical_global_current_table_name(mapping.table_id);
         Ok(GraphBuilder::variant_index_scan(
             storage_table,
+            physical_current_index_name(column_id),
+            projection_target,
+            match source_limit {
+                Some(max_items) => StaticScanSpec::PrefixLimit {
+                    prefix: prefix.iter().cloned().map(LiteralValue::from).collect(),
+                    max_items,
+                },
+                None => {
+                    StaticScanSpec::Prefix(prefix.iter().cloned().map(LiteralValue::from).collect())
+                }
+            },
+        ))
+    }
+
+    fn physical_ahead_current_source_for_index_scan(
+        &self,
+        table: &TableSchema,
+        schema_version: SchemaVersionId,
+        column: &str,
+        prefix: &[Value],
+        source_limit: Option<usize>,
+        projection_target: &str,
+    ) -> Result<GraphBuilder, Error> {
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(&table.name))
+            .ok_or(Error::InvalidStoredValue(
+                "physical current index table mapping missing",
+            ))?;
+        let column_id = mapping
+            .columns
+            .get(column)
+            .copied()
+            .ok_or(Error::InvalidStoredValue(
+                "physical current index column mapping missing",
+            ))?;
+        Ok(GraphBuilder::variant_index_scan(
+            physical_ahead_current_table_name(mapping.table_id),
             physical_current_index_name(column_id),
             projection_target,
             match source_limit {
