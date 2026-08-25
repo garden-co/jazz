@@ -694,9 +694,10 @@ pub struct ChunkCacheStats {
     pub budget_bytes: usize,
     pub active_leases: usize,
     pub leased_bytes: usize,
-    /// Requests currently suspended in the backing provider. Reclamation is
-    /// deferred while this is non-zero because the requested locator may have
-    /// been discovered from an active root before its bytes were leased.
+    /// Admitted chunk-read consumers, including callers sharing one backing
+    /// load and callers served from the verified cache. Reclamation is deferred
+    /// while this is non-zero because a requested locator may have been
+    /// discovered from an active root before its bytes were leased.
     pub active_requests: usize,
 }
 
