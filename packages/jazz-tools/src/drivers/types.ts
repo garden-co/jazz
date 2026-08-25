@@ -17,7 +17,10 @@ export type Value =
   | { type: "Uuid"; value: string }
   | { type: "Bytea"; value: Uint8Array }
   | { type: "Array"; value: Value[] }
-  | { type: "Row"; value: { id?: string; values: Value[] } }
+  | {
+      type: "Row";
+      value: { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> };
+    }
   | { type: "Enum"; value: { case: string; values: Value[] } }
   | { type: "Null" };
 
@@ -28,6 +31,7 @@ export type FFIRecord = InsertValues;
 export interface WasmRow {
   id: string;
   values: Value[];
+  valuesByColumn?: Map<string, Value>;
 }
 
 export type FFIRow = WasmRow;
@@ -60,6 +64,19 @@ export interface NativeTerminalOperation {
   edit: NativeTerminalEdit;
 }
 
+/** Logical terminal-tree path consumed by the TypeScript materializer. */
+export type RuntimeTerminalPathSegment = { Collection: number } | { Key: number[] };
+export type RuntimeTerminalEdit =
+  | { Insert: { index: number; key: number[]; row: WasmRow } }
+  | { Update: { key: number[]; row: WasmRow } }
+  | { Remove: { key: number[] } }
+  | { Move: { key: number[]; index: number } };
+export interface RuntimeTerminalOperation {
+  root_key: number[];
+  path: RuntimeTerminalPathSegment[];
+  edit: RuntimeTerminalEdit;
+}
+
 export interface RuntimeSubscriptionAddedRow {
   sourceId: string;
   occurrenceKey: Uint8Array;
@@ -86,7 +103,7 @@ export interface RuntimeSubscriptionDelta {
   added: RuntimeSubscriptionAddedRow[];
   removed: RuntimeSubscriptionRemovedRow[];
   updated: RuntimeSubscriptionUpdatedRow[];
-  terminalOperations?: NativeTerminalOperation[];
+  terminalOperations?: RuntimeTerminalOperation[];
 }
 
 export type ColumnType =

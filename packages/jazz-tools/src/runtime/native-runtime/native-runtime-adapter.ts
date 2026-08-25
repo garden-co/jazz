@@ -4,6 +4,7 @@ import type {
   InsertValues,
   NativeTerminalOperation,
   RuntimeSubscriptionDelta,
+  RuntimeTerminalOperation,
   TablePolicies,
   Value,
   WasmRow,
@@ -69,6 +70,7 @@ import {
   createNativeRowValueEncoder,
   createRecord,
   createRecordValueDecoder,
+  decodeNativeTerminalRow,
   decodeNativeRowValues,
   encodeNativeColumnValue,
   encodeNativeNullValue,
@@ -456,7 +458,7 @@ type SubscriptionState = {
   visibleOpened: boolean;
   deferredVisiblePublication: boolean;
   deferredVisibleReset: boolean;
-  deferredTerminalOperations: NativeTerminalOperation[];
+  deferredTerminalOperations: RuntimeTerminalOperation[];
   deferredPlaceholderChunks: number;
   deferredPlaceholderRows: number;
   deferredPlaceholderBytes: number;
@@ -2575,6 +2577,10 @@ export class NativeRuntimeAdapter implements Runtime {
       subscription.rows = applied.rows;
       subscription.rowIndexByKey = applied.rowIndexByKey;
       subscription.opened = true;
+      const terminalOperations = decodeRuntimeTerminalOperations(
+        chunk.terminalOperations,
+        subscription.outputColumns?.rootColumns,
+      );
       if (
         subscriptionRowsRequireBufferedPublication(
           subscription.rows,
@@ -2589,13 +2595,14 @@ export class NativeRuntimeAdapter implements Runtime {
         }
         this.deferSubscriptionRows(
           subscription,
+          terminalOperations,
           chunk.terminalOperations,
           chunk.reset === true,
           chunk.delta,
         );
         return;
       }
-      applied.rootDelta.terminalOperations = chunk.terminalOperations;
+      applied.rootDelta.terminalOperations = terminalOperations;
       this.publishSubscriptionRows(
         subscription,
         applied.rootDelta,
@@ -2645,7 +2652,7 @@ export class NativeRuntimeAdapter implements Runtime {
     // full present-state terminal values. Replaying producer operations that
     // led to that state on top of it can address occurrence lifecycles that no
     // longer exist (for example, a deferred Move after a synthesized reset).
-    // Raw terminal history belongs only to a forwarded producer delta.
+    // Producer terminal history belongs only to a forwarded producer delta.
     if (visibleDelta === rootDelta) {
       const terminalOperations = [
         ...subscription.deferredTerminalOperations,
@@ -2669,7 +2676,8 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private deferSubscriptionRows(
     subscription: SubscriptionState,
-    terminalOperations: NativeTerminalOperation[] | undefined,
+    terminalOperations: RuntimeTerminalOperation[] | undefined,
+    nativeTerminalOperations: NativeTerminalOperation[] | undefined,
     reset: boolean,
     delta: NativeSubscriptionDelta,
   ): void {
@@ -2679,9 +2687,9 @@ export class NativeRuntimeAdapter implements Runtime {
     subscription.deferredPlaceholderChunks = reset ? 1 : subscription.deferredPlaceholderChunks + 1;
     subscription.deferredPlaceholderRows = subscription.rows.length;
     subscription.deferredPlaceholderBytes = reset
-      ? subscriptionDeltaPayloadBytes(delta, terminalOperations)
+      ? subscriptionDeltaPayloadBytes(delta, nativeTerminalOperations)
       : subscription.deferredPlaceholderBytes +
-        subscriptionDeltaPayloadBytes(delta, terminalOperations);
+        subscriptionDeltaPayloadBytes(delta, nativeTerminalOperations);
     if (
       subscription.deferredPlaceholderChunks > MAX_DEFERRED_PLACEHOLDER_CHUNKS ||
       subscription.deferredPlaceholderRows > MAX_DEFERRED_PLACEHOLDER_ROWS ||
@@ -3542,6 +3550,93 @@ function subscriptionOutputColumns(
       readQueryArraySubqueries(parsed.array_subqueries, parsed.table, schema) ?? [],
     ),
   };
+}
+
+/**
+ * Compile the native producer's named terminal path and packed row payloads
+ * into the logical edit shape consumed by the TypeScript materializer.
+ */
+function decodeRuntimeTerminalOperations(
+  operations: readonly NativeTerminalOperation[] | undefined,
+  rootColumns: readonly ColumnDescriptor[] | undefined,
+): RuntimeTerminalOperation[] | undefined {
+  if (!operations || operations.length === 0) return undefined;
+
+  return operations.map((operation) => {
+    let columns = rootColumns;
+    let targetColumns: readonly ColumnDescriptor[] | undefined;
+    const path: RuntimeTerminalOperation["path"] = operation.path.map((segment) => {
+      if ("Key" in segment) return { Key: segment.Key };
+
+      if (!columns) {
+        throw new Error("native terminal collection path requires subscription output columns");
+      }
+
+      const collectionName = segment.Collection.startsWith(HIDDEN_INCLUDE_COLUMN_PREFIX)
+        ? segment.Collection.slice(HIDDEN_INCLUDE_COLUMN_PREFIX.length)
+        : segment.Collection;
+      const collectionIndex = columns.findIndex((column) => column.name === collectionName);
+      const collectionType = columns[collectionIndex]?.column_type;
+      if (collectionType?.type !== "Array" || collectionType.element.type !== "Row") {
+        throw new Error(`native terminal operation addressed unknown collection ${collectionName}`);
+      }
+      columns = collectionType.element.columns;
+      targetColumns = columns;
+      return { Collection: collectionIndex };
+    });
+
+    const edit = operation.edit;
+    if ("Insert" in edit) {
+      if (!targetColumns) throw new Error("native terminal insert has no collection target");
+      const id = terminalPayloadRowId(edit.Insert.key);
+      return {
+        root_key: operation.root_key,
+        path,
+        edit: {
+          Insert: {
+            index: edit.Insert.index,
+            key: edit.Insert.key,
+            row: decodeNativeTerminalRow(id, targetColumns, Uint8Array.from(edit.Insert.value)),
+          },
+        },
+      };
+    }
+    if ("Update" in edit) {
+      if (!targetColumns) throw new Error("native terminal update has no collection target");
+      const id = terminalPayloadRowId(edit.Update.key);
+      return {
+        root_key: operation.root_key,
+        path,
+        edit: {
+          Update: {
+            key: edit.Update.key,
+            row: decodeNativeTerminalRow(id, targetColumns, Uint8Array.from(edit.Update.value)),
+          },
+        },
+      };
+    }
+    if ("Remove" in edit) {
+      return {
+        root_key: operation.root_key,
+        path,
+        edit: { Remove: edit.Remove },
+      };
+    }
+    return {
+      root_key: operation.root_key,
+      path,
+      edit: { Move: edit.Move },
+    };
+  });
+}
+
+/** Decode the leading UUID key field from Groove's ordered record-key carrier. */
+function terminalPayloadRowId(encoded: readonly number[]): string {
+  const bytes = Uint8Array.from(encoded);
+  if (bytes.length < 17 || bytes[0] !== 10) {
+    throw new Error("terminal key must begin with a UUID row key");
+  }
+  return formatUuid(bytes.subarray(1, 17));
 }
 
 function outputColumnsForTable(

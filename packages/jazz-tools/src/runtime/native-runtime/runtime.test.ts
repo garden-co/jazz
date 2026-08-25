@@ -6063,14 +6063,10 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
   ]);
   expect(firstDelta[0]!.id).not.toBe(firstDelta[1]!.id);
   const manager = new SubscriptionManager<{ id: string; title: string }>();
-  const transformed = manager.handleDelta(
-    first.rootDelta,
-    (row) => ({
-      id: row.id,
-      title: row.values[0]?.type === "Text" ? row.values[0].value : "",
-    }),
-    testSchema.todos.columns,
-  );
+  const transformed = manager.handleDelta(first.rootDelta, (row) => ({
+    id: row.id,
+    title: row.values[0]?.type === "Text" ? row.values[0].value : "",
+  }));
   expect(transformed.all).toHaveLength(2);
   expect(transformed.all?.map((item) => item.id)).toEqual([formatUuid(rowId), formatUuid(rowId)]);
   const publicRows: Array<{ id: string; title: string }> = [];
@@ -6090,14 +6086,10 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
   expect(updatedDelta).toHaveLength(1);
   expect(updatedDelta[0]!.id).toBe(firstDelta[1]!.id);
   expect(afterUpdate.rows).toHaveLength(2);
-  const publicUpdate = manager.handleDelta(
-    afterUpdate.rootDelta,
-    (row) => ({
-      id: row.id,
-      title: row.values[0]?.type === "Text" ? row.values[0].value : "",
-    }),
-    testSchema.todos.columns,
-  );
+  const publicUpdate = manager.handleDelta(afterUpdate.rootDelta, (row) => ({
+    id: row.id,
+    title: row.values[0]?.type === "Text" ? row.values[0].value : "",
+  }));
   expect(publicUpdate.all).toHaveLength(2);
   applySubscriptionDelta(publicRows, publicUpdate);
   expect(publicRows).toHaveLength(2);
@@ -6113,11 +6105,7 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
   const second = applySubscriptionDeltaWithRootDelta(afterUpdate.rows, removal, testSchema);
   expect(second.rows).toHaveLength(1);
   expect(runtimeDeltaChanges(second.rootDelta)[0]!.id).toBe(firstDelta[0]!.id);
-  const publicRemoval = manager.handleDelta(
-    second.rootDelta,
-    (row) => ({ id: row.id, title: "" }),
-    testSchema.todos.columns,
-  );
+  const publicRemoval = manager.handleDelta(second.rootDelta, (row) => ({ id: row.id, title: "" }));
   expect(publicRemoval.all).toHaveLength(1);
   applySubscriptionDelta(publicRows, publicRemoval);
   expect(publicRows).toHaveLength(1);

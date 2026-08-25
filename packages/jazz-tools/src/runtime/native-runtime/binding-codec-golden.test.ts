@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
-import type { RuntimeSubscriptionDelta } from "../../drivers/types.js";
+import type { NativeTerminalOperation } from "../../drivers/types.js";
 import { PostcardReader } from "./native-codec.js";
 import {
   readNativeRelationSubscriptionSnapshot,
@@ -16,7 +16,7 @@ type BindingCodecGoldenFixture = {
   terminal: {
     events: Array<{
       type: "delta";
-      terminalOperations: NonNullable<RuntimeSubscriptionDelta["terminalOperations"]>;
+      terminalOperations: NativeTerminalOperation[];
     }>;
     rejections: Array<Record<string, unknown>>;
   };

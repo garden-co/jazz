@@ -744,7 +744,6 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         manager.handleDelta(
           delta as Parameters<SubscriptionManager<WasmRow>["handleDelta"]>[0],
           (row) => row,
-          TEST_SCHEMA.todos.columns,
         ),
       );
     });
@@ -904,7 +903,6 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         manager.handleDelta(
           delta as Parameters<SubscriptionManager<WasmRow>["handleDelta"]>[0],
           (row) => row,
-          BYTEA_SCHEMA.blobs.columns,
         ),
       );
     });
@@ -1109,7 +1107,6 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         manager.handleDelta(
           delta as Parameters<SubscriptionManager<WasmRow>["handleDelta"]>[0],
           (row) => row,
-          TEST_SCHEMA.todos.columns,
         ),
       );
     });
@@ -1267,7 +1264,6 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       aliceSubscription.handleDelta(
         delta as Parameters<SubscriptionManager<WasmRow>["handleDelta"]>[0],
         (row) => row,
-        OWNED_TODOS_SCHEMA.todos.columns,
       );
     const aliceDecodedUpdates: ReturnType<SubscriptionManager<WasmRow>["handleDelta"]>[] = [];
 

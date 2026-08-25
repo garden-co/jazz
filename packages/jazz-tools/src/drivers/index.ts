@@ -12,4 +12,7 @@ export type {
   RuntimeSubscriptionAddedRow,
   RuntimeSubscriptionUpdatedRow,
   RuntimeSubscriptionRemovedRow,
+  RuntimeTerminalPathSegment,
+  RuntimeTerminalEdit,
+  RuntimeTerminalOperation,
 } from "./types.js";

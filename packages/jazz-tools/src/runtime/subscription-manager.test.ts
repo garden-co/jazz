@@ -4,7 +4,6 @@
 
 import { describe, expect, it } from "vitest";
 import type {
-  ColumnDescriptor,
   RuntimeSubscriptionAddedRow,
   RuntimeSubscriptionDelta,
   RuntimeSubscriptionRemovedRow,
@@ -40,11 +39,6 @@ function handleDecodedDelta<T extends { id: string }>(
     }
   ).handleDecodedDelta(delta, transformRow);
 }
-
-const nativeColumns: ColumnDescriptor[] = [
-  { name: "name", column_type: { type: "Text" }, nullable: false },
-  { name: "count", column_type: { type: "Integer" }, nullable: false },
-];
 
 function makeRow(id: string, name: string, count: number): WasmRow {
   return {
@@ -138,8 +132,13 @@ function runtimeAddedRoot(id: string, index: number, title: string): RuntimeSubs
   return { sourceId: id, occurrenceKey: occurrenceKey(id), index, row: includedRootRow(id, title) };
 }
 
-function terminalTextChild(id: string, name: string): Uint8Array {
-  return Uint8Array.from([...uuidBytes(id), 0, ...new TextEncoder().encode(name)]);
+function terminalTextChild(id: string, name: string): WasmRow {
+  const values: Value[] = [{ type: "Text", value: name }];
+  const row: WasmRow = { id, values };
+  Object.defineProperty(row, "valuesByColumn", {
+    value: new Map([["name", values[0]!]]),
+  });
+  return row;
 }
 
 function emptyRuntimeDelta(
@@ -158,18 +157,6 @@ type IncludedRoot = {
   title: string;
   children: Array<{ id: string; name: string }>;
 };
-
-const childColumns: ColumnDescriptor[] = [
-  { name: "name", column_type: { type: "Text" }, nullable: false },
-];
-const includedRootColumns: ColumnDescriptor[] = [
-  { name: "title", column_type: { type: "Text" }, nullable: false },
-  {
-    name: "children",
-    column_type: { type: "Array", element: { type: "Row", columns: childColumns } },
-    nullable: false,
-  },
-];
 
 function transformIncluded(row: WasmRow): IncludedRoot {
   const byName = (row as WasmRow & { valuesByColumn: Map<string, Value> }).valuesByColumn;
@@ -280,7 +267,6 @@ describe("SubscriptionManager", () => {
     const result = manager.handleDelta(
       emptyRuntimeDelta({ added: [runtimeAddedRecord(id, 0, "native", -42)] }),
       transform,
-      nativeColumns,
     );
 
     expect(reduceDeltas(result)).toEqual([{ id, name: "native", count: -42 }]);
@@ -296,16 +282,16 @@ describe("SubscriptionManager", () => {
     manager.handleDelta(
       emptyRuntimeDelta({ added: [runtimeAddedRecord(id, 0, "before", 1)] }),
       transform,
-      nativeColumns,
     );
 
     expect(() =>
       manager.handleDelta(
         emptyRuntimeDelta({
-          terminalOperations: [{ root_key: key, path: [], edit: { Update: { key, value: [] } } }],
+          terminalOperations: [
+            { root_key: key, path: [], edit: { Update: { key, row: makeRow(id, "after", 2) } } },
+          ],
         }),
         transform,
-        nativeColumns,
       ),
     ).toThrow(/native producer emitted a root terminal operation/);
     expect(manager.all()).toEqual([{ id, name: "before", count: 1 }]);
@@ -324,7 +310,6 @@ describe("SubscriptionManager", () => {
         manager.handleDelta(
           emptyRuntimeDelta({ added: [runtimeAddedRecord(id, 0, "typed", 1, sidecar)] }),
           transform,
-          nativeColumns,
         ),
       ).toThrow(/malformed or noncanonical typed terminal occurrence key/);
       expect(manager.all()).toEqual([]);
@@ -374,7 +359,6 @@ describe("SubscriptionManager", () => {
     manager.handleDelta(
       emptyRuntimeDelta({ added: [runtimeAddedRoot(rootId, 0, "root")] }),
       transformIncluded,
-      includedRootColumns,
     );
 
     const inserted = manager.handleDelta(
@@ -382,22 +366,21 @@ describe("SubscriptionManager", () => {
         terminalOperations: [
           {
             root_key: rootKey,
-            path: [{ Collection: "children" }],
+            path: [{ Collection: 1 }],
             edit: {
-              Insert: { index: 0, key: firstKey, value: [...terminalTextChild(firstId, "one")] },
+              Insert: { index: 0, key: firstKey, row: terminalTextChild(firstId, "one") },
             },
           },
           {
             root_key: rootKey,
-            path: [{ Collection: "children" }],
+            path: [{ Collection: 1 }],
             edit: {
-              Insert: { index: 1, key: secondKey, value: [...terminalTextChild(secondId, "two")] },
+              Insert: { index: 1, key: secondKey, row: terminalTextChild(secondId, "two") },
             },
           },
         ],
       }),
       transformIncluded,
-      includedRootColumns,
     );
     expect(inserted.all?.[0]?.children.map((child) => child.name)).toEqual(["one", "two"]);
 
@@ -406,25 +389,24 @@ describe("SubscriptionManager", () => {
         terminalOperations: [
           {
             root_key: rootKey,
-            path: [{ Collection: "children" }],
+            path: [{ Collection: 1 }],
             edit: { Move: { index: 0, key: secondKey } },
           },
           {
             root_key: rootKey,
-            path: [{ Collection: "children" }],
+            path: [{ Collection: 1 }],
             edit: {
-              Update: { key: secondKey, value: [...terminalTextChild(secondId, "updated")] },
+              Update: { key: secondKey, row: terminalTextChild(secondId, "updated") },
             },
           },
           {
             root_key: rootKey,
-            path: [{ Collection: "children" }],
+            path: [{ Collection: 1 }],
             edit: { Remove: { key: firstKey } },
           },
         ],
       }),
       transformIncluded,
-      includedRootColumns,
     );
     expect(edited.all).toEqual([
       { id: rootId, title: "root", children: [{ id: secondId, name: "updated" }] },
@@ -443,22 +425,20 @@ describe("SubscriptionManager", () => {
         terminalOperations: [
           {
             root_key: rootKey,
-            path: [{ Collection: "children" }],
+            path: [{ Collection: 1 }],
             edit: {
-              Insert: { index: 0, key: childKey, value: [...terminalTextChild(childId, "child")] },
+              Insert: { index: 0, key: childKey, row: terminalTextChild(childId, "child") },
             },
           },
         ],
       }),
       transformIncluded,
-      includedRootColumns,
     );
     expect(deferred.all).toEqual([]);
 
     const result = manager.handleDelta(
       emptyRuntimeDelta({ added: [runtimeAddedRoot(rootId, 0, "root")] }),
       transformIncluded,
-      includedRootColumns,
     );
     expect(result.all).toEqual([
       { id: rootId, title: "root", children: [{ id: childId, name: "child" }] },
@@ -474,7 +454,6 @@ describe("SubscriptionManager", () => {
     manager.handleDelta(
       emptyRuntimeDelta({ added: [runtimeAddedRoot(rootId, 0, "original")] }),
       transformIncluded,
-      includedRootColumns,
     );
 
     const removed = manager.handleDelta(
@@ -483,20 +462,18 @@ describe("SubscriptionManager", () => {
         terminalOperations: [
           {
             root_key: rootKey,
-            path: [{ Collection: "children" }],
+            path: [{ Collection: 1 }],
             edit: { Remove: { key: childKey } },
           },
         ],
       }),
       transformIncluded,
-      includedRootColumns,
     );
     expect(removed.all).toEqual([]);
 
     const reopened = manager.handleDelta(
       emptyRuntimeDelta({ added: [runtimeAddedRoot(rootId, 0, "reopened")] }),
       transformIncluded,
-      includedRootColumns,
     );
     expect(reopened.all).toEqual([{ id: rootId, title: "reopened", children: [] }]);
 
@@ -507,19 +484,18 @@ describe("SubscriptionManager", () => {
           terminalOperations: [
             {
               root_key: rootKey,
-              path: [{ Collection: "children" }],
+              path: [{ Collection: 1 }],
               edit: {
                 Insert: {
                   index: 0,
                   key: childKey,
-                  value: [...terminalTextChild(childId, "rejected")],
+                  row: terminalTextChild(childId, "rejected"),
                 },
               },
             },
           ],
         }),
         transformIncluded,
-        includedRootColumns,
       ),
     ).toThrow(/terminal child edit addressed a root removed in the same frame/);
     expect(manager.all()).toEqual([{ id: rootId, title: "reopened", children: [] }]);
@@ -532,7 +508,6 @@ describe("SubscriptionManager", () => {
     manager.handleDelta(
       emptyRuntimeDelta({ added: [runtimeAddedRecord(first, 0, "first", 1)] }),
       transform,
-      nativeColumns,
     );
 
     const result = manager.handleDelta(
@@ -541,7 +516,6 @@ describe("SubscriptionManager", () => {
         added: [runtimeAddedRecord(second, 0, "second", 2)],
       }),
       transform,
-      nativeColumns,
     );
 
     expect(result.reset).toBe(true);

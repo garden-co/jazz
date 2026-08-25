@@ -6,14 +6,11 @@
  */
 
 import type {
-  ColumnDescriptor,
-  NativeTerminalOperation,
   RuntimeSubscriptionDelta,
+  RuntimeTerminalOperation,
   Value,
   WasmRow,
 } from "../drivers/types.js";
-import { HIDDEN_INCLUDE_COLUMN_PREFIX } from "./select-projection.js";
-import { decodeNativeTerminalRow } from "./native-runtime/native-row-codec.js";
 
 const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -58,7 +55,7 @@ type SubscriptionManagerSnapshot<T> = {
   terminalOccurrenceAddresses: Map<string, string>;
   orderedIds: string[];
   orderedIdIndex: Map<string, number>;
-  deferredTerminalOperations: NativeTerminalOperation[];
+  deferredTerminalOperations: RuntimeTerminalOperation[];
 };
 
 /**
@@ -239,7 +236,7 @@ export class SubscriptionManager<T extends { id: string }> {
   private orderedIds: string[] = [];
   private orderedIdIndex = new Map<string, number>();
   /** Child edits received before a non-durable browser root hydration. */
-  private deferredTerminalOperations: NativeTerminalOperation[] = [];
+  private deferredTerminalOperations: RuntimeTerminalOperation[] = [];
 
   private removeId(id: string): void {
     const index = this.orderedIdIndex.get(id);
@@ -271,13 +268,9 @@ export class SubscriptionManager<T extends { id: string }> {
   handleDelta(
     delta: RuntimeSubscriptionDelta,
     transform: (row: WasmRow) => T,
-    nativeColumns?: readonly ColumnDescriptor[],
   ): SubscriptionDelta<T> {
     const reset = delta.reset === true;
-    if (!nativeColumns) {
-      throw new Error("Runtime subscription delta requires output columns");
-    }
-    const snapshot = this.snapshot(nativeColumns);
+    const snapshot = this.snapshot();
     try {
       if (reset) {
         this.clearRows();
@@ -332,7 +325,7 @@ export class SubscriptionManager<T extends { id: string }> {
         } else if (change.row) {
           // Terminal edits mutate the positional tree, so retain a private
           // copy whose positional and named values share one value graph.
-          this.terminalRows.set(change.id, cloneTerminalRow(change.row, nativeColumns));
+          this.terminalRows.set(change.id, cloneTerminalRow(change.row));
         }
       }
       const wireResult = this.handleDecodedDelta(decoded, transform, reset);
@@ -341,11 +334,7 @@ export class SubscriptionManager<T extends { id: string }> {
         removedRoots,
       );
       if (terminalOperations.length > 0) {
-        const terminalResult = this.handleTerminalOperations(
-          terminalOperations,
-          transform,
-          nativeColumns,
-        );
+        const terminalResult = this.handleTerminalOperations(terminalOperations, transform);
         const combined = normalizeRowDelta([...wireResult.delta, ...terminalResult.delta]);
         return reset
           ? { delta: combined, all: this.all(), reset: true }
@@ -358,11 +347,11 @@ export class SubscriptionManager<T extends { id: string }> {
     }
   }
 
-  private snapshot(columns: readonly ColumnDescriptor[]): SubscriptionManagerSnapshot<T> {
+  private snapshot(): SubscriptionManagerSnapshot<T> {
     return {
       currentResults: new Map(this.currentResults),
       terminalRows: new Map(
-        Array.from(this.terminalRows, ([id, row]) => [id, cloneTerminalRow(row, columns)]),
+        Array.from(this.terminalRows, ([id, row]) => [id, cloneTerminalRow(row)]),
       ),
       terminalOccurrenceAddresses: new Map(this.terminalOccurrenceAddresses),
       orderedIds: [...this.orderedIds],
@@ -382,15 +371,15 @@ export class SubscriptionManager<T extends { id: string }> {
 
   /** Preserve a child splice that raced ahead of its root hydration. */
   private readyTerminalOperations(
-    incoming: NativeTerminalOperation[],
+    incoming: RuntimeTerminalOperation[],
     removedRoots: ReadonlySet<string>,
-  ): NativeTerminalOperation[] {
+  ): RuntimeTerminalOperation[] {
     const operations = [
       ...this.deferredTerminalOperations.map((operation) => ({ operation, deferred: true })),
       ...incoming.map((operation) => ({ operation, deferred: false })),
     ];
     this.deferredTerminalOperations = [];
-    const ready: NativeTerminalOperation[] = [];
+    const ready: RuntimeTerminalOperation[] = [];
     for (const { operation, deferred } of operations) {
       if (operation.path.length === 0) {
         throw new Error("native producer emitted a root terminal operation");
@@ -413,9 +402,8 @@ export class SubscriptionManager<T extends { id: string }> {
   }
 
   private handleTerminalOperations(
-    operations: NativeTerminalOperation[],
+    operations: RuntimeTerminalOperation[],
     transform: (row: WasmRow) => T,
-    rootColumns: readonly ColumnDescriptor[],
   ): SubscriptionDelta<T> {
     const beforeIndices = new Map(this.orderedIdIndex);
     const affectedRoots = new Set<string>();
@@ -426,21 +414,25 @@ export class SubscriptionManager<T extends { id: string }> {
       const root = this.terminalRows.get(rootId);
       if (!root) throw new Error(`terminal child edit addressed missing root ${rootId}`);
       assertTerminalPathEditKey(operation.path, edit);
-      const target = terminalCollection(root, rootColumns, operation.path);
+      const target = terminalCollection(root, operation.path);
       if (!target) throw new Error(`terminal child edit addressed an unresolved path on ${rootId}`);
-      const { values, columns } = target;
+      const values = target;
       if ("Insert" in edit) {
         const id = terminalPayloadRowId(edit.Insert.key);
-        const row = decodeNativeTerminalRow(id, columns, Uint8Array.from(edit.Insert.value));
-        const value: Value = { type: "Row", value: { id, values: row.values } };
+        if (edit.Insert.row.id !== id) {
+          throw new Error("terminal insert row key does not match its edit key");
+        }
+        const value: Value = { type: "Row", value: edit.Insert.row };
         removeTerminalValue(values, id);
         values.splice(Math.max(0, Math.min(edit.Insert.index, values.length)), 0, value);
       } else if ("Update" in edit) {
         const id = terminalPayloadRowId(edit.Update.key);
         const index = terminalValueIndex(values, id);
         if (index === -1) throw new Error(`terminal child update addressed missing key ${id}`);
-        const row = decodeNativeTerminalRow(id, columns, Uint8Array.from(edit.Update.value));
-        values[index] = { type: "Row", value: { id, values: row.values } };
+        if (edit.Update.row.id !== id) {
+          throw new Error("terminal update row key does not match its edit key");
+        }
+        values[index] = { type: "Row", value: edit.Update.row };
       } else if ("Remove" in edit) {
         const id = terminalPayloadRowId(edit.Remove.key);
         if (!removeTerminalValue(values, id)) {
@@ -816,8 +808,8 @@ function terminalPayloadRowId(encoded: readonly number[]): string {
 }
 
 function assertTerminalPathEditKey(
-  path: NativeTerminalOperation["path"],
-  edit: NativeTerminalOperation["edit"],
+  path: RuntimeTerminalOperation["path"],
+  edit: RuntimeTerminalOperation["edit"],
 ): void {
   const last = path.at(-1);
   if (!last || !("Key" in last)) return;
@@ -830,7 +822,7 @@ function assertTerminalPathEditKey(
   }
 }
 
-function terminalEditKey(edit: NativeTerminalOperation["edit"]): readonly number[] {
+function terminalEditKey(edit: RuntimeTerminalOperation["edit"]): readonly number[] {
   return "Insert" in edit
     ? edit.Insert.key
     : "Update" in edit
@@ -844,13 +836,46 @@ function terminalValueIndex(values: Value[], id: string): number {
   return values.findIndex((value) => value.type === "Row" && value.value.id === id);
 }
 
-function cloneTerminalRow(row: WasmRow, columns: readonly ColumnDescriptor[]): WasmRow {
-  const values = structuredClone(row.values) as Value[];
-  const clone = { id: row.id, values };
-  Object.defineProperty(clone, "valuesByColumn", {
-    value: new Map(columns.map((column, index) => [column.name, values[index]!])),
-  });
-  return clone;
+function cloneTerminalRow(row: WasmRow): WasmRow {
+  return cloneTerminalGraph(row, new WeakMap<object, unknown>());
+}
+
+/** Clone the positional tree while preserving hidden named-value maps and aliases. */
+function cloneTerminalGraph<T>(value: T, seen: WeakMap<object, unknown>): T {
+  if (typeof value !== "object" || value === null) return value;
+  const existing = seen.get(value);
+  if (existing !== undefined) return existing as T;
+  if (value instanceof Uint8Array) {
+    const clone = value.slice();
+    seen.set(value, clone);
+    return clone as T;
+  }
+  if (value instanceof Map) {
+    const clone = new Map<unknown, unknown>();
+    seen.set(value, clone);
+    for (const [key, entry] of value) {
+      clone.set(cloneTerminalGraph(key, seen), cloneTerminalGraph(entry, seen));
+    }
+    return clone as T;
+  }
+  if (Array.isArray(value)) {
+    const clone: unknown[] = [];
+    seen.set(value, clone);
+    for (const entry of value) clone.push(cloneTerminalGraph(entry, seen));
+    return clone as T;
+  }
+
+  const clone = Object.create(Object.getPrototypeOf(value)) as object;
+  seen.set(value, clone);
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor) continue;
+    if ("value" in descriptor) {
+      descriptor.value = cloneTerminalGraph(descriptor.value, seen);
+    }
+    Object.defineProperty(clone, key, descriptor);
+  }
+  return clone as T;
 }
 
 function removeTerminalValue(values: Value[], id: string): boolean {
@@ -862,34 +887,24 @@ function removeTerminalValue(values: Value[], id: string): boolean {
 
 function terminalCollection(
   root: WasmRow,
-  rootColumns: readonly ColumnDescriptor[],
-  path: NativeTerminalOperation["path"],
-): { values: Value[]; columns: readonly ColumnDescriptor[] } | undefined {
+  path: RuntimeTerminalOperation["path"],
+): Value[] | undefined {
   let ownerValues = root.values;
-  let columns = rootColumns;
   for (let index = 0; index < path.length; index += 1) {
     const segment = path[index]!;
     if (!("Collection" in segment)) return undefined;
-    const collectionName = segment.Collection.startsWith(HIDDEN_INCLUDE_COLUMN_PREFIX)
-      ? segment.Collection.slice(HIDDEN_INCLUDE_COLUMN_PREFIX.length)
-      : segment.Collection;
-    const columnIndex = columns.findIndex((candidate) => candidate.name === collectionName);
-    const column = columns[columnIndex];
-    const columnType = column?.column_type;
-    if (columnType?.type !== "Array" || columnType.element.type !== "Row") return undefined;
-    const collection = ownerValues[columnIndex];
+    if (!Number.isSafeInteger(segment.Collection) || segment.Collection < 0) return undefined;
+    const collection = ownerValues[segment.Collection];
     if (collection?.type !== "Array") return undefined;
     const values = collection.value;
-    const childColumns = columnType.element.columns;
-    if (index === path.length - 1) return { values, columns: childColumns };
+    if (index === path.length - 1) return values;
     const keySegment = path[++index];
     if (!keySegment || !("Key" in keySegment)) return undefined;
     const childId = terminalPayloadRowId(keySegment.Key);
-    if (index === path.length - 1) return { values, columns: childColumns };
+    if (index === path.length - 1) return values;
     const child = values.find((value) => value.type === "Row" && value.value.id === childId);
     if (child?.type !== "Row") return undefined;
     ownerValues = child.value.values;
-    columns = childColumns;
   }
   return undefined;
 }

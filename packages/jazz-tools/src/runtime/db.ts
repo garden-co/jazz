@@ -10,13 +10,7 @@
  * - all/one are async (need storage I/O for queries)
  */
 
-import type {
-  ColumnDescriptor,
-  ColumnType,
-  WasmSchema,
-  WasmRow,
-  StorageDriver,
-} from "../drivers/types.js";
+import type { ColumnDescriptor, WasmSchema, WasmRow, StorageDriver } from "../drivers/types.js";
 import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
   ExclusiveWriteHandle,
@@ -59,7 +53,6 @@ import {
 } from "./client-session.js";
 import { canonicalAuthorSubject } from "./author-id.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
-import { isPermissionIntrospectionColumn, magicColumnType } from "../magic-columns.js";
 import {
   normalizeBuiltQuery,
   type BuiltRelation,
@@ -524,23 +517,6 @@ function requireSchemaWithTable(preferredSchema: WasmSchema, tableName: string):
   throw new Error(`Query schema is missing table "${tableName}".`);
 }
 
-function resolveOutputColumnDescriptor(
-  tableName: string,
-  schema: WasmSchema,
-  columnName: string,
-): ColumnDescriptor | undefined {
-  const magicType = magicColumnType(columnName);
-  if (magicType) {
-    return {
-      name: columnName,
-      column_type: magicType,
-      nullable: isPermissionIntrospectionColumn(columnName),
-    };
-  }
-
-  return schema[tableName]?.columns.find((column) => column.name === columnName);
-}
-
 function toWriteRecordForOperation(
   operation: WriteOperationName,
   data: Record<string, unknown>,
@@ -557,68 +533,6 @@ function toWriteRecordForOperation(
 
 function escapeWriteErrorReason(message: string): string {
   return message.replaceAll('"', '\\"');
-}
-
-function resolveNativeSubscriptionColumns(
-  tableName: string,
-  schema: WasmSchema,
-  includes: NormalizedIncludeSpec,
-  projection?: readonly string[],
-  rootTerminal = true,
-): ColumnDescriptor[] {
-  const wildcard = projection === undefined || projection.length === 0;
-  const selectedColumns = resolveSelectedColumns(tableName, schema, projection);
-  // IDs are implicit in query results, so an explicit `select("id")` resolves
-  // to no ordinary public columns. The native query projection represents that
-  // state with its empty/default sentinel and therefore retains the full
-  // physical record; decode that carrier fully before the row transformer
-  // applies the public ID-only projection.
-  const usesDefaultNativeProjection = wildcard || selectedColumns.length === 0;
-  const nativeColumns = usesDefaultNativeProjection
-    ? resolveSelectedColumns(tableName, schema, undefined)
-    : selectedColumns;
-  const columns = nativeColumns
-    .map((columnName) => {
-      const column = resolveOutputColumnDescriptor(tableName, schema, columnName);
-      return column && usesDefaultNativeProjection && rootTerminal
-        ? { ...column, sparse: true }
-        : column;
-    })
-    .filter((column): column is ColumnDescriptor => column !== undefined);
-
-  if (Object.keys(includes).length === 0) {
-    return columns;
-  }
-
-  const relationsByTable = analyzeRelations(schema);
-  const relations = relationsByTable.get(tableName) ?? [];
-
-  for (const [relationName, include] of Object.entries(includes)) {
-    const relation = relations.find((candidate) => candidate.name === relationName);
-    if (!relation) {
-      throw new Error(`Unknown relation "${relationName}" on table "${tableName}"`);
-    }
-
-    const nestedColumns = resolveNativeSubscriptionColumns(
-      relation.toTable,
-      schema,
-      include.includes,
-      include.select.length > 0 ? include.select : undefined,
-      false,
-    );
-    const columnType: ColumnType = {
-      type: "Array",
-      element: { type: "Row", columns: nestedColumns },
-    };
-
-    columns.push({
-      name: relationName,
-      column_type: columnType,
-      nullable: false,
-    });
-  }
-
-  return columns;
 }
 
 /**
@@ -2008,12 +1922,6 @@ export class Db {
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = requireSchemaWithTable(query._schema, outputTable);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
-    const nativeOutputColumns = resolveNativeSubscriptionColumns(
-      outputTable,
-      outputSchema,
-      outputIncludes,
-      builtQuery.select,
-    );
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
     const transform = (row: WasmRow): T =>
@@ -2022,7 +1930,7 @@ export class Db {
         transformRow(row, outputSchema, outputTable, outputIncludes, builtQuery.select),
       );
     const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
-      const typedDelta = manager.handleDelta(delta, transform, nativeOutputColumns);
+      const typedDelta = manager.handleDelta(delta, transform);
       callback(typedDelta);
     };
 
