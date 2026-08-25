@@ -36,7 +36,7 @@ export function resolveConfiguredUrl(url: string, locationHref: string | undefin
   return url;
 }
 
-function versionRuntimeAssetUrl(url: string, runtime?: RuntimeSourcesConfig): string {
+export function versionRuntimeAssetUrl(url: string, runtime?: RuntimeSourcesConfig): string {
   if (!runtime?.wasmVersion) return url;
   try {
     const versioned = new URL(url);

@@ -5,12 +5,12 @@ import {
   resolveConfiguredUrl,
   resolveRuntimeConfigBrokerWorkerUrl,
   resolveRuntimeConfigWasmUrl,
+  versionRuntimeAssetUrl,
 } from "./runtime-config.js";
 
 const SHARED_RUNTIME_PROTOCOL_VERSION = "jazz-shared-runtime-v1";
 const BROWSER_STORAGE_FORMAT_VERSION = "idbtree-v1";
 const inMemoryWasmAssetIds = new WeakMap<object, string>();
-let nextInMemoryWasmAssetId = 0;
 
 /** Resolve the exact script URL that identifies the origin-wide SharedWorker. */
 export function resolveBrowserWorkerUrl(runtimeSources?: RuntimeSourcesConfig): string {
@@ -23,9 +23,9 @@ export function resolveBrowserWorkerUrl(runtimeSources?: RuntimeSourcesConfig): 
   }
   // Keep this literal statically analyzable so bundlers emit the worker asset.
   const bundledUrl = new URL("../worker/jazz-broker-worker.js", import.meta.url).href;
-  return resolveConfiguredUrl(
-    bundledUrl,
-    typeof location !== "undefined" ? location.href : undefined,
+  return versionRuntimeAssetUrl(
+    resolveConfiguredUrl(bundledUrl, typeof location !== "undefined" ? location.href : undefined),
+    runtimeSources,
   );
 }
 
@@ -93,7 +93,7 @@ function inMemoryWasmAssetIdentity(runtimeSources: RuntimeSourcesConfig): string
   if (!value || !kind) return undefined;
   let identity = inMemoryWasmAssetIds.get(value);
   if (!identity) {
-    identity = `${kind}:${++nextInMemoryWasmAssetId}`;
+    identity = `${kind}:${crypto.randomUUID()}`;
     inMemoryWasmAssetIds.set(value, identity);
   }
   return identity;

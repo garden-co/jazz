@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   createBrowserWorkerAssetScope,
@@ -56,6 +56,34 @@ describe("browser SharedWorker asset handoff", () => {
     );
   });
 
+  it("uses random opaque identities for source and module inputs across realms", async () => {
+    const wasmBytes = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]);
+    const wasmModule = new WebAssembly.Module(wasmBytes);
+
+    const sourceIdentity = resolveBrowserWorkerRuntimeSources({
+      wasmSource: wasmBytes,
+    })?.workerWasmAssetIdentity;
+    const repeatedSourceIdentity = resolveBrowserWorkerRuntimeSources({
+      wasmSource: wasmBytes,
+    })?.workerWasmAssetIdentity;
+    const moduleIdentity = resolveBrowserWorkerRuntimeSources({
+      wasmModule,
+    })?.workerWasmAssetIdentity;
+
+    expect(sourceIdentity).toMatch(/^source:[0-9a-f-]{36}$/);
+    expect(sourceIdentity).toBe(repeatedSourceIdentity);
+    expect(moduleIdentity).toMatch(/^module:[0-9a-f-]{36}$/);
+
+    vi.resetModules();
+    const freshRealm = await import("./browser-worker-config.js");
+    const freshRealmIdentity = freshRealm.resolveBrowserWorkerRuntimeSources({
+      wasmSource: wasmBytes,
+    })?.workerWasmAssetIdentity;
+
+    expect(freshRealmIdentity).toMatch(/^source:[0-9a-f-]{36}$/);
+    expect(freshRealmIdentity).not.toBe(sourceIdentity);
+  });
+
   it("does not collapse distinct assets that collide under the retired 32-bit scope hash", () => {
     const first = {
       wasmUrl: "https://assets.test/jazz_wasm_bg.wasm",
@@ -95,6 +123,15 @@ describe("browser SharedWorker asset handoff", () => {
     expect(resolveBrowserWorkerUrl(runtimeSources)).toBe(
       "https://assets.test/jazz/worker/jazz-broker-worker.js?jazz-runtime-version=deploy-42",
     );
+  });
+
+  it("versions the bundled worker when only an explicit WASM URL is configured", () => {
+    const workerUrl = resolveBrowserWorkerUrl({
+      wasmUrl: "https://assets.test/jazz_wasm_bg.wasm",
+      wasmVersion: "deploy-42",
+    });
+
+    expect(new URL(workerUrl).searchParams.get("jazz-runtime-version")).toBe("deploy-42");
   });
 });
 
