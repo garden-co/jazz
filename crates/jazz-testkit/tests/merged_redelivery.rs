@@ -411,9 +411,9 @@ async fn same_value_write_still_advances_visible_row_metadata_impl() {
         panic!("$updatedAt should decode as timestamp");
     };
 
-    // Public provenance exposes physical milliseconds rather than HLC logical
-    // bits. Inject a distinct physical timestamp through the documented write
-    // context so this metadata-only delivery remains observable through
+    // Write contexts accept physical milliseconds, while this public query
+    // facade exposes provenance in microseconds. Inject a distinct physical
+    // timestamp so this metadata-only delivery remains observable through
     // `$updatedAt`, regardless of the client's synthetic HLC counter.
     let explicit_updated_at = 1_700_000_000_001;
     alice
@@ -434,8 +434,9 @@ async fn same_value_write_still_advances_visible_row_metadata_impl() {
             if let Value::Timestamp(updated_at) = rows[0].1[0] {
                 if updated_at > initial_updated_at {
                     assert_eq!(
-                        updated_at, explicit_updated_at,
-                        "$updatedAt exposes the requested physical millisecond"
+                        updated_at,
+                        explicit_updated_at * 1_000,
+                        "$updatedAt exposes the requested physical millisecond in public microseconds"
                     );
                     break;
                 }

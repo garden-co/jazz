@@ -250,8 +250,8 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
     );
     assert_eq!(overlay_row.cell_at(1), Some(Value::Bool(true)));
     let overlay_provenance = overlay_row.provenance().unwrap().unwrap();
-    assert_eq!(overlay_provenance.created_at, 1_704_067_200_456);
-    assert_eq!(overlay_provenance.updated_at, 1_704_067_200_456);
+    assert_eq!(overlay_provenance.created_at, 1_704_067_200_456.into());
+    assert_eq!(overlay_provenance.updated_at, 1_704_067_200_456.into());
     owner.abandon_transaction_handle(overlay_open).unwrap();
 
     let rows = block_on(view.all(&prepared, ReadOpts::default())).unwrap();
@@ -323,8 +323,8 @@ fn mergeable_overlay_uses_staged_provenance_and_preserves_it_at_commit() {
         .provenance()
         .unwrap()
         .unwrap();
-    assert_eq!(inserted_overlay.created_at, 200);
-    assert_eq!(inserted_overlay.updated_at, 200);
+    assert_eq!(inserted_overlay.created_at, 200.into());
+    assert_eq!(inserted_overlay.updated_at, 200.into());
     assert_eq!(inserted_overlay.created_by, db.identity.author);
     let updated_overlay = overlay
         .iter()
@@ -333,8 +333,8 @@ fn mergeable_overlay_uses_staged_provenance_and_preserves_it_at_commit() {
         .provenance()
         .unwrap()
         .unwrap();
-    assert_eq!(updated_overlay.created_at, 100);
-    assert_eq!(updated_overlay.updated_at, 300);
+    assert_eq!(updated_overlay.created_at, 100.into());
+    assert_eq!(updated_overlay.updated_at, 300.into());
     assert_eq!(updated_overlay.updated_by, db.identity.author);
 
     tx.commit().unwrap();
@@ -405,10 +405,10 @@ fn exclusive_overlay_reserves_stable_provenance_for_insert_and_update() {
     };
     let inserted_overlay = provenance(&overlay, inserted);
     let updated_overlay = provenance(&overlay, existing);
-    assert_ne!(inserted_overlay.created_at, 0);
+    assert_ne!(inserted_overlay.created_at, 0.into());
     assert_eq!(inserted_overlay.created_at, inserted_overlay.updated_at);
-    assert_eq!(updated_overlay.created_at, 100);
-    assert_ne!(updated_overlay.updated_at, 0);
+    assert_eq!(updated_overlay.created_at, 100.into());
+    assert_ne!(updated_overlay.updated_at, 0.into());
 
     tx.commit().unwrap();
     let committed = db.read(&query).unwrap();
@@ -516,10 +516,10 @@ fn exclusive_crud_preserves_explicit_updated_at() {
             .updated_at
     };
 
-    assert_eq!(updated_at(inserted), 100);
-    assert_eq!(updated_at(upserted), 200);
-    assert_eq!(updated_at(deleted), 300);
-    assert_eq!(updated_at(restored), 400);
+    assert_eq!(updated_at(inserted), 100.into());
+    assert_eq!(updated_at(upserted), 200.into());
+    assert_eq!(updated_at(deleted), 300.into());
+    assert_eq!(updated_at(restored), 400.into());
 }
 
 #[test]

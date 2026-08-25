@@ -263,9 +263,9 @@ where
                     (
                         RowProvenance {
                             created_by: created.created_by(),
-                            created_at: created.created_at().physical_ms(),
+                            created_at: created.created_at(),
                             updated_by: updated.updated_by(),
-                            updated_at: updated.updated_at().physical_ms(),
+                            updated_at: updated.updated_at(),
                         },
                         (updated.tx_time(), updated.tx_node_alias()),
                     )
@@ -275,7 +275,7 @@ where
                     let Some(now_ms) = write.now_ms else {
                         continue;
                     };
-                    let updated_at = now_ms;
+                    let updated_at = TxTime::from(now_ms);
                     provenance = Some(match provenance {
                         Some(existing) => RowProvenance {
                             updated_by: provisional_author,

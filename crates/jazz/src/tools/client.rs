@@ -1910,9 +1910,9 @@ fn core_row_provenance_to_public(
     // milliseconds) and mirrors `PublicQueryDecoder` below.
     crate::tools::metadata::RowProvenance {
         created_by: provenance.created_by.0.to_string(),
-        created_at: provenance.created_at * 1_000,
+        created_at: provenance.created_at.physical_ms() * 1_000,
         updated_by: provenance.updated_by.0.to_string(),
-        updated_at: provenance.updated_at * 1_000,
+        updated_at: provenance.updated_at.physical_ms() * 1_000,
     }
 }
 
@@ -1998,9 +1998,14 @@ fn normalize_public_subscription_value(
         (CoreValueType::U64, CoreValue::U64(timestamp))
             if matches!(field_name, Some("$createdAt" | "$updatedAt")) =>
         {
-            *timestamp = timestamp.checked_mul(1_000).ok_or_else(|| {
-                JazzError::Query("subscription provenance timestamp exceeds public range".into())
-            })?;
+            *timestamp = crate::time::TxTime(*timestamp)
+                .physical_ms()
+                .checked_mul(1_000)
+                .ok_or_else(|| {
+                    JazzError::Query(
+                        "subscription provenance timestamp exceeds public range".into(),
+                    )
+                })?;
             Ok(())
         }
         (_, _) if matches!(field_name, Some("$createdAt" | "$updatedAt")) => {
@@ -2893,18 +2898,26 @@ impl PublicQueryDecoder {
                 };
                 match column {
                     "$createdAt" => Value::Timestamp(
-                        provenance.created_at.checked_mul(1_000).ok_or_else(|| {
-                            JazzError::Query(
-                                "provenance created_at exceeds u64 microseconds".to_owned(),
-                            )
-                        })?,
+                        provenance
+                            .created_at
+                            .physical_ms()
+                            .checked_mul(1_000)
+                            .ok_or_else(|| {
+                                JazzError::Query(
+                                    "provenance created_at exceeds u64 microseconds".to_owned(),
+                                )
+                            })?,
                     ),
                     "$updatedAt" => Value::Timestamp(
-                        provenance.updated_at.checked_mul(1_000).ok_or_else(|| {
-                            JazzError::Query(
-                                "provenance updated_at exceeds u64 microseconds".to_owned(),
-                            )
-                        })?,
+                        provenance
+                            .updated_at
+                            .physical_ms()
+                            .checked_mul(1_000)
+                            .ok_or_else(|| {
+                                JazzError::Query(
+                                    "provenance updated_at exceeds u64 microseconds".to_owned(),
+                                )
+                            })?,
                     ),
                     "$createdBy" => Value::Text(provenance.created_by.0.to_string()),
                     "$updatedBy" => Value::Text(provenance.updated_by.0.to_string()),
@@ -3565,9 +3578,9 @@ mod tests {
 
         let provenance = core_row_provenance_to_public(crate::node::RowProvenance {
             created_by: CoreAuthorId::SYSTEM,
-            created_at: physical_ms,
+            created_at: created,
             updated_by: CoreAuthorId::SYSTEM,
-            updated_at: physical_ms + 1,
+            updated_at: TxTime::new(physical_ms + 1, 0),
         });
         assert_eq!(provenance.created_at, physical_ms * 1_000);
         assert_eq!(provenance.updated_at, (physical_ms + 1) * 1_000);

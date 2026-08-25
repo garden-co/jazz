@@ -1048,15 +1048,12 @@ struct PendingTransactionScan {
 pub struct RowProvenance {
     /// Principal that created the row.
     pub created_by: AuthorId,
-    /// Physical milliseconds of the row's first retained content version.
-    ///
-    /// HLC logical counters are an internal ordering concern and live on the
-    /// version's transaction time, not in public provenance.
-    pub created_at: u64,
+    /// Commit time of the row's first retained content version.
+    pub created_at: TxTime,
     /// Principal that authored the visible row version.
     pub updated_by: AuthorId,
-    /// Physical milliseconds of the visible row version.
-    pub updated_at: u64,
+    /// Commit time of the visible row version.
+    pub updated_at: TxTime,
 }
 
 /// Directed relation edge emitted for an array-subquery payload.
@@ -1189,9 +1186,9 @@ impl CurrentRow {
         };
         Ok(Some(RowProvenance {
             created_by: AuthorId(borrowed.get_uuid(created_by_idx)?),
-            created_at: borrowed.get_u64(created_at_idx)?,
+            created_at: TxTime(borrowed.get_u64(created_at_idx)?),
             updated_by: AuthorId(borrowed.get_uuid(updated_by_idx)?),
-            updated_at: borrowed.get_u64(updated_at_idx)?,
+            updated_at: TxTime(borrowed.get_u64(updated_at_idx)?),
         }))
     }
 
@@ -1237,9 +1234,9 @@ impl CurrentRow {
         }
         if let Some(provenance) = self.provenance()? {
             values.push(Value::Uuid(provenance.created_by.0));
-            values.push(Value::U64(provenance.created_at));
+            values.push(Value::U64(provenance.created_at.0));
             values.push(Value::Uuid(provenance.updated_by.0));
-            values.push(Value::U64(provenance.updated_at));
+            values.push(Value::U64(provenance.updated_at.0));
         } else {
             values.push(Value::Uuid(AuthorId::SYSTEM.0));
             values.push(Value::U64(0));
