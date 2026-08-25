@@ -19,13 +19,13 @@ operator needs.
 Each runtime column also freezes an internal large-value semantic kind at
 schema lowering: bytes, text, or JSON. JSON remains the existing logical
 string-shaped Groove value, but the physical-row descriptor carries its
-schema-derived JSON context so a JSON root cannot be staged or encoded as text
-(or vice versa). Every persisted `Primitive` and `Chunked` payload carries a
-Groove-owned kind witness, checked against that immutable schema context before
-the primitive, root, or edit tail is consumed. Every immutable tree node repeats
-that witness and Groove binds it into the locator-independent logical hash.
-Neither witness is client-chosen or visible to logical queries, policies,
-indices, or application results.
+schema-derived JSON context. Inline primitives and chunked descriptors do not
+duplicate that context: their ordinary Groove enum schema is parameterized by
+the column kind. Every independently addressed immutable tree node carries a
+Groove-owned kind witness, checked against the schema-derived expected kind and
+bound into the locator-independent logical hash, so a JSON root cannot be
+replayed as text (or vice versa). The witness is not client-chosen or visible to
+logical queries, policies, indices, or application results.
 
 Invariant digest:
 

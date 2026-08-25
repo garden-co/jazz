@@ -1152,7 +1152,7 @@ async fn malformed_later_upload_child_has_no_durable_partial_write_after_reopen(
             object_hash: crate::large_values::object_hash(&malformed),
             locator: crate::large_values::Locator::random(),
         };
-        root.encoded = postcard::to_allocvec(&crate::large_values::ChunkNode::Branch {
+        root.encoded = crate::large_values::encode_node(&crate::large_values::ChunkNode::Branch {
             format: crate::large_values::FORMAT_VERSION,
             kind: crate::large_values::LargeValueKind::Bytes,
             children: mutated_children.clone(),

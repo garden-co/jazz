@@ -35,11 +35,10 @@ storage are physical arms of those types, encoded as one engine-owned ordinary
 Groove enum that is not visible in a schema, query, policy, index, or result:
 
 ```text
-StoredScalar = enum {
-  Primitive { kind, value: declared primitive },
+StoredScalar<kind> = enum {
+  Primitive { value: primitive for kind },
   Chunked {
     format_version,
-    kind,
     logical_hash,
     root: { object_hash, locator },
     byte_length,
@@ -68,11 +67,13 @@ record, array, nullable, and enum codecs;
 there is no private tag byte or postcard envelope for a scalar descriptor.
 `bytes` uses the bytes primitive and `string` uses the string primitive. JSON
 retains Groove's existing canonical JSON-as-string logical representation, so
-its primitive backing is string as well. Both physical arms carry a Groove-owned
-kind witness which MUST equal the immutable kind supplied by schema lowering
-before the payload is interpreted. The witness authenticates that a stored
-payload has not been replayed through another logical kind; it is never a
-client-selected semantics switch. Internal raw string/bytes backing primitives
+its primitive backing is string as well. The ordinary enum schema is
+parameterized by the immutable kind supplied by schema lowering, so neither
+physical arm duplicates that context. Inline payloads are interpreted as the
+primitive selected by that schema; the same raw UTF-8 content can therefore be
+a valid string or JSON value when stored under the corresponding column kind.
+Every independently addressed immutable tree node carries and authenticates its
+own format and kind before traversal. Internal raw string/bytes backing primitives
 only terminate this self-hosting enum encoding and are impossible at the public
 schema or logical-operator boundary.
 
@@ -167,6 +168,13 @@ second hash in each child descriptor. Consequently, identical UTF-8 or JSON-comp
 not share logical identities across bytes, text, and JSON values. Candidate
 format-1 nodes fail closed; there is no compatibility decoder.
 
+Nodes use Groove's ordinary canonical enum/record codec rather than a private
+serialization envelope. A leaf is `{ format, kind, bytes }`; a branch is
+`{ format, kind, children }`, where each child is the ordinary record
+`{ object_hash, locator, byte_length, utf16_length?, logical_hash }`. The exact
+canonical bytes are object-hashed. A byte appended to a leaf's raw-bytes field
+is therefore authenticated content, not ignorable trailing data.
+
 Text leaf boundaries are valid UTF-8 code-point boundaries. Text branches also
 carry exact aggregate UTF-16 code-unit lengths. JSON uses literal validated
 UTF-8 source bytes; it is not stored as a persistent object graph.
@@ -175,7 +183,7 @@ Every decoded node is checked against the expected object hash learned from its
 parent (or the owner descriptor for the root). Branch fanout, depth, child
 metrics, total metrics and encoded sizes
 are bounded and checked. Unknown format versions, cycles, dishonest metrics,
-invalid UTF-8, invalid JSON, arithmetic overflow, trailing bytes, and malformed
+invalid UTF-8, invalid JSON, arithmetic overflow, and malformed
 child references fail the affected evaluation closure.
 
 Postcard decoding alone is insufficient because it accepts a valid value with
