@@ -1489,6 +1489,9 @@ pub struct MergeableCommit {
     /// provenance prevents callers from handcrafting physical descriptors.
     prepared_large_columns: BTreeSet<String>,
     staged_large_values: Vec<groove::large_values::StagedLargeValueId>,
+    /// Construction-time proof that Jazz generated this insert's row id.
+    /// Kept private so direct commits and replicated writes cannot assert it.
+    known_fresh_row: bool,
 }
 
 impl MergeableCommit {
@@ -1508,7 +1511,13 @@ impl MergeableCommit {
             user_metadata_json: None,
             prepared_large_columns: BTreeSet::new(),
             staged_large_values: Vec::new(),
+            known_fresh_row: false,
         }
+    }
+
+    pub(crate) fn known_fresh_row(mut self) -> Self {
+        self.known_fresh_row = true;
+        self
     }
 
     /// Target an exact branch-keyed row branch-local row.

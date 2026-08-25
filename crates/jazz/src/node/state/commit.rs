@@ -339,21 +339,27 @@ where
                     branch_key.clone(),
                     commit.row_uuid,
                 ));
-            let previous_local_current = self
-                .query_local_layer_winner_in_branch(
+            let known_fresh_content_row = commit.known_fresh_row
+                && layer == VersionLayer::Content
+                && first_content_occurrence_in_batch;
+            let previous_local_current = if known_fresh_content_row {
+                None
+            } else {
+                self.query_local_layer_winner_in_branch(
                     &table_schema.name,
                     &branch_key,
                     commit.row_uuid,
                     layer,
                 )
-                .await?;
+                .await?
+            };
             let known_first_local_content_version =
                 layer == VersionLayer::Content
                     && first_content_occurrence_in_batch
-                    && previous_local_current.is_none();
+                    && (known_fresh_content_row || previous_local_current.is_none());
             let previous_current = match previous_local_current {
                 Some(previous) => Some(previous),
-                None => {
+                None if !known_fresh_content_row => {
                     self.query_global_layer_winner_in_branch(
                         &table_schema.name,
                         &branch_key,
@@ -362,6 +368,7 @@ where
                     )
                     .await?
                 }
+                None => None,
             };
             let creator_source = if let Some(previous) = previous_current.as_ref() {
                 Some(previous.clone())

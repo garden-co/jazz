@@ -250,15 +250,8 @@ fn seed_releases_with_batch_size(db: &BenchDb, release_count: usize, batch_size:
         let end = (start + batch_size).min(release_count);
         block_on(db.transaction(async |tx| {
             for release in start..end {
-                tx.insert(
-                    "releases",
-                    release_cells(release),
-                    InsertOptions {
-                        row_id: Some(row_id(4, release)),
-                        ..Default::default()
-                    },
-                )
-                .await?;
+                tx.insert("releases", release_cells(release), InsertOptions::default())
+                    .await?;
             }
             Ok(())
         }))
