@@ -629,14 +629,24 @@ impl OrderedKvStorage for SqliteStorage {
                                 )
                                 .optional()
                                 .map_err(backend)?;
-                            let merged =
-                                apply_storage_delta(existing.as_deref(), &delta.encode()?)?;
-                            transaction
-                                .execute(
-                                    "INSERT OR REPLACE INTO kv (cf, k, v) VALUES (?1, ?2, ?3)",
-                                    params![cf, key, merged],
-                                )
-                                .map_err(backend)?;
+                            match apply_storage_delta(existing.as_deref(), &delta.encode()?)? {
+                                Some(merged) => {
+                                    transaction
+                                        .execute(
+                                            "INSERT OR REPLACE INTO kv (cf, k, v) VALUES (?1, ?2, ?3)",
+                                            params![cf, key, merged],
+                                        )
+                                        .map_err(backend)?;
+                                }
+                                None => {
+                                    transaction
+                                        .execute(
+                                            "DELETE FROM kv WHERE cf = ?1 AND k = ?2",
+                                            params![cf, key],
+                                        )
+                                        .map_err(backend)?;
+                                }
+                            }
                         }
                     }
                 }
@@ -690,4 +700,62 @@ fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use groove::storage::{StorageDelta, collect_scan};
+
+    #[test]
+    fn former_rocksdb_tombstone_bytes_remain_an_ordinary_value() {
+        futures::executor::block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let storage =
+                SqliteStorage::open(directory.path().join("storage.sqlite"), &["records"]).unwrap();
+            let key = b"former-tombstone".to_vec();
+            let value = b"\0groove-storage-delta-tombstone-v1".to_vec();
+
+            storage
+                .set("records".to_owned(), key.clone(), value.clone())
+                .await
+                .unwrap();
+            storage
+                .write_many(vec![OwnedWriteOperation::Delta {
+                    cf: "records".to_owned(),
+                    key: key.clone(),
+                    delta: StorageDelta::set_if_absent(b"replacement".to_vec()),
+                }])
+                .await
+                .unwrap();
+            assert_eq!(
+                storage
+                    .get("records".to_owned(), key.clone())
+                    .await
+                    .unwrap(),
+                Some(value.clone())
+            );
+            assert_eq!(
+                collect_scan(
+                    storage
+                        .scan(ScanRequest::prefix("records".to_owned(), Vec::new()))
+                        .await
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+                vec![(key.clone(), value.clone())]
+            );
+
+            storage
+                .write_many(vec![OwnedWriteOperation::Delta {
+                    cf: "records".to_owned(),
+                    key: key.clone(),
+                    delta: StorageDelta::delete_if_value_matches(value),
+                }])
+                .await
+                .unwrap();
+            assert_eq!(storage.get("records".to_owned(), key).await.unwrap(), None);
+        });
+    }
 }
