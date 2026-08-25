@@ -468,6 +468,10 @@ where
             target,
             updated_at_ms,
         } = options;
+        self.reject_attributed_branch_target(
+            identity,
+            matches!(target, ExactWriteTarget::Branch(_)),
+        )?;
         let supplied_row_id = row_id.is_some();
         let row = row_id.unwrap_or_else(|| self.row_id_source.borrow_mut().next_row_id());
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
@@ -475,7 +479,10 @@ where
 
         if supplied_row_id {
             match target {
-                ExactWriteTarget::Root => self.ensure_row_absent(table, row, made_by).await?,
+                ExactWriteTarget::Root => {
+                    self.ensure_row_absent(table, row, permission_subject.unwrap_or(made_by))
+                        .await?
+                }
                 ExactWriteTarget::Branch(_) => {
                     self.ensure_exact_branch_row_absent(table, &branch, row)
                         .await?
@@ -494,6 +501,28 @@ where
             None,
             updated_at_ms.unwrap_or_else(|| self.next_now_ms()),
             branch,
+        )
+        .await
+    }
+
+    /// Trusted-backend-only root insert retaining backend admission while
+    /// recording `made_by` as external provenance.
+    #[doc(hidden)]
+    pub async fn insert_with_id_attributed(
+        &self,
+        made_by: AuthorSubject,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.insert(
+            table,
+            cells,
+            InsertOptions {
+                row_id: Some(row),
+                identity: WriteIdentity::Attribution(made_by),
+                ..Default::default()
+            },
         )
         .await
     }
@@ -615,7 +644,7 @@ where
         match result_rx.await {
             Ok(Ok(())) => {
                 self.finish_streaming_value_upload(
-                    upload, mutation, table, row, cells, column, identity, now_ms, head, base,
+                    upload, mutation, table, row, cells, column, identity, now_ms, head, base, None,
                 )
                 .await
             }
@@ -743,7 +772,27 @@ where
         now_ms: Option<u64>,
         head: Option<BranchSelector>,
         base: Option<BranchViewBase>,
+        attribution: Option<AuthorSubject>,
     ) -> Result<WriteHandle<S>, Error> {
+        let attribution_rejection = match attribution {
+            Some(author) if author != self.identity.author && !self.backend_attribution => {
+                Some("attribution requires a trusted serving node")
+            }
+            Some(_) if identity.is_some() => Some(
+                "backend-attributed streaming mutations cannot override backend admission identity",
+            ),
+            Some(_) if head.is_some() || base.is_some() => {
+                Some("backend-attributed streaming mutations do not support branch targets")
+            }
+            _ => None,
+        };
+        if let Some(message) = attribution_rejection {
+            self.abort_streaming_value_upload(upload).await?;
+            return Err(Error::new(ErrorCode::WriteRejected, message));
+        }
+        // Provenance is external, but trusted backend admission remains this
+        // Db's identity all the way through the final policy-bearing commit.
+        let identity = attribution.map(|_| self.identity.author).or(identity);
         if !upload.initialized {
             self.node
                 .node
@@ -811,7 +860,18 @@ where
                 }
             };
         self.publish_streaming_value_with_id(
-            mutation, table, row, cells, column, staged, nullable, identity, now_ms, head, base,
+            mutation,
+            table,
+            row,
+            cells,
+            column,
+            staged,
+            nullable,
+            identity,
+            now_ms,
+            head,
+            base,
+            attribution,
         )
         .await
     }
@@ -874,8 +934,9 @@ where
         now_ms: Option<u64>,
         head: Option<BranchSelector>,
         base: Option<BranchViewBase>,
+        attribution: Option<AuthorSubject>,
     ) -> Result<WriteHandle<S>, Error> {
-        let made_by = identity.unwrap_or(self.identity.author);
+        let made_by = attribution.or(identity).unwrap_or(self.identity.author);
         let permission_subject = identity;
         let branch = head.clone().unwrap_or_default();
         let (mut cells, parents, authored_columns, inserting) = match mutation {
@@ -884,7 +945,8 @@ where
                     self.ensure_exact_branch_row_absent(table, &branch, row)
                         .await?;
                 } else {
-                    self.ensure_row_absent(table, row, made_by).await?;
+                    self.ensure_row_absent(table, row, identity.unwrap_or(self.identity.author))
+                        .await?;
                 }
                 (cells, Vec::new(), None, true)
             }
@@ -1064,6 +1126,10 @@ where
             target,
             updated_at_ms,
         } = options;
+        self.reject_attributed_branch_target(
+            identity,
+            matches!(target, WriteTarget::BranchView { .. }),
+        )?;
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
 
@@ -1072,8 +1138,12 @@ where
                 if patch.is_empty() {
                     return match identity {
                         WriteIdentity::Database | WriteIdentity::Attribution(_) => {
-                            self.no_op_update_handle_for_client(table, row, made_by)
-                                .await
+                            self.no_op_update_handle_for_client(
+                                table,
+                                row,
+                                permission_subject.unwrap_or(made_by),
+                            )
+                            .await
                         }
                         WriteIdentity::Session(author) => {
                             self.no_op_update_handle_for_identity(table, row, author)
@@ -1164,6 +1234,26 @@ where
         }
     }
 
+    #[doc(hidden)]
+    pub async fn update_attributed(
+        &self,
+        made_by: AuthorSubject,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.update(
+            table,
+            row,
+            patch,
+            UpdateOptions {
+                identity: WriteIdentity::Attribution(made_by),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
     /// Insert or update one row through a single implementation.
     pub async fn upsert(
         &self,
@@ -1177,6 +1267,10 @@ where
             target,
             updated_at_ms,
         } = options;
+        self.reject_attributed_branch_target(
+            identity,
+            matches!(target, ExactWriteTarget::Branch(_)),
+        )?;
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         let branch = target.branch();
@@ -1186,7 +1280,11 @@ where
                 self.ensure_row_not_deleted(table, row).await?;
                 let exists = match identity {
                     WriteIdentity::Database | WriteIdentity::Attribution(_) => self
-                        .upsert_target_for_client_identity(table, row, made_by)
+                        .upsert_target_for_client_identity(
+                            table,
+                            row,
+                            permission_subject.unwrap_or(made_by),
+                        )
                         .await?
                         .is_some(),
                     WriteIdentity::Session(author) => self
@@ -1256,6 +1354,26 @@ where
         .await
     }
 
+    #[doc(hidden)]
+    pub async fn upsert_attributed(
+        &self,
+        made_by: AuthorSubject,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.upsert(
+            table,
+            row,
+            cells,
+            UpsertOptions {
+                identity: WriteIdentity::Attribution(made_by),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
     /// Soft-delete one row, optionally through a branch view.
     pub async fn delete(
         &self,
@@ -1268,6 +1386,10 @@ where
             target,
             updated_at_ms,
         } = options;
+        self.reject_attributed_branch_target(
+            identity,
+            matches!(target, WriteTarget::BranchView { .. }),
+        )?;
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
 
@@ -1321,6 +1443,24 @@ where
             None,
             now_ms,
             branch,
+        )
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn delete_attributed(
+        &self,
+        made_by: AuthorSubject,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.delete(
+            table,
+            row,
+            DeleteOptions {
+                identity: WriteIdentity::Attribution(made_by),
+                ..Default::default()
+            },
         )
         .await
     }
@@ -1420,6 +1560,10 @@ where
             target,
             updated_at_ms,
         } = options;
+        self.reject_attributed_branch_target(
+            identity,
+            matches!(target, ExactWriteTarget::Branch(_)),
+        )?;
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
         let branch = target.branch();
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
@@ -1428,7 +1572,8 @@ where
             .transpose()?;
         let (content_parents, deletion_parents) = match target {
             ExactWriteTarget::Root => {
-                self.ensure_row_deleted(table, row, made_by).await?;
+                self.ensure_row_deleted(table, row, permission_subject.unwrap_or(made_by))
+                    .await?;
                 self.row_layer_parents(table, row).await?
             }
             ExactWriteTarget::Branch(_) => {
@@ -1481,6 +1626,26 @@ where
             .commit_mergeable_many_in_schema(self.schema_version_id, commits)
             .await?;
         self.finish_published_write(row, published).await
+    }
+
+    #[doc(hidden)]
+    pub async fn restore_attributed(
+        &self,
+        made_by: AuthorSubject,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.restore(
+            table,
+            row,
+            Some(cells),
+            RestoreOptions {
+                identity: WriteIdentity::Attribution(made_by),
+                ..Default::default()
+            },
+        )
+        .await
     }
 
     async fn write_mergeable_at_ms_with_authorship(
@@ -1642,7 +1807,9 @@ where
         match identity {
             WriteIdentity::Database => Ok((self.identity.author, None)),
             WriteIdentity::Session(author) => Ok((author, Some(author))),
-            WriteIdentity::Attribution(author) if author == self.identity.author => {
+            WriteIdentity::Attribution(author)
+                if author == self.identity.author || self.backend_attribution =>
+            {
                 Ok((author, Some(self.identity.author)))
             }
             WriteIdentity::Attribution(_) => Err(Error::new(
@@ -1650,6 +1817,20 @@ where
                 "attribution requires a trusted serving node",
             )),
         }
+    }
+
+    fn reject_attributed_branch_target(
+        &self,
+        identity: WriteIdentity,
+        targets_branch: bool,
+    ) -> Result<(), Error> {
+        if matches!(identity, WriteIdentity::Attribution(_)) && targets_branch {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                "backend-attributed writes do not support branch targets",
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn check_catalogue_admin(&self) -> Result<(), Error> {

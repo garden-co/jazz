@@ -102,6 +102,29 @@ where
             .map_err(Into::into)
     }
 
+    /// Open a mergeable transaction admitted as this Db while retaining an
+    /// external provenance author for every staged write.
+    #[doc(hidden)]
+    pub async fn begin_mergeable_attributed(
+        &self,
+        id: OpenTransactionId,
+        made_by: AuthorSubject,
+    ) -> Result<(), Error> {
+        if made_by != self.identity.author && !self.backend_attribution {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                "attribution requires a trusted serving node",
+            ));
+        }
+        self.node
+            .node
+            .lock()
+            .await
+            .open_mergeable(id, made_by, Some(self.identity.author))
+            .await
+            .map_err(Into::into)
+    }
+
     /// Return a non-owning operations handle for an already-open mergeable transaction.
     ///
     /// This handle never closes the transaction when dropped, so it is suitable
@@ -110,6 +133,25 @@ where
     /// [`MergeableTx`] handle.
     pub fn mergeable_tx_ref(&self, tx_id: OpenTransactionId) -> MergeableTxRef<'_, S> {
         MergeableTxRef { db: self, tx_id }
+    }
+
+    async fn reject_attributed_mergeable_branch(
+        &self,
+        tx_id: OpenTransactionId,
+    ) -> Result<(), Error> {
+        if self
+            .node
+            .node
+            .lock()
+            .await
+            .mergeable_transaction_is_attributed(tx_id)?
+        {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                "backend-attributed transactions do not support branch targets",
+            ));
+        }
+        Ok(())
     }
 
     pub(super) async fn stage_mergeable_insert(
@@ -150,6 +192,7 @@ where
         cells: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        self.reject_attributed_mergeable_branch(tx_id).await?;
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
         self.node
@@ -199,6 +242,7 @@ where
         patch: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        self.reject_attributed_mergeable_branch(tx_id).await?;
         if patch.is_empty() {
             return Err(Error::new(
                 ErrorCode::Schema,
@@ -284,6 +328,7 @@ where
         row: RowUuid,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        self.reject_attributed_mergeable_branch(tx_id).await?;
         if self
             .node
             .node
@@ -326,6 +371,7 @@ where
         cells: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        self.reject_attributed_mergeable_branch(tx_id).await?;
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.node.node.lock().await;

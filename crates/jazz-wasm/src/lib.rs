@@ -282,6 +282,7 @@ impl WasmStreamingMutation {
                         state.updated_at_ms,
                         state.head,
                         state.base,
+                        None,
                     )
                     .await
                     .map_err(to_js_error)?,
@@ -300,6 +301,7 @@ impl WasmStreamingMutation {
                         state.updated_at_ms,
                         state.head,
                         state.base,
+                        None,
                     )
                     .await
                     .map_err(to_js_error)?,
