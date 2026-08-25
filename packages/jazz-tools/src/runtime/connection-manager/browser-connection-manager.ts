@@ -23,7 +23,6 @@ export class BrowserConnectionManager extends ConnectionManager {
   private disconnected = false;
   private readonly reconnectWaiters = new Set<() => void>();
   private transportTransition: Promise<void> = Promise.resolve();
-  private transportRequest = 0;
   private storageReset: Promise<void> | null = null;
   private unregisterInspectorControl: (() => void) | null = null;
 
@@ -57,6 +56,13 @@ export class BrowserConnectionManager extends ConnectionManager {
       throw error;
     });
     void this.connectionReady.catch(() => undefined);
+    if (this.disconnected) {
+      const ready = this.connectionReady;
+      void this.enqueueTransportTransition(async () => {
+        await ready;
+        await connection.disconnect();
+      }).catch(() => undefined);
+    }
   }
 
   async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
@@ -109,31 +115,25 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (!this.host.config.serverUrl) {
       throw new Error("Db.disconnect() requires a configured serverUrl.");
     }
-    const request = ++this.transportRequest;
-    this.disconnected = true;
-    try {
-      await this.enqueueTransportTransition(async () => {
-        await this.connectionReady;
-        await this.connection?.disconnect();
-      });
-    } catch (error) {
-      if (this.transportRequest === request) this.disconnected = false;
-      throw error;
-    }
+    await this.enqueueTransportTransition(async () => {
+      await this.connectionReady;
+      await this.connection?.disconnect();
+      // Keep RemoteIfPossible strict until the worker confirms disconnect.
+      this.disconnected = true;
+    });
   }
 
   async reconnect(): Promise<void> {
     if (!this.host.config.serverUrl) {
       throw new Error("Db.reconnect() requires a configured serverUrl.");
     }
-    ++this.transportRequest;
-    this.disconnected = false;
     await this.enqueueTransportTransition(async () => {
       await this.connectionReady;
       await this.connection?.reconnect(
         JSON.stringify(runtimeAuth(this.host.config)),
         runtimeSessionClaims(this.host.config),
       );
+      this.disconnected = false;
     });
     if (!this.disconnected) this.resolveReconnectWaiters();
   }

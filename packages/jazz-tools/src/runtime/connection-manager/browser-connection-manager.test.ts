@@ -109,4 +109,43 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
     await expect(manager.disconnect()).rejects.toBe(failure);
     expect(manager.isExplicitlyOffline()).toBe(false);
   });
+
+  it("disconnects a worker created while offline before an immediate reconnect", async () => {
+    const disconnectGate = deferred();
+    const connection = {
+      ready: vi.fn(async () => undefined),
+      disconnect: vi.fn(() => disconnectGate.promise),
+      reconnect: vi.fn(async () => undefined),
+      openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
+    } as unknown as BrowserWorkerConnection;
+    const host = {
+      config: { serverUrl: "https://example.test" },
+      isShuttingDown: false,
+      runtimeSource: {
+        createBrowserWorkerConnection: vi.fn(() => connection),
+      },
+      markUnauthenticated: vi.fn(),
+      clearAuthError: vi.fn(),
+    } as unknown as DbForConnection;
+    const manager = new BrowserConnectionManager(host);
+    await manager.disconnect();
+
+    (
+      manager as unknown as {
+        onClientCreated(input: {
+          schemaKey: string;
+          schema: Record<string, never>;
+          client: JazzClient;
+        }): void;
+      }
+    ).onClientCreated({ schemaKey: "empty", schema: {}, client: {} as JazzClient });
+    const reconnect = manager.reconnect();
+    await vi.waitFor(() => expect(connection.disconnect).toHaveBeenCalledOnce());
+    expect(connection.reconnect).not.toHaveBeenCalled();
+
+    disconnectGate.resolve();
+    await reconnect;
+    expect(connection.reconnect).toHaveBeenCalledOnce();
+    expect(manager.isExplicitlyOffline()).toBe(false);
+  });
 });

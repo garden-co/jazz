@@ -249,7 +249,8 @@ describe("Db ReadTier.RemoteIfPossible", () => {
   it("does not treat a failed explicit disconnect as permission to fall back", async () => {
     const client = makeClient();
     const failure = new Error("disconnect transport failed");
-    client.disconnectTransport.mockRejectedValueOnce(failure);
+    const disconnectResult = deferred<void>();
+    client.disconnectTransport.mockImplementationOnce(() => disconnectResult.promise);
     const db = await createDbWithRuntimeSource(
       {
         appId: "read-tier-failed-disconnect",
@@ -261,11 +262,53 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     dbs.push(db);
     await db.all(query(), { tier: ReadTier.LocalFirst });
 
-    await expect(db.disconnect()).rejects.toBe(failure);
-    await db.all(query(), { tier: ReadTier.RemoteIfPossible });
+    const disconnect = db.disconnect();
+    const read = db.all(query(), { tier: ReadTier.RemoteIfPossible });
+    await settle();
+    expect(client.query).toHaveBeenCalledOnce();
+
+    disconnectResult.reject(failure);
+    await expect(disconnect).rejects.toBe(failure);
+    await expect(read).resolves.toEqual([]);
     expect(client.query.mock.calls.at(-1)?.[1]).toMatchObject({
       tier: "remote-if-possible",
     });
+  });
+
+  it("disconnects a client created while offline before an immediate reconnect", async () => {
+    const client = makeClient();
+    const newClientDisconnect = deferred<void>();
+    client.disconnectTransport.mockImplementationOnce(() => newClientDisconnect.promise);
+    const db = await createDbWithRuntimeSource(
+      {
+        appId: "read-tier-offline-client-creation",
+        serverUrl: "https://example.test",
+        adminSecret: "test-admin-secret",
+      },
+      new TestRuntimeSource(client),
+    );
+    dbs.push(db);
+    await db.disconnect();
+
+    const unsubscribe = db.subscribeAll(query(), () => undefined, {
+      tier: ReadTier.RemoteIfPossible,
+    });
+    const reconnect = db.reconnect();
+    await settle();
+    expect(client.disconnectTransport).toHaveBeenCalledOnce();
+    expect(client.connectTransport).not.toHaveBeenCalled();
+
+    newClientDisconnect.resolve();
+    await reconnect;
+    expect(client.connectTransport).toHaveBeenCalledOnce();
+    expect(
+      (
+        db as unknown as {
+          connection: { isExplicitlyOffline: () => boolean };
+        }
+      ).connection.isExplicitlyOffline(),
+    ).toBe(false);
+    unsubscribe();
   });
 
   it("replaces an explicitly-offline local subscription with edge exactly on reconnect", async () => {

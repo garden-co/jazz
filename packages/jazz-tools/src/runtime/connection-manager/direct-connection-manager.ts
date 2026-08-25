@@ -10,7 +10,6 @@ export class DirectConnectionManager extends ConnectionManager {
   private isDisconnected = false;
   private reconnectWaiters = new Set<() => void>();
   private transportTransition: Promise<void> = Promise.resolve();
-  private transportRequest = 0;
 
   constructor(host: DbForConnection) {
     super(host);
@@ -22,7 +21,9 @@ export class DirectConnectionManager extends ConnectionManager {
     if (this.isDisconnected) {
       // Establish the runtime's reconnect barrier for clients created while the
       // Db is explicitly offline.
-      void client.disconnectTransport().catch(() => undefined);
+      void this.enqueueTransportTransition(() => client.disconnectTransport()).catch(
+        () => undefined,
+      );
       return;
     }
     this.connectClient(client);
@@ -79,29 +80,22 @@ export class DirectConnectionManager extends ConnectionManager {
     if (!this.host.config.serverUrl) {
       throw new Error("Db.disconnect() requires a configured serverUrl.");
     }
-    const request = ++this.transportRequest;
-    this.isDisconnected = true;
-    try {
-      await this.enqueueTransportTransition(async () => {
-        await this.clientEntry?.client.disconnectTransport();
-      });
-    } catch (error) {
-      // A failed explicit disconnect must not be mistaken for permission to
-      // fall back locally. A newer control request owns the state if present.
-      if (this.transportRequest === request) this.isDisconnected = false;
-      throw error;
-    }
+    await this.enqueueTransportTransition(async () => {
+      await this.clientEntry?.client.disconnectTransport();
+      // An in-flight or failed disconnect is not permission for a
+      // RemoteIfPossible read to fall back locally.
+      this.isDisconnected = true;
+    });
   }
 
   async reconnect(): Promise<void> {
     if (!this.host.config.serverUrl) {
       throw new Error("Db.reconnect() requires a configured serverUrl.");
     }
-    ++this.transportRequest;
-    this.isDisconnected = false;
     await this.enqueueTransportTransition(async () => {
       const client = this.clientEntry?.client;
       if (client) this.connectClient(client);
+      this.isDisconnected = false;
     });
     if (!this.isDisconnected) {
       for (const resolve of [...this.reconnectWaiters]) resolve();
