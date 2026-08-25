@@ -212,10 +212,10 @@ fn fragment_admission_bounds_peer_state_and_rejects_conflicting_duplicates() {
         payload: vec![payload],
     };
     let mut reassembler = LogicalMessageReassembler::default();
-    assert_eq!(reassembler.push(fragment(1, 1)).unwrap(), None);
+    assert_eq!(reassembler.push(fragment(1, 1), 0).unwrap(), None);
     assert!(
         reassembler
-            .push(fragment(1, 2))
+            .push(fragment(1, 2), 0)
             .unwrap_err()
             .contains("disagree")
     );
@@ -223,17 +223,220 @@ fn fragment_admission_bounds_peer_state_and_rejects_conflicting_duplicates() {
     for message_id in 0..MAX_INFLIGHT_LOGICAL_MESSAGES as u64 {
         assert_eq!(
             reassembler
-                .push(fragment(message_id, message_id as u8))
+                .push(fragment(message_id, message_id as u8), 0)
                 .unwrap(),
             None
         );
     }
     assert!(
         reassembler
-            .push(fragment(MAX_INFLIGHT_LOGICAL_MESSAGES as u64, 9))
+            .push(fragment(MAX_INFLIGHT_LOGICAL_MESSAGES as u64, 9), 0)
             .unwrap_err()
             .contains("too many incomplete")
     );
+}
+
+fn test_message_fragment(
+    message_id: u64,
+    message_digest: [u8; 32],
+    total_len: u64,
+    offset: u64,
+    payload: Vec<u8>,
+) -> WireMessageFragment {
+    WireMessageFragment {
+        protocol_version: WIRE_PROTOCOL_VERSION,
+        features: FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_MESSAGE_FRAGMENTATION,
+        session: None,
+        message_id,
+        message_digest,
+        total_len,
+        offset,
+        payload,
+    }
+}
+
+#[test]
+fn stale_near_limit_staged_bytes_are_reclaimed_and_duplicates_do_not_extend_expiry() {
+    let mut reassembler = LogicalMessageReassembler::with_staging_budget_for_test(8);
+    let stale = test_message_fragment(1, [1; 32], 8, 0, vec![1; 7]);
+
+    assert_eq!(reassembler.push(stale.clone(), 0).unwrap(), None);
+    assert_eq!(
+        reassembler
+            .push(stale, MAX_FRAGMENT_REASSEMBLY_IDLE_MS - 1)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        reassembler
+            .push(
+                test_message_fragment(2, [2; 32], 9, 0, vec![2; 8]),
+                MAX_FRAGMENT_REASSEMBLY_IDLE_MS,
+            )
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        (
+            reassembler.incomplete.len(),
+            reassembler.staged_bytes,
+            reassembler.incomplete.contains_key(&2),
+        ),
+        (1, 8, true)
+    );
+}
+
+#[test]
+fn four_stale_tiny_incomplete_ids_are_reclaimed_before_admitting_another() {
+    let mut reassembler = LogicalMessageReassembler::default();
+    for message_id in 0..MAX_INFLIGHT_LOGICAL_MESSAGES as u64 {
+        assert_eq!(
+            reassembler
+                .push(
+                    test_message_fragment(message_id, [message_id as u8; 32], 2, 0, vec![1]),
+                    0,
+                )
+                .unwrap(),
+            None
+        );
+    }
+
+    assert_eq!(
+        reassembler
+            .push(
+                test_message_fragment(
+                    MAX_INFLIGHT_LOGICAL_MESSAGES as u64,
+                    [9; 32],
+                    2,
+                    0,
+                    vec![9],
+                ),
+                MAX_FRAGMENT_REASSEMBLY_IDLE_MS,
+            )
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        (
+            reassembler.incomplete.len(),
+            reassembler.staged_bytes,
+            reassembler
+                .incomplete
+                .contains_key(&(MAX_INFLIGHT_LOGICAL_MESSAGES as u64)),
+        ),
+        (1, 1, true)
+    );
+}
+
+#[test]
+fn actively_progressing_legal_fragmented_message_completes_before_maximum_age() {
+    let payload = b"legal fragmented message".to_vec();
+    let digest = *blake3::hash(&payload).as_bytes();
+    let total_len = payload.len() as u64;
+    let mut reassembler = LogicalMessageReassembler::default();
+
+    assert_eq!(
+        reassembler
+            .push(
+                test_message_fragment(7, digest, total_len, 0, payload[..5].to_vec()),
+                0,
+            )
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        reassembler
+            .push(
+                test_message_fragment(7, digest, total_len, 5, payload[5..11].to_vec()),
+                MAX_FRAGMENT_REASSEMBLY_IDLE_MS - 1,
+            )
+            .unwrap(),
+        None
+    );
+    let envelope = reassembler
+        .push(
+            test_message_fragment(7, digest, total_len, 11, payload[11..].to_vec()),
+            (MAX_FRAGMENT_REASSEMBLY_IDLE_MS - 1) * 2,
+        )
+        .unwrap()
+        .expect("novel extents refresh inactivity without exceeding maximum age");
+
+    assert_eq!(envelope.payload, payload);
+}
+
+#[test]
+fn steady_progress_cannot_retain_an_incomplete_message_beyond_maximum_age() {
+    let mut reassembler = LogicalMessageReassembler::default();
+    let mut now_ms = 0;
+    let mut offset = 0;
+    while now_ms < MAX_FRAGMENT_REASSEMBLY_AGE_MS {
+        assert_eq!(
+            reassembler
+                .push(
+                    test_message_fragment(
+                        8,
+                        [8; 32],
+                        MAX_LOGICAL_MESSAGE_BYTES as u64,
+                        offset,
+                        vec![8],
+                    ),
+                    now_ms,
+                )
+                .unwrap(),
+            None
+        );
+        offset += 1;
+        now_ms = now_ms.saturating_add(MAX_FRAGMENT_REASSEMBLY_IDLE_MS - 1);
+    }
+
+    reassembler.expire(MAX_FRAGMENT_REASSEMBLY_AGE_MS);
+
+    assert_eq!(
+        (reassembler.incomplete.len(), reassembler.staged_bytes),
+        (0, 0)
+    );
+}
+
+#[test]
+fn active_reassembly_still_rejects_overlapping_extents() {
+    let payload = b"abcd";
+    let digest = *blake3::hash(payload).as_bytes();
+    let mut reassembler = LogicalMessageReassembler::default();
+    assert_eq!(
+        reassembler
+            .push(
+                test_message_fragment(9, digest, payload.len() as u64, 0, payload[..2].to_vec()),
+                0,
+            )
+            .unwrap(),
+        None
+    );
+
+    let error = reassembler
+        .push(
+            test_message_fragment(9, digest, payload.len() as u64, 1, payload[1..3].to_vec()),
+            1,
+        )
+        .unwrap_err();
+
+    assert!(error.contains("overlapping logical message fragments"));
+}
+
+#[test]
+fn active_reassembly_still_rejects_a_completed_payload_with_the_wrong_digest() {
+    let mut reassembler = LogicalMessageReassembler::default();
+    assert_eq!(
+        reassembler
+            .push(test_message_fragment(10, [0; 32], 2, 0, vec![1]), 0)
+            .unwrap(),
+        None
+    );
+
+    let error = reassembler
+        .push(test_message_fragment(10, [0; 32], 2, 1, vec![2]), 1)
+        .unwrap_err();
+
+    assert!(error.contains("logical message digest mismatch"));
 }
 
 #[test]
