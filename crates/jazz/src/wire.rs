@@ -1260,6 +1260,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn uncompressed_stream_decoder_borrows_payload() {
+        let mut decoder = WireStreamDecoder::new(FEATURE_NONE).unwrap();
+        let message = b"uncompressed logical message".to_vec();
+
+        let decoded = decoder.decode_message(&message, FEATURE_NONE).unwrap();
+
+        assert_eq!(decoded.as_ptr(), message.as_ptr());
+    }
+
     #[cfg(feature = "transport-compression-zstd")]
     #[test]
     fn compressed_stream_decoder_accepts_raw_envelopes() {
