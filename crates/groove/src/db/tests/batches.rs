@@ -1077,6 +1077,7 @@ async fn malformed_later_upload_child_has_no_durable_partial_write_after_reopen(
         };
         root.encoded = postcard::to_allocvec(&crate::large_values::ChunkNode::Branch {
             format: crate::large_values::FORMAT_VERSION,
+            kind: crate::large_values::LargeValueKind::Bytes,
             children: mutated_children.clone(),
         })
         .unwrap();
@@ -2005,7 +2006,7 @@ async fn direct_record_store_stores_ordered_records_independent_of_tables() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(raw_value, b"\x02one");
+        assert_eq!(raw_value, b"\x02\x00one");
 
         store
             .delete(&[
