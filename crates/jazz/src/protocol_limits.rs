@@ -34,6 +34,10 @@ pub const MAX_LOGICAL_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_INFLIGHT_LOGICAL_MESSAGE_BYTES: usize = MAX_LOGICAL_MESSAGE_BYTES;
 /// Per-peer fairness bound for concurrently incomplete logical messages.
 pub const MAX_INFLIGHT_LOGICAL_MESSAGES: usize = 4;
+/// Maximum inactivity after the last novel fragment before reassembly expires.
+pub const MAX_FRAGMENT_REASSEMBLY_IDLE_MS: u64 = 30_000;
+/// Maximum total lifetime of an incomplete fragmented message, even with progress.
+pub const MAX_FRAGMENT_REASSEMBLY_AGE_MS: u64 = 5 * 60 * 1_000;
 
 /// Maximum postcard-encoded query shape AST payload.
 ///

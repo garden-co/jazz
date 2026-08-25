@@ -293,7 +293,13 @@ where
                     batch.insert_raw(history_table.as_ref(), storage_key, groove_record);
                 }
             } else {
-                batch.insert_raw_fresh(history_table.as_ref(), storage_key, groove_record);
+                // SAFETY: transaction metadata and immutable history rows persist atomically, so
+                // an unknown transaction id proves that this history key is absent from storage.
+                // The bulk-ingest path also deduplicates transaction ids before staging, proving
+                // there is no earlier operation for this key in the same batch.
+                unsafe {
+                    batch.insert_raw_fresh(history_table.as_ref(), storage_key, groove_record);
+                }
             }
             if update_current_indexes && !matches!(fate, Fate::Rejected(_)) && global_time.is_none()
             {
@@ -387,6 +393,17 @@ where
     /// from an authored value and reintroduce partial-row sync semantics.
     fn malformed_authored_version_reason(&self, versions: &[VersionRecord]) -> Option<String> {
         for version in versions {
+            for (field, physical_ms) in [
+                ("created_at_ms", version.created_at_ms()),
+                ("updated_at_ms", version.updated_at_ms()),
+            ] {
+                if crate::time::TxTime::from_physical_ms(physical_ms).is_err() {
+                    return Some(format!(
+                        "row version for table '{}' has {field} outside the packed HLC physical-millisecond range",
+                        version.table()
+                    ));
+                }
+            }
             let Some(schema) = self
                 .catalogue
                 .catalogue_schemas
@@ -468,6 +485,13 @@ where
         versions: &[VersionRecord],
     ) -> Result<(), Error> {
         for version in versions {
+            if crate::time::TxTime::from_physical_ms(version.created_at_ms()).is_err()
+                || crate::time::TxTime::from_physical_ms(version.updated_at_ms()).is_err()
+            {
+                return Err(Error::MalformedViewUpdate(
+                    "row version provenance exceeds packed HLC physical-millisecond range",
+                ));
+            }
             let schema = self
                 .catalogue
                 .catalogue_schemas

@@ -27,14 +27,14 @@ export declare class NapiDb {
   upsertEncodedAttributed(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array): Write
   deleteAttributed(table: string, rowId: Uint8Array, author: Uint8Array): Write
   restoreEncodedAttributed(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array): Write
-  beginStreamingMutationEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, kind: string, mutation?: string | undefined | null, author?: Uint8Array | undefined | null, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
+  beginStreamingMutationEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, mutation?: string | undefined | null, author?: Uint8Array | undefined | null, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
   /**
    * Trusted-backend streaming counterpart: SYSTEM remains the admission
    * identity and `attribution` is retained only for final row provenance.
    * Branch streaming is intentionally unsupported until its split state is
    * designed, so it fails closed rather than silently losing attribution.
    */
-  beginStreamingMutationAttributedEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, kind: string, mutation: string | undefined | null, author: Uint8Array | undefined | null, attribution: Uint8Array, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
+  beginStreamingMutationAttributedEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, mutation: string | undefined | null, author: Uint8Array | undefined | null, attribution: Uint8Array, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
   static openMemory(schema: Uint8Array, config: Uint8Array): NapiDb
   /**
    * Open a deliberate backend runtime. Unlike the public raw-open entrypoint,
