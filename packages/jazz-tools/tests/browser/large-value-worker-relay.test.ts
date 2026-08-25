@@ -32,7 +32,9 @@ const permissions = s.definePermissions(app, ({ policy }) => [
 describe("browser persistent-worker large-value relay", () => {
   const cleanup = new TestCleanup();
 
-  afterEach(async () => cleanup.cleanup());
+  afterEach(async () => {
+    await withTimeout(cleanup.cleanup(), 10_000, "browser relay cleanup did not finish");
+  });
 
   /// A tab streams multi-chunk Text and Bytea through its durable SharedWorker
   /// to the server; a following ordinary mutation proves the connection remains
@@ -97,11 +99,30 @@ describe("browser persistent-worker large-value relay", () => {
       "ordinary control write was blocked after streamed uploads",
     );
 
+    // Control: the same server-side receipt is readable by a direct-memory
+    // client. If the persistent reader regresses, this separates a nested
+    // tab -> worker relay failure from upload/server availability.
+    const directReader = await withTimeout(
+      openSyncedBrowserDb("large-value-worker-relay-direct-reader", secret, server, false),
+      10_000,
+      "direct-memory reader did not attach to the server",
+    );
+    const directValues = await waitForQuery(
+      directReader,
+      app.values,
+      (rows) => rows.length === 3 && rows.some((row) => row.name === "control"),
+      "direct-memory reader did not receive the persistent-worker receipt",
+      20_000,
+      "edge",
+    );
+    expect(directValues.find((row) => row.name === "streamed-text")?.text).toBe(text);
+    expect(directValues.find((row) => row.name === "streamed-bytes")?.bytes).toEqual(bytes);
+
     const values = await waitForQuery(
       reader,
       app.values,
       (rows) => rows.length === 3 && rows.some((row) => row.name === "control"),
-      "reader did not receive the streamed values and following control write",
+      "persistent reader did not receive a direct-memory-verified streamed receipt",
       20_000,
       "edge",
     );
@@ -115,13 +136,19 @@ describe("browser persistent-worker large-value relay", () => {
     label: string,
     secret: string,
     server: Awaited<ReturnType<typeof getJazzServerInfo>>,
+    persistent = true,
   ): Promise<Db> {
     return cleanup.track(
       await createDb({
         appId: server.appId,
         serverUrl: server.serverUrl,
         secret,
-        driver: { type: "persistent", dbName: uniqueDbName(label) },
+        // The focused harness forwards the bounded redacted SharedWorker
+        // flight recorder to Vitest, making a receipt failure inspectable.
+        logLevel: "trace",
+        driver: persistent
+          ? { type: "persistent", dbName: uniqueDbName(label) }
+          : { type: "memory" },
       }),
     );
   }

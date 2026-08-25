@@ -99,6 +99,39 @@ describe("BrowserWorkerTransportPump", () => {
     pump.close();
   });
 
+  it("forwards only opt-in bounded auxiliary relay diagnostics", () => {
+    const setAuxiliaryTraceEnabled = vi.fn();
+    const onTrace = vi.fn();
+    const trace = {
+      event: "outbound-request",
+      role: "upstream" as const,
+      connection: "7",
+      requestId: "3",
+      remainingHops: 6,
+      objectHash: "9d1c2b3a4e5f",
+      locatorFingerprint: "7a6b5c4d3e2f",
+    };
+    const peer = transport({
+      recvAuxiliaryWireFrames: () => [Uint8Array.from([9])],
+      takeAuxiliaryTrace: () => [trace],
+      setAuxiliaryTraceEnabled,
+    });
+    const pump = new BrowserWorkerTransportPump(
+      runtime(peer),
+      peer,
+      () => undefined,
+      vi.fn(),
+      onTrace,
+    );
+
+    pump.drainOutboundFrames();
+
+    expect(setAuxiliaryTraceEnabled).toHaveBeenCalledWith(true);
+    expect(onTrace).toHaveBeenCalledWith([trace]);
+    pump.close();
+    expect(setAuxiliaryTraceEnabled).toHaveBeenLastCalledWith(false);
+  });
+
   it("preserves FIFO across MessagePort batches while auxiliary routing is pending", async () => {
     const auxiliary = Uint8Array.from([7, 7]);
     const semantic = Uint8Array.from([8, 8]);

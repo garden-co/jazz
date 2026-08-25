@@ -46,6 +46,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       BrowserFollowerConnectionContext,
       "onAuthFailure" | "onAuthRestored" | "onFailure" | "onStorageReset" | "onStorageInvalidated"
     >,
+    private readonly traceRelay = false,
   ) {
     port.addEventListener("message", this.onMessage);
     port.addEventListener("messageerror", this.onMessageError);
@@ -69,6 +70,17 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
         );
       },
       (error) => this.fail(asError(error)),
+      traceRelay
+        ? (entries) => {
+            // Vitest forwards page-console diagnostics, unlike SharedWorker
+            // console output. This surfaces the complete worker relay trace
+            // from focused browser fixtures without exposing capabilities.
+            console.debug(
+              "JAZZ_AUX_RELAY",
+              entries.map((entry) => ({ ...entry, hop: "tab-worker" })),
+            );
+          }
+        : undefined,
     );
   }
 
@@ -203,6 +215,10 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     if (message.type === "storage-invalidated") {
       this.callbacks.onStorageInvalidated?.();
       this.dispose(new Error("IndexedDB storage was externally invalidated"));
+      return;
+    }
+    if (message.type === "relay-trace") {
+      if (this.traceRelay) console.debug("JAZZ_AUX_RELAY", message.entries);
       return;
     }
     if (message.type === "error") {

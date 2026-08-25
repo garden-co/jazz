@@ -56,6 +56,7 @@ type RuntimeContext = {
   idleReleaseTimer: ReturnType<typeof setTimeout> | null;
   pageStore: IndexedDbPageStore | null;
   disposeTelemetry: (() => void) | null;
+  disposeAuxiliaryTrace: (() => void) | null;
   resetBarrier: { id: number; pending: Set<string>; resolve: () => void } | null;
   storageInvalidated: boolean;
   intentionalStorageReset: boolean;
@@ -129,6 +130,7 @@ function createContext(
     runtime: null,
     pageStore: null,
     disposeTelemetry: null,
+    disposeAuxiliaryTrace: null,
     resetBarrier: null,
     storageInvalidated: false,
     intentionalStorageReset: false,
@@ -195,6 +197,14 @@ async function initialize(context: RuntimeContext): Promise<void> {
       post(peer.port, { type: "mutation-error", event: received }),
     );
   });
+  if (options.logLevel === "trace") {
+    context.disposeAuxiliaryTrace = context.runtime.onAuxiliaryTrace((entries) => {
+      broadcast(context, {
+        type: "relay-trace",
+        entries: entries.map((entry) => ({ ...entry, hop: "worker-server" })),
+      });
+    });
+  }
 }
 
 async function configureServer(
@@ -496,6 +506,8 @@ async function finalizeContextStorageReset(context: RuntimeContext): Promise<voi
   context.pageStore = null;
   context.disposeTelemetry?.();
   context.disposeTelemetry = null;
+  context.disposeAuxiliaryTrace?.();
+  context.disposeAuxiliaryTrace = null;
   contexts.delete(context.key);
 }
 
@@ -517,6 +529,8 @@ async function releaseIdleContext(context: RuntimeContext): Promise<void> {
       context.pageStore = null;
       context.disposeTelemetry?.();
       context.disposeTelemetry = null;
+      context.disposeAuxiliaryTrace?.();
+      context.disposeAuxiliaryTrace = null;
       if (contexts.get(context.key) === context) contexts.delete(context.key);
     })();
   }
@@ -553,6 +567,8 @@ function handleStorageInvalidation(context: RuntimeContext): void {
   context.runtime = null;
   context.disposeTelemetry?.();
   context.disposeTelemetry = null;
+  context.disposeAuxiliaryTrace?.();
+  context.disposeAuxiliaryTrace = null;
   broadcast(context, { type: "storage-invalidated" });
   setTimeout(() => closeContextPeers(context), 0);
 }
@@ -596,6 +612,14 @@ function attachPeerTransport(
       );
     },
     (error) => failPeer(peer, asError(error)),
+    peer.context.options.logLevel === "trace"
+      ? (entries) => {
+          post(peer.port, {
+            type: "relay-trace",
+            entries: entries.map((entry) => ({ ...entry, hop: "worker-tab" })),
+          });
+        }
+      : undefined,
   );
   return peer.pump;
 }
