@@ -1644,7 +1644,11 @@ fn session_delete_uses_current_row_for_owner_write_policy() {
 fn trusted_backend_upload_uses_backend_policy_and_stores_user_made_by() {
     let schema = owner_write_schema();
     let backend_author = AuthorSubject::for_test_bytes([0xb0; 16]);
-    let attributed_user = AuthorSubject::for_test_bytes([0xa1; 16]);
+    // Provenance may record an anonymous user while the trusted backend is the
+    // effective permission subject. The anonymous write gate must therefore
+    // inspect `permission_subject`, not `made_by`.
+    let attributed_user =
+        AuthorSubject::from_canonical(r#"["urn:jazz:anonymous","anonymous-user"]"#).unwrap();
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let backend = open_db(0xb0, backend_author, &schema);
 
@@ -1655,7 +1659,6 @@ fn trusted_backend_upload_uses_backend_policy_and_stores_user_made_by() {
         backend_author,
         CommitUnitTrust::TrustedBackend,
     );
-    backend.set_identity_claims(attributed_user, test_provider_claims(attributed_user));
     backend.tick().unwrap();
     server.tick().unwrap();
 
