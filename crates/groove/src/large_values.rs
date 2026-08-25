@@ -1,6 +1,6 @@
 //! Canonical indirect representation for large logical scalar values.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -1510,8 +1510,10 @@ struct PhysicalNodeState {
 /// edge occurrence contributes bytes to the scalar and is instead protected by
 /// [`MAX_LOGICAL_TRAVERSAL_STEPS`].
 struct PhysicalTraversal {
+    root: NodeRef,
     pending: Vec<PhysicalTraversalEntry>,
     nodes: BTreeMap<NodeRef, PhysicalNodeState>,
+    edges: BTreeMap<NodeRef, Vec<NodeRef>>,
     node_budget: PhysicalTraversalNodeBudget,
 }
 
@@ -1539,6 +1541,7 @@ impl PhysicalTraversal {
         let mut node_budget = PhysicalTraversalNodeBudget::with_limit(max_nodes);
         node_budget.consume()?;
         Ok(Self {
+            root: root.clone(),
             pending: vec![PhysicalTraversalEntry {
                 node_ref: root.clone(),
                 ancestors: Vec::new(),
@@ -1551,6 +1554,7 @@ impl PhysicalTraversal {
                     actual_metrics: None,
                 },
             )]),
+            edges: BTreeMap::new(),
             node_budget,
         })
     }
@@ -1577,6 +1581,60 @@ impl PhysicalTraversal {
             return Err(Error::DescriptorMismatch);
         }
         state.actual_metrics = Some(actual_metrics);
+        self.edges.insert(
+            node_ref.clone(),
+            match node {
+                ChunkNode::Leaf { .. } => Vec::new(),
+                ChunkNode::Branch { children, .. } => children
+                    .iter()
+                    .map(|child| child.node_ref.clone())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+            },
+        );
+        Ok(())
+    }
+
+    /// Verify the complete authenticated physical graph without enumerating
+    /// its potentially exponential logical paths. Memoized height evaluation
+    /// rejects both cycles and paths beyond the depth ceiling in O(V + E).
+    fn finish(&self) -> Result<(), Error> {
+        fn height(
+            node_ref: &NodeRef,
+            edges: &BTreeMap<NodeRef, Vec<NodeRef>>,
+            visiting: &mut BTreeSet<NodeRef>,
+            heights: &mut BTreeMap<NodeRef, usize>,
+        ) -> Result<usize, Error> {
+            if let Some(height) = heights.get(node_ref) {
+                return Ok(*height);
+            }
+            if !visiting.insert(node_ref.clone()) {
+                return Err(Error::InvalidTree);
+            }
+            let children = edges.get(node_ref).ok_or(Error::InvalidTree)?;
+            let mut result = 0_usize;
+            for child in children {
+                result = result.max(
+                    height(child, edges, visiting, heights)?
+                        .checked_add(1)
+                        .ok_or(Error::InvalidTree)?,
+                );
+                if result > MAX_TREE_DEPTH {
+                    return Err(Error::InvalidTree);
+                }
+            }
+            visiting.remove(node_ref);
+            heights.insert(node_ref.clone(), result);
+            Ok(result)
+        }
+
+        height(
+            &self.root,
+            &self.edges,
+            &mut BTreeSet::new(),
+            &mut BTreeMap::new(),
+        )?;
         Ok(())
     }
 
@@ -1722,6 +1780,7 @@ pub async fn visit_reachable_chunks(
             traversal.discover_children(&entry, children)?;
         }
     }
+    traversal.finish()?;
     Ok(visited)
 }
 
@@ -1755,8 +1814,11 @@ impl LargeValueUploadCursor {
         &mut self,
         limit: usize,
     ) -> Result<Vec<StagedChunk>, ReachabilityError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let mut batch = Vec::new();
-        while batch.len() < limit.max(1) {
+        while batch.len() < limit {
             let Some(entry) = self.traversal.pop() else {
                 break;
             };
@@ -1775,6 +1837,9 @@ impl LargeValueUploadCursor {
                 node_ref: entry.node_ref,
                 encoded: encoded.bytes().to_vec(),
             });
+        }
+        if self.traversal.pending.is_empty() {
+            self.traversal.finish()?;
         }
         Ok(batch)
     }
@@ -1814,6 +1879,9 @@ pub(crate) async fn missing_upload_frontier(
         if let ChunkNode::Branch { children, .. } = node {
             traversal.discover_children(&entry, children)?;
         }
+    }
+    if missing.is_empty() {
+        traversal.finish()?;
     }
     Ok(missing)
 }
@@ -1856,6 +1924,7 @@ pub(crate) async fn validate_finalized_upload(
             traversal.discover_children(&entry, children)?;
         }
     }
+    traversal.finish()?;
     Ok(())
 }
 
@@ -4142,6 +4211,76 @@ pub(crate) fn repeated_child_dag_fixture(depth: usize, fanout: usize) -> Prepare
     }
 }
 
+/// Build a four-node diamond in which two distinct physical branch nodes share
+/// one leaf. The branches intentionally use distinct locators even though their
+/// immutable bytes match, exercising ownership through distinct `NodeRef`s.
+#[cfg(test)]
+pub(crate) fn shared_child_dag_fixture() -> PreparedLargeValue {
+    let mut staged_chunks = Vec::new();
+    let mut nonce = 0_u64;
+    let mut locator = |hash: ContentHash| {
+        let mut seed = hash.0.to_vec();
+        seed.extend_from_slice(&nonce.to_le_bytes());
+        nonce += 1;
+        Locator::from_seed(&seed)
+    };
+    let mut stage = |node: ChunkNode| {
+        stage_node(
+            node.clone(),
+            node_metrics(LargeValueKind::Bytes, &node).unwrap(),
+            &mut locator,
+            &mut staged_chunks,
+        )
+        .unwrap()
+    };
+    let leaf = stage(ChunkNode::Leaf {
+        format: FORMAT_VERSION,
+        kind: LargeValueKind::Bytes,
+        bytes: Vec::new(),
+    });
+    let branch_node = ChunkNode::Branch {
+        format: FORMAT_VERSION,
+        kind: LargeValueKind::Bytes,
+        children: vec![BranchChild {
+            node_ref: leaf.node_ref.clone(),
+            metrics: leaf.metrics,
+            logical_hash: leaf.structural_hash,
+        }],
+    };
+    let left = stage(branch_node.clone());
+    let right = stage(branch_node);
+    let root_node = ChunkNode::Branch {
+        format: FORMAT_VERSION,
+        kind: LargeValueKind::Bytes,
+        children: vec![
+            BranchChild {
+                node_ref: left.node_ref,
+                metrics: left.metrics,
+                logical_hash: left.structural_hash,
+            },
+            BranchChild {
+                node_ref: right.node_ref,
+                metrics: right.metrics,
+                logical_hash: right.structural_hash,
+            },
+        ],
+    };
+    let root = stage(root_node);
+    drop(stage);
+    PreparedLargeValue {
+        value_ref: LargeValueRef {
+            kind: LargeValueKind::Bytes,
+            format_version: FORMAT_VERSION,
+            logical_hash: root.structural_hash,
+            root: root.node_ref,
+            byte_length: 0,
+            utf16_length: None,
+            edit_tail: Vec::new(),
+        },
+        staged_chunks,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4184,6 +4323,105 @@ mod tests {
                     .ok_or(crate::chunks::ChunkError::Unavailable)
             })
         }
+    }
+
+    #[test]
+    fn physical_graph_completion_accepts_sharing_but_rejects_cycles_and_long_paths() {
+        let node_ref = |id: u8| NodeRef {
+            object_hash: ContentHash([id; 32]),
+            locator: Locator::from_seed(&[id]),
+        };
+        let [root, left, right, shared] = [node_ref(1), node_ref(2), node_ref(3), node_ref(4)];
+        let mut diamond = PhysicalTraversal::new(root.clone(), None, ContentHash([9; 32]));
+        diamond
+            .edges
+            .insert(root.clone(), vec![left.clone(), right.clone()]);
+        diamond.edges.insert(left.clone(), vec![shared.clone()]);
+        diamond.edges.insert(right, vec![shared.clone()]);
+        diamond.edges.insert(shared, Vec::new());
+        assert_eq!(diamond.finish(), Ok(()));
+
+        let mut cycle = PhysicalTraversal::new(root.clone(), None, ContentHash([9; 32]));
+        cycle.edges.insert(root.clone(), vec![left.clone()]);
+        cycle.edges.insert(left, vec![root]);
+        assert_eq!(cycle.finish(), Err(Error::InvalidTree));
+
+        let path = (0..=MAX_TREE_DEPTH + 1)
+            .map(|id| node_ref(id as u8 + 10))
+            .collect::<Vec<_>>();
+        let mut too_deep = PhysicalTraversal::new(path[0].clone(), None, ContentHash([9; 32]));
+        for edge in path.windows(2) {
+            too_deep
+                .edges
+                .insert(edge[0].clone(), vec![edge[1].clone()]);
+        }
+        too_deep
+            .edges
+            .insert(path.last().unwrap().clone(), Vec::new());
+        assert_eq!(too_deep.finish(), Err(Error::InvalidTree));
+    }
+
+    #[test]
+    fn shared_dag_physical_walks_deduplicate_and_logical_materialization_is_bounded() {
+        let prepared = repeated_child_dag_fixture(MAX_TREE_DEPTH, BRANCH_MAX_CHILDREN);
+        assert_eq!(prepared.staged_chunks.len(), MAX_TREE_DEPTH + 1);
+
+        let provider = PreparedProvider::new(&prepared);
+        let mut visited = std::collections::BTreeSet::new();
+        let count = futures::executor::block_on(visit_reachable_chunks(
+            &prepared.value_ref,
+            &provider,
+            |request| {
+                visited.insert(request.clone());
+            },
+        ))
+        .unwrap();
+        assert_eq!(count as usize, prepared.staged_chunks.len());
+        assert_eq!(visited.len(), prepared.staged_chunks.len());
+
+        let owned = crate::chunks::OwnedChunkProvider::new(std::rc::Rc::new(
+            PreparedProvider::new(&prepared),
+        ));
+        let mut cursor = LargeValueUploadCursor::new(&prepared.value_ref, owned).unwrap();
+        assert!(
+            futures::executor::block_on(cursor.next_batch(0))
+                .unwrap()
+                .is_empty()
+        );
+        let mut uploaded = Vec::new();
+        loop {
+            let batch = futures::executor::block_on(cursor.next_batch(7)).unwrap();
+            if batch.is_empty() {
+                break;
+            }
+            uploaded.extend(batch);
+        }
+        assert_eq!(uploaded.len(), prepared.staged_chunks.len());
+        assert_eq!(
+            uploaded
+                .iter()
+                .map(|chunk| chunk.node_ref.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            prepared.staged_chunks.len()
+        );
+
+        let mut inputs = EvaluationInputs::default();
+        for chunk in &prepared.staged_chunks {
+            inputs.install_chunk(
+                ChunkRequest {
+                    object_hash: chunk.node_ref.object_hash.0,
+                    locator: chunk.node_ref.locator,
+                },
+                bytes::Bytes::copy_from_slice(&chunk.encoded),
+            );
+        }
+        assert!(matches!(
+            materialize_attempt(&prepared.value_ref, &mut inputs),
+            Err(IvmRuntimeError::LargeValue(
+                Error::TraversalWorkLimitExceeded
+            ))
+        ));
     }
 
     fn deterministic_locator(hash: ContentHash) -> Locator {

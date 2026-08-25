@@ -1,3 +1,4 @@
+import type { WasmDb } from "jazz-wasm";
 import { loadWasmModule, type WasmModule } from "../runtime/client.js";
 import { IndexedDbPageStore } from "../runtime/indexeddb-page-store.js";
 import { installWasmTelemetry } from "../runtime/sync-telemetry.js";
@@ -26,6 +27,7 @@ import { deliverMutationErrorToAttachedPeers } from "./mutation-error-delivery.j
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
 type SharedWorkerGlobal = typeof globalThis & {
+  __JAZZ_WASM_LOG_LEVEL?: BrowserWorkerInitOptions["logLevel"];
   onconnect: ((event: MessageEvent & { ports: MessagePort[] }) => void) | null;
   close(): void;
 };
@@ -146,55 +148,109 @@ function createContext(
 }
 
 async function initialize(context: RuntimeContext): Promise<void> {
-  const { options } = context;
-  (globalThis as any).__JAZZ_WASM_LOG_LEVEL = options.logLevel ?? DEFAULT_WASM_LOG_LEVEL;
-  wasmModulePromise ??= loadWasmModule(options.runtimeSources);
-  const wasmModule = await wasmModulePromise;
-  context.disposeTelemetry = installWasmTelemetry({
-    wasmModule,
-    collectorUrl: options.telemetryCollectorUrl,
-    appId: options.appId,
-    runtimeThread: "worker",
-  });
-  context.pageStore = await IndexedDbPageStore.open(options.dbName, () =>
-    handleStorageInvalidation(context),
-  );
-  const schema = encodeSchema(options.schema);
-  const config = openConfig(options.node, options.author, 1, false, options.initialSyncFlushEvery);
-  const proof = options.selfSignedClientProof;
-  if (proof && typeof wasmModule.WasmDb.openBrowserWithSelfSignedProof !== "function") {
-    throw new Error(
-      "WASM runtime does not support self-signed client opens; rebuild the matching Jazz WASM artifact",
+  let unownedDb: WasmDb | null = null;
+  try {
+    const { options } = context;
+    workerGlobal.__JAZZ_WASM_LOG_LEVEL = options.logLevel ?? DEFAULT_WASM_LOG_LEVEL;
+    const wasmModule = await loadWorkerWasmModule(options.runtimeSources);
+    context.disposeTelemetry = installWasmTelemetry({
+      wasmModule,
+      collectorUrl: options.telemetryCollectorUrl,
+      appId: options.appId,
+      runtimeThread: "worker",
+    });
+    context.pageStore = await IndexedDbPageStore.open(options.dbName, () =>
+      handleStorageInvalidation(context),
     );
+    const schema = encodeSchema(options.schema);
+    const config = openConfig(
+      options.node,
+      options.author,
+      1,
+      false,
+      options.initialSyncFlushEvery,
+    );
+    const proof = options.selfSignedClientProof;
+    if (proof && typeof wasmModule.WasmDb.openBrowserWithSelfSignedProof !== "function") {
+      throw new Error(
+        "WASM runtime does not support self-signed client opens; rebuild the matching Jazz WASM artifact",
+      );
+    }
+    unownedDb = proof
+      ? await wasmModule.WasmDb.openBrowserWithSelfSignedProof(
+          context.pageStore,
+          schema,
+          config,
+          proof.token,
+          proof.appId,
+          proof.claimedAuthor,
+        )
+      : await wasmModule.WasmDb.openBrowser(context.pageStore, schema, config);
+    const runtime = NativeRuntimeAdapter.fromDb(
+      unownedDb as never,
+      options.schema,
+      options.node,
+      options.author,
+      1,
+      false,
+    );
+    context.runtime = runtime;
+    unownedDb = null;
+    context.runtime.onAuthFailure((reason) => broadcast(context, { type: "auth-failure", reason }));
+    context.runtime.onMutationError((event) => {
+      // A mutation error is a notification for foreground runtimes that are
+      // attached now. Durable reconciliation belongs to the worker's database;
+      // persisting this event would instead surface an old application's toast
+      // to an unrelated future tab.
+      deliverMutationErrorToAttachedPeers(context.peers.values(), event, (peer, received) =>
+        post(peer.port, { type: "mutation-error", event: received }),
+      );
+    });
+  } catch (error) {
+    try {
+      await unownedDb?.close();
+    } catch {
+      // The initialisation error is the actionable failure.
+    }
+    try {
+      cleanupFailedContext(context);
+    } catch {
+      // Cleanup must not replace the initialisation error reported to the tab.
+    }
+    throw error;
   }
-  const db = proof
-    ? await wasmModule.WasmDb.openBrowserWithSelfSignedProof(
-        context.pageStore,
-        schema,
-        config,
-        proof.token,
-        proof.appId,
-        proof.claimedAuthor,
-      )
-    : await wasmModule.WasmDb.openBrowser(context.pageStore, schema, config);
-  context.runtime = NativeRuntimeAdapter.fromDb(
-    db as never,
-    options.schema,
-    options.node,
-    options.author,
-    1,
-    false,
-  );
-  context.runtime.onAuthFailure((reason) => broadcast(context, { type: "auth-failure", reason }));
-  context.runtime.onMutationError((event) => {
-    // A mutation error is a notification for foreground runtimes that are
-    // attached now. Durable reconciliation belongs to the worker's database;
-    // persisting this event would instead surface an old application's toast
-    // to an unrelated future tab.
-    deliverMutationErrorToAttachedPeers(context.peers.values(), event, (peer, received) =>
-      post(peer.port, { type: "mutation-error", event: received }),
-    );
-  });
+}
+
+async function loadWorkerWasmModule(
+  runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
+): Promise<WasmModule> {
+  const load = wasmModulePromise ?? loadWasmModule(runtimeSources);
+  wasmModulePromise = load;
+  try {
+    return await load;
+  } catch (error) {
+    if (wasmModulePromise === load) wasmModulePromise = null;
+    throw error;
+  }
+}
+
+function cleanupFailedContext(context: RuntimeContext): void {
+  const runtime = context.runtime;
+  const pageStore = context.pageStore;
+  const disposeTelemetry = context.disposeTelemetry;
+  context.runtime = null;
+  context.pageStore = null;
+  context.disposeTelemetry = null;
+  if (contexts.get(context.key) === context) contexts.delete(context.key);
+  try {
+    runtime?.discard();
+  } finally {
+    try {
+      pageStore?.close();
+    } finally {
+      disposeTelemetry?.();
+    }
+  }
 }
 
 async function configureServer(
