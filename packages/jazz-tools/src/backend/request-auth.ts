@@ -32,7 +32,15 @@ type LocalJwksDocument = {
   keys: Array<Record<string, unknown>>;
 };
 
-const jwksDocuments = new Map<string, LocalJwksDocument>();
+type CachedJwksDocument = {
+  document: LocalJwksDocument;
+  expiresAtMs: number;
+};
+
+// Expiry is fail closed: never use keys older than five minutes,
+// even when the JWKS provider is unavailable.
+const JWKS_CACHE_TTL_MS = 5 * 60 * 1000;
+const jwksDocuments = new Map<string, CachedJwksDocument>();
 const jwksFetches = new Map<string, Promise<LocalJwksDocument>>();
 const jwksRefreshNotBefore = new Map<string, number>();
 const JWKS_FORCED_REFRESH_COOLDOWN_MS = 30_000;
@@ -131,8 +139,9 @@ async function getRemoteJwksDocument(
   forceRefresh = false,
 ): Promise<LocalJwksDocument> {
   const cached = jwksDocuments.get(jwksUrl);
-  if (!forceRefresh && cached) {
-    return cached;
+  const now = Date.now();
+  if (!forceRefresh && cached && now < cached.expiresAtMs) {
+    return cached.document;
   }
 
   const pending = jwksFetches.get(jwksUrl);
@@ -140,13 +149,22 @@ async function getRemoteJwksDocument(
     return pending;
   }
 
-  if (forceRefresh && cached && Date.now() < (jwksRefreshNotBefore.get(jwksUrl) ?? 0)) {
-    return cached;
+  if (
+    forceRefresh &&
+    cached &&
+    now < cached.expiresAtMs &&
+    now < (jwksRefreshNotBefore.get(jwksUrl) ?? 0)
+  ) {
+    return cached.document;
   }
 
   const fetchPromise = fetchRemoteJwks(jwksUrl).then((document) => {
-    jwksDocuments.set(jwksUrl, document);
-    jwksRefreshNotBefore.set(jwksUrl, Date.now() + JWKS_FORCED_REFRESH_COOLDOWN_MS);
+    const refreshedAtMs = Date.now();
+    jwksDocuments.set(jwksUrl, {
+      document,
+      expiresAtMs: refreshedAtMs + JWKS_CACHE_TTL_MS,
+    });
+    jwksRefreshNotBefore.set(jwksUrl, refreshedAtMs + JWKS_FORCED_REFRESH_COOLDOWN_MS);
     return document;
   });
   jwksFetches.set(jwksUrl, fetchPromise);

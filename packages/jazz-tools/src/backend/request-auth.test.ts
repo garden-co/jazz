@@ -389,6 +389,114 @@ describe("backend request auth", () => {
     expect(jwks.requests).toBe(2);
   });
 
+  it("uses a cached JWKS document until its five-minute TTL expires", async () => {
+    let now = 1_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const jwks = await JwksServer.start();
+    servers.add(jwks);
+    const config = {
+      appId: "app-with-fresh-jwks",
+      jwksUrl: jwks.url,
+    };
+    const token = signHs256Jwt({
+      sub: "fresh-cache-user",
+      iss: "https://issuer.example",
+    });
+    const request = {
+      headers: { authorization: `Bearer ${token}` },
+    };
+
+    await expect(resolveRequestSession(request, config)).resolves.toMatchObject({
+      user_id: "fresh-cache-user",
+    });
+    expect(jwks.requests).toBe(1);
+
+    jwks.rotateKey("replacement-backend-request-test-secret");
+    now += 5 * 60 * 1000 - 1;
+
+    await expect(resolveRequestSession(request, config)).resolves.toMatchObject({
+      user_id: "fresh-cache-user",
+    });
+    expect(jwks.requests).toBe(1);
+  });
+
+  it("coalesces expiry refreshes and retires the old key without a forced refetch", async () => {
+    let now = 1_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const jwks = await JwksServer.start();
+    servers.add(jwks);
+    const config = {
+      appId: "app-with-expiring-jwks",
+      jwksUrl: jwks.url,
+    };
+    const oldToken = signHs256Jwt({
+      sub: "retired-key-user",
+      iss: "https://issuer.example",
+    });
+    const replacementSecret = "replacement-backend-request-test-secret";
+    const replacementToken = signHs256Jwt(
+      {
+        sub: "replacement-key-user",
+        iss: "https://issuer.example",
+      },
+      replacementSecret,
+    );
+    const requestFor = (token: string) => ({
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    await resolveRequestSession(requestFor(oldToken), config);
+    expect(jwks.requests).toBe(1);
+
+    jwks.rotateKey(replacementSecret);
+    now += 5 * 60 * 1000;
+
+    const refreshes = await Promise.all(
+      Array.from({ length: 20 }, () => resolveRequestSession(requestFor(replacementToken), config)),
+    );
+    expect(refreshes.every((session) => session.user_id === "replacement-key-user")).toBe(true);
+    expect(jwks.requests).toBe(2);
+
+    await expect(resolveRequestSession(requestFor(oldToken), config)).rejects.toThrow(
+      /Invalid JWT/,
+    );
+    expect(jwks.requests).toBe(2);
+  });
+
+  it("fails closed on provider outage after the JWKS TTL and retries immediately", async () => {
+    let now = 1_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const jwks = await JwksServer.start();
+    servers.add(jwks);
+    const config = {
+      appId: "app-with-expired-jwks",
+      jwksUrl: jwks.url,
+    };
+    const token = signHs256Jwt({
+      sub: "expired-cache-user",
+      iss: "https://issuer.example",
+    });
+    const request = {
+      headers: { authorization: `Bearer ${token}` },
+    };
+
+    await expect(resolveRequestSession(request, config)).resolves.toMatchObject({
+      user_id: "expired-cache-user",
+    });
+    expect(jwks.requests).toBe(1);
+
+    now += 5 * 60 * 1000;
+    jwks.failNextFetch();
+
+    await expect(resolveRequestSession(request, config)).rejects.toThrow(/HTTP 503/);
+    expect(jwks.requests).toBe(2);
+
+    await expect(resolveRequestSession(request, config)).resolves.toMatchObject({
+      user_id: "expired-cache-user",
+    });
+    expect(jwks.requests).toBe(3);
+  });
+
   it("verifies external JWTs via a static JWK and uses JWT sub as the session user", async () => {
     const token = signHs256Jwt({
       sub: "user-subject",
