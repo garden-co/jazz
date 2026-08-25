@@ -12,7 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { sourceIdentity } from "./source-identity.mjs";
+import { sameTrackedSource, sourceIdentity } from "./source-identity.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const testArgs = [
@@ -140,6 +140,36 @@ function writeJson(file, value) {
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+function cleanSourceBaseline(argv) {
+  const receipt = argv[0];
+  const expectedCommit = argv[1];
+  if (!receipt || !/^[0-9a-f]{40}$/.test(expectedCommit))
+    fail("usage: clean-source-baseline RECEIPT EXPECTED_COMMIT");
+  const source = {
+    commit: run("git", ["rev-parse", "HEAD"]).stdout.trim(),
+    ...sourceIdentity(root),
+  };
+  if (!validSourceIdentity(source))
+    fail("checkout contains source changes before dependency setup");
+  if (source.commit !== expectedCommit)
+    fail("checkout source commit does not match workflow event commit");
+  writeJson(receipt, source);
+}
+
+function shadowSourceBaseline() {
+  const baselinePath = process.env.RUST_SHADOW_SOURCE_BASELINE;
+  if (!baselinePath) return null;
+  const source = JSON.parse(fs.readFileSync(baselinePath, "utf8"));
+  if (!validSourceIdentity(source)) fail("shadow source baseline is not a clean checkout");
+  const observed = {
+    commit: run("git", ["rev-parse", "HEAD"]).stdout.trim(),
+    ...sourceIdentity(root),
+  };
+  if (!sameTrackedSource(source, observed))
+    fail("dependency setup changed the checked-out source after the shadow baseline");
+  return source;
+}
+
 function shard(argv) {
   const index = Number(argv[0]);
   const count = Number(argv[1]);
@@ -155,6 +185,7 @@ function shard(argv) {
   const startedAt = now();
   const phases = [];
   const partition = `hash:${index}/${count}`;
+  const baseline = shadowSourceBaseline();
   const value = {
     schemaVersion: 1,
     kind: "rust-shadow-shard-receipt",
@@ -163,7 +194,10 @@ function shard(argv) {
     testArgs,
     phases,
     status: "failed",
-    source: { commit: run("git", ["rev-parse", "HEAD"]).stdout.trim(), ...sourceIdentity(root) },
+    source: baseline ?? {
+      commit: run("git", ["rev-parse", "HEAD"]).stdout.trim(),
+      ...sourceIdentity(root),
+    },
     environment: {
       platform: process.platform,
       arch: process.arch,
@@ -203,6 +237,14 @@ function shard(argv) {
       if (result.status !== 0) fail(`partition tests exited ${result.status}`);
     });
     value.testReceipt = JSON.parse(fs.readFileSync(testReceipt, "utf8"));
+    if (
+      baseline &&
+      !sameTrackedSource(baseline, {
+        commit: run("git", ["rev-parse", "HEAD"]).stdout.trim(),
+        ...sourceIdentity(root),
+      })
+    )
+      fail("shadow execution changed the checked-out source after the baseline");
     if (index === 1) {
       // This is the same maintained seed required by CI, folded into shard 1
       // after the complete ordinary workspace partition has run.
@@ -388,4 +430,5 @@ function aggregate(argv) {
 const [command, ...argv] = process.argv.slice(2);
 if (command === "shard") shard(argv);
 else if (command === "aggregate") aggregate(argv);
+else if (command === "clean-source-baseline") cleanSourceBaseline(argv);
 else fail("expected shard or aggregate command");

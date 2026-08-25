@@ -3,6 +3,81 @@
 use super::*;
 
 #[test]
+fn reopened_seeded_row_ids_do_not_claim_freshness() {
+    let schema = doctest_support::schema();
+    let column_families = schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let dir = tempfile::tempdir().unwrap();
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([0x92; 16]),
+        author: AuthorSubject::for_test_bytes([0xa2; 16]),
+    };
+
+    let open = |storage| {
+        block_on(Db::open(DbConfig {
+            schema: schema.clone(),
+            storage,
+            identity,
+            id_source: Some(Box::new(SeededRowIdSource::new(0x9292))),
+        }))
+        .unwrap()
+    };
+
+    let db = open(RocksDbStorage::open(dir.path(), &refs).unwrap());
+    let first_tx = OpenTransactionId::new();
+    db.begin_mergeable(first_tx).unwrap();
+    let first_row = db
+        .mergeable_tx_ref(first_tx)
+        .insert(
+            "todos",
+            doctest_support::todo_cells("first", false),
+            InsertOptions {
+                updated_at_ms: Some(100),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    block_on(db.commit_mergeable_handle(first_tx)).unwrap();
+    let first_provenance = prepared_one(&db, &db.table("todos"))
+        .unwrap()
+        .provenance()
+        .unwrap()
+        .unwrap();
+    block_on(db.close()).unwrap();
+    drop(db);
+
+    let reopened = open(RocksDbStorage::open(dir.path(), &refs).unwrap());
+    let repeated_tx = OpenTransactionId::new();
+    reopened.begin_mergeable(repeated_tx).unwrap();
+    let repeated_row = reopened
+        .mergeable_tx_ref(repeated_tx)
+        .insert(
+            "todos",
+            doctest_support::todo_cells("must conflict", true),
+            InsertOptions {
+                updated_at_ms: Some(200),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(repeated_row, first_row);
+    block_on(reopened.commit_mergeable_handle(repeated_tx)).unwrap();
+    let rows = prepared_all(&reopened, &reopened.table("todos"), ReadOpts::default());
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String("must conflict".to_owned()))
+    );
+    let repeated_provenance = rows[0].provenance().unwrap().unwrap();
+    assert_eq!(repeated_provenance.created_at, first_provenance.created_at);
+    assert_eq!(repeated_provenance.created_by, first_provenance.created_by);
+    assert!(repeated_provenance.updated_at > repeated_provenance.created_at);
+}
+
+#[test]
 fn exclusive_transactions_lower_oversized_scalars_before_publication() {
     let db = block_on(doctest_support::open_todos_db()).unwrap();
     let title = "x".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 91);
@@ -250,8 +325,8 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
     );
     assert_eq!(overlay_row.cell_at(1), Some(Value::Bool(true)));
     let overlay_provenance = overlay_row.provenance().unwrap().unwrap();
-    assert_eq!(overlay_provenance.created_at, TxTime(1_704_067_200_456));
-    assert_eq!(overlay_provenance.updated_at, TxTime(1_704_067_200_456));
+    assert_eq!(overlay_provenance.created_at, 1_704_067_200_456);
+    assert_eq!(overlay_provenance.updated_at, 1_704_067_200_456);
     owner.abandon_transaction_handle(overlay_open).unwrap();
 
     let rows = block_on(view.all(&prepared, ReadOpts::default())).unwrap();
@@ -323,8 +398,8 @@ fn mergeable_overlay_uses_staged_provenance_and_preserves_it_at_commit() {
         .provenance()
         .unwrap()
         .unwrap();
-    assert_eq!(inserted_overlay.created_at, TxTime(200));
-    assert_eq!(inserted_overlay.updated_at, TxTime(200));
+    assert_eq!(inserted_overlay.created_at, 200);
+    assert_eq!(inserted_overlay.updated_at, 200);
     assert_eq!(inserted_overlay.created_by, db.identity.author);
     let updated_overlay = overlay
         .iter()
@@ -333,8 +408,8 @@ fn mergeable_overlay_uses_staged_provenance_and_preserves_it_at_commit() {
         .provenance()
         .unwrap()
         .unwrap();
-    assert_eq!(updated_overlay.created_at, TxTime(100));
-    assert_eq!(updated_overlay.updated_at, TxTime(300));
+    assert_eq!(updated_overlay.created_at, 100);
+    assert_eq!(updated_overlay.updated_at, 300);
     assert_eq!(updated_overlay.updated_by, db.identity.author);
 
     tx.commit().unwrap();
@@ -405,10 +480,10 @@ fn exclusive_overlay_reserves_stable_provenance_for_insert_and_update() {
     };
     let inserted_overlay = provenance(&overlay, inserted);
     let updated_overlay = provenance(&overlay, existing);
-    assert_ne!(inserted_overlay.created_at, TxTime(0));
+    assert_ne!(inserted_overlay.created_at, 0);
     assert_eq!(inserted_overlay.created_at, inserted_overlay.updated_at);
-    assert_eq!(updated_overlay.created_at, TxTime(100));
-    assert_ne!(updated_overlay.updated_at, TxTime(0));
+    assert_eq!(updated_overlay.created_at, 100);
+    assert_ne!(updated_overlay.updated_at, 0);
 
     tx.commit().unwrap();
     let committed = db.read(&query).unwrap();
@@ -516,10 +591,36 @@ fn exclusive_crud_preserves_explicit_updated_at() {
             .updated_at
     };
 
-    assert_eq!(updated_at(inserted), TxTime(100));
-    assert_eq!(updated_at(upserted), TxTime(200));
-    assert_eq!(updated_at(deleted), TxTime(300));
-    assert_eq!(updated_at(restored), TxTime(400));
+    assert_eq!(updated_at(inserted), 100);
+    assert_eq!(updated_at(upserted), 200);
+    assert_eq!(updated_at(deleted), 300);
+    assert_eq!(updated_at(restored), 400);
+}
+
+#[test]
+fn out_of_range_explicit_timestamp_is_rejected_before_mutating() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let row_id = row(0xc5);
+    let result = block_on(db.insert(
+        "todos",
+        doctest_support::todo_cells("must not be written", false),
+        InsertOptions {
+            row_id: Some(row_id),
+            updated_at_ms: Some(crate::time::HLC_MAX_PHYSICAL_MS + 1),
+            ..Default::default()
+        },
+    ));
+    let error = match result {
+        Ok(_) => panic!("a timestamp outside the HLC physical range must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+
+    let query = db.prepare_query(&db.table("todos")).unwrap();
+    assert!(
+        db.read(&query).unwrap().is_empty(),
+        "rejected timestamp input must not leave a visible row"
+    );
 }
 
 /// This stays internal because transaction overlays are not sync-visible. The

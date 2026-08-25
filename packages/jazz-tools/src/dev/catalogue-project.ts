@@ -400,7 +400,7 @@ interface SnapshotEntry {
   schema: WasmSchema;
 }
 
-// Supports both millisecond and microsecond-precision timestamps.
+// Schema snapshots are named from their Unix-millisecond publication time.
 function looksLikeSnapshotFileName(fileName: string): boolean {
   return /^(?:\d{8,17}T\d{6}-)?[0-9a-f]{12}\.json$/i.test(fileName);
 }

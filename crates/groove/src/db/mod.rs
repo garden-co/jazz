@@ -13,6 +13,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::str;
+use std::sync::{Arc, Weak};
 use std::task::{Poll, Waker};
 
 use futures::lock::Mutex as AsyncMutex;
@@ -93,9 +94,131 @@ struct LargeValueNodeReferences {
     children: Vec<crate::large_values::NodeRef>,
 }
 
+fn unique_large_value_children(
+    node: &crate::large_values::ChunkNode,
+) -> Vec<crate::large_values::NodeRef> {
+    match node {
+        crate::large_values::ChunkNode::Leaf { .. } => Vec::new(),
+        crate::large_values::ChunkNode::Branch { children, .. } => {
+            canonical_large_value_children(children.iter().map(|child| child.node_ref.clone()))
+        }
+    }
+}
+
+/// Metadata child edges describe physical ownership rather than a logical
+/// byte order. Normalize them on every read/write boundary so historical
+/// logical-order vectors and duplicate child occurrences retain their exact
+/// one-edge-per-physical-child meaning.
+fn canonical_large_value_children(
+    children: impl IntoIterator<Item = crate::large_values::NodeRef>,
+) -> Vec<crate::large_values::NodeRef> {
+    children
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Apply physical-node ownership transitions against one read-your-own-write
+/// overlay. Each active parent contributes one reference to each distinct
+/// child node, regardless of how many logical occurrences that child has.
+async fn large_value_node_transition_operations(
+    storage: &LayoutStorage,
+    mut node_updates: BTreeMap<crate::large_values::NodeRef, LargeValueNodeReferences>,
+    mut pending: Vec<(crate::large_values::NodeRef, i8)>,
+    allow_missing_positive_metadata: bool,
+) -> Result<Vec<OwnedWriteOperation>, Error> {
+    let mut node_budget = crate::large_values::PhysicalTraversalNodeBudget::new();
+    node_budget
+        .consume_many(node_updates.len())
+        .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
+    let mut reclaim_candidates = BTreeSet::new();
+    while let Some((node_ref, delta)) = pending.pop() {
+        let mut metadata = if let Some(metadata) = node_updates.remove(&node_ref) {
+            metadata
+        } else {
+            node_budget
+                .consume()
+                .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
+            match storage
+                .get(
+                    LARGE_VALUE_METADATA_CF.to_owned(),
+                    large_value_node_key(&node_ref)?,
+                )
+                .await?
+            {
+                Some(encoded) => postcard::from_bytes(&encoded).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot decode node references: {error}"
+                    ))
+                })?,
+                None if delta > 0 && allow_missing_positive_metadata => {
+                    LargeValueNodeReferences::default()
+                }
+                None => {
+                    return Err(Error::InvalidLargeValueMetadata(
+                        "active node reference metadata is missing".to_owned(),
+                    ));
+                }
+            }
+        };
+        metadata.children = canonical_large_value_children(metadata.children);
+        let crossed_zero = if delta > 0 {
+            let crossed = metadata.references == 0;
+            metadata.references = metadata.references.checked_add(1).ok_or_else(|| {
+                Error::InvalidLargeValueMetadata("node reference count overflow".to_owned())
+            })?;
+            reclaim_candidates.remove(&node_ref);
+            crossed
+        } else {
+            metadata.references = metadata.references.checked_sub(1).ok_or_else(|| {
+                Error::InvalidLargeValueMetadata("node reference count underflow".to_owned())
+            })?;
+            let crossed = metadata.references == 0;
+            if crossed {
+                reclaim_candidates.insert(node_ref.clone());
+            }
+            crossed
+        };
+        if crossed_zero {
+            pending.extend(
+                metadata
+                    .children
+                    .iter()
+                    .cloned()
+                    .map(|child| (child, delta)),
+            );
+        }
+        node_updates.insert(node_ref, metadata);
+    }
+    let mut operations = Vec::new();
+    for (node_ref, metadata) in node_updates {
+        operations.push(OwnedWriteOperation::Set {
+            cf: LARGE_VALUE_METADATA_CF.to_owned(),
+            key: large_value_node_key(&node_ref)?,
+            value: postcard::to_allocvec(&metadata).map_err(|error| {
+                Error::InvalidLargeValueMetadata(format!("cannot encode node references: {error}"))
+            })?,
+        });
+        if metadata.references == 0 && reclaim_candidates.contains(&node_ref) {
+            operations.push(OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: large_value_reclaim_key(&node_ref)?,
+                value: postcard::to_allocvec(&node_ref).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot encode reclaim entry: {error}"
+                    ))
+                })?,
+            });
+        }
+    }
+    Ok(operations)
+}
+
 #[derive(Clone)]
 struct MetadataChunkInstallObserver {
     storage: std::rc::Weak<LayoutStorage>,
+    lifecycle: Weak<AsyncMutex<()>>,
 }
 
 impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
@@ -110,15 +233,18 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
                     "database storage closed during chunk installation".to_owned(),
                 )
             })?;
-            let node: crate::large_values::ChunkNode = postcard::from_bytes(&encoded)
-                .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
-            let children = match node {
-                crate::large_values::ChunkNode::Leaf { .. } => Vec::new(),
-                crate::large_values::ChunkNode::Branch { children, .. } => children
-                    .into_iter()
-                    .map(|child| child.node_ref)
-                    .collect::<Vec<_>>(),
-            };
+            let lifecycle = self.lifecycle.upgrade().ok_or_else(|| {
+                crate::chunks::ChunkError::Backend(
+                    "database lifecycle closed during chunk installation".to_owned(),
+                )
+            })?;
+            let _lifecycle = lifecycle.lock().await;
+            let node = crate::large_values::decode_node_untyped_authenticated(
+                node_ref.object_hash,
+                &encoded,
+            )
+            .map_err(|_| crate::chunks::ChunkError::Integrity)?;
+            let children = unique_large_value_children(&node);
             let node_key = large_value_node_key(&node_ref)
                 .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
             let existing = storage
@@ -131,11 +257,13 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
                 .transpose()
                 .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?
                 .unwrap_or_default();
-            if !metadata.children.is_empty() && metadata.children != children {
+            let existing_children =
+                canonical_large_value_children(std::mem::take(&mut metadata.children));
+            if !existing_children.is_empty() && existing_children != children {
                 return Err(crate::chunks::ChunkError::Integrity);
             }
             let newly_discovered_active_children =
-                metadata.references > 0 && metadata.children.is_empty() && !children.is_empty();
+                metadata.references > 0 && existing_children.is_empty() && !children.is_empty();
             metadata.children = children.clone();
 
             let root_key = large_value_root_key(&node_ref)
@@ -157,18 +285,23 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
                 && !root_references.node_active;
             if activate_root {
                 root_references.node_active = true;
-                metadata.references = metadata.references.checked_add(1).ok_or_else(|| {
-                    crate::chunks::ChunkError::Backend("node reference count overflow".to_owned())
-                })?;
             }
-            let activate_children =
-                newly_discovered_active_children || (activate_root && metadata.references == 1);
-            let mut operations = vec![OwnedWriteOperation::Set {
-                cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                key: node_key,
-                value: postcard::to_allocvec(&metadata)
-                    .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?,
-            }];
+            let mut initial = BTreeMap::from([(node_ref.clone(), metadata)]);
+            let mut transitions = Vec::new();
+            if activate_root {
+                transitions.push((node_ref.clone(), 1));
+            }
+            if newly_discovered_active_children {
+                transitions.extend(children.into_iter().map(|child| (child, 1)));
+            }
+            let mut operations = large_value_node_transition_operations(
+                &storage,
+                std::mem::take(&mut initial),
+                transitions,
+                true,
+            )
+            .await
+            .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
             if activate_root {
                 operations.push(OwnedWriteOperation::Set {
                     cf: LARGE_VALUE_METADATA_CF.to_owned(),
@@ -176,35 +309,6 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
                     value: postcard::to_allocvec(&root_references)
                         .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?,
                 });
-            }
-            if activate_children {
-                for child in children {
-                    let child_key = large_value_node_key(&child)
-                        .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
-                    let encoded = storage
-                        .get(LARGE_VALUE_METADATA_CF.to_owned(), child_key.clone())
-                        .await
-                        .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
-                    let mut child_metadata: LargeValueNodeReferences = encoded
-                        .as_deref()
-                        .map(postcard::from_bytes)
-                        .transpose()
-                        .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?
-                        .unwrap_or_default();
-                    child_metadata.references =
-                        child_metadata.references.checked_add(1).ok_or_else(|| {
-                            crate::chunks::ChunkError::Backend(
-                                "child reference count overflow".to_owned(),
-                            )
-                        })?;
-                    operations.push(OwnedWriteOperation::Set {
-                        cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                        key: child_key,
-                        value: postcard::to_allocvec(&child_metadata).map_err(|error| {
-                            crate::chunks::ChunkError::Backend(error.to_string())
-                        })?,
-                    });
-                }
             }
             storage
                 .write_many(operations)
@@ -240,7 +344,7 @@ pub struct Database {
     /// promotion, and reclamation lifecycle. The blob backend may be separate
     /// from metadata storage, so this boundary prevents both intent eviction
     /// during an in-flight put and lost reference-count updates across uploads.
-    large_value_lifecycle: Rc<AsyncMutex<()>>,
+    large_value_lifecycle: Arc<AsyncMutex<()>>,
     abandoned_application: Rc<Cell<bool>>,
     poisoned: bool,
 }
@@ -267,6 +371,10 @@ pub struct AppliedBatch {
     tick: TickMetrics,
     notifications_deferred: bool,
     lifecycle: Rc<Cell<AppliedBatchLifecycle>>,
+    /// Retains the large-value metadata lifecycle through the matching
+    /// ordered storage write. This is acquired after the IVM tick, whose
+    /// chunk resolution may itself install metadata through that lifecycle.
+    large_value_lifecycle_guard: Rc<RefCell<Option<futures::lock::OwnedMutexGuard<()>>>>,
     abandoned_application: Rc<Cell<bool>>,
 }
 
@@ -283,6 +391,8 @@ impl AppliedBatch {
         );
         let mut attempt = PersistenceAttempt {
             lifecycle: Rc::clone(&self.lifecycle),
+            large_value_lifecycle_guard: self.large_value_lifecycle_guard.borrow_mut().take(),
+            large_value_lifecycle_guard_slot: Rc::clone(&self.large_value_lifecycle_guard),
             completed: false,
         };
         let turn = std::future::poll_fn(|cx| {
@@ -355,6 +465,8 @@ impl AppliedBatch {
 
 struct PersistenceAttempt {
     lifecycle: Rc<Cell<AppliedBatchLifecycle>>,
+    large_value_lifecycle_guard: Option<futures::lock::OwnedMutexGuard<()>>,
+    large_value_lifecycle_guard_slot: Rc<RefCell<Option<futures::lock::OwnedMutexGuard<()>>>>,
     completed: bool,
 }
 
@@ -362,6 +474,8 @@ impl Drop for PersistenceAttempt {
     fn drop(&mut self) {
         if !self.completed && self.lifecycle.get() == AppliedBatchLifecycle::Persisting {
             self.lifecycle.set(AppliedBatchLifecycle::Applied);
+            *self.large_value_lifecycle_guard_slot.borrow_mut() =
+                self.large_value_lifecycle_guard.take();
         }
     }
 }
