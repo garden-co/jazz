@@ -145,6 +145,37 @@ test("WASM provenance ignores local generated fingerprints but not tracked sourc
     rmSync(root, { recursive: true, force: true });
   }));
 
+test("native compatibility identity is stable across committed generated expectations", () =>
+  withRepositoryGitProvenance(() => {
+    const root = fixture();
+    const runtime = join(root, "packages/jazz-tools/src/runtime");
+    mkdirSync(runtime, { recursive: true });
+    const napiExpectation = join(runtime, "native-artifact-fingerprint-napi.ts");
+    const wasmExpectation = join(runtime, "native-artifact-fingerprint-wasm.ts");
+    writeFileSync(napiExpectation, "// generated baseline NAPI\n");
+    writeFileSync(wasmExpectation, "// generated baseline WASM\n");
+    git(root, ["init", "--quiet"]);
+    git(root, ["config", "user.email", "tests@example.invalid"]);
+    git(root, ["config", "user.name", "Jazz tests"]);
+    git(root, ["add", "."]);
+    git(root, ["commit", "--quiet", "-m", "fixture"]);
+
+    const before = nativeArtifactFingerprint(root, "wasm", "fast");
+    const beforeHead = expectedManifest(root, "wasm", "fast").git.head;
+    writeFileSync(napiExpectation, "// regenerated NAPI\n");
+    writeFileSync(wasmExpectation, "// regenerated WASM\n");
+    git(root, ["add", "."]);
+    git(root, ["commit", "--quiet", "-m", "commit generated expectations"]);
+
+    assert.notEqual(expectedManifest(root, "wasm", "fast").git.head, beforeHead);
+    assert.equal(nativeArtifactFingerprint(root, "wasm", "fast"), before);
+    assert.equal(nativeArtifactFingerprint(root, "wasm", "fast"), before);
+
+    writeFileSync(join(root, "crates/jazz-wasm/src/lib.rs"), "// planted native change\n");
+    assert.notEqual(nativeArtifactFingerprint(root, "wasm", "fast"), before);
+    rmSync(root, { recursive: true, force: true });
+  }));
+
 test("NAPI provenance excludes only the wrapper's ephemeral staged binding", () => {
   const root = fixture();
   writeManifest(root, "napi", "release");

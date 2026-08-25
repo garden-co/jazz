@@ -220,7 +220,7 @@ function activeNapiBindings(root) {
     .map((entry) => join(generation, entry.name));
 }
 
-export function expectedManifest(root, kind, profile, targetOverride, options = {}) {
+function packageInputsFingerprint(root, kind) {
   if (!(kind in inputsFor)) throw new Error(`unknown artifact kind: ${kind}`);
   const trackedInputs = files(root, inputsFor[kind]);
   const inputHash = createHash("sha256");
@@ -230,6 +230,11 @@ export function expectedManifest(root, kind, profile, targetOverride, options = 
       .update(readFileSync(join(root, path)))
       .update("\0");
   }
+  return inputHash.digest("hex");
+}
+
+export function expectedManifest(root, kind, profile, targetOverride, options = {}) {
+  const packageInputs = packageInputsFingerprint(root, kind);
   const cargoLock = join(root, "Cargo.lock");
   const toolchain = join(root, "rust-toolchain.toml");
   const injectedGit =
@@ -272,7 +277,7 @@ export function expectedManifest(root, kind, profile, targetOverride, options = 
         ? "wasm32-unknown-unknown"
         : (toolVersion(root, "rustc", ["-vV"]).match(/^host: (.+)$/m)?.[1] ?? "unknown")),
     features: "default",
-    packageInputs: inputHash.digest("hex"),
+    packageInputs,
     artifacts: artifactHashes(root, kind, options),
   };
 }
@@ -286,7 +291,12 @@ export function expectedManifest(root, kind, profile, targetOverride, options = 
  * post-build circular fingerprint.
  */
 export function nativeArtifactFingerprint(root, kind, profile, targetOverride) {
-  const manifest = expectedManifest(root, kind, profile, targetOverride);
+  // Runtime compatibility is content-addressed by relevant producer inputs,
+  // never by commit identity or provenance receipts. In particular, do not
+  // derive this through `expectedManifest`: its git HEAD/tree fields must
+  // remain useful for local freshness without making the generated expected
+  // fingerprint self-referential when that expectation is committed.
+  const packageInputs = packageInputsFingerprint(root, kind);
   const surface =
     kind === "napi"
       ? ["crates/jazz-napi/index.cjs", "crates/jazz-napi/index.mjs"]
@@ -297,7 +307,7 @@ export function nativeArtifactFingerprint(root, kind, profile, targetOverride) {
     surfaceHash.update(existsSync(join(root, path)) ? readFileSync(join(root, path)) : "missing");
     surfaceHash.update("\0");
   }
-  return sha256(`${manifest.packageInputs}\0${surfaceHash.digest("hex")}`);
+  return sha256(`${packageInputs}\0${surfaceHash.digest("hex")}`);
 }
 
 export const manifestPath = (root, kind) => {
