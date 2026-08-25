@@ -391,6 +391,82 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     unsubscribe();
   });
 
+  it("publishes a synchronous replacement snapshot only after owning its handle", async () => {
+    const client = makeClient();
+    const db = await createDbWithRuntimeSource(
+      {
+        appId: "read-tier-synchronous-replacement",
+        serverUrl: "https://example.test",
+        adminSecret: "test-admin-secret",
+      },
+      new TestRuntimeSource(client),
+    );
+    dbs.push(db);
+    await db.disconnect();
+    const publications: string[][] = [];
+    const unsubscribe = db.subscribeAll(
+      query(),
+      (delta) => publications.push(delta.all.map((row) => row.title)),
+      { tier: ReadTier.RemoteIfPossible },
+    );
+    client.subscribe.mockImplementationOnce((_query, callback) => {
+      callback(added("remote", "synchronous remote"));
+      return 2;
+    });
+
+    await db.reconnect();
+    await vi.waitFor(() => expect(client.subscribe).toHaveBeenCalledTimes(2));
+
+    expect(publications).toEqual([[], ["synchronous remote"]]);
+    expect(client.unsubscribe).toHaveBeenCalledWith(1);
+    unsubscribe();
+  });
+
+  it("does not publish a synchronous replacement callback when subscribe then throws", async () => {
+    const client = makeClient();
+    const db = await createDbWithRuntimeSource(
+      {
+        appId: "read-tier-throwing-replacement",
+        serverUrl: "https://example.test",
+        adminSecret: "test-admin-secret",
+      },
+      new TestRuntimeSource(client),
+    );
+    dbs.push(db);
+    await db.disconnect();
+    const publications: string[][] = [];
+    const unsubscribe = db.subscribeAll(
+      query(),
+      (delta) => publications.push(delta.all.map((row) => row.title)),
+      { tier: ReadTier.RemoteIfPossible },
+    );
+    const localCallback = client.subscriptionCallbacks.get(1)!;
+    const failure = new Error("replacement subscribe failed after callback");
+    client.subscribe.mockImplementationOnce((_query, callback) => {
+      callback(added("remote", "must stay buffered"));
+      throw failure;
+    });
+    const deferredErrors: Array<() => void> = [];
+    const timeout = vi.spyOn(globalThis, "setTimeout").mockImplementation((callback: any) => {
+      deferredErrors.push(callback);
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    });
+
+    try {
+      await db.reconnect();
+      for (let turn = 0; turn < 8; turn++) await Promise.resolve();
+
+      expect(client.subscribe).toHaveBeenCalledTimes(2);
+      expect(deferredErrors).toHaveLength(1);
+      expect(publications).toEqual([[]]);
+      localCallback(added("local", "local resumes"));
+      expect(publications.at(-1)).toEqual(["local resumes"]);
+    } finally {
+      timeout.mockRestore();
+      unsubscribe();
+    }
+  });
+
   it("hands off multiple concurrent subscriptions once across repeated offline cycles", async () => {
     const client = makeClient();
     const db = await createDbWithRuntimeSource(

@@ -145,6 +145,26 @@ describe("JazzClient onAuthFailure wiring", () => {
   });
 });
 
+describe("JazzClient subscription ownership", () => {
+  it("releases a created handle when synchronous callback installation throws", () => {
+    const runtime = makeFakeRuntime();
+    const failure = new Error("executeSubscription failed after callback");
+    runtime.createSubscription.mockReturnValue(41);
+    runtime.executeSubscription.mockImplementation((_handle, onUpdate) => {
+      onUpdate([]);
+      throw failure;
+    });
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const callback = vi.fn();
+
+    expect(() => client.subscribe('{"table":"todos"}', callback)).toThrow(failure);
+
+    expect(callback).toHaveBeenCalledOnce();
+    expect(runtime.unsubscribe).toHaveBeenCalledOnce();
+    expect(runtime.unsubscribe).toHaveBeenCalledWith(41);
+  });
+});
+
 describe("JazzClient.updateAuthToken", () => {
   it("forwards refreshed JWT to the Rust runtime via runtime.updateAuth", () => {
     const runtime = makeFakeRuntime();

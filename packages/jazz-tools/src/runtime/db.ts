@@ -2046,12 +2046,18 @@ export class Db {
       // may synchronously publish its opening snapshot from subscribe(). A
       // callback retained by a retired runtime is rejected by this generation.
       activeSubscription = { id: -1, generation };
+      const openingDeltas: Parameters<SubscriptionManager<T>["handleDelta"]>[0][] = [];
+      let installationComplete = false;
       let id: number;
       try {
         id = client.subscribe(
           wasmQuery,
           (delta) => {
             if (unsubscribed || activeSubscription?.generation !== generation) return;
+            if (!installationComplete) {
+              openingDeltas.push(delta);
+              return;
+            }
             handleDelta(delta);
           },
           subscriptionOptions,
@@ -2061,13 +2067,22 @@ export class Db {
         activeSubscription = previous;
         throw error;
       }
-      const installed = { id, generation };
-      activeSubscription = installed;
+      const subscription = { id, generation };
+      activeSubscription = subscription;
+      installationComplete = true;
       if (unsubscribed) {
         client.unsubscribe(id);
         activeSubscription = null;
+        return null;
       }
-      return installed;
+      try {
+        for (const delta of openingDeltas) handleDelta(delta);
+      } catch (error) {
+        client.unsubscribe(id);
+        activeSubscription = previous;
+        throw error;
+      }
+      return subscription;
     };
     const traceId = this.registerActiveQuerySubscriptionTrace(
       wasmQuery,

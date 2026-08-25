@@ -1574,19 +1574,27 @@ export class JazzClient {
       optionsJson,
     );
 
-    this.runtime.executeSubscription(handle, (...args: unknown[]) => {
-      const deltaJsonOrObject = normalizeSubscriptionCallbackArgs(args);
-      if (deltaJsonOrObject === undefined) {
-        return;
-      }
-      if (deltaJsonOrObject instanceof Error) {
-        throw deltaJsonOrObject;
-      }
+    try {
+      this.runtime.executeSubscription(handle, (...args: unknown[]) => {
+        const deltaJsonOrObject = normalizeSubscriptionCallbackArgs(args);
+        if (deltaJsonOrObject === undefined) {
+          return;
+        }
+        if (deltaJsonOrObject instanceof Error) {
+          throw deltaJsonOrObject;
+        }
 
-      const delta: SubscriptionWireDelta =
-        typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
-      callback(delta);
-    });
+        const delta: SubscriptionWireDelta =
+          typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
+        callback(delta);
+      });
+    } catch (error) {
+      // createSubscription already transferred ownership to this facade. If
+      // callback installation fails synchronously, no caller can own the
+      // handle because subscribe() has not returned it yet.
+      this.runtime.unsubscribe(handle);
+      throw error;
+    }
 
     return handle;
   }
