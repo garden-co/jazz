@@ -2762,7 +2762,19 @@ fn verify_self_signed_runtime_author_core(
     app_id: &str,
     claimed_author: &str,
 ) -> Result<AuthorSubject, String> {
-    jazz::tools::identity::verify_client_runtime_author(token, app_id, claimed_author)
+    // `std::time::SystemTime` panics under wasm32. The verifier's explicit
+    // clock form keeps proof expiry validation intact while using the browser-
+    // safe clock already used by this binding.
+    let now_seconds = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_secs();
+    jazz::tools::identity::verify_client_runtime_author_at(
+        token,
+        app_id,
+        claimed_author,
+        now_seconds,
+    )
 }
 
 fn configure_initial_sync_flush_cadence<S>(
