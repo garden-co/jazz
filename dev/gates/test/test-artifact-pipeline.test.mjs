@@ -526,6 +526,7 @@ test("CI uses the correctness artifact path while package builds keep release WA
     "JAZZ_TEST_ARTIFACT_LOCK_PATH",
     "JAZZ_ARTIFACT_BUILD_LEASE",
     "JAZZ_ARTIFACT_BUILD_LOCK_PATH",
+    "JAZZ_TEST_SEALED_TOOLS_DIST",
   ];
   for (const task of ["jazz-napi#build", "jazz-wasm#build", "jazz-wasm#build:fast"])
     assert.deepEqual(
