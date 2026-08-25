@@ -50,6 +50,10 @@ async function update(client: JazzClient, messageId: string, text: string): Prom
   await client.db.update(app.messages, messageId, { text }).wait({ tier: "edge" });
 }
 
+async function move(client: JazzClient, messageId: string, chat_id: string): Promise<void> {
+  await client.db.update(app.messages, messageId, { chat_id }).wait({ tier: "edge" });
+}
+
 async function remove(client: JazzClient, messageId: string): Promise<void> {
   await client.db.delete(app.messages, messageId).wait({ tier: "edge" });
 }
@@ -65,6 +69,14 @@ describe("auth-betterauth-chat permissions", () => {
       expect(tablePermissions.update?.with_check).toEqual({ type: "False" });
       expect(tablePermissions.delete?.using).toEqual({ type: "False" });
     }
+  });
+
+  it("uses one update predicate for both the old and new message", () => {
+    // Update `using` evaluates the old row and `with_check` evaluates the new
+    // one. They must use the same room/role predicate; independently OR-ing
+    // per-room rules lets a General-message creator switch its chat_id to
+    // Announcements.
+    expect(permissions.messages!.update?.using).toEqual(permissions.messages!.update?.with_check);
   });
 
   it("allows only admins to mutate Announcements", async () => {
@@ -88,6 +100,7 @@ describe("auth-betterauth-chat permissions", () => {
     await expect(update(member, messageId, "member edit")).resolves.toBeUndefined();
     await expect(update(admin, messageId, "admin edit")).rejects.toThrow();
     await expect(remove(admin, messageId)).rejects.toThrow();
+    await expect(move(member, messageId, __ANNOUNCEMENTS_CHAT_ID__)).rejects.toThrow();
     await expect(remove(member, messageId)).resolves.toBeUndefined();
   });
 
