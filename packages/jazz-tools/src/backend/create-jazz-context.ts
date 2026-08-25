@@ -350,7 +350,7 @@ export class JazzContext {
   asBackend(source?: BackendSchemaInput): Db {
     const { client, schema } = this.getClientAndSchema(source);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(client, schema, undefined, undefined, true, true);
+    return this.wrapDb(client, schema, undefined, undefined, true, false);
   }
 
   /**
