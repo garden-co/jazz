@@ -53,6 +53,7 @@ fn load_tolerant_wait_timeout(timeout: Duration) -> Duration {
 /// Per-attempt query timeouts and transient query errors are retried until the
 /// outer deadline is reached.
 #[cfg(feature = "testing")]
+#[allow(deprecated)] // Intentionally exercises legacy DurabilityTier read controls.
 pub async fn wait_for_query<T, F>(
     client: &JazzClient,
     query: Query,
@@ -112,6 +113,7 @@ where
 
 /// Re-runs an identity-bearing query until its ResultKey rows satisfy the matcher.
 #[cfg(feature = "testing")]
+#[allow(deprecated)] // Intentionally exercises legacy DurabilityTier read controls.
 pub async fn wait_for_query_results<T, F>(
     client: &JazzClient,
     query: Query,
