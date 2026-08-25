@@ -24,6 +24,12 @@ interface Entry {
   closing: Promise<void> | null;
   /** True only after creation produced a client and its shutdown was invoked. */
   shutdownStarted: boolean;
+  /**
+   * The shutdown that must remain the barrier when this entry only waits for an
+   * earlier handoff. It is needed if several pending handoffs are abandoned
+   * before the original shutdown settles.
+   */
+  shutdownBarrier: Entry | null;
 }
 
 const registry = new Map<string, Entry>();
@@ -48,11 +54,12 @@ export function acquireClient<T extends RegisteredClient>(
       pendingRelease: null,
       closing: null,
       shutdownStarted: false,
+      shutdownBarrier: previous.shutdownStarted ? previous : previous.shutdownBarrier,
     };
     created.promise.catch(() => {
       if (registry.get(key) === created) {
-        if (!teardownSucceeded && previous.shutdownStarted) {
-          registry.set(key, previous);
+        if (!teardownSucceeded && created.shutdownBarrier) {
+          registry.set(key, created.shutdownBarrier);
         } else {
           registry.delete(key);
         }
@@ -69,6 +76,7 @@ export function acquireClient<T extends RegisteredClient>(
       pendingRelease: null,
       closing: null,
       shutdownStarted: false,
+      shutdownBarrier: null,
     };
     // Evict on failure so the next acquire re-creates instead of re-rejecting.
     created.promise.catch(() => {

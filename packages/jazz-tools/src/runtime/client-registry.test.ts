@@ -124,6 +124,77 @@ describe("client-registry", () => {
     expect(create).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps the original failed shutdown barrier through chained abandoned handoffs", async () => {
+    vi.useFakeTimers();
+    let failShutdown!: (error: Error) => void;
+    const shutdownFinished = new Promise<void>((_, reject) => {
+      failShutdown = reject;
+    });
+    const shutdownError = new Error("shutdown failed");
+    const first = { shutdown: vi.fn(() => shutdownFinished) };
+    const recovered = fakeClient();
+    const create = vi
+      .fn<() => Promise<{ shutdown(): Promise<void> }>>()
+      .mockResolvedValueOnce(first)
+      .mockResolvedValueOnce(recovered);
+    const firstHolder = {};
+    const handoffHolder = {};
+    await acquireClient("persistent:chain", create, firstHolder);
+
+    const firstRelease = releaseClient("persistent:chain", firstHolder);
+    await vi.runOnlyPendingTimersAsync();
+    expect(first.shutdown).toHaveBeenCalledOnce();
+
+    const abandonedHandoff = acquireClient("persistent:chain", create, handoffHolder);
+    const handoffRelease = releaseClient("persistent:chain", handoffHolder);
+    await vi.runOnlyPendingTimersAsync();
+    const laterHandoff = acquireClient("persistent:chain", create, {});
+
+    failShutdown(shutdownError);
+    await expect(firstRelease).resolves.toBeUndefined();
+    await expect(handoffRelease).resolves.toBeUndefined();
+    await expect(abandonedHandoff).rejects.toBe(shutdownError);
+    await expect(laterHandoff).rejects.toBe(shutdownError);
+
+    await expect(acquireClient("persistent:chain", create, {})).rejects.toBe(shutdownError);
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it("cleans up an abandoned handoff after its predecessor shuts down", async () => {
+    vi.useFakeTimers();
+    let finishShutdown!: () => void;
+    const shutdownFinished = new Promise<void>((resolve) => {
+      finishShutdown = resolve;
+    });
+    const first = { shutdown: vi.fn(() => shutdownFinished) };
+    const replacement = fakeClient();
+    const create = vi
+      .fn<() => Promise<{ shutdown(): Promise<void> }>>()
+      .mockResolvedValueOnce(first)
+      .mockResolvedValueOnce(replacement)
+      .mockResolvedValueOnce(fakeClient());
+    const firstHolder = {};
+    const handoffHolder = {};
+    await acquireClient("persistent:successful-chain", create, firstHolder);
+
+    const firstRelease = releaseClient("persistent:successful-chain", firstHolder);
+    await vi.runOnlyPendingTimersAsync();
+    expect(first.shutdown).toHaveBeenCalledOnce();
+
+    const abandonedHandoff = acquireClient("persistent:successful-chain", create, handoffHolder);
+    const handoffRelease = releaseClient("persistent:successful-chain", handoffHolder);
+    await vi.runOnlyPendingTimersAsync();
+
+    finishShutdown();
+    await expect(abandonedHandoff).resolves.toBe(replacement);
+    await expect(firstRelease).resolves.toBeUndefined();
+    await expect(handoffRelease).resolves.toBeUndefined();
+    expect(replacement.shutdown).toHaveBeenCalledOnce();
+
+    await expect(acquireClient("persistent:successful-chain", create, {})).resolves.toBeTruthy();
+    expect(create).toHaveBeenCalledTimes(3);
+  });
+
   it("retries after a pending creation fails during release and re-acquire", async () => {
     vi.useFakeTimers();
     let failCreate!: (error: Error) => void;
