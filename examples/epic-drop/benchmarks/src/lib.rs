@@ -5,11 +5,11 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 
-use jazz::db::{Db, DbConfig, DbIdentity, block_on};
+use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, block_on};
 use jazz::groove::large_values::LargeValueKind;
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -159,7 +159,9 @@ fn open_db() -> (BenchDb, TableSchema) {
         MemoryStorage::new(&family_refs),
         DbIdentity {
             node: NodeUuid::from_bytes([0xe1; 16]),
-            author: AuthorId::SYSTEM,
+            // Native fixtures use an explicit canonical system subject rather
+            // than the retired raw author-id alias.
+            author: AuthorSubject::SYSTEM,
         },
     )))
     .expect("open EpicDrop benchmark database");
@@ -167,9 +169,8 @@ fn open_db() -> (BenchDb, TableSchema) {
 }
 
 fn insert_folder(db: &BenchDb) {
-    let write = block_on(db.insert_with_id(
+    let write = block_on(db.insert(
         "folders",
-        folder_id(),
         BTreeMap::from([
             ("name".to_owned(), Value::String("Demos".to_owned())),
             (
@@ -177,6 +178,10 @@ fn insert_folder(db: &BenchDb) {
                 Value::String("demo-owner".to_owned()),
             ),
         ]),
+        InsertOptions {
+            row_id: Some(folder_id()),
+            ..Default::default()
+        },
     ))
     .expect("insert benchmark folder");
     block_on(write.wait(DurabilityTier::Local)).expect("folder reaches local durability");
