@@ -227,10 +227,19 @@ impl Database {
             .chain(accepted_roots.keys())
             .cloned()
             .collect::<BTreeSet<_>>();
-        // Validate and encode the complete lifecycle transition before the
-        // runtime receives a publication id or makes any resident mutation.
-        // A corrupt metadata record can therefore reject this batch without
-        // leaving an unfillable hole in ordered persistence.
+        // Acquire before reading lifecycle metadata. A prior pipelined
+        // publication keeps its owned guard on the database, so later batches
+        // join the same serialized resident sequence without relocking.
+        let lifecycle_guard =
+            if roots.is_empty() || self.large_value_publication_lifecycle_guard.is_some() {
+                None
+            } else {
+                Some(self.large_value_lifecycle.clone().lock_owned().await)
+            };
+        // While serialized, validate and encode the complete transition before
+        // the runtime receives a publication id or makes a resident mutation.
+        // After the tick returns, registration below contains no cancellable
+        // await, and this guard remains owned through the durable frontier.
         if !roots.is_empty() {
             let mut node_transitions = Vec::<(crate::large_values::NodeRef, i8)>::new();
             let mut lifecycle_operations = Vec::new();
@@ -331,17 +340,6 @@ impl Database {
                 return Err(Error::IvmRuntime(error));
             }
         };
-        // Chunk resolution during the tick can invoke the install observer,
-        // which takes this mutex itself. Acquire only after ticking, before
-        // this publication becomes externally resident, then keep the guard
-        // until every resident lifecycle transition reaches the durable
-        // frontier. Later pipelined batches join an already-held guard.
-        let lifecycle_guard =
-            if roots.is_empty() || self.large_value_publication_lifecycle_guard.is_some() {
-                None
-            } else {
-                Some(self.large_value_lifecycle.clone().lock_owned().await)
-            };
         let ivm_tick_time = tick_start.elapsed();
         let staged_operations = std::mem::take(&mut *staged_state.borrow_mut()).into_operations();
         let operations = staged_operations

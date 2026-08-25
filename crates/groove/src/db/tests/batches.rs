@@ -1495,6 +1495,176 @@ async fn corrupt_large_value_root_does_not_leave_a_publication_hole() {
     database.finish_persistence(persisted).unwrap();
 }
 
+/// Verifies cancelling Alice while she waits for lifecycle serialization does
+/// not reserve a publication, so Bob's following batch persists immediately.
+///
+/// holder ──lock──► alice apply ──wait/cancel──✗
+/// holder ──unlock────────────────► bob apply/persist
+#[futures_test::test]
+async fn cancelled_lifecycle_wait_does_not_leave_a_publication_hole() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(Rc::new(crate::chunks::MemoryChunkStorage::new()));
+    let staged = database
+        .prepare_and_stage_large_value(
+            crate::large_values::LargeValueKind::Bytes,
+            &vec![4; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
+        )
+        .await
+        .unwrap();
+    let mut insert = database.open_batch();
+    insert.insert(
+        "objects",
+        vec![Value::U64(1), Value::Large(staged.value_ref)],
+    );
+    insert.accept_large_value(staged.id);
+    database.commit_batch(insert).await.unwrap();
+
+    let blocker = database.large_value_lifecycle.clone().lock_owned().await;
+    let next_publication = database.next_publication_id;
+    let mut delete = database.open_batch();
+    delete.delete("objects", PrimaryKeyValue::U64(1));
+    let mut cancelled = Box::pin(database.apply_batch(delete));
+    assert!(futures::poll!(cancelled.as_mut()).is_pending());
+    drop(cancelled);
+    assert_eq!(database.next_publication_id, next_publication);
+    drop(blocker);
+
+    let mut valid = database.open_batch();
+    valid.insert("objects", vec![Value::U64(2), Value::Bytes(vec![2])]);
+    let applied = database.apply_batch(valid).await.unwrap();
+    let mut persistence = Box::pin(applied.persist());
+    let persisted = match futures::poll!(persistence.as_mut()) {
+        Poll::Ready(persisted) => persisted,
+        Poll::Pending => panic!("valid persistence waited on a cancelled publication"),
+    };
+    database.finish_persistence(persisted).unwrap();
+}
+
+/// Verifies Bob's already-queued resolver installs child metadata before
+/// Alice computes her last-root deletion, so Alice observes and retracts the
+/// child reference instead of persisting a stale transition snapshot.
+///
+/// holder ──lock──► bob observer queue ──► alice delete queue
+/// holder ──unlock─► bob install ─────────► alice compute/persist
+#[futures_test::test]
+async fn queued_resolver_before_last_root_delete_does_not_leak_child_reference() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(chunks.clone());
+    let prepared = crate::large_values::repeated_child_dag_fixture(1, 4);
+    let root_chunk = prepared
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref == prepared.value_ref.root)
+        .unwrap()
+        .clone();
+    let child = prepared
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref != prepared.value_ref.root)
+        .unwrap()
+        .node_ref
+        .clone();
+    let staged = database
+        .stage_large_value_preparation(prepared.clone())
+        .await
+        .unwrap();
+    let mut insert = database.open_batch();
+    insert.insert(
+        "objects",
+        vec![Value::U64(1), Value::Large(staged.value_ref.clone())],
+    );
+    insert.accept_large_value(staged.id);
+    database.commit_batch(insert).await.unwrap();
+
+    database
+        .storage
+        .write_many(vec![
+            OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: large_value_node_key(&prepared.value_ref.root).unwrap(),
+                value: postcard::to_allocvec(&LargeValueNodeReferences {
+                    references: 1,
+                    upload_references: 0,
+                    children: Vec::new(),
+                })
+                .unwrap(),
+            },
+            OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: large_value_node_key(&child).unwrap(),
+                value: postcard::to_allocvec(&LargeValueNodeReferences::default()).unwrap(),
+            },
+        ])
+        .await
+        .unwrap();
+    crate::chunks::ChunkStorage::delete(
+        &*chunks,
+        root_chunk.node_ref.locator,
+        root_chunk.node_ref.object_hash,
+    )
+    .await
+    .unwrap();
+    database.set_missing_chunk_resolver(Rc::new(FixtureChunkResolver {
+        chunks: Rc::new(std::collections::BTreeMap::from([(
+            crate::chunks::ChunkRequest {
+                object_hash: root_chunk.node_ref.object_hash.0,
+                locator: root_chunk.node_ref.locator,
+            },
+            Bytes::from(root_chunk.encoded.clone()),
+        )])),
+    }));
+
+    let blocker = database.large_value_lifecycle.clone().lock_owned().await;
+    let provider = database.owned_chunk_provider();
+    let mut installation = Box::pin(provider.get(crate::chunks::ChunkRequest {
+        object_hash: root_chunk.node_ref.object_hash.0,
+        locator: root_chunk.node_ref.locator,
+    }));
+    assert!(futures::poll!(installation.as_mut()).is_pending());
+
+    let mut delete = database.open_batch();
+    delete.delete("objects", PrimaryKeyValue::U64(1));
+    let mut deletion = Box::pin(database.apply_batch(delete));
+    assert!(futures::poll!(deletion.as_mut()).is_pending());
+    drop(blocker);
+
+    installation.await.unwrap();
+    let applied = deletion.await.unwrap();
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted).unwrap();
+
+    let encoded = database
+        .storage
+        .get(
+            LARGE_VALUE_METADATA_CF.to_owned(),
+            large_value_node_key(&child).unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let metadata: LargeValueNodeReferences = postcard::from_bytes(&encoded).unwrap();
+    assert_eq!(metadata.references, 0);
+}
+
 #[futures_test::test]
 async fn root_first_upload_requests_only_authenticated_missing_frontier() {
     let schema = DatabaseSchema::new([TableSchema::new(
