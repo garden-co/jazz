@@ -469,6 +469,18 @@ impl Database {
         Ok(pending_writes)
     }
 
+    #[cfg(any(test, feature = "test"))]
+    #[allow(dead_code)] // Used by the lib-test batch overlay helper, not non-test builds.
+    pub(super) fn pending_writes_from_operations(
+        &self,
+        operations: &[BatchOperation],
+    ) -> Result<Vec<PendingTableWrite>, Error> {
+        operations
+            .iter()
+            .map(|operation| self.pending_write_from_operation(operation))
+            .collect()
+    }
+
     pub(super) fn ensure_batch_storage_txn(&self, batch: &DatabaseBatch) -> Result<(), Error> {
         let mut txn_operations = batch.txn_operations.borrow_mut();
         while batch.txn_indexed_operations.get() < batch.operations.len() {
