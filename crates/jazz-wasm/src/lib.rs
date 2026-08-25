@@ -3713,8 +3713,7 @@ mod dynamic_schema_view_tests {
         // subscriber transport intentionally omits authorization-scope
         // extensions, whose feature-gated enum layout must not leak into this
         // auxiliary frame.
-        transport.features &=
-            !(jazz::wire::FEATURE_PAYLOAD_LZ4 | jazz::wire::FEATURE_PAYLOAD_ZSTD);
+        transport.features &= !(jazz::wire::FEATURE_PAYLOAD_LZ4 | jazz::wire::FEATURE_PAYLOAD_ZSTD);
         let features = transport.features;
         let request = |request_id| jazz::protocol::ChunkRequestEntry {
             request_id,
