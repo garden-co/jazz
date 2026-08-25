@@ -610,14 +610,31 @@ pub enum ChunkError {
     Retryable { retry_after_ms: u32 },
     #[error("chunk retrieval failed: {0}")]
     Backend(String),
-    /// A publication-scoped install completed after its owning snapshot and
-    /// could not durably record the resulting lifecycle metadata.
-    #[error("chunk publication metadata durability failed: {0}")]
-    PublicationMetadataDurability(String),
     #[error("chunk bytes do not match the requested object hash")]
     Integrity,
     #[error("chunk request re-entered while its backing request was being polled")]
     Reentrant,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct PublicationInstallFailures {
+    failures: Rc<RefCell<BTreeMap<ChunkRequest, ChunkError>>>,
+}
+
+impl PublicationInstallFailures {
+    pub(crate) fn record(&self, node_ref: crate::large_values::NodeRef, error: ChunkError) {
+        self.failures.borrow_mut().insert(
+            ChunkRequest {
+                object_hash: node_ref.object_hash.0,
+                locator: node_ref.locator,
+            },
+            error,
+        );
+    }
+
+    fn take(&self, request: &ChunkRequest) -> Option<ChunkError> {
+        self.failures.borrow_mut().remove(request)
+    }
 }
 
 impl From<ChunkStorageError> for ChunkError {
@@ -663,6 +680,7 @@ pub struct OwnedChunkProvider {
     activity: Rc<RefCell<ChunkActivityState>>,
     in_flight: Rc<RefCell<InFlightChunks>>,
     install_observer: Option<Rc<dyn ChunkInstallObserver>>,
+    install_failures: Option<PublicationInstallFailures>,
 }
 
 #[derive(Default, Debug)]
@@ -744,8 +762,8 @@ struct InFlightChunk {
     /// Temporarily `None` only while a consumer is polling it outside the
     /// registry borrow. A synchronous reentrant request for this exact key is
     /// a request cycle and fails deterministically.
-    future: Option<ChunkFuture<'static, Result<Bytes, ChunkError>>>,
-    result: Option<Result<Bytes, ChunkError>>,
+    future: Option<ChunkFuture<'static, Result<Bytes, OwnedChunkError>>>,
+    result: Option<Result<Bytes, OwnedChunkError>>,
     /// Each consumer has at most one replaceable registered waker. Futures may
     /// legally be re-polled with a different waker, so retaining a bare list
     /// would keep every old task allocation alive until completion.
@@ -771,6 +789,33 @@ struct CoalescedChunkGet {
     in_flight: Rc<RefCell<InFlightChunks>>,
     leases: Rc<RefCell<ChunkLeaseStats>>,
     done: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct OwnedChunkError {
+    error: ChunkError,
+    publication_metadata_durability: bool,
+}
+
+impl OwnedChunkError {
+    pub(crate) fn into_parts(self) -> (ChunkError, bool) {
+        (self.error, self.publication_metadata_durability)
+    }
+}
+
+impl From<ChunkError> for OwnedChunkError {
+    fn from(error: ChunkError) -> Self {
+        Self {
+            error,
+            publication_metadata_durability: false,
+        }
+    }
+}
+
+impl From<OwnedChunkError> for ChunkError {
+    fn from(error: OwnedChunkError) -> Self {
+        error.error
+    }
 }
 
 impl CoalescedChunkGet {
@@ -808,12 +853,12 @@ impl CoalescedChunkGet {
 }
 
 impl Future for CoalescedChunkGet {
-    type Output = Result<ChunkLease, ChunkError>;
+    type Output = Result<ChunkLease, OwnedChunkError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         enum Next {
-            Complete(Result<Bytes, ChunkError>),
-            Poll(ChunkFuture<'static, Result<Bytes, ChunkError>>),
+            Complete(Result<Bytes, OwnedChunkError>),
+            Poll(ChunkFuture<'static, Result<Bytes, OwnedChunkError>>),
             Reentrant,
         }
 
@@ -833,7 +878,7 @@ impl Future for CoalescedChunkGet {
         let mut wake = Vec::new();
         let result = match next {
             Next::Complete(result) => Some(result),
-            Next::Reentrant => Some(Err(ChunkError::Reentrant)),
+            Next::Reentrant => Some(Err(ChunkError::Reentrant.into())),
             Next::Poll(mut future) => match future.as_mut().poll(cx) {
                 Poll::Pending => {
                     let mut in_flight = self.in_flight.borrow_mut();
@@ -978,10 +1023,15 @@ impl OwnedChunkProvider {
             activity: Rc::new(RefCell::new(ChunkActivityState::default())),
             in_flight: Rc::new(RefCell::new(InFlightChunks::default())),
             install_observer: None,
+            install_failures: None,
         }
     }
 
-    pub(crate) fn with_install_observer(&self, observer: Rc<dyn ChunkInstallObserver>) -> Self {
+    pub(crate) fn with_install_observer(
+        &self,
+        observer: Rc<dyn ChunkInstallObserver>,
+        failures: PublicationInstallFailures,
+    ) -> Self {
         Self {
             provider: Rc::clone(&self.provider),
             cache: Rc::clone(&self.cache),
@@ -989,6 +1039,7 @@ impl OwnedChunkProvider {
             activity: Rc::clone(&self.activity),
             in_flight: Rc::new(RefCell::new(InFlightChunks::default())),
             install_observer: Some(observer),
+            install_failures: Some(failures),
         }
     }
 
@@ -1027,12 +1078,21 @@ impl OwnedChunkProvider {
         &self,
         request: ChunkRequest,
     ) -> ChunkFuture<'static, Result<ChunkLease, ChunkError>> {
+        let future = self.get_tracked(request);
+        Box::pin(async move { future.await.map_err(Into::into) })
+    }
+
+    pub(crate) fn get_tracked(
+        &self,
+        request: ChunkRequest,
+    ) -> ChunkFuture<'static, Result<ChunkLease, OwnedChunkError>> {
         let provider = Rc::clone(&self.provider);
         let cache = Rc::clone(&self.cache);
         let leases = Rc::clone(&self.leases);
         let activity = Rc::clone(&self.activity);
         let in_flight = Rc::clone(&self.in_flight);
         let install_observer = self.install_observer.clone();
+        let install_failures = self.install_failures.clone();
         Box::pin(async move {
             // Admission must precede even a verified-cache hit. A reclamation
             // pass may start after the last lease is dropped, and every new
@@ -1068,6 +1128,7 @@ impl OwnedChunkProvider {
                                 cache,
                                 request.clone(),
                                 install_observer,
+                                install_failures,
                             )),
                             result: None,
                             waiters: Vec::new(),
@@ -1095,19 +1156,41 @@ fn load_and_verify_chunk(
     cache: Rc<RefCell<VerifiedChunkCache>>,
     request: ChunkRequest,
     install_observer: Option<Rc<dyn ChunkInstallObserver>>,
-) -> ChunkFuture<'static, Result<Bytes, ChunkError>> {
+    install_failures: Option<PublicationInstallFailures>,
+) -> ChunkFuture<'static, Result<Bytes, OwnedChunkError>> {
     Box::pin(async move {
         let bytes = if let Some(observer) = install_observer {
-            provider
+            let result = provider
                 .get_with_install_observer(request.clone(), observer)
-                .await?
+                .await;
+            if let Some(error) = install_failures
+                .as_ref()
+                .and_then(|failures| failures.take(&request))
+            {
+                return Err(OwnedChunkError {
+                    error,
+                    publication_metadata_durability: true,
+                });
+            }
+            match result {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    return Err(OwnedChunkError {
+                        error,
+                        publication_metadata_durability: false,
+                    });
+                }
+            }
         } else {
-            provider.get(request.clone()).await?
+            provider
+                .get(request.clone())
+                .await
+                .map_err(OwnedChunkError::from)?
         };
         if bytes.len() > crate::large_values::MAX_ENCODED_NODE_BYTES
             || crate::large_values::object_hash(&bytes).0 != request.object_hash
         {
-            return Err(ChunkError::Integrity);
+            return Err(ChunkError::Integrity.into());
         }
         let mut cache = cache.borrow_mut();
         let length = bytes.len();

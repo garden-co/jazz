@@ -71,6 +71,27 @@ impl crate::chunks::MissingChunkResolver for DeferredFixtureChunkResolver {
 }
 
 #[derive(Clone)]
+struct DeferredErrorChunkProvider {
+    ready: Rc<Cell<bool>>,
+    message: String,
+}
+
+impl crate::chunks::ChunkProvider for DeferredErrorChunkProvider {
+    fn get(
+        &self,
+        _request: crate::chunks::ChunkRequest,
+    ) -> crate::chunks::ChunkFuture<'_, Result<Bytes, crate::chunks::ChunkError>> {
+        let ready = Rc::clone(&self.ready);
+        let message = self.message.clone();
+        Box::pin(async move {
+            std::future::poll_fn(|_| ready.get().then_some(()).map_or(Poll::Pending, Poll::Ready))
+                .await;
+            Err(crate::chunks::ChunkError::Backend(message))
+        })
+    }
+}
+
+#[derive(Clone)]
 struct CrashAfterChunkPut {
     storage: Rc<crate::chunks::MemoryChunkStorage>,
     fail_after_successes: Cell<Option<usize>>,
@@ -2200,7 +2221,7 @@ async fn late_publication_metadata_write_failure_is_fatal_and_observable() {
     assert!(matches!(
         error,
         Error::IvmRuntime(IvmRuntimeError::Chunk(
-            crate::chunks::ChunkError::PublicationMetadataDurability(ref message)
+            crate::chunks::ChunkError::Backend(ref message)
         )) if message.contains("injected WriteMany failure")
     ));
     assert!(database.poisoned);
@@ -2212,13 +2233,78 @@ async fn late_publication_metadata_write_failure_is_fatal_and_observable() {
     assert!(matches!(
         error.source_error(),
         Some(IvmRuntimeError::Chunk(
-            crate::chunks::ChunkError::PublicationMetadataDurability(message)
+            crate::chunks::ChunkError::Backend(message)
         )) if message.contains("injected WriteMany failure")
     ));
     assert!(matches!(
         database.flush().await,
         Err(Error::DatabasePoisoned)
     ));
+}
+
+/// A host provider can return the same public backend error text as a late
+/// metadata write, but it cannot claim the runtime's private install-failure
+/// provenance. The request remains query-scoped without poisoning the database.
+#[futures_test::test]
+async fn external_chunk_backend_error_cannot_forge_publication_durability_failure() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(Rc::new(crate::chunks::MemoryChunkStorage::new()));
+    let staged = database
+        .prepare_and_stage_large_value(
+            crate::large_values::LargeValueKind::Bytes,
+            &vec![9; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
+        )
+        .await
+        .unwrap();
+    let provider_ready = Rc::new(Cell::new(false));
+    let forged_message = "test storage error: injected WriteMany failure";
+    database.set_chunk_provider(Rc::new(DeferredErrorChunkProvider {
+        ready: Rc::clone(&provider_ready),
+        message: forged_message.to_owned(),
+    }));
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("objects"))
+        .await
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut first = database.open_batch();
+    first.insert("objects", vec![Value::U64(1), Value::Bytes(vec![1])]);
+    let first = database.apply_batch(first).await.unwrap();
+    assert_eq!(
+        subscription
+            .try_recv_with_publication()
+            .unwrap()
+            .publication,
+        Some(first.publication())
+    );
+    database.finish_persistence(first.persist().await).unwrap();
+
+    let mut second = database.open_batch();
+    second.insert(
+        "objects",
+        vec![Value::U64(2), Value::Large(staged.value_ref)],
+    );
+    second.accept_large_value(staged.id);
+    let second = database.apply_batch(second).await.unwrap();
+    assert!(subscription.try_recv().is_err());
+    database.finish_persistence(second.persist().await).unwrap();
+
+    provider_ready.set(true);
+    database.flush().await.unwrap();
+    assert!(!database.poisoned);
+    let waker = futures::task::noop_waker();
+    let mut context = std::task::Context::from_waker(&waker);
+    assert!(subscription.poll_next_event(&mut context).is_pending());
 }
 
 #[futures_test::test]

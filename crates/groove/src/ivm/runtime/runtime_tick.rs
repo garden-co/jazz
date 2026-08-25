@@ -7,7 +7,9 @@ use std::rc::Rc;
 use std::sync::Mutex;
 use std::task::{Context, Poll};
 
-use super::evaluation_session::{EvaluationInputs, EvaluationRequestKey, EvaluationRequests};
+use super::evaluation_session::{
+    EvaluationInputs, EvaluationRequestFailure, EvaluationRequestKey, EvaluationRequests,
+};
 use super::*;
 use crate::storage::OwnedStorage;
 
@@ -404,12 +406,9 @@ impl EvaluationWorkQueue {
     fn failure_for_request(
         &self,
         request: &EvaluationRequestKey,
-        error: IvmRuntimeError,
+        failure: EvaluationRequestFailure,
     ) -> EvaluationFailure {
-        let kind = if matches!(
-            &error,
-            IvmRuntimeError::Chunk(crate::chunks::ChunkError::PublicationMetadataDurability(_))
-        ) {
+        let kind = if failure.publication_metadata_durability {
             EvaluationFailureKind::Fatal
         } else {
             EvaluationFailureKind::Scoped
@@ -423,7 +422,7 @@ impl EvaluationWorkQueue {
                     .flatten()
                     .copied(),
             ),
-            error: Arc::new(error),
+            error: Arc::new(failure.error),
         }
     }
 
@@ -1017,7 +1016,7 @@ impl<'a> EvaluationSession<'a> {
         self.requests.poll(cx);
         let ready = match self.requests.drain_ready() {
             Ok(ready) => ready,
-            Err(error) => return Poll::Ready(Err(error.1)),
+            Err(error) => return Poll::Ready(Err(error.1.error)),
         };
         self.work_queue.requests_ready(ready.keys().cloned());
         self.evaluation_inputs.install(ready);
@@ -1349,15 +1348,20 @@ impl IvmRuntime {
         table_deltas: Vec<TableDelta>,
         storage: OwnedStorage<'static>,
         defer_notifications_until_durable: bool,
-        install_observer: Option<Rc<dyn crate::chunks::ChunkInstallObserver>>,
+        publication_install: Option<(
+            Rc<dyn crate::chunks::ChunkInstallObserver>,
+            crate::chunks::PublicationInstallFailures,
+        )>,
     ) -> Result<ResidentTick, IvmRuntimeError> {
         let publication = PendingResidentPublication {
             publication: Rc::new(Cell::new(None)),
             notifications: Rc::new(RefCell::new(Vec::new())),
             completed: Rc::new(Cell::new(false)),
             defer_notifications_until_durable,
-            chunk_provider: install_observer
-                .map(|observer| self.chunk_provider.with_install_observer(observer)),
+            chunk_provider: publication_install.map(|(observer, failures)| {
+                self.chunk_provider
+                    .with_install_observer(observer, failures)
+            }),
         };
         let temporal_blockers = {
             let pending = self.pending_incremental.0.borrow();
@@ -1589,14 +1593,12 @@ impl IvmRuntime {
                         self.unsubscribe(hydration.subscription_id);
                     }
                     if failure.kind == EvaluationFailureKind::Fatal {
-                        if let IvmRuntimeError::Chunk(
-                            error @ crate::chunks::ChunkError::PublicationMetadataDurability(_),
-                        ) = failure.error.as_ref()
-                        {
-                            self.fail_all_subscriptions(Arc::new(IvmRuntimeError::Chunk(
-                                error.clone(),
-                            )));
-                        }
+                        let IvmRuntimeError::Chunk(error) = failure.error.as_ref() else {
+                            unreachable!("trusted install failures originate from chunk requests")
+                        };
+                        self.fail_all_subscriptions(Arc::new(IvmRuntimeError::Chunk(
+                            error.clone(),
+                        )));
                         state.order = retained_order;
                         *slot.borrow_mut() = state;
                         return Poll::Ready(Err(failure.into_error()));

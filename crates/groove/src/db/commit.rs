@@ -240,6 +240,7 @@ impl Database {
             Rc::clone(&staged_state),
         ));
         let resident_install_durable = Rc::new(Cell::new(false));
+        let resident_install_failures = crate::chunks::PublicationInstallFailures::default();
         let resident_install_observer = Rc::new(MetadataChunkInstallObserver {
             storage: Rc::downgrade(&self.storage),
             lifecycle: std::sync::Arc::downgrade(&self.large_value_lifecycle),
@@ -248,6 +249,7 @@ impl Database {
                 staged: Rc::clone(&staged_state),
                 lifecycle_held: Rc::clone(&self.large_value_lifecycle_held),
                 durable: Rc::clone(&resident_install_durable),
+                install_failures: resident_install_failures.clone(),
             }),
         }) as Rc<dyn crate::chunks::ChunkInstallObserver>;
         let tick_start = Instant::now();
@@ -257,7 +259,7 @@ impl Database {
                 table_deltas,
                 OwnedStorage::new(Rc::clone(&storage)),
                 defer_notifications_until_durable,
-                Some(resident_install_observer),
+                Some((resident_install_observer, resident_install_failures)),
             )
             .await
         {

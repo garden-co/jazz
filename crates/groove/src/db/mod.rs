@@ -238,6 +238,7 @@ struct ResidentLifecycleInstall {
     /// Before durability, installation metadata belongs in the publication
     /// snapshot; afterwards it is a serialized follow-on write.
     durable: Rc<Cell<bool>>,
+    install_failures: crate::chunks::PublicationInstallFailures,
 }
 
 impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
@@ -348,9 +349,14 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
             }
             if let Some(install) = resident_install {
                 if install.durable.get() {
-                    storage.write_many(operations).await.map_err(|error| {
-                        crate::chunks::ChunkError::PublicationMetadataDurability(error.to_string())
-                    })
+                    match storage.write_many(operations).await {
+                        Ok(()) => Ok(()),
+                        Err(error) => {
+                            let error = crate::chunks::ChunkError::Backend(error.to_string());
+                            install.install_failures.record(node_ref, error.clone());
+                            Err(error)
+                        }
+                    }
                 } else {
                     install.staged.borrow_mut().extend(operations);
                     Ok(())
