@@ -210,6 +210,24 @@ pub enum StorageDeltaKind {
     /// RocksDB: separate database handles/processes may race, but RocksDB
     /// serializes merge operands for one key while materializing the winner.
     SetIfAbsentV1,
+    /// Remove a key only when its current value is byte-for-byte equal to the
+    /// payload. This is the storage-level compare-and-delete primitive used
+    /// when reclaiming immutable large-value chunk locators.
+    DeleteIfValueMatchesV1,
+}
+
+// RocksDB merge operators cannot physically remove a key. They materialize
+// this reserved value instead, and the Rocks adapter exposes it as absence.
+// Non-merge backends delete the key outright. Chunk values always contain a
+// 32-byte content hash, so they cannot equal this short internal marker.
+const STORAGE_DELTA_TOMBSTONE_V1: &[u8] = b"\0groove-storage-delta-tombstone-v1";
+
+pub fn storage_delta_tombstone_value() -> Vec<u8> {
+    STORAGE_DELTA_TOMBSTONE_V1.to_vec()
+}
+
+pub fn is_storage_delta_tombstone(value: &[u8]) -> bool {
+    value == STORAGE_DELTA_TOMBSTONE_V1
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -240,6 +258,15 @@ impl StorageDelta {
         Self {
             kind: StorageDeltaKind::SetIfAbsentV1,
             payload: value,
+        }
+    }
+
+    /// Atomically remove a key only when its current value still matches
+    /// `expected`. A missing or different value is left untouched.
+    pub fn delete_if_value_matches(expected: Vec<u8>) -> Self {
+        Self {
+            kind: StorageDeltaKind::DeleteIfValueMatchesV1,
+            payload: expected,
         }
     }
 
@@ -287,23 +314,41 @@ pub fn compact_storage_delta_operand(
         // representation: applying it to an absent base recreates the winner,
         // while applying it to a present base keeps that older value.
         StorageDeltaKind::SetIfAbsentV1 => Ok(template_operand.to_vec()),
+        // A compare-and-delete must remain an individual merge operand: its
+        // effect depends on the durable value that a later full merge sees.
+        StorageDeltaKind::DeleteIfValueMatchesV1 => Ok(template_operand.to_vec()),
     }
+}
+
+/// Whether an operand's transition depends on the eventual durable base.
+/// RocksDB must defer these operands to a full merge rather than compacting
+/// them without that base.
+pub fn storage_delta_requires_full_merge(encoded_delta: &[u8]) -> Result<bool, Error> {
+    Ok(matches!(
+        StorageDelta::decode(encoded_delta)?.kind,
+        StorageDeltaKind::DeleteIfValueMatchesV1
+    ))
 }
 
 pub fn apply_storage_delta(
     existing: Option<&[u8]>,
     encoded_delta: &[u8],
-) -> Result<Vec<u8>, Error> {
+) -> Result<Option<Vec<u8>>, Error> {
     let delta = StorageDelta::decode(encoded_delta)?;
+    let existing = existing.filter(|value| !is_storage_delta_tombstone(value));
     match delta.kind {
         StorageDeltaKind::CurrentWinnerV1 => {
             let candidate: CurrentWinnerDelta = postcard::from_bytes(&delta.payload)
                 .map_err(|error| Error::InvalidStorageDelta(error.to_string()))?;
-            apply_current_winner_delta(existing, &candidate)
+            apply_current_winner_delta(existing, &candidate).map(Some)
         }
         StorageDeltaKind::SetIfAbsentV1 => {
-            Ok(existing.map(<[u8]>::to_vec).unwrap_or(delta.payload))
+            Ok(Some(existing.map(<[u8]>::to_vec).unwrap_or(delta.payload)))
         }
+        StorageDeltaKind::DeleteIfValueMatchesV1 => Ok((existing
+            != Some(delta.payload.as_slice()))
+        .then(|| existing.map(<[u8]>::to_vec))
+        .flatten()),
     }
 }
 
@@ -1572,7 +1617,7 @@ fn overlay_point_value(
             OwnedWriteOperation::Set { value: set, .. } => value = Some(set.clone()),
             OwnedWriteOperation::Delete { .. } => value = None,
             OwnedWriteOperation::Delta { delta, .. } => {
-                value = Some(apply_storage_delta(value.as_deref(), &delta.encode()?)?);
+                value = apply_storage_delta(value.as_deref(), &delta.encode()?)?;
             }
         }
     }
@@ -2125,6 +2170,55 @@ pub(crate) mod conformance {
                 .unwrap(),
             Some(child)
         );
+    }
+
+    pub(crate) async fn conditional_delete_delta_matches_the_durable_value<S>(storage: S)
+    where
+        S: OrderedKvStorage,
+    {
+        let key = b"conditional-delete".to_vec();
+        let old = b"old authenticated bytes".to_vec();
+        let new = b"new authenticated bytes".to_vec();
+        storage
+            .set("records".into(), key.clone(), old.clone())
+            .await
+            .unwrap();
+
+        storage
+            .write_many(vec![OwnedWriteOperation::delta(
+                "records",
+                key.clone(),
+                StorageDelta::delete_if_value_matches(b"different bytes".to_vec()),
+            )])
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.get("records".into(), key.clone()).await.unwrap(),
+            Some(old.clone())
+        );
+
+        storage
+            .write_many(vec![OwnedWriteOperation::delta(
+                "records",
+                key.clone(),
+                StorageDelta::delete_if_value_matches(old),
+            )])
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.get("records".into(), key.clone()).await.unwrap(),
+            None
+        );
+
+        storage
+            .write_many(vec![OwnedWriteOperation::delta(
+                "records",
+                key.clone(),
+                StorageDelta::set_if_absent(new.clone()),
+            )])
+            .await
+            .unwrap();
+        assert_eq!(storage.get("records".into(), key).await.unwrap(), Some(new));
     }
 }
 
@@ -3837,6 +3931,12 @@ mod tests {
     async fn memory_storage_conforms_to_delta_append_contract() {
         let storage = MemoryStorage::new(&["records"]);
         conformance::delta_append_current_winner_observes_merged_state(storage).await;
+    }
+
+    #[futures_test::test]
+    async fn memory_storage_conditional_delete_delta_matches_the_durable_value() {
+        let storage = MemoryStorage::new(&["records"]);
+        conformance::conditional_delete_delta_matches_the_durable_value(storage).await;
     }
 
     #[futures_test::test]

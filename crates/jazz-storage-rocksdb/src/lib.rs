@@ -22,6 +22,7 @@ use groove::storage::{
     BoxedStorage, ColumnFamilyName, Error, KeyValue, OrderedKvStorage, OwnedWriteOperation,
     ReopenableStorage, ScanBounds, ScanDirection, ScanRequest, StorageCursor, StorageFactory,
     StorageFuture, StorageScan, Value, apply_storage_delta, compact_storage_delta_operand,
+    is_storage_delta_tombstone, storage_delta_requires_full_merge, storage_delta_tombstone_value,
 };
 
 trait RocksResultExt<T> {
@@ -161,6 +162,9 @@ impl StorageCursor for RocksDbCursor<'_> {
                 {
                     self.done = true;
                     break;
+                }
+                if is_storage_delta_tombstone(&value) {
+                    continue;
                 }
                 batch.push((key.into_vec(), value.into_vec()));
             }
@@ -460,11 +464,12 @@ impl ReopenableStorage for RocksDbStorage {
 impl OrderedKvStorage for RocksDbStorage {
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         Box::pin(async move {
-            if cf == "default" {
+            let value = if cf == "default" {
                 self.db.get(key).storage()
             } else {
                 self.db.get_cf(self.cf_handle(&cf)?, key).storage()
-            }
+            }?;
+            Ok(value.filter(|value| !is_storage_delta_tombstone(value)))
         })
     }
 
@@ -690,13 +695,21 @@ fn rocksdb_partial_merge_delta(
     left_operand: Option<&[u8]>,
     operands: &MergeOperands,
 ) -> Option<Vec<u8>> {
+    if left_operand
+        .is_some_and(|operand| !matches!(storage_delta_requires_full_merge(operand), Ok(false)))
+        || operands
+            .iter()
+            .any(|operand| !matches!(storage_delta_requires_full_merge(operand), Ok(false)))
+    {
+        return None;
+    }
     let mut value = match left_operand {
-        Some(operand) => Some(apply_storage_delta(None, operand).ok()?),
+        Some(operand) => apply_storage_delta(None, operand).ok()?,
         None => None,
     };
     let template = left_operand.or_else(|| operands.iter().next())?;
     for operand in operands {
-        value = Some(apply_storage_delta(value.as_deref(), operand).ok()?);
+        value = apply_storage_delta(value.as_deref(), operand).ok()?;
     }
     compact_storage_delta_operand(template, value?).ok()
 }
@@ -707,9 +720,9 @@ fn apply_merge_operands(
 ) -> Result<Vec<u8>, Error> {
     let mut value = initial.map(<[u8]>::to_vec);
     for operand in operands {
-        value = Some(apply_storage_delta(value.as_deref(), operand)?);
+        value = apply_storage_delta(value.as_deref(), operand)?;
     }
-    value.ok_or_else(|| Error::InvalidStorageDelta("merge operator received no value".to_owned()))
+    Ok(value.unwrap_or_else(storage_delta_tombstone_value))
 }
 
 fn advance_prefix_upper_bound(prefix: &mut [u8]) -> bool {
@@ -809,6 +822,51 @@ mod tests {
         assert_eq!(
             ready(storage.get("chunks".to_owned(), key)).unwrap(),
             Some(b"first authenticated bytes".to_vec())
+        );
+    }
+
+    #[test]
+    fn conditional_delete_merge_removes_only_the_matching_durable_value() {
+        use groove::storage::OrderedKvStorage;
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path(), &["chunks"]).unwrap();
+        let key = b"same-opaque-locator".to_vec();
+        let old = b"old authenticated bytes".to_vec();
+        let new = b"new authenticated bytes".to_vec();
+        ready(storage.set("chunks".to_owned(), key.clone(), old.clone())).unwrap();
+
+        ready(storage.write_many(vec![OwnedWriteOperation::Delta {
+            cf: "chunks".to_owned(),
+            key: key.clone(),
+            delta: StorageDelta::delete_if_value_matches(b"different bytes".to_vec()),
+        }]))
+        .unwrap();
+        assert_eq!(
+            ready(storage.get("chunks".to_owned(), key.clone())).unwrap(),
+            Some(old.clone())
+        );
+
+        ready(storage.write_many(vec![OwnedWriteOperation::Delta {
+            cf: "chunks".to_owned(),
+            key: key.clone(),
+            delta: StorageDelta::delete_if_value_matches(old),
+        }]))
+        .unwrap();
+        assert_eq!(
+            ready(storage.get("chunks".to_owned(), key.clone())).unwrap(),
+            None
+        );
+
+        ready(storage.write_many(vec![OwnedWriteOperation::Delta {
+            cf: "chunks".to_owned(),
+            key: key.clone(),
+            delta: StorageDelta::set_if_absent(new.clone()),
+        }]))
+        .unwrap();
+        assert_eq!(
+            ready(storage.get("chunks".to_owned(), key)).unwrap(),
+            Some(new)
         );
     }
 

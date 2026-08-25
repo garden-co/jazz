@@ -513,12 +513,19 @@ impl ChunkKvStorage for OrderedChunkStorage {
             else {
                 return Ok(());
             };
-            let (hash, bytes) = Self::decode(existing)?;
+            let (hash, bytes) = Self::decode(existing.clone())?;
             if hash != expected_hash || object_hash(&bytes) != expected_hash {
                 return Err(ChunkStorageError::Integrity);
             }
+            // The read above is only an integrity proof. The durable compare
+            // and delete must happen as one delta so a newer mapping installed
+            // after that read survives this orphan cleanup.
             storage
-                .delete(crate::db::LARGE_VALUE_METADATA_CF.to_owned(), key)
+                .write_many(vec![OwnedWriteOperation::Delta {
+                    cf: crate::db::LARGE_VALUE_METADATA_CF.to_owned(),
+                    key,
+                    delta: StorageDelta::delete_if_value_matches(existing),
+                }])
                 .await
                 .map_err(|error| ChunkStorageError::Backend(error.to_string()))
         })
@@ -1243,5 +1250,67 @@ mod tests {
                 .expect("the winner must remain durable");
         assert_eq!(stored_bytes, winner);
         assert_eq!(stored_hash, object_hash(&winner));
+    }
+
+    #[test]
+    fn stale_chunk_delete_cannot_remove_a_newer_durable_mapping() {
+        block_on(async {
+            let (inner, control) =
+                crate::storage::TestStorage::controlled(&[crate::db::LARGE_VALUE_METADATA_CF]);
+            let layout = Rc::new(
+                LayoutStorage::new(inner, crate::storage::StorageLayout::Identity)
+                    .await
+                    .unwrap(),
+            );
+            let backend = OrderedChunkStorage::new(Rc::downgrade(&layout));
+            let locator = Locator::from_seed(b"conditional-chunk-delete-race");
+            let old_bytes = Bytes::from_static(b"old authenticated chunk");
+            let old_hash = object_hash(&old_bytes);
+            let new_bytes = Bytes::from_static(b"new authenticated chunk");
+            let new_hash = object_hash(&new_bytes);
+
+            assert_eq!(
+                backend
+                    .put_if_absent(locator, old_hash, old_bytes.clone())
+                    .await
+                    .unwrap(),
+                None
+            );
+            control.take_observed();
+
+            // Freeze the stale cleanup after its integrity read but before its
+            // durable compare-and-delete. Another completed reclamation frees
+            // the old locator and a new owner reuses it before this stale
+            // cleanup reaches the durable compare.
+            control.pause_on(crate::storage::TestStorageOperation::WriteMany);
+            let mut delete = Box::pin(backend.delete_exact(locator, old_hash));
+            assert!(futures::poll!(delete.as_mut()).is_pending());
+            assert_eq!(
+                control.take_observed(),
+                vec![crate::storage::TestStorageOperation::WriteMany]
+            );
+
+            layout
+                .delete(
+                    crate::db::LARGE_VALUE_METADATA_CF.to_owned(),
+                    OrderedChunkStorage::key(locator.as_bytes()),
+                )
+                .await
+                .unwrap();
+            control.resume_operation(crate::storage::TestStorageOperation::WriteMany);
+            assert_eq!(
+                backend
+                    .put_if_absent(locator, new_hash, new_bytes.clone())
+                    .await
+                    .unwrap(),
+                None
+            );
+            delete.await.unwrap();
+
+            assert_eq!(
+                backend.get_exact(locator).await.unwrap(),
+                Some((new_hash, new_bytes))
+            );
+        });
     }
 }

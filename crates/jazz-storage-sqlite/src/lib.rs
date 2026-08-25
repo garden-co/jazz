@@ -629,14 +629,24 @@ impl OrderedKvStorage for SqliteStorage {
                                 )
                                 .optional()
                                 .map_err(backend)?;
-                            let merged =
-                                apply_storage_delta(existing.as_deref(), &delta.encode()?)?;
-                            transaction
-                                .execute(
-                                    "INSERT OR REPLACE INTO kv (cf, k, v) VALUES (?1, ?2, ?3)",
-                                    params![cf, key, merged],
-                                )
-                                .map_err(backend)?;
+                            match apply_storage_delta(existing.as_deref(), &delta.encode()?)? {
+                                Some(merged) => {
+                                    transaction
+                                        .execute(
+                                            "INSERT OR REPLACE INTO kv (cf, k, v) VALUES (?1, ?2, ?3)",
+                                            params![cf, key, merged],
+                                        )
+                                        .map_err(backend)?;
+                                }
+                                None => {
+                                    transaction
+                                        .execute(
+                                            "DELETE FROM kv WHERE cf = ?1 AND k = ?2",
+                                            params![cf, key],
+                                        )
+                                        .map_err(backend)?;
+                                }
+                            }
                         }
                     }
                 }

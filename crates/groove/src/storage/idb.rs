@@ -222,7 +222,7 @@ where
                                 apply_storage_delta(existing.as_deref(), &encoded)?
                             }
                         };
-                        planned.insert(key, Some(value));
+                        planned.insert(key, value);
                     }
                 }
             }
@@ -430,6 +430,10 @@ mod tests {
                 .unwrap();
             super::super::conformance::persistence_order_and_batch_atomicity(storage.clone()).await;
             super::super::conformance::delta_append_current_winner_observes_merged_state(
+                storage.clone(),
+            )
+            .await;
+            super::super::conformance::conditional_delete_delta_matches_the_durable_value(
                 storage.clone(),
             )
             .await;
