@@ -847,6 +847,11 @@ fn worker_relay_forwards_upstream_subscription_rejection_to_every_group_member()
         );
     }
     assert_eq!(worker.relay_upstream_subscription_owner_count_for_test(), 0);
+    assert_eq!(
+        worker.relay_registered_query_binding_count_for_test(),
+        0,
+        "rejection must unregister each distinct wire usage site",
+    );
     let messages = &authority_state.borrow().outbound;
     assert_eq!(
         messages
@@ -906,7 +911,7 @@ fn worker_relay_fans_upstream_subscription_rejection_to_distinct_wire_group_memb
         .send(SyncMessage::RegisterShape {
             shape_id: shape.shape_id(),
             ast: ShapeAst::from_validated(shape),
-            opts,
+            opts: opts.clone(),
         })
         .expect("register relay shape");
     worker.tick().expect("register shape at worker");
@@ -940,22 +945,93 @@ fn worker_relay_fans_upstream_subscription_rejection_to_distinct_wire_group_memb
         "the authority rejection must fan out to both distinct wire usage sites",
     );
     assert_eq!(worker.relay_upstream_subscription_owner_count_for_test(), 0);
-    let messages = &authority_state.borrow().outbound;
     assert_eq!(
-        messages
-            .iter()
-            .filter(|message| matches!(message, SyncMessage::Subscribe(_)))
-            .count(),
-        1,
-        "identical wire members share one relayed coverage request",
+        worker.relay_registered_query_binding_count_for_test(),
+        0,
+        "rejection must unregister each distinct wire usage site",
     );
-    assert_eq!(
-        messages
-            .iter()
-            .filter(|message| matches!(message, SyncMessage::Unsubscribe { .. }))
-            .count(),
-        1,
-        "the rejected shared owner is retired exactly once",
+    {
+        let authority_state = authority_state.borrow();
+        let messages = &authority_state.outbound;
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| matches!(message, SyncMessage::Subscribe(_)))
+                .count(),
+            1,
+            "identical wire members share one relayed coverage request",
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| matches!(message, SyncMessage::Unsubscribe { .. }))
+                .count(),
+            1,
+            "the rejected shared owner is retired exactly once",
+        );
+    }
+
+    // Keep one relay connection open while authority rejects fresh wire keys.
+    // Every failure must leave it reusable; otherwise a hostile or buggy peer
+    // can retain unbounded registration and known-state entries without ever
+    // disconnecting.
+    for byte in 0x74..0x7c {
+        let subscription = SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: BindingId(uuid::Uuid::from_bytes([byte; 16])),
+            read_view: opts.read_view_key(),
+        };
+        alice_transport
+            .send(SyncMessage::Subscribe(Subscribe {
+                shape_id: shape.shape_id(),
+                subscription,
+                values: Vec::new(),
+                known_state: None,
+            }))
+            .expect("subscribe with a fresh rejected wire key");
+        for _ in 0..3 {
+            worker.tick().expect("reject fresh wire key");
+        }
+        assert_eq!(
+            worker.relay_registered_query_binding_count_for_test(),
+            0,
+            "a rejected wire key must not accumulate state while the relay remains connected",
+        );
+        assert!(
+            std::iter::from_fn(|| alice_transport.try_recv()).any(|message| matches!(
+                message,
+                SyncMessage::SubscribeRejected {
+                    subscription: rejected,
+                    reason: ref rejected_reason,
+                } if rejected == subscription && rejected_reason == &rejection
+            )),
+            "authority rejection must reach each fresh wire key",
+        );
+    }
+
+    // Reusing an earlier rejected key must perform a fresh lifecycle rather
+    // than observe a retained registration from its previous attempt.
+    alice_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription: first,
+            values: Vec::new(),
+            known_state: None,
+        }))
+        .expect("resubscribe a previously rejected wire key");
+    for _ in 0..3 {
+        worker.tick().expect("reject reused wire key");
+    }
+    assert_eq!(worker.relay_registered_query_binding_count_for_test(), 0);
+    assert!(
+        std::iter::from_fn(|| alice_transport.try_recv()).any(|message| matches!(
+            message,
+            SyncMessage::SubscribeRejected {
+                subscription,
+                reason: ref rejected_reason,
+            } if subscription == first && rejected_reason == &rejection
+        )),
+        "a reused wire key must receive a fresh rejection rather than stale relay state",
     );
 }
 

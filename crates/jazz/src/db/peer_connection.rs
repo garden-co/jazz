@@ -2109,7 +2109,25 @@ where
                             .map_err(transport_error)?;
                     }
                     if let Some(group) = coverage_groups.remove(&rejection.coverage) {
+                        let group_subscription = SubscriptionKey {
+                            shape_id: rejection.coverage.shape_id,
+                            binding_id: rejection.coverage.binding_id,
+                            read_view: rejection.coverage.opts.read_view_key(),
+                        };
+                        let mut node = self.node.borrow_mut();
+                        // `group_subscription` owns the one shared maintained
+                        // evaluator. The individual subscribers are still
+                        // separately registered wire usage sites, including
+                        // the case where a peer deliberately used noncanonical
+                        // binding handles. Retire both layers: dropping only
+                        // the group leaves the individual registrations and
+                        // known-state declarations resident after rejection.
+                        peer.forget_subscription_with_node(&mut node, group_subscription);
                         for subscription in group.subscribers {
+                            node.apply_unsubscribe(subscription);
+                            if subscription != group_subscription {
+                                peer.forget_subscription(subscription);
+                            }
                             served.remove(&subscription);
                             if let Some(purpose) = scope_purposes.remove(&subscription) {
                                 remove_scope_aggregate_member(
@@ -2119,14 +2137,6 @@ where
                                 );
                             }
                         }
-                        peer.forget_subscription_with_node(
-                            &mut self.node.borrow_mut(),
-                            SubscriptionKey {
-                                shape_id: rejection.coverage.shape_id,
-                                binding_id: rejection.coverage.binding_id,
-                                read_view: rejection.coverage.opts.read_view_key(),
-                            },
-                        );
                     }
                 }
                 for fate in std::mem::take(&mut *self.downstream_fates.borrow_mut()) {

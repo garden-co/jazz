@@ -208,6 +208,17 @@ where
         }
     }
 
+    #[cfg(feature = "testing")]
+    /// Test-only count of live wire binding registrations. This is deliberately
+    /// usage-site state, rather than the deduplicated evaluator count.
+    pub fn registered_query_binding_count_for_test(&self) -> usize {
+        self.query
+            .registered_bindings
+            .values()
+            .map(BTreeMap::len)
+            .sum()
+    }
+
     fn registered_binding_resolves_to_binding_view_key(
         &self,
         binding_view_key: BindingViewKey,
