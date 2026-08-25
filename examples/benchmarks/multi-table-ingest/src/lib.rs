@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, block_on};
+use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, WriteIdentity, block_on};
 use jazz::groove::records::Value;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -18,14 +18,23 @@ const RESOURCES: usize = 1_000;
 pub struct IngestFixture<S: OrderedKvStorage> {
     db: Db<S>,
     next_job: usize,
+    write_identity: WriteIdentity,
 }
 
 impl IngestFixture<MemoryStorage> {
     pub fn memory(existing_jobs: usize) -> Self {
+        Self::memory_with_attribution(existing_jobs, false)
+    }
+
+    pub fn memory_attributed(existing_jobs: usize) -> Self {
+        Self::memory_with_attribution(existing_jobs, true)
+    }
+
+    fn memory_with_attribution(existing_jobs: usize, attributed: bool) -> Self {
         let schema = schema();
         let families = schema.column_families();
         let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-        Self::new(schema, MemoryStorage::new(&refs), existing_jobs)
+        Self::new(schema, MemoryStorage::new(&refs), existing_jobs, attributed)
     }
 }
 
@@ -38,22 +47,41 @@ impl IngestFixture<RocksDbStorage> {
         let storage =
             RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync)
                 .expect("open ingest benchmark RocksDB");
-        (dir, Self::new(schema, storage, existing_jobs))
+        (dir, Self::new(schema, storage, existing_jobs, false))
     }
 }
 
 impl<S: OrderedKvStorage + ReopenableStorage + 'static> IngestFixture<S> {
-    fn new(schema: JazzSchema, storage: S, existing_jobs: usize) -> Self {
-        let db = block_on(Db::open(DbConfig::new(
+    fn new(schema: JazzSchema, storage: S, existing_jobs: usize, attributed: bool) -> Self {
+        let config = DbConfig::new(
             schema,
             storage,
             DbIdentity {
                 node: NodeUuid::from_bytes([0x83; 16]),
                 author: AuthorSubject::SYSTEM,
             },
-        )))
+        );
+        let db = if attributed {
+            // SAFETY: this synthetic process owns the isolated benchmark DB and
+            // never exposes its trusted-backend capability to another caller.
+            unsafe { block_on(Db::open_with_backend_attribution(config)) }
+        } else {
+            block_on(Db::open(config))
+        }
         .expect("open multi-table ingest database");
-        let mut fixture = Self { db, next_job: 0 };
+        let write_identity = if attributed {
+            WriteIdentity::Attribution(
+                AuthorSubject::authenticated("https://benchmark.invalid", "synthetic-writer")
+                    .expect("synthetic attributed identity"),
+            )
+        } else {
+            WriteIdentity::Database
+        };
+        let mut fixture = Self {
+            db,
+            next_job: 0,
+            write_identity,
+        };
         fixture.seed_dimensions();
         fixture.insert_jobs(existing_jobs);
         fixture
@@ -167,6 +195,7 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> IngestFixture<S> {
             cells,
             InsertOptions {
                 row_id: Some(row_id),
+                identity: self.write_identity,
                 ..Default::default()
             },
         ))
