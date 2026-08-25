@@ -19,13 +19,13 @@ describe("readTableIndexes", () => {
   });
 
   it("rejects sparse index metadata before normal writes can TypeError", () => {
-    expect(() => readTableIndexes("account", new Array(1))).toThrow(
+    expect(() => readTableIndexes("account", Array(1))).toThrow(
       '[Jazz Better Auth adapter] Invalid index metadata for table "account": index 0 must be present.',
     );
   });
 
   it("rejects sparse index fields before normal writes can TypeError", () => {
-    expect(() => readTableIndexes("account", [{ fields: new Array(1), unique: true }])).toThrow(
+    expect(() => readTableIndexes("account", [{ fields: Array(1), unique: true }])).toThrow(
       '[Jazz Better Auth adapter] Invalid index metadata for table "account": index 0 must declare a non-empty string[] fields.',
     );
   });
