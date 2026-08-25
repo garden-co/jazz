@@ -1767,7 +1767,11 @@ fn served_subscription_rows_for_author_with_claims(
     table: &str,
     claims: BTreeMap<String, Value>,
 ) -> Vec<RowUuid> {
-    let client = open_db(author.test_uuid().as_bytes()[0], author, schema);
+    let client_node = match author {
+        AuthorSubject::System => 0x5d,
+        AuthorSubject::Authenticated(_) => author.test_uuid().as_bytes()[0],
+    };
+    let client = open_db(client_node, author, schema);
     client
         .node
         .node

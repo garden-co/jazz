@@ -170,8 +170,14 @@ fn empty_schema() -> JazzSchema {
 fn identity_for_subject(node: u8, subject: &str) -> DbIdentity {
     DbIdentity {
         node: NodeUuid::from_bytes([node; 16]),
-        author: AuthorSubject::authenticated("urn:jazz:test", subject)
-            .expect("test subject uses the external test issuer"),
+        // The loopback server authenticates this handshake using the configured
+        // static bearer, so the local runtime must use the exact same reserved
+        // issuer-and-subject identity as the authority.
+        author: AuthorSubject::from_canonical(
+            &serde_json::to_string(&(jazz::serving::auth_admission::STATIC_BEARER_ISSUER, subject))
+                .expect("serialize canonical static-bearer test identity"),
+        )
+        .expect("parse canonical static-bearer test identity"),
     }
 }
 
