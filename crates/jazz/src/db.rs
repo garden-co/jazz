@@ -254,12 +254,19 @@ impl PeerChunkResolver {
         state.outbound.drain(..count).collect()
     }
 
-    fn take_relay_responses(&self, connection: u64) -> Vec<ChunkResponseEntry> {
-        self.state
-            .borrow_mut()
-            .relay_responses
-            .remove(&connection)
-            .unwrap_or_default()
+    fn take_relay_responses(&self, connection: u64, limit: usize) -> Vec<ChunkResponseEntry> {
+        let mut state = self.state.borrow_mut();
+        let (responses, exhausted) = match state.relay_responses.get_mut(&connection) {
+            Some(queued) => {
+                let count = limit.min(queued.len());
+                (queued.drain(..count).collect(), queued.is_empty())
+            }
+            None => return Vec::new(),
+        };
+        if exhausted {
+            state.relay_responses.remove(&connection);
+        }
+        responses
     }
 
     fn is_active_upstream(&self, connection: u64) -> bool {
@@ -282,8 +289,10 @@ impl PeerChunkResolver {
                     let result = match &response.result {
                         ChunkResponse::Found(bytes) => Ok(bytes::Bytes::copy_from_slice(bytes)),
                         ChunkResponse::Unavailable => Err(groove::chunks::ChunkError::Unavailable),
-                        ChunkResponse::Retryable { .. } => {
-                            Err(groove::chunks::ChunkError::Unavailable)
+                        ChunkResponse::Retryable { retry_after_ms } => {
+                            Err(groove::chunks::ChunkError::Retryable {
+                                retry_after_ms: *retry_after_ms,
+                            })
                         }
                     };
                     let _ = sender.send(result);
@@ -553,9 +562,69 @@ impl PeerIoPump {
         negotiated_features: crate::wire::WireFeatures,
         session: Option<crate::wire::WireSession>,
     ) -> Result<Option<Vec<u8>>, String> {
-        let Some(message) = self.take_outbound(1) else {
-            return Ok(None);
-        };
+        let mut frames = self.take_outbound_wire_frames(
+            protocol_version,
+            negotiated_features,
+            session,
+            1,
+            crate::protocol_limits::MAX_WIRE_FRAME_BYTES,
+        )?;
+        Ok(frames.pop())
+    }
+
+    /// Drain a bounded FIFO prefix of the auxiliary lane into complete wire
+    /// frames. If the next complete frame would exceed `max_bytes`, it remains
+    /// queued for a later drain; no response is dropped merely because a host
+    /// transport chooses a smaller batch boundary.
+    pub fn take_outbound_wire_frames(
+        &self,
+        protocol_version: u16,
+        negotiated_features: crate::wire::WireFeatures,
+        session: Option<crate::wire::WireSession>,
+        max_frames: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<Vec<u8>>, String> {
+        if max_frames == 0 || max_bytes == 0 {
+            return Ok(Vec::new());
+        }
+        let mut frames = Vec::new();
+        let mut total_bytes: usize = 0;
+        while frames.len() < max_frames {
+            let Some(message) = self.take_outbound(1) else {
+                break;
+            };
+            let frame = Self::encode_outbound_wire_frame(
+                message.clone(),
+                protocol_version,
+                negotiated_features,
+                session.clone(),
+            )?;
+            let Some(next_total) = total_bytes.checked_add(frame.len()) else {
+                self.restore_outbound(message);
+                break;
+            };
+            if next_total > max_bytes {
+                self.restore_outbound(message);
+                if frames.is_empty() {
+                    return Err(format!(
+                        "auxiliary wire frame exceeds bounded drain budget: frame={} budget={max_bytes}",
+                        frame.len()
+                    ));
+                }
+                break;
+            }
+            total_bytes = next_total;
+            frames.push(frame);
+        }
+        Ok(frames)
+    }
+
+    fn encode_outbound_wire_frame(
+        message: SyncMessage,
+        protocol_version: u16,
+        negotiated_features: crate::wire::WireFeatures,
+        session: Option<crate::wire::WireSession>,
+    ) -> Result<Vec<u8>, String> {
         let payload = crate::wire::encode_sync_message_for_features(&message, negotiated_features)
             .map_err(|error| format!("cannot encode auxiliary sync payload: {error:?}"))?;
         let active_features = negotiated_features
@@ -566,7 +635,6 @@ impl PeerIoPump {
             envelope = envelope.with_session(session);
         }
         crate::wire::encode_frame(&crate::wire::WireFrame::Message(envelope))
-            .map(Some)
             .map_err(|error| format!("cannot encode auxiliary wire frame: {error}"))
     }
 
@@ -580,7 +648,7 @@ impl PeerIoPump {
                 ))
             }
             PeerIoPumpRole::Subscriber => {
-                let responses = self.resolver.take_relay_responses(self.connection);
+                let responses = self.resolver.take_relay_responses(self.connection, limit);
                 (!responses.is_empty()).then_some(SyncMessage::ChunkResponseBatch(
                     ChunkResponseBatch { responses },
                 ))
@@ -1623,6 +1691,8 @@ mod lifecycle;
 mod mutations;
 pub use mutations::{StreamingMutationKind, StreamingValueUpload};
 mod reads;
+#[doc(hidden)]
+pub use reads::BindingHydrationError;
 mod subscriptions;
 mod transactions;
 

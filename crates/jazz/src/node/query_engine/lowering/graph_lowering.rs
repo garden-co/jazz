@@ -2942,9 +2942,7 @@ fn lower_not_predicate_inner(
         PredicateExpr::In { value, options } => GroovePredicateExpr::And(
             options
                 .iter()
-                .map(|option| {
-                    lower_compare(value, ComparisonOp::Ne, option, source_id, source, request)
-                })
+                .map(|option| lower_two_valued_ne(value, option, source_id, source, request))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         PredicateExpr::ArrayContains { .. } | PredicateExpr::TextContains { .. } => {
@@ -2975,6 +2973,30 @@ fn lower_not_predicate_inner(
             ));
         }
     })
+}
+
+fn lower_two_valued_ne(
+    left: &NormalizedValueRef,
+    right: &NormalizedValueRef,
+    source_id: &SourceId,
+    source: &ResolvedSource,
+    request: &QueryProgramRequest,
+) -> Result<GroovePredicateExpr, UnsupportedReason> {
+    // Groove comparisons deliberately use SQL-null semantics. Jazz comparison
+    // predicates are two-valued, so unequal means either exactly one operand is
+    // null or both are non-null and Groove reports inequality.
+    Ok(GroovePredicateExpr::Or(vec![
+        GroovePredicateExpr::And(vec![
+            lower_null_test(left, true, source_id, source, request)?,
+            lower_null_test(right, false, source_id, source, request)?,
+        ]),
+        GroovePredicateExpr::And(vec![
+            lower_null_test(left, false, source_id, source, request)?,
+            lower_null_test(right, true, source_id, source, request)?,
+        ]),
+        lower_compare(left, ComparisonOp::Ne, right, source_id, source, request)?,
+    ])
+    .canonicalize())
 }
 
 fn invert_comparison(op: ComparisonOp) -> ComparisonOp {

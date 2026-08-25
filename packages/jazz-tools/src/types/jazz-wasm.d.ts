@@ -42,6 +42,9 @@ declare module "jazz-wasm" {
   export class WasmTransport {
     sendWireFrame(frame: Uint8Array): void;
     recvWireFrames(): Uint8Array[];
+    routeAuxiliaryWireFrame(frame: Uint8Array): Promise<Uint8Array | undefined>;
+    recvAuxiliaryWireFrames(maxFrames?: number, maxBytes?: number): Uint8Array[];
+    auxiliaryOutboundReady(): Promise<void>;
     tick(): Promise<number>;
     updateAuthenticatedClaims(claims: Record<string, unknown>): Promise<void>;
     close(): boolean;

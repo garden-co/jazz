@@ -79,15 +79,21 @@ impl SyncBench {
     fn new(config: Config) -> Self {
         let schema = schema();
         let mut dirs = Vec::new();
-        let (dir, ui) = open_node(node(1), schema.clone());
+        let (dir, mut ui) = open_node(node(1), schema.clone());
         dirs.push(dir);
-        let (dir, worker) = open_node(node(2), schema.clone());
+        let (dir, mut worker) = open_node(node(2), schema.clone());
         dirs.push(dir);
-        let (dir, edge) = open_node(node(3), schema.clone());
+        let (dir, mut edge) = open_node(node(3), schema.clone());
         dirs.push(dir);
-        let (dir, core) = open_node(node(4), schema);
+        let (dir, mut core) = open_node(node(4), schema);
         dirs.push(dir);
         let ui_author = AuthorSubject::for_test_bytes([7; 16]);
+        for node in [&mut ui, &mut worker, &mut edge, &mut core] {
+            node.admit_test_session_claims(
+                ui_author,
+                BTreeMap::from([("user_id".to_owned(), Value::Uuid(ui_author.test_uuid()))]),
+            );
+        }
         Self {
             config,
             ui,
@@ -268,7 +274,9 @@ impl SyncBench {
     fn next_exclusive(&mut self, step: usize) -> (TxId, SyncMessage, u64) {
         let row_uuid = row(120 + (step % 12) as u8);
         let tx_id = OpenTransactionId::new();
-        self.ui.open_exclusive(tx_id).expect("open exclusive");
+        self.ui
+            .open_exclusive_for_test(tx_id, self.ui_author)
+            .expect("open exclusive");
         let _ = self.ui.tx_read(tx_id, TABLE, row_uuid).expect("read");
         self.ui
             .tx_write(

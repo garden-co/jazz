@@ -565,10 +565,22 @@ function resolveNativeSubscriptionColumns(
   rootTerminal = true,
 ): ColumnDescriptor[] {
   const wildcard = projection === undefined || projection.length === 0;
-  const columns = resolveSelectedColumns(tableName, schema, projection)
+  const selectedColumns = resolveSelectedColumns(tableName, schema, projection);
+  // IDs are implicit in query results, so an explicit `select("id")` resolves
+  // to no ordinary public columns. The native query projection represents that
+  // state with its empty/default sentinel and therefore retains the full
+  // physical record; decode that carrier fully before the row transformer
+  // applies the public ID-only projection.
+  const usesDefaultNativeProjection = wildcard || selectedColumns.length === 0;
+  const nativeColumns = usesDefaultNativeProjection
+    ? resolveSelectedColumns(tableName, schema, undefined)
+    : selectedColumns;
+  const columns = nativeColumns
     .map((columnName) => {
       const column = resolveOutputColumnDescriptor(tableName, schema, columnName);
-      return column && wildcard && rootTerminal ? { ...column, sparse: true } : column;
+      return column && usesDefaultNativeProjection && rootTerminal
+        ? { ...column, sparse: true }
+        : column;
     })
     .filter((column): column is ColumnDescriptor => column !== undefined);
 

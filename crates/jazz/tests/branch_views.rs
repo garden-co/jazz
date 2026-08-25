@@ -88,6 +88,13 @@ fn policy_with_all_writes(read: PolicyExpr) -> TablePolicies {
         .with_delete(read)
 }
 
+fn set_test_user_claims(db: &Db<MemoryStorage>, identity: AuthorSubject) {
+    db.set_identity_claims(
+        identity,
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(identity.test_uuid()))]),
+    );
+}
+
 fn open_db() -> (Db<MemoryStorage>, JazzSchema) {
     let schema = compile_schema(
         &SchemaBuilder::new()
@@ -564,6 +571,8 @@ fn branch_column_reference_policy_controls_effective_reads() {
     let (db, _schema) = open_policy_db();
     let owner = AuthorSubject::for_test_bytes([0x76; 16]);
     let outsider = AuthorSubject::for_test_bytes([0x77; 16]);
+    set_test_user_claims(&db, owner);
+    set_test_user_claims(&db, outsider);
     let branch = RowUuid::from_bytes([0x78; 16]);
     let selector = BranchSelector::new([("branch_id", Value::Uuid(branch.0))]);
     db.insert(
@@ -684,6 +693,8 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
     .unwrap();
     let before = AuthorSubject::for_test_bytes([0xad; 16]);
     let after = AuthorSubject::for_test_bytes([0xae; 16]);
+    set_test_user_claims(&db, before);
+    set_test_user_claims(&db, after);
     let base_branch = RowUuid::from_bytes([0xaa; 16]);
     let head_branch = RowUuid::from_bytes([0xab; 16]);
     let base = BranchSelector::new([("branch_id", Value::Uuid(base_branch.0))]);
@@ -792,6 +803,8 @@ fn branch_view_subscription_tracks_reference_policy_revoke_and_grant() {
     let (db, _schema) = open_policy_db();
     let owner = AuthorSubject::for_test_bytes([0xb5; 16]);
     let outsider = AuthorSubject::for_test_bytes([0xb6; 16]);
+    set_test_user_claims(&db, owner);
+    set_test_user_claims(&db, outsider);
     let branch = RowUuid::from_bytes([0xb7; 16]);
     let selector = BranchSelector::new([("branch_id", Value::Uuid(branch.0))]);
     db.insert(

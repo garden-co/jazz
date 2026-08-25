@@ -82,11 +82,16 @@ struct ValidationBench {
 impl ValidationBench {
     fn new(config: Config) -> Self {
         let schema = schema();
-        let (core_dir, core) = open_node(node(250), schema.clone());
+        let (core_dir, mut core) = open_node(node(250), schema.clone());
         let mut client_dirs = Vec::with_capacity(config.clients);
         let mut clients = Vec::with_capacity(config.clients);
         for idx in 0..config.clients {
-            let (dir, client) = open_node(node(idx as u8 + 1), schema.clone());
+            let (dir, mut client) = open_node(node(idx as u8 + 1), schema.clone());
+            let identity = author(idx);
+            let claims =
+                BTreeMap::from([("user_id".to_owned(), Value::Uuid(identity.test_uuid()))]);
+            client.admit_test_session_claims(identity, claims.clone());
+            core.admit_test_session_claims(identity, claims);
             client_dirs.push(dir);
             clients.push(client);
         }
@@ -152,7 +157,7 @@ impl ValidationBench {
             let client_idx = self.rng.usize(self.config.clients);
             let tx_id = OpenTransactionId::new();
             self.clients[client_idx]
-                .open_exclusive(tx_id)
+                .open_exclusive_for_test(tx_id, author(client_idx))
                 .expect("open exclusive");
 
             let read_count = 1 + self.rng.usize(3);

@@ -208,6 +208,10 @@ export type QueryPredicate =
       predicates: QueryPredicate[];
     }
   | {
+      op: "Not";
+      predicate: QueryPredicate;
+    }
+  | {
       column: string;
       op: QueryPredicateOp;
       value: QueryLiteral;
@@ -399,6 +403,11 @@ function writePredicate(writer: PostcardWriter, predicate: QueryPredicate): void
       (predicateWriter, index) => writePredicate(predicateWriter, predicate.predicates[index]!),
       predicate.predicates.length,
     );
+    return;
+  }
+  if (predicate.op === "Not") {
+    writer.u64(2); // Predicate::Not
+    writePredicate(writer, predicate.predicate);
     return;
   }
   if (predicate.op === "In") {

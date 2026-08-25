@@ -137,7 +137,7 @@ fn upload_start_is_rate_admitted_before_pending_metadata_is_written() {
                 value_ref: prepared.value_ref,
             }),
             Some(CommitUnitIngestContext {
-                identity: AuthorId::SYSTEM,
+                identity: AuthorSubject::SYSTEM,
                 trust: CommitUnitTrust::Session,
                 edge_authority: false,
             }),
