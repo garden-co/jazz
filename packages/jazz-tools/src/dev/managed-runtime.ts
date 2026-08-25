@@ -125,10 +125,14 @@ function normalizeServerOption(
     }, {});
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function readEnvAppId(envPath: string, envKey: string): string | null {
   try {
     const content = readFileSync(envPath, "utf8");
-    const match = content.match(new RegExp(`^${envKey}=(.+)$`, "m"));
+    const match = content.match(new RegExp(`^${escapeRegExp(envKey)}=(.+)$`, "m"));
     return match?.[1]?.trim() ?? null;
   } catch {
     return null;
@@ -142,10 +146,11 @@ function persistAppIdToEnv(envPath: string, envKey: string, appId: string): void
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
-  if (content.includes(`${envKey}=`)) return;
-  const line = `${envKey}=${appId}\n`;
+  if (new RegExp(`^${escapeRegExp(envKey)}=`, "m").test(content)) return;
+  const separator = content && !content.endsWith("\n") ? "\n" : "";
+  const line = `${separator}${envKey}=${appId}\n`;
   mkdirSync(join(envPath, ".."), { recursive: true });
-  writeFileSync(envPath, content ? content + line : line);
+  writeFileSync(envPath, content + line);
 }
 
 export interface InitializeOptions extends JazzPluginOptions {

@@ -116,6 +116,35 @@ describe("ManagedDevRuntime", () => {
     }
   });
 
+  it("separates a generated app ID from a final unterminated env line", async () => {
+    const schemaDir = await tempRoots.create("jazz-managed-unterminated-env-");
+    const appId = "00000000-0000-0000-0000-000000000125";
+    await writeFile(join(schemaDir, ".env"), "EXISTING=value");
+
+    const runtime = makeRuntime();
+    expect(runtime.prepareEnv({ appId, schemaDir })).toBe(appId);
+
+    await expect(readFile(join(schemaDir, ".env"), "utf8")).resolves.toBe(
+      `EXISTING=value\nVITE_JAZZ_APP_ID=${appId}\n`,
+    );
+  });
+
+  it("does not mistake comments or longer variable names for the app ID", async () => {
+    const schemaDir = await tempRoots.create("jazz-managed-similar-env-");
+    const appId = "00000000-0000-0000-0000-000000000126";
+    await writeFile(
+      join(schemaDir, ".env"),
+      "# VITE_JAZZ_APP_ID=disabled\nMY_VITE_JAZZ_APP_ID=other\n",
+    );
+
+    const runtime = makeRuntime();
+    expect(runtime.prepareEnv({ appId, schemaDir })).toBe(appId);
+
+    await expect(readFile(join(schemaDir, ".env"), "utf8")).resolves.toBe(
+      `# VITE_JAZZ_APP_ID=disabled\nMY_VITE_JAZZ_APP_ID=other\nVITE_JAZZ_APP_ID=${appId}\n`,
+    );
+  });
+
   it("does not print the local server banner when stdout is not interactive", async () => {
     const schemaDir = await tempRoots.create("jazz-managed-noninteractive-banner-");
     await writeFile(join(schemaDir, "schema.ts"), todoSchema());
