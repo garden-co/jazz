@@ -234,6 +234,251 @@ fn collector_layout_retains_public_magic_timestamp_fields_on_child_rows() {
     assert!(row.field_index("$updatedBy").is_none());
 }
 
+// Internal compiler-boundary regression: the public useAll receipt is covered
+// by browser integration, while this test proves the collector retains a
+// provenance order key through source preparation without adding it to the
+// public row projection.
+#[test]
+fn collector_orders_and_slices_by_hidden_provenance_keys() {
+    for (direction, expected_title) in
+        [(SortDirection::Asc, "near"), (SortDirection::Desc, "later")]
+    {
+        let request =
+            provenance_window_collector_request(ProvenanceField::CreatedAt, direction, false);
+        let mut resolver = InlineCollectorResolver::with_root_rows([
+            (0xd1, "early", 10),
+            (0xd2, "near", 20),
+            (0xd3, "later", 30),
+            (0xd4, "late", 40),
+        ]);
+        let program = lower_query_program(request, &mut resolver)
+            .expect("hidden provenance window key should lower");
+        assert!(resolver.requests.iter().any(|request| {
+            request.source.table == "todos"
+                && request
+                    .requirements
+                    .metadata
+                    .contains(&SourceMetadataRequirement::Provenance(
+                        ProvenanceField::CreatedAt,
+                    ))
+        }));
+        let terminal = program
+            .lowered
+            .terminals
+            .iter()
+            .find(|terminal| terminal.sink == "app_rows")
+            .expect("app rows collector");
+        let OutputTerminalSchema::AppRows(schema) = &terminal.output else {
+            panic!("collector must expose app rows");
+        };
+        assert!(
+            schema.descriptor.field_index("$createdAt").is_none(),
+            "order keys must stay internal unless explicitly selected"
+        );
+
+        let rows = run_collector_graph(terminal.graph.clone());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0[1], Value::String(expected_title.to_owned()));
+    }
+}
+
+#[test]
+fn collector_executes_every_hidden_provenance_order_key() {
+    let rows = [
+        (0xd1, "first", 30, 0xa3, 70, 0xa1),
+        (0xd2, "second", 10, 0xa1, 80, 0xa3),
+        (0xd3, "third", 20, 0xa2, 90, 0xa2),
+    ];
+    for (field, direction, expected_title) in [
+        (ProvenanceField::CreatedBy, SortDirection::Asc, "third"),
+        (ProvenanceField::UpdatedAt, SortDirection::Desc, "second"),
+        (ProvenanceField::UpdatedBy, SortDirection::Desc, "third"),
+    ] {
+        let request = provenance_window_collector_request(field, direction, false);
+        let mut resolver = InlineCollectorResolver::with_provenance_root_rows(rows);
+        let program = lower_query_program(request, &mut resolver)
+            .expect("hidden provenance window key should lower");
+        assert!(resolver.requests.iter().any(|request| {
+            request.source.table == "todos"
+                && request
+                    .requirements
+                    .metadata
+                    .contains(&SourceMetadataRequirement::Provenance(field))
+        }));
+        let terminal = program
+            .lowered
+            .terminals
+            .iter()
+            .find(|terminal| terminal.sink == "app_rows")
+            .expect("app rows collector");
+        let OutputTerminalSchema::AppRows(schema) = &terminal.output else {
+            panic!("collector must expose app rows");
+        };
+        assert!(
+            schema
+                .descriptor
+                .field_index(provenance_field_name(field))
+                .is_none(),
+            "order keys must stay internal unless explicitly selected"
+        );
+        let output = run_collector_graph(terminal.graph.clone());
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].0[1], Value::String(expected_title.to_owned()));
+    }
+}
+
+#[test]
+fn collector_uses_row_id_tie_breakers_for_hidden_provenance_windows() {
+    let request =
+        provenance_window_collector_request(ProvenanceField::CreatedAt, SortDirection::Asc, false);
+    let mut resolver = InlineCollectorResolver::with_root_rows([
+        (0xd1, "first", 10),
+        (0xd2, "second", 10),
+        (0xd3, "third", 10),
+    ]);
+    let program = lower_query_program(request, &mut resolver)
+        .expect("tied hidden provenance window key should lower");
+    let terminal = program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == "app_rows")
+        .expect("app rows collector");
+    let output = run_collector_graph(terminal.graph.clone());
+    assert_eq!(output.len(), 1);
+    assert_eq!(
+        output[0].0[1],
+        Value::String("second".to_owned()),
+        "limit/offset must select the row after the stable row-id tie breaker"
+    );
+}
+
+#[test]
+fn shape_default_collector_hides_provenance_window_keys() {
+    let mut request = correlated_path_request(
+        CorrelationRequirement::Optional,
+        row_set_output(BTreeSet::new()),
+    );
+    add_root_provenance_window(
+        &mut request,
+        ProvenanceField::UpdatedAt,
+        SortDirection::Desc,
+    );
+    let mut resolver = InlineCollectorResolver::with_provenance_root_rows([
+        (0xd1, "first", 10, 0xa1, 20, 0xa1),
+        (0xd2, "second", 20, 0xa2, 30, 0xa2),
+        (0xd3, "third", 30, 0xa3, 40, 0xa3),
+    ]);
+    let program = lower_query_program(request, &mut resolver)
+        .expect("shape-default hidden provenance window should lower");
+    let terminal = program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == "app_rows")
+        .expect("shape-default app rows collector");
+    let OutputTerminalSchema::AppRows(schema) = &terminal.output else {
+        panic!("collector must expose app rows");
+    };
+    for field in ["$createdAt", "$createdBy", "$updatedAt", "$updatedBy"] {
+        assert!(schema.descriptor.field_index(field).is_none());
+    }
+    let output = run_collector_graph(terminal.graph.clone());
+    assert_eq!(output.len(), 1);
+    assert_eq!(
+        output[0].0[1],
+        Value::Nullable(Some(Box::new(Value::String("second".to_owned()))))
+    );
+}
+
+#[test]
+fn collector_exposes_provenance_only_when_selected() {
+    let request =
+        provenance_window_collector_request(ProvenanceField::CreatedAt, SortDirection::Asc, true);
+    let program = lower_query_program(request, &mut InlineCollectorResolver::new(None))
+        .expect("selected provenance window key should lower");
+    let terminal = program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == "app_rows")
+        .expect("app rows collector");
+    let OutputTerminalSchema::AppRows(schema) = &terminal.output else {
+        panic!("collector must expose app rows");
+    };
+    assert!(schema.descriptor.field_index("$createdAt").is_some());
+}
+
+fn provenance_window_collector_request(
+    field: ProvenanceField,
+    direction: SortDirection,
+    select_created_at: bool,
+) -> QueryProgramRequest {
+    let mut request = collector_request(system_policy_context());
+    add_root_provenance_window(&mut request, field, direction);
+    let PayloadProjection::Tree(projection) = &mut request
+        .output
+        .app_rows
+        .as_mut()
+        .expect("app rows")
+        .projection
+    else {
+        panic!("collector request must use a tree projection");
+    };
+    projection.paths.clear();
+    let mut fields = BTreeSet::from(["title".to_owned()]);
+    if select_created_at {
+        fields.insert("$createdAt".to_owned());
+    }
+    projection.fields = FieldProjection::Fields(fields);
+    request
+}
+
+fn add_root_provenance_window(
+    request: &mut QueryProgramRequest,
+    field: ProvenanceField,
+    direction: SortDirection,
+) {
+    let input = request.input.shape.root.clone();
+    let order = RowSetNodeId("root_provenance_order".to_owned());
+    let slice = RowSetNodeId("root_provenance_slice".to_owned());
+    let root_source = source("todos", SourceRole::Root);
+    request.input.shape.nodes.insert(
+        order.clone(),
+        RowSetExpr::OrderBy {
+            input,
+            keys: vec![OrderKey {
+                value: NormalizedValueRef::Provenance {
+                    source: root_source.clone(),
+                    field,
+                },
+                direction,
+            }],
+        },
+    );
+    request.input.shape.nodes.insert(
+        slice.clone(),
+        RowSetExpr::Slice {
+            input: order,
+            partition_by: Vec::new(),
+            limit: Some(1),
+            offset: 1,
+            tie_breaker: vec![NormalizedValueRef::RowId(RowIdRef::Source(root_source))],
+            rank_output: None,
+        },
+    );
+    request.input.shape.root = slice;
+}
+
+fn provenance_field_name(field: ProvenanceField) -> &'static str {
+    match field {
+        ProvenanceField::CreatedAt => "$createdAt",
+        ProvenanceField::CreatedBy => "$createdBy",
+        ProvenanceField::UpdatedAt => "$updatedAt",
+        ProvenanceField::UpdatedBy => "$updatedBy",
+    }
+}
+
 #[test]
 fn flat_collectors_bind_preserved_and_unwrapped_root_carriers() {
     let mut collect_all = collector_request(system_policy_context());
@@ -439,6 +684,97 @@ fn collector_tree_keeps_sibling_slots_distinct_and_nests_grandchildren_by_path()
         required_tags.len(),
         1,
         "a child whose required nested relation is missing must be filtered"
+    );
+}
+
+#[test]
+fn collector_orders_nested_slots_by_hidden_provenance_keys() {
+    let mut request = collector_request(system_policy_context());
+    let tags = source("todo_tags", SourceRole::CorrelatedChild("tags".to_owned()));
+    let order = RowSetNodeId("tags_provenance_order".to_owned());
+    let slice = RowSetNodeId("tags_provenance_slice".to_owned());
+    request.input.shape.nodes.insert(
+        order.clone(),
+        RowSetExpr::OrderBy {
+            input: RowSetNodeId("child".to_owned()),
+            keys: vec![OrderKey {
+                value: NormalizedValueRef::Provenance {
+                    source: tags.clone(),
+                    field: ProvenanceField::CreatedAt,
+                },
+                direction: SortDirection::Asc,
+            }],
+        },
+    );
+    request.input.shape.nodes.insert(
+        slice.clone(),
+        RowSetExpr::Slice {
+            input: order,
+            partition_by: Vec::new(),
+            limit: Some(1),
+            offset: 1,
+            tie_breaker: vec![NormalizedValueRef::RowId(RowIdRef::Source(tags.clone()))],
+            rank_output: None,
+        },
+    );
+    let RowSetExpr::CorrelatedPathProjection { child_input, .. } = request
+        .input
+        .shape
+        .nodes
+        .get_mut(&RowSetNodeId("path".to_owned()))
+        .expect("tags path")
+    else {
+        panic!("tags path must remain correlated");
+    };
+    *child_input = slice;
+
+    let mut resolver = InlineCollectorResolver::new(None);
+    let program = lower_query_program(request, &mut resolver)
+        .expect("nested hidden provenance window should lower");
+    assert!(resolver.requests.iter().any(|request| {
+        request.source == tags
+            && request
+                .requirements
+                .metadata
+                .contains(&SourceMetadataRequirement::Provenance(
+                    ProvenanceField::CreatedAt,
+                ))
+    }));
+    let terminal = program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == "app_rows")
+        .expect("app rows collector");
+    let OutputTerminalSchema::AppRows(schema) = &terminal.output else {
+        panic!("collector must expose app rows");
+    };
+    let tags_descriptor = schema
+        .descriptor
+        .fields()
+        .iter()
+        .find(|field| field.name.as_deref() == Some("tags"))
+        .expect("tags output field");
+    let ValueType::Array(tag) = &tags_descriptor.value_type else {
+        panic!("tags must be an array");
+    };
+    let ValueType::Record(tag) = tag.as_ref() else {
+        panic!("tags must contain records");
+    };
+    assert!(tag.field_index("$createdAt").is_none());
+
+    let rows = run_collector_graph(terminal.graph.clone());
+    let Value::Array(tags) = &rows[0].0[3] else {
+        panic!("collector must render tags slot");
+    };
+    assert_eq!(tags.len(), 1);
+    let Value::Record(tag) = &tags[0] else {
+        panic!("tags slot must contain child records");
+    };
+    assert_eq!(
+        tag.to_values().expect("tag values")[1],
+        Value::String("denied".to_owned()),
+        "the nested slot must honor the hidden key's row-id tie breaker"
     );
 }
 

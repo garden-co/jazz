@@ -46,4 +46,18 @@ describe("useLocalStorageState", () => {
 
     expect(screen.getByRole("button", { name: "5" })).not.toBeNull();
   });
+
+  it("updates when another window changes localStorage", () => {
+    render(<LocalStorageNumberProbe storageKey="test.storage.number" />);
+    localStorage.setItem("test.storage.number", "12");
+
+    fireEvent(
+      window,
+      new StorageEvent("storage", {
+        key: "test.storage.number",
+      }),
+    );
+
+    expect(screen.getByRole("button", { name: "12" })).not.toBeNull();
+  });
 });
