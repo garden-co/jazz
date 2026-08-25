@@ -7,6 +7,7 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { startApp } from "../../src/main.js";
+import { app } from "../../schema.js";
 import { TEST_PORT, APP_ID } from "./test-constants.js";
 import { type Db, type DbConfig } from "jazz-tools";
 
@@ -119,6 +120,26 @@ describe("Vanilla TS Todo App E2E", () => {
     const li = el.querySelector("#todo-list li")!;
     expect(li.querySelector("span")!.textContent).toBe("Buy milk");
     expect(li.classList.contains("done")).toBe(false);
+  });
+
+  it("renders todo titles and descriptions as text instead of HTML", async () => {
+    const { container: el, db } = await mountWithDb();
+    const ownerId = db.getAuthState().session?.user_id;
+    if (!ownerId) throw new Error("Todo test database is not authenticated");
+    const title = '<img src="invalid" data-injected-title="true">';
+    const description = '<img src="invalid" data-injected-description="true">';
+
+    db.insert(app.todos, { title, description, done: false, owner_id: ownerId });
+
+    await waitFor(
+      () => el.querySelectorAll("#todo-list li").length === 1,
+      3000,
+      "Todo should appear after insertion",
+    );
+
+    expect(el.querySelector("#todo-list li span")?.textContent).toBe(title);
+    expect(el.querySelector("#todo-list li small")?.textContent).toBe(description);
+    expect(el.querySelector("[data-injected-title], [data-injected-description]")).toBeNull();
   });
 
   it("renders child todos directly under their parent with nesting depth", async () => {
