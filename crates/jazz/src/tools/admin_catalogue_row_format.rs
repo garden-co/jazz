@@ -268,7 +268,7 @@ fn encode_row_columns_into(
             buf[offset_position..offset_position + size_of::<u32>()]
                 .copy_from_slice(&offset.to_le_bytes());
         }
-        encode_variable_value(buf, col, val);
+        encode_variable_value(buf, col, val)?;
     }
 
     Ok(())
@@ -498,6 +498,21 @@ fn validate_value_size(
             }
             Ok(())
         }
+        (
+            Value::Enum { case, values },
+            ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. },
+        ) => {
+            if let Some(entry) = cases.iter().find(|entry| entry.name == *case) {
+                for (inner_value, inner_column) in values.iter().zip(&entry.fields) {
+                    validate_value_size(
+                        inner_value,
+                        &inner_column.column_type,
+                        inner_column.name_str(),
+                    )?;
+                }
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -576,15 +591,25 @@ fn encode_enum_payload_into(
     case: &str,
     values: &[Value],
     col_type: &ColumnType,
-) {
+) -> Result<(), EncodingError> {
     let cases = match col_type {
         ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. } => cases,
-        _ => unreachable!("Enum value does not match column type"),
+        _ => {
+            return Err(EncodingError::TypeMismatch {
+                column: "enum payload".into(),
+                expected: Box::new(col_type.clone()),
+                actual: None,
+            });
+        }
     };
     let entry = cases
         .iter()
         .find(|entry| entry.name == case)
-        .unwrap_or_else(|| unreachable!("validated enum case"));
+        .ok_or_else(|| EncodingError::TypeMismatch {
+            column: "enum payload case".into(),
+            expected: Box::new(col_type.clone()),
+            actual: None,
+        })?;
     let (fixed_section_size, variable_column_count) = row_encoding_layout(&entry.fields);
     let case_bytes = case.as_bytes();
     buf.extend_from_slice(&(case_bytes.len() as u32).to_le_bytes());
@@ -596,15 +621,18 @@ fn encode_enum_payload_into(
         variable_column_count,
         values,
     )
-    .unwrap_or_else(|_| unreachable!("validated enum payload"));
 }
 
 /// Encode a variable-length value to the buffer.
-fn encode_variable_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value) {
+fn encode_variable_value(
+    buf: &mut Vec<u8>,
+    col: &ColumnDescriptor,
+    val: &Value,
+) -> Result<(), EncodingError> {
     if col.nullable {
         if val.is_null() {
             buf.push(0); // null marker
-            return;
+            return Ok(());
         } else {
             buf.push(1); // present marker
         }
@@ -613,7 +641,7 @@ fn encode_variable_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value)
     match val {
         Value::Text(s) => buf.extend_from_slice(s.as_bytes()),
         Value::Bytea(bytes) => buf.extend_from_slice(bytes),
-        Value::Array(elements) => encode_array_into(buf, elements, &col.column_type),
+        Value::Array(elements) => encode_array_into(buf, elements, &col.column_type)?,
         Value::Row { id, values } => {
             // Encode row using its descriptor from the column type
             if let ColumnType::Row { columns: desc } = &col.column_type {
@@ -625,16 +653,17 @@ fn encode_variable_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value)
                     }
                     None => buf.push(0),
                 }
-                let row_bytes = encode_row(desc, values).unwrap_or_default();
+                let row_bytes = encode_row(desc, values)?;
                 buf.extend(row_bytes);
             }
         }
         Value::Enum { case, values } => {
-            encode_enum_payload_into(buf, case, values, &col.column_type);
+            encode_enum_payload_into(buf, case, values, &col.column_type)?;
         }
         Value::Null => {} // Already handled above for nullable
         _ => unreachable!("Non-text/bytea/array/row types are fixed-size"),
     }
+    Ok(())
 }
 
 cfg_decode! {
@@ -1067,8 +1096,10 @@ pub fn encode_value_with_type(value: &Value, col_type: &ColumnType) -> Vec<u8> {
             ColumnType::EnumPayload { .. } | ColumnType::CatalogueEnumPayload { .. },
         ) => {
             let mut buf = Vec::with_capacity(estimated_enum_payload_len(case, values, col_type));
-            encode_enum_payload_into(&mut buf, case, values, col_type);
-            buf
+            match encode_enum_payload_into(&mut buf, case, values, col_type) {
+                Ok(()) => buf,
+                Err(_) => Vec::new(),
+            }
         }
         (Value::Row { id, values }, ColumnType::Row { columns: desc }) => {
             let mut buf = Vec::new();
@@ -1141,22 +1172,28 @@ fn encode_array_simple(elements: &[Value]) -> Vec<u8> {
 /// which require their descriptor for encoding.
 fn encode_array(elements: &[Value], array_type: &ColumnType) -> Vec<u8> {
     let mut result = Vec::with_capacity(estimated_array_len(elements, array_type));
-    encode_array_into(&mut result, elements, array_type);
-    result
+    match encode_array_into(&mut result, elements, array_type) {
+        Ok(()) => result,
+        Err(_) => Vec::new(),
+    }
 }
 
-fn encode_array_into(buf: &mut Vec<u8>, elements: &[Value], array_type: &ColumnType) {
+fn encode_array_into(
+    buf: &mut Vec<u8>,
+    elements: &[Value],
+    array_type: &ColumnType,
+) -> Result<(), EncodingError> {
     let count = elements.len() as u32;
     buf.extend_from_slice(&count.to_le_bytes());
 
     if elements.is_empty() {
-        return;
+        return Ok(());
     }
 
     // Get the element type from the array type
     let element_type = match array_type {
         ColumnType::Array { element: elem_type } => elem_type.as_ref(),
-        _ => return, // Not an array type
+        _ => return Ok(()), // Not an array type
     };
 
     // Check if element type is fixed-size
@@ -1165,7 +1202,7 @@ fn encode_array_into(buf: &mut Vec<u8>, elements: &[Value], array_type: &ColumnT
     if is_fixed {
         // Fixed-size elements: just concatenate encoded values (no offset table)
         for elem in elements {
-            encode_value_with_type_into(buf, elem, element_type);
+            encode_value_with_type_into(buf, elem, element_type)?;
         }
     } else {
         let offset_table_start = buf.len();
@@ -1180,12 +1217,17 @@ fn encode_array_into(buf: &mut Vec<u8>, elements: &[Value], array_type: &ColumnT
                 buf[offset_position..offset_position + size_of::<u32>()]
                     .copy_from_slice(&offset.to_le_bytes());
             }
-            encode_value_with_type_into(buf, elem, element_type);
+            encode_value_with_type_into(buf, elem, element_type)?;
         }
     }
+    Ok(())
 }
 
-fn encode_value_with_type_into(buf: &mut Vec<u8>, value: &Value, col_type: &ColumnType) {
+fn encode_value_with_type_into(
+    buf: &mut Vec<u8>,
+    value: &Value,
+    col_type: &ColumnType,
+) -> Result<(), EncodingError> {
     match (value, col_type) {
         (
             Value::Text(raw),
@@ -1196,7 +1238,20 @@ fn encode_value_with_type_into(buf: &mut Vec<u8>, value: &Value, col_type: &Colu
         (
             Value::Enum { case, values },
             ColumnType::EnumPayload { .. } | ColumnType::CatalogueEnumPayload { .. },
-        ) => encode_enum_payload_into(buf, case, values, col_type),
+        ) => encode_enum_payload_into(buf, case, values, col_type)?,
+        (Value::Row { id, values }, ColumnType::Row { columns }) => {
+            match id {
+                Some(obj_id) => {
+                    buf.push(1);
+                    buf.extend_from_slice(obj_id.uuid().as_bytes());
+                }
+                None => buf.push(0),
+            }
+            buf.extend(encode_row(columns, values)?);
+        }
+        (Value::Array(elements), ColumnType::Array { .. }) => {
+            encode_array_into(buf, elements, col_type)?;
+        }
         (Value::Integer(n), _) => buf.extend_from_slice(&n.to_le_bytes()),
         (Value::BigInt(n), _) => buf.extend_from_slice(&n.to_le_bytes()),
         (Value::Double(f), _) => buf.extend_from_slice(&f.to_le_bytes()),
@@ -1206,6 +1261,7 @@ fn encode_value_with_type_into(buf: &mut Vec<u8>, value: &Value, col_type: &Colu
         (Value::TransactionId(bytes), _) => buf.extend_from_slice(bytes),
         _ => buf.extend(encode_value_with_type(value, col_type)),
     }
+    Ok(())
 }
 
 cfg_decode! {
@@ -1734,6 +1790,82 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, EncodingError::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn enum_payload_bytea_limit_is_propagated_directly_and_in_arrays() {
+        let event_type = ColumnType::EnumPayload {
+            cases: vec![EnumCaseDescriptor {
+                name: "attachment".into(),
+                fields: vec![ColumnDescriptor::new("body", ColumnType::Bytea)],
+            }],
+        };
+        let oversized_event = Value::Enum {
+            case: "attachment".into(),
+            values: vec![Value::Bytea(vec![0; BYTEA_MAX_BYTES + 1])],
+        };
+
+        let direct_descriptor =
+            RowDescriptor::new(vec![ColumnDescriptor::new("event", event_type.clone())]);
+        let direct_error = encode_row(&direct_descriptor, &[oversized_event.clone()]).unwrap_err();
+        match direct_error {
+            EncodingError::ByteaTooLarge {
+                column,
+                actual,
+                max,
+            } => {
+                assert_eq!(column, "body");
+                assert_eq!(actual, BYTEA_MAX_BYTES + 1);
+                assert_eq!(max, BYTEA_MAX_BYTES);
+            }
+            other => panic!("expected ByteaTooLarge, got {other:?}"),
+        }
+
+        let row_descriptor = RowDescriptor::new(vec![ColumnDescriptor::new(
+            "record",
+            ColumnType::Row {
+                columns: Box::new(RowDescriptor::new(vec![ColumnDescriptor::new(
+                    "event",
+                    event_type.clone(),
+                )])),
+            },
+        )]);
+        let row_error = encode_row(
+            &row_descriptor,
+            &[Value::Row {
+                id: None,
+                values: vec![oversized_event.clone()],
+            }],
+        )
+        .unwrap_err();
+        assert!(matches!(row_error, EncodingError::ByteaTooLarge { .. }));
+
+        let array_descriptor = RowDescriptor::new(vec![ColumnDescriptor::new(
+            "events",
+            ColumnType::Array {
+                element: Box::new(event_type.clone()),
+            },
+        )]);
+        let array_error = encode_row(
+            &array_descriptor,
+            &[Value::Array(vec![oversized_event.clone()])],
+        )
+        .unwrap_err();
+        assert!(matches!(array_error, EncodingError::ByteaTooLarge { .. }));
+
+        // The direct encoder must remain fallible even if a future validation path drifts.
+        let mut encoded = Vec::new();
+        let encoder_error = encode_enum_payload_into(
+            &mut encoded,
+            "attachment",
+            match &oversized_event {
+                Value::Enum { values, .. } => values,
+                _ => unreachable!(),
+            },
+            &event_type,
+        )
+        .unwrap_err();
+        assert!(matches!(encoder_error, EncodingError::ByteaTooLarge { .. }));
     }
 
     #[test]
