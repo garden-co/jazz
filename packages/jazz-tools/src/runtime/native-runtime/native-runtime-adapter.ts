@@ -234,7 +234,6 @@ type NativeDb = {
     rowId: Uint8Array,
     cells: Uint8Array,
     column: string,
-    kind: "Text" | "Json" | "Bytea",
     mutation?: StreamingMutationKind,
     author?: Uint8Array,
     updatedAtMs?: number,

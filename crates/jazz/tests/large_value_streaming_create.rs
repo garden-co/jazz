@@ -229,6 +229,7 @@ fn failed_streaming_publication_evicts_the_finalized_staged_root() {
         None,
         None,
         None,
+        None,
     ));
     let error = match result {
         Ok(_) => panic!("duplicate insert unexpectedly published"),
