@@ -622,6 +622,8 @@ pub enum ChunkError {
     Backend(String),
     #[error("chunk bytes do not match the requested object hash")]
     Integrity,
+    #[error("chunk request re-entered while its backing request was being polled")]
+    Reentrant,
 }
 
 impl From<ChunkStorageError> for ChunkError {
@@ -657,6 +659,7 @@ pub struct OwnedChunkProvider {
     cache: Rc<RefCell<VerifiedChunkCache>>,
     leases: Rc<RefCell<ChunkLeaseStats>>,
     activity: Rc<RefCell<ChunkActivityState>>,
+    in_flight: Rc<RefCell<InFlightChunks>>,
 }
 
 #[derive(Default, Debug)]
@@ -711,9 +714,10 @@ pub struct ChunkCacheStats {
     pub budget_bytes: usize,
     pub active_leases: usize,
     pub leased_bytes: usize,
-    /// Requests currently suspended in the backing provider. Reclamation is
-    /// deferred while this is non-zero because the requested locator may have
-    /// been discovered from an active root before its bytes were leased.
+    /// Admitted chunk-read consumers, including callers sharing one backing
+    /// load and callers served from the verified cache. Reclamation is deferred
+    /// while this is non-zero because a requested locator may have been
+    /// discovered from an active root before its bytes were leased.
     pub active_requests: usize,
 }
 
@@ -722,6 +726,171 @@ struct ChunkActivityState {
     active_requests: usize,
     reclaiming: bool,
     waiters: Vec<Waker>,
+}
+
+/// The durable evaluation-request registry is per database rather than per
+/// evaluation session. Keep the provider future here too: two independently
+/// installed terminals can discover the same cold immutable node before either
+/// session has a result to cache.
+#[derive(Default)]
+struct InFlightChunks {
+    entries: BTreeMap<ChunkRequest, InFlightChunk>,
+}
+
+struct InFlightChunk {
+    /// Temporarily `None` only while a consumer is polling it outside the
+    /// registry borrow. A synchronous reentrant request for this exact key is
+    /// a request cycle and fails deterministically.
+    future: Option<ChunkFuture<'static, Result<Bytes, ChunkError>>>,
+    result: Option<Result<Bytes, ChunkError>>,
+    /// Each consumer has at most one replaceable registered waker. Futures may
+    /// legally be re-polled with a different waker, so retaining a bare list
+    /// would keep every old task allocation alive until completion.
+    waiters: Vec<ChunkWaiter>,
+    consumers: usize,
+    next_consumer_id: u64,
+}
+
+struct ChunkWaiter {
+    consumer_id: u64,
+    waker: Waker,
+}
+
+/// One caller's lease-producing view of a shared exact chunk request.
+///
+/// The wrapper owns its consumer count. If every blocked evaluation is
+/// cancelled, dropping the last wrapper removes and drops the backing request,
+/// so a later evaluation creates a fresh request instead of joining a future
+/// that no executor will ever poll.
+struct CoalescedChunkGet {
+    request: ChunkRequest,
+    consumer_id: u64,
+    in_flight: Rc<RefCell<InFlightChunks>>,
+    leases: Rc<RefCell<ChunkLeaseStats>>,
+    done: bool,
+}
+
+impl CoalescedChunkGet {
+    fn finish(&mut self) {
+        if self.done {
+            return;
+        }
+        self.done = true;
+        let (remove, wake) = {
+            let mut in_flight = self.in_flight.borrow_mut();
+            let Some(entry) = in_flight.entries.get_mut(&self.request) else {
+                return;
+            };
+            entry.consumers = entry.consumers.saturating_sub(1);
+            entry
+                .waiters
+                .retain(|waiter| waiter.consumer_id != self.consumer_id);
+            // The consumer which last polled the backing future may be the
+            // one being cancelled. Wake remaining consumers so one of them
+            // installs its waker on the single shared future.
+            let wake = if entry.consumers != 0 && entry.result.is_none() {
+                std::mem::take(&mut entry.waiters)
+            } else {
+                Vec::new()
+            };
+            (entry.consumers == 0, wake)
+        };
+        if remove {
+            self.in_flight.borrow_mut().entries.remove(&self.request);
+        }
+        for waiter in wake {
+            waiter.waker.wake();
+        }
+    }
+}
+
+impl Future for CoalescedChunkGet {
+    type Output = Result<ChunkLease, ChunkError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        enum Next {
+            Complete(Result<Bytes, ChunkError>),
+            Poll(ChunkFuture<'static, Result<Bytes, ChunkError>>),
+            Reentrant,
+        }
+
+        let next = {
+            let mut in_flight = self.in_flight.borrow_mut();
+            let entry = in_flight
+                .entries
+                .get_mut(&self.request)
+                .expect("coalesced chunk request remains registered while a consumer exists");
+            if let Some(result) = &entry.result {
+                Next::Complete(result.clone())
+            } else {
+                entry.future.take().map_or(Next::Reentrant, Next::Poll)
+            }
+        };
+
+        let mut wake = Vec::new();
+        let result = match next {
+            Next::Complete(result) => Some(result),
+            Next::Reentrant => Some(Err(ChunkError::Reentrant)),
+            Next::Poll(mut future) => match future.as_mut().poll(cx) {
+                Poll::Pending => {
+                    let mut in_flight = self.in_flight.borrow_mut();
+                    let entry = in_flight.entries.get_mut(&self.request).expect(
+                        "coalesced chunk request remains registered while a consumer exists",
+                    );
+                    debug_assert!(entry.future.is_none());
+                    entry.future = Some(future);
+                    None
+                }
+                Poll::Ready(result) => {
+                    let mut in_flight = self.in_flight.borrow_mut();
+                    let entry = in_flight.entries.get_mut(&self.request).expect(
+                        "coalesced chunk request remains registered while a consumer exists",
+                    );
+                    entry.result = Some(result.clone());
+                    wake = std::mem::take(&mut entry.waiters)
+                        .into_iter()
+                        .filter(|waiter| waiter.consumer_id != self.consumer_id)
+                        .collect();
+                    Some(result)
+                }
+            },
+        };
+        if result.is_none() {
+            let mut in_flight = self.in_flight.borrow_mut();
+            let entry = in_flight
+                .entries
+                .get_mut(&self.request)
+                .expect("coalesced chunk request remains registered while a consumer exists");
+            if let Some(waiter) = entry
+                .waiters
+                .iter_mut()
+                .find(|waiter| waiter.consumer_id == self.consumer_id)
+            {
+                if !waiter.waker.will_wake(cx.waker()) {
+                    waiter.waker = cx.waker().clone();
+                }
+            } else {
+                entry.waiters.push(ChunkWaiter {
+                    consumer_id: self.consumer_id,
+                    waker: cx.waker().clone(),
+                });
+            }
+        }
+        for waiter in wake {
+            waiter.waker.wake();
+        }
+        let Some(result) = result else {
+            return Poll::Pending;
+        };
+        self.as_mut().get_mut().finish();
+        Poll::Ready(result.map(|bytes| ChunkLease::new(bytes, Rc::clone(&self.leases))))
+    }
+}
+
+impl Drop for CoalescedChunkGet {
+    fn drop(&mut self) {
+        self.finish();
+    }
 }
 
 struct ActiveChunkRequest {
@@ -804,6 +973,7 @@ impl OwnedChunkProvider {
             })),
             leases: Rc::new(RefCell::new(ChunkLeaseStats::default())),
             activity: Rc::new(RefCell::new(ChunkActivityState::default())),
+            in_flight: Rc::new(RefCell::new(InFlightChunks::default())),
         }
     }
 
@@ -846,52 +1016,94 @@ impl OwnedChunkProvider {
         let cache = Rc::clone(&self.cache);
         let leases = Rc::clone(&self.leases);
         let activity = Rc::clone(&self.activity);
+        let in_flight = Rc::clone(&self.in_flight);
         Box::pin(async move {
-            let request_guard = ActiveChunkRequest::acquire(activity).await;
-            {
+            // Admission must precede even a verified-cache hit. A reclamation
+            // pass may start after the last lease is dropped, and every new
+            // reader must remain pending until that pass releases its guard.
+            let _request_guard = ActiveChunkRequest::acquire(activity).await;
+            let cached = {
                 let mut cache = cache.borrow_mut();
                 cache.clock = cache.clock.wrapping_add(1);
                 let clock = cache.clock;
                 if let Some((bytes, last_use)) = cache.entries.get_mut(&request) {
                     *last_use = clock;
-                    let lease = ChunkLease::new(bytes.clone(), leases);
-                    drop(request_guard);
-                    return Ok(lease);
+                    Some(bytes.clone())
+                } else {
+                    None
                 }
+            };
+            if let Some(bytes) = cached {
+                return Ok(ChunkLease::new(bytes, leases));
             }
-            let bytes = provider.get(request.clone()).await?;
-            if bytes.len() > crate::large_values::MAX_ENCODED_NODE_BYTES {
-                return Err(ChunkError::Integrity);
-            }
-            if crate::large_values::object_hash(&bytes).0 != request.object_hash {
-                return Err(ChunkError::Integrity);
-            }
-            let mut cache = cache.borrow_mut();
-            let length = bytes.len();
-            if length <= cache.budget {
-                while cache.bytes.saturating_add(length) > cache.budget {
-                    let Some(oldest) = cache
-                        .entries
-                        .iter()
-                        .min_by_key(|(_, (_, last_use))| *last_use)
-                        .map(|(request, _)| request.clone())
-                    else {
-                        break;
-                    };
-                    if let Some((evicted, _)) = cache.entries.remove(&oldest) {
-                        cache.bytes = cache.bytes.saturating_sub(evicted.len());
-                    }
+            let consumer_id = {
+                let mut entries = in_flight.borrow_mut();
+                if let Some(entry) = entries.entries.get_mut(&request) {
+                    entry.consumers = entry.consumers.saturating_add(1);
+                    let consumer_id = entry.next_consumer_id;
+                    entry.next_consumer_id = entry.next_consumer_id.wrapping_add(1);
+                    consumer_id
+                } else {
+                    entries.entries.insert(
+                        request.clone(),
+                        InFlightChunk {
+                            future: Some(load_and_verify_chunk(provider, cache, request.clone())),
+                            result: None,
+                            waiters: Vec::new(),
+                            consumers: 1,
+                            next_consumer_id: 1,
+                        },
+                    );
+                    0
                 }
-                cache.clock = cache.clock.wrapping_add(1);
-                let clock = cache.clock;
-                cache.entries.insert(request, (bytes.clone(), clock));
-                cache.bytes = cache.bytes.saturating_add(length);
+            };
+            CoalescedChunkGet {
+                request,
+                consumer_id,
+                in_flight,
+                leases,
+                done: false,
             }
-            let lease = ChunkLease::new(bytes, leases);
-            drop(request_guard);
-            Ok(lease)
+            .await
         })
     }
+}
+
+fn load_and_verify_chunk(
+    provider: Rc<dyn ChunkProvider>,
+    cache: Rc<RefCell<VerifiedChunkCache>>,
+    request: ChunkRequest,
+) -> ChunkFuture<'static, Result<Bytes, ChunkError>> {
+    Box::pin(async move {
+        let bytes = provider.get(request.clone()).await?;
+        if bytes.len() > crate::large_values::MAX_ENCODED_NODE_BYTES
+            || crate::large_values::object_hash(&bytes).0 != request.object_hash
+        {
+            return Err(ChunkError::Integrity);
+        }
+        let mut cache = cache.borrow_mut();
+        let length = bytes.len();
+        if length <= cache.budget {
+            while cache.bytes.saturating_add(length) > cache.budget {
+                let Some(oldest) = cache
+                    .entries
+                    .iter()
+                    .min_by_key(|(_, (_, last_use))| *last_use)
+                    .map(|(request, _)| request.clone())
+                else {
+                    break;
+                };
+                if let Some((evicted, _)) = cache.entries.remove(&oldest) {
+                    cache.bytes = cache.bytes.saturating_sub(evicted.len());
+                }
+            }
+            cache.clock = cache.clock.wrapping_add(1);
+            let clock = cache.clock;
+            cache.entries.insert(request, (bytes.clone(), clock));
+            cache.bytes = cache.bytes.saturating_add(length);
+        }
+        Ok(bytes)
+    })
 }
 
 #[derive(Debug)]
@@ -1035,8 +1247,14 @@ impl ChunkProvider for TestChunkProvider {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::pin::Pin;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use futures::executor::block_on;
+    use futures::task::{ArcWake, noop_waker, waker};
 
     use super::*;
 
@@ -1078,6 +1296,414 @@ mod tests {
         assert_eq!(block_on(chunks.get(request.clone())).unwrap(), bytes);
         assert_eq!(block_on(chunks.get(request)).unwrap(), bytes);
         assert_eq!(provider.calls.get(), 1);
+    }
+
+    #[test]
+    fn concurrent_cold_sessions_share_one_provider_request_and_cancel_cleanly() {
+        let bytes = Bytes::from_static(b"one cold authenticated chunk");
+        let request = ChunkRequest {
+            object_hash: crate::large_values::object_hash(&bytes).0,
+            locator: Locator::from_seed(b"one-cold-request"),
+        };
+        let (provider, control) = TestChunkProvider::controlled([(request.clone(), bytes)]);
+        let chunks = OwnedChunkProvider::new(Rc::new(provider));
+        control.pause();
+        let mut first = chunks.get(request.clone());
+        let mut second = chunks.get(request.clone());
+        let waker = noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+
+        assert!(matches!(
+            Pin::new(&mut first).poll(&mut context),
+            Poll::Pending
+        ));
+        assert!(matches!(
+            Pin::new(&mut second).poll(&mut context),
+            Poll::Pending
+        ));
+        assert_eq!(control.observed(), vec![request.clone()]);
+        assert_eq!(chunks.cache_stats().active_requests, 2);
+
+        // No blocked consumer remains, so the shared request is dropped rather
+        // than becoming a permanently unpolled registry entry.
+        drop(first);
+        drop(second);
+        assert_eq!(chunks.cache_stats().active_requests, 0);
+        let mut retry = chunks.get(request.clone());
+        assert!(matches!(
+            Pin::new(&mut retry).poll(&mut context),
+            Poll::Pending
+        ));
+        assert_eq!(control.observed(), vec![request.clone(), request]);
+    }
+
+    #[test]
+    fn cancelling_the_backing_poller_wakes_a_remaining_consumer() {
+        struct WakeCounter(AtomicUsize);
+
+        impl ArcWake for WakeCounter {
+            fn wake_by_ref(arc_self: &Arc<Self>) {
+                arc_self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let bytes = Bytes::from_static(b"handoff the backing poller");
+        let request = ChunkRequest {
+            object_hash: crate::large_values::object_hash(&bytes).0,
+            locator: Locator::from_seed(b"cancellation-handoff"),
+        };
+        let (provider, control) = TestChunkProvider::controlled([(request.clone(), bytes.clone())]);
+        let chunks = OwnedChunkProvider::new(Rc::new(provider));
+        control.pause();
+        let mut first = chunks.get(request.clone());
+        let mut second = chunks.get(request.clone());
+        let first_wakes = Arc::new(WakeCounter(AtomicUsize::new(0)));
+        let second_wakes = Arc::new(WakeCounter(AtomicUsize::new(0)));
+        let first_waker = waker(Arc::clone(&first_wakes));
+        let second_waker = waker(Arc::clone(&second_wakes));
+        let mut first_context = std::task::Context::from_waker(&first_waker);
+        let mut second_context = std::task::Context::from_waker(&second_waker);
+
+        assert!(matches!(
+            Pin::new(&mut first).poll(&mut first_context),
+            Poll::Pending
+        ));
+        assert!(matches!(
+            Pin::new(&mut second).poll(&mut second_context),
+            Poll::Pending
+        ));
+        assert_eq!(second_wakes.0.load(Ordering::SeqCst), 0);
+
+        // `first` owns the backing future's last waker. Its cancellation must
+        // explicitly wake `second` so the shared future keeps making progress.
+        drop(first);
+        assert_eq!(second_wakes.0.load(Ordering::SeqCst), 1);
+        assert!(
+            chunks
+                .in_flight
+                .borrow()
+                .entries
+                .get(&request)
+                .expect("remaining consumer keeps the shared request")
+                .waiters
+                .is_empty()
+        );
+        assert!(matches!(
+            Pin::new(&mut second).poll(&mut second_context),
+            Poll::Pending
+        ));
+        assert_eq!(
+            chunks
+                .in_flight
+                .borrow()
+                .entries
+                .get(&request)
+                .expect("remaining consumer re-registers its waker")
+                .waiters
+                .len(),
+            1
+        );
+        control.release_one();
+        assert!(matches!(
+            Pin::new(&mut second).poll(&mut second_context),
+            Poll::Ready(Ok(_))
+        ));
+    }
+
+    // This must stay internal: public query APIs cannot observe an executor's
+    // replacement waker identity or prove that obsolete task allocations are
+    // released while a shared request remains pending.
+    #[test]
+    fn replacing_a_pending_consumers_waker_drops_stale_wakers() {
+        struct NeverReadyProvider;
+
+        impl ChunkProvider for NeverReadyProvider {
+            fn get(&self, _request: ChunkRequest) -> ChunkFuture<'_, Result<Bytes, ChunkError>> {
+                Box::pin(std::future::pending())
+            }
+        }
+
+        struct WakeToken;
+
+        impl ArcWake for WakeToken {
+            fn wake_by_ref(_: &Arc<Self>) {}
+        }
+
+        let bytes = Bytes::from_static(b"replace stale consumer wakers");
+        let request = ChunkRequest {
+            object_hash: crate::large_values::object_hash(&bytes).0,
+            locator: Locator::from_seed(b"replace-stale-consumer-wakers"),
+        };
+        let chunks = OwnedChunkProvider::new(Rc::new(NeverReadyProvider));
+        let mut first = chunks.get(request.clone());
+        let mut second = chunks.get(request.clone());
+        let mut weak_wakers = Vec::new();
+
+        // Futures may be polled repeatedly by executors which install a fresh
+        // task waker after every suspension. The registry must retain only the
+        // current waker for this one consumer, not one clone per poll.
+        for _ in 0..8 {
+            let token = Arc::new(WakeToken);
+            weak_wakers.push(Arc::downgrade(&token));
+            let waker = waker(token);
+            let mut context = std::task::Context::from_waker(&waker);
+            assert!(matches!(
+                Pin::new(&mut first).poll(&mut context),
+                Poll::Pending
+            ));
+        }
+
+        let second_token = Arc::new(WakeToken);
+        let second_waker = waker(second_token);
+        let mut second_context = std::task::Context::from_waker(&second_waker);
+        assert!(matches!(
+            Pin::new(&mut second).poll(&mut second_context),
+            Poll::Pending
+        ));
+        assert_eq!(
+            chunks
+                .in_flight
+                .borrow()
+                .entries
+                .get(&request)
+                .expect("both pending consumers retain the request")
+                .waiters
+                .len(),
+            2
+        );
+        assert!(
+            weak_wakers[..7]
+                .iter()
+                .all(|waker| waker.upgrade().is_none())
+        );
+        assert!(weak_wakers[7].upgrade().is_some());
+
+        // Dropping the backing poller releases its current waiter and wakes
+        // the remaining consumer to register itself as the new poller.
+        drop(first);
+        assert_eq!(
+            chunks
+                .in_flight
+                .borrow()
+                .entries
+                .get(&request)
+                .expect("remaining consumer retains the request")
+                .waiters
+                .len(),
+            0,
+            "handoff wakes and clears the remaining consumer for re-registration"
+        );
+        assert!(weak_wakers[7].upgrade().is_none());
+
+        drop(second);
+        assert!(chunks.in_flight.borrow().entries.is_empty());
+    }
+
+    #[test]
+    fn cached_get_waits_for_reclamation_admission_before_returning_a_lease() {
+        let bytes = Bytes::from_static(b"warm verified chunk");
+        let provider = Rc::new(CountingProvider {
+            calls: Cell::new(0),
+            bytes: bytes.clone(),
+        });
+        let chunks = OwnedChunkProvider::new(provider);
+        let request = ChunkRequest {
+            object_hash: crate::large_values::object_hash(&bytes).0,
+            locator: Locator::from_seed(b"warm-cache-reclamation"),
+        };
+
+        // Warm the verified cache, then leave no lease that would prevent a
+        // reclamation pass from beginning.
+        drop(block_on(chunks.get(request.clone())).unwrap());
+        let reclamation = chunks
+            .try_begin_reclamation()
+            .expect("a lease-free warm cache may begin reclamation");
+        let mut cached_get = chunks.get(request);
+        let waker = noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+
+        // This is the cache-before-admission regression: returning here would
+        // let a new read overlap a pass that has exclusive reclamation access.
+        assert!(matches!(
+            Pin::new(&mut cached_get).poll(&mut context),
+            Poll::Pending
+        ));
+        assert_eq!(chunks.cache_stats().active_requests, 0);
+        drop(reclamation);
+        assert!(matches!(
+            Pin::new(&mut cached_get).poll(&mut context),
+            Poll::Ready(Ok(_))
+        ));
+    }
+
+    #[test]
+    fn same_key_fanout_receives_one_error_and_a_later_retry_starts_fresh() {
+        let bytes = Bytes::from_static(b"retry after shared failure");
+        let request = ChunkRequest {
+            object_hash: crate::large_values::object_hash(&bytes).0,
+            locator: Locator::from_seed(b"shared-failure"),
+        };
+        let (provider, control) = TestChunkProvider::controlled([(request.clone(), bytes.clone())]);
+        let chunks = OwnedChunkProvider::new(Rc::new(provider));
+        control.pause();
+        control.fail_next(ChunkError::Unavailable);
+        let mut first = chunks.get(request.clone());
+        let mut second = chunks.get(request.clone());
+        let waker = noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+
+        assert!(matches!(
+            Pin::new(&mut first).poll(&mut context),
+            Poll::Pending
+        ));
+        assert!(matches!(
+            Pin::new(&mut second).poll(&mut context),
+            Poll::Pending
+        ));
+        control.release_one();
+        assert!(matches!(
+            Pin::new(&mut first).poll(&mut context),
+            Poll::Ready(Err(ChunkError::Unavailable))
+        ));
+        assert!(matches!(
+            Pin::new(&mut second).poll(&mut context),
+            Poll::Ready(Err(ChunkError::Unavailable))
+        ));
+        assert!(chunks.in_flight.borrow().entries.is_empty());
+        control.resume();
+        assert_eq!(block_on(chunks.get(request.clone())).unwrap(), bytes);
+        assert_eq!(control.observed(), vec![request.clone(), request]);
+    }
+
+    #[test]
+    fn concurrent_cold_sessions_receive_independent_leases_from_one_completion() {
+        let bytes = Bytes::from_static(b"shared completion bytes");
+        let request = ChunkRequest {
+            object_hash: crate::large_values::object_hash(&bytes).0,
+            locator: Locator::from_seed(b"shared-completion"),
+        };
+        let (provider, control) = TestChunkProvider::controlled([(request.clone(), bytes.clone())]);
+        let chunks = OwnedChunkProvider::new(Rc::new(provider));
+        control.pause();
+        let mut first = chunks.get(request.clone());
+        let mut second = chunks.get(request.clone());
+        let waker = noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+
+        assert!(matches!(
+            Pin::new(&mut first).poll(&mut context),
+            Poll::Pending
+        ));
+        assert!(matches!(
+            Pin::new(&mut second).poll(&mut context),
+            Poll::Pending
+        ));
+        control.release_one();
+        let Poll::Ready(Ok(first)) = Pin::new(&mut first).poll(&mut context) else {
+            panic!("first coalesced consumer must complete after the shared request");
+        };
+        let Poll::Ready(Ok(second)) = Pin::new(&mut second).poll(&mut context) else {
+            panic!("second coalesced consumer must complete after the shared request");
+        };
+        assert_eq!(first, bytes);
+        assert_eq!(second, bytes);
+        assert_eq!(control.observed(), vec![request]);
+        assert_eq!(chunks.cache_stats().active_requests, 0);
+        assert_eq!(chunks.cache_stats().active_leases, 2);
+        assert!(chunks.in_flight.borrow().entries.is_empty());
+    }
+
+    #[test]
+    fn provider_may_reentrantly_request_a_different_cold_chunk() {
+        struct ReentrantProvider {
+            chunks: Rc<RefCell<Option<OwnedChunkProvider>>>,
+            first: ChunkRequest,
+            second: ChunkRequest,
+            first_bytes: Bytes,
+            second_bytes: Bytes,
+        }
+
+        impl ChunkProvider for ReentrantProvider {
+            fn get(&self, request: ChunkRequest) -> ChunkFuture<'_, Result<Bytes, ChunkError>> {
+                let chunks = Rc::clone(&self.chunks);
+                let first = self.first.clone();
+                let second = self.second.clone();
+                let first_bytes = self.first_bytes.clone();
+                let second_bytes = self.second_bytes.clone();
+                Box::pin(async move {
+                    if request == first {
+                        let nested = chunks
+                            .borrow()
+                            .as_ref()
+                            .expect("provider is installed")
+                            .get(second);
+                        let _nested_lease = nested.await?;
+                        Ok(first_bytes)
+                    } else {
+                        Ok(second_bytes)
+                    }
+                })
+            }
+        }
+
+        let first_bytes = Bytes::from_static(b"outer chunk");
+        let second_bytes = Bytes::from_static(b"reentrant chunk");
+        let first = ChunkRequest {
+            object_hash: crate::large_values::object_hash(&first_bytes).0,
+            locator: Locator::from_seed(b"reentrant-first"),
+        };
+        let second = ChunkRequest {
+            object_hash: crate::large_values::object_hash(&second_bytes).0,
+            locator: Locator::from_seed(b"reentrant-second"),
+        };
+        let slot = Rc::new(RefCell::new(None));
+        let chunks = OwnedChunkProvider::new(Rc::new(ReentrantProvider {
+            chunks: Rc::clone(&slot),
+            first: first.clone(),
+            second,
+            first_bytes: first_bytes.clone(),
+            second_bytes,
+        }));
+        *slot.borrow_mut() = Some(chunks.clone());
+
+        assert_eq!(block_on(chunks.get(first)).unwrap(), first_bytes);
+    }
+
+    #[test]
+    fn synchronously_reentrant_same_key_fails_and_cleans_up() {
+        struct CycleProvider {
+            chunks: Rc<RefCell<Option<OwnedChunkProvider>>>,
+        }
+
+        impl ChunkProvider for CycleProvider {
+            fn get(&self, request: ChunkRequest) -> ChunkFuture<'_, Result<Bytes, ChunkError>> {
+                let chunks = Rc::clone(&self.chunks);
+                Box::pin(async move {
+                    let nested = chunks
+                        .borrow()
+                        .as_ref()
+                        .expect("provider is installed")
+                        .get(request);
+                    let _nested_lease = nested.await?;
+                    Ok(Bytes::new())
+                })
+            }
+        }
+
+        let bytes = Bytes::from_static(b"same-key request cycle");
+        let request = ChunkRequest {
+            object_hash: crate::large_values::object_hash(&bytes).0,
+            locator: Locator::from_seed(b"same-key-cycle"),
+        };
+        let slot = Rc::new(RefCell::new(None));
+        let chunks = OwnedChunkProvider::new(Rc::new(CycleProvider {
+            chunks: Rc::clone(&slot),
+        }));
+        *slot.borrow_mut() = Some(chunks.clone());
+
+        assert_eq!(block_on(chunks.get(request)), Err(ChunkError::Reentrant));
+        assert!(chunks.in_flight.borrow().entries.is_empty());
+        assert_eq!(chunks.cache_stats().active_requests, 0);
     }
 
     #[test]

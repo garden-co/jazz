@@ -3,6 +3,81 @@
 use super::*;
 
 #[test]
+fn reopened_seeded_row_ids_do_not_claim_freshness() {
+    let schema = doctest_support::schema();
+    let column_families = schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let dir = tempfile::tempdir().unwrap();
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([0x92; 16]),
+        author: AuthorSubject::for_test_bytes([0xa2; 16]),
+    };
+
+    let open = |storage| {
+        block_on(Db::open(DbConfig {
+            schema: schema.clone(),
+            storage,
+            identity,
+            id_source: Some(Box::new(SeededRowIdSource::new(0x9292))),
+        }))
+        .unwrap()
+    };
+
+    let db = open(RocksDbStorage::open(dir.path(), &refs).unwrap());
+    let first_tx = OpenTransactionId::new();
+    db.begin_mergeable(first_tx).unwrap();
+    let first_row = db
+        .mergeable_tx_ref(first_tx)
+        .insert(
+            "todos",
+            doctest_support::todo_cells("first", false),
+            InsertOptions {
+                updated_at_ms: Some(100),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    block_on(db.commit_mergeable_handle(first_tx)).unwrap();
+    let first_provenance = prepared_one(&db, &db.table("todos"))
+        .unwrap()
+        .provenance()
+        .unwrap()
+        .unwrap();
+    block_on(db.close()).unwrap();
+    drop(db);
+
+    let reopened = open(RocksDbStorage::open(dir.path(), &refs).unwrap());
+    let repeated_tx = OpenTransactionId::new();
+    reopened.begin_mergeable(repeated_tx).unwrap();
+    let repeated_row = reopened
+        .mergeable_tx_ref(repeated_tx)
+        .insert(
+            "todos",
+            doctest_support::todo_cells("must conflict", true),
+            InsertOptions {
+                updated_at_ms: Some(200),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(repeated_row, first_row);
+    block_on(reopened.commit_mergeable_handle(repeated_tx)).unwrap();
+    let rows = prepared_all(&reopened, &reopened.table("todos"), ReadOpts::default());
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String("must conflict".to_owned()))
+    );
+    let repeated_provenance = rows[0].provenance().unwrap().unwrap();
+    assert_eq!(repeated_provenance.created_at, first_provenance.created_at);
+    assert_eq!(repeated_provenance.created_by, first_provenance.created_by);
+    assert!(repeated_provenance.updated_at > repeated_provenance.created_at);
+}
+
+#[test]
 fn exclusive_transactions_lower_oversized_scalars_before_publication() {
     let db = block_on(doctest_support::open_todos_db()).unwrap();
     let title = "x".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 91);
