@@ -1563,7 +1563,11 @@ test("a missing prepared native artifact prevents both TypeScript suites from st
       },
     });
     assert.equal(result.status, 1, result.stderr);
-    assert.equal(fs.existsSync(nodeMarker), false, "node suite started after failed artifact check");
+    assert.equal(
+      fs.existsSync(nodeMarker),
+      false,
+      "node suite started after failed artifact check",
+    );
     assert.equal(
       fs.existsSync(browserMarker),
       false,
@@ -1640,7 +1644,10 @@ test("missing public root or framework exports prevent both TypeScript suites fr
       assert.equal(result.status, 1, `${relative}: ${result.stderr}`);
       assert.equal(fs.existsSync(nodeMarker), false, `${relative}: node suite started`);
       assert.equal(fs.existsSync(browserMarker), false, `${relative}: browser suite started`);
-      assert.match(`${result.stdout}\n${result.stderr}`, new RegExp(`public export is missing: ${relative}`));
+      assert.match(
+        `${result.stdout}\n${result.stderr}`,
+        new RegExp(`public export is missing: ${relative}`),
+      );
     } finally {
       if (fs.existsSync(backup)) fs.renameSync(backup, target);
       fs.rmSync(fixture, { recursive: true, force: true });
