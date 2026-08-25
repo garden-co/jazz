@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { isDeepStrictEqual } from "node:util";
 import { parse } from "yaml";
 import {
   RUST_CI_FEATURES,
@@ -20,15 +21,42 @@ const workflowModel = parse(workflow);
 
 const partitionCommand = (partition) =>
   `node dev/gates/local-ci-equivalent.mjs --ci-partition ${partition}`;
-const isSccacheExport = ({ name, run }) =>
-  name === "Export trusted sccache configuration" &&
-  run
-    .trim()
-    .split("\n")
-    .every((line) => /^echo "SCCACHE_[A-Z0-9_]+=.*" >> "\$\{GITHUB_ENV\}"$/.test(line));
-const isTurboExport = ({ name, run }) =>
-  name === "Export trusted Turbo cache signing key" &&
-  /^echo "TURBO_REMOTE_CACHE_SIGNATURE_KEY=.*" >> "\$\{GITHUB_ENV\}"$/.test(run.trim());
+const trustedSccacheCondition =
+  "inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '')";
+const trustedTurboCondition = "inputs.trusted-cache";
+const sccacheExportStep = Object.freeze({
+  name: "Export trusted sccache configuration",
+  if: trustedSccacheCondition,
+  env: {
+    CACHE_BUCKET: "${{ vars.SCCACHE_BUCKET }}",
+    CACHE_REGION: "${{ vars.SCCACHE_REGION }}",
+  },
+  run:
+    [
+      'echo "SCCACHE_BUCKET=${CACHE_BUCKET}" >> "${GITHUB_ENV}"',
+      'echo "SCCACHE_REGION=${CACHE_REGION}" >> "${GITHUB_ENV}"',
+      'echo "SCCACHE_S3_USE_SSL=true" >> "${GITHUB_ENV}"',
+      'echo "SCCACHE_S3_KEY_PREFIX=jazz-ci/v1/production/blacksmith-v1" >> "${GITHUB_ENV}"',
+    ].join("\n") + "\n",
+});
+const turboExportStep = Object.freeze({
+  name: "Export trusted Turbo cache signing key",
+  if: trustedTurboCondition,
+  env: { CACHE_SIGNATURE_KEY: "${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}" },
+  run: 'echo "TURBO_REMOTE_CACHE_SIGNATURE_KEY=${CACHE_SIGNATURE_KEY}" >> "${GITHUB_ENV}"',
+});
+
+function isExactStep(actual, expected) {
+  return (
+    Object.keys(actual).length === Object.keys(expected).length &&
+    Object.keys(expected).every(
+      (key) => Object.hasOwn(actual, key) && isDeepStrictEqual(actual[key], expected[key]),
+    )
+  );
+}
+
+const isKnownAdminExport = (step) =>
+  isExactStep(step, sccacheExportStep) || isExactStep(step, turboExportStep);
 
 function assertCiSuiteUsesOnlySharedCorrectnessPartitions(model) {
   const expectedJobs = new Set(Object.values(ciPartitionJobs));
@@ -43,12 +71,7 @@ function assertCiSuiteUsesOnlySharedCorrectnessPartitions(model) {
       `${jobName} must invoke its shared ${partition} partition exactly once`,
     );
     for (const step of runSteps) {
-      if (
-        step.run === expected ||
-        step.run === "sccache --show-stats" ||
-        isSccacheExport(step) ||
-        isTurboExport(step)
-      )
+      if (step.run === expected || step.run === "sccache --show-stats" || isKnownAdminExport(step))
         continue;
       assert.fail(`${jobName} has an unshared direct run step: ${step.name ?? step.run}`);
     }
@@ -79,6 +102,22 @@ test("CI invokes only shared partitions and rejects a direct correctness bypass"
   assert.throws(
     () => assertCiSuiteUsesOnlySharedCorrectnessPartitions(planted),
     /unshared direct run step: quiet bypass/,
+  );
+
+  const sccacheExploit = structuredClone(workflowModel);
+  sccacheExploit.jobs.lint.steps.find(({ name }) => name === sccacheExportStep.name).run =
+    'echo "SCCACHE_PROBE=$(cargo test -p jazz)" >> "${GITHUB_ENV}"';
+  assert.throws(
+    () => assertCiSuiteUsesOnlySharedCorrectnessPartitions(sccacheExploit),
+    /unshared direct run step: Export trusted sccache configuration/,
+  );
+
+  const turboExploit = structuredClone(workflowModel);
+  turboExploit.jobs["test-ts"].steps.find(({ name }) => name === turboExportStep.name).run =
+    'echo "TURBO_REMOTE_CACHE_SIGNATURE_KEY=$(cargo test -p jazz)" >> "${GITHUB_ENV}"';
+  assert.throws(
+    () => assertCiSuiteUsesOnlySharedCorrectnessPartitions(turboExploit),
+    /unshared direct run step: Export trusted Turbo cache signing key/,
   );
 
   assert.deepEqual(
