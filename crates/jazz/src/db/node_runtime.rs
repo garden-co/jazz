@@ -1176,6 +1176,7 @@ where
             ),
             ConnectionLink::Subscriber(_) => (None, None, None),
         };
+        connection_ref.auxiliary_pump.disconnect();
         drop(connection_ref);
         let mut connections = self.connections.borrow_mut();
         connections.retain(|candidate| !Rc::ptr_eq(candidate, connection));

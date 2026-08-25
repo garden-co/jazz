@@ -144,6 +144,9 @@ fn storage_error_kind(error: &groove::chunks::ChunkStorageError) -> &'static str
         groove::chunks::ChunkStorageError::Backend(_) => "backend",
     }
 }
+// Relay correlation entries and their queued responses share one global
+// budget while in-process consumers remain outside peer admission.
+const MAX_RELAY_CHUNK_OBLIGATIONS: usize = MAX_PENDING_CHUNK_DEMANDS;
 
 enum ChunkDemandWaiter {
     Local {
@@ -166,6 +169,7 @@ struct PendingChunkDemand {
 struct ChunkDemandState {
     next_request_id: u64,
     next_waiter_id: u64,
+    relay_chunk_obligations: usize,
     pending_by_chunk: BTreeMap<groove::chunks::ChunkRequest, PendingChunkDemand>,
     chunk_by_upstream_id: BTreeMap<u64, groove::chunks::ChunkRequest>,
     outbound: VecDeque<ChunkRequestEntry>,
@@ -267,6 +271,40 @@ impl PeerChunkResolver {
         }
     }
 
+    fn queue_relay_response(
+        state: &mut ChunkDemandState,
+        connection: u64,
+        response: ChunkResponseEntry,
+        reserved: bool,
+    ) -> bool {
+        if !reserved {
+            if state.relay_chunk_obligations >= MAX_RELAY_CHUNK_OBLIGATIONS {
+                return false;
+            }
+            state.relay_chunk_obligations += 1;
+        }
+        state
+            .relay_responses
+            .entry(connection)
+            .or_default()
+            .push(response);
+        Self::wake_connection(state, connection);
+        true
+    }
+
+    fn enqueue_relay_responses(
+        &self,
+        connection: u64,
+        responses: impl IntoIterator<Item = ChunkResponseEntry>,
+    ) {
+        let mut state = self.state.borrow_mut();
+        for response in responses {
+            if !Self::queue_relay_response(&mut state, connection, response, false) {
+                break;
+            }
+        }
+    }
+
     fn enqueue(
         &self,
         request: groove::chunks::ChunkRequest,
@@ -274,8 +312,13 @@ impl PeerChunkResolver {
         waiter: ChunkDemandWaiter,
     ) -> Result<(), ChunkDemandWaiter> {
         let mut state = self.state.borrow_mut();
+        let relay_waiter = matches!(&waiter, ChunkDemandWaiter::Relay { .. });
+        if relay_waiter && state.relay_chunk_obligations >= MAX_RELAY_CHUNK_OBLIGATIONS {
+            return Err(waiter);
+        }
         if let Some(pending) = state.pending_by_chunk.get_mut(&request) {
             pending.waiters.push(waiter);
+            state.relay_chunk_obligations += usize::from(relay_waiter);
             return Ok(());
         }
         if state.pending_by_chunk.len() >= MAX_PENDING_CHUNK_DEMANDS {
@@ -300,6 +343,7 @@ impl PeerChunkResolver {
                 waiters: vec![waiter],
             },
         );
+        state.relay_chunk_obligations += usize::from(relay_waiter);
         if let Some(connection) = state.upstream_connection {
             Self::wake_connection(&mut state, connection);
         }
@@ -309,15 +353,15 @@ impl PeerChunkResolver {
     fn enqueue_relay(&self, connection: u64, request: ChunkRequestEntry) {
         if request.remaining_hops == 0 {
             let mut state = self.state.borrow_mut();
-            state
-                .relay_responses
-                .entry(connection)
-                .or_default()
-                .push(ChunkResponseEntry {
+            Self::queue_relay_response(
+                &mut state,
+                connection,
+                ChunkResponseEntry {
                     request_id: request.request_id,
                     result: ChunkResponse::Unavailable,
-                });
-            Self::wake_connection(&mut state, connection);
+                },
+                false,
+            );
             return;
         }
         if let Err(ChunkDemandWaiter::Relay {
@@ -335,15 +379,15 @@ impl PeerChunkResolver {
             },
         ) {
             let mut state = self.state.borrow_mut();
-            state
-                .relay_responses
-                .entry(connection)
-                .or_default()
-                .push(ChunkResponseEntry {
+            Self::queue_relay_response(
+                &mut state,
+                connection,
+                ChunkResponseEntry {
                     request_id,
                     result: ChunkResponse::Retryable { retry_after_ms: 25 },
-                });
-            Self::wake_connection(&mut state, connection);
+                },
+                false,
+            );
         }
     }
 
@@ -363,13 +407,17 @@ impl PeerChunkResolver {
         let (responses, exhausted) = match state.relay_responses.get_mut(&connection) {
             Some(queued) => {
                 let count = limit.min(queued.len());
-                (queued.drain(..count).collect(), queued.is_empty())
+                (queued.drain(..count).collect::<Vec<_>>(), queued.is_empty())
             }
             None => return Vec::new(),
         };
         if exhausted {
             state.relay_responses.remove(&connection);
         }
+        state.relay_chunk_obligations = state
+            .relay_chunk_obligations
+            .checked_sub(responses.len())
+            .expect("drained relay responses are accounted");
         responses
     }
 
@@ -405,18 +453,19 @@ impl PeerChunkResolver {
                     connection,
                     request_id,
                 } => {
-                    state
-                        .relay_responses
-                        .entry(connection)
-                        .or_default()
-                        .push(ChunkResponseEntry {
+                    Self::queue_relay_response(
+                        &mut state,
+                        connection,
+                        ChunkResponseEntry {
                             request_id,
                             result: response.result.clone(),
-                        });
-                    Self::wake_connection(&mut state, connection);
+                        },
+                        true,
+                    );
                 }
             }
         }
+        debug_assert!(state.relay_chunk_obligations <= MAX_RELAY_CHUNK_OBLIGATIONS);
     }
 
     fn cancel_local(&self, request: &groove::chunks::ChunkRequest, waiter_id: u64) {
@@ -443,7 +492,14 @@ impl PeerChunkResolver {
         state.trace_by_connection.remove(&connection);
         state.traced_connections.remove(&connection);
         let disconnected_waker = state.outbound_wakers.remove(&connection);
-        state.relay_responses.remove(&connection);
+        let queued_responses = state
+            .relay_responses
+            .remove(&connection)
+            .map_or(0, |responses| responses.len());
+        state.relay_chunk_obligations = state
+            .relay_chunk_obligations
+            .checked_sub(queued_responses)
+            .expect("disconnected relay responses are accounted");
         if upstream {
             state.upstream_connections.remove(&connection);
             if state.upstream_connection == Some(connection) {
@@ -480,11 +536,24 @@ impl PeerChunkResolver {
             let Some(pending) = state.pending_by_chunk.get_mut(&request) else {
                 continue;
             };
+            let mut removed_relay_waiters = 0;
             pending.waiters.retain(|waiter| {
-                !matches!(waiter, ChunkDemandWaiter::Relay { connection: relay, .. } if *relay == connection)
+                let remove = matches!(
+                    waiter,
+                    ChunkDemandWaiter::Relay {
+                        connection: relay,
+                        ..
+                    } if *relay == connection
+                );
+                removed_relay_waiters += usize::from(remove);
+                !remove
             });
-            if pending.waiters.is_empty() {
-                let upstream_id = pending.upstream_id;
+            let emptied_upstream_id = pending.waiters.is_empty().then_some(pending.upstream_id);
+            state.relay_chunk_obligations = state
+                .relay_chunk_obligations
+                .checked_sub(removed_relay_waiters)
+                .expect("disconnected relay waiters are accounted");
+            if let Some(upstream_id) = emptied_upstream_id {
                 state.pending_by_chunk.remove(&request);
                 state.chunk_by_upstream_id.remove(&upstream_id);
                 state
@@ -619,6 +688,9 @@ impl PeerIoPump {
             (PeerIoPumpRole::Subscriber, SyncMessage::ChunkRequestBatch(batch)) => {
                 let mut responses = Vec::new();
                 for request in batch.requests {
+                    if self.is_disconnected() {
+                        break;
+                    }
                     self.resolver.record_request(
                         self.connection,
                         self.role,
@@ -627,14 +699,17 @@ impl PeerIoPump {
                         None,
                         None,
                     );
-                    match self
+                    let result = self
                         .local_chunks
                         .get(
                             request.locator.clone(),
                             groove::large_values::ContentHash(request.expected_hash),
                         )
-                        .await
-                    {
+                        .await;
+                    if self.is_disconnected() {
+                        break;
+                    }
+                    match result {
                         Ok(bytes) => {
                             self.resolver.record_request(
                                 self.connection,
@@ -676,14 +751,9 @@ impl PeerIoPump {
                         }
                     }
                 }
-                if !responses.is_empty() {
-                    let mut state = self.resolver.state.borrow_mut();
-                    state
-                        .relay_responses
-                        .entry(self.connection)
-                        .or_default()
-                        .extend(responses);
-                    PeerChunkResolver::wake_connection(&mut state, self.connection);
+                if !responses.is_empty() && !self.is_disconnected() {
+                    self.resolver
+                        .enqueue_relay_responses(self.connection, responses);
                 }
                 Ok(())
             }
@@ -852,6 +922,11 @@ impl PeerIoPump {
                 }
             }
             (PeerIoPumpRole::Subscriber, SyncMessage::ChunkResponseBatch(batch)) => {
+                state.relay_chunk_obligations = state
+                    .relay_chunk_obligations
+                    .checked_add(batch.responses.len())
+                    .filter(|count| *count <= MAX_RELAY_CHUNK_OBLIGATIONS)
+                    .expect("restored relay responses retain their admission");
                 let queued = state.relay_responses.entry(self.connection).or_default();
                 queued.splice(0..0, batch.responses);
             }

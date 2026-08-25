@@ -12,9 +12,7 @@ use super::{duplex, open_db, schema};
 #[derive(Default)]
 struct DeferredChunkStorage {
     backend: groove::chunks::MemoryChunkStorage,
-    outcome: RefCell<
-        Option<Result<bytes::Bytes, groove::chunks::ChunkStorageError>>,
-    >,
+    outcome: RefCell<Option<Result<bytes::Bytes, groove::chunks::ChunkStorageError>>>,
     waiter: RefCell<Option<Waker>>,
 }
 
@@ -32,10 +30,8 @@ impl ChunkStorage for DeferredChunkStorage {
         &self,
         _locator: groove::large_values::Locator,
         _expected_hash: groove::large_values::ContentHash,
-    ) -> groove::chunks::ChunkFuture<
-        '_,
-        Result<bytes::Bytes, groove::chunks::ChunkStorageError>,
-    > {
+    ) -> groove::chunks::ChunkFuture<'_, Result<bytes::Bytes, groove::chunks::ChunkStorageError>>
+    {
         Box::pin(std::future::poll_fn(|context| {
             if let Some(outcome) = self.outcome.borrow_mut().take() {
                 Poll::Ready(outcome)
@@ -51,10 +47,7 @@ impl ChunkStorage for DeferredChunkStorage {
         chunks: Vec<groove::large_values::StagedChunk>,
     ) -> groove::chunks::ChunkFuture<
         '_,
-        Result<
-            groove::large_values::StagedLargeValueAccounting,
-            groove::chunks::ChunkStorageError,
-        >,
+        Result<groove::large_values::StagedLargeValueAccounting, groove::chunks::ChunkStorageError>,
     > {
         self.backend.stage(chunks)
     }
@@ -68,10 +61,7 @@ impl ChunkStorage for DeferredChunkStorage {
     }
 }
 
-fn deferred_local_chunk_reader() -> (
-    groove::chunks::LocalChunkReader,
-    Rc<DeferredChunkStorage>,
-) {
+fn deferred_local_chunk_reader() -> (groove::chunks::LocalChunkReader, Rc<DeferredChunkStorage>) {
     let storage = Rc::new(DeferredChunkStorage::default());
     let mut database = crate::db::block_on(groove::db::Database::new(
         groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new()),
@@ -89,11 +79,7 @@ fn retained_relay_obligations(state: &ChunkDemandState) -> usize {
         .flat_map(|pending| &pending.waiters)
         .filter(|waiter| matches!(waiter, ChunkDemandWaiter::Relay { .. }))
         .count()
-        + state
-            .relay_responses
-            .values()
-            .map(Vec::len)
-            .sum::<usize>()
+        + state.relay_responses.values().map(Vec::len).sum::<usize>()
 }
 
 #[test]
@@ -219,14 +205,12 @@ fn subscriber_auxiliary_responses_are_bounded_to_one_chunk_per_wire_frame() {
     );
     let response_count = 10;
     let chunk_bytes = vec![0x5a; groove::large_values::LEAF_MAX_BYTES];
-    resolver.state.borrow_mut().relay_responses.insert(
+    resolver.enqueue_relay_responses(
         23,
-        (0..response_count)
-            .map(|request_id| ChunkResponseEntry {
-                request_id,
-                result: ChunkResponse::Found(chunk_bytes.clone()),
-            })
-            .collect(),
+        (0..response_count).map(|request_id| ChunkResponseEntry {
+            request_id,
+            result: ChunkResponse::Found(chunk_bytes.clone()),
+        }),
     );
 
     let features = crate::wire::current_wire_features();
@@ -283,14 +267,12 @@ fn bounded_auxiliary_drain_keeps_large_response_batches_fifo_and_within_bytes() 
     );
     let response_count = 32_u64;
     let chunk_bytes = vec![0x3c; groove::large_values::LEAF_MAX_BYTES];
-    resolver.state.borrow_mut().relay_responses.insert(
+    resolver.enqueue_relay_responses(
         24,
-        (0..response_count)
-            .map(|request_id| ChunkResponseEntry {
-                request_id,
-                result: ChunkResponse::Found(chunk_bytes.clone()),
-            })
-            .collect(),
+        (0..response_count).map(|request_id| ChunkResponseEntry {
+            request_id,
+            result: ChunkResponse::Found(chunk_bytes.clone()),
+        }),
     );
 
     let features = crate::wire::current_wire_features();
@@ -481,9 +463,7 @@ fn immediate_overload_responses_cannot_bypass_the_relay_obligation_bound() {
             },
         );
     }
-    for request_id in
-        MAX_PENDING_CHUNK_DEMANDS as u64..MAX_PENDING_CHUNK_DEMANDS as u64 + 64
-    {
+    for request_id in MAX_PENDING_CHUNK_DEMANDS as u64..MAX_PENDING_CHUNK_DEMANDS as u64 + 64 {
         resolver.enqueue_relay(
             connection,
             ChunkRequestEntry {
@@ -618,11 +598,10 @@ fn duplicate_relay_chunk_waiters_are_bounded_and_release_capacity() {
             .clone()
             .step_by(crate::protocol_limits::MAX_CHUNK_REQUEST_BATCH_ENTRIES)
         {
-            let end = (first
-                + crate::protocol_limits::MAX_CHUNK_REQUEST_BATCH_ENTRIES as u64)
+            let end = (first + crate::protocol_limits::MAX_CHUNK_REQUEST_BATCH_ENTRIES as u64)
                 .min(request_ids.end);
-            crate::db::block_on(pump.route_incoming(SyncMessage::ChunkRequestBatch(
-                ChunkRequestBatch {
+            crate::db::block_on(
+                pump.route_incoming(SyncMessage::ChunkRequestBatch(ChunkRequestBatch {
                     requests: (first..end)
                         .map(|request_id| ChunkRequestEntry {
                             request_id,
@@ -631,8 +610,8 @@ fn duplicate_relay_chunk_waiters_are_bounded_and_release_capacity() {
                             remaining_hops: DEFAULT_CHUNK_FORWARD_HOPS,
                         })
                         .collect(),
-                },
-            )))
+                })),
+            )
             .unwrap();
         }
     };
@@ -698,7 +677,11 @@ fn duplicate_relay_chunk_waiters_are_bounded_and_release_capacity() {
 
     assert!(server.detach_connection(&subscriber));
     assert!(
-        !resolver.state.borrow().pending_by_chunk.contains_key(&request),
+        !resolver
+            .state
+            .borrow()
+            .pending_by_chunk
+            .contains_key(&request),
         "standard database detach removes every relay waiter owned by the session"
     );
 
@@ -870,10 +853,7 @@ fn detach_during_peer_tick_chunk_lookup_drops_missing_and_found_outcomes() {
         let mut ticking = Box::pin(connection.tick());
         let waker = futures::task::noop_waker();
         let mut context = Context::from_waker(&waker);
-        assert!(matches!(
-            ticking.as_mut().poll(&mut context),
-            Poll::Pending
-        ));
+        assert!(matches!(ticking.as_mut().poll(&mut context), Poll::Pending));
 
         pump.disconnect();
         storage.release(if found {
