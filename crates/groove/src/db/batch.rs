@@ -1,4 +1,5 @@
 use super::*;
+use crate::records::ValidatedVariantRecord;
 
 /// Mutable staged table writes whose reads observe writes already added to the
 /// stage. Commit runs one normal database batch commit, so current callers of
@@ -191,6 +192,7 @@ impl From<VariantRecord> for RecordInput {
 pub enum RawRecordInput {
     Payload(Vec<u8>),
     Record(VariantRecord),
+    ValidatedRecord(ValidatedVariantRecord),
 }
 
 impl From<Vec<u8>> for RawRecordInput {
@@ -202,6 +204,12 @@ impl From<Vec<u8>> for RawRecordInput {
 impl From<VariantRecord> for RawRecordInput {
     fn from(record: VariantRecord) -> Self {
         Self::Record(record)
+    }
+}
+
+impl From<ValidatedVariantRecord> for RawRecordInput {
+    fn from(record: ValidatedVariantRecord) -> Self {
+        Self::ValidatedRecord(record)
     }
 }
 

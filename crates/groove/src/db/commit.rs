@@ -709,6 +709,7 @@ impl Database {
         let variant_tag = match record {
             RawRecordInput::Payload(_) => 0,
             RawRecordInput::Record(record) => record.variant_tag(),
+            RawRecordInput::ValidatedRecord(record) => record.variant_tag(),
         };
         self.record_descriptor(table, variant_tag)
     }

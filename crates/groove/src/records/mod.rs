@@ -1690,6 +1690,14 @@ pub struct VariantRecord {
     record: OwnedRecord,
 }
 
+/// An encoded variant record whose bytes were produced by its descriptor.
+///
+/// This proof lets commit paths retain the descriptor-compatibility check
+/// while avoiding a second structural validation pass over freshly encoded
+/// bytes. Arbitrary stored or caller-supplied bytes remain [`VariantRecord`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedVariantRecord(VariantRecord);
+
 impl VariantRecord {
     pub fn new(variant_tag: u32, record: OwnedRecord) -> Self {
         Self {
@@ -1749,6 +1757,36 @@ impl VariantRecord {
 
     pub fn into_stored_bytes(self) -> Vec<u8> {
         encode_variant_record(self.variant_tag, self.record.raw())
+    }
+}
+
+impl ValidatedVariantRecord {
+    pub fn create(
+        variant_tag: u32,
+        descriptor: RecordDescriptor,
+        values: &[Value],
+    ) -> Result<Self, Error> {
+        let raw = descriptor.create(values)?;
+        Ok(Self(VariantRecord::new(
+            variant_tag,
+            OwnedRecord::new(raw, descriptor),
+        )))
+    }
+
+    pub fn variant_tag(&self) -> u32 {
+        self.0.variant_tag()
+    }
+
+    pub fn descriptor(&self) -> &RecordDescriptor {
+        self.0.descriptor()
+    }
+
+    pub fn record(&self) -> &OwnedRecord {
+        self.0.record()
+    }
+
+    pub(crate) fn into_parts(self) -> (u32, OwnedRecord) {
+        self.0.into_parts()
     }
 }
 

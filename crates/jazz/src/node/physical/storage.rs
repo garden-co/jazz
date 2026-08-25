@@ -315,7 +315,13 @@ where
     pub(super) fn version_storage_write_binding(
         &mut self,
         version: &VersionRow,
-    ) -> Result<(groove::Intern<String>, groove::records::VariantRecord), Error> {
+    ) -> Result<
+        (
+            groove::Intern<String>,
+            groove::records::ValidatedVariantRecord,
+        ),
+        Error,
+    > {
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue(
@@ -486,16 +492,13 @@ where
                 "root",
             )?)));
         }
-        let record = OwnedRecord::new(
-            plan.physical_descriptor.create(&values)?,
-            plan.physical_descriptor,
-        );
         Ok((
             groove::Intern::new(plan.storage_table.clone()),
-            groove::records::VariantRecord::new(
+            groove::records::ValidatedVariantRecord::create(
                 groove_variant_tag(version.schema_version_alias())?,
-                record,
-            ),
+                plan.physical_descriptor,
+                &values,
+            )?,
         ))
     }
 
@@ -505,7 +508,13 @@ where
     pub(super) fn shared_deletion_history_write_binding(
         &mut self,
         version: &VersionRow,
-    ) -> Result<(groove::Intern<String>, groove::records::VariantRecord), Error> {
+    ) -> Result<
+        (
+            groove::Intern<String>,
+            groove::records::ValidatedVariantRecord,
+        ),
+        Error,
+    > {
         debug_assert_eq!(version.layer(), VersionLayer::Deletion);
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
@@ -519,10 +528,13 @@ where
             .database
             .table_schema(SHARED_DELETION_HISTORY_TABLE)?
             .record_schema();
-        let record = OwnedRecord::new(descriptor.create(&values)?, descriptor);
         Ok((
             groove::Intern::new(SHARED_DELETION_HISTORY_TABLE.to_owned()),
-            version.bind_groove_record(record),
+            groove::records::ValidatedVariantRecord::create(
+                groove_variant_tag(version.schema_version_alias())?,
+                descriptor,
+                &values,
+            )?,
         ))
     }
 
