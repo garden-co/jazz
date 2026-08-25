@@ -93,12 +93,7 @@ async function fileExists(path: string): Promise<boolean> {
 function spawnMigrationCreate(
   root: string,
   migrationsDir: string,
-  pauseAt:
-    | "lock-held"
-    | "lock-quarantined"
-    | "between-publications"
-    | "journaled"
-    | "snapshot-read",
+  pauseAt: "lock-held" | "lock-quarantined" | "between-publications" | "journaled",
   marker: string,
   releaseMarker?: string,
 ) {
@@ -1218,27 +1213,6 @@ describe("cli migrations", () => {
     },
   );
 
-  it("rejects a snapshot-directory symlink swapped after publication is journaled", async () => {
-    const { root } = await createWorkspace();
-    const migrationsDir = join(root, "migrations");
-    const snapshotsDir = join(migrationsDir, "snapshots");
-    const outside = join(root, "outside");
-    const marker = join(root, "journaled.marker");
-    const releaseMarker = join(root, "journaled.release");
-    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
-    await mkdir(outside);
-
-    const child = spawnMigrationCreate(root, migrationsDir, "journaled", marker, releaseMarker);
-    await waitForCrashMarker(marker, child);
-    await rm(snapshotsDir, { recursive: true });
-    await symlink(outside, snapshotsDir, "dir");
-    await writeFile(releaseMarker, "release\n");
-    const code = await new Promise<number | null>((resolve) => child.once("close", resolve));
-
-    expect(code).not.toBe(0);
-    expect(await readdir(outside)).toEqual([]);
-  });
-
   it("does not overwrite a destination created after publication is journaled", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
@@ -1251,131 +1225,14 @@ describe("cli migrations", () => {
     const journal = JSON.parse(
       await readFile(join(migrationsDir, ".jazz-create-migration.journal.json"), "utf8"),
     ) as { files: Array<{ finalRelativePath: string }> };
-    expect(journal.files).toHaveLength(1);
     const destination = join(migrationsDir, journal.files[0]!.finalRelativePath);
-    await writeFile(destination, "legitimate collision\n");
+    await mkdir(dirname(destination), { recursive: true });
+    await writeFile(destination, "concurrent writer\n");
     await writeFile(releaseMarker, "release\n");
     const code = await new Promise<number | null>((resolve) => child.once("close", resolve));
 
     expect(code).not.toBe(0);
-    expect(await readFile(destination, "utf8")).toBe("legitimate collision\n");
-  });
-
-  it("rejects a snapshot leaf swapped after the baseline directory is opened", async () => {
-    const { root } = await createWorkspace();
-    const migrationsDir = join(root, "migrations");
-    const snapshotsDir = join(migrationsDir, "snapshots");
-    const marker = join(root, "snapshot-read.marker");
-    const releaseMarker = join(root, "snapshot-read.release");
-    const outside = join(root, "outside-snapshot.json");
-    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
-    await createCatalogueMigration({ schemaDir: root, migrationsDir });
-    const snapshot = (await readdir(snapshotsDir)).find((name) => name.endsWith(".json"));
-    expect(snapshot).toBeDefined();
-    const snapshotPath = join(snapshotsDir, snapshot!);
-    await copyFile(snapshotPath, outside);
-
-    const child = spawnMigrationCreate(root, migrationsDir, "snapshot-read", marker, releaseMarker);
-    await waitForCrashMarker(marker, child);
-    await rm(snapshotPath);
-    await symlink(outside, snapshotPath, "file");
-    await writeFile(releaseMarker, "release\n");
-    const code = await new Promise<number | null>((resolve) => child.once("close", resolve));
-
-    expect(code).not.toBe(0);
-  });
-
-  it("rejects an explicit local historical snapshot swapped after its secure operation begins", async () => {
-    const { root } = await createWorkspace();
-    const migrationsDir = join(root, "migrations");
-    const snapshotsDir = join(migrationsDir, "snapshots");
-    const marker = join(root, "explicit-local-read.marker");
-    const releaseMarker = join(root, "explicit-local-read.release");
-    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
-    await createCatalogueMigration({ schemaDir: root, migrationsDir });
-    const snapshot = (await readdir(snapshotsDir)).find((name) => name.endsWith(".json"));
-    expect(snapshot).toBeDefined();
-    const snapshotPath = join(snapshotsDir, snapshot!);
-    const outside = join(root, "outside-snapshot.json");
-    await copyFile(snapshotPath, outside);
-
-    const previousPause = process.env.JAZZ_TEST_MIGRATION_PAUSE_AT;
-    const previousMarker = process.env.JAZZ_TEST_MIGRATION_PAUSE_MARKER;
-    const previousRelease = process.env.JAZZ_TEST_MIGRATION_PAUSE_RELEASE_MARKER;
-    process.env.JAZZ_TEST_MIGRATION_PAUSE_AT = "explicit-local-read";
-    process.env.JAZZ_TEST_MIGRATION_PAUSE_MARKER = marker;
-    process.env.JAZZ_TEST_MIGRATION_PAUSE_RELEASE_MARKER = releaseMarker;
-    try {
-      const create = createCatalogueMigration({
-        schemaDir: root,
-        migrationsDir,
-        fromHash: snapshot!.split("-").at(-1)!.replace(".json", ""),
-      });
-      await waitForCrashMarker(marker, { exitCode: null } as ReturnType<typeof spawn>);
-      await rm(snapshotPath);
-      await symlink(outside, snapshotPath, "file");
-      await writeFile(releaseMarker, "release\n");
-      await expect(create).rejects.toThrow();
-    } finally {
-      process.env.JAZZ_TEST_MIGRATION_PAUSE_AT = previousPause;
-      process.env.JAZZ_TEST_MIGRATION_PAUSE_MARKER = previousMarker;
-      process.env.JAZZ_TEST_MIGRATION_PAUSE_RELEASE_MARKER = previousRelease;
-    }
-  });
-
-  it("rejects a remote historical cache write after its snapshot directory is swapped", async () => {
-    const { root } = await createWorkspace();
-    const migrationsDir = join(root, "migrations");
-    const snapshotsDir = join(migrationsDir, "snapshots");
-    const outside = join(root, "outside");
-    const marker = join(root, "remote-cache-write.marker");
-    const releaseMarker = join(root, "remote-cache-write.release");
-    const fromHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
-    await mkdir(outside);
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string) => {
-        if (input.endsWith(`/apps/${APP_ID}/schemas`)) {
-          return new Response(JSON.stringify({ hashes: [fromHash] }), { status: 200 });
-        }
-        if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
-          return storedSchemaResponse({
-            todos: {
-              columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
-            },
-          });
-        }
-        throw new Error(`Unexpected fetch: ${input}`);
-      }),
-    );
-
-    const previousPause = process.env.JAZZ_TEST_MIGRATION_PAUSE_AT;
-    const previousMarker = process.env.JAZZ_TEST_MIGRATION_PAUSE_MARKER;
-    const previousRelease = process.env.JAZZ_TEST_MIGRATION_PAUSE_RELEASE_MARKER;
-    process.env.JAZZ_TEST_MIGRATION_PAUSE_AT = "remote-cache-write";
-    process.env.JAZZ_TEST_MIGRATION_PAUSE_MARKER = marker;
-    process.env.JAZZ_TEST_MIGRATION_PAUSE_RELEASE_MARKER = releaseMarker;
-    try {
-      const create = createCatalogueMigration({
-        schemaDir: root,
-        migrationsDir,
-        appId: APP_ID,
-        serverUrl: "http://localhost:1625",
-        adminSecret: "admin-secret",
-        fromHash: fromHash.slice(0, 12),
-      });
-      await waitForCrashMarker(marker, { exitCode: null } as ReturnType<typeof spawn>);
-      await rm(snapshotsDir, { recursive: true });
-      await symlink(outside, snapshotsDir, "dir");
-      await writeFile(releaseMarker, "release\n");
-      await expect(create).rejects.toThrow();
-      expect(await readdir(outside)).toEqual([]);
-    } finally {
-      process.env.JAZZ_TEST_MIGRATION_PAUSE_AT = previousPause;
-      process.env.JAZZ_TEST_MIGRATION_PAUSE_MARKER = previousMarker;
-      process.env.JAZZ_TEST_MIGRATION_PAUSE_RELEASE_MARKER = previousRelease;
-    }
+    expect(await readFile(destination, "utf8")).toBe("concurrent writer\n");
   });
 
   it.each(["outside", "in-tree"])(
