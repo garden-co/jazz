@@ -338,6 +338,17 @@ where
         binding: &Binding,
         snapshot: &Snapshot,
     ) -> Result<BTreeSet<(RowUuid, TxId)>, Error> {
+        // An origin snapshot has no visible application rows.  Do not ask the
+        // historical compiler for provenance columns in that empty state: such
+        // columns require a historical storage cut even though the result set
+        // is necessarily empty (notably after a transaction reads its own
+        // staged insert before the first authority receipt).
+        if snapshot.global_base == GlobalTime(0)
+            && snapshot.local_base == TxTime(0)
+            && snapshot.dots.is_empty()
+        {
+            return Ok(BTreeSet::new());
+        }
         let table = shape.query().table.clone();
         let rows = self
             .query_rows_at_snapshot(shape, binding, snapshot)
@@ -382,7 +393,7 @@ where
         };
         for version in versions {
             if !self
-                .version_satisfies_write_policy(version, permission_subject)
+                .version_satisfies_write_policy(version, permission_subject, tx.tx_id)
                 .await?
             {
                 return Ok(false);
@@ -394,9 +405,11 @@ where
     pub(super) async fn version_satisfies_write_policy(
         &mut self,
         version: &VersionRecord,
-        author: AuthorId,
+        author: AuthorSubject,
+        candidate_tx_id: TxId,
     ) -> Result<bool, Error> {
-        self.write_policy_allows_version_record(version, author).await
+        self.write_policy_allows_version_record(version, author, Some(candidate_tx_id))
+            .await
     }
 
     pub(super) async fn cascade_root_for_versions(

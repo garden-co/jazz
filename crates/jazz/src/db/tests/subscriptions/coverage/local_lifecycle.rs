@@ -12,7 +12,7 @@ fn db_facade_local_subscription_reports_initial_and_changed_results() {
         storage: doctest_support::MemoryStorage::new(&refs),
         identity: DbIdentity {
             node: NodeUuid::from_bytes([0x11; 16]),
-            author: AuthorId::from_bytes([0xa1; 16]),
+            author: AuthorSubject::for_test_bytes([0xa1; 16]),
         },
         id_source: Some(Box::new(SeededRowIdSource::new(0x1111))),
     }))
@@ -77,6 +77,7 @@ fn db_facade_subscription_refresh_preserves_read_tier() {
     db.insert(
         "todos",
         doctest_support::todo_cells("pending local-only write", true),
+        Default::default(),
     )
     .unwrap();
 
@@ -100,6 +101,7 @@ fn db_facade_subscription_accepts_local_tier_for_alpha_style_live_reads() {
     db.insert(
         "todos",
         doctest_support::todo_cells("local callback", false),
+        Default::default(),
     )
     .unwrap();
     let changed = doctest_support::block_on(subscription.next_raw()).unwrap();
@@ -122,6 +124,7 @@ fn local_write_is_readable_synchronously_without_running_tick() {
     db.insert(
         "todos",
         doctest_support::todo_cells("read before tick", false),
+        Default::default(),
     )
     .unwrap();
 
@@ -145,6 +148,7 @@ fn local_write_notifies_subscription_synchronously_without_running_tick() {
     db.insert(
         "todos",
         doctest_support::todo_cells("notify before tick", false),
+        Default::default(),
     )
     .unwrap();
 
@@ -299,7 +303,7 @@ fn db_facade_schedules_immediate_tick_for_upstream_connection() {
 #[test]
 fn upstream_inbound_application_completes_synchronously_or_schedules_continuation() {
     let schema = schema();
-    let author = AuthorId::from_bytes([0xa1; 16]);
+    let author = AuthorSubject::for_test_bytes([0xa1; 16]);
     let server = open_core(0x51, author, &schema);
     let client = open_db(0x52, author, &schema);
     let scheduler = Rc::new(RecordingScheduler::default());

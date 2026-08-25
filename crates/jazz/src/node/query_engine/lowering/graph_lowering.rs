@@ -1190,6 +1190,12 @@ fn lower_linear_plan_steps_cached(
                     Some(LinearStep::Join { .. })
                 );
                 if *mode == JoinMode::Inner && next_is_join {
+                    // Consecutive joins must retain the right input for the
+                    // next predicate. Public queries also use those values as
+                    // occurrence carriers; authorization subplans keep the
+                    // same single lowering path, but mark them internal so a
+                    // decision terminal never asks for public row identity.
+                    let policy_subplan = omits_public_occurrence_carriers(request);
                     let (_, right_nullable, right_depths, right_fields) = last_join_right
                         .take()
                         .expect("inner join records its right input");
@@ -1207,7 +1213,11 @@ fn lower_linear_plan_steps_cached(
                     let mut next_nullable = nullable_fields.clone();
                     let mut next_depths = nullable_field_depths.clone();
                     for field in right_fields {
-                        let output = format!("__flat_join_source_{step_index}_{field}");
+                        let output = if policy_subplan {
+                            format!("__policy_join_source_{step_index}_{field}")
+                        } else {
+                            format!("__flat_join_source_{step_index}_{field}")
+                        };
                         projection.push(ProjectField::renamed(right_field(&field), output.clone()));
                         let nullable_depth = right_depths.get(&field).copied().unwrap_or(0);
                         accumulated_join_fields.insert(
@@ -1241,7 +1251,12 @@ fn lower_linear_plan_steps_cached(
                         &introduced_route_fields,
                     );
                     let mut occurrence_fields = BTreeSet::new();
-                    if *mode == JoinMode::Inner {
+                    if !omits_public_occurrence_carriers(request) {
+                        // A trailing semi-join filters the complete public
+                        // tuple but contributes no occurrence of its own.
+                        // Preserve the earlier inner-join row IDs from the
+                        // left input: terminals still use them to distinguish
+                        // public root occurrences.
                         for ((source_id, field), (output, _)) in &accumulated_join_fields {
                             let is_row_id = resolved_sources
                                 .get(source_id)
@@ -1254,6 +1269,8 @@ fn lower_linear_plan_steps_cached(
                                 occurrence_fields.insert(output.clone());
                             }
                         }
+                    }
+                    if *mode == JoinMode::Inner && !omits_public_occurrence_carriers(request) {
                         if let Some(right_source_id) = right.root_source() {
                             let right_source = resolved_sources.get(right_source_id).ok_or_else(|| {
                                 UnsupportedReason::Operator(format!(
@@ -1464,6 +1481,18 @@ fn lower_linear_plan_steps_cached(
 
 fn uses_policy_value_comparison(request: &QueryProgramRequest) -> bool {
     matches!(request.policy, PolicyContext::AuthorizationSubplan { .. })
+}
+
+/// Policy-predicate programs reuse relation lowering but do not publish rows.
+/// Their intermediate join values remain available to later predicates, never
+/// becoming occurrence identity that a public terminal must retain.
+fn omits_public_occurrence_carriers(request: &QueryProgramRequest) -> bool {
+    uses_policy_value_comparison(request)
+        || request
+            .output
+            .app_rows
+            .as_ref()
+            .is_some_and(|output| !output.public_terminal)
 }
 
 fn policy_join_if_needed(
@@ -1957,6 +1986,23 @@ fn lower_relation_key_ref(
                 && let Ok(field) = lower_named_relation_field(value, &output.fields)
             {
                 return Ok(field);
+            }
+            if let Some(LinearStep::Project(columns)) = linear.steps.last()
+                && let NormalizedValueRef::RowId(RowIdRef::Source(value_source)) = value
+                && linear.root.source() == Some(value_source)
+                && let Some(column) = columns.iter().find(|column| {
+                    matches!(
+                        &column.value,
+                        NormalizedValueRef::RowId(RowIdRef::Source(column_source))
+                            if column_source == value_source
+                    )
+                })
+            {
+                // Relation-backed policy expressions commonly project their
+                // source row ID as public `id`. Subsequent outer joins must
+                // consume that projected private proof field, rather than
+                // asking the graph for the pre-projection `row_uuid` name.
+                return Ok(column.output.name.clone());
             }
             if let Some(source) = &output.root_source {
                 if let Some(source_id) = linear.root.source() {
@@ -2896,9 +2942,7 @@ fn lower_not_predicate_inner(
         PredicateExpr::In { value, options } => GroovePredicateExpr::And(
             options
                 .iter()
-                .map(|option| {
-                    lower_compare(value, ComparisonOp::Ne, option, source_id, source, request)
-                })
+                .map(|option| lower_two_valued_ne(value, option, source_id, source, request))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         PredicateExpr::ArrayContains { .. } | PredicateExpr::TextContains { .. } => {
@@ -2929,6 +2973,30 @@ fn lower_not_predicate_inner(
             ));
         }
     })
+}
+
+fn lower_two_valued_ne(
+    left: &NormalizedValueRef,
+    right: &NormalizedValueRef,
+    source_id: &SourceId,
+    source: &ResolvedSource,
+    request: &QueryProgramRequest,
+) -> Result<GroovePredicateExpr, UnsupportedReason> {
+    // Groove comparisons deliberately use SQL-null semantics. Jazz comparison
+    // predicates are two-valued, so unequal means either exactly one operand is
+    // null or both are non-null and Groove reports inequality.
+    Ok(GroovePredicateExpr::Or(vec![
+        GroovePredicateExpr::And(vec![
+            lower_null_test(left, true, source_id, source, request)?,
+            lower_null_test(right, false, source_id, source, request)?,
+        ]),
+        GroovePredicateExpr::And(vec![
+            lower_null_test(left, false, source_id, source, request)?,
+            lower_null_test(right, true, source_id, source, request)?,
+        ]),
+        lower_compare(left, ComparisonOp::Ne, right, source_id, source, request)?,
+    ])
+    .canonicalize())
 }
 
 fn invert_comparison(op: ComparisonOp) -> ComparisonOp {
@@ -3270,7 +3338,7 @@ pub(super) fn claim_value(
         return Ok(value.clone());
     }
     match name.as_str() {
-        "sub" => Ok(Value::Uuid(permission_subject.0)),
+        "author" => Ok(Value::String(permission_subject.canonical().to_owned())),
         _ => Err(UnsupportedReason::UnboundClaim(path.clone())),
     }
 }

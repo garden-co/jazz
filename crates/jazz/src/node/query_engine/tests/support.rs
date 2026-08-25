@@ -10,8 +10,8 @@ pub(super) fn row(byte: u8) -> RowUuid {
     RowUuid::from_bytes([byte; 16])
 }
 
-pub(super) fn author(byte: u8) -> AuthorId {
-    AuthorId::from_bytes([byte; 16])
+pub(super) fn author(byte: u8) -> AuthorSubject {
+    AuthorSubject::for_test_bytes([byte; 16])
 }
 
 pub(super) fn shape(byte: u8) -> ShapeId {
@@ -64,7 +64,8 @@ pub(super) fn collect_binding_source_fingerprint(
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
         | GraphBuilder::CollectBy { input, .. }
-        | GraphBuilder::Aggregate { input, .. } => {
+        | GraphBuilder::Aggregate { input, .. }
+        | GraphBuilder::StreamingChecksum { input, .. } => {
             collect_binding_source_fingerprint(input, sources);
         }
         GraphBuilder::Union { inputs } => {
@@ -114,7 +115,8 @@ pub(super) fn graph_any(graph: &GraphBuilder, predicate: &impl Fn(&GraphBuilder)
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
         | GraphBuilder::CollectBy { input, .. }
-        | GraphBuilder::Aggregate { input, .. } => graph_any(input, predicate),
+        | GraphBuilder::Aggregate { input, .. }
+        | GraphBuilder::StreamingChecksum { input, .. } => graph_any(input, predicate),
         GraphBuilder::Union { inputs } => inputs.iter().any(|input| graph_any(input, predicate)),
         GraphBuilder::Join { left, right, .. }
         | GraphBuilder::SemiJoin { left, right, .. }

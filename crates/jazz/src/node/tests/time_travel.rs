@@ -108,19 +108,21 @@ fn query_rows_at_lowers_filters_against_historical_current_rows() {
 }
 #[test]
 fn query_rows_at_for_link_evaluates_read_policy_at_historical_cut() {
-    let alice = AuthorId::from_bytes([0xa1; 16]);
-    let bob = AuthorId::from_bytes([0xb2; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
     let schema = owner_read_schema("todos");
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(2), schema);
+    install_test_uuid_sub_claim(&mut core, alice);
+    install_test_uuid_sub_claim(&mut core, bob);
     let shape = Query::from("todos").validate(&core.catalogue.schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let row_uuid = row(2);
     let mut oracle = Oracle::new();
     let mut alice_cells = title_cells("owned by alice");
-    alice_cells.insert("owner".to_owned(), Value::Uuid(alice.0));
+    alice_cells.insert("owner".to_owned(), Value::Uuid(alice.test_uuid()));
     let mut bob_cells = title_cells("owned by bob");
-    bob_cells.insert("owner".to_owned(), Value::Uuid(bob.0));
+    bob_cells.insert("owner".to_owned(), Value::Uuid(bob.test_uuid()));
 
     let (first, s1) = commit_global_and_oracle(
         &mut writer,

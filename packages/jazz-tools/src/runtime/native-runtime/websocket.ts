@@ -1,7 +1,8 @@
 import { httpUrlToWs } from "../url.js";
 import { mapAuthReason } from "../auth-state.js";
 import type { AuthFailureReason } from "../auth-state.js";
-import { isUsableSubject } from "../author-id.js";
+import { canonicalAuthorSubject, isUsableSubject } from "../author-id.js";
+import { parseJwtPayload } from "../client-session.js";
 import { PostcardReader, PostcardWriter } from "./native-codec.js";
 
 export type WebSocketFrameHandler = (frame: Uint8Array) => void;
@@ -44,7 +45,7 @@ export type BrowserWebSocket = {
   ): void;
 };
 
-export const WIRE_PROTOCOL_VERSION = 11;
+export const WIRE_PROTOCOL_VERSION = 12;
 export const MIN_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
 export const MAX_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
 export const FEATURE_SYNC_MESSAGE_PAYLOAD = 1 << 0;
@@ -53,13 +54,15 @@ export const FEATURE_PAYLOAD_ZSTD = 1 << 4;
 export const FEATURE_MESSAGE_FRAGMENTATION = 1 << 5;
 export const FEATURE_AUTHORIZATION_SCOPE_RECEIPTS = 1 << 6;
 export const FEATURE_AUTHORIZATION_SCOPE_VIEWS = 1 << 7;
+export const FEATURE_AUXILIARY_CHUNKS = 1 << 8;
 export const CLIENT_WIRE_FEATURES =
   FEATURE_SYNC_MESSAGE_PAYLOAD |
   FEATURE_STRUCTURED_ERRORS |
   FEATURE_PAYLOAD_ZSTD |
   FEATURE_MESSAGE_FRAGMENTATION |
   FEATURE_AUTHORIZATION_SCOPE_RECEIPTS |
-  FEATURE_AUTHORIZATION_SCOPE_VIEWS;
+  FEATURE_AUTHORIZATION_SCOPE_VIEWS |
+  FEATURE_AUXILIARY_CHUNKS;
 
 // The server route accepts WebSocket messages up to one MiB. Reserve enough
 // postcard framing bytes that a burst of otherwise-valid wire frames remains
@@ -234,7 +237,7 @@ export class WebSocketCarrier {
           if (wireAuthFailureReason(error)) {
             this.onError?.(error);
             this.rejectNegotiation(
-              new Error("websocket authentication failed before server hello"),
+              new Error(`websocket authentication failed before server hello: ${error.message}`),
             );
             this.close();
             return;
@@ -284,13 +287,90 @@ function websocketCloseDetails(event: unknown): { code?: number; reason?: string
 
 export function encodeWebSocketPrelude(authJson: string, peerIdentity: Uint8Array): string {
   const auth = JSON.parse(authJson) as Record<string, unknown>;
-  const sub = authSub(auth) ?? bytesToHex(peerIdentity);
+  const peerAuthor = new TextDecoder().decode(peerIdentity);
+  const sub = authSub(auth) ?? canonicalAuthorSubjectPart(peerAuthor) ?? peerAuthor;
   return JSON.stringify({
-    peer_identity: bytesToHex(peerIdentity),
+    peer_identity: peerAuthor,
     ...auth,
     auth: { ...auth, sub },
     sub,
   });
+}
+
+/**
+ * Pick the logical author asserted by a client WebSocket connection.
+ *
+ * `peerIdentity` on a native runtime is also the identity that opened its
+ * raw-core storage handle. Reserved first-party sessions intentionally cannot
+ * use that public raw-core ingress, so that handle may instead have a private
+ * runtime-host identity. A WebSocket is different: the server authenticates
+ * its credential and compares the asserted identity with the resulting session
+ * author. Derive that assertion from the credential's full issuer and subject
+ * pair, never from a bare `sub` or the raw-core fallback.
+ *
+ * A credential without a usable session subject (for example an admin-only
+ * connection) retains the caller's transport identity. It cannot accidentally
+ * fall back to the historical bare-sub wire representation.
+ */
+export function peerIdentityForWebSocketAuth(
+  authJson: string,
+  fallbackIdentity: Uint8Array,
+): Uint8Array {
+  const auth = JSON.parse(authJson) as Record<string, unknown>;
+  const canonical = canonicalAuthorForWebSocketAuth(auth);
+  return canonical ? new TextEncoder().encode(canonical) : fallbackIdentity;
+}
+
+function canonicalAuthorForWebSocketAuth(auth: Record<string, unknown>): string | null {
+  // Admin admission is intentionally sessionless and takes precedence over
+  // every other field in the server route. Do not let an incidental (or
+  // attacker-controlled) bearer payload change its peer identity/cap bucket.
+  if (typeof auth.admin_secret === "string") return null;
+
+  // `backend_session` is only accepted by the server together with a valid
+  // backend secret. It carries the same public Session wire fields as a
+  // server-side impersonation request, so it uses the same canonical author.
+  // It also has the server's highest session-authentication precedence.
+  const session = auth.backend_session as { issuer?: unknown; user_id?: unknown } | null;
+  if (
+    typeof auth.backend_secret === "string" &&
+    session !== null &&
+    typeof session === "object" &&
+    !Array.isArray(session) &&
+    typeof session.issuer === "string" &&
+    typeof session.user_id === "string" &&
+    isUsableSubject(session.issuer) &&
+    isUsableSubject(session.user_id)
+  ) {
+    return canonicalAuthorSubject(session.issuer, session.user_id);
+  }
+
+  if (typeof auth.jwt_token === "string") {
+    const payload = parseJwtPayload(auth.jwt_token);
+    const issuer = typeof payload?.iss === "string" ? payload.iss : undefined;
+    const subject = payload?.sub;
+    if (
+      typeof issuer === "string" &&
+      typeof subject === "string" &&
+      isUsableSubject(issuer) &&
+      isUsableSubject(subject)
+    ) {
+      return canonicalAuthorSubject(issuer, subject);
+    }
+  }
+
+  return null;
+}
+
+function canonicalAuthorSubjectPart(author: string): string | null {
+  try {
+    const parsed = JSON.parse(author) as unknown;
+    return Array.isArray(parsed) && parsed.length === 2 && typeof parsed[1] === "string"
+      ? parsed[1]
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function connectWebSocketCarrier(
@@ -369,10 +449,6 @@ function waitForOpen(socket: BrowserWebSocket): Promise<void> {
       settle(() => reject(new Error("websocket closed before open"))),
     );
   });
-}
-
-function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function authSub(auth: Record<string, unknown>): string | null {

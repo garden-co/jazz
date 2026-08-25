@@ -254,7 +254,7 @@ where
     pub async fn pending_transaction_ids_for(
         &mut self,
         node: NodeUuid,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<Vec<TxId>, Error> {
         Ok(self.pending_transaction_scan_for(node, author).await?.tx_ids)
     }
@@ -265,14 +265,14 @@ where
     /// relay's ordinary local-origin recovery scan cannot find them.
     pub(crate) async fn pending_transaction_ids_for_author(
         &mut self,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<Vec<TxId>, Error> {
         self.below_global_transaction_ids_for_author(author, true).await
     }
 
     pub(crate) async fn unresolved_transaction_ids_for_author(
         &mut self,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<Vec<TxId>, Error> {
         self.below_global_transaction_ids_for_author(author, false)
             .await
@@ -280,7 +280,7 @@ where
 
     async fn below_global_transaction_ids_for_author(
         &mut self,
-        author: AuthorId,
+        author: AuthorSubject,
         include_accepted: bool,
     ) -> Result<Vec<TxId>, Error> {
         let mut candidates = Vec::new();
@@ -293,7 +293,11 @@ where
         {
             let record = raw.record();
             let fate = record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)?;
-            if AuthorId(record.get_uuid(TransactionRowRecord::FIELD_MADE_BY_IDX)?) != author
+            if AuthorSubject::from_canonical(
+                record.get_str(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
+            )
+            .map_err(|_| groove::records::Error::NonCanonicalRecord)?
+                != author
                 || !(fate == 0 || (include_accepted && fate == 1))
                 || durability_from_discriminant(
                     record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
@@ -340,7 +344,7 @@ where
     async fn pending_transaction_scan_for(
         &mut self,
         node: NodeUuid,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<PendingTransactionScan, Error> {
         let Some(node_alias) = self.node_aliases.get(&node).copied() else {
             return Ok(PendingTransactionScan::default());
@@ -357,7 +361,11 @@ where
             scan.records_visited += 1;
             let record = raw.record();
             if NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?) != node_alias
-                || AuthorId(record.get_uuid(TransactionRowRecord::FIELD_MADE_BY_IDX)?) != author
+                || AuthorSubject::from_canonical(
+                    record.get_str(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
+                )
+                .map_err(|_| groove::records::Error::NonCanonicalRecord)?
+                    != author
             {
                 continue;
             }

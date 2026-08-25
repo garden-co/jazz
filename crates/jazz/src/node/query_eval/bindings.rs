@@ -150,19 +150,20 @@ pub(super) fn rewrite_claim_predicate_for_binding(
     }
 }
 
-pub(super) fn default_permission_scope_claim_values(writer: AuthorId) -> BTreeMap<String, Value> {
+pub(super) fn default_permission_scope_claim_values(
+    writer: AuthorSubject,
+) -> BTreeMap<String, Value> {
     default_policy_claim_values(writer)
 }
 
-pub(super) fn default_policy_claim_values(writer: AuthorId) -> BTreeMap<String, Value> {
+pub(super) fn default_policy_claim_values(writer: AuthorSubject) -> BTreeMap<String, Value> {
     // Alpha-compat built-ins live at the node admission/query boundary, not in
     // the compiler: lowering receives ordinary claim values plus spec `sub`.
     BUILTIN_POLICY_CLAIMS
         .iter()
         .map(|name| {
             let value = match *name {
-                "sub" => Value::Uuid(writer.0),
-                "user_id" => Value::String(writer.0.to_string()),
+                "author" => Value::String(writer.canonical().to_owned()),
                 "isAdmin" => Value::Bool(false),
                 _ => unreachable!("unknown built-in policy claim"),
             };
@@ -171,7 +172,7 @@ pub(super) fn default_policy_claim_values(writer: AuthorId) -> BTreeMap<String, 
         .collect()
 }
 
-const BUILTIN_POLICY_CLAIMS: &[&str] = &["sub", "user_id", "isAdmin"];
+const BUILTIN_POLICY_CLAIMS: &[&str] = &["author", "isAdmin"];
 
 fn is_builtin_policy_claim(name: &str) -> bool {
     BUILTIN_POLICY_CLAIMS.contains(&name)
@@ -1267,6 +1268,28 @@ where
         policy: &PolicyContext,
         prepared_claim_binding_mode: PreparedClaimBindingMode,
     ) -> Result<ProgramBinding, Error> {
+        // System authority bypasses row policy entirely.  It consequently has
+        // no identity context from which a policy claim could be bound. Some
+        // authorization builders receive claim slots from an enclosing
+        // prepared plan, so enforce the descriptor invariant at the shared
+        // binding boundary as well as in the current-query path.
+        //
+        // The binding-source key includes every claim slot.  Retaining the
+        // caller's key after dropping the slots would let a System program
+        // reuse an identity-scoped descriptor, so derive a replacement key
+        // from its ordinary query/user parameters only.
+        let (source_shape, claim_params) = if matches!(policy, PolicyContext::System) {
+            let mut param_types = shape.params().clone();
+            param_types.extend(extra_user_params.clone());
+            (
+                source_shape.and_then(|_| {
+                    query_binding_source_shape_for_parts_if_needed(&param_types, &BTreeMap::new())
+                }),
+                BTreeMap::new(),
+            )
+        } else {
+            (source_shape, claim_params)
+        };
         let mut program_binding = self.program_binding_for_shape(
             shape,
             binding,

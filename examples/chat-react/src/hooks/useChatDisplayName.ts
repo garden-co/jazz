@@ -17,7 +17,7 @@ export function useChatDisplayName(chatId: string, chatName?: string): string {
   const { data: members = [] } = useAll(app.chatMembers.where({ chatId }));
   const { data: allProfiles = [] } = useAll(app.profiles);
   const { data: messages = [] } = useAll(
-    app.messages.where({ chatId }).orderBy("createdAt", "asc").limit(1),
+    app.messages.select("*", "$createdAt").where({ chatId }).orderBy("$createdAt", "asc").limit(1),
   );
 
   if (chatName) return chatName;
@@ -25,7 +25,7 @@ export function useChatDisplayName(chatId: string, chatName?: string): string {
   if (members.length === 0) return "Chat";
 
   const firstMessage = messages[0];
-  const dateSuffix = firstMessage ? ` · ${formatChatDate(firstMessage.createdAt)}` : "";
+  const dateSuffix = firstMessage ? ` · ${formatChatDate(firstMessage.$createdAt)}` : "";
 
   const memberUserIds = new Set(members.map((m) => m.userId));
   const otherNames = allProfiles
@@ -35,7 +35,7 @@ export function useChatDisplayName(chatId: string, chatName?: string): string {
   if (otherNames.length > 0) return "Chat with " + otherNames.join(", ") + dateSuffix;
 
   // Solo chat — just the date
-  return firstMessage ? formatChatDate(firstMessage.createdAt) : "Chat";
+  return firstMessage ? formatChatDate(firstMessage.$createdAt) : "Chat";
 }
 
 function formatChatDate(date: number | Date): string {

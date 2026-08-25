@@ -6,6 +6,14 @@ impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    /// Return whether two schema facades share one open-transaction runtime.
+    ///
+    /// This compares the private runtime capability, not caller-controlled ids.
+    #[doc(hidden)]
+    pub fn shares_runtime_with(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.node, &other.node)
+    }
+
     /// Build a mergeable transaction that commits multiple writes under one id.
     pub async fn mergeable_tx(&self) -> Result<MergeableTx<'_, S>, Error> {
         let tx_id = OpenTransactionId::new();
@@ -34,7 +42,7 @@ where
     /// Build a mergeable transaction authored and permission-checked as `author`.
     pub async fn mergeable_tx_for_identity(
         &self,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<MergeableTx<'_, S>, Error> {
         let tx_id = OpenTransactionId::new();
         self.begin_mergeable_for_identity(tx_id, author).await?;
@@ -50,7 +58,7 @@ where
     /// If `callback` returns an error, the transaction is dropped without committing.
     pub async fn transaction_for_identity<T>(
         &self,
-        author: AuthorId,
+        author: AuthorSubject,
         callback: impl AsyncFnOnce(&mut MergeableTx<'_, S>) -> Result<T, Error>,
     ) -> Result<(T, TxId), Error> {
         let mut tx = self.mergeable_tx_for_identity(author).await?;
@@ -83,7 +91,7 @@ where
     pub async fn begin_mergeable_for_identity(
         &self,
         id: OpenTransactionId,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<(), Error> {
         self.node
             .node
@@ -466,21 +474,17 @@ where
         self.open_exclusive_handle(id).await
     }
 
-    /// Open an exclusive transaction authored and permission-checked as `author`.
+    /// Open an exclusive transaction whose identity is fixed for its lifetime.
     ///
-    /// See [`Db::begin_exclusive`] for ownership and operation-handle guidance.
+    /// Transaction-local reads, authorization, provenance, and commit
+    /// attribution all use `author`; subsequent calls cannot replace it.
+    #[doc(hidden)]
     pub async fn begin_exclusive_for_identity(
         &self,
         id: OpenTransactionId,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<(), Error> {
-        self.node
-            .node
-            .lock()
-            .await
-            .open_exclusive_for_identity(id, author)
-            .await
-            .map_err(Into::into)
+        self.open_exclusive_handle_for_identity(id, author).await
     }
 
     /// Return a non-owning operations handle for an already-open exclusive transaction.
@@ -493,19 +497,20 @@ where
         ExclusiveTxRef { db: self, tx_id }
     }
 
-    pub(super) async fn exclusive_read(
+    pub(super) async fn transaction_read(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
         row: RowUuid,
     ) -> Result<Option<RowCells>, Error> {
-        self.node
-            .node
-            .lock()
-            .await
+        let mut node = self.node.node.lock().await;
+        let mut cells = node
             .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
-            .await
-            .map_err(Into::into)
+            .await?;
+        if let Some(cells) = &mut cells {
+            node.hydrate_large_value_cells(cells).await?;
+        }
+        Ok(cells)
     }
 
     pub(super) async fn transaction_all(
@@ -528,7 +533,7 @@ where
         &self,
         tx_id: OpenTransactionId,
         prepared: &PreparedQuery,
-        author: AuthorId,
+        author: AuthorSubject,
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.transaction_all_in_authorization_mode(
@@ -545,13 +550,13 @@ where
         &self,
         tx_id: OpenTransactionId,
         prepared: &PreparedQuery,
-        author: AuthorId,
+        author: AuthorSubject,
         opts: ReadOpts,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
         ensure_default_read_view(&opts)?;
         let mut node = self.node.node.lock().await;
-        match authorization_mode {
+        let mut rows = match authorization_mode {
             QueryAuthorizationMode::ClientLocal => node
                 .tx_query_with_options(
                     tx_id,
@@ -560,7 +565,7 @@ where
                     opts.include_deleted,
                 )
                 .await
-                .map_err(Into::into),
+                .map_err(Error::from)?,
             QueryAuthorizationMode::TrustedServing => node
                 .tx_query_for_identity_with_options(
                     tx_id,
@@ -570,8 +575,21 @@ where
                     opts.include_deleted,
                 )
                 .await
-                .map_err(Into::into),
-        }
+                .map_err(Error::from)?,
+        };
+        node.hydrate_current_rows(&mut rows).await?;
+        Ok(rows)
+    }
+
+    pub(super) async fn transaction_current_rows(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let mut node = self.node.node.lock().await;
+        let mut rows = node.tx_current_rows(tx_id, table).await?;
+        node.hydrate_current_rows(&mut rows).await?;
+        Ok(rows)
     }
 
     pub(super) async fn stage_exclusive_insert(
@@ -580,8 +598,9 @@ where
         table: &str,
         row: RowUuid,
         cells: RowCells,
+        updated_at_ms: Option<u64>,
     ) -> Result<(), Error> {
-        let now_ms = self.next_now_ms();
+        let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         let cells = self.apply_insert_defaults(table, cells)?;
         self.node
             .node
@@ -600,13 +619,71 @@ where
             .map_err(Into::into)
     }
 
+    pub(super) async fn stage_exclusive_update(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        updated_at_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
+        let mut node = self.node.node.lock().await;
+        let mut cells = node
+            .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
+            .await?
+            .unwrap_or_default();
+        cells.extend(patch);
+        node.tx_write_in_schema_at_ms(
+            tx_id,
+            self.schema_version_id,
+            table,
+            row,
+            cells,
+            None,
+            Some(now_ms),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub(super) async fn stage_exclusive_upsert(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        updated_at_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
+        let mut node = self.node.node.lock().await;
+        let mut cells = node
+            .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
+            .await?
+            .unwrap_or_default();
+        cells.extend(patch);
+        let cells = self.apply_insert_defaults(table, cells)?;
+        node.tx_write_in_schema_at_ms(
+            tx_id,
+            self.schema_version_id,
+            table,
+            row,
+            cells,
+            None,
+            Some(now_ms),
+        )
+        .await?;
+        Ok(())
+    }
+
     pub(super) async fn stage_exclusive_delete(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
         row: RowUuid,
+        updated_at_ms: Option<u64>,
     ) -> Result<(), Error> {
-        let now_ms = self.next_now_ms();
+        let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         self.node
             .node
             .lock()
@@ -630,8 +707,9 @@ where
         table: &str,
         row: RowUuid,
         cells: RowCells,
+        updated_at_ms: Option<u64>,
     ) -> Result<(), Error> {
-        let now_ms = self.next_now_ms();
+        let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.node.node.lock().await;
         // Restore needs one content version and one deletion-register version:
@@ -666,15 +744,26 @@ where
         &self,
         open_tx_id: OpenTransactionId,
     ) -> Result<TxId, Error> {
-        self.commit_exclusive_handle_for_identity(open_tx_id, self.identity.author)
+        let (published, unit) = self
+            .node
+            .node
+            .lock()
             .await
+            .commit_exclusive_bound(open_tx_id, self.next_now_ms())
+            .await?;
+        self.finish_exclusive_publication(published, unit).await
     }
 
-    /// Commit an owned exclusive transaction handle as `author`.
-    pub async fn commit_exclusive_handle_for_identity(
+    /// Commit an owned exclusive transaction as an explicit policy identity.
+    ///
+    /// Bindings that expose session-scoped transactions use this rather than
+    /// the connection's default identity so a trusted backend cannot silently
+    /// turn a `for_session` transaction into a system-authored commit.
+    #[cfg_attr(not(feature = "testing"), allow(dead_code))]
+    pub(crate) async fn commit_exclusive_handle_for_identity(
         &self,
         open_tx_id: OpenTransactionId,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<TxId, Error> {
         let (published, unit) = self
             .node
@@ -683,6 +772,14 @@ where
             .await
             .commit_exclusive(open_tx_id, author, self.next_now_ms())
             .await?;
+        self.finish_exclusive_publication(published, unit).await
+    }
+
+    async fn finish_exclusive_publication(
+        &self,
+        published: PublishedTransaction,
+        unit: SyncMessage,
+    ) -> Result<TxId, Error> {
         let tx_id = published.tx_id;
         if self.node.defer_local_persistence.get() {
             self.refresh_subscriptions().await?;
@@ -701,11 +798,20 @@ where
     }
 
     pub(crate) async fn open_exclusive_handle(&self, id: OpenTransactionId) -> Result<(), Error> {
+        self.open_exclusive_handle_for_identity(id, self.identity.author)
+            .await
+    }
+
+    async fn open_exclusive_handle_for_identity(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
         self.node
             .node
             .lock()
             .await
-            .open_exclusive_for_identity(id, self.identity.author)
+            .open_exclusive_for_identity(id, author)
             .await
             .map_err(Into::into)
     }

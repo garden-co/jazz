@@ -80,7 +80,7 @@ fn contribution_merge_provenance_survives_reopen() {
                 tx_id,
                 kind: TxKind::Mergeable,
                 n_total_writes: 1,
-                made_by: AuthorId::SYSTEM,
+                made_by: AuthorSubject::SYSTEM,
                 permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,
@@ -448,7 +448,7 @@ fn recovery_rebuilds_only_pending_parent_edges_and_prunes_on_acceptance() {
         node.open_exclusive(tx).unwrap();
         node.tx_write(tx, "todos", row(1), title_cells("parent"), None)
             .unwrap();
-        let (parent_tx, _unit) = node.commit_exclusive_settled(tx, AuthorId::SYSTEM, 10).unwrap();
+        let (parent_tx, _unit) = node.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10).unwrap();
         parent = parent_tx;
         child = node
             .commit_mergeable_settled(
@@ -674,7 +674,7 @@ node.database.finish_persistence(persisted).unwrap();
 // exposes the restored upload queue but not candidate-record work. It seeds
 // transaction states through node ingest APIs, then compares the null-slice
 // lookup against the former full-decode predicate.
-fn pending_replay_fixture_transaction(tx_id: TxId, made_by: AuthorId) -> Transaction {
+fn pending_replay_fixture_transaction(tx_id: TxId, made_by: AuthorSubject) -> Transaction {
     Transaction {
         tx_id,
         kind: TxKind::Mergeable,
@@ -693,7 +693,7 @@ fn pending_replay_fixture_transaction(tx_id: TxId, made_by: AuthorId) -> Transac
 fn seed_pending_replay_state(
     node: &mut NodeState<RocksDbStorage>,
     tx_id: TxId,
-    made_by: AuthorId,
+    made_by: AuthorSubject,
     fate: Fate,
     global_time: Option<GlobalTime>,
     durability: DurabilityTier,
@@ -710,7 +710,7 @@ fn seed_pending_replay_state(
 fn legacy_pending_transaction_ids_for(
     node: &mut NodeState<RocksDbStorage>,
     local_node: NodeUuid,
-    author: AuthorId,
+    author: AuthorSubject,
 ) -> PendingTransactionScan {
     let mut scan = PendingTransactionScan::default();
     for tx_id in node.transaction_ids().unwrap() {
@@ -806,13 +806,13 @@ fn pending_replay_index_scan_failure_is_not_treated_as_empty() {
 
     storage.fail_scans.set(true);
     let error = node_under_test
-        .pending_transaction_ids_for(node(1), AuthorId::SYSTEM)
+        .pending_transaction_ids_for(node(1), AuthorSubject::SYSTEM)
         .unwrap_err();
     assert!(error.to_string().contains("injected replay index scan failure"));
 
     assert_eq!(
         node_under_test
-            .pending_transaction_ids_for(node(1), AuthorId::SYSTEM)
+            .pending_transaction_ids_for(node(1), AuthorSubject::SYSTEM)
             .unwrap(),
         vec![tx_id],
         "a failed discovery scan must not clear replayable state"
@@ -823,8 +823,8 @@ fn pending_replay_index_scan_failure_is_not_treated_as_empty() {
 fn pending_replay_null_slice_is_a_superset_then_filters_fate_and_identity() {
     let (_dir, mut node_under_test) = open_node();
     let local_node = node(1);
-    let local_author = AuthorId::from_bytes([0xa1; 16]);
-    let other_author = AuthorId::from_bytes([0xb2; 16]);
+    let local_author = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let other_author = AuthorSubject::for_test_bytes([0xb2; 16]);
     let other_node = node(2);
     let states = [
         (local_node, local_author, Fate::Pending, None, DurabilityTier::Local),
@@ -874,7 +874,7 @@ const SERVER_REJECTED_NULL_SEQUENCE: usize = 16;
 fn pending_replay_lookup_work(settled_history: usize) -> (PendingTransactionScan, PendingTransactionScan) {
     let (_dir, mut node_under_test) = open_node();
     let local_node = node(1);
-    let local_author = AuthorId::from_bytes([0xa1; 16]);
+    let local_author = AuthorSubject::for_test_bytes([0xa1; 16]);
     for offset in 0..settled_history {
         seed_pending_replay_state(
             &mut node_under_test,
@@ -889,7 +889,7 @@ fn pending_replay_lookup_work(settled_history: usize) -> (PendingTransactionScan
         seed_pending_replay_state(
             &mut node_under_test,
             TxId::new(TxTime::from(10_000 + offset as u64), node(0x40 + (offset / 4) as u8)),
-            AuthorId::from_bytes([offset as u8; 16]),
+            AuthorSubject::for_test_bytes([offset as u8; 16]),
             Fate::Pending,
             None,
             DurabilityTier::Local,
@@ -899,7 +899,7 @@ fn pending_replay_lookup_work(settled_history: usize) -> (PendingTransactionScan
         seed_pending_replay_state(
             &mut node_under_test,
             TxId::new(TxTime::from(20_000 + offset as u64), node(0xe0)),
-            AuthorId::from_bytes([0xf0; 16]),
+            AuthorSubject::for_test_bytes([0xf0; 16]),
             Fate::Rejected(RejectionReason::AuthorizationDenied),
             None,
             DurabilityTier::Local,
@@ -959,7 +959,7 @@ fn reopen_replay_lookup_keeps_local_pending_write() {
 
     let mut reopened = reopen_node_at(&node_dir, node(1), schema);
     assert_eq!(
-        reopened.pending_transaction_ids_for(node(1), AuthorId::SYSTEM).unwrap(),
+        reopened.pending_transaction_ids_for(node(1), AuthorSubject::SYSTEM).unwrap(),
         vec![tx_id]
     );
     assert_eq!(
@@ -992,7 +992,7 @@ fn reopen_in_place_recovers_history_watermarks_pending_edges_and_rehydrates_peer
     core.tx_write(parent_tx, "todos", row(1), title_cells("parent"), None)
         .unwrap();
     let (parent, _unit) = core
-        .commit_exclusive_settled(parent_tx, AuthorId::SYSTEM, 10)
+        .commit_exclusive_settled(parent_tx, AuthorSubject::SYSTEM, 10)
         .unwrap();
     let child = core
         .commit_mergeable_settled(
@@ -1002,7 +1002,7 @@ fn reopen_in_place_recovers_history_watermarks_pending_edges_and_rehydrates_peer
         )
         .unwrap();
     let update = peer.current_rows_update(&mut core, "todos").unwrap();
-    assert!(matches!(update, SyncMessage::ViewUpdate { .. }));
+    assert!(matches!(update, SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. })));
 
     let mut reopened = core.reopen_in_place().unwrap();
     assert_eq!(
@@ -1024,7 +1024,7 @@ fn reopen_in_place_recovers_history_watermarks_pending_edges_and_rehydrates_peer
     );
 
     let rehydrated = peer.rehydrate_current_rows(&mut reopened, "todos").unwrap();
-    assert!(matches!(rehydrated, SyncMessage::ViewUpdate { .. }));
+    assert!(matches!(rehydrated, SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. })));
 }
 #[test]
 fn empty_string_cells_and_absent_cells_survive_restart() {
@@ -1160,7 +1160,7 @@ fn recovery_ignores_foreign_tx_ids_when_restoring_next_own_ingest_seq() {
                 tx_id: foreign,
                 kind: TxKind::Mergeable,
                 n_total_writes: 1,
-                made_by: AuthorId::SYSTEM,
+                made_by: AuthorSubject::SYSTEM,
                 permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,
@@ -1218,7 +1218,7 @@ fn row_history_reports_versions_flags_and_audit_records_across_restart() {
     core.tx_read(tx_id, "todos", row).unwrap();
     core.tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
         .unwrap();
-    let (exclusive, _unit) = core.commit_exclusive_settled(tx_id, AuthorId::SYSTEM, 30).unwrap();
+    let (exclusive, _unit) = core.commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 30).unwrap();
     let exclusive_global_time = core.allocate_global_time_for_test();
     core.apply_fate_update(
         exclusive,
@@ -1244,7 +1244,7 @@ fn row_history_reports_versions_flags_and_audit_records_across_restart() {
         .tx_write(rejected_tx, "todos", row, title_cells("rejected"), None)
         .unwrap();
     let (rejected, unit) = writer_b
-        .commit_exclusive_settled(rejected_tx, AuthorId::SYSTEM, 41)
+        .commit_exclusive_settled(rejected_tx, AuthorSubject::SYSTEM, 41)
         .unwrap();
     let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
     assert_eq!(
@@ -1290,7 +1290,7 @@ fn row_history_reports_versions_flags_and_audit_records_across_restart() {
     assert!(history.iter().any(|entry| {
         entry.tx_id() == exclusive
             && entry.kind() == TxKind::Exclusive
-            && entry.made_by() == AuthorId::SYSTEM
+            && entry.made_by() == AuthorSubject::SYSTEM
             && entry.cell(&schema().tables[0], "title") == Some(v("exclusive"))
             && entry.parents().len() == 1
     }));
@@ -1329,7 +1329,7 @@ fn transaction_metadata_round_trips_through_recovery() {
         .tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
         .unwrap();
     let (exclusive, _) = local_node
-        .commit_exclusive_settled(tx_id, AuthorId::SYSTEM, 11)
+        .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 11)
         .unwrap();
 
     assert_eq!(

@@ -6,6 +6,7 @@ import type {
   WasmRow,
 } from "../../drivers/types.js";
 import { isProvenanceMagicColumn, isProvenanceMagicTimestampColumn } from "../../magic-columns.js";
+import { decodeCanonicalAuthorSubjectBytes } from "../author-id.js";
 
 const textDecoder = new TextDecoder();
 const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
@@ -541,14 +542,10 @@ function terminalLayoutValueTypeMatchesColumn(
   // public value. Rust collector descriptors have already removed it.
   const logicalColumn = logicalStorageColumns([column])[0]!;
   // Provenance lives in fixed CurrentRow system fields, not nullable user_
-  // carriers. Authors are UUIDs internally and public strings; timestamps
-  // retain their native scalar storage type.
+  // carriers. Author subjects are already canonical text at the native/public
+  // boundary; timestamps retain their native scalar storage type.
   if (isProvenanceMagicColumn(column.name)) {
-    const storageColumn =
-      column.name === "$createdBy" || column.name === "$updatedBy"
-        ? { ...logicalColumn, column_type: { type: "Uuid" as const } }
-        : logicalColumn;
-    return terminalValueTypeMatchesColumn(valueType, storageColumn, false);
+    return terminalValueTypeMatchesColumn(valueType, logicalColumn, false);
   }
   if (carrier === "Logical") {
     return terminalValueTypeMatchesColumn(valueType, logicalColumn, false);
@@ -646,12 +643,6 @@ function terminalValueTypeMatchesColumn(
       terminalValueTypeMatchesColumn(valueType.inner, { ...column, nullable: false }, false)
     );
   }
-  if (
-    (column.name === "$createdBy" || column.name === "$updatedBy") &&
-    column.column_type.type === "Text"
-  ) {
-    return valueType.tag === 10;
-  }
   switch (column.column_type.type) {
     case "Boolean":
       return valueType.tag === 7;
@@ -729,16 +720,23 @@ function decodeTerminalColumnBytes(
   bytes: Uint8Array,
   valueType: ValueType | undefined,
 ): Value {
-  let storageType = valueType;
-  while (storageType?.tag === 14) storageType = storageType.inner;
   if (
-    (column.name === "$createdBy" || column.name === "$updatedBy") &&
+    isProvenanceMagicColumn(column.name) &&
     column.column_type.type === "Text" &&
-    storageType?.tag === 10
+    nonNullableValueType(valueType)?.tag === 8
   ) {
-    return { type: "Text", value: formatUuid(bytes) };
+    return { type: "Text", value: decodeProvenanceText(bytes) };
   }
   return decodeTerminalBytes(column.column_type, bytes);
+}
+
+function decodeProvenanceText(bytes: Uint8Array): string {
+  return decodeCanonicalAuthorSubjectBytes(bytes);
+}
+
+function nonNullableValueType(valueType: ValueType | undefined): ValueType | undefined {
+  while (valueType?.tag === 14) valueType = valueType.inner;
+  return valueType;
 }
 
 function isKnownValueType(valueType: ValueType): boolean {
@@ -1088,7 +1086,7 @@ function encodeNativeNonNullValue(type: ColumnType, value: Value): Uint8Array {
     case "Json":
     case "Enum":
       if (value.type !== "Text") throw new Error(`expected ${type.type} value`);
-      return new TextEncoder().encode(value.value);
+      return concatBytes([Uint8Array.of(0), new TextEncoder().encode(value.value)]);
     case "EnumPayload": {
       if (value.type !== "Enum") throw new Error("expected Enum payload value");
       const entry = type.cases.find((candidate) => candidate.name === value.value.case);
@@ -1104,7 +1102,7 @@ function encodeNativeNonNullValue(type: ColumnType, value: Value): Uint8Array {
       return parseUuid(value.value);
     case "Bytea":
       if (value.type !== "Bytea") throw new Error("expected Bytea value");
-      return value.value;
+      return concatBytes([Uint8Array.of(0), value.value]);
     case "Array":
       if (value.type !== "Array") throw new Error("expected Array value");
       return encodeNativeArrayValue(type.element, value.value);
@@ -1254,7 +1252,7 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
     case "Text":
     case "Json":
     case "Enum":
-      return { type: "Text", value: textDecoder.decode(bytes) };
+      return { type: "Text", value: textDecoder.decode(decodeInlineScalar(bytes)) };
     case "EnumPayload": {
       if (bytes.length < 4) throw new Error("invalid Enum payload value");
       const nameLength = view.getUint32(0, true);
@@ -1273,12 +1271,19 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
     case "Uuid":
       return { type: "Uuid", value: formatUuid(bytes) };
     case "Bytea":
-      return { type: "Bytea", value: bytes.slice() };
+      return { type: "Bytea", value: decodeInlineScalar(bytes).slice() };
     case "Array":
       return { type: "Array", value: decodeArray(type.element, bytes) };
     case "Row":
       return { type: "Row", value: decodeRowValue(type.columns, bytes) };
   }
+}
+
+function decodeInlineScalar(bytes: Uint8Array): Uint8Array {
+  if (bytes[0] !== 0) {
+    throw new Error("indirect scalar crossed a logical binding boundary");
+  }
+  return bytes.subarray(1);
 }
 
 function decodeRowValue(

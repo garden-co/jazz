@@ -7,6 +7,7 @@ import {
   migrate,
   resetCollectedState,
   table,
+  allowExternalProvenanceName,
 } from "./dsl.js";
 import { defineMigration, renameTableFrom } from "./migrations.js";
 import { definePermissions } from "./permissions/index.js";
@@ -20,6 +21,9 @@ import {
 import type {
   App as TypedApp,
   InsertOf as TypedInsertOf,
+  StreamingInsertOf as TypedStreamingInsertOf,
+  StreamingUpdateOf as TypedStreamingUpdateOf,
+  StreamingUpsertOf as TypedStreamingUpsertOf,
   RowOf as TypedRowOf,
   Schema as TypedSchema,
   SchemaDefinition as TypedSchemaDefinition,
@@ -37,6 +41,7 @@ export {
   getCollectedSchema,
   getCollectedMigration,
   resetCollectedState,
+  allowExternalProvenanceName,
 } from "./dsl.js";
 export type {
   Schema as SchemaAst,
@@ -127,6 +132,8 @@ export type {
   DefinedTable,
   TableRow,
   TableInit,
+  TableStreamingInit,
+  TableStreamingUpdate,
   TableWhereInput,
   TableSelectableColumn,
   TableOrderableColumn,
@@ -148,6 +155,9 @@ export type {
   TypedApp,
   RowOf,
   InsertOf,
+  StreamingInsertOf,
+  StreamingUpdateOf,
+  StreamingUpsertOf,
   TableMetaOf,
   WhereOf,
 } from "./typed-app.js";
@@ -168,6 +178,7 @@ type RuntimeSchemaNamespace = typeof col & {
   defineMigration: typeof defineMigration;
   renameTableFrom: typeof renameTableFrom;
   definePermissions: typeof definePermissions;
+  allowExternalProvenanceName: typeof allowExternalProvenanceName;
 };
 
 export const schema: RuntimeSchemaNamespace = Object.assign({}, col, {
@@ -178,6 +189,7 @@ export const schema: RuntimeSchemaNamespace = Object.assign({}, col, {
   defineMigration,
   renameTableFrom,
   definePermissions,
+  allowExternalProvenanceName,
 } as const);
 
 export namespace schema {
@@ -205,6 +217,10 @@ export namespace schema {
    * Input type for new rows inserted into a table (no `id`, respects optionals and defaults)
    */
   export type InsertOf<TTable> = TypedInsertOf<TTable>;
+  /** Input type for inserting a row with one streamed Text, JSON, or Bytea column. */
+  export type StreamingInsertOf<TTable> = TypedStreamingInsertOf<TTable>;
+  export type StreamingUpdateOf<TTable> = TypedStreamingUpdateOf<TTable>;
+  export type StreamingUpsertOf<TTable> = TypedStreamingUpsertOf<TTable>;
   /**
    * Metadata for a given table.
    */

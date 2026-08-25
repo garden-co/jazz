@@ -274,14 +274,13 @@ Two work items:
 
 ### Residuals / accepted-for-now
 
-- Plan-1 receipts (ledger `dev/benchmarks/SMOKE_LEDGER.md`): tick runtime stats
+- Historical Plan-1 receipts: tick runtime stats
   were split into cheap always-on counters plus explicit expensive arrangement
   walks; the S3 permissions smoke receipt moved from **12.597s** before the split
   to **0.893s** in the first post-cleanup smoke run (`20260702T000844Z`, dirty
-  git `18e31f13a`). After Step 8, `smoke.sh` records
-  `prebuild_s` separately; the final Plan-1 execution-only run
-  (`20260702T005632Z`) records S3 smoke at **1.262s** with
-  `prebuild_s = 280.686s`.
+  git `18e31f13a`). The historical execution-only run measured S3 smoke at
+  **1.262s** after a **280.686s** prebuild; that mismatch is why timing is now
+  owned by CodSpeed rather than a local omnibus script.
 - RocksDB baseline configuration landed in groove: the groove crate now declares
   its own `lz4` and `zstd` RocksDB features; the adapter configures block-based
   bloom filters (10 bits/key), a shared 256 MiB LRU block cache, a shared 256 MiB
@@ -308,30 +307,5 @@ Two work items:
 
 ## Open Questions
 
-### Open questions
-
-- 🔶 **Propagation fan-out implementation gap.** Per-commit propagation is
-  intended to be O(delta), not O(table); the implementation still needs the
-  remaining propagation path work described below.
-- 🔶 **O(delta) propagation design.** The general path for filtered/join views
-  (incremental receiver path, closure-expansion batching, exclusive-finalize
-  behavior) is still open beyond the relay whole-table case.
-- 🔶 **Cold-hydration scope.** Does the global-current routing help only
-  degenerate whole-table current-row subscriptions, or also simple filtered global
-  queries answerable from global-current indexes?
-- 🔶 **Db-surface bench migration order.** With B1/B1.5 landed (S3 has a Db-surface
-  mode), decide which of S4/S5/S7/S9 migrate to the public API next (ch. 13).
-- 🔶 **Storage physics receipts.** The old storage-physics note is folded here:
-  keep physical-layout, compaction/compression, WAL, and cold/warm-open work
-  attached to benchmark receipts rather than unmeasured design claims.
-- 🔶 **Wire and row payload byte budget.** Track verbose batch payloads,
-  text-encoded storage enums, common-case row encoding, and avoidable WebSocket
-  frame clones as one byte/copy budget.
-- 🔶 **Projection hot path.** Decide whether `project_row` and related record
-  projection paths need memcpy avoidance, descriptor specialization, or a
-  different row representation.
-- 🔶 **Memory profiling accuracy.** Stabilize the memory measurement harness
-  across WASM/native/server paths before using retained memory numbers as launch
-  evidence.
-
----
+- 🔶 [#1787](https://github.com/garden-co/jazz/issues/1787) — Performance measurement and benchmark migration.
+- 🔶 [#1776](https://github.com/garden-co/jazz/issues/1776) — Propagation/access-path implementation and query performance.

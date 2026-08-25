@@ -107,6 +107,7 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
     const session: Session = {
       user_id: "local:alice",
       claims: {},
+      issuer: "urn:jazz:local-first",
       authMode: "local-first",
     };
     const db = createMockDb("test-app", session);
@@ -135,6 +136,22 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
     expect(manager.shutdown.mock.invocationCallOrder[0]!).toBeLessThan(
       db.shutdown.mock.invocationCallOrder[0]!,
     );
+  });
+
+  it("continues database teardown after orchestrator shutdown fails", async () => {
+    const managerError = new Error("orchestrator shutdown failed");
+    const dbError = new Error("database shutdown failed");
+    const db = createMockDb("shutdown-failure");
+    db.shutdown.mockRejectedValueOnce(dbError);
+    mocks.createDb.mockResolvedValue(db);
+
+    const client = await createJazzClient({ appId: "shutdown-failure" });
+    const manager = mocks.orchestratorInstances[0]!;
+    manager.shutdown.mockRejectedValueOnce(managerError);
+
+    await expect(client.shutdown()).resolves.toBeUndefined();
+    expect(manager.shutdown).toHaveBeenCalledOnce();
+    expect(db.shutdown).toHaveBeenCalledOnce();
   });
 
   it("AGC-02: rejects when db creation fails", async () => {

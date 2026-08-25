@@ -27,6 +27,7 @@ impl PeerState {
             node,
             permission_identity,
             &versions,
+            Some(tx.tx_id),
             true,
         )
         .await?
@@ -81,6 +82,7 @@ impl PeerState {
                     node,
                     fate.permission_identity,
                     &fate.versions,
+                    Some(tx_id),
                     false,
                 )
                 .await?
@@ -117,14 +119,14 @@ impl PeerState {
     }
 
     fn record_outgoing_view_update_metadata(&mut self, update: &SyncMessage) {
-        let SyncMessage::ViewUpdate {
+        let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             version_carriers,
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
             ..
-        } = update
+        }) = update
         else {
             return;
         };
@@ -152,13 +154,17 @@ impl PeerState {
     pub(crate) async fn prove_terminal_commit_authorization<S>(
         &mut self,
         node: &mut NodeState<S>,
-        writer: AuthorId,
+        writer: AuthorSubject,
         versions: &[VersionRecord],
+        candidate_tx_id: TxId,
     ) -> Result<(), Error>
     where
         S: OrderedKvStorage,
     {
-        for action in node.authorization_actions_for_versions(versions).await? {
+        for action in node
+            .authorization_actions_for_versions_in_transaction(versions, Some(candidate_tx_id))
+            .await?
+        {
             let scope = node.authorization_support_scope(writer, &action)?;
             if scope.subscriptions.is_empty() {
                 continue;
@@ -189,28 +195,19 @@ impl PeerState {
                         self.authorization_progress_for_subscription(subscription),
                     )
                 } else {
-                    let previous_role = self.role;
-                    let previous_permission_identity = self.permission_identity;
-                    self.role = PeerRole::ClientLink { identity: writer };
-                    // The support proof must evaluate claims as the commit's
-                    // permission subject. Trusted backend links normally use
-                    // `SYSTEM` for their served reads, so changing only the
-                    // transient client role would still bind policy claims as
-                    // `SYSTEM` here.
-                    self.permission_identity = Some(writer);
                     let update = self
-                        .rehydrate_authorization_support_query(
-                        node,
-                        &shape,
-                        &binding,
-                        scope.options.clone(),
-                    )
-                    .await;
-                    self.role = previous_role;
-                    self.permission_identity = previous_permission_identity;
-                    let SyncMessage::ViewUpdate {
+                        .rehydrate_authorization_support_query_for_identity(
+                            node,
+                            writer,
+                            subscription,
+                            &shape,
+                            &binding,
+                            scope.options.clone(),
+                        )
+                        .await;
+                    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                         settled_through, ..
-                    } = update?
+                    }) = update?
                     else {
                         return Err(Error::UnsupportedSyncMessage(
                             "terminal authority support hydration did not return a view",
@@ -245,15 +242,19 @@ impl PeerState {
     async fn unsettled_authority_scope_subscriptions<S>(
         &mut self,
         node: &mut NodeState<S>,
-        writer: AuthorId,
+        writer: AuthorSubject,
         versions: &[VersionRecord],
+        candidate_tx_id: Option<TxId>,
         retained_scope_is_unsettled: bool,
     ) -> Result<Option<Vec<SubscriptionKey>>, Error>
     where
         S: OrderedKvStorage,
     {
         let mut unsettled = Vec::new();
-        for action in node.authorization_actions_for_versions(versions).await? {
+        for action in node
+            .authorization_actions_for_versions_in_transaction(versions, candidate_tx_id)
+            .await?
+        {
             let scope = node.authorization_support_scope(writer, &action)?;
             if scope.subscriptions.is_empty() {
                 // A policy with no support clauses is structurally complete;
@@ -300,24 +301,20 @@ impl PeerState {
                     );
                     continue;
                 }
-                let previous_role = self.role;
-                let previous_permission_identity = self.permission_identity;
-                self.role = PeerRole::ClientLink { identity: writer };
-                self.permission_identity = Some(writer);
                 let rehydrate = self
-                    .rehydrate_authorization_support_query(
+                    .rehydrate_authorization_support_query_for_identity(
                         node,
+                        writer,
+                        subscription,
                         &shape,
                         &binding,
                         scope.options.clone(),
                     )
                     .await;
-                self.role = previous_role;
-                self.permission_identity = previous_permission_identity;
                 let update = rehydrate?;
-                let SyncMessage::ViewUpdate {
+                let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     settled_through, ..
-                } = update
+                }) = update
                 else {
                     return Err(Error::UnsupportedSyncMessage(
                         "authority support hydration did not return a view",
@@ -432,7 +429,7 @@ impl PeerState {
     }
 
     fn apply_outgoing_view_update_result_set(&mut self, update: &SyncMessage) {
-        let SyncMessage::ViewUpdate {
+        let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             reset_result_set,
             result_member_adds,
@@ -440,7 +437,7 @@ impl PeerState {
             program_fact_adds,
             program_fact_removes,
             ..
-        } = update
+        }) = update
         else {
             return;
         };

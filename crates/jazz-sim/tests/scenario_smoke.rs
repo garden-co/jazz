@@ -1,4 +1,7 @@
 #[allow(dead_code)]
+#[path = "../benches/micro.rs"]
+mod micro;
+#[allow(dead_code)]
 #[path = "../benches/s1_saas.rs"]
 mod s1_saas;
 #[allow(dead_code)]
@@ -17,12 +20,20 @@ mod s5_durable_stream;
 #[path = "../benches/s7_migrations.rs"]
 mod s7_migrations;
 #[allow(dead_code)]
+#[path = "../benches/s8_branch_views.rs"]
+mod s8_branch_views;
+#[allow(dead_code)]
 #[path = "../benches/s9_durable_execution.rs"]
 mod s9_durable_execution;
 
 #[test]
 fn s1_saas_smoke() {
     s1_saas::smoke();
+}
+
+#[test]
+fn micro_correctness_smoke() {
+    micro::correctness_smoke();
 }
 
 #[test]
@@ -53,6 +64,13 @@ fn s5_durable_stream_smoke() {
 #[test]
 fn s7_migrations_smoke() {
     s7_migrations::smoke();
+}
+
+#[test]
+fn s8_branch_views_smoke() {
+    // This is the legacy smoke size, but runs as an ordinary deterministic
+    // test rather than through a timed benchmark binary.
+    s8_branch_views::run(64);
 }
 
 #[test]

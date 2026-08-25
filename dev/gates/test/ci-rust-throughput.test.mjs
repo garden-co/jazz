@@ -26,6 +26,11 @@ const packageBuild = fs.readFileSync(
   "utf8",
 );
 const codspeedWorkflow = fs.readFileSync(path.join(root, ".github/workflows/codspeed.yml"), "utf8");
+const realisticWorkflow = fs.readFileSync(
+  path.join(root, ".github/workflows/benchmarks.yml"),
+  "utf8",
+);
+const benchmarkSmokeGate = fs.readFileSync(path.join(root, "dev/gates/benchmark-smoke.sh"), "utf8");
 const otherWorkflows = fs
   .readdirSync(path.join(root, ".github/workflows"))
   .filter((name) => name.endsWith(".yml") && !["ci.yml", "ci-suite.yml"].includes(name))
@@ -58,6 +63,14 @@ const job = (name) => {
   const source = jobs.get(name);
   assert.notEqual(source, undefined, `missing ${name} job`);
   return source;
+};
+const benchmarkSmokeMode = (mode) => {
+  const start = `if [[ "\${1:-}" == "--${mode}" && $# == 1 ]]; then`;
+  const startIndex = benchmarkSmokeGate.indexOf(start);
+  assert.notEqual(startIndex, -1, `missing --${mode} benchmark smoke mode`);
+  const endIndex = benchmarkSmokeGate.indexOf("\nfi", startIndex);
+  assert.notEqual(endIndex, -1, `unterminated --${mode} benchmark smoke mode`);
+  return benchmarkSmokeGate.slice(startIndex + start.length, endIndex);
 };
 const assertUsesBlacksmithRunner = (jobName, jobSource) => {
   const cpu = jobName === "test-ts" ? 16 : 4;
@@ -264,6 +277,43 @@ test("Rust CI uses pinned prebuilt tools without charging Rust-only jobs for was
     assert.match(source, /uses: \.\/\.github\/actions\/setup-blacksmith/);
 });
 
+test("continuous soak precompiles outside seed watchdogs and preserves failure artifacts", () => {
+  const source = fs.readFileSync(
+    path.join(root, ".github/workflows/continuous-simulation-soak.yml"),
+    "utf8",
+  );
+  const parsed = parse(source);
+  const steps = parsed.jobs.soak.steps;
+  const precompile = steps.find((step) => step.name === "Precompile exact Jazz soak test binary");
+  const assertPrecompileCommand = (run) => {
+    assert.match(run, /timeout --kill-after=30s "\$\{PRECOMPILE_TIMEOUT_SECONDS\}s"/);
+    assert.match(
+      run,
+      /cargo test -p jazz --lib --no-default-features \\\n\s+--features testing,transport-compression-zstd --no-run \\\n/,
+    );
+    assert.doesNotMatch(run, /--no-exec/);
+  };
+  assert.ok(precompile, "missing named cold precompile step");
+  assertPrecompileCommand(precompile.run);
+  assert.throws(
+    () => assertPrecompileCommand(precompile.run.replace("--no-run", "--no-exec")),
+    /does not match|match the regular expression/,
+    "contract must reject a planted precompile flag regression",
+  );
+  for (const id of ["shard_one", "shard_two"])
+    assert.equal(
+      steps.find((step) => step.id === id)?.if,
+      "steps.precompile.outcome == 'success'",
+      `${id} must require successful precompile`,
+    );
+  assert.equal(steps.find((step) => step.name === "Upload soak receipts")?.if, "always()");
+  assert.match(
+    steps.find((step) => step.name === "Fail job when a shard failed")?.if,
+    /steps\.precompile\.outcome == 'failure'/,
+  );
+  assert.match(precompile.run, /phase:\s*"precompile"/);
+});
+
 test("build setup scopes mutable pnpm and sccache state to the agent temp directory", () => {
   assert.match(setupBuildAction, /dest: \$\{\{ runner\.temp \}\}\/setup-pnpm/);
   assert.match(setupBuildAction, /sccache_dir="\$\{RUNNER_TEMP\}\/sccache"/);
@@ -455,7 +505,7 @@ test("Rust CI splits a bounded real differential-oracle smoke behind a stable ag
   assert.doesNotMatch(differential, /tracked red debt/);
   assert.match(
     m3Differential,
-    /#\[ignore = "manual randomized differential soak; bounded seed 11 runs in CI"\]\n(?:pub )?fn m3_maintained_one_shot_differential_oracle/,
+    /#\[ignore = "#\d+: manual randomized differential soak; bounded seed 11 runs in CI"\]\n(?:pub )?fn m3_maintained_one_shot_differential_oracle/,
   );
   assert.doesNotMatch(workspace, /m3_maintained_one_shot_differential_oracle/);
   assert.match(aggregate, /if: always\(\)/);
@@ -822,7 +872,7 @@ test("CI runs the workflow contract test through its package script", () => {
   const lint = job("lint");
   assert.equal(
     packageJson.scripts["test:ci-workflow"],
-    "node --test dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/ci-tool-bundle.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs dev/gates/test/release-gates.test.mjs && node dev/gates/test-burndown-ts.mjs",
+    "node --test dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/ci-tool-bundle.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs dev/gates/test/release-gates.test.mjs && node dev/gates/ignored-tests.mjs --self-test",
   );
   assert.match(lint, /run: pnpm test:ci-workflow/);
 });
@@ -874,6 +924,135 @@ test("CodSpeed runs nightly on main and only for benchmark-labeled PRs", () => {
       "github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')",
     );
   }, /strictly equal/);
+});
+
+test("benchmark correctness stays on ordinary CI while API compilation uses realistic benchmarks", () => {
+  const workspace = job("test-rust-workspace");
+  const scenarioMode = benchmarkSmokeMode("ci");
+  const compileMode = benchmarkSmokeMode("compile-ci");
+  assert.match(
+    workspace,
+    /name: Benchmark deterministic scenario smoke\s+run: dev\/gates\/benchmark-smoke\.sh --ci/,
+  );
+  assert.match(
+    realisticWorkflow,
+    /name: Compile maintained benchmark APIs\s+run: dev\/gates\/benchmark-smoke\.sh --compile-ci/,
+  );
+  assert.match(
+    compileMode,
+    /run_phase jazz-benchmark-api cargo check -p jazz --benches --features testing/,
+  );
+  assert.match(compileMode, /run_phase jazz-sim-benchmark-api cargo check -p jazz-sim --benches/);
+  assert.doesNotMatch(scenarioMode, /cargo check -p (?:jazz|jazz-sim) --benches/);
+  assert.doesNotMatch(compileMode, /cargo test -p (?:jazz|jazz-sim)/);
+  assert.match(benchmarkSmokeGate, /cargo metadata --no-deps --format-version 1/);
+  assert.match(benchmarkSmokeGate, /required-features/);
+  assert.match(scenarioMode, /cargo test -p jazz --features testing --test legacy_benchmark_smoke/);
+  assert.match(scenarioMode, /cargo test -p jazz-sim --test scenario_smoke/);
+  assert.match(benchmarkSmokeGate, /benchmark-smoke phase=%s duration_seconds=%s status=%s/);
+  assert.throws(
+    () =>
+      assert.match(
+        scenarioMode.replace("cargo test -p jazz-sim --test scenario_smoke", "true"),
+        /cargo test -p jazz-sim --test scenario_smoke/,
+      ),
+    /scenario_smoke/,
+  );
+  assert.doesNotMatch(benchmarkSmokeGate, /^\s*cargo bench|^\s*.*--release/m);
+  assert.throws(
+    () =>
+      assert.match(
+        benchmarkSmokeGate.replace("cargo test -p jazz-sim --test scenario_smoke", "true"),
+        /cargo test -p jazz-sim --test scenario_smoke/,
+      ),
+    /scenario_smoke/,
+  );
+  assert.throws(
+    () =>
+      assert.match(
+        benchmarkSmokeGate.replace('.["required-features"][]?', ""),
+        /required-features/,
+      ),
+    /required-features/,
+  );
+});
+
+test("realistic benchmark compilation has an explicit guarded trigger matrix", () => {
+  const document = parse(realisticWorkflow);
+  assert.deepEqual(document.on.pull_request, {
+    branches: ["main"],
+    types: ["opened", "reopened", "synchronize", "labeled"],
+  });
+  assert.deepEqual(document.on.push, { branches: ["main"] });
+  assert.deepEqual(document.on.schedule, [{ cron: "0 5 * * *" }]);
+  assert.equal(document.on.workflow_dispatch.inputs.profile.default, "s");
+  assert.equal(document.on.workflow_dispatch.inputs.include_browser.type, "boolean");
+  assert.deepEqual(document.permissions, { contents: "read", issues: "write" });
+
+  const native = document.jobs.native;
+  assert.deepEqual(native["runs-on"], ["self-hosted", "linux", "x64", "jazz-bench"]);
+  assert.equal(native["timeout-minutes"], 180);
+  const expectedNativeCondition =
+    "${{ (github.event_name != 'push' || github.actor != 'github-actions[bot]') && ( github.event_name != 'pull_request' || ( contains(github.event.pull_request.labels.*.name, 'benchmark') && github.event.pull_request.head.repo.full_name == github.repository ) ) }}";
+  const normalizeCondition = (condition) => condition.replace(/\s+/g, " ").trim();
+  assert.equal(normalizeCondition(native.if), expectedNativeCondition);
+
+  assert.throws(() => {
+    const unsafe = parse(realisticWorkflow.replace('  schedule:\n    - cron: "0 5 * * *"\n', ""));
+    assert.ok(unsafe.on.schedule, "nightly schedule must remain");
+  }, /nightly schedule/);
+  assert.throws(() => {
+    const unsafe = parse(
+      realisticWorkflow.replace(
+        "github.event.pull_request.head.repo.full_name == github.repository",
+        "true",
+      ),
+    );
+    assert.equal(normalizeCondition(unsafe.jobs.native.if), expectedNativeCondition);
+  }, /true/);
+  assert.throws(() => {
+    const unsafe = parse(
+      realisticWorkflow.replace(
+        "        )\n      }}\n    runs-on:",
+        "        ) || true\n      }}\n    runs-on:",
+      ),
+    );
+    assert.equal(normalizeCondition(unsafe.jobs.native.if), expectedNativeCondition);
+  }, /true/);
+});
+
+test("realistic timing retains every retired legacy smoke suite", () => {
+  for (const bench of [
+    "cold_subscription",
+    "sync",
+    "validation",
+    "relation_include_delivery",
+    "route_subscription_curve",
+    "micro",
+    "s8_branch_views",
+  ]) {
+    assert.match(realisticWorkflow, new RegExp(`--bench ${bench}(?: |\\n|$)`));
+  }
+  assert.match(realisticWorkflow, /Run legacy Jazz timing suites/);
+  assert.match(realisticWorkflow, /status_file=bench-out\/native\/legacy-jazz\/status\.tsv/);
+  assert.match(realisticWorkflow, /status: statuses\.get\(name\) \?\? "failed"/);
+  assert.match(realisticWorkflow, /exit "\$failed"/);
+  assert.throws(
+    () =>
+      assert.match(
+        realisticWorkflow.replaceAll("--bench route_subscription_curve", ""),
+        /--bench route_subscription_curve/,
+      ),
+    /route_subscription_curve/,
+  );
+  assert.throws(
+    () =>
+      assert.match(
+        realisticWorkflow.replace('status: statuses.get(name) ?? "failed"', 'status: "passed"'),
+        /statuses\.get\(name\)/,
+      ),
+    /statuses/,
+  );
 });
 
 test("CodSpeed builds and runs the BigLabel benchmark variant", () => {

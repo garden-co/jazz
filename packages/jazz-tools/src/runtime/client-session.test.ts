@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { Session } from "./context.js";
 import {
+  ANONYMOUS_JWT_ISSUER,
+  LOCAL_FIRST_JWT_ISSUER,
+  RESERVED_JAZZ_SESSION_ISSUERS,
+  STATIC_BEARER_SESSION_ISSUER,
+  SYSTEM_SESSION_ISSUER,
   resolveClientSessionSync,
   resolveClientSessionStateSync,
   resolveJwtSession,
-  LOCAL_FIRST_JWT_ISSUER,
-  ANONYMOUS_JWT_ISSUER,
+  sessionFromVerifiedReservedJwtPayload,
 } from "./client-session.js";
 
 function toBase64Url(value: string): string {
@@ -24,6 +28,7 @@ function makeJwt(payload: Record<string, unknown>): string {
 describe("client session resolution", () => {
   it("uses a mirrored cookie session when provided", () => {
     const session: Session = {
+      issuer: "https://issuer.example",
       user_id: "cookie-user",
       claims: {
         role: "writer",
@@ -45,6 +50,22 @@ describe("client session resolution", () => {
     });
   });
 
+  it("rejects malformed and externally supplied reserved cookie sessions", () => {
+    for (const issuer of ["", " \t", ...RESERVED_JAZZ_SESSION_ISSUERS]) {
+      expect(
+        resolveClientSessionSync({
+          appId: "cookie-app",
+          cookieSession: {
+            issuer,
+            user_id: "alice",
+            claims: {},
+            authMode: "external",
+          },
+        }),
+      ).toBeNull();
+    }
+  });
+
   it("uses JWT sub as user_id", () => {
     const jwt = makeJwt({
       sub: "user-subject",
@@ -58,52 +79,110 @@ describe("client session resolution", () => {
     });
 
     expect(session).toEqual({
+      issuer: "https://issuer.example",
       user_id: "user-subject",
-      claims: {
-        role: "editor",
-        subject: "user-subject",
-        issuer: "https://issuer.example",
-      },
+      claims: { role: "editor" },
       authMode: "external",
     });
   });
 
-  it("preserves exact nonblank JWT subject bytes and rejects whitespace-only subjects", () => {
+  it("preserves the exact claims object without identity aliases", () => {
+    const claims = {
+      subject: "application-owned-subject",
+      issuer: "application-owned-issuer",
+      sub: "application-owned-sub",
+      nested: { role: "editor" },
+    };
+
+    expect(
+      resolveClientSessionSync({
+        appId: "app-exact-claims",
+        jwtToken: makeJwt({ iss: "https://issuer.example", sub: "alice", claims }),
+      }),
+    ).toMatchObject({ issuer: "https://issuer.example", user_id: "alice", claims });
+  });
+
+  it("preserves exact nonblank JWT issuer and subject bytes and rejects ASCII-whitespace-only components", () => {
     const spaced = resolveClientSessionSync({
       appId: "app-jwt-spaced-subject",
-      jwtToken: makeJwt({ sub: " alice " }),
+      jwtToken: makeJwt({ iss: " issuer ", sub: " alice " }),
     });
     const plain = resolveClientSessionSync({
       appId: "app-jwt-plain-subject",
-      jwtToken: makeJwt({ sub: "alice" }),
+      jwtToken: makeJwt({ iss: "issuer", sub: "alice" }),
     });
 
+    expect(spaced?.issuer).toBe(" issuer ");
     expect(spaced?.user_id).toBe(" alice ");
-    expect(spaced?.claims.subject).toBe(" alice ");
+    expect(spaced?.claims.subject).toBeUndefined();
+    expect(spaced?.issuer).not.toBe(plain?.issuer);
     expect(spaced?.user_id).not.toBe(plain?.user_id);
     for (const subject of [" ", "\t", "\n", "\v", "\f", "\r", " \t\n\v\f\r "]) {
       expect(
         resolveClientSessionSync({
           appId: "app-jwt-whitespace-subject",
-          jwtToken: makeJwt({ sub: subject }),
+          jwtToken: makeJwt({ iss: "issuer", sub: subject }),
+        }),
+      ).toBeNull();
+    }
+    for (const issuer of [" ", "\t", "\n", "\v", "\f", "\r", " \t\n\v\f\r "]) {
+      expect(
+        resolveClientSessionSync({
+          appId: "app-jwt-whitespace-issuer",
+          jwtToken: makeJwt({ iss: issuer, sub: "alice" }),
         }),
       ).toBeNull();
     }
   });
 
-  it("preserves Unicode whitespace in a usable subject", () => {
+  it("preserves Unicode whitespace in usable issuer and subject components", () => {
     for (const subject of ["\u0085", "\uFEFF", "\u0085provider", "provider\uFEFF"]) {
       const session = resolveClientSessionSync({
         appId: "app-jwt-unicode-subject",
-        jwtToken: makeJwt({ sub: subject }),
+        jwtToken: makeJwt({ iss: `${subject}issuer`, sub: subject }),
       });
 
+      expect(session?.issuer).toBe(`${subject}issuer`);
       expect(session?.user_id).toBe(subject);
-      expect(session?.claims.subject).toBe(subject);
+      expect(session?.claims.subject).toBeUndefined();
     }
   });
 
-  it("accepts a JWT with only a sub claim", () => {
+  it("rejects unpaired surrogate issuer and subject components from JWTs and cookies", () => {
+    for (const [iss, sub] of [
+      ["issuer", "\ud800"],
+      ["issuer", "\udc00"],
+      ["\ud800", "alice"],
+      ["\udc00", "alice"],
+    ]) {
+      expect(
+        resolveClientSessionSync({
+          appId: "app-jwt-surrogate-subject",
+          jwtToken: makeJwt({ iss, sub }),
+        }),
+      ).toBeNull();
+      expect(
+        resolveClientSessionSync({
+          appId: "cookie-app",
+          cookieSession: {
+            issuer: iss,
+            user_id: sub,
+            claims: {},
+            authMode: "external",
+          },
+        }),
+      ).toBeNull();
+    }
+
+    expect(
+      resolveClientSessionSync({
+        appId: "app-jwt-emoji-subject",
+        jwtToken: makeJwt({ iss: "issuer🚀", sub: "alice🚀" }),
+      }),
+    ).toMatchObject({ issuer: "issuer🚀", user_id: "alice🚀" });
+  });
+
+  it("rejects a JWT without an iss claim", () => {
     const jwt = makeJwt({
       sub: "user-subject",
       claims: { team: "eng" },
@@ -114,12 +193,43 @@ describe("client session resolution", () => {
       jwtToken: jwt,
     });
 
-    expect(session).toEqual({
-      user_id: "user-subject",
-      claims: {
-        team: "eng",
-        subject: "user-subject",
-      },
+    expect(session).toBeNull();
+  });
+
+  it("rejects reserved issuers in generic JWT and cookie resolution", () => {
+    for (const issuer of RESERVED_JAZZ_SESSION_ISSUERS) {
+      expect(
+        resolveClientSessionSync({
+          appId: "app-reserved-spoof",
+          jwtToken: makeJwt({ iss: issuer, sub: "user-controlled-subject" }),
+        }),
+      ).toBeNull();
+      expect(
+        resolveClientSessionSync({
+          appId: "cookie-app",
+          cookieSession: {
+            issuer,
+            user_id: "user-controlled-subject",
+            claims: {},
+            authMode:
+              issuer === LOCAL_FIRST_JWT_ISSUER
+                ? "local-first"
+                : issuer === ANONYMOUS_JWT_ISSUER
+                  ? "anonymous"
+                  : "external",
+          },
+        }),
+      ).toBeNull();
+    }
+
+    expect(
+      resolveClientSessionSync({
+        appId: "app-reserved-subject-only",
+        jwtToken: makeJwt({ iss: "https://issuer.example", sub: SYSTEM_SESSION_ISSUER }),
+      }),
+    ).toMatchObject({
+      issuer: "https://issuer.example",
+      user_id: SYSTEM_SESSION_ISSUER,
       authMode: "external",
     });
   });
@@ -133,26 +243,54 @@ describe("client session resolution", () => {
   });
 });
 
-describe("resolveJwtSession — authMode derivation", () => {
+describe("resolveJwtSession — reserved issuer admission", () => {
   function jwt(payload: Record<string, unknown>): string {
     const header = Buffer.from(JSON.stringify({ alg: "EdDSA", typ: "JWT" })).toString("base64url");
     const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
     return `${header}.${body}.sig`;
   }
 
-  it("local-first issuer → authMode 'local-first' and no synthetic claim", () => {
-    const session = resolveJwtSession(jwt({ sub: "u1", iss: LOCAL_FIRST_JWT_ISSUER }))!;
-    expect(session.authMode).toBe("local-first");
-    expect(session.claims.auth_mode).toBeUndefined();
+  it("generic JWT resolution rejects reserved Jazz issuers", () => {
+    for (const issuer of [
+      LOCAL_FIRST_JWT_ISSUER,
+      ANONYMOUS_JWT_ISSUER,
+      STATIC_BEARER_SESSION_ISSUER,
+      SYSTEM_SESSION_ISSUER,
+    ]) {
+      expect(resolveJwtSession(jwt({ sub: "u1", iss: issuer }))).toBeNull();
+    }
   });
 
-  it("anonymous issuer → authMode 'anonymous'", () => {
-    const session = resolveJwtSession(jwt({ sub: "u1", iss: ANONYMOUS_JWT_ISSUER }))!;
-    expect(session.authMode).toBe("anonymous");
-    expect(session.claims.auth_mode).toBeUndefined();
+  it("verified reserved JWT paths construct only their dedicated auth modes", () => {
+    const localFirst = sessionFromVerifiedReservedJwtPayload(
+      { sub: "u1", iss: LOCAL_FIRST_JWT_ISSUER, claims: { role: "writer" } },
+      "local-first",
+    );
+    expect(localFirst).toEqual({
+      issuer: LOCAL_FIRST_JWT_ISSUER,
+      user_id: "u1",
+      claims: { role: "writer" },
+      authMode: "local-first",
+    });
+    expect(
+      resolveClientSessionSync({
+        appId: "app-verified-local-first",
+        jwtToken: jwt({ sub: "u1", iss: LOCAL_FIRST_JWT_ISSUER }),
+        trustedReservedSession: localFirst!,
+      }),
+    ).toBe(localFirst);
+    expect(
+      sessionFromVerifiedReservedJwtPayload({ sub: "u1", iss: ANONYMOUS_JWT_ISSUER }, "anonymous"),
+    ).toMatchObject({ issuer: ANONYMOUS_JWT_ISSUER, user_id: "u1", authMode: "anonymous" });
+    expect(
+      sessionFromVerifiedReservedJwtPayload(
+        { sub: "u1", iss: LOCAL_FIRST_JWT_ISSUER },
+        "anonymous",
+      ),
+    ).toBeNull();
   });
 
-  it("any other issuer → authMode 'external'", () => {
+  it("external issuer resolves as authMode 'external'", () => {
     const session = resolveJwtSession(jwt({ sub: "u1", iss: "https://auth.example.com" }))!;
     expect(session.authMode).toBe("external");
     expect(session.claims.auth_mode).toBeUndefined();

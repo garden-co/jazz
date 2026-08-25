@@ -75,10 +75,9 @@ counts output deltas processed, not storage rows scanned.)
 
 ### B.6 Retained-baseline workflow
 
-Use `dev/benchmarks/receipt-adapters.sh` to retain a Groove run under
-`dev/benchmarks/results/` and append its smoke-shaped previous/delta summary to
-`dev/benchmarks/SMOKE_LEDGER.md`; the former `scripts/bench_*.py` retention tree
-is not present in this checkout. SQLite baselines are usually frozen and
+Use CodSpeed for comparable performance baselines. For exploratory Groove work,
+keep the native JSON output with the investigation that relies on it; do not
+append laptop timings to the repository. SQLite baselines are usually frozen and
 refreshed only when fixtures, SQL/indexes, durability, or knobs change — this
 keeps laptop cost down while preserving a comparison target.
 

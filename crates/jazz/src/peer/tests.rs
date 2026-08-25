@@ -150,7 +150,7 @@ fn client_fast_cursor_requires_retained_matching_authorization_progress() {
     let previous = BTreeSet::from([settled_member(row(1), 7)]);
     let revoked = BTreeSet::new();
 
-    let mut fresh_client = PeerState::client_link(AuthorId::from_bytes([0x11; 16]));
+    let mut fresh_client = PeerState::client_link(AuthorSubject::for_test_bytes([0x11; 16]));
     fresh_client.declare_known_state(subscription, known_state.clone());
     assert!(!fresh_client.fast_cursor_authorization_matches(subscription, &known_state));
     assert!(fast_cursor_requires_authoritative_reset(
@@ -195,15 +195,15 @@ fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
         })
     };
 
-    let identity = AuthorId::from_bytes([0x11; 16]);
+    let identity = AuthorSubject::for_test_bytes([0x11; 16]);
     let mut fresh = PeerState::client_link(identity);
     fresh.declare_known_state(subscription, known(1, 0));
     let fresh_update = fresh.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         result_member_adds,
         ..
-    } = fresh_update
+    }) = fresh_update
     else {
         panic!("expected view update");
     };
@@ -237,11 +237,11 @@ fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
 
     fresh.declare_known_state(subscription, known(1, 0));
     let retained_update = fresh.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         result_member_adds,
         ..
-    } = retained_update
+    }) = retained_update
     else {
         panic!("expected view update");
     };
@@ -266,9 +266,9 @@ fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
     accept_global(&mut core, deleted_tx, 2);
     fresh.declare_known_state(subscription, known(2, 1));
     let revoke_update = fresh.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set, ..
-    } = revoke_update
+    }) = revoke_update
     else {
         panic!("expected view update");
     };
@@ -300,7 +300,7 @@ fn duplicate_structured_query_authorization_mismatch_forces_reset() {
         binding_id: crate::query::BindingId(uuid::Uuid::from_u128(0x47)),
         ..canonical
     };
-    let mut peer = PeerState::client_link(AuthorId::from_bytes([0x11; 16]));
+    let mut peer = PeerState::client_link(AuthorSubject::for_test_bytes([0x11; 16]));
     peer.rehydrate_query_for_subscription_with_opts(
         &mut core,
         canonical,
@@ -325,9 +325,9 @@ fn duplicate_structured_query_authorization_mismatch_forces_reset() {
         )
         .unwrap()
         .expect("expected view update");
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set, ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -424,7 +424,7 @@ fn incremental_delivery_keeps_terminal_children_with_their_root() {
         binding_id: crate::query::BindingId(uuid::Uuid::from_u128(42)),
         read_view: Default::default(),
     };
-    let update = |adds, removes| SyncMessage::ViewUpdate {
+    let update = |adds, removes| SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through: GlobalTime(0),
         reset_result_set: false,
@@ -436,7 +436,7 @@ fn incremental_delivery_keeps_terminal_children_with_their_root() {
         terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
-    };
+    });
     let mut peer = PeerState::default();
     peer.apply_outgoing_view_update_result_set(&update(
         vec![root_member.clone(), child_member.clone()],
@@ -484,7 +484,7 @@ fn maintained_delivery_does_not_leak_intermediate_replacement_refcounts() {
         binding_id: crate::query::BindingId(uuid::Uuid::from_u128(12)),
         read_view: Default::default(),
     };
-    let update = |adds, removes| SyncMessage::ViewUpdate {
+    let update = |adds, removes| SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through: GlobalTime(0),
         reset_result_set: false,
@@ -496,7 +496,7 @@ fn maintained_delivery_does_not_leak_intermediate_replacement_refcounts() {
         terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
-    };
+    });
     let mut peer = PeerState::default();
     peer.apply_outgoing_view_update_result_set(&update(vec![tx10.clone()], Vec::new()));
     peer.apply_outgoing_view_update_result_set(&update(
@@ -524,7 +524,7 @@ fn maintained_delivery_rekeys_delta_and_reset_by_output_occurrence() {
         binding_id: crate::query::BindingId(uuid::Uuid::from_u128(2)),
         read_view: Default::default(),
     };
-    let update = |reset_result_set, adds, removes| SyncMessage::ViewUpdate {
+    let update = |reset_result_set, adds, removes| SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through: GlobalTime(0),
         reset_result_set,
@@ -536,7 +536,7 @@ fn maintained_delivery_rekeys_delta_and_reset_by_output_occurrence() {
         terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
-    };
+    });
     let mut peer = PeerState::default();
 
     peer.apply_outgoing_view_update_result_set(&update(
@@ -622,7 +622,7 @@ fn access_policy_schema() -> JazzSchema {
         "docAccess",
         vec![
             public_session_eq("doc", &["__jazz_outer_row", "id"]),
-            public_session_eq("userID", &["claims", "sub"]),
+            public_session_eq("userID", &["user_id"]),
         ],
     );
     public_peer_schema(
@@ -648,10 +648,10 @@ fn doc_cells(title: impl Into<String>, project: RowUuid) -> BTreeMap<String, Val
     ])
 }
 
-fn access_cells(doc: RowUuid, user: AuthorId) -> BTreeMap<String, Value> {
+fn access_cells(doc: RowUuid, user: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("doc".to_owned(), Value::Uuid(doc.0)),
-        ("userID".to_owned(), Value::Uuid(user.0)),
+        ("userID".to_owned(), Value::Uuid(user.test_uuid())),
     ])
 }
 
@@ -660,7 +660,7 @@ fn aggregate_access_policy_schema() -> JazzSchema {
         "docAccess",
         vec![
             public_session_eq("doc", &["__jazz_outer_row", "id"]),
-            public_session_eq("userID", &["claims", "sub"]),
+            public_session_eq("userID", &["user_id"]),
         ],
     );
     public_peer_schema(
@@ -737,7 +737,7 @@ fn session_seed_write_policy_schema() -> JazzSchema {
 
 fn resource_commit_unit(
     writer: &mut NodeState<RocksDbStorage>,
-    author: AuthorId,
+    author: AuthorSubject,
     row_uuid: RowUuid,
 ) -> (Transaction, Vec<VersionRecord>) {
     let (_, unit) = writer
@@ -746,7 +746,7 @@ fn resource_commit_unit(
                 .made_by(author)
                 .cells(BTreeMap::from([(
                     "owner".to_owned(),
-                    Value::Uuid(author.0),
+                    Value::Uuid(author.test_uuid()),
                 )])),
         )
         .expect("writer creates policy-protected resource commit");
@@ -759,8 +759,8 @@ fn resource_commit_unit(
 #[test]
 fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
     let schema = session_claim_read_policy_schema();
-    let writer = AuthorId::from_bytes([0xa1; 16]);
-    let transport_identity = AuthorId::from_bytes([0xa2; 16]);
+    let writer = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let transport_identity = AuthorSubject::for_test_bytes([0xa2; 16]);
     let resource = row(0xa3);
     let (_writer_dir, mut writer_node) = open_node_with_schema(node(0xa4), schema.clone());
     let (tx, versions) = resource_commit_unit(&mut writer_node, writer, resource);
@@ -785,29 +785,29 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
     let (_bound_dir, mut bound_edge) = open_node_with_schema(node(0xa6), schema.clone());
     bound_edge.set_session_claims(
         writer,
-        BTreeMap::from([("session_id".to_owned(), Value::Uuid(writer.0))]),
+        BTreeMap::from([("session_id".to_owned(), Value::Uuid(writer.test_uuid()))]),
     );
     let prior = bound_edge
         .commit_mergeable_settled(
             MergeableCommit::new("resources", row(0xa8), 1)
-                .made_by(AuthorId::SYSTEM)
+                .made_by(AuthorSubject::SYSTEM)
                 .cells(BTreeMap::from([(
                     "owner".to_owned(),
-                    Value::Uuid(writer.0),
+                    Value::Uuid(writer.test_uuid()),
                 )])),
         )
         .expect("seed readable resource at the edge");
     accept_global(&mut bound_edge, prior, 1);
-    let mut wrong_subject_peer =
-        PeerState::edge_client_with_permission_identity(transport_identity, transport_identity);
-    let bound_subscriptions = wrong_subject_peer
-        .unsettled_authority_scope_subscriptions(&mut bound_edge, writer, &versions, true)
+    let mut system_serving_peer =
+        PeerState::edge_client_with_permission_identity(transport_identity, AuthorSubject::SYSTEM);
+    let bound_subscriptions = system_serving_peer
+        .unsettled_authority_scope_subscriptions(&mut bound_edge, writer, &versions, None, true)
         .expect("edge support must bind the writer rather than the transport identity");
     let bound_subscription = bound_subscriptions
         .and_then(|subscriptions| subscriptions.into_iter().next())
         .expect("write support must register one policy subscription");
     assert!(
-        !wrong_subject_peer
+        !system_serving_peer
             .publication_states
             .get(&bound_subscription)
             .expect("bound support subscription state")
@@ -815,8 +815,8 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
             .is_empty(),
         "the writer's bound claim must authorize the seeded resource"
     );
-    assert_eq!(wrong_subject_peer.link_identity(), transport_identity);
-    assert_eq!(wrong_subject_peer.identity(), transport_identity);
+    assert_eq!(system_serving_peer.link_identity(), transport_identity);
+    assert_eq!(system_serving_peer.identity(), AuthorSubject::SYSTEM);
 
     // A present but ill-typed claim remains a real binding error; only an
     // absent claim receives the fail-closed empty-proof treatment.
@@ -831,7 +831,13 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
     let mut wrong_type_peer =
         PeerState::edge_client_with_permission_identity(transport_identity, transport_identity);
     wrong_type_peer
-        .unsettled_authority_scope_subscriptions(&mut wrong_type_edge, writer, &versions, true)
+        .unsettled_authority_scope_subscriptions(
+            &mut wrong_type_edge,
+            writer,
+            &versions,
+            None,
+            true,
+        )
         .expect_err("present ill-typed claim must remain an error");
     assert_eq!(wrong_type_peer.link_identity(), transport_identity);
     assert_eq!(wrong_type_peer.identity(), transport_identity);
@@ -840,7 +846,7 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
 #[test]
 fn edge_ingest_turns_missing_prepared_seed_claim_into_deferred_empty_support() {
     let schema = session_seed_write_policy_schema();
-    let writer = AuthorId::from_bytes([0xb1; 16]);
+    let writer = AuthorSubject::for_test_bytes([0xb1; 16]);
     let resource = row(0xb2);
     let (_writer_dir, mut writer_node) = open_node_with_schema(node(0xb3), schema.clone());
     let (tx, versions) = resource_commit_unit(&mut writer_node, writer, resource);
@@ -1103,11 +1109,11 @@ fn register_shape_binding_for_receiver_with_opts(
 
 fn version_bundles_for_update(update: &SyncMessage) -> Vec<VersionBundle> {
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             version_carriers,
             version_bundles,
             ..
-        } => {
+        }) => {
             let mut bundles = version_bundles.clone();
             bundles.extend(
                 crate::protocol::expand_version_carriers(version_carriers)
@@ -1194,12 +1200,12 @@ fn aggregate_cells(row: &crate::node::CurrentRow) -> BTreeMap<String, Value> {
 }
 
 fn view_update_added_rows(update: SyncMessage) -> BTreeSet<RowUuid> {
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -1217,11 +1223,11 @@ fn assert_view_update_rows(
     expected_adds: Vec<(&str, RowUuid, TxId)>,
     expected_removes: Vec<(&str, RowUuid, TxId)>,
 ) {
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -1248,11 +1254,11 @@ fn assert_view_update_row_order(
     expected_adds: Vec<(&str, RowUuid, TxId)>,
     expected_removes: Vec<(&str, RowUuid, TxId)>,
 ) {
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -1345,14 +1351,14 @@ fn maintained_structured_terminal_only_change_is_not_dropped_by_empty_guard() {
         .unwrap();
     accept_global(&mut core, child_update_tx, 3);
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         program_fact_adds,
         program_fact_removes,
         terminal_operations,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update")
     };
@@ -1408,9 +1414,9 @@ fn maintained_rehydrate_run_emission_matches_forced_singleton_receiver_results()
         .rehydrate_query(&mut core, &shape, &binding)
         .unwrap();
 
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         version_carriers, ..
-    } = &run_update
+    }) = &run_update
     else {
         panic!("expected view update");
     };
@@ -1496,11 +1502,11 @@ fn maintained_subscription_view_limit_one_installs_subscription() {
             .unsupported_skips_out,
         0
     );
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -1550,9 +1556,9 @@ fn maintained_subscription_view_cold_rehydrate_after_restore_ships_restored_cont
 
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
 
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds, ..
-    } = &update
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -1641,9 +1647,9 @@ fn local_rehydrate_after_edge_restore_ships_restored_row() {
         .rehydrate_query_with_opts(&mut core, &shape, &binding, opts.clone())
         .unwrap();
 
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds, ..
-    } = &update
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -1716,9 +1722,9 @@ fn local_rehydrate_after_edge_restore_transaction_ships_restored_row() {
         .rehydrate_query_with_opts(&mut core, &shape, &binding, opts.clone())
         .unwrap();
 
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds, ..
-    } = &update
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -1790,11 +1796,11 @@ fn maintained_subscription_view_limit_one_switches_after_winner_delete_and_lower
         .unwrap();
     accept_global(&mut core, delete_first_tx, 3);
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -1815,11 +1821,11 @@ fn maintained_subscription_view_limit_one_switches_after_winner_delete_and_lower
         .unwrap();
     accept_global(&mut core, new_first_tx, 4);
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -2470,14 +2476,14 @@ fn maintained_subscription_view_aggregate_rehydrate_ships_payload_fact() {
     let update = peer
         .rehydrate_query(&mut core, &aggregate_shape, &aggregate_binding)
         .unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         result_member_adds,
         result_member_removes,
         program_fact_adds,
         program_fact_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -2514,9 +2520,9 @@ fn maintained_subscription_view_aggregate_updates_incrementally() {
     let mut peer = PeerState::new();
 
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         program_fact_adds, ..
-    } = initial
+    }) = initial
     else {
         panic!("expected view update");
     };
@@ -2534,14 +2540,14 @@ fn maintained_subscription_view_aggregate_updates_incrementally() {
     let update = peer
         .query_update_for_subscription(&mut core, subscription, &shape, &binding)
         .unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         result_member_adds,
         result_member_removes,
         program_fact_adds,
         program_fact_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -2559,9 +2565,9 @@ fn maintained_subscription_view_aggregate_updates_incrementally() {
 
 #[test]
 fn aggregate_policy_oracle_matches_visible_rows_per_identity() {
-    let admin = AuthorId::from_bytes([0xa1; 16]);
-    let member = AuthorId::from_bytes([0xb2; 16]);
-    let spy = AuthorId::from_bytes([0xc3; 16]);
+    let admin = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let member = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let spy = AuthorSubject::for_test_bytes([0xc3; 16]);
     let (_dir, mut core) = open_node_with_schema(node(0x90), aggregate_access_policy_schema());
     let docs = [
         (row(0x10), "alpha", 10, vec![admin, member]),
@@ -2598,6 +2604,10 @@ fn aggregate_policy_oracle_matches_visible_rows_per_identity() {
     for (identity, expected_count, expected_sum) in
         [(admin, 2, Some(30)), (member, 2, Some(40)), (spy, 0, None)]
     {
+        core.set_session_claims(
+            identity,
+            BTreeMap::from([("user_id".to_owned(), Value::Uuid(identity.test_uuid()))]),
+        );
         let rows = core
             .query_rows_with_prepared_plan_for_identity(
                 &shape,
@@ -2618,7 +2628,7 @@ fn aggregate_policy_oracle_matches_visible_rows_per_identity() {
 
 #[test]
 fn peer_runtime_handles_do_not_cross_node_runtime_instances() {
-    let user = AuthorId::from_bytes([0xa1; 16]);
+    let user = AuthorSubject::for_test_bytes([0xa1; 16]);
     let (_first_dir, mut first_core) = open_node_with_schema(node(0x90), access_policy_schema());
     let mut peer = PeerState::edge_client(user);
 
@@ -2655,7 +2665,7 @@ fn maintained_subscription_view_forget_with_node_unsubscribes_and_drops_state() 
     let stale_tick = peer.query_update(&mut core, &shape, &binding).unwrap();
     assert_eq!(
         stale_tick,
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through: crate::time::GlobalTime(0),
             reset_result_set: false,
@@ -2667,7 +2677,7 @@ fn maintained_subscription_view_forget_with_node_unsubscribes_and_drops_state() 
             terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
-        }
+        })
     );
 }
 
@@ -2743,11 +2753,11 @@ fn maintained_subscription_view_contains_literal_stays_maintained() {
     accept_global(&mut core, added, 3);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -2789,11 +2799,11 @@ fn maintained_subscription_view_contains_param_stays_maintained() {
     accept_global(&mut core, added, 3);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -2873,11 +2883,11 @@ fn maintained_subscription_view_ne_param_stays_maintained() {
     accept_global(&mut core, still_excluded, 4);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -3151,16 +3161,16 @@ fn maintained_subscription_view_exclusive_delta_stays_maintained() {
     core.open_exclusive(tx).unwrap();
     core.tx_write(tx, "todos", row(0x61), title_cells("match"), None)
         .unwrap();
-    let (tx_id, _unit) = core.commit_exclusive_settled(tx, AuthorId::SYSTEM, 1_000).unwrap();
+    let (tx_id, _unit) = core.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 1_000).unwrap();
     accept_global(&mut core, tx_id, 1);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -3188,12 +3198,12 @@ fn maintained_subscription_view_exclusive_delta_ships_view_scoped_partial_bundle
         .unwrap();
     core.tx_write(tx, "todos", row(0x72), title_cells("other"), None)
         .unwrap();
-    let (tx_id, _unit) = core.commit_exclusive_settled(tx, AuthorId::SYSTEM, 1_000).unwrap();
+    let (tx_id, _unit) = core.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 1_000).unwrap();
     accept_global(&mut core, tx_id, 1);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: complete_tx_payload_refs,
@@ -3202,7 +3212,7 @@ fn maintained_subscription_view_exclusive_delta_ships_view_scoped_partial_bundle
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -3240,12 +3250,12 @@ fn maintained_subscription_view_can_ship_complete_exclusive_payload_for_writer_p
         .unwrap();
     core.tx_write(tx, "todos", row(0x72), title_cells("other"), None)
         .unwrap();
-    let (tx_id, _unit) = core.commit_exclusive_settled(tx, AuthorId::SYSTEM, 1_000).unwrap();
+    let (tx_id, _unit) = core.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 1_000).unwrap();
     accept_global(&mut core, tx_id, 1);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: complete_tx_payload_refs,
@@ -3254,7 +3264,7 @@ fn maintained_subscription_view_can_ship_complete_exclusive_payload_for_writer_p
         result_member_adds,
         result_member_removes,
         ..
-    } = &update
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -3345,9 +3355,9 @@ fn maintained_subscription_view_tags_terminal_columns_by_table() {
     let mut peer = PeerState::new();
     let update = peer.current_rows_update(&mut core, "orderLines").unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds, ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -3363,8 +3373,8 @@ fn maintained_subscription_view_tags_terminal_columns_by_table() {
 fn maintained_subscription_view_policy_view_exclusive_delta_ships_identity_scoped_partial_bundle() {
     let schema = access_policy_schema();
     let (_dir, mut core) = open_node_with_schema(node(0x98), schema);
-    let user_a = AuthorId::from_bytes([0xa1; 16]);
-    let user_b = AuthorId::from_bytes([0xb2; 16]);
+    let user_a = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let user_b = AuthorSubject::for_test_bytes([0xb2; 16]);
     let doc_a = row(0x81);
     let doc_b = row(0x82);
     let project = row(0x83);
@@ -3375,7 +3385,7 @@ fn maintained_subscription_view_policy_view_exclusive_delta_ships_identity_scope
         .unwrap();
     core.tx_write(tx, "docs", doc_b, doc_cells("b", project), None)
         .unwrap();
-    let (docs_tx, _unit) = core.commit_exclusive_settled(tx, AuthorId::SYSTEM, 10).unwrap();
+    let (docs_tx, _unit) = core.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10).unwrap();
     accept_global(&mut core, docs_tx, 1);
     let grant_a = core
         .commit_mergeable_settled(
@@ -3391,11 +3401,15 @@ fn maintained_subscription_view_policy_view_exclusive_delta_ships_identity_scope
     accept_global(&mut core, grant_b, 3);
 
     let mut peer = PeerState::client_link(user_a);
+    core.set_session_claims(
+        user_a,
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(user_a.test_uuid()))]),
+    );
     peer.set_ship_complete_exclusive_payloads(true);
     core.reset_query_engine_read_metrics();
     let update = peer.current_rows_update(&mut core, "docs").unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: complete_tx_payload_refs,
@@ -3404,7 +3418,7 @@ fn maintained_subscription_view_policy_view_exclusive_delta_ships_identity_scope
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -3460,9 +3474,9 @@ fn maintained_subscription_view_rehydrate_replaces_subscription_and_fresh_indexe
         .expect("replacement maintained subscription missing");
     assert_ne!(old_id, new_id);
     assert!(!core.unsubscribe_groove_subscription(old_id));
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set, ..
-    } = &rehydrate
+    }) = &rehydrate
     else {
         panic!("expected view update");
     };
@@ -3514,12 +3528,12 @@ fn maintained_subscription_view_new_binding_after_forget_has_no_stale_state() {
             other_tx,
         )]))
     );
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         reset_result_set,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -3543,7 +3557,7 @@ fn peer_state_dedups_version_payloads_across_subscription_views() {
 
     let first = peer.current_rows_update(&mut core, "todos").unwrap();
     let version_bundles = version_bundles_for_update(&first);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: complete_tx_payload_refs,
@@ -3552,7 +3566,7 @@ fn peer_state_dedups_version_payloads_across_subscription_views() {
         result_member_adds,
         result_member_removes,
         ..
-    } = first
+    }) = first
     else {
         panic!("expected view update");
     };
@@ -3566,7 +3580,7 @@ fn peer_state_dedups_version_payloads_across_subscription_views() {
 
     let second = peer.current_rows_update(&mut core, "todos").unwrap();
     let version_bundles = version_bundles_for_update(&second);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: complete_tx_payload_refs,
@@ -3575,7 +3589,7 @@ fn peer_state_dedups_version_payloads_across_subscription_views() {
         result_member_adds,
         result_member_removes,
         ..
-    } = second
+    }) = second
     else {
         panic!("expected view update");
     };
@@ -3594,8 +3608,8 @@ fn peer_state_dedups_version_payloads_across_subscription_views() {
 fn current_rows_update_installs_maintained_subscription_for_relay_and_edge_client() {
     let schema = access_policy_schema();
     let (_dir, mut core) = open_node_with_schema(node(9), schema);
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let other = AuthorId::from_bytes([0xb2; 16]);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let other = AuthorSubject::for_test_bytes([0xb2; 16]);
     let project = row(0x40);
     let doc = row(0x41);
     let grant = row(0x42);
@@ -3620,6 +3634,10 @@ fn current_rows_update_installs_maintained_subscription_for_relay_and_edge_clien
     assert!(view_update_added_rows(relay_update).contains(&doc));
 
     let mut edge_owner = PeerState::edge_client(owner);
+    core.set_session_claims(
+        owner,
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(owner.test_uuid()))]),
+    );
     let edge_update = edge_owner.current_rows_update(&mut core, "docs").unwrap();
     assert!(maintained_subscription_id(&edge_owner, subscription).is_some());
     assert_eq!(
@@ -3629,6 +3647,10 @@ fn current_rows_update_installs_maintained_subscription_for_relay_and_edge_clien
     assert!(view_update_added_rows(edge_update).contains(&doc));
 
     let mut edge_other = PeerState::edge_client(other);
+    core.set_session_claims(
+        other,
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(other.test_uuid()))]),
+    );
     let other_update = edge_other.current_rows_update(&mut core, "docs").unwrap();
     assert!(maintained_subscription_id(&edge_other, subscription).is_some());
     assert_eq!(
@@ -3644,7 +3666,7 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
     let (_reader_dir, mut reader) = open_node_with_schema(node(3), schema);
-    let user = AuthorId::from_bytes([0xa1; 16]);
+    let user = AuthorSubject::for_test_bytes([0xa1; 16]);
     let doc_one = row(1);
     let doc_two = row(2);
     let project = row(9);
@@ -3657,7 +3679,7 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
     writer
         .tx_write(tx, "docs", doc_two, doc_cells("two", project), None)
         .unwrap();
-    let (docs_tx, unit) = writer.commit_exclusive_settled(tx, AuthorId::SYSTEM, 10).unwrap();
+    let (docs_tx, unit) = writer.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10).unwrap();
     let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
     assert!(matches!(
         fate,
@@ -3675,9 +3697,13 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
     accept_global(&mut core, first_grant, 2);
 
     let mut peer = PeerState::client_link(user);
+    core.set_session_claims(
+        user,
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(user.test_uuid()))]),
+    );
     let first_update = peer.current_rows_update(&mut core, "docs").unwrap();
     let version_bundles = version_bundles_for_update(&first_update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: complete_tx_payload_refs,
@@ -3685,7 +3711,7 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
             },
         result_member_adds,
         ..
-    } = &first_update
+    }) = &first_update
     else {
         panic!("expected view update");
     };
@@ -3720,7 +3746,7 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
 
     let grant_update = peer.current_rows_update(&mut core, "docs").unwrap();
     let version_bundles = version_bundles_for_update(&grant_update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: complete_tx_payload_refs,
@@ -3729,7 +3755,7 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
         result_member_adds,
         result_member_removes,
         ..
-    } = &grant_update
+    }) = &grant_update
     else {
         panic!("expected view update");
     };
@@ -3769,9 +3795,9 @@ fn all_exclusive_never_gated_stays_incremental() {
 
     let empty = peer.current_rows_update(&mut core, "todos").unwrap();
     let version_bundles = version_bundles_for_update(&empty);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds, ..
-    } = empty
+    }) = empty
     else {
         panic!("expected view update");
     };
@@ -3784,12 +3810,12 @@ fn all_exclusive_never_gated_stays_incremental() {
         .unwrap();
     core.tx_write(tx, "todos", row_two, title_cells("two"), None)
         .unwrap();
-    let (tx_id, _unit) = core.commit_exclusive_settled(tx, AuthorId::SYSTEM, 10).unwrap();
+    let (tx_id, _unit) = core.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10).unwrap();
     accept_global(&mut core, tx_id, 1);
 
     let update = peer.current_rows_update(&mut core, "todos").unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
@@ -3798,7 +3824,7 @@ fn all_exclusive_never_gated_stays_incremental() {
             },
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -3835,7 +3861,7 @@ fn peer_state_records_current_result_set_and_can_rehydrate() {
     assert!(peer.subscription_result_sets(subscription).is_none());
     let rehydrated = peer.current_rows_update(&mut core, "todos").unwrap();
     let version_bundles = version_bundles_for_update(&rehydrated);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: complete_tx_payload_refs,
@@ -3844,7 +3870,7 @@ fn peer_state_records_current_result_set_and_can_rehydrate() {
         result_member_adds,
         result_member_removes,
         ..
-    } = rehydrated
+    }) = rehydrated
     else {
         panic!("expected view update");
     };
@@ -3895,10 +3921,10 @@ fn rehydrate_keeps_peer_payload_dedup_but_resends_result_set() {
         .unwrap();
     accept_global(&mut core, deletion_tx, 3);
     let missed_remove = peer.current_rows_update(&mut core, "todos").unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_removes,
         ..
-    } = &missed_remove
+    }) = &missed_remove
     else {
         panic!("expected view update");
     };
@@ -3909,7 +3935,7 @@ fn rehydrate_keeps_peer_payload_dedup_but_resends_result_set() {
 
     let rehydrated = peer.reset_current_rows(&mut core, "todos").unwrap();
     let version_bundles = version_bundles_for_update(&rehydrated);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
@@ -3919,7 +3945,7 @@ fn rehydrate_keeps_peer_payload_dedup_but_resends_result_set() {
         result_member_adds,
         result_member_removes,
         ..
-    } = &rehydrated
+    }) = &rehydrated
     else {
         panic!("expected view update");
     };
@@ -3977,11 +4003,11 @@ fn peer_state_sends_result_removes_after_deletes() {
         .unwrap();
     accept_global(&mut core, deletion_tx, 2);
     let removed = peer.current_rows_update(&mut core, "todos").unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = &removed
+    }) = &removed
     else {
         panic!("expected view update");
     };
@@ -4034,7 +4060,7 @@ fn whole_table_incremental_delta_ships_restore_register_witness() {
     accept_global(&mut core, restore_tx, 3);
     let restored = peer.current_rows_update(&mut core, "todos").unwrap();
     let version_bundles = version_bundles_for_update(&restored);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: complete_tx_payload_refs,
@@ -4043,7 +4069,7 @@ fn whole_table_incremental_delta_ships_restore_register_witness() {
         result_member_adds,
         result_member_removes,
         ..
-    } = &restored
+    }) = &restored
     else {
         panic!("expected view update");
     };
@@ -4110,11 +4136,11 @@ fn incremental_query_result_set_tracks_identical_cell_rewrite_tx_id() {
         .unwrap();
     accept_global(&mut core, second_tx, 2);
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected query view update");
     };
@@ -4164,11 +4190,11 @@ fn incremental_query_result_set_drops_enter_then_leave_same_drain_cycle() {
     accept_global(&mut core, unmatch_tx, 2);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = &update
+    }) = &update
     else {
         panic!("expected query view update");
     };
@@ -4231,11 +4257,11 @@ fn incremental_query_result_set_keeps_leave_then_reenter_same_drain_cycle() {
     accept_global(&mut core, second_match_tx, 3);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = &update
+    }) = &update
     else {
         panic!("expected query view update");
     };
@@ -4334,11 +4360,11 @@ fn incremental_query_result_set_rebuilds_stale_closure_rows() {
     accept_global(&mut core, second_line_tx, 4);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected query view update");
     };

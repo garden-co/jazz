@@ -7,6 +7,7 @@ import type {
   ColumnBuilderValue,
   ColumnTransform,
 } from "./dsl.js";
+import { hasExternalProvenanceNameAllowance } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import type { WasmSchema } from "./drivers/types.js";
 import {
@@ -15,6 +16,7 @@ import {
   assertUserColumnNameAllowed,
 } from "./magic-columns.js";
 import type { ColumnTransformMap, QueryBuilder } from "./runtime/db.js";
+import type { StreamingValueSource } from "./runtime/client.js";
 import type { Column, Schema as SchemaAst, SqlType, TSTypeFromSqlType } from "./schema.js";
 
 export type TableDefinition = Record<string, AnyTypedColumnBuilder>;
@@ -241,6 +243,36 @@ export type TableInit<TSchema extends SchemaLike, TTable extends TableName<TSche
   }
 >;
 
+type StreamingColumnName<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
+  [TColumn in ColumnName<TSchema, TTable>]-?: ColumnBuilderSqlType<
+    BuilderForColumn<TSchema, TTable, TColumn>
+  > extends "TEXT" | "BYTEA" | { kind: "JSON" }
+    ? TColumn
+    : never;
+}[ColumnName<TSchema, TTable>];
+
+/**
+ * Input for a streaming insert. Exactly one Text, JSON, or Bytea column is
+ * replaced by an asynchronous source; every other column retains its ordinary
+ * insert type and required/defaulted status.
+ */
+export type TableStreamingInit<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
+  [TColumn in StreamingColumnName<TSchema, TTable>]: Simplify<
+    Omit<TableInit<TSchema, TTable>, TColumn> & {
+      [TStreamed in TColumn]-?: StreamingValueSource;
+    }
+  >;
+}[StreamingColumnName<TSchema, TTable>];
+
+/** Streaming update/upsert input with one required streamed scalar. */
+export type TableStreamingUpdate<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
+  [TColumn in StreamingColumnName<TSchema, TTable>]: Simplify<
+    Partial<Omit<TableInit<TSchema, TTable>, TColumn>> & {
+      [TStreamed in TColumn]-?: StreamingValueSource;
+    }
+  >;
+}[StreamingColumnName<TSchema, TTable>];
+
 type MaybeNullableWhere<T, TOptional extends boolean> = TOptional extends true ? T | null : T;
 type WhereEqNe<T, TOptional extends boolean, TExtra extends object = {}> =
   | MaybeNullableWhere<T, TOptional>
@@ -248,10 +280,11 @@ type WhereEqNe<T, TOptional extends boolean, TExtra extends object = {}> =
       eq?: MaybeNullableWhere<T, TOptional>;
       ne?: MaybeNullableWhere<T, TOptional>;
     } & TExtra);
+type Membership<T> = { in?: T[]; notIn?: T[] };
 type NumberWhere<T extends number, TOptional extends boolean> = WhereEqNe<
   T,
   TOptional,
-  { gt?: T; gte?: T; lt?: T; lte?: T; in?: T[] }
+  { gt?: T; gte?: T; lt?: T; lte?: T } & Membership<T>
 >;
 type TimestampWhere<TOptional extends boolean> = WhereEqNe<
   Date | number,
@@ -261,13 +294,12 @@ type TimestampWhere<TOptional extends boolean> = WhereEqNe<
     gte?: Date | number;
     lt?: Date | number;
     lte?: Date | number;
-    in?: (Date | number)[];
-  }
+  } & Membership<Date | number>
 >;
 type UuidWhere<TOptional extends boolean> = WhereEqNe<
   string,
   TOptional,
-  TOptional extends true ? { in?: string[]; isNull?: boolean } : { in?: string[] }
+  TOptional extends true ? Membership<string> & { isNull?: boolean } : Membership<string>
 >;
 type PayloadEnumMatch<T> = T extends { type: infer Case extends string }
   ? { type: Case; where?: Partial<Omit<T, "type">> }
@@ -275,9 +307,9 @@ type PayloadEnumMatch<T> = T extends { type: infer Case extends string }
 
 type WhereInputForBuilder<TBuilder extends AnyTypedColumnBuilder> =
   ColumnBuilderSqlType<TBuilder> extends "TEXT"
-    ? WhereEqNe<string, ColumnBuilderOptional<TBuilder>, { contains?: string; in?: string[] }>
+    ? WhereEqNe<string, ColumnBuilderOptional<TBuilder>, { contains?: string } & Membership<string>>
     : ColumnBuilderSqlType<TBuilder> extends "BOOLEAN"
-      ? WhereEqNe<boolean, ColumnBuilderOptional<TBuilder>, { in?: boolean[] }>
+      ? WhereEqNe<boolean, ColumnBuilderOptional<TBuilder>, Membership<boolean>>
       : ColumnBuilderSqlType<TBuilder> extends "INTEGER" | "REAL"
         ? NumberWhere<number, ColumnBuilderOptional<TBuilder>>
         : ColumnBuilderSqlType<TBuilder> extends "TIMESTAMP"
@@ -288,19 +320,19 @@ type WhereInputForBuilder<TBuilder extends AnyTypedColumnBuilder> =
               ? WhereEqNe<
                   Uint8Array,
                   ColumnBuilderOptional<TBuilder>,
-                  { in?: (Uint8Array | number[])[] }
+                  Membership<Uint8Array | number[]>
                 >
               : ColumnBuilderSqlType<TBuilder> extends { kind: "JSON" }
                 ? WhereEqNe<
                     StoredColumnValue<TBuilder>,
                     ColumnBuilderOptional<TBuilder>,
-                    { in?: StoredColumnValue<TBuilder>[] }
+                    Membership<StoredColumnValue<TBuilder>>
                   >
                 : ColumnBuilderSqlType<TBuilder> extends {
                       kind: "ENUM";
                       variants: readonly (infer TVariant extends string)[];
                     }
-                  ? WhereEqNe<TVariant, ColumnBuilderOptional<TBuilder>, { in?: TVariant[] }>
+                  ? WhereEqNe<TVariant, ColumnBuilderOptional<TBuilder>, Membership<TVariant>>
                   : ColumnBuilderSqlType<TBuilder> extends {
                         kind: "ENUM";
                         cases: readonly unknown[];
@@ -313,10 +345,9 @@ type WhereInputForBuilder<TBuilder extends AnyTypedColumnBuilder> =
                       ? WhereEqNe<
                           StoredColumnValue<TBuilder>,
                           ColumnBuilderOptional<TBuilder>,
-                          {
-                            contains?: TSTypeFromSqlType<TElementSql>;
-                            in?: StoredColumnValue<TBuilder>[];
-                          }
+                          { contains?: TSTypeFromSqlType<TElementSql> } & Membership<
+                            StoredColumnValue<TBuilder>
+                          >
                         >
                       : never;
 
@@ -325,7 +356,7 @@ export type TableWhereInput<
   TTable extends TableName<TSchema>,
 > = Simplify<
   {
-    id?: string | { eq?: string; ne?: string; in?: string[] };
+    id?: string | ({ eq?: string; ne?: string } & Membership<string>);
   } & {
     [TColumn in ColumnName<TSchema, TTable>]?: WhereInputForBuilder<
       BuilderForColumn<TSchema, TTable, TColumn>
@@ -473,6 +504,8 @@ type QueryBuilderShape<
 > = QueryBuilder<TRow> & {
   readonly _table: TTable;
   readonly _initType: TableInit<TSchema, TTable>;
+  readonly _streamingInitType: TableStreamingInit<TSchema, TTable>;
+  readonly _streamingUpdateType: TableStreamingUpdate<TSchema, TTable>;
 };
 
 type RelationSeedQuery<TTable extends string = string> = QueryBuilder<unknown> & {
@@ -618,10 +651,14 @@ export interface TableMeta<
   TInit extends object = Record<string, never>,
   TWhere extends object = Record<string, never>,
   TRelations extends TableRelationMap = {},
+  TStreamingInit = never,
+  TStreamingUpdate = never,
 > {
   readonly name: TName;
   readonly row: TRow;
   readonly init: TInit;
+  readonly streamingInit: TStreamingInit;
+  readonly streamingUpdate: TStreamingUpdate;
   readonly where: TWhere;
   readonly relations: TRelations;
 }
@@ -631,12 +668,16 @@ export type AnyTableMeta = TableMeta<
   { id: string },
   Record<string, unknown>,
   Record<string, unknown>,
-  TableRelationMap
+  TableRelationMap,
+  unknown,
+  unknown
 >;
 
 type TableNameFromMeta<TMeta extends AnyTableMeta> = TMeta["name"];
 type TableRowFromMeta<TMeta extends AnyTableMeta> = TMeta["row"];
 type TableInitFromMeta<TMeta extends AnyTableMeta> = TMeta["init"];
+type TableStreamingInitFromMeta<TMeta extends AnyTableMeta> = TMeta["streamingInit"];
+type TableStreamingUpdateFromMeta<TMeta extends AnyTableMeta> = TMeta["streamingUpdate"];
 type TableWhereFromMeta<TMeta extends AnyTableMeta> = TMeta["where"];
 type TableRelationsFromMeta<TMeta extends AnyTableMeta> = TMeta["relations"];
 type RelationNameFromMeta<TMeta extends AnyTableMeta> = Extract<
@@ -690,7 +731,9 @@ export type SchemaTable<TTable extends string, TSchema extends SchemaLike> =
         TableRow<TSchema, TTable>,
         TableInit<TSchema, TTable>,
         TableWhereInput<TSchema, TTable>,
-        SchemaRelations<TTable, TSchema>
+        SchemaRelations<TTable, TSchema>,
+        TableStreamingInit<TSchema, TTable>,
+        TableStreamingUpdate<TSchema, TTable>
       >
     : never;
 
@@ -699,6 +742,8 @@ type SchemaMeta<TTable extends string, TSchema extends SchemaLike> = SchemaTable
 type MetaQueryBuilderShape<TMeta extends AnyTableMeta, TRow = unknown> = QueryBuilder<TRow> & {
   readonly _table: TableNameFromMeta<TMeta>;
   readonly _initType: TableInitFromMeta<TMeta>;
+  readonly _streamingInitType: TableStreamingInitFromMeta<TMeta>;
+  readonly _streamingUpdateType: TableStreamingUpdateFromMeta<TMeta>;
 };
 
 type BuilderInclude<TMeta extends AnyTableMeta> = {
@@ -841,6 +886,8 @@ export class TypedTableQueryBuilder<
   readonly _schema: WasmSchema;
   declare readonly _rowType: SelectedWithIncludesFromMeta<TMeta, TInclude, TSelection, TRequired>;
   declare readonly _initType: TableInitFromMeta<TMeta>;
+  declare readonly _streamingInitType: TableStreamingInitFromMeta<TMeta>;
+  declare readonly _streamingUpdateType: TableStreamingUpdateFromMeta<TMeta>;
   private _conditions: BuiltCondition[] = [];
   private _includes: Partial<BuilderInclude<TMeta>> = {};
   private _requireIncludes = false;
@@ -1186,6 +1233,8 @@ export type App<TSchema extends SchemaLike> = Simplify<
       relations: readonly RelationSeedQuery<TTable>[],
     ): TypedTableQueryBuilder<any, any, any, any>;
     wasmSchema: WasmSchema;
+    /** Authoring metadata retained for local tooling; not a runtime contract. */
+    schemaAst?: SchemaAst;
   }
 >;
 
@@ -1205,6 +1254,17 @@ export interface SliceableApp<TSchema extends SchemaLike> {
 
 export type RowOf<TTable> = TTable extends { readonly _rowType: infer TRow } ? TRow : never;
 export type InsertOf<TTable> = TTable extends { readonly _initType: infer TInit } ? TInit : never;
+export type StreamingInsertOf<TTable> = TTable extends {
+  readonly _streamingInitType: infer TStreamingInit;
+}
+  ? TStreamingInit
+  : never;
+export type StreamingUpdateOf<TTable> = TTable extends {
+  readonly _streamingUpdateType: infer TStreamingUpdate;
+}
+  ? TStreamingUpdate
+  : never;
+export type StreamingUpsertOf<TTable> = StreamingUpdateOf<TTable>;
 export type TableMetaOf<TTable> =
   TTable extends Table<infer TTableName, infer TSchema>
     ? SchemaMeta<Extract<TTableName, string>, Extract<TSchema, SchemaLike>>
@@ -1284,7 +1344,9 @@ function definitionToColumns(
   const columns: Column[] = [];
   for (const [columnName, builder] of Object.entries(columnsDefinition)) {
     assertUserColumnNameAllowed(columnName);
-    columns.push(builder._build(columnName));
+    const column = builder._build(columnName);
+    if (hasExternalProvenanceNameAllowance(builder)) column.allowExternalProvenanceName = true;
+    columns.push(column);
   }
   return columns;
 }
@@ -1352,7 +1414,12 @@ export function defineApp(
   const normalizedDefinition = definition as unknown as SchemaDefinition;
   const schema = definitionToSchema(normalizedDefinition);
   const wasmSchema = schemaToWasm(schema);
-  return createAppForTables(Object.keys(normalizedDefinition), wasmSchema, normalizedDefinition);
+  return createAppForTables(
+    Object.keys(normalizedDefinition),
+    wasmSchema,
+    normalizedDefinition,
+    schema,
+  );
 }
 
 /**
@@ -1415,6 +1482,7 @@ function createAppForTables(
   tableNames: readonly string[],
   wasmSchema: WasmSchema,
   definition?: SchemaDefinition,
+  schemaAst?: SchemaAst,
 ): App<Schema<SchemaDefinition>> {
   registeredWasmSchema = wasmSchema;
   const tables = {} as Record<string, TypedTableQueryBuilder<any>>;
@@ -1444,6 +1512,7 @@ function createAppForTables(
       return builder;
     },
     wasmSchema,
+    schemaAst,
   } as App<Schema<SchemaDefinition>>;
 }
 

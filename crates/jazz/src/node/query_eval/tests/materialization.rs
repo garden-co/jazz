@@ -196,7 +196,7 @@ fn relation_edge_target_projects_old_witness_into_read_schema() {
     let evolved_table = evolved_schema.tables[0].clone();
     let evolved = SchemaVersion::new(evolved_schema);
     node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         catalogue_seq: 1,
         publication: Box::new(SchemaLineagePublication::new(
             evolved.clone(),
@@ -266,7 +266,7 @@ fn authoritative_reset_relation_target_projects_old_renamed_witness() {
     let people = evolved_schema.tables[0].clone();
     let evolved = SchemaVersion::new(evolved_schema);
     node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         catalogue_seq: 1,
         publication: Box::new(SchemaLineagePublication::new(
             evolved.clone(),
@@ -367,7 +367,7 @@ fn authoritative_reset_relation_target_projects_two_hop_canonical_witness() {
         PublicTableSchemaBuilder::new("people").column("name", PublicColumnType::Text),
     )));
     node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         catalogue_seq: 1,
         publication: Box::new(SchemaLineagePublication::new(
             v2.clone(),
@@ -399,7 +399,7 @@ fn authoritative_reset_relation_target_projects_two_hop_canonical_witness() {
     let members = v3_schema.tables[0].clone();
     let v3 = SchemaVersion::new(v3_schema);
     node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         catalogue_seq: 2,
         publication: Box::new(SchemaLineagePublication::new(
             v3.clone(),
@@ -606,7 +606,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
     )
     .expect("settle mismatched v1 post");
     node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         catalogue_seq: 1,
         publication: Box::new(SchemaLineagePublication::new(
             v2.clone(),
@@ -636,7 +636,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
     .expect("publish users to people lens");
     client
         .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(SchemaLineagePublication::new(
                 v2.clone(),
@@ -665,7 +665,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
         })
         .expect("publish users to people lens to client");
     node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: v2.id,
@@ -674,7 +674,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
     .expect("activate v2 read schema");
     client
         .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
                 schema: v2.id,
@@ -722,7 +722,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
         binding_id: binding.binding_id(),
         read_view: opts.read_view_key(),
     };
-    let mut peer = PeerState::edge_client(AuthorId::SYSTEM);
+    let mut peer = PeerState::edge_client(AuthorSubject::SYSTEM);
     let known_author = RowVersionRef::new("users", author, author_tx);
     peer.declare_known_state(
         subscription,
@@ -754,11 +754,11 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
     client
         .apply_sync_message_settled(update.clone())
         .expect("apply maintained v2 flat join on client");
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         result_member_adds,
         ..
-    } = update
+    }) = update
     else {
         panic!("flat join rehydrate must emit a view update");
     };
@@ -777,7 +777,12 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
     // local IVM must instead rebuild it from canonical source versions.
     assert_eq!(
         client
-            .query_rows_for_client(&shape, &binding, DurabilityTier::Global, AuthorId::SYSTEM)
+            .query_rows_for_client(
+                &shape,
+                &binding,
+                DurabilityTier::Global,
+                AuthorSubject::SYSTEM
+            )
             .expect("read applied v2 flat join on client")
             .len(),
         1,
@@ -809,7 +814,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
         )
         .expect("publish flat tuple replacement")
         .expect("expected view update");
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         version_carriers,
         version_bundles,
@@ -818,7 +823,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
         program_fact_adds,
         program_fact_removes,
         ..
-    } = &replacement
+    }) = &replacement
     else {
         panic!("flat tuple replacement must emit a view update");
     };
@@ -934,7 +939,12 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
     ));
     assert_eq!(
         client
-            .query_rows_for_client(&shape, &binding, DurabilityTier::Global, AuthorId::SYSTEM)
+            .query_rows_for_client(
+                &shape,
+                &binding,
+                DurabilityTier::Global,
+                AuthorSubject::SYSTEM
+            )
             .expect("read retained flat tuple after no-op source version")
             .len(),
         1

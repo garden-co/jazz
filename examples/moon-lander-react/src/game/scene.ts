@@ -398,7 +398,7 @@ function renderSpeechBubbles(scene: SceneContext): void {
 
   const nowS = Math.floor(Date.now() / 1000);
   const BUBBLE_EXPIRY_S = 15;
-  const recentMsgs = chatMessages.filter((m) => nowS - m.createdAt < BUBBLE_EXPIRY_S);
+  const recentMsgs = chatMessages.filter((m) => nowS - m.sentAtSeconds < BUBBLE_EXPIRY_S);
   if (recentMsgs.length === 0) return;
 
   const byPlayer = new Map<string, string[]>();

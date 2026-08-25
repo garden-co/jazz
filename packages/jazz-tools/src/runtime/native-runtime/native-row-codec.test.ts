@@ -89,7 +89,7 @@ describe("native row codec", () => {
       { name: "row_uuid", valueType: { tag: 10 } },
       { name: "user_title", valueType: { tag: 14, inner: { tag: 8 } } },
       { name: "user_done", valueType: { tag: 14, inner: { tag: 7 } } },
-      { name: "$createdBy", valueType: { tag: 10 } },
+      { name: "$createdBy", valueType: { tag: 8 } },
     ];
     const nullableLogicalNames = [
       { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },
@@ -220,7 +220,7 @@ describe("native row codec", () => {
     const cells = encodeCellsForRow({ columns }, values);
     expect(cells).toEqual(writer.finish());
     expect(bytesToHex(cells)).toMatchInlineSnapshot(
-      `"06010661637469766507010663686f6963650801066c6162656c730d0801066e65737465640901046e6f74650e0801067370617273650e04440001070000001b00000029000000430000007075626c6973686564020000000b0000006f6e6574776f0100000000000040008000000000000001050000006368696c6400"`,
+      `"06010661637469766507010663686f6963650801066c6162656c730d0801066e65737465640901046e6f74650e0801067370617273650e04480001070000001c0000002c00000047000000007075626c6973686564020000000c000000006f6e650074776f010000000000004000800000000000000106000000006368696c6400"`,
     );
   });
 
@@ -545,7 +545,7 @@ describe("native row codec", () => {
       },
     ];
     const childRecord = (id: string, name: string) =>
-      Uint8Array.from([...uuidBytes(id), ...new TextEncoder().encode(name)]);
+      Uint8Array.from([...uuidBytes(id), 0, ...new TextEncoder().encode(name)]);
     const first = childRecord(firstChildId, "first");
     const second = childRecord(secondChildId, "second");
     const childArray = Uint8Array.from([

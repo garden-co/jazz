@@ -63,7 +63,7 @@ async fn wait_for_admin_row(client: &JazzClient, admin_id: ObjectId, user_id: &s
 /// Verifies that a permissive local insert which fails a server-side EXISTS
 /// INSERT policy is rejected on sync and does not become visible to peers.
 #[tokio::test]
-#[ignore = "server schema conversion requires policy EXISTS expressions to include an equality against __jazz_outer_row"]
+#[ignore = "#1759: server schema conversion requires policy EXISTS expressions to include an equality against __jazz_outer_row"]
 async fn rebac_exists_clause_denies_non_matching_insert() {
     tokio::task::LocalSet::new()
         .run_until(rebac_exists_clause_denies_non_matching_insert_inner())
@@ -125,7 +125,7 @@ async fn rebac_exists_clause_denies_non_matching_insert_inner() {
 /// Verifies that UPDATE USING policies with EXISTS are enforced on sync, and
 /// that a rejected optimistic update rolls back to server-authoritative state.
 #[tokio::test]
-#[ignore = "server schema conversion requires policy EXISTS expressions to include an equality against __jazz_outer_row"]
+#[ignore = "#1759: server schema conversion requires policy EXISTS expressions to include an equality against __jazz_outer_row"]
 async fn rebac_update_denied_by_using_exists_policy() {
     tokio::task::LocalSet::new()
         .run_until(rebac_update_denied_by_using_exists_policy_inner())
@@ -237,7 +237,7 @@ async fn rebac_update_denied_by_using_exists_policy_inner() {
 /// Verifies local UPDATE enforcement for an EXISTS-based admin policy: non-admin
 /// sessions are denied and matching admin sessions are allowed.
 #[tokio::test]
-#[ignore = "schema conversion requires policy EXISTS expressions to include an equality against __jazz_outer_row"]
+#[ignore = "#1759: schema conversion requires policy EXISTS expressions to include an equality against __jazz_outer_row"]
 async fn local_update_using_exists_policy_allows_admin_and_denies_non_admin() {
     tokio::task::LocalSet::new()
         .run_until(local_update_using_exists_policy_allows_admin_and_denies_non_admin_inner())
@@ -284,7 +284,7 @@ async fn local_update_using_exists_policy_allows_admin_and_denies_non_admin_inne
         .0;
 
     let bob_err = client
-        .for_session(Session::new(super::BOB_ID))
+        .for_session(Session::new("urn:jazz:test", super::BOB_ID))
         .update(
             protected,
             vec![("data".into(), Value::Text("bob update".into()))],
@@ -293,7 +293,7 @@ async fn local_update_using_exists_policy_allows_admin_and_denies_non_admin_inne
     assert_client_policy_denied(bob_err, "protected", Operation::Update);
 
     client
-        .for_session(Session::new(super::ALICE_ID))
+        .for_session(Session::new("urn:jazz:test", super::ALICE_ID))
         .update(
             protected,
             vec![("data".into(), Value::Text("alice update".into()))],

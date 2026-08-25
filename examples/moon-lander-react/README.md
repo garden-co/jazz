@@ -94,8 +94,13 @@ Three tables, all synced through Jazz:
 | Table           | Key columns                                                                                        |
 | --------------- | -------------------------------------------------------------------------------------------------- |
 | `players`       | playerId, name, color, mode, positionX/Y, velocityX/Y, requiredFuelType, landerFuelLevel, lastSeen |
-| `fuel_deposits` | fuelType, positionX, collected, collectedBy, createdAt                                             |
-| `chat_messages` | playerId, message, createdAt                                                                       |
+| `fuel_deposits` | fuelType, positionX, collected, collectedBy, spawnedAtSeconds                                      |
+| `chat_messages` | playerId, message, sentAtSeconds                                                                   |
+
+These two event timestamps intentionally use the simulation/sender device clock. They are not row
+creation metadata: deposit release can reinsert an existing simulation event, and chat expiry is
+measured from the sender event even if sync arrives later. Ordinary row creation time remains
+available as Jazz's `$createdAt` magic column.
 
 Players older than 180 seconds (based on `lastSeen`) are filtered out as stale.
 

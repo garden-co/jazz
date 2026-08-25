@@ -143,6 +143,43 @@ where
             .await
     }
 
+    /// Return the newest locally known version for a row/layer except one
+    /// candidate transaction.  Authority finalization persists its candidate
+    /// before assigning fate, so policy classification must be able to find
+    /// the next older pending or accepted version rather than falling straight
+    /// through to global current state.
+    pub(super) async fn query_local_layer_winner_in_branch_excluding_tx(
+        &mut self,
+        table: &str,
+        branch_key: &BranchKey,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+        excluded_tx_id: TxId,
+    ) -> Result<Option<VersionRow>, Error> {
+        let mut winner = None;
+        for candidate in self
+            .query_row_versions_in_branch(table, branch_key, row_uuid)
+            .await?
+        {
+            if candidate.layer() != layer || self.version_tx_id(&candidate)? == excluded_tx_id {
+                continue;
+            }
+            let candidate_tx = self.version_tx_id(&candidate)?;
+            let replace = match winner.as_ref() {
+                None => true,
+                Some(current) => {
+                    let current_tx = self.version_tx_id(current)?;
+                    candidate.tx_time().sort_key(candidate_tx.node)
+                        > current.tx_time().sort_key(current_tx.node)
+                }
+            };
+            if replace {
+                winner = Some(candidate);
+            }
+        }
+        Ok(winner)
+    }
+
     #[allow(dead_code)] // Stage 1 read primitive; production reads switch in Stage 2.
     pub(super) async fn query_global_layer_winner(
         &mut self,
@@ -925,10 +962,15 @@ where
                 record.get_enum(TransactionRowRecord::FIELD_KIND_IDX)?,
             )?,
             n_total_writes: record.get_u32(TransactionRowRecord::FIELD_N_TOTAL_WRITES_IDX)?,
-            made_by: AuthorId(record.get_uuid(TransactionRowRecord::FIELD_MADE_BY_IDX)?),
+            made_by: AuthorSubject::from_canonical(
+                record.get_str(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
+            )
+            .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
             permission_subject: record
-                .get_nullable_uuid(TransactionRowRecord::FIELD_PERMISSION_SUBJECT_IDX)?
-                .map(AuthorId),
+                .get_nullable_string(TransactionRowRecord::FIELD_PERMISSION_SUBJECT_IDX)?
+                .map(AuthorSubject::from_canonical)
+                .transpose()
+                .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
             base_snapshot: None,
             row_read_set: None,
             absent_read_set: None,

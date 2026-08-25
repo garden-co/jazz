@@ -11,11 +11,13 @@
 //! Start reading at [`db::Database`] for the external API, then follow
 //! [`ivm::planner`] for query lowering and [`ivm::runtime`] for the tick loop.
 
+pub mod chunks;
 /// Disabled-by-default counters used by the cold-settle attribution bench.
 #[cfg(feature = "cold-settle-attribution")]
 pub mod cold_settle_attribution;
 pub mod db;
 pub mod ivm;
+pub mod large_values;
 pub mod queries;
 pub mod records;
 pub mod schema;

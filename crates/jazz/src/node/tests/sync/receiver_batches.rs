@@ -26,9 +26,9 @@ fn cold_reset_bulk_ingest_matches_incremental_ingest() {
     let mut peer = PeerState::new();
     let update = peer.rehydrate_current_rows(&mut core, "todos").unwrap();
     let mut incremental_update = update.clone();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set, ..
-    } = &mut incremental_update
+    }) = &mut incremental_update
     else {
         panic!("expected view update");
     };
@@ -82,7 +82,7 @@ fn receiver_batch_ingests_non_reset_complete_bundles_once() {
 
     let update = core.view_update_for_current_rows("todos").unwrap();
     let mut version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
         peer_payload_inventory,
@@ -91,7 +91,7 @@ fn receiver_batch_ingests_non_reset_complete_bundles_once() {
         program_fact_adds,
         program_fact_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -235,7 +235,7 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
         tx_id,
         kind: TxKind::Exclusive,
         n_total_writes: 2,
-        made_by: AuthorId::SYSTEM,
+        made_by: AuthorSubject::SYSTEM,
         permission_subject: None,
         base_snapshot: None,
         row_read_set: None,
@@ -509,7 +509,7 @@ fn sequential_partial_exclusive_bundles_index_the_complete_transaction() {
         tx_id,
         kind: TxKind::Exclusive,
         n_total_writes: 2,
-        made_by: AuthorId::SYSTEM,
+        made_by: AuthorSubject::SYSTEM,
         permission_subject: None,
         base_snapshot: None,
         row_read_set: None,
@@ -554,7 +554,7 @@ fn completing_partial_exclusive_transaction_rejects_conflicting_metadata() {
         tx_id,
         kind: TxKind::Exclusive,
         n_total_writes: 2,
-        made_by: AuthorId::SYSTEM,
+        made_by: AuthorSubject::SYSTEM,
         permission_subject: None,
         base_snapshot: None,
         row_read_set: None,
@@ -573,7 +573,7 @@ fn completing_partial_exclusive_transaction_rejects_conflicting_metadata() {
         .unwrap();
 
     let mut conflicting_tx = tx;
-    conflicting_tx.made_by = AuthorId::from_bytes([0xa1; 16]);
+    conflicting_tx.made_by = AuthorSubject::for_test_bytes([0xa1; 16]);
     assert!(matches!(
         reader.apply_view_update(partial_exclusive_view_update(
             subscription,
@@ -591,7 +591,7 @@ fn completing_partial_exclusive_transaction_rejects_conflicting_metadata() {
     );
     assert_eq!(
         reader.query_transaction(tx_id).unwrap().unwrap().tx.made_by,
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         "the original transaction metadata must remain authoritative"
     );
 }
@@ -754,7 +754,7 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
         tx_id,
         kind: TxKind::Mergeable,
         n_total_writes: 2,
-        made_by: AuthorId::SYSTEM,
+        made_by: AuthorSubject::SYSTEM,
         permission_subject: None,
         base_snapshot: None,
         row_read_set: None,
@@ -769,7 +769,7 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
     redacted_tx.n_total_writes = 1;
 
     reader
-        .apply_sync_message_settled(SyncMessage::ViewUpdate {
+        .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through: GlobalTime(0),
             reset_result_set: false,
@@ -788,7 +788,7 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
             terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
-        })
+        }))
         .unwrap();
     assert_eq!(
         reader.current_rows("todos", DurabilityTier::Local).unwrap(),
@@ -805,7 +805,7 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
     );
 
     reader
-        .apply_sync_message_settled(SyncMessage::ViewUpdate {
+        .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through: GlobalTime(0),
             reset_result_set: false,
@@ -824,7 +824,7 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
             terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
-        })
+        }))
         .unwrap();
     assert_eq!(
         reader.current_rows("todos", DurabilityTier::Local).unwrap(),
@@ -843,7 +843,7 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
         tx_id,
         kind: TxKind::Mergeable,
         n_total_writes: 2,
-        made_by: AuthorId::SYSTEM,
+        made_by: AuthorSubject::SYSTEM,
         permission_subject: None,
         base_snapshot: None,
         row_read_set: None,
@@ -857,7 +857,7 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
     let mut redacted_tx = tx.clone();
     redacted_tx.n_total_writes = 1;
     reader
-        .apply_sync_message_settled(SyncMessage::ViewUpdate {
+        .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through: GlobalTime(1),
             reset_result_set: false,
@@ -876,7 +876,7 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
             terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
-        })
+        }))
         .unwrap();
     assert!(reader.query_transaction(tx_id).unwrap().unwrap().view_scoped_cardinality);
 
@@ -884,7 +884,7 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
     let mut reader = reopen_node_at(&reader_dir, node(3), schema());
     assert!(reader.query_transaction(tx_id).unwrap().unwrap().view_scoped_cardinality);
     reader
-        .apply_sync_message_settled(SyncMessage::ViewUpdate {
+        .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through: GlobalTime(1),
             reset_result_set: false,
@@ -903,7 +903,7 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
             terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
-        })
+        }))
         .unwrap();
     let stored = reader.query_transaction(tx_id).unwrap().unwrap();
     assert_eq!(stored.tx.n_total_writes, 2);

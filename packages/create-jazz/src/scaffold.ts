@@ -10,7 +10,12 @@ import {
 import { installJazzSkills } from "./agent-skills.js";
 
 const REPO = "garden-co/jazz";
-const BRANCH = "main";
+const CREATE_JAZZ_VERSION = (
+  JSON.parse(fs.readFileSync(path.resolve(import.meta.dirname, "../package.json"), "utf-8")) as {
+    version: string;
+  }
+).version;
+const RELEASE_REF = `v${CREATE_JAZZ_VERSION}`;
 const DEFAULT_STARTER = "next-betterauth";
 
 export const KNOWN_STARTERS = [
@@ -68,6 +73,15 @@ export interface ScaffoldOptions {
 
 const SCAFFOLD_COPY_SKIP = new Set(["node_modules", ".next", ".jazz", ".turbo", ".env", ".git"]);
 
+function sourceSnapshotError(action: string, cause: unknown): Error {
+  return new Error(
+    `Could not ${action} from immutable source snapshot ${RELEASE_REF} for create-jazz@${CREATE_JAZZ_VERSION}. ` +
+      "Jazz deliberately does not fall back to main, because that could scaffold code incompatible with the installed CLI. " +
+      "This release snapshot may be unavailable; upgrade with `npm create jazz@latest` and try again.",
+    { cause },
+  );
+}
+
 async function fetchStarter(starter: StarterName, dir: string): Promise<void> {
   const localPath = process.env.JAZZ_STARTER_PATH;
   if (localPath) {
@@ -78,8 +92,12 @@ async function fetchStarter(starter: StarterName, dir: string): Promise<void> {
     return;
   }
   const tiged = (await import("tiged")).default;
-  const emitter = tiged(`${REPO}/starters/${starter}#${BRANCH}`, { disableCache: true });
-  await emitter.clone(dir);
+  const emitter = tiged(`${REPO}/starters/${starter}#${RELEASE_REF}`, { disableCache: true });
+  try {
+    await emitter.clone(dir);
+  } catch (cause) {
+    throw sourceSnapshotError(`fetch starter "${starter}"`, cause);
+  }
 }
 
 async function resolveManifest(
@@ -90,7 +108,15 @@ async function resolveManifest(
   if (localPath) {
     return resolveLocalDeps(manifest, path.resolve(localPath, "../.."), onProgress);
   }
-  return resolveRemoteDeps(manifest, { repo: REPO, branch: BRANCH }, onProgress);
+  try {
+    return await resolveRemoteDeps(
+      manifest,
+      { repo: REPO, ref: `refs/tags/${RELEASE_REF}` },
+      onProgress,
+    );
+  } catch (cause) {
+    throw sourceSnapshotError("resolve starter dependencies", cause);
+  }
 }
 
 export async function scaffold(options: ScaffoldOptions): Promise<void> {

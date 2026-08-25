@@ -11,13 +11,12 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
   policy.chats.allowRead.where((chat) =>
     anyOf([{ isPublic: true }, userIsChatMember(chat), { joinCode: session["claims.join_code"] }]),
   );
-  policy.chats.allowInsert.where({ createdBy: session.user_id });
+  policy.chats.allowInsert.where({ $createdBy: session.author });
   policy.chats.allowUpdate.whereOld(userIsChatMember).whereNew((chat) =>
     allOf([
       userIsChatMember(chat),
-      // Users may update only non-protected fields. `createdBy` and `isPublic` cannot be updated.
+      // Users may update only non-protected fields. `isPublic` cannot be updated.
       policy.chats.exists.where({
-        createdBy: chat.createdBy,
         id: chat.id,
         isPublic: chat.isPublic,
       }),
@@ -40,7 +39,10 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
     ]),
   );
   policy.messages.allowInsert.where((message) =>
-    policy.chatMembers.exists.where({ chatId: message.chatId, userId: session.user_id }),
+    allOf([
+      policy.chatMembers.exists.where({ chatId: message.chatId, userId: session.user_id }),
+      policy.profiles.exists.where({ id: message.senderId, userId: session.user_id }),
+    ]),
   );
   policy.messages.allowDelete.where((message) =>
     policy.profiles.exists.where({ id: message.senderId, userId: session.user_id }),
@@ -57,5 +59,5 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
 
   policy.strokes.allowRead.where(allowedTo.read("canvasId"));
   policy.strokes.allowInsert.where(allowedTo.read("canvasId"));
-  policy.strokes.allowDelete.where({ ownerId: session.user_id });
+  policy.strokes.allowDelete.where({ $createdBy: session.author });
 });

@@ -29,8 +29,9 @@ use crate::ivm::{
     InlineRecordsOp, IvmGraph, JoinOp, JoinOpKind, LiteralValue, MAX_COLLECT_BY_TREE_DEPTH,
     MapProjectOp, NodeDescriptor, NodeDurability, NodeId, NodeOutput, OpType, PersistOp, PlanExpr,
     PredicateExpr, ProjectExpr, ProjectField, ProjectionExpr, RecursiveEnumRemaps, RecursiveOp,
-    Retainer, StaticScanSpec, TableSourceOp, TopByDirection, TopByLimit, TopByOp, TopByOrderField,
-    UnnestOp, UnwrapNullableOp, ValueComparison, VariantProjectOp, VariantProjectionTarget,
+    Retainer, StaticScanSpec, StreamingChecksumOp, TableSourceOp, TopByDirection, TopByLimit,
+    TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp, ValueComparison, VariantProjectOp,
+    VariantProjectionTarget,
 };
 use crate::records::{
     self, BorrowedRecord, EnumSchema, EnumValue, OwnedRecord, RawProjectionField,
@@ -41,7 +42,7 @@ use crate::storage::{OrderedKvStorage, RecordStore, ScanBounds, ScanDirection, S
 use thiserror::Error;
 
 mod aggregate;
-mod evaluation_session;
+pub(crate) mod evaluation_session;
 mod join;
 mod persist;
 mod recursion;
@@ -151,6 +152,7 @@ impl VariantProjectionCase {
 #[derive(Clone, Debug)]
 pub struct IvmRuntime {
     schema: DatabaseSchema,
+    chunk_provider: crate::chunks::OwnedChunkProvider,
     table_descriptors: HashMap<String, RecordDescriptor>,
     /// Append-only, fixed-output projection families for heterogeneous table
     /// sources. Cases are runtime input metadata rather than graph identity.
@@ -208,6 +210,7 @@ impl IvmRuntime {
             .collect();
         let mut runtime = Self {
             schema,
+            chunk_provider: crate::chunks::OwnedChunkProvider::default(),
             table_descriptors,
             variant_projections: HashMap::default(),
             graph: IvmGraph::new(),
@@ -243,6 +246,21 @@ impl IvmRuntime {
         runtime.define_schema_index_variant_projections()?;
         runtime.add_dedup_schema_indices()?;
         Ok(runtime)
+    }
+
+    pub(crate) fn set_chunk_provider(
+        &mut self,
+        provider: std::rc::Rc<dyn crate::chunks::ChunkProvider>,
+    ) {
+        self.chunk_provider = crate::chunks::OwnedChunkProvider::new(provider);
+    }
+
+    pub(crate) fn set_owned_chunk_provider(&mut self, provider: crate::chunks::OwnedChunkProvider) {
+        self.chunk_provider = provider;
+    }
+
+    pub(crate) fn chunk_provider(&self) -> crate::chunks::OwnedChunkProvider {
+        self.chunk_provider.clone()
     }
 
     pub fn set_tick_runtime_stats_enabled(&mut self, enabled: bool) {
@@ -356,10 +374,18 @@ pub enum IvmRuntimeError {
     RecursiveIterationLimit { node: NodeId, max_iters: usize },
     #[error(transparent)]
     Storage(#[from] crate::storage::Error),
+    #[error(transparent)]
+    Chunk(#[from] crate::chunks::ChunkError),
+    #[error(transparent)]
+    LargeValue(#[from] crate::large_values::Error),
     #[error("storage unavailable for durable node")]
     StorageUnavailable,
     #[error("evaluation blocked on a non-resident storage input")]
     EvaluationBlocked,
+    #[error("streaming checksum window and work budgets must be non-zero")]
+    InvalidStreamingChecksumBudget,
+    #[error("streaming checksum requires a String or Bytes field")]
+    StreamingChecksumTypeMismatch,
     #[error("subscription shape not found: {0:?}")]
     PreparedShapeNotFound(PreparedShapeId),
     #[error("cannot retire prepared shape {0:?} while it has active bindings")]

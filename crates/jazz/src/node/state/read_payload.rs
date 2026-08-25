@@ -244,7 +244,7 @@ where
     pub(crate) async fn row_version_payloads_for_refs(
         &mut self,
         requests: &[RowVersionRef],
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<Vec<VersionBundle>, Error> {
         let mut by_tx = BTreeMap::<TxId, Vec<VersionRow>>::new();
         for request in requests {
@@ -452,14 +452,14 @@ where
             version_bundles,
             program_fact_adds,
         ) = match message {
-            SyncMessage::ViewUpdate {
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription,
                 result_member_adds,
                 version_carriers,
                 version_bundles,
                 program_fact_adds,
                 ..
-            } => (
+            }) => (
                 *subscription,
                 result_member_adds,
                 version_carriers,

@@ -10,7 +10,7 @@ use jazz::block_on;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent};
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{ArraySubquery, Query};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -79,6 +79,13 @@ fn main() {
     }
 
     emit_slope(samples, max_ratio, &rungs);
+}
+
+#[allow(dead_code)]
+pub(crate) fn correctness_smoke() {
+    // Exercise the delivery-shape assertions without treating an allocator
+    // ratio measured on this host as a correctness signal.
+    let _ = measure_single_child_insert(3, 0);
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -285,7 +292,7 @@ fn open_db(scale: usize, sample: usize) -> Db<MemoryStorage> {
             MemoryStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([(scale as u8).wrapping_add(sample as u8); 16]),
-                author: AuthorId::from_bytes([0xa1; 16]),
+                author: AuthorSubject::for_test_bytes([0xa1; 16]),
             },
         )
         .with_id_source(SeededRowIdSource::new((scale + sample) as u64 + 1)),
@@ -311,9 +318,8 @@ fn measure_single_child_insert(scale: usize, sample: usize) -> Measurement {
 
     reset_alloc_counter();
     let start = Instant::now();
-    block_on(db.insert_with_id(
+    block_on(db.insert(
         "children",
-        row(10_000_000),
         BTreeMap::from([
             ("parent_id".to_owned(), Value::Uuid(parent.0)),
             (
@@ -322,6 +328,10 @@ fn measure_single_child_insert(scale: usize, sample: usize) -> Measurement {
             ),
             ("ordinal".to_owned(), Value::I32(1)),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(row(10_000_000)),
+            ..Default::default()
+        },
     ))
     .expect("insert exactly one measured child");
     let event = block_on(stream.next_event()).expect("measured relation update");
@@ -339,9 +349,8 @@ fn measure_single_child_insert(scale: usize, sample: usize) -> Measurement {
 
 fn seed_relation_fixture(db: &Db<MemoryStorage>, child_rows: usize) -> RowUuid {
     let parent = row(1);
-    block_on(db.insert_with_id(
+    block_on(db.insert(
         "parents",
-        parent,
         BTreeMap::from([
             (
                 "label".to_owned(),
@@ -349,17 +358,24 @@ fn seed_relation_fixture(db: &Db<MemoryStorage>, child_rows: usize) -> RowUuid {
             ),
             ("ordinal".to_owned(), Value::I32(0)),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(parent),
+            ..Default::default()
+        },
     ))
     .expect("insert parent");
     for index in 0..child_rows {
-        block_on(db.insert_with_id(
+        block_on(db.insert(
             "children",
-            row(1_000 + index as u64),
             BTreeMap::from([
                 ("parent_id".to_owned(), Value::Uuid(parent.0)),
                 ("label".to_owned(), Value::String(format!("child-{index}"))),
                 ("ordinal".to_owned(), Value::I32(index as i32)),
             ]),
+            jazz::db::InsertOptions {
+                row_id: Some(row(1_000 + index as u64)),
+                ..Default::default()
+            },
         ))
         .unwrap_or_else(|error| panic!("seed child {index}: {error}"));
     }

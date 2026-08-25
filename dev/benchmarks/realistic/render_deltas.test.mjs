@@ -93,6 +93,15 @@ test("render_deltas compares jazz-sim JSONL metrics from manifests", () => {
   assert.doesNotMatch(output, /8888|9999|\/edits|\/seed/);
 });
 
+test("history report normalizes storage-less legacy lanes to null", () => {
+  const report = fs.readFileSync(
+    path.join(REPO_ROOT, "dev/benchmarks/realistic/render_history_report.mjs"),
+    "utf8",
+  );
+  assert.match(report, /const storageEngine = rawStorageEngine \|\| null/);
+  assert.match(report, /\(run\.storage_engine \?\? null\) === \(storageEngine \?\? null\)/);
+});
+
 test("render_deltas help and validation include jazz-sim kind", () => {
   const help = execFileSync("node", ["dev/benchmarks/realistic/render_deltas.mjs", "--help"], {
     cwd: REPO_ROOT,

@@ -104,6 +104,8 @@ export interface Column {
   default?: unknown;
   references?: string; // Target table name for foreign key
   mergeStrategy?: ColumnMergeStrategy;
+  /** Local authoring metadata; never emitted into the structural schema. */
+  allowExternalProvenanceName?: true;
 }
 
 export type EnumValueFromCases<Cases extends readonly EnumCaseSqlType[]> = {

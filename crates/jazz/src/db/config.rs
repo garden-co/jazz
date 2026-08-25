@@ -8,7 +8,7 @@ pub struct DbIdentity {
     /// Node identity.
     pub node: NodeUuid,
     /// Application author identity.
-    pub author: AuthorId,
+    pub author: AuthorSubject,
 }
 
 /// Configuration for [`Db::open`].

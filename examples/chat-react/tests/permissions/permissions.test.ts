@@ -19,7 +19,6 @@ describe("chat permissions", () => {
       db.insert(app.chats, {
         name: "Private room",
         isPublic: false,
-        createdBy: "alice",
         joinCode: "invite-123",
       }),
     );
@@ -55,7 +54,6 @@ describe("chat permissions", () => {
       db.insert(app.chats, {
         name: "Members only",
         isPublic: false,
-        createdBy: "alice",
         joinCode: "invite-456",
       }),
     );
@@ -76,7 +74,7 @@ describe("chat permissions", () => {
     );
   });
 
-  it("does not allow chat creator and isPublic updates", async () => {
+  it("does not allow isPublic updates", async () => {
     await testApp.seed((db) =>
       db.insert(app.profiles, {
         userId: "alice",
@@ -87,7 +85,6 @@ describe("chat permissions", () => {
       db.insert(app.chats, {
         name: "Members only",
         isPublic: false,
-        createdBy: "alice",
         joinCode: "invite-456",
       }),
     );
@@ -100,12 +97,6 @@ describe("chat permissions", () => {
     );
 
     const aliceDb = testApp.as({ user_id: "alice", claims: {}, authMode: "local-first" });
-
-    await aliceDb.expectDenied((db) =>
-      db.update(app.chats, privateChat.id, {
-        createdBy: "bob",
-      }),
-    );
 
     await aliceDb.expectDenied((db) =>
       db.update(app.chats, privateChat.id, {
@@ -131,7 +122,6 @@ describe("chat permissions", () => {
       db.insert(app.chats, {
         name: "Members only",
         isPublic: false,
-        createdBy: "alice",
         joinCode: "invite-456",
       }),
     );
@@ -151,7 +141,6 @@ describe("chat permissions", () => {
         chatId: privateChat.id,
         text: "hello from alice",
         senderId: aliceProfile.id,
-        createdAt: new Date("2026-01-01T00:00:00.000Z"),
       }),
     );
 
@@ -160,7 +149,6 @@ describe("chat permissions", () => {
         chatId: privateChat.id,
         text: "hello from bob",
         senderId: bobProfile.id,
-        createdAt: new Date("2026-01-01T00:00:01.000Z"),
       }),
     );
 
@@ -177,7 +165,99 @@ describe("chat permissions", () => {
         chatId: privateChat.id,
         text: "hello from bob after joining",
         senderId: bobProfile.id,
-        createdAt: new Date("2026-01-01T00:00:02.000Z"),
+      }),
+    );
+  });
+
+  it("binds message attribution to the authenticated user's profile", async () => {
+    const aliceProfile = await testApp.seed((db) =>
+      db.insert(app.profiles, {
+        userId: "alice",
+        name: "Alice",
+      }),
+    );
+    const bobProfile = await testApp.seed((db) =>
+      db.insert(app.profiles, {
+        userId: "bob",
+        name: "Bob",
+      }),
+    );
+    const chat = await testApp.seed((db) =>
+      db.insert(app.chats, {
+        name: "Members only",
+        isPublic: false,
+        joinCode: "invite-authors",
+      }),
+    );
+    await testApp.seed((db) =>
+      db.insert(app.chatMembers, {
+        chatId: chat.id,
+        userId: "alice",
+        joinCode: "invite-authors",
+      }),
+    );
+
+    const aliceDb = testApp.as({ user_id: "alice", claims: {}, authMode: "local-first" });
+
+    aliceDb.expectAllowed((db) =>
+      db.insert(app.messages, {
+        chatId: chat.id,
+        text: "hello from alice",
+        senderId: aliceProfile.id,
+      }),
+    );
+    await aliceDb.expectDenied((db) =>
+      db.insert(app.messages, {
+        chatId: chat.id,
+        text: "forged message from bob",
+        senderId: bobProfile.id,
+      }),
+    );
+  });
+
+  it("binds reaction attribution to the authenticated user", async () => {
+    const aliceProfile = await testApp.seed((db) =>
+      db.insert(app.profiles, {
+        userId: "alice",
+        name: "Alice",
+      }),
+    );
+    const chat = await testApp.seed((db) =>
+      db.insert(app.chats, {
+        name: "Members only",
+        isPublic: false,
+        joinCode: "invite-reactions",
+      }),
+    );
+    await testApp.seed((db) =>
+      db.insert(app.chatMembers, {
+        chatId: chat.id,
+        userId: "alice",
+        joinCode: "invite-reactions",
+      }),
+    );
+    const message = await testApp.seed((db) =>
+      db.insert(app.messages, {
+        chatId: chat.id,
+        text: "react to this",
+        senderId: aliceProfile.id,
+      }),
+    );
+
+    const aliceDb = testApp.as({ user_id: "alice", claims: {}, authMode: "local-first" });
+
+    aliceDb.expectAllowed((db) =>
+      db.insert(app.reactions, {
+        messageId: message.id,
+        userId: "alice",
+        emoji: "thumbs-up",
+      }),
+    );
+    await aliceDb.expectDenied((db) =>
+      db.insert(app.reactions, {
+        messageId: message.id,
+        userId: "bob",
+        emoji: "fire",
       }),
     );
   });
@@ -193,7 +273,6 @@ describe("chat permissions", () => {
       db.insert(app.chats, {
         name: "Uploads",
         isPublic: false,
-        createdBy: "alice",
         joinCode: "invite-789",
       }),
     );
@@ -216,7 +295,6 @@ describe("chat permissions", () => {
         chatId: privateChat.id,
         text: "see attachment",
         senderId: aliceProfile.id,
-        createdAt: new Date("2026-01-01T00:00:03.000Z"),
       }),
     );
     const reaction = await testApp.seed((db) =>

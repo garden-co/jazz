@@ -13,10 +13,9 @@ This document is the planning contract for that program. It deliberately does
 not define new product APIs: individual app work must use documented public APIs
 and turn gaps it finds into separately reviewed API/design work.
 
-Implementation lanes record adopter-facing surprises in
-[Example App Learnings](./EXAMPLE_APP_LEARNINGS.md). That inbox is periodically
-triaged; entries remain until fixed, captured by a durable test, or promoted to
-an explicit open question in a spec.
+Implementation lanes record adopter-facing surprises as GitHub issues. Each
+issue is fixed, captured by a durable test, or linked from the relevant spec
+question; GitHub is the inbox rather than a repository-local queue.
 
 ## Goals and non-goals
 
@@ -141,23 +140,13 @@ The performance receipt is conditional: it is not required for a purely
 semantic bug. Conversely, a benchmark regression must point back to a scenario
 and should gain a focused correctness assertion when it reveals one.
 
-## Staging and blockers
+## Delivery tracking
 
-Start with products that exercise stable, currently supported surfaces, while
-recording blockers rather than designing around them:
-
-1. **Program foundation and BandChat:** repository layout, fixture/scenario contract, gallery shell, and first topology harness.
-2. **BigLabel and WorldTour:** scale/policy ownership and evolution of the existing map app.
-3. **Jamazon Warehouse and Jamazon:** exclusive transaction/order flow, durable execution, and external-effect boundary.
-4. **PosterShop and BandBinder:** canvas/history/branches and rich nested permission flows across pages, blocks, tasks, calendars, songs, notes, and attachments.
-5. **RecordPlayer and EpicDrop:** add after large binary values, partial chunk fulfillment, bounded-memory transfer, and native cache/VFS contracts are stable enough to test honestly.
-6. **MusicAgent:** add after large streamed text values and durable server-side agent execution have explicit recovery and secret-handling contracts.
-7. **Wequencer:** add after synchronization and high-frequency update contracts are explicit and testable.
-
-Before starting an app lane, classify its dependencies as **ready**,
-**implement alongside**, or **blocked**. A blocked app may still contribute a
-schema, synthetic fixture, and headless scenario design, but it must not imply
-that an unavailable runtime feature works.
+The current examples use [#1754](https://github.com/garden-co/jazz/issues/1754)
+(BandChat), [#1755](https://github.com/garden-co/jazz/issues/1755) (BigLabel),
+and [#1757](https://github.com/garden-co/jazz/issues/1757) (large values).
+Future catalogue apps and blockers are tracked as GitHub issues; this document
+remains the durable product/test contract rather than a staged work queue.
 
 ## Acceptance criteria
 
@@ -169,11 +158,3 @@ The collection is established when:
 - Existing realistic and `jazz-sim` workloads have an owner, migration status, and no accidental duplicated scheduled workload.
 - Benchmark history/receipts can identify the app, scenario, profile, topology, fixture version, and seed.
 - Each app-found bug follows the correctness-forcing loop, and all public fixtures pass the sensitive-data guard.
-
-## Implementation plan
-
-1. Establish an `examples-and-benchmarks` manifest (catalogue ownership, status, links, and scenario identifiers) plus a shared schema/fixture/scenario package layout.
-2. Make BandChat the reference implementation of that contract and add the first deterministic UI and headless topology scenarios.
-3. Move one existing scenario at a time behind app-owned names while preserving its old runner/report ingestion until parity is verified.
-4. Add gallery cards from the manifest; do not hard-code a second catalogue in the homepage and reference docs.
-5. Expand through the staging order, using every defect and performance investigation to improve the core test, app E2E, and receipt layers.

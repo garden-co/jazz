@@ -58,7 +58,7 @@ fn register_projection(database: &mut Database) -> Result<(), groove::db::Error>
 }
 
 #[futures_test::test]
-#[ignore = "manual release A/B receipt"]
+#[ignore = "#1787: manual release A/B receipt"]
 async fn repeated_release_write_ivm_and_cold_scan_receipt() -> Result<(), Box<dyn std::error::Error>>
 {
     let descriptors = {

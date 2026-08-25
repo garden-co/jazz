@@ -80,13 +80,37 @@ describe("isQuerySupported", () => {
     expect(isQuerySupported(tableSchema, where)).toBe(true);
   });
 
-  it("supports in on columns with equality support", () => {
+  it("supports in and not_in on columns with equality support", () => {
     expect(
       isQuerySupported(tableSchema, [
         {
           field: "id",
           operator: "in",
           value: ["row-1", "row-2"],
+          connector: "AND",
+          mode: "sensitive",
+        },
+      ]),
+    ).toBe(true);
+
+    expect(
+      isQuerySupported(tableSchema, [
+        {
+          field: "id",
+          operator: "not_in",
+          value: ["row-1", "row-2"],
+          connector: "AND",
+          mode: "sensitive",
+        },
+      ]),
+    ).toBe(true);
+
+    expect(
+      isQuerySupported(tableSchema, [
+        {
+          field: "email_address",
+          operator: "not_in",
+          value: ["blocked@example.com"],
           connector: "AND",
           mode: "sensitive",
         },

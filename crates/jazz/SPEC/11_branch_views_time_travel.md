@@ -417,33 +417,15 @@ columns, and nullable branch columns. An ordinary column rename is allowed
 because schema lineage retains its physical column identity; no branch-specific
 identity is stored.
 
+### Current limitation: distributed uniqueness
+
+Jazz has no convergent distributed uniqueness mechanism today. Groove can
+reject a conflicting write to one local unique index, but offline replicas can
+independently accept distinct `RowUuid`s for the same value; arrival order is
+not a replicated winner rule. Branch-aware uniqueness therefore remains
+unavailable until its replicated claim identity, deterministic arbitration,
+authorization, selected delivery, and recovery semantics are specified.
+
 ## Open Questions
 
-- ⚠️ **Distributed uniqueness across replicas and branch keys.** Jazz has no
-  convergent distributed uniqueness mechanism today. Groove can reject a
-  conflicting write to one local unique index, but two offline replicas may
-  independently accept different `RowUuid`s for the same value, and arrival
-  order is not a deterministic replicated winner rule. Before Jazz exposes
-  branch-aware unique constraints, specify the replicated claim identity
-  (naturally `(PhysicalTableId, exact BranchKey, index identity, canonical
-values)`), deterministic arbitration, loser visibility, transaction-level
-  atomicity, authorization and selected-delivery behavior, and recovery when a
-  winning claim is deleted or becomes unauthorized. A composed head/base view
-  is not itself a uniqueness domain. This branch-view work intentionally
-  preserves only whatever local uniqueness behavior already exists and makes no
-  new cross-replica uniqueness promise.
-- **Selected delivery for cross-branch-key transactions.** Specify the minimal
-  transaction witness an untrusted receiver needs for atomic settlement without
-  exposing hidden sibling count or structure.
-- **Exclusive transactions.** Define predicate-read coordinates and conflict
-  validation for branch views before allowing view-relative exclusive writes.
-- **Dimension type surface.** Start with UUIDs, stable enums, and fixed-width
-  integers; decide whether strings or composite values can ever provide stable
-  canonical coordinates.
-- **Multiple bases.** An ordered fallback stack is a natural extension, but the
-  initial implementation supports at most one base.
-- **Exact branch-local row references.** Add only if product use cases cannot be
-  expressed by view-relative `RowUuid` references.
-- **Dynamic base resolution.** Applications resolve branch rows initially;
-  relation-driven base selection, cycle handling, and live base-pointer changes
-  are future query composition work.
+- 🔶 [#1780](https://github.com/garden-co/jazz/issues/1780) — Branch-view semantics beyond v1.

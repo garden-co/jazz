@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { execFile } from "node:child_process";
-import { readFile, rm } from "node:fs/promises";
+import { access, readFile, rm, stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -15,13 +15,16 @@ describe("broker worker packaging", () => {
     const outfile = fileURLToPath(
       new URL("../../dist/worker/jazz-broker-worker.js", import.meta.url),
     );
+    const wasmOutfile = fileURLToPath(
+      new URL("../../dist/worker/jazz_wasm_bg.wasm", import.meta.url),
+    );
     const pkgPath = fileURLToPath(new URL("../../package.json", import.meta.url));
     const pkg = JSON.parse(await readFile(pkgPath, "utf8"));
     expect(pkg.scripts["build:runtime"]).toContain("bundle-broker-worker");
 
     // Delete the pre-existing build output so a no-op or broken script cannot
     // false-green by inspecting an artifact produced by an earlier command.
-    await rm(outfile, { force: true });
+    await Promise.all([rm(outfile, { force: true }), rm(wasmOutfile, { force: true })]);
     await execFileAsync(process.execPath, [bundleScript], { cwd: packageRoot });
 
     const source = await readFile(outfile, "utf8");
@@ -30,5 +33,7 @@ describe("broker worker packaging", () => {
     expect(source).not.toMatch(/\bfrom\s*["']\.\.?\//);
     expect(source).not.toMatch(/\bimport\s*\(\s*["']\.\.?\//);
     expect(source).toMatch(/onconnect/);
+    await expect(access(wasmOutfile)).resolves.toBeUndefined();
+    expect((await stat(wasmOutfile)).size).toBeGreaterThan(0);
   });
 });

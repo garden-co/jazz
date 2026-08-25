@@ -12,8 +12,32 @@ export declare class JazzServer {
 }
 
 export declare class NapiDb {
+  insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Write
+  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): Write
+  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions | undefined | null): Write
+  deleteEncoded(table: string, rowId: Uint8Array, options?: DeleteOptions | undefined | null): Write
+  restoreEncoded(table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): Write
+  beginStreamingMutationEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, kind: string, mutation?: string | undefined | null, author?: Uint8Array | undefined | null, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
   static openMemory(schema: Uint8Array, config: Uint8Array): NapiDb
+  /**
+   * Open a deliberate backend runtime. Unlike the public raw-open entrypoint,
+   * this explicit ABI derives the canonical system author.
+   */
+  static openMemoryAsBackend(schema: Uint8Array, config: Uint8Array): NapiDb
+  /**
+   * Open with a verified Jazz self-signed client identity. This is a
+   * separate ABI entrypoint deliberately: a new client cannot accidentally
+   * hand proof bytes to an old constructor, and an old client cannot enter
+   * the proof-bearing path.
+   */
+  static openMemoryWithSelfSignedProof(schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string): NapiDb
   static openPersistent(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDb
+  /**
+   * Open a deliberate persistent backend runtime. This is intentionally a
+   * distinct ABI from the public raw-open entrypoint.
+   */
+  static openPersistentAsBackend(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDb
+  static openPersistentWithSelfSignedProof(dataPath: string, schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string): NapiDb
   /** Register and return a typed view backed by this same runtime owner. */
   registerSchema(schema: Uint8Array): NapiDb
   /**
@@ -26,15 +50,15 @@ export declare class NapiDb {
   /** Begin one owner-wide transaction without creating an owning per-schema Tx. */
   beginTransaction(openBatchId: string, kind: string, author?: Uint8Array | undefined | null): void
   /** Commit an owner-wide transaction by id and optional kind. */
-  commitTransaction(openBatchId: string, kind?: string | undefined | null, author?: Uint8Array | undefined | null): Write
+  commitTransaction(openBatchId: string, kind?: string | undefined | null): Write
   /** Roll back an owner-wide open transaction by id. */
   rollbackTransaction(openBatchId: string): void
   setTickScheduler(callback: ((err: Error | null, arg: string) => void)): void
   onMutationError(callback: (event: any) => void): void
   prepareQuery(query: Uint8Array): PreparedQuery
   all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
+  /** Read through an open transaction using the identity bound at begin. */
   allInTransaction(query: PreparedQuery, tx: Tx, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
-  allInTransactionForIdentity(query: PreparedQuery, tx: Tx, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
   allRelationSnapshot(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
@@ -50,28 +74,16 @@ export declare class NapiDb {
   subscribeForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
   subscribeRelationQuery(queryJson: string, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
   subscribeRelationQueryForIdentity(queryJson: string, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
-  insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): Write
-  insertWithIdEncodedInBranch(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue): Write
-  insertWithIdEncodedInBranchForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue, author: Uint8Array): Write
-  insertWithIdEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
-  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, updatedAtMs?: number | undefined | null): Write
-  updateEncodedInBranch(table: string, rowId: Uint8Array, patch: Uint8Array, branch: JsonValue): Write
-  updateEncodedInBranchView(table: string, rowId: Uint8Array, patch: Uint8Array, head: JsonValue, base?: JsonValue | undefined | null): Write
-  updateEncodedInBranchViewForIdentity(table: string, rowId: Uint8Array, patch: Uint8Array, head: JsonValue, base: JsonValue | undefined | null, author: Uint8Array): Write
-  updateEncodedForIdentity(table: string, rowId: Uint8Array, patch: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
-  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): Write
-  upsertEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
-  delete(table: string, rowId: Uint8Array, updatedAtMs?: number | undefined | null): Write
-  deleteInBranch(table: string, rowId: Uint8Array, branch: JsonValue): Write
-  deleteInBranchView(table: string, rowId: Uint8Array, head: JsonValue, base?: JsonValue | undefined | null): Write
-  deleteInBranchViewForIdentity(table: string, rowId: Uint8Array, head: JsonValue, base: JsonValue | undefined | null, author: Uint8Array): Write
-  deleteForIdentity(table: string, rowId: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
-  restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): Write
-  restoreInBranch(table: string, rowId: Uint8Array, branch: JsonValue): Write
-  restoreEncodedInBranch(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue): Write
-  restoreEncodedInBranchForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue, author: Uint8Array): Write
-  restoreEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
   tick(): void
+  /** Configure Jazz-owned upload ingress and unpublished-tree expiry limits. */
+  setLargeValueStagingPolicy(incomingBytesPerWindow: number, windowMs: number, maxAgeMs?: number | undefined | null): void
+  /** Run one idempotent expiry pass; native hosts normally call this on a timer. */
+  evictExpiredStagedLargeValues(): number
+  readValueRange(table: string, rowId: Uint8Array, column: string, start: number, end: number): Uint8Array
+  readTextUtf16Range(table: string, rowId: Uint8Array, column: string, start: number, end: number): string
+  readJsonPointer(table: string, rowId: Uint8Array, column: string, pointer: string): string | null
+  appendValue(table: string, rowId: Uint8Array, column: string, bytes: Uint8Array): Write
+  spliceValue(table: string, rowId: Uint8Array, column: string, offset: number, deleteLength: number, insert: Uint8Array): Write
   setNonDurableClient(): void
   connectUpstream(): Transport
   connectUpstreamWithSession(protocolVersion: number, features: number, remoteNode: Buffer, remoteEpoch: bigint, localNode: Buffer, localEpoch: bigint): Transport
@@ -88,6 +100,17 @@ export declare class QueryAttachment {
 
 }
 
+/**
+ * Native bounded-memory sink used by the TypeScript async streaming-mutation
+ * adapter. Each push incrementally prepares and stages bounded Groove nodes,
+ * using the same ingress policy and resumable construction as WASM.
+ */
+export declare class StreamingMutation {
+  push(chunk: Uint8Array): void
+  finish(): Write
+  abort(): boolean
+}
+
 export declare class Subscription {
   readAll(): Array<SubscriptionEvent>
   drain(): Array<SubscriptionEvent>
@@ -102,6 +125,9 @@ export declare class TestJwtIssuer {
 }
 
 export declare class Transport {
+  routeAuxiliaryWireFrame(frame: Uint8Array): Uint8Array | null
+  recvAuxiliaryWireFrames(): Array<Uint8Array>
+  auxiliaryOutboundReady(): boolean
   sendWireFrame(frame: Uint8Array): void
   sendWireFrames(frames: Array<Uint8Array>): void
   recvWireFrames(): Array<Uint8Array>
@@ -110,15 +136,11 @@ export declare class Transport {
 }
 
 export declare class Tx {
-  insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): void
-  insertWithIdEncodedInBranch(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue): void
-  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, updatedAtMs?: number | undefined | null): void
-  updateEncodedInBranchView(table: string, rowId: Uint8Array, patch: Uint8Array, head: JsonValue, base?: JsonValue | undefined | null): void
-  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): void
-  delete(table: string, rowId: Uint8Array, updatedAtMs?: number | undefined | null): void
-  deleteInBranchView(table: string, rowId: Uint8Array, head: JsonValue, base?: JsonValue | undefined | null): void
-  restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): void
-  restoreEncodedInBranch(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue): void
+  insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Uint8Array
+  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): void
+  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions | undefined | null): void
+  deleteEncoded(table: string, rowId: Uint8Array, options?: DeleteOptions | undefined | null): void
+  restoreEncoded(table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): void
   commit(): Write
   rollback(): void
 }
@@ -126,12 +148,33 @@ export declare class Tx {
 export declare class Write {
   get batchId(): string
   get payload(): Uint8Array
+  get rowId(): Uint8Array
   writeState(): any
   wait(tier: string): Promise<undefined>
   close(): boolean
 }
 
+export interface DeleteOptions {
+  author?: Uint8Array
+  head?: JsonValue
+  base?: JsonValue
+  updatedAtMs?: number
+}
+
+export interface InsertOptions {
+  rowId?: Uint8Array
+  author?: Uint8Array
+  branch?: JsonValue
+  updatedAtMs?: number
+}
+
 export declare function mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
+
+export interface RestoreOptions {
+  author?: Uint8Array
+  branch?: JsonValue
+  updatedAtMs?: number
+}
 
 export interface SubscriptionClosedEvent {
   type: 'closed'
@@ -249,6 +292,19 @@ export interface SubscriptionTerminalUpdateEdit {
 export interface SubscriptionUnsupportedShapeCapabilityReason {
   type: 'UnsupportedShapeCapability'
   detail: string
+}
+
+export interface UpdateOptions {
+  author?: Uint8Array
+  head?: JsonValue
+  base?: JsonValue
+  updatedAtMs?: number
+}
+
+export interface UpsertOptions {
+  author?: Uint8Array
+  branch?: JsonValue
+  updatedAtMs?: number
 }
 
 export declare function verifyLocalFirstIdentityProof(token: string | undefined | null, expectedAudience: string): VerifyTokenResult

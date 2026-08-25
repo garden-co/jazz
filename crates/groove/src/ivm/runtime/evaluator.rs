@@ -1,6 +1,21 @@
 //! Per-tick evaluator state, memoization, arrangements, and recursive execution.
 
 use super::*;
+
+fn plan_expr_fields(expressions: &[PlanExpr]) -> BTreeSet<String> {
+    expressions
+        .iter()
+        .filter_map(|expression| match expression {
+            PlanExpr::Field(field)
+            | PlanExpr::Nullable(field)
+            | PlanExpr::NullableFlat(field)
+            | PlanExpr::EnumTagRemap { field, .. }
+            | PlanExpr::EnumRemap { field, .. }
+            | PlanExpr::RecursiveEnumRemap { field, .. } => Some(field.clone()),
+            PlanExpr::Literal(_) | PlanExpr::Null(_) => None,
+        })
+        .collect()
+}
 use crate::storage::StorageFuture;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
@@ -13,6 +28,20 @@ pub(super) enum OperatorState {
     AntiJoin(AntiJoinState),
     Recursive(AsOf<RecursiveState, Tick>),
     CollectBy(CollectByIncrementalState),
+    StreamingChecksum(Box<StreamingChecksumOperatorState>),
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct StreamingChecksumOperatorState {
+    pending: Option<PendingStreamingChecksum>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingStreamingChecksum {
+    input: Arc<RecordDeltas>,
+    next_delta: usize,
+    current: Option<crate::large_values::StreamingChecksum>,
+    output: Vec<RecordDelta>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -65,6 +94,7 @@ pub(super) fn operator_state_for(operator: &OpType) -> OperatorState {
         OpType::AntiJoin(_) => OperatorState::AntiJoin(AntiJoinState),
         OpType::Recursive(_) => OperatorState::Recursive(AsOf::new(RecursiveState::default())),
         OpType::CollectBy(_) => OperatorState::CollectBy(CollectByIncrementalState::default()),
+        OpType::StreamingChecksum(_) => OperatorState::StreamingChecksum(Box::default()),
         _ => OperatorState::Stateless,
     }
 }
@@ -99,6 +129,7 @@ pub(super) fn builder_contains_recursive(graph: &GraphBuilder) -> bool {
         GraphBuilder::Recursive { .. } => true,
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::Project { input, .. }
+        | GraphBuilder::StreamingChecksum { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::Unnest { input, .. }
         | GraphBuilder::VariantProject { input, .. }
@@ -734,7 +765,37 @@ impl TickEvaluator<'_> {
                 }
                 OpType::Filter(filter) => {
                     let input = self.update_unary_input(graph_node, node).await?;
-                    NodeState::update_filter(filter, output_desc, &input)
+                    if filter.predicate.supports_indirect_literal_attempt()
+                        && self.evaluation_inputs.is_some()
+                    {
+                        let inputs = self
+                            .evaluation_inputs
+                            .as_deref_mut()
+                            .expect("checked evaluation inputs");
+                        let mut deltas = Vec::new();
+                        for delta in &input.deltas {
+                            let record = delta.borrowed(&input.descriptor);
+                            let matches = match filter
+                                .predicate
+                                .matches_indirect_literal_attempt(record, inputs)?
+                            {
+                                Some(matches) => matches,
+                                None => filter.predicate.matches(record, filter.comparison)?,
+                            };
+                            if matches {
+                                deltas.push(delta.clone());
+                            }
+                        }
+                        Ok(RecordDeltas {
+                            descriptor: output_desc,
+                            deltas,
+                        })
+                    } else {
+                        let mut referenced = BTreeSet::new();
+                        filter.predicate.referenced_fields(&mut referenced);
+                        let input = self.materialize_indirect_fields(&input, &referenced)?;
+                        NodeState::update_filter(filter, output_desc, &input)
+                    }
                 }
                 OpType::MapProject(project) => {
                     let input = self.update_unary_input(graph_node, node).await?;
@@ -758,6 +819,11 @@ impl TickEvaluator<'_> {
                     }
                     result
                 }
+                OpType::StreamingChecksum(checksum) => {
+                    let input = self.update_unary_input(graph_node, node).await?;
+                    self.update_streaming_checksum(node, checksum, output_desc, input)
+                        .await
+                }
                 OpType::UnwrapNullable(unwrap) => {
                     let input = self.update_unary_input(graph_node, node).await?;
                     NodeState::update_unwrap_nullable(unwrap, output_desc, &input)
@@ -772,6 +838,10 @@ impl TickEvaluator<'_> {
                 }
                 OpType::ArgMaxBy(arg_max_by) => {
                     let input = self.update_unary_input(graph_node, node).await?;
+                    let input = self.materialize_indirect_field_indices(
+                        &input,
+                        &arg_max_by.primary_key_field_indices,
+                    )?;
                     self.update_arg_by(
                         node,
                         ArgBySpec {
@@ -786,6 +856,10 @@ impl TickEvaluator<'_> {
                 }
                 OpType::ArgMinBy(arg_min_by) => {
                     let input = self.update_unary_input(graph_node, node).await?;
+                    let input = self.materialize_indirect_field_indices(
+                        &input,
+                        &arg_min_by.primary_key_field_indices,
+                    )?;
                     self.update_arg_by(
                         node,
                         ArgBySpec {
@@ -800,18 +874,59 @@ impl TickEvaluator<'_> {
                 }
                 OpType::TopBy(top_by) => {
                     let input = self.update_unary_input(graph_node, node).await?;
+                    let mut fields = top_by.group_field_indices.clone();
+                    fields.extend(top_by.sort_field_indices.iter().copied());
+                    fields.sort_unstable();
+                    fields.dedup();
+                    let input = self.materialize_indirect_field_indices(&input, &fields)?;
                     self.update_top_by(node, top_by, output_desc, &input)
                 }
                 OpType::CollectBy(collect_by) => {
                     let input = self.update_unary_input(graph_node, node).await?;
+                    let input = self.materialize_indirect_input(&input)?;
                     self.update_collect_by(node, collect_by, output_desc, &input)
                 }
                 OpType::Aggregate(aggregate) => {
                     let input = self.update_unary_input(graph_node, node).await?;
+                    // COUNT(*) without grouping observes only row weights. Its
+                    // exact result cannot depend on any scalar bytes, so retain
+                    // indirect columns and issue no chunk requests.
+                    let needs_values = !aggregate.group_key.is_empty()
+                        || aggregate.aggregates.iter().any(|expr| {
+                            expr.function != AggregateFunction::Count
+                                || expr.expression.is_some()
+                                || expr.distinct
+                        });
+                    let input = if needs_values {
+                        let mut fields = aggregate.group_field_indices.clone();
+                        let expression_fields = aggregate
+                            .aggregates
+                            .iter()
+                            .filter_map(|aggregate| aggregate.expression.as_ref())
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        for field in plan_expr_fields(&expression_fields) {
+                            fields.push(input.descriptor.field_index(&field).ok_or_else(|| {
+                                IvmRuntimeError::GraphFieldNotFound(field.clone())
+                            })?);
+                        }
+                        fields.sort_unstable();
+                        fields.dedup();
+                        self.materialize_indirect_field_indices(&input, &fields)?
+                    } else {
+                        input
+                    };
                     self.update_aggregate(node, aggregate, output_desc, &input)
                 }
                 OpType::IndexBy(index_by) => {
                     let input = self.update_unary_input(graph_node, node).await?;
+                    let mut fields = index_by.key_fields.clone();
+                    if index_by.append_value_to_key {
+                        fields.extend(index_by.value_fields.iter().copied());
+                    }
+                    fields.sort_unstable();
+                    fields.dedup();
+                    let input = self.materialize_indirect_field_indices(&input, &fields)?;
                     let trace = std::env::var_os("GROOVE_TRACE_INDEX_BY").is_some();
                     let start = trace.then(std::time::Instant::now);
                     let input_len = input.deltas.len();
@@ -858,6 +973,19 @@ impl TickEvaluator<'_> {
                     };
                     let left = self.update_node(*left_input).await?;
                     let right = self.update_node(*right_input).await?;
+                    let (left, right) = if join.residual_predicate.is_some() {
+                        (
+                            self.materialize_indirect_input(&left)?,
+                            self.materialize_indirect_input(&right)?,
+                        )
+                    } else {
+                        let left_fields = plan_expr_fields(&join.left_key);
+                        let right_fields = plan_expr_fields(&join.right_key);
+                        (
+                            self.materialize_indirect_fields(&left, &left_fields)?,
+                            self.materialize_indirect_fields(&right, &right_fields)?,
+                        )
+                    };
                     self.update_join(
                         node,
                         join,
@@ -874,6 +1002,10 @@ impl TickEvaluator<'_> {
                     };
                     let left = self.update_node(*left_input).await?;
                     let right = self.update_node(*right_input).await?;
+                    let left_fields = plan_expr_fields(&join.left_key);
+                    let right_fields = plan_expr_fields(&join.right_key);
+                    let left = self.materialize_indirect_fields(&left, &left_fields)?;
+                    let right = self.materialize_indirect_fields(&right, &right_fields)?;
                     self.update_semi_join(
                         node,
                         join,
@@ -890,6 +1022,10 @@ impl TickEvaluator<'_> {
                     };
                     let left = self.update_node(*left_input).await?;
                     let right = self.update_node(*right_input).await?;
+                    let left_fields = plan_expr_fields(&join.left_key);
+                    let right_fields = plan_expr_fields(&join.right_key);
+                    let left = self.materialize_indirect_fields(&left, &left_fields)?;
+                    let right = self.materialize_indirect_fields(&right, &right_fields)?;
                     self.update_anti_join(
                         node,
                         join,
@@ -1135,6 +1271,7 @@ impl TickEvaluator<'_> {
                 graph_node
                     .descriptor
                     .output
+                    .records()
                     .fields()
                     .iter()
                     .any(|candidate| candidate.name.as_deref() == Some(field))
@@ -2308,4 +2445,210 @@ impl TickEvaluator<'_> {
             .ok_or(IvmRuntimeError::GraphInputMissing(node))?;
         self.update_node(input).await
     }
+
+    async fn update_streaming_checksum(
+        &mut self,
+        node: NodeId,
+        checksum: &StreamingChecksumOp,
+        output_desc: RecordDescriptor,
+        input: Arc<RecordDeltas>,
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
+        let operator_key = self.operator_key(node)?;
+        let operator = self
+            .operator_states
+            .remove(&operator_key)
+            .unwrap_or_else(|| operator_state_for(&OpType::StreamingChecksum(checksum.clone())));
+        let OperatorState::StreamingChecksum(mut state) = operator else {
+            return Err(IvmRuntimeError::NodeStateOperatorMismatch(node));
+        };
+        let replace_pending = state
+            .pending
+            .as_ref()
+            .is_none_or(|pending| pending.input.as_ref() != input.as_ref());
+        if replace_pending {
+            state.pending = Some(PendingStreamingChecksum {
+                input: Arc::clone(&input),
+                next_delta: 0,
+                current: None,
+                output: Vec::with_capacity(input.deltas.len()),
+            });
+        }
+        let pending = state.pending.as_mut().expect("initialized above");
+
+        while pending.next_delta < pending.input.deltas.len() {
+            let delta = &pending.input.deltas[pending.next_delta];
+            let mut values = delta.borrowed(&pending.input.descriptor).to_values()?;
+            let value = values.get(checksum.field_idx).ok_or(
+                IvmRuntimeError::GraphFieldIndexOutOfBounds(checksum.field_idx),
+            )?;
+
+            let digest = match value {
+                Value::String(value) => Some(*blake3::hash(value.as_bytes()).as_bytes()),
+                Value::Bytes(value) => Some(*blake3::hash(value).as_bytes()),
+                Value::Large(value) => {
+                    if pending.current.is_none() {
+                        pending.current = Some(crate::large_values::StreamingChecksum::new(
+                            value.clone(),
+                            checksum.window_bytes,
+                            checksum.max_bytes_per_turn,
+                        )?);
+                    }
+                    let streaming = pending.current.as_mut().expect("initialized above");
+                    if streaming.cursor().remaining_bytes() != 0 {
+                        let range = streaming
+                            .cursor()
+                            .next_range()
+                            .expect("non-complete cursor has a range");
+                        let inputs = self
+                            .evaluation_inputs
+                            .as_deref_mut()
+                            .ok_or(IvmRuntimeError::EvaluationBlocked)?;
+                        let bytes = match crate::large_values::byte_range_attempt(
+                            streaming.cursor().value(),
+                            range,
+                            inputs,
+                        ) {
+                            Ok(bytes) => bytes,
+                            Err(IvmRuntimeError::EvaluationBlocked) => {
+                                self.operator_states
+                                    .insert(operator_key, OperatorState::StreamingChecksum(state));
+                                return Err(IvmRuntimeError::EvaluationBlocked);
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        let should_yield = streaming.consume_window(&bytes)?;
+                        inputs.release_chunks();
+                        if should_yield {
+                            streaming.record_yield()?;
+                            self.operator_states
+                                .insert(operator_key, OperatorState::StreamingChecksum(state));
+                            cooperative_operator_yield().await;
+                            unreachable!("yielded operator futures resume through saved state")
+                        }
+                    }
+                    if streaming.cursor().remaining_bytes() == 0 {
+                        let completed = pending.current.take().expect("complete state exists");
+                        Some(completed.finish()?.0.0)
+                    } else {
+                        None
+                    }
+                }
+                _ => return Err(IvmRuntimeError::StreamingChecksumTypeMismatch),
+            };
+            let Some(digest) = digest else {
+                continue;
+            };
+            values[checksum.field_idx] = Value::Bytes(digest.to_vec());
+            pending.output.push(RecordDelta {
+                record: output_desc.create(&values)?.into(),
+                weight: delta.weight,
+            });
+            pending.next_delta += 1;
+        }
+
+        let completed = state.pending.take().expect("completed batch exists");
+        self.operator_states.insert(
+            operator_key,
+            OperatorState::StreamingChecksum(Box::default()),
+        );
+        Ok(RecordDeltas {
+            descriptor: output_desc,
+            deltas: completed.output,
+        })
+    }
+
+    pub(super) fn materialize_indirect_input(
+        &mut self,
+        input: &Arc<RecordDeltas>,
+    ) -> Result<Arc<RecordDeltas>, IvmRuntimeError> {
+        let Some(evaluation_inputs) = self.evaluation_inputs.as_deref_mut() else {
+            return Ok(Arc::clone(input));
+        };
+        let mut deltas = Vec::with_capacity(input.deltas.len());
+        let mut changed = false;
+        for delta in &input.deltas {
+            let raw = crate::large_values::materialize_record_attempt(
+                &input.descriptor,
+                delta.raw(),
+                evaluation_inputs,
+            )?;
+            changed |= raw.as_slice() != delta.raw();
+            deltas.push(RecordDelta {
+                record: raw.into(),
+                weight: delta.weight,
+            });
+        }
+        if changed {
+            Ok(Arc::new(RecordDeltas {
+                descriptor: input.descriptor,
+                deltas,
+            }))
+        } else {
+            Ok(Arc::clone(input))
+        }
+    }
+
+    fn materialize_indirect_fields(
+        &mut self,
+        input: &Arc<RecordDeltas>,
+        fields: &BTreeSet<String>,
+    ) -> Result<Arc<RecordDeltas>, IvmRuntimeError> {
+        let indices = fields
+            .iter()
+            .map(|field| {
+                input
+                    .descriptor
+                    .field_index(field)
+                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.materialize_indirect_field_indices(input, &indices)
+    }
+
+    fn materialize_indirect_field_indices(
+        &mut self,
+        input: &Arc<RecordDeltas>,
+        indices: &[usize],
+    ) -> Result<Arc<RecordDeltas>, IvmRuntimeError> {
+        let Some(evaluation_inputs) = self.evaluation_inputs.as_deref_mut() else {
+            return Ok(Arc::clone(input));
+        };
+        let mut deltas = Vec::with_capacity(input.deltas.len());
+        let mut changed = false;
+        for delta in &input.deltas {
+            let raw = crate::large_values::materialize_record_fields_attempt(
+                &input.descriptor,
+                delta.raw(),
+                indices,
+                evaluation_inputs,
+            )?;
+            changed |= raw.as_slice() != delta.raw();
+            deltas.push(RecordDelta {
+                record: raw.into(),
+                weight: delta.weight,
+            });
+        }
+        if changed {
+            Ok(Arc::new(RecordDeltas {
+                descriptor: input.descriptor,
+                deltas,
+            }))
+        } else {
+            Ok(Arc::clone(input))
+        }
+    }
+}
+
+async fn cooperative_operator_yield() {
+    let mut yielded = false;
+    std::future::poll_fn(move |context| {
+        if yielded {
+            std::task::Poll::Ready(())
+        } else {
+            yielded = true;
+            context.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    })
+    .await
 }

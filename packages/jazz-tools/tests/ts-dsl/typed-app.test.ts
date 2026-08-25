@@ -274,11 +274,30 @@ describe("typed app prototype", () => {
 
     type TodoRow = s.RowOf<typeof app.todos>;
     type TodoInsert = s.InsertOf<typeof app.todos>;
+    type TodoStreamingInsert = s.StreamingInsertOf<typeof app.todos>;
+    type TodoStreamingUpdate = s.StreamingUpdateOf<typeof app.todos>;
     type TodoWhere = s.WhereOf<typeof app.todos>;
     type TodoWithProject = s.RowOf<typeof todoWithProjectQuery>;
     type ProjectWithTitles = s.RowOf<typeof projectWithTitlesQuery>;
     const todoRow = {} as TodoRow;
     const todoInsert = {} as TodoInsert;
+    const streamedTitle = {
+      title: new ReadableStream<string>(),
+      done: false,
+      tags: [],
+      attachment: new Uint8Array(),
+      project: "project-id",
+    } satisfies TodoStreamingInsert;
+    const streamedAttachment = {
+      title: "todo",
+      done: false,
+      tags: [],
+      attachment: new ReadableStream<Uint8Array>(),
+      project: "project-id",
+    } satisfies TodoStreamingInsert;
+    const streamedTitleUpdate = {
+      title: new ReadableStream<string>(),
+    } satisfies TodoStreamingUpdate;
     const todoWithProject = {} as TodoWithProject;
     const projectWithTitles = {} as ProjectWithTitles;
 
@@ -296,22 +315,45 @@ describe("typed app prototype", () => {
     expectTypeOf(todoInsert.attachment).toEqualTypeOf<Uint8Array>();
     expectTypeOf(todoInsert.project).toEqualTypeOf<string>();
     expectTypeOf(todoInsert.owner).toEqualTypeOf<string | null | undefined>();
+    expectTypeOf(streamedTitle.title).toEqualTypeOf<ReadableStream<string>>();
+    expectTypeOf(streamedAttachment.attachment).toEqualTypeOf<ReadableStream<Uint8Array>>();
+    expectTypeOf(streamedTitleUpdate.title).toEqualTypeOf<ReadableStream<string>>();
 
     expectTypeOf<TodoWhere["project"]>().branded.toEqualTypeOf<
-      string | { eq?: string; ne?: string; in?: string[] } | undefined
+      string | { eq?: string; ne?: string; in?: string[]; notIn?: string[] } | undefined
     >();
     expectTypeOf<TodoWhere["owner"]>().branded.toEqualTypeOf<
       | string
       | null
-      | { eq?: string | null; ne?: string | null; in?: string[]; isNull?: boolean }
+      | {
+          eq?: string | null;
+          ne?: string | null;
+          in?: string[];
+          notIn?: string[];
+          isNull?: boolean;
+        }
       | undefined
     >();
     expectTypeOf<TodoWhere["tags"]>().branded.toEqualTypeOf<
-      string[] | { eq?: string[]; ne?: string[]; contains?: string; in?: string[][] } | undefined
+      | string[]
+      | { eq?: string[]; ne?: string[]; contains?: string; in?: string[][]; notIn?: string[][] }
+      | undefined
     >();
     expectTypeOf<TodoWhere["attachment"]>().branded.toEqualTypeOf<
-      Uint8Array | { eq?: Uint8Array; ne?: Uint8Array; in?: (Uint8Array | number[])[] } | undefined
+      | Uint8Array
+      | {
+          eq?: Uint8Array;
+          ne?: Uint8Array;
+          in?: (Uint8Array | number[])[];
+          notIn?: (Uint8Array | number[])[];
+        }
+      | undefined
     >();
+
+    // Membership is deliberately non-nullable. Express null handling with
+    // isNull/isNotNull rather than SQL-style null membership semantics.
+    // @ts-expect-error null is not a valid membership value
+    app.todos.where({ owner: { notIn: [null] } });
 
     const projectRecord: ProjectRecord | null = todoWithProject.project;
     expectTypeOf(todoWithProject.owner).toEqualTypeOf<string | null>();
@@ -324,6 +366,9 @@ describe("typed app prototype", () => {
 
     void projectRecord;
     void todoTitleRecords;
+    void streamedTitle;
+    void streamedAttachment;
+    void streamedTitleUpdate;
     void queryContract;
     void typedQueryContract;
     void tableProxyContract;
@@ -332,6 +377,15 @@ describe("typed app prototype", () => {
     if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
       // @ts-expect-error invalid root key
       void app.unknown;
+      const invalidStreamedReference: TodoStreamingInsert = {
+        title: "todo",
+        done: false,
+        tags: [],
+        attachment: new Uint8Array(),
+        // @ts-expect-error UUID references are not streamable despite being strings in TypeScript.
+        project: new ReadableStream<string>(),
+      };
+      void invalidStreamedReference;
 
       // @ts-expect-error invalid where column
       app.todos.where({ missing: true });
@@ -409,6 +463,7 @@ describe("typed app prototype", () => {
           eq?: boolean;
           ne?: boolean;
           in?: boolean[];
+          notIn?: boolean[];
         }
       | undefined
     >();
@@ -419,6 +474,7 @@ describe("typed app prototype", () => {
           ne?: string[];
           contains?: string;
           in?: string[][];
+          notIn?: string[][];
         }
       | undefined
     >();
@@ -428,6 +484,7 @@ describe("typed app prototype", () => {
           eq?: Uint8Array;
           ne?: Uint8Array;
           in?: (Uint8Array | number[])[];
+          notIn?: (Uint8Array | number[])[];
         }
       | undefined
     >();
@@ -453,6 +510,7 @@ describe("typed app prototype", () => {
           lt?: number;
           lte?: number;
           in?: number[];
+          notIn?: number[];
         }
       | undefined
     >();

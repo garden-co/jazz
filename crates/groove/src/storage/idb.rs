@@ -1,9 +1,10 @@
 //! Async IDBTree adapter for Groove's ordered storage contract.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+use futures::lock::Mutex;
 use idb_tree::{IdbTree, Options, PageStore, WriteOperation};
 
 use super::{
@@ -16,6 +17,7 @@ use super::{
 pub struct IdbStorage<S> {
     tree: IdbTree<S>,
     column_families: Rc<RefCell<BTreeSet<String>>>,
+    mutation_gate: Rc<Mutex<()>>,
 }
 
 impl<S> IdbStorage<S>
@@ -28,6 +30,7 @@ where
             column_families: Rc::new(RefCell::new(
                 column_families.iter().map(|cf| (*cf).to_owned()).collect(),
             )),
+            mutation_gate: Rc::new(Mutex::new(())),
         })
     }
 
@@ -85,6 +88,7 @@ where
     ) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
             let key = self.encoded_key(&cf, &key)?;
+            let _guard = self.mutation_gate.lock().await;
             self.tree.put(key, value).await?;
             self.tree.flush().await?;
             Ok(())
@@ -94,6 +98,7 @@ where
     fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
             let key = self.encoded_key(&cf, &key)?;
+            let _guard = self.mutation_gate.lock().await;
             self.tree.delete(&key).await?;
             self.tree.flush().await?;
             Ok(())
@@ -102,6 +107,7 @@ where
 
     fn close(&self) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
+            let _guard = self.mutation_gate.lock().await;
             self.tree.flush().await?;
             Ok(())
         })
@@ -109,6 +115,7 @@ where
 
     fn flush_write_boundary(&self) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
+            let _guard = self.mutation_gate.lock().await;
             self.tree.flush().await?;
             Ok(())
         })
@@ -193,25 +200,39 @@ where
     ) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
             self.prevalidate_write_many(&operations)?;
-            let mut writes = Vec::with_capacity(operations.len());
+            let _guard = self.mutation_gate.lock().await;
+            // Resolve each key's prospective value before changing the tree so
+            // deltas observe earlier operations in this ordered batch.
+            let mut planned = BTreeMap::<Vec<u8>, Option<Vec<u8>>>::new();
             for operation in operations {
-                writes.push(match operation {
-                    OwnedWriteOperation::Set { cf, key, value } => WriteOperation::Set {
-                        key: self.encoded_key(&cf, &key)?,
-                        value,
-                    },
-                    OwnedWriteOperation::Delete { cf, key } => WriteOperation::Delete {
-                        key: self.encoded_key(&cf, &key)?,
-                    },
+                match operation {
+                    OwnedWriteOperation::Set { cf, key, value } => {
+                        planned.insert(self.encoded_key(&cf, &key)?, Some(value));
+                    }
+                    OwnedWriteOperation::Delete { cf, key } => {
+                        planned.insert(self.encoded_key(&cf, &key)?, None);
+                    }
                     OwnedWriteOperation::Delta { cf, key, delta } => {
                         let key = self.encoded_key(&cf, &key)?;
-                        let existing = self.tree.get(&key).await?;
                         let encoded = delta.encode()?;
-                        let value = apply_storage_delta(existing.as_deref(), &encoded)?;
-                        WriteOperation::Set { key, value }
+                        let value = match planned.get(&key) {
+                            Some(existing) => apply_storage_delta(existing.as_deref(), &encoded)?,
+                            None => {
+                                let existing = self.tree.get(&key).await?;
+                                apply_storage_delta(existing.as_deref(), &encoded)?
+                            }
+                        };
+                        planned.insert(key, Some(value));
                     }
-                });
+                }
             }
+            let writes = planned
+                .into_iter()
+                .map(|(key, value)| match value {
+                    Some(value) => WriteOperation::Set { key, value },
+                    None => WriteOperation::Delete { key },
+                })
+                .collect();
             self.tree.write_many(writes).await?;
             self.tree.flush().await?;
             Ok(())
@@ -237,9 +258,166 @@ where
 
 #[cfg(test)]
 mod tests {
-    use idb_tree::MemoryPageStore;
+    use std::task::Poll;
 
+    use idb_tree::{BoxFuture, Commit, MemoryPageStore, Metadata};
+
+    use super::super::{CurrentWinnerDelta, MemoryStorage, StorageDelta};
     use super::*;
+
+    #[derive(Clone, Default)]
+    struct YieldingCommitPageStore {
+        inner: MemoryPageStore,
+    }
+
+    impl PageStore for YieldingCommitPageStore {
+        fn load_metadata(&self) -> BoxFuture<'_, Result<Option<Metadata>, String>> {
+            self.inner.load_metadata()
+        }
+
+        fn read_page(&self, page_id: u64) -> BoxFuture<'_, Result<Option<Vec<u8>>, String>> {
+            self.inner.read_page(page_id)
+        }
+
+        fn commit<'a>(&'a self, commit: &'a Commit) -> BoxFuture<'a, Result<Metadata, String>> {
+            Box::pin(async move {
+                let mut yielded = false;
+                futures::future::poll_fn(move |cx| {
+                    if yielded {
+                        Poll::Ready(())
+                    } else {
+                        yielded = true;
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                })
+                .await;
+                self.inner.commit(commit).await
+            })
+        }
+    }
+
+    fn winner_record(time: u64, node: u8, payload: &[u8]) -> Vec<u8> {
+        let mut record = Vec::with_capacity(24 + payload.len());
+        record.extend(time.to_le_bytes());
+        record.extend([node; 16]);
+        record.extend(payload);
+        record
+    }
+
+    fn winner_delta(record: Vec<u8>) -> StorageDelta {
+        let tx_time = u64::from_le_bytes(record[..8].try_into().unwrap());
+        let mut tx_node_uuid = [0; 16];
+        tx_node_uuid.copy_from_slice(&record[8..24]);
+        StorageDelta::current_winner(CurrentWinnerDelta {
+            tx_time,
+            tx_node_uuid,
+            parents: Vec::new(),
+            tx_time_offset: 0,
+            tx_node_uuid_offset: 8,
+            record,
+        })
+        .unwrap()
+    }
+
+    async fn durable_idb_and_memory_values(
+        operations: Vec<OwnedWriteOperation>,
+    ) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+        let page_store = MemoryPageStore::default();
+        let idb = IdbStorage::open(page_store.clone(), &["records"])
+            .await
+            .unwrap();
+        let memory = MemoryStorage::new(&["records"]);
+
+        memory.write_many(operations.clone()).await.unwrap();
+        idb.write_many(operations).await.unwrap();
+        drop(idb);
+
+        let reopened = IdbStorage::open(page_store, &["records"]).await.unwrap();
+        let key = b"same-key".to_vec();
+        (
+            reopened.get("records".into(), key.clone()).await.unwrap(),
+            memory.get("records".into(), key).await.unwrap(),
+        )
+    }
+
+    #[test]
+    fn set_then_delta_in_one_batch_matches_memory_after_reopen() {
+        futures::executor::block_on(async {
+            let set_winner = winner_record(20, 1, b"set-winner");
+            let delta_loser = winner_record(10, 2, b"delta-loser");
+            let (durable, memory) = durable_idb_and_memory_values(vec![
+                OwnedWriteOperation::set("records", b"same-key", set_winner.clone()),
+                OwnedWriteOperation::delta("records", b"same-key", winner_delta(delta_loser)),
+            ])
+            .await;
+
+            assert_eq!(memory, Some(set_winner.clone()));
+            assert_eq!(durable, memory);
+        });
+    }
+
+    #[test]
+    fn delta_then_delta_in_one_batch_matches_memory_after_reopen() {
+        futures::executor::block_on(async {
+            let first_winner = winner_record(20, 1, b"first-winner");
+            let second_loser = winner_record(10, 2, b"second-loser");
+            let (durable, memory) = durable_idb_and_memory_values(vec![
+                OwnedWriteOperation::delta(
+                    "records",
+                    b"same-key",
+                    winner_delta(first_winner.clone()),
+                ),
+                OwnedWriteOperation::delta("records", b"same-key", winner_delta(second_loser)),
+            ])
+            .await;
+
+            assert_eq!(memory, Some(first_winner.clone()));
+            assert_eq!(durable, memory);
+        });
+    }
+
+    #[test]
+    fn overlapping_write_many_calls_are_serialized_across_clones() {
+        futures::executor::block_on(async {
+            let page_store = YieldingCommitPageStore::default();
+            let storage = IdbStorage::open(page_store.clone(), &["records"])
+                .await
+                .unwrap();
+            let memory = MemoryStorage::new(&["records"]);
+            let first_winner = winner_record(20, 1, b"first-winner");
+            let second_winner = winner_record(30, 2, b"second-winner");
+            let first = vec![OwnedWriteOperation::delta(
+                "records",
+                b"same-key",
+                winner_delta(first_winner),
+            )];
+            let second = vec![OwnedWriteOperation::delta(
+                "records",
+                b"same-key",
+                winner_delta(second_winner),
+            )];
+
+            memory.write_many(first.clone()).await.unwrap();
+            memory.write_many(second.clone()).await.unwrap();
+            let first_storage = storage.clone();
+            let second_storage = storage.clone();
+            let (first_result, second_result) = futures::join!(
+                first_storage.write_many(first),
+                second_storage.write_many(second),
+            );
+            first_result.unwrap();
+            second_result.unwrap();
+            drop((first_storage, second_storage, storage));
+
+            let reopened = IdbStorage::open(page_store, &["records"]).await.unwrap();
+            let key = b"same-key".to_vec();
+            assert_eq!(
+                reopened.get("records".into(), key.clone()).await.unwrap(),
+                memory.get("records".into(), key).await.unwrap(),
+            );
+        });
+    }
 
     // Storage-level conformance is intentionally tested here because ordering,
     // atomic encoded batches, and reopen are backend contracts below Jazz's

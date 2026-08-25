@@ -21,6 +21,7 @@ import type { StoredPermissionsHead } from "./runtime/schema-fetch.js";
 export interface BuildOptions {
   jazzBin?: string;
   schemaDir: string;
+  strictProvenance?: boolean;
 }
 
 export interface SchemaExportOptions {
@@ -44,6 +45,7 @@ function parseArgs(): { command: string; options: BuildOptions } {
   const command = args[0] || "";
   let schemaDir = process.cwd();
   let jazzBin: string | undefined;
+  let strictProvenance = false;
 
   for (let i = 1; i < args.length; i++) {
     const arg = args[i];
@@ -54,14 +56,22 @@ function parseArgs(): { command: string; options: BuildOptions } {
     } else if (arg === "--schema-dir" && nextArg) {
       schemaDir = nextArg;
       i += 1;
+    } else if (arg === "--strict-provenance") {
+      strictProvenance = true;
     }
   }
 
-  return { command, options: { jazzBin, schemaDir } };
+  return { command, options: { jazzBin, schemaDir, strictProvenance } };
 }
 
 export async function validate(options: BuildOptions): Promise<void> {
   const result = await validateProject(options);
+  const provenanceWarnings = result.warnings.filter((warning) => warning.includes("built-in $"));
+  if (options.strictProvenance && provenanceWarnings.length > 0) {
+    throw new Error(
+      `Conventional provenance columns are forbidden by --strict-provenance:\n${provenanceWarnings.join("\n")}`,
+    );
+  }
   console.log(`Loaded structural schema from ${result.schemaFile}.`);
   if (result.permissionsFile) {
     console.log(`Loaded current permissions from ${result.permissionsFile}.`);
@@ -670,6 +680,7 @@ if (isMainModule()) {
     );
     console.log("\nValidation options:");
     console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
+    console.log("  --strict-provenance   Reject conventional duplicates of Jazz provenance");
     console.log("\nSchema hash options:");
     console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
     console.log("\nSchema export options:");

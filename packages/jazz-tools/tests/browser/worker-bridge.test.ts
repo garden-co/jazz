@@ -163,6 +163,9 @@ function makeStructurallyValidJwt(userId: string): string {
     btoa(JSON.stringify(value)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   const header = encode({ alg: "HS256", typ: "JWT" });
   const payload = encode({
+    // Match TestJwtIssuer's ordinary external identity so this remains a
+    // same-principal refresh after the server rejects the signature.
+    iss: "urn:jazz:test",
     sub: userId,
     exp: Math.floor(Date.now() / 1000) + 3600,
   });

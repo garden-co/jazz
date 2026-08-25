@@ -13,9 +13,9 @@ names defined here, but their behavior is specified in those chapters.
 Invariant digest:
 
 - `INV-CLASS-1`: Column-class shipping principle: upstream-decided mutable state and node-local derived state MUST NOT be shipped as replicated row payload.
-- `INV-DATA-1`: Stable wire identity fields MUST use the UUID newtypes (`NodeUuid`, `RowUuid`, `SchemaVersionId`, `MigrationLensId`, `AuthorId`) in wire byte order; node-local alias types MUST NOT be part of wire identity.
+- `INV-DATA-1`: Stable UUID wire identity fields MUST use the UUID newtypes (`NodeUuid`, `RowUuid`, `SchemaVersionId`, `MigrationLensId`) in wire byte order; `AuthorSubject` MUST use its canonical `[iss,sub]` JSON string; node-local alias and intern types MUST NOT be part of wire identity.
 - `INV-DATA-2`: `NodeAlias` and `SchemaVersionAlias` MUST be node-local storage aliases allocated in `jazz_nodes` and `jazz_schema_versions`; all egress from stored rows MUST resolve aliases back to `NodeUuid` and `SchemaVersionId`.
-- `INV-DATA-3`: `AuthorId::SYSTEM` MUST equal the UUIDv5 derivation `Uuid::new_v5(&Uuid::NAMESPACE_OID, b"jazz:system-author")`.
+- `INV-DATA-3`: `AuthorSubject::SYSTEM` MUST have the exact portable value `["urn:jazz:system","system"]`, and no authenticated user may claim the reserved system issuer.
 - `INV-DATA-4`: `TxTime` MUST encode physical milliseconds in the high 48 bits and a logical counter in the low 16 bits; construction MUST reject values outside those packed ranges.
 - `INV-DATA-5`: A `TxId` MUST identify a transaction as `(time: TxTime, node: NodeUuid)`; stored transaction rows MUST use primary key `(time, node_id)` where `node_id` is the local alias for the wire `NodeUuid`.
 - `INV-DATA-6`: `SchemaVersionId` MUST be UUIDv5 over `JazzSchema::canonical_bytes()` in namespace `SCHEMA_VERSION_NAMESPACE`.
@@ -57,16 +57,17 @@ node-local derived state is never shipped.
 
 ### 2.2 Identity types
 
-Cross-node identity is stable because every durable name is a wire-stable UUID
-newtype (`ids.rs`): `NodeUuid`, `RowUuid`, `SchemaVersionId`,
-`MigrationLensId`, `AuthorId`, and
+Cross-node identity is stable because durable object names are wire-stable UUID
+newtypes (`ids.rs`): `NodeUuid`, `RowUuid`, `SchemaVersionId`,
+`MigrationLensId`, and
 `TxId { time: TxTime, node: NodeUuid }`. Global settlement ordering uses the
 distinct packed HLC newtype `GlobalTime` (ch. 3–4). A transaction id combines a
 packed hybrid logical clock (`TxTime`,
 physical milliseconds plus a logical counter) with the writing node; the
 transaction is identified and tie-broken by both values (`INV-DATA-5`). The
-well-known `AuthorId::SYSTEM` is a fixed, content-derived id that passes all
-policies (ch. 7, `INV-DATA-3`).
+An `AuthorSubject` is instead the exact canonical JSON string `[iss,sub]`; its
+in-memory intern is never durable or portable. The well-known
+`AuthorSubject::SYSTEM` string passes all policies (ch. 7, `INV-DATA-3`).
 
 Storage may use compact local aliases without changing the wire identity model.
 Each node interns `NodeUuid` and `SchemaVersionId` to local `u64` aliases
@@ -99,6 +100,16 @@ constraints are covered by
 _Further invariants._ `INV-DATA-11` — a merge-strategy declaration names an
 existing user column. `INV-DATA-12` — a table policy validates against the whole
 schema.
+
+### 2.3.1 Ordinary-value baseline
+
+`string` and `bytes` are ordinary column values with ordinary Jazz row history.
+The current core has no specialized Text/Blob large-value type, edit API,
+materialized value handle, content store, extent/chunk protocol traffic, or
+large-value query source. Sync transports only ordinary commit, schema, query,
+and subscription data. A future large-value design is tracked in
+[#1757](https://github.com/garden-co/jazz/issues/1757); it must be introduced as
+new semantics rather than inferred from this baseline.
 
 ### 2.4 Schema identity is content-addressed
 
@@ -168,10 +179,11 @@ is covered by `schema::storage_lowering_declares_system_columns_by_shape`.
 
 **Identity encoding.** `TxTime` packs physical milliseconds in the high 48 bits
 and a logical counter in the low 16; construction rejects values outside those
-ranges (`INV-DATA-4`). `AuthorId::SYSTEM` is
-`Uuid::new_v5(&NAMESPACE_OID, b"jazz:system-author")` (`= 93c209ee-…-c0bbcf6a`).
-Node-local aliases live in `jazz_nodes` / `jazz_schema_versions` and are rebuilt
-from those tables on recovery.
+ranges (`INV-DATA-4`). UUID object identities retain their newtype encodings;
+`AuthorSubject::SYSTEM` is the canonical JSON string
+`["urn:jazz:system","system"]`, and authenticated author subjects are exact
+canonical `[iss,sub]` JSON strings. Node-local aliases live in `jazz_nodes` /
+`jazz_schema_versions` and are rebuilt from those tables on recovery.
 
 **Lowered tables.** `lower_to_groove()` produces:
 
@@ -214,17 +226,5 @@ and sync machinery.
 
 ## Open Questions
 
-### Open questions
-
-- 🔶 **`jazz_nodes.uuid` uniqueness.** The README states the interned node UUID
-  is unique, but `schema.rs::nodes_table` declares only the `id` primary key with
-  no uniqueness constraint. Decide whether UUID uniqueness is a normative
-  invariant with storage-level enforcement, or the README prose is stale.
-- 🔶 **Mixed-version row descriptors.** What compatibility guarantees, if any,
-  must sync provide when sender and receiver row descriptors differ? Ch. 8 /
-  ch. 10 own the answer.
-- 🔶 **Visible-row common-case encoding.** The old visible-row notes and later
-  storage TODO both called out duplication between current visible entries and
-  retained history. Decide the compact encoding for singleton frontiers, empty
-  metadata, and deletion/register metadata without changing the row/version
-  identity model.
+- 🔶 [#1758](https://github.com/garden-co/jazz/issues/1758) — Canonical authorship and node identity.
+- 🔶 [#1777](https://github.com/garden-co/jazz/issues/1777) — Mixed-version descriptors and visible-row encoding.

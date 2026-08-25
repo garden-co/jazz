@@ -33,7 +33,8 @@ export function isQuerySupported(tableSchema: WasmSchema[string], where?: Cleane
       return false;
     }
 
-    if (!supportedOperators.includes(condition.operator as WhereOperator)) {
+    const jazzOperator = condition.operator === "not_in" ? "notIn" : condition.operator;
+    if (!supportedOperators.includes(jazzOperator as WhereOperator)) {
       return false;
     }
 

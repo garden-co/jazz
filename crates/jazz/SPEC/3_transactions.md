@@ -286,22 +286,5 @@ atomicity.
 
 ## Open Questions
 
-### Open questions
-
-- 🔶 **Mergeable authority placement.** What deployment and
-  permission-subscription-gating requirements must apply when an edge is wired
-  as a mergeable fate authority, rather than merely relaying commits to core?
-- 🔶 **Opt-in transaction facade.** The former replayable-reconciliation TODO
-  defines explicit transactional writes with authority-decided fate, optional
-  local pending overlay, schema-family validation, restart persistence, and
-  rejected-state acknowledgement. Decide which pieces land as public `Db`
-  transaction API versus lower-level `Node` authority plumbing.
-- 🔶 **Unsealed pending cleanup.** Staged/open rows that never commit must be
-  cleaned without ever becoming ordinary visible state, including rollback,
-  disconnect, thrown user code, and restart cases.
-- 🔶 **Durability guarantee wording.** `wait(tier)` is the durable contract;
-  fire-and-forget writes may be dropped under backpressure/rate limiting only if
-  the resulting write-state semantics remain explicit and observable.
-- 🔶 **Timestamp sanity.** The history model accepts HLC ordering, but the policy
-  for unrealistic future or past physical timestamps is still open: reject,
-  clamp, quarantine, or accept with diagnostics.
+- 🔶 [#1783](https://github.com/garden-co/jazz/issues/1783) — Transaction facade, authority placement, pending cleanup, and durability wording.
+- 🔶 [#1782](https://github.com/garden-co/jazz/issues/1782) — Timestamp sanity and merge/history strategy boundaries.

@@ -31,16 +31,24 @@ For ordinary Rust/core work, the full gate set is:
 1. `cargo test -p jazz`
 2. `cargo test -p groove`
 3. `cargo test -p jazz --no-default-features --features testing,transport-compression-zstd`
-4. `cargo check -p jazz-sim --benches`
+4. `cargo check -p jazz-sim --benches` on the realistic benchmark workflow
 5. `dev/gates/ts-wire-codec.sh`
 6. `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
 7. `cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --exact`
 8. the sensitive-data guard from `jazz-private/dev/gates/`, normally reached
    through the optional lefthook hook
 
-Run `dev/benchmarks/smoke.sh` for any change touching protocol, engine,
-storage, or benchmark harnesses. A change to a public `jazz` type additionally
-gates the full workspace, including examples.
+For a benchmark edit, locally run
+`dev/gates/benchmark-smoke.sh <jazz|jazz-sim> <bench>`; it is a targeted debug
+compile check. Ordinary PR CI runs `dev/gates/benchmark-smoke.sh --ci`, which
+executes deterministic core and jazz-sim scenario assertions. The realistic
+benchmark workflow runs `dev/gates/benchmark-smoke.sh --compile-ci` to check
+all maintained benchmark APIs on same-repository benchmark-labeled PRs,
+non-bot default-branch pushes, manual runs, and nightly. CodSpeed evaluates the
+example benchmark crates on benchmark-labeled PRs and nightly; native `jazz`
+and `jazz-sim` timing remains in the realistic benchmark workflow until it is
+ported. No local omnibus benchmark script is a push gate. A change to a public
+`jazz` type additionally gates the full workspace, including examples.
 
 Use a `-j` appropriate for the box; see PR #1157 for the rationale behind
 replacing the former fixed `-j 2` guidance.
@@ -48,9 +56,10 @@ replacing the former fixed `-j 2` guidance.
 ### D.2 The tiers
 
 - **Crate tests** — integration and crate tests for `jazz` and `groove`.
-- **Bench API compilation** — `cargo check -p jazz-sim --benches` is always in
-  the ordinary gate set because benchmark API rot has previously hidden until
-  late in a lane.
+- **Bench API compilation** — `cargo check -p jazz-sim --benches` runs on the
+  realistic benchmark workflow (same-repository benchmark-labeled PRs,
+  non-bot default-branch pushes, manual runs, and nightly), where it catches
+  benchmark API rot without extending every ordinary PR's critical path.
 - **TS/native wire codec** — `dev/gates/ts-wire-codec.sh` is the current
   TypeScript/native-runtime wire-codec gate. `dev/gates/` currently contains
   this gate and no legacy JS ABI decoder or WASM binding script.
@@ -59,7 +68,7 @@ replacing the former fixed `-j 2` guidance.
   is the canonical randomized equivalence gate; `JAZZ_SEED_COUNT=2000` is the
   wide soak form. The test is currently Rust-ignored because canonical seed 47
   fails at fuzz-step-1 and seed 4,372,288 at fuzz-step-2; both are tracked in
-  `TEST_BURNDOWN.md`. Replay either bounded failure with `JAZZ_SEED=<seed>
+  source ignore annotation. Replay either bounded failure with `JAZZ_SEED=<seed>
   JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000 JAZZ_DIFFERENTIAL_STEP_COUNT=3` and
   the fully qualified command below with `--exact --ignored`. CI compiles only
   the `--lib` test binary before separately bounding its semantic execution,
@@ -74,13 +83,17 @@ cargo test -p jazz --lib node::tests::harness::m3_maintained_one_shot_differenti
 - **Sensitive-data guard** — the guard in `jazz-private/dev/gates/` keeps
   customer-specific fixture names, domains, and ids out of the public
   repository.
-- **Benchmark smoke** — `dev/benchmarks/smoke.sh` is conditional on changes to
-  protocol, engine, storage, or benchmark harnesses.
+- **Benchmark API and scenario smoke** — Ordinary CI runs deterministic
+  scenario assertions. The realistic benchmark workflow compiles all
+  maintained benchmark targets; CodSpeed compares example benchmark crates;
+  native `jazz` and `jazz-sim` timing stays in the realistic workflow until
+  migrated.
 - **Public type changes** — changes to public `jazz` types additionally gate the
   full workspace, including examples.
 - **Server shell** — the server-shell tests are included in the `jazz` package
   gates above. They exercise the in-memory Rust server shell over the public
-  frame pump, loopback HTTP and WebSocket listeners, and real ABI clients.
+  frame pump, production Axum HTTP routes, loopback WebSocket listeners, and
+  real ABI clients.
 
 ### D.3 Simulation-first discipline
 
@@ -164,7 +177,7 @@ was handed the expected projected row is not evidence for this design.
 | 8. Aggregate boundary                        | Count/sum/min/max and ordered/windowed aggregates converge only from their complete admitted input multiset and deterministic witnesses; removing any input proves the terminal was locally recomputed. A privacy-preserving or otherwise non-reconstructible aggregate is rejected rather than carried as an authority summary.                                                                                                                                                                                                                                                                     | New focused maintained-subscription tests; existing aggregate terminal coverage is not reconstruction coverage.                                                                                                           |
 | 9. Differential and fault injection          | Seeded multi-node runs vary manifest/epoch changes, lens arrival, duplicate/reordered closure facts, reconnect, policy changes, branch views, joins, arrays, and aggregate inputs; receiver `ResultTree` equals authority one-shot at each settled frontier.                                                                                                                                                                                                                                                                                                                                         | Extends `m3_maintained_one_shot_differential_oracle`; its present shared-source-only comparison is insufficient under §D.4.1.                                                                                             |
 
-The named `TEST_BURNDOWN.md` rows above remain failures to be burned down, not
+The named source ignore annotations above remain failures to be burned down, not
 coverage claims. Rungs 1–8 should become focused deterministic tests first;
 rung 9 becomes the property/oracle gate only after their failure diagnostics can
 name the missing closure component.
@@ -178,17 +191,4 @@ The canonical set above is the pre-push discipline mirrored from
 
 ## Open Questions
 
-### Open questions
-
-- 🔶 **CI scope.** Decide which canonical local gates should become GitHub
-  Actions gates.
-- 🔶 **Test catalogue ownership.** The old test-catalogue inventory is folded
-  here: keep tests organized by public contract owner, not by historical module,
-  and prefer black-box integration coverage for Rust crate behavior.
-- 🔶 **Multi-server topology tests.** Add integration tests that exercise client
-  to edge to core communication, including reconnect, policy narrowing,
-  subscription deltas, and durability waits.
-- 🔶 **Browser storage fallback tests.** IndexedDB-unavailable modes need explicit
-  browser coverage for fail-loud or in-memory fallback behavior.
-- 🔶 **WASM teardown regression.** Keep navigation/teardown churn coverage for
-  multi-client WASM transports until the true shutdown fix lands.
+- 🔶 [#1787](https://github.com/garden-co/jazz/issues/1787) — Gate scope, test catalogue ownership, and topology/browser coverage.

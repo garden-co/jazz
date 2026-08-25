@@ -374,7 +374,7 @@ app.post("/signup", async (req, res) => {
 
 The `audience` string on the client and server must match. `jazz-napi` normalizes it internally, so any consistent string works.
 
-Jazz reads the JWT `sub` claim verbatim as `session.user_id` — no custom-claim fallback — so your provider needs to emit the Jazz ID as `sub`. If it doesn't let you override `sub` (e.g. it pins it to its own user ID), you'll need to mint the JWT yourself rather than using the provider's issuer.
+Jazz reads JWT `iss` and `sub` verbatim as `session.issuer` and `session.user_id`; it does not use a custom-claim fallback. Their pair is the stable author identity. Your application can associate that pair with whichever user row shape it chooses instead of rewriting an external provider's `sub`.
 
 ## Next steps
 

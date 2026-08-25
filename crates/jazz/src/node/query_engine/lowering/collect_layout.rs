@@ -55,7 +55,7 @@ pub(super) fn collect_layout(
             })
         })
         .collect::<Vec<_>>();
-    let root_occurrence_inputs = root_join_occurrence_fields(plan, resolved_sources)?
+    let root_occurrence_inputs = root_join_occurrence_fields(plan, resolved_sources, request)?
         .into_iter()
         .filter(|(name, _)| available_fields.contains(name))
         .map(|(name, value_type)| {

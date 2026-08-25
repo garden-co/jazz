@@ -27,7 +27,7 @@ use jazz::db::{
 };
 use jazz::groove::db::StorageReadMetrics;
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit, param};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -225,7 +225,12 @@ fn run_rung(config: ConfigRef, table_rows: usize) -> RungReceipt {
 
     db.reset_storage_read_metrics_for_test();
     let query_started = Instant::now();
-    let rows = block_on(db.all(&prepared, global_read_opts())).expect("run selective Global query");
+    // This receipt seeds a complete authoritative database directly, rather
+    // than consuming an identity-scoped result set delivered by an upstream
+    // peer. `Db::all` is deliberately the latter client-local API at Global;
+    // use the serving entry point so this measures the declared index path.
+    let rows = block_on(db.all_for_identity(&prepared, global_read_opts(), AuthorSubject::SYSTEM))
+        .expect("run selective Global query");
     let query_us = query_started.elapsed().as_micros();
     let query_metrics = db.take_storage_read_metrics_for_test();
 
@@ -299,7 +304,7 @@ fn open_db(path: &Path, schema: JazzSchema) -> (Db<RocksDbStorage>, u128, u128) 
             storage,
             DbIdentity {
                 node: NodeUuid::from_bytes([0x73; 16]),
-                author: AuthorId::SYSTEM,
+                author: AuthorSubject::SYSTEM,
             },
         )
         .with_id_source(SeededRowIdSource::new(0x73)),
@@ -319,9 +324,8 @@ fn seed_rows(db: &Db<RocksDbStorage>, config: ConfigRef, table_rows: usize) {
             } else {
                 (filler_row(index), filler_team(), index)
             };
-            block_on(tx.insert_with_id(
+            block_on(tx.insert(
                 TABLE,
-                row,
                 BTreeMap::from([
                     ("team".to_owned(), Value::Uuid(team.0)),
                     ("active".to_owned(), Value::Bool(true)),
@@ -331,6 +335,10 @@ fn seed_rows(db: &Db<RocksDbStorage>, config: ConfigRef, table_rows: usize) {
                         Value::String(format!("document-{index}")),
                     ),
                 ]),
+                jazz::db::InsertOptions {
+                    row_id: Some(row),
+                    ..Default::default()
+                },
             ))
             .expect("stage selective-hydration seed row");
         }

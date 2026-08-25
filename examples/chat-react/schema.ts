@@ -9,7 +9,6 @@ const schema = {
   chats: s.table({
     name: s.string().optional(),
     isPublic: s.boolean(),
-    createdBy: s.string(),
     joinCode: s.string().optional(),
   }),
   chatMembers: s.table({
@@ -21,7 +20,6 @@ const schema = {
     chatId: s.ref("chats"),
     text: s.string(),
     senderId: s.ref("profiles"),
-    createdAt: s.timestamp(),
   }),
   reactions: s.table({
     messageId: s.ref("messages"),
@@ -30,15 +28,12 @@ const schema = {
   }),
   canvases: s.table({
     chatId: s.ref("chats"),
-    createdAt: s.timestamp(),
   }),
   strokes: s.table({
     canvasId: s.ref("canvases"),
-    ownerId: s.string(),
     color: s.string(),
     width: s.int(),
     pointsJson: s.string(),
-    createdAt: s.timestamp(),
   }),
 };
 
@@ -47,4 +42,4 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
 
 export type Profile = s.RowOf<typeof app.profiles>;
 export type Chat = s.RowOf<typeof app.chats>;
-export type Message = s.RowOf<typeof app.messages>;
+export type Message = s.RowOf<typeof app.messages> & { $createdAt: Date };

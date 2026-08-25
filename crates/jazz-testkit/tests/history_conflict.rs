@@ -6,14 +6,18 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use uuid::Uuid;
-
+use jazz::ids::AuthorSubject;
 use jazz::query::Query;
 use jazz::tools::{
-    AppContext, ColumnType, DurabilityTier, JazzClient, ObjectId, SchemaBuilder, TableSchema, Value,
+    AppContext, ClientId, ColumnType, DurabilityTier, JazzClient, ObjectId, SchemaBuilder,
+    TableSchema, Value,
 };
 use jazz_server::JazzServer;
-use support::{TestingClient, has_added_id, wait_for_query, wait_for_subscription_update};
+use support::{
+    TestingClient, has_added_id, wait_for_edge_query_ready, wait_for_query,
+    wait_for_subscription_update,
+};
+use uuid::Uuid;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(25);
@@ -577,7 +581,10 @@ async fn subscription_reflects_concurrent_update_impl() {
         .ready_on("todos", READY_TIMEOUT)
         .connect()
         .await;
-    let bob_author = Uuid::new_v5(&Uuid::NAMESPACE_URL, b"bob-sub").to_string();
+    let bob_author = AuthorSubject::authenticated("urn:jazz:test", "bob-sub")
+        .expect("test subject is valid")
+        .canonical()
+        .to_owned();
 
     // Alice creates a todo
     let (todo_id, _, _) = alice.insert("todos", todo_values("task")).expect("create");
@@ -1106,14 +1113,21 @@ async fn establish_offline_reconnect_baseline(
         .connect()
         .await;
 
-    let (bob_ctx, bob) = TestingClient::builder()
+    let bob_builder = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema)
         .with_user_id(bob_user_id)
         .with_persistent_storage()
-        .ready_on("todos", READY_TIMEOUT)
-        .connect_with_context()
-        .await;
+        .ready_on("todos", READY_TIMEOUT);
+    let mut bob_ctx = bob_builder.build_context();
+    bob_ctx.client_id = Some(ClientId(Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        bob_user_id.as_bytes(),
+    )));
+    let bob = jazz_testkit::connect(bob_ctx.clone())
+        .await
+        .expect("connect persistent bob");
+    wait_for_edge_query_ready(&bob, "todos", READY_TIMEOUT).await;
 
     let (todo_id, _, _) = alice
         .insert("todos", todo_values("create"))
@@ -1313,7 +1327,7 @@ async fn offline_reconnect_replays_local_edit_after_rejoin_impl() {
         "bob's Fjall state should be at alice-v1 (last synced before offline)"
     );
 
-    bob_offline
+    let bob_offline_tx = bob_offline
         .update(
             todo_id,
             vec![(
@@ -1321,7 +1335,8 @@ async fn offline_reconnect_replays_local_edit_after_rejoin_impl() {
                 Value::Text("bob-offline-edit".to_string()),
             )],
         )
-        .expect("bob offline edit");
+        .expect("bob offline edit")
+        .expect("ordinary offline update records a transaction id");
 
     // Verify bob sees his own edit locally
     let bob_local = bob_offline
@@ -1334,6 +1349,10 @@ async fn offline_reconnect_replays_local_edit_after_rejoin_impl() {
         "bob should see his offline edit locally"
     );
 
+    bob_offline
+        .wait_for_transaction(bob_offline_tx, DurabilityTier::Local)
+        .await
+        .expect("bob offline edit is durable locally before shutdown");
     bob_offline.shutdown().await.expect("bob offline shutdown");
 
     bob_ctx.server_url = server.base_url();

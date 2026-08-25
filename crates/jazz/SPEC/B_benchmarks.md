@@ -137,13 +137,12 @@ parallel product API. Scenario smoke runs currently exercise the client↔edge�
 shape in-process; browser IndexedDB and worker ownership remain integrability gates
 (ch. 9 and ch. 17).
 
-**Latest Plan-1 smoke baseline (2026-07-02, ledger run
-`20260702T005632Z`, git `48e6a65aa`, dirty tree).** All smoke scenarios are
+**Historical Plan-1 smoke baseline (2026-07-02, git `48e6a65aa`, dirty tree).** All smoke scenarios were
 green: jazz (`cold_subscription`, `sync`, `validation`, `merge_back_cost`) and
 jazz-sim (`micro`, S1–S5, S7, S9). S2's historical
 load phase is not counted as a hidden pass: it emits visible gated rows with
 `needs: "historical-implicit-include-source-coverage"` for the known
-`Source(Coverage)` capability gap. Earlier Plan-1 ledger runs record the repaired
+`Source(Coverage)` capability gap. Earlier Plan-1 receipts record the repaired
 historical S4 failure: the former edge-routing assertion no longer reproduces,
 and the retained line now reports settlement and propagation-inclusive
 throughput separately. The first artifact-backed smoke run is
@@ -1072,15 +1071,4 @@ headline artifacts — and only those — are what end up in README-level claims
 
 ## Open Questions
 
-### Open questions
-
-- 🔶 **Db-surface migration status** is mixed: some scenarios (S1/S2/S3/S5)
-  have Db-surface smoke/summary paths while others remain peer-layer; state it
-  per-scenario rather than as a blanket "blocked."
-- 🔶 **S7 is smoke-sized**; define the retained-run fields and matrix it must
-  emit to graduate from an interactive harness to a reporting benchmark.
-- 🔶 **Dirty-tree retention.** `git_dirty` is recorded but a dirty run is still
-  appendable when retention is on — decide whether tooling should refuse to quote
-  dirty-tree results or rely on author discipline.
-
----
+- 🔶 [#1787](https://github.com/garden-co/jazz/issues/1787) — Benchmark ownership, Db-surface migration, retained-run evidence, and dirty-tree policy.
