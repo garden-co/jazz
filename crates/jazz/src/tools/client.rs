@@ -34,7 +34,7 @@ use crate::tools::public_schema::{OrderedRowDelta, QueryResult, Row};
 use crate::tools::public_schema::{Schema, validate_json_value};
 #[cfg(feature = "testing")]
 use crate::tools::sync::ClientId;
-use crate::tools::sync::DurabilityTier;
+use crate::tools::sync::{DurabilityTier, ReadTier};
 use crate::tools::transaction::TransactionId;
 use crate::tools::websocket_prelude_auth::AuthConfig as WsAuthConfig;
 use crate::tx::{
@@ -2249,6 +2249,10 @@ impl JazzClient {
             read_view: CoreReadViewSpec::default(),
         }
     }
+
+    fn core_read_opts_for_read_tier(tier: ReadTier) -> CoreReadOpts {
+        Self::core_read_opts(Some(tier.legacy_durability_tier()))
+    }
 }
 
 impl PublicQueryDecoder {
@@ -2942,11 +2946,21 @@ impl JazzClient {
     ///
     /// Returns a stream of row deltas as the data changes.
     pub async fn subscribe(&self, query: Query) -> Result<SubscriptionStream> {
-        self.subscribe_with_opts(
-            query,
-            Self::core_read_opts(Some(DurabilityTier::EdgeServer)),
-        )
-        .await
+        self.subscribe_with_read_tier(query, ReadTier::Remote).await
+    }
+
+    /// Subscribe using a product-level read tier.
+    ///
+    /// `RemoteIfPossible` remains strict in the native Rust facade because it
+    /// has no public explicit-disconnect state; host bindings can lower it to
+    /// local only after their caller explicitly disconnects.
+    pub async fn subscribe_with_read_tier(
+        &self,
+        query: Query,
+        tier: ReadTier,
+    ) -> Result<SubscriptionStream> {
+        self.subscribe_with_opts(query, Self::core_read_opts_for_read_tier(tier))
+            .await
     }
 
     /// Subscribe to a query with explicit core read options.
@@ -2964,9 +2978,24 @@ impl JazzClient {
         Ok(SubscriptionStream::new(rx, cancellation))
     }
 
-    /// One-shot query, optionally waiting for a durability tier.
+    /// One-shot query using a product-level read tier.
     ///
     /// Returns the current results as `Vec<(ObjectId, Vec<Value>)>`.
+    pub async fn query_with_read_tier(
+        &self,
+        query: Query,
+        tier: ReadTier,
+    ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
+        self.query_with_opts(query, Self::core_read_opts_for_read_tier(tier))
+            .await
+    }
+
+    /// One-shot query, optionally waiting for a legacy durability tier.
+    ///
+    /// Returns the current results as `Vec<(ObjectId, Vec<Value>)>`.
+    #[deprecated(
+        note = "read APIs should use query_with_read_tier(query, ReadTier); DurabilityTier remains supported for write waits"
+    )]
     pub async fn query(
         &self,
         query: Query,
@@ -3003,7 +3032,20 @@ impl JazzClient {
             .collect()
     }
 
-    /// One-shot query with a stable key for every result, including flat joins.
+    /// One-shot query with stable result keys using a product-level read tier.
+    pub async fn query_results_with_read_tier(
+        &self,
+        query: Query,
+        tier: ReadTier,
+    ) -> Result<Vec<QueryResult>> {
+        self.query_results_with_opts(query, Self::core_read_opts_for_read_tier(tier))
+            .await
+    }
+
+    /// One-shot query with stable keys using a legacy durability tier.
+    #[deprecated(
+        note = "read APIs should use query_results_with_read_tier(query, ReadTier); DurabilityTier remains supported for write waits"
+    )]
     pub async fn query_results(
         &self,
         query: Query,
@@ -3297,6 +3339,25 @@ mod tests {
     use crate::tools::{ClientStorage, ColumnType, SchemaBuilder, TableSchema};
     use serde_json::json;
     use tempfile::TempDir;
+
+    /// Product read tiers lower to the unchanged facade durability contract,
+    /// keeping write durability independent of the read API migration.
+    #[test]
+    fn read_tier_lowers_without_changing_write_durability() {
+        assert_eq!(
+            ReadTier::LocalFirst.legacy_durability_tier(),
+            DurabilityTier::Local
+        );
+        assert_eq!(
+            ReadTier::Remote.legacy_durability_tier(),
+            DurabilityTier::EdgeServer
+        );
+        assert_eq!(
+            ReadTier::RemoteIfPossible.legacy_durability_tier(),
+            DurabilityTier::EdgeServer,
+            "the native facade has no explicit offline boundary"
+        );
+    }
 
     fn declared_todo_schema() -> Schema {
         SchemaBuilder::new()
@@ -3604,7 +3665,7 @@ mod tests {
             .record_tick_driver_failure(error.to_string());
 
         let error = client
-            .query(Query::from("todos"), Some(DurabilityTier::Local))
+            .query_with_read_tier(Query::from("todos"), ReadTier::LocalFirst)
             .await
             .expect_err("a stopped tick driver must be visible to the caller");
         assert!(
@@ -3646,7 +3707,7 @@ mod tests {
             .await
             .expect("reconnect offline persistent client");
         let rows = restarted
-            .query(Query::from("todos"), Some(DurabilityTier::Local))
+            .query_with_read_tier(Query::from("todos"), ReadTier::LocalFirst)
             .await
             .expect("query rehydrated rows");
 

@@ -2974,7 +2974,7 @@ fn read_opts_from_js(value: JsValue) -> Result<ReadOpts, JsValue> {
         }
     }
     if let Some(tier) = optional_string_prop(&value, "tier")? {
-        opts.tier = durability_tier_from_str(&tier)?;
+        opts.tier = read_tier_from_str(&tier)?;
     }
     if let Some(local_updates) = optional_string_prop(&value, "local_updates")? {
         opts.local_updates = match local_updates.as_str() {
@@ -3005,6 +3005,19 @@ fn durability_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
         other => Err(JsValue::from_str(&format!(
             "unknown durability tier {other}"
         ))),
+    }
+}
+
+/// Read-only binding lowering. Write waits keep `durability_tier_from_str`, so
+/// a product read choice can never change write-settlement semantics.
+fn read_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
+    match tier {
+        "local-first" | "LocalFirst" => Ok(DurabilityTier::Local),
+        // The host connection manager applies the explicit-offline decision
+        // before invoking this ABI. A direct WASM caller therefore gets the
+        // strict remote behavior for RemoteIfPossible.
+        "remote" | "Remote" | "remote-if-possible" | "RemoteIfPossible" => Ok(DurabilityTier::Edge),
+        _ => durability_tier_from_str(tier),
     }
 }
 
@@ -3510,6 +3523,24 @@ mod dynamic_schema_view_tests {
     use jazz::tools::public_schema::{
         ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchema,
     };
+
+    /// Binding read choices lower to the existing core tiers.
+    #[test]
+    fn read_tier_names_lower_to_existing_core_tiers() {
+        assert_eq!(
+            read_tier_from_str("local-first").expect("local-first read tier"),
+            DurabilityTier::Local
+        );
+        assert_eq!(
+            read_tier_from_str("remote-if-possible").expect("strict remote read tier"),
+            DurabilityTier::Edge
+        );
+        assert_eq!(
+            durability_tier_from_str("local").expect("legacy write tier"),
+            DurabilityTier::Local,
+            "the write parser remains the separate legacy durability boundary"
+        );
+    }
 
     #[test]
     fn subscription_chunk_retry_uses_a_bounded_nonzero_backoff() {

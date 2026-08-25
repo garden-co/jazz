@@ -211,6 +211,27 @@ bridge over the core subscription surface: it carries opened, reset, and delta
 events, rather than facade-side diffs of full result sets (`INV-API-7`, and
 `groove/SPEC/INVARIANTS.md::INV-INC-1` for the mechanism law it serves).
 
+#### Binding read choices
+
+`DurabilityTier` remains the protocol/core lattice and the write-settlement API.
+Bindings expose the separate, read-only `ReadTier` vocabulary:
+
+| `ReadTier`         | binding behavior                                                                                           | core lowering                                                                       |
+| ------------------ | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `LocalFirst`       | return/evaluate local knowledge                                                                            | `DurabilityTier::Local`                                                             |
+| `Remote`           | wait for the ordinary remote/edge view                                                                     | legacy remote durability tier                                                       |
+| `RemoteIfPossible` | use local knowledge only after an application explicitly disconnects; otherwise wait exactly like `Remote` | local only for that explicit-offline start, otherwise legacy remote durability tier |
+
+`RemoteIfPossible` does **not** infer offline state from a timeout, connection
+error, slow response, or an ordinary transport reconnect. A one-shot read
+chooses once. A subscription that starts while explicitly offline starts local,
+then atomically replaces that local native subscription with the remote one on
+reconnect; it never creates a second query path or replays a historical remote
+failure. Low-level `ReadOpts` and the legacy binding entrypoints still accept
+`DurabilityTier` unchanged during the migration. The native Rust facade has no
+public explicit-offline toggle, so its `RemoteIfPossible` is strict `Remote`
+until such a host boundary exists.
+
 Subscription finalization is also asynchronous ownership work. Dropping a
 stream MUST synchronously enqueue one idempotent finalization command without
 borrowing the storage-owning node; the next node tick drains it under ordinary
