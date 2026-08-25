@@ -44,9 +44,9 @@ describe("native row codec", () => {
 
   it("rejects the old UUID-at-tag-10 descriptor instead of treating it compatibly", () => {
     const writer = new PostcardWriter();
-    expect(() =>
-      writeDescriptor(writer, [{ name: "old_uuid", valueType: { tag: 10 } }]),
-    ).toThrow("missing physical type for ValueType::Internal");
+    expect(() => writeDescriptor(writer, [{ name: "old_uuid", valueType: { tag: 10 } }])).toThrow(
+      "missing physical type for ValueType::Internal",
+    );
   });
 
   it("accepts nested terminal descriptors with producer fields beyond the root output", () => {
