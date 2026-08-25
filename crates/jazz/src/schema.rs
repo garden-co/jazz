@@ -645,23 +645,95 @@ pub(crate) fn registered_column_transform(key: &str) -> Option<ColumnTransformSe
     }
 }
 
+/// Internal schema-derived physical interpretation for a scalar column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum LargeValueSemanticKind {
+    /// The column never uses the hidden large-scalar representation.
+    NotLarge,
+    /// Byte scalar semantics.
+    Bytes,
+    /// UTF-8 text scalar semantics.
+    String,
+    /// Canonical JSON-in-string scalar semantics.
+    Json,
+}
+
 /// Application column declaration.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct ColumnSchema {
     /// Logical column name.
-    pub name: String,
+    pub(crate) name: String,
     /// Groove storage type used for this column's cell value.
-    pub column_type: GrooveColumnType,
+    pub(crate) column_type: GrooveColumnType,
+    /// Immutable, schema-derived semantic kind used only by the hidden
+    /// physical large-scalar envelope. JSON remains logically string-shaped in
+    /// Groove, but cannot be decoded or staged as text at this boundary.
+    pub(crate) large_value_kind: LargeValueSemanticKind,
     /// Literal value used when an insert omits this column.
     #[serde(default)]
-    pub default: Option<Value>,
+    pub(crate) default: Option<Value>,
+}
+
+#[derive(serde::Deserialize)]
+struct SerializedColumnSchema {
+    name: String,
+    column_type: GrooveColumnType,
+    #[serde(default)]
+    large_value_kind: Option<LargeValueSemanticKind>,
+    #[serde(default)]
+    default: Option<Value>,
+}
+
+impl<'de> serde::Deserialize<'de> for ColumnSchema {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let serialized = SerializedColumnSchema::deserialize(deserializer)?;
+        if contains_internal_storage_type(&serialized.column_type) {
+            return Err(serde::de::Error::custom(
+                "internal Groove storage types cannot appear in a Jazz schema",
+            ));
+        }
+        let derived = large_value_kind_for_type(&serialized.column_type);
+        let large_value_kind = serialized.large_value_kind.unwrap_or(derived);
+        let kind_is_valid = large_value_kind == derived
+            || (large_value_kind == LargeValueSemanticKind::Json
+                && derived == LargeValueSemanticKind::String);
+        if !kind_is_valid {
+            return Err(serde::de::Error::custom(
+                "large-value semantic kind does not match the declared column type",
+            ));
+        }
+        Ok(Self {
+            name: serialized.name,
+            column_type: serialized.column_type,
+            large_value_kind,
+            default: serialized.default,
+        })
+    }
 }
 
 impl ColumnSchema {
+    /// Logical column name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Public logical Groove type. Physical large-scalar backing types remain sealed.
+    pub fn column_type(&self) -> &GrooveColumnType {
+        &self.column_type
+    }
+
     /// Construct an ordinary column from a groove storage type.
     pub fn new(name: impl Into<String>, column_type: GrooveColumnType) -> Self {
+        assert!(
+            !contains_internal_storage_type(&column_type),
+            "raw and stored-scalar value types are physical-only and cannot be declared in a Jazz schema"
+        );
         Self {
             name: name.into(),
+            large_value_kind: large_value_kind_for_type(&column_type),
             column_type,
             default: None,
         }
@@ -674,10 +746,55 @@ impl ColumnSchema {
     }
 }
 
+fn contains_internal_storage_type(column_type: &GrooveColumnType) -> bool {
+    if column_type.is_internal_storage_type() {
+        return true;
+    }
+    match column_type {
+        GrooveColumnType::Nullable(inner) | GrooveColumnType::Array(inner) => {
+            contains_internal_storage_type(inner)
+        }
+        GrooveColumnType::Tuple(members) => members.iter().any(contains_internal_storage_type),
+        GrooveColumnType::Record(descriptor) => descriptor
+            .fields()
+            .iter()
+            .any(|field| contains_internal_storage_type(&field.value_type)),
+        GrooveColumnType::Enum(schema) => schema.cases.iter().any(|case| {
+            case.payload
+                .fields()
+                .iter()
+                .any(|field| contains_internal_storage_type(&field.value_type))
+        }),
+        _ => false,
+    }
+}
+
+fn large_value_kind_for_type(column_type: &GrooveColumnType) -> LargeValueSemanticKind {
+    match column_type {
+        GrooveColumnType::String => LargeValueSemanticKind::String,
+        GrooveColumnType::Bytes => LargeValueSemanticKind::Bytes,
+        GrooveColumnType::Nullable(inner) => large_value_kind_for_type(inner),
+        _ => LargeValueSemanticKind::NotLarge,
+    }
+}
+
+/// Storage descriptors are schema-derived. JSON remains string-shaped to
+/// callers and operators, but its internal cell codec is distinct so a large
+/// JSON descriptor cannot be mistaken for text.
+fn storage_column_type(column: &ColumnSchema) -> GrooveColumnType {
+    match column.large_value_kind {
+        LargeValueSemanticKind::Json => groove::large_values::physical_storage_value_type(
+            groove::large_values::LargeValueKind::Json,
+        ),
+        _ => column.column_type.clone(),
+    }
+}
+
 impl From<groove::schema::ColumnSchema> for ColumnSchema {
     fn from(column: groove::schema::ColumnSchema) -> Self {
         Self {
             name: column.name,
+            large_value_kind: large_value_kind_for_type(&column.column_type),
             column_type: column.column_type,
             default: None,
         }
@@ -866,7 +983,7 @@ impl TableSchema {
         columns.extend(self.columns.iter().map(|user_column| {
             column(
                 format!("user_{}", user_column.name),
-                user_column.column_type.clone().nullable(),
+                storage_column_type(user_column).nullable(),
             )
         }));
         GrooveTableSchema::new(format!("jazz_{}_rejected_versions", self.name), columns)
@@ -881,6 +998,12 @@ impl TableSchema {
     /// Return the storage history table for this application table.
     pub fn history_storage_table(&self) -> GrooveTableSchema {
         self.history_storage_table_named(format!("jazz_{}_history", self.name))
+    }
+
+    /// Alias kept at the codec boundary to make the physical interpretation
+    /// explicit at call sites.
+    pub(crate) fn authored_history_storage_table(&self) -> GrooveTableSchema {
+        self.history_storage_table()
     }
 
     fn history_storage_table_named(&self, name: String) -> GrooveTableSchema {
@@ -899,7 +1022,7 @@ impl TableSchema {
         columns.extend(self.columns.iter().map(|user_column| {
             column(
                 format!("user_{}", user_column.name),
-                user_column.column_type.clone().nullable(),
+                storage_column_type(user_column).nullable(),
             )
         }));
         // Absent on legacy records. When present, this is a serialized set of
@@ -980,7 +1103,7 @@ impl TableSchema {
         content_columns.extend(self.columns.iter().map(|user_column| {
             column(
                 format!("user_{}", user_column.name),
-                user_column.column_type.clone().nullable(),
+                storage_column_type(user_column).nullable(),
             )
         }));
         content_columns.push(column(
@@ -1045,7 +1168,7 @@ impl TableSchema {
         content_columns.extend(self.columns.iter().map(|user_column| {
             column(
                 format!("user_{}", user_column.name),
-                user_column.column_type.clone().nullable(),
+                storage_column_type(user_column).nullable(),
             )
         }));
         content_columns.push(column(
@@ -1426,7 +1549,7 @@ fn transactions_table() -> GrooveTableSchema {
 
 fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
     let mut bytes = Vec::new();
-    put_str(&mut bytes, "jazz-schema-v2-branch-columns");
+    put_str(&mut bytes, "jazz-schema-v3-large-value-kinds");
     let mut tables = schema.tables.iter().collect::<Vec<_>>();
     tables.sort_by(|left, right| left.name.cmp(&right.name));
     put_u64(&mut bytes, tables.len() as u64);
@@ -1436,6 +1559,12 @@ fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
         for column in &table.columns {
             put_str(&mut bytes, &column.name);
             put_column_type(&mut bytes, &column.column_type);
+            bytes.push(match column.large_value_kind {
+                LargeValueSemanticKind::NotLarge => 0,
+                LargeValueSemanticKind::Bytes => 1,
+                LargeValueSemanticKind::String => 2,
+                LargeValueSemanticKind::Json => 3,
+            });
             put_merge_strategy(&mut bytes, table.merge_strategy(&column.name));
         }
         put_u64(&mut bytes, table.references.len() as u64);
@@ -1529,6 +1658,9 @@ fn put_column_type(bytes: &mut Vec<u8>, column_type: &GrooveColumnType) {
                     put_column_type(bytes, &field.value_type);
                 }
             }
+        }
+        _ => {
+            panic!("raw stored-scalar backing types cannot appear in a Jazz schema")
         }
     }
 }
@@ -1971,6 +2103,34 @@ mod tests {
             registry(left.history_storage_table(), "user_state"),
             registry(right.history_storage_table(), "user_state"),
             "structurally identical user enums must retain independent registries"
+        );
+    }
+
+    #[test]
+    fn deserializing_a_schema_rejects_internal_storage_types_and_kind_spoofing() {
+        let internal = groove::large_values::physical_storage_value_type(
+            groove::large_values::LargeValueKind::Json,
+        );
+        let internal_column = serde_json::json!({
+            "name": "body",
+            "column_type": internal,
+            "large_value_kind": "Json",
+            "default": null,
+        });
+        assert!(
+            serde_json::from_value::<ColumnSchema>(internal_column).is_err(),
+            "serde must not bypass the public schema constructor with an internal type"
+        );
+
+        let spoofed_kind = serde_json::json!({
+            "name": "body",
+            "column_type": GrooveColumnType::Bytes,
+            "large_value_kind": "Json",
+            "default": null,
+        });
+        assert!(
+            serde_json::from_value::<ColumnSchema>(spoofed_kind).is_err(),
+            "semantic kind must be structurally compatible with its public column type"
         );
     }
 }

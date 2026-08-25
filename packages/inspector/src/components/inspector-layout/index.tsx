@@ -1,11 +1,21 @@
-import { NavLink, Outlet, useLocation } from "react-router";
+import { useEffect } from "react";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { useStandaloneContext } from "../../contexts/standalone-context.js";
 import {
   formatSchemaHashOptionLabel,
   type SchemaHashInfo,
 } from "../../utility/schema-hash-display.js";
-import { requestCloseOverlay } from "../../utility/overlay-settings.js";
+import {
+  DETACH_SHORTCUT_TOOLTIP,
+  OVERLAY_ROUTE_MESSAGE_TYPE,
+  OVERLAY_SHOW_DETACH_BUTTON_STORAGE_KEY,
+  isBoolean,
+  isDetachedInspector,
+  requestCloseOverlay,
+  requestDetachOverlay,
+  setOverlayActiveRoute,
+} from "../../utility/overlay-settings.js";
 import { useLocalStorageState } from "../../utility/use-local-storage-state.js";
 import { Tooltip } from "../tooltip/Tooltip.js";
 import styles from "./index.module.css";
@@ -53,17 +63,79 @@ function CloseIcon() {
   );
 }
 
+function PictureInPictureIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M2 10h6V4" />
+      <path d="m2 4 6 6" />
+      <path d="M21 10V7a2 2 0 0 0-2-2h-7" />
+      <path d="M3 14v2a2 2 0 0 0 2 2h3" />
+      <rect x="12" y="14" width="10" height="7" rx="1" />
+    </svg>
+  );
+}
+
 export function InspectorLayout() {
   const { runtime } = useDevtoolsContext();
   const isOverlay = runtime === "overlay";
+  const isDetached = isOverlay && isDetachedInspector();
   const standaloneContext = useStandaloneContext();
   const location = useLocation();
+  const navigate = useNavigate();
   const [isTablesPanelOpen, setIsTablesPanelOpen] = useLocalStorageState(
     TABLES_PANEL_OPEN_STORAGE_KEY,
     true,
   );
+  const [showDetachButton, setShowDetachButton] = useLocalStorageState<boolean>(
+    OVERLAY_SHOW_DETACH_BUTTON_STORAGE_KEY,
+    true,
+    { isValid: isBoolean },
+  );
 
   const isDataExplorerRoute = location.pathname.startsWith("/data-explorer");
+  const activeRoute = `${location.pathname}${location.search}`;
+
+  useEffect(() => {
+    if (!isOverlay) return;
+    setOverlayActiveRoute(activeRoute);
+
+    if (isDetached) return;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!event.altKey || !event.shiftKey || event.code !== "KeyD") return;
+      event.preventDefault();
+      requestDetachOverlay(activeRoute);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [activeRoute, isDetached, isOverlay]);
+
+  useEffect(() => {
+    if (!isOverlay || isDetached) return;
+    const onMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin || event.source !== window.parent) return;
+      const data = event.data as { type?: unknown; route?: unknown } | null;
+      if (
+        data?.type === OVERLAY_ROUTE_MESSAGE_TYPE &&
+        typeof data.route === "string" &&
+        data.route.startsWith("/")
+      ) {
+        navigate(data.route);
+      }
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [isDetached, isOverlay, navigate]);
 
   const onToggleTablesPanel = () => {
     setIsTablesPanelOpen((isOpen) => !isOpen);
@@ -129,22 +201,36 @@ export function InspectorLayout() {
               </button>
             </>
           ) : null}
-          {isOverlay ? (
-            <Tooltip label="Close (Esc)">
-              <button
-                type="button"
-                onClick={requestCloseOverlay}
-                className={styles.iconButton}
-                aria-label="Close inspector"
-              >
-                <CloseIcon />
-              </button>
-            </Tooltip>
+          {isOverlay && !isDetached ? (
+            <>
+              {showDetachButton ? (
+                <Tooltip label={DETACH_SHORTCUT_TOOLTIP}>
+                  <button
+                    type="button"
+                    onClick={() => requestDetachOverlay(activeRoute)}
+                    className={styles.iconButton}
+                    aria-label="Open inspector in separate window"
+                  >
+                    <PictureInPictureIcon />
+                  </button>
+                </Tooltip>
+              ) : null}
+              <Tooltip label="Close (Esc)">
+                <button
+                  type="button"
+                  onClick={requestCloseOverlay}
+                  className={styles.iconButton}
+                  aria-label="Close inspector"
+                >
+                  <CloseIcon />
+                </button>
+              </Tooltip>
+            </>
           ) : null}
         </div>
       </header>
       <section className={styles.content}>
-        <Outlet context={{ isTablesPanelOpen }} />
+        <Outlet context={{ isTablesPanelOpen, showDetachButton, setShowDetachButton }} />
       </section>
     </main>
   );

@@ -19,12 +19,32 @@ interface Entry {
   /**
    * Set once teardown has started. A later acquire must wait for this before
    * constructing a replacement, otherwise two browser workers can open the
-   * same persistent storage at once.
+   * same persistent storage at once. A failed teardown remains the barrier.
    */
   closing: Promise<void> | null;
+  /** True only after creation produced a client and its shutdown was invoked. */
+  shutdownStarted: boolean;
+  /**
+   * The immediately preceding closing entry. On a rejected handoff, walk this
+   * chain to retain the first shutdown that actually started. Keeping the
+   * direct predecessor is necessary because an acquire can observe `closing`
+   * before that entry's shutdown microtask marks it started. Once this entry
+   * starts shutting down, this link is cleared: any later handoff can retain
+   * this entry directly, rather than keeping completed clients alive.
+   */
+  shutdownBarrier: Entry | null;
 }
 
 const registry = new Map<string, Entry>();
+
+function startedShutdownBarrier(entry: Entry | null): Entry | null {
+  let current = entry;
+  while (current) {
+    if (current.shutdownStarted) return current;
+    current = current.shutdownBarrier;
+  }
+  return null;
+}
 
 export function acquireClient<T extends RegisteredClient>(
   key: string,
@@ -32,19 +52,30 @@ export function acquireClient<T extends RegisteredClient>(
   holder: object,
 ): Promise<T> {
   let entry = registry.get(key);
-  if (entry?.closing) {
+  const previousClosing = entry?.closing;
+  if (entry && previousClosing) {
     const previous = entry;
-    const previousClosing = previous.closing!;
+    let teardownSucceeded = false;
     const created: Entry = {
-      promise: previousClosing.then(() => create()),
+      promise: previousClosing.then(() => {
+        teardownSucceeded = true;
+        return create();
+      }),
       holders: new Set(),
       releaseTimer: null,
       pendingRelease: null,
       closing: null,
+      shutdownStarted: false,
+      shutdownBarrier: previous,
     };
     created.promise.catch(() => {
       if (registry.get(key) === created) {
-        registry.delete(key);
+        const shutdownBarrier = startedShutdownBarrier(created.shutdownBarrier);
+        if (!teardownSucceeded && shutdownBarrier) {
+          registry.set(key, shutdownBarrier);
+        } else {
+          registry.delete(key);
+        }
       }
     });
     registry.set(key, created);
@@ -57,6 +88,8 @@ export function acquireClient<T extends RegisteredClient>(
       releaseTimer: null,
       pendingRelease: null,
       closing: null,
+      shutdownStarted: false,
+      shutdownBarrier: null,
     };
     // Evict on failure so the next acquire re-creates instead of re-rejecting.
     created.promise.catch(() => {
@@ -86,7 +119,7 @@ export function acquireClient<T extends RegisteredClient>(
 /**
  * Release `holder`'s claim. The last release tears the client down on a deferred
  * tick (so a same-tick re-acquire keeps it alive); the promise resolves once
- * teardown has run, or immediately if other holders remain.
+ * teardown has settled, or immediately if other holders remain.
  */
 export function releaseClient(key: string, holder: object): Promise<void> {
   const entry = registry.get(key);
@@ -94,7 +127,7 @@ export function releaseClient(key: string, holder: object): Promise<void> {
 
   entry.holders.delete(holder);
   if (entry.holders.size > 0) return Promise.resolve();
-  if (entry.closing) return entry.closing;
+  if (entry.closing) return entry.closing.catch(() => {});
   if (entry.releaseTimer !== null) {
     return entry.pendingRelease?.promise ?? Promise.resolve();
   }
@@ -111,15 +144,20 @@ export function releaseClient(key: string, holder: object): Promise<void> {
       resolveRelease();
       return;
     }
-    entry.closing = entry.promise
-      .then((client) => client.shutdown())
-      .catch(() => {})
-      .finally(() => {
+    entry.closing = entry.promise.then((client) => {
+      entry.shutdownStarted = true;
+      entry.shutdownBarrier = null;
+      return client.shutdown();
+    });
+    entry.closing.then(
+      () => {
         if (registry.get(key) === entry) {
           registry.delete(key);
         }
         resolveRelease();
-      });
+      },
+      () => resolveRelease(),
+    );
   }, 0);
   return releasePromise;
 }

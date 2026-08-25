@@ -14,18 +14,9 @@ export interface FetchStoredWasmSchemaOptions {
   schemaHash: string;
 }
 
-const MICROSECONDS_PER_MILLISECOND = 1_000;
-const EPOCH_MICROSECONDS_THRESHOLD = 100_000_000_000_000;
-
-function normalizePublishedAtEpochMilliseconds(
-  publishedAt: number | null | undefined,
-): number | null {
+function publishedAtEpochMilliseconds(publishedAt: number | null | undefined): number | null {
   if (typeof publishedAt !== "number" || !Number.isFinite(publishedAt)) {
     return null;
-  }
-
-  if (publishedAt >= EPOCH_MICROSECONDS_THRESHOLD) {
-    return Math.trunc(publishedAt / MICROSECONDS_PER_MILLISECOND);
   }
 
   return publishedAt;
@@ -61,7 +52,7 @@ export async function fetchStoredWasmSchema(
 
   return {
     schema: body.schema.tables,
-    publishedAt: normalizePublishedAtEpochMilliseconds(body.publishedAt),
+    publishedAt: publishedAtEpochMilliseconds(body.publishedAt),
   };
 }
 
@@ -141,7 +132,7 @@ export async function fetchSchemaHashes(
   const schemas =
     schemaHashesResponse.schemas?.map((schema) => ({
       hash: schema.hash,
-      publishedAt: normalizePublishedAtEpochMilliseconds(schema.publishedAt),
+      publishedAt: publishedAtEpochMilliseconds(schema.publishedAt),
     })) ?? [];
 
   return {

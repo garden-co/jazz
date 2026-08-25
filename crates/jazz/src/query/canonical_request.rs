@@ -816,6 +816,9 @@ fn put_column_type(bytes: &mut Vec<u8>, ty: &ColumnType) {
                 "union column types are internal to Groove and have no Jazz query binding encoding"
             )
         }
+        _ => {
+            panic!("raw stored-scalar backing types are not Jazz query column types")
+        }
     }
 }
 

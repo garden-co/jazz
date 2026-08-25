@@ -143,9 +143,9 @@ fn policy_graph_version(
         row_uuid,
         Vec::new(),
         AuthorSubject::SYSTEM,
-        tx_id.time,
+        tx_id.time.physical_ms(),
         AuthorSubject::SYSTEM,
-        tx_id.time,
+        tx_id.time.physical_ms(),
         cells,
         None,
     )
