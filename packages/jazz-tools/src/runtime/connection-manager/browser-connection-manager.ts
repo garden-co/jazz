@@ -76,6 +76,20 @@ export class BrowserConnectionManager extends ConnectionManager {
   shouldDeferSubscriptionStart(tier?: DurabilityTier): boolean {
     return tier === "edge" || tier === "global";
   }
+  isExplicitlyOffline(): boolean {
+    return this.disconnected;
+  }
+  async waitForReconnect(signal?: AbortSignal): Promise<void> {
+    if (!this.disconnected) return;
+    await new Promise<void>((resolve) => {
+      const onAbort = () => resolve();
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.reconnectWaiters.add(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      });
+    });
+  }
 
   async disconnect(): Promise<void> {
     if (!this.host.config.serverUrl) {

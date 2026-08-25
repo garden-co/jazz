@@ -319,6 +319,8 @@ export interface AuthConfig {
  * - `global`: Persisted at global server
  */
 export type DurabilityTier = "local" | "edge" | "global";
+/** Product-facing read tier names. Legacy durability names remain supported. */
+export type ReadTier = DurabilityTier | "local-first" | "remote" | "remote-if-possible";
 /**
  * Controls when a write is visible to subscriptions.
  *
@@ -360,7 +362,8 @@ export interface BranchView {
 }
 
 export interface QueryExecutionOptions {
-  tier?: DurabilityTier;
+  /** `local-first` = legacy `local`; `remote` = legacy `edge`; `remote-if-possible` falls back only after an explicit disconnect. */
+  tier?: ReadTier;
   localUpdates?: LocalUpdatesMode;
   propagation?: QueryPropagation;
   visibility?: QueryVisibility;
@@ -516,12 +519,21 @@ export function resolveEffectiveQueryExecutionOptions(
   options?: QueryExecutionOptions,
 ): ResolvedQueryExecutionOptions {
   return {
-    tier: options?.tier ?? resolveDefaultDurabilityTier(context),
+    tier: resolveReadTier(options?.tier ?? resolveDefaultDurabilityTier(context)),
     localUpdates: options?.localUpdates ?? "immediate",
     propagation: options?.propagation ?? "full",
     visibility: options?.visibility ?? "public",
     branch: options?.branch,
   };
+}
+
+/** @internal Low-level runtimes retain the legacy three-tier wire contract. */
+export function resolveReadTier(tier: ReadTier): DurabilityTier {
+  return tier === "local-first"
+    ? "local"
+    : tier === "remote" || tier === "remote-if-possible"
+      ? "edge"
+      : tier;
 }
 
 function isBrowserRuntime(): boolean {

@@ -119,6 +119,11 @@ export abstract class ConnectionManager {
 
   abstract shouldDeferSubscriptionStart(tier?: DurabilityTier): boolean;
 
+  /** True only after the application explicitly called Db.disconnect(). */
+  abstract isExplicitlyOffline(): boolean;
+  /** Resolves when that explicit offline state is cleared. */
+  abstract waitForReconnect(signal?: AbortSignal): Promise<void>;
+
   openInspectorControlPort(): Promise<MessagePort> {
     return Promise.reject(new Error("This runtime has no shared browser worker"));
   }

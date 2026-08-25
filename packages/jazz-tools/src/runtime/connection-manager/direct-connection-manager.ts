@@ -47,6 +47,20 @@ export class DirectConnectionManager extends ConnectionManager {
   shouldDeferSubscriptionStart(_tier?: DurabilityTier): boolean {
     return false;
   }
+  isExplicitlyOffline(): boolean {
+    return this.isDisconnected;
+  }
+  async waitForReconnect(signal?: AbortSignal): Promise<void> {
+    if (!this.isDisconnected) return;
+    await new Promise<void>((resolve) => {
+      const onAbort = () => resolve();
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.reconnectWaiters.push(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      });
+    });
+  }
 
   async disconnect(): Promise<void> {
     if (!this.host.config.serverUrl) {
