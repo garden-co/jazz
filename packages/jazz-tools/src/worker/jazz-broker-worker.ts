@@ -69,6 +69,7 @@ type RuntimeContext = {
 const workerGlobal = globalThis as SharedWorkerGlobal;
 const contexts = new Map<string, RuntimeContext>();
 let wasmModulePromise: Promise<WasmModule> | null = null;
+let wasmModuleSource: string | null = null;
 let contextInitializationTail: Promise<void> = Promise.resolve();
 let nextResetId = 1;
 
@@ -224,14 +225,30 @@ async function initialize(context: RuntimeContext): Promise<void> {
 async function loadWorkerWasmModule(
   runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
 ): Promise<WasmModule> {
+  const source = workerWasmSource(runtimeSources);
+  if (wasmModulePromise && wasmModuleSource !== source) {
+    throw new Error(
+      "incompatible WASM asset source for this SharedWorker; start a worker scoped to the new asset URL",
+    );
+  }
   const load = wasmModulePromise ?? loadWasmModule(runtimeSources);
   wasmModulePromise = load;
+  wasmModuleSource = source;
   try {
     return await load;
   } catch (error) {
-    if (wasmModulePromise === load) wasmModulePromise = null;
+    if (wasmModulePromise === load) {
+      wasmModulePromise = null;
+      wasmModuleSource = null;
+    }
     throw error;
   }
+}
+
+function workerWasmSource(runtimeSources: BrowserWorkerInitOptions["runtimeSources"]): string {
+  if (runtimeSources?.wasmModule) return "provided-module";
+  if (runtimeSources?.wasmSource) return "provided-source";
+  return runtimeSources?.wasmUrl ?? "worker-local";
 }
 
 function cleanupFailedContext(context: RuntimeContext): void {
