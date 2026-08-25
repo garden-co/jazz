@@ -1450,6 +1450,8 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   );
   assert.match(typescript, /name: Run Node and browser test suites in parallel/);
   assert.match(typescript, /run: dev\/gates\/run-ts-tests\.sh/);
+  assert.match(runner, /pnpm --filter jazz-tools build/);
+  assert.match(runner, /Every example resolves the public `jazz-tools\/\*` exports from `dist`/);
   assert.match(runner, /--concurrency=2/);
   assert.match(runner, /setsid bash -c "\$\{node_tests_command\}" >"\$\{node_tests_log\}" 2>&1 &/);
   assert.match(
@@ -1488,6 +1490,7 @@ test("parallel TypeScript runner waits for both suites and combines their failur
       encoding: "utf8",
       env: {
         ...process.env,
+        JAZZ_SKIP_JAZZ_TOOLS_BUILD: "1",
         JAZZ_NODE_TEST_COMMAND: `sleep 0.05; touch ${JSON.stringify(nodeMarker)}; exit ${testCase.node}`,
         JAZZ_BROWSER_TEST_COMMAND: `sleep 0.1; touch ${JSON.stringify(browserMarker)}; exit ${testCase.browser}`,
       },
@@ -1501,6 +1504,37 @@ test("parallel TypeScript runner waits for both suites and combines their failur
   }
 });
 
+test("a failed jazz-tools prebuild prevents both TypeScript suites from starting", () => {
+  const runner = path.join(root, "dev/gates/run-ts-tests.sh");
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-ts-ci-prebuild-"));
+  const fakePnpm = path.join(fixture, "pnpm");
+  const nodeMarker = path.join(fixture, "node");
+  const browserMarker = path.join(fixture, "browser");
+  try {
+    fs.writeFileSync(fakePnpm, "#!/bin/sh\nexit 23\n", { mode: 0o755 });
+    const result = spawnSync("bash", [runner], {
+      cwd: root,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${fixture}:${process.env.PATH}`,
+        JAZZ_NODE_TEST_COMMAND: `touch ${JSON.stringify(nodeMarker)}`,
+        JAZZ_BROWSER_TEST_COMMAND: `touch ${JSON.stringify(browserMarker)}`,
+      },
+    });
+    assert.equal(result.status, 23, result.stderr);
+    assert.equal(fs.existsSync(nodeMarker), false, "node suite started after failed prebuild");
+    assert.equal(
+      fs.existsSync(browserMarker),
+      false,
+      "browser suite started after failed prebuild",
+    );
+    assert.match(result.stderr, /refusing to launch suites against stale exports/);
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
 test("parallel TypeScript runner terminates both child process groups", async () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-ts-ci-interrupt-"));
   const nodeMarker = path.join(fixture, "node-orphan");
@@ -1509,6 +1543,7 @@ test("parallel TypeScript runner terminates both child process groups", async ()
     cwd: root,
     env: {
       ...process.env,
+      JAZZ_SKIP_JAZZ_TOOLS_BUILD: "1",
       JAZZ_NODE_TEST_COMMAND: `sleep 0.5; touch ${JSON.stringify(nodeMarker)}`,
       JAZZ_BROWSER_TEST_COMMAND: `sleep 0.5; touch ${JSON.stringify(browserMarker)}`,
     },
