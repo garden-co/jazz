@@ -2801,7 +2801,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
