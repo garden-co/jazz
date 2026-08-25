@@ -274,7 +274,7 @@ describe("nested row physical carriers", () => {
       Uint8Array.of(0),
       presentBytes(Uint8Array.of(1, 0, 0, 0)),
       presentBytes(uuidBytes("06839e1b-9b29-732c-1b39-8ee592bd2a68")),
-      concatBytes([Uint8Array.of(1, 0, 0, 0, 0), new TextEncoder().encode("x")]),
+      concatBytes([Uint8Array.of(1, 0, 0, 0, 2), new TextEncoder().encode("x")]),
     ]);
 
     expect(decodeNestedRowBytes(todoColumns, bytes, todoDescriptor, "full-record")).toMatchObject({
