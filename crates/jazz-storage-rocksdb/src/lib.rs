@@ -786,6 +786,40 @@ mod tests {
     }
 
     #[test]
+    fn close_flushes_a_partial_write_cadence() {
+        use groove::storage::{OrderedKvStorage, OwnedWriteOperation};
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        ready(storage.set_write_flush_cadence(8)).unwrap();
+        ready(storage.write_many(vec![OwnedWriteOperation::Set {
+            cf: "records".to_owned(),
+            key: b"pending".to_vec(),
+            value: b"value".to_vec(),
+        }]))
+        .unwrap();
+        assert_eq!(
+            storage
+                .write_flush_cadence
+                .borrow()
+                .as_ref()
+                .map(|cadence| cadence.pending),
+            Some(1)
+        );
+
+        ready(storage.close()).unwrap();
+
+        assert_eq!(
+            storage
+                .write_flush_cadence
+                .borrow()
+                .as_ref()
+                .map(|cadence| cadence.pending),
+            Some(0)
+        );
+    }
+
+    #[test]
     fn approximate_class_bytes_reports_populated_family() {
         use groove::storage::OrderedKvStorage;
 
