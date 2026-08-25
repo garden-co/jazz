@@ -1,3 +1,4 @@
+import type { WasmDb } from "jazz-wasm";
 import { loadWasmModule, type WasmModule } from "../runtime/client.js";
 import { IndexedDbPageStore } from "../runtime/indexeddb-page-store.js";
 import { installWasmTelemetry } from "../runtime/sync-telemetry.js";
@@ -147,6 +148,7 @@ function createContext(
 }
 
 async function initialize(context: RuntimeContext): Promise<void> {
+  let unownedDb: WasmDb | null = null;
   try {
     const { options } = context;
     workerGlobal.__JAZZ_WASM_LOG_LEVEL = options.logLevel ?? DEFAULT_WASM_LOG_LEVEL;
@@ -161,14 +163,20 @@ async function initialize(context: RuntimeContext): Promise<void> {
       handleStorageInvalidation(context),
     );
     const schema = encodeSchema(options.schema);
-    const config = openConfig(options.node, options.author, 1, false, options.initialSyncFlushEvery);
+    const config = openConfig(
+      options.node,
+      options.author,
+      1,
+      false,
+      options.initialSyncFlushEvery,
+    );
     const proof = options.selfSignedClientProof;
     if (proof && typeof wasmModule.WasmDb.openBrowserWithSelfSignedProof !== "function") {
       throw new Error(
         "WASM runtime does not support self-signed client opens; rebuild the matching Jazz WASM artifact",
       );
     }
-    const db = proof
+    unownedDb = proof
       ? await wasmModule.WasmDb.openBrowserWithSelfSignedProof(
           context.pageStore,
           schema,
@@ -178,14 +186,16 @@ async function initialize(context: RuntimeContext): Promise<void> {
           proof.claimedAuthor,
         )
       : await wasmModule.WasmDb.openBrowser(context.pageStore, schema, config);
-    context.runtime = NativeRuntimeAdapter.fromDb(
-      db as never,
+    const runtime = NativeRuntimeAdapter.fromDb(
+      unownedDb as never,
       options.schema,
       options.node,
       options.author,
       1,
       false,
     );
+    context.runtime = runtime;
+    unownedDb = null;
     context.runtime.onAuthFailure((reason) => broadcast(context, { type: "auth-failure", reason }));
     context.runtime.onMutationError((event) => {
       // A mutation error is a notification for foreground runtimes that are
@@ -197,7 +207,16 @@ async function initialize(context: RuntimeContext): Promise<void> {
       );
     });
   } catch (error) {
-    cleanupFailedContext(context);
+    try {
+      await unownedDb?.close();
+    } catch {
+      // The initialisation error is the actionable failure.
+    }
+    try {
+      cleanupFailedContext(context);
+    } catch {
+      // Cleanup must not replace the initialisation error reported to the tab.
+    }
     throw error;
   }
 }
