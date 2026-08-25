@@ -30,6 +30,21 @@ pub struct HlcOverflow {
     pub physical_ms: u64,
 }
 
+/// A public Unix-millisecond value that cannot be represented by the packed
+/// HLC's 46-bit physical component.
+///
+/// Unlike [`HlcOverflow`], this is an ingress/decoding error: no clock position
+/// has been allocated.  Wire provenance is public Unix milliseconds, so every
+/// conversion back into an internal [`TxTime`] must use this fallible boundary.
+#[derive(Clone, Copy, Debug, thiserror::Error, PartialEq, Eq)]
+#[error("physical millisecond {physical_ms} exceeds the packed HLC maximum {max_physical_ms}")]
+pub struct HlcPhysicalMsOutOfRange {
+    /// The unrepresentable public Unix-millisecond value.
+    pub physical_ms: u64,
+    /// The greatest physical value representable by the packed HLC.
+    pub max_physical_ms: u64,
+}
+
 /// Core-assigned hybrid logical timestamp for globally accepted transactions.
 ///
 /// The high 46 bits contain physical milliseconds and the low 18 bits contain
@@ -113,6 +128,21 @@ impl TxTime {
         Self((physical_ms << HLC_COUNTER_BITS) | u64::from(counter))
     }
 
+    /// Reconstruct a provenance HLC from a public Unix-millisecond value.
+    ///
+    /// Wire provenance deliberately omits the private logical counter, so the
+    /// reconstructed timestamp always has counter zero.  This is fallible at
+    /// the 46-bit physical horizon; callers handling peer input must reject
+    /// rather than panic or truncate it.
+    pub fn from_physical_ms(physical_ms: u64) -> Result<Self, HlcPhysicalMsOutOfRange> {
+        (physical_ms <= HLC_MAX_PHYSICAL_MS)
+            .then_some(Self(physical_ms << HLC_COUNTER_BITS))
+            .ok_or(HlcPhysicalMsOutOfRange {
+                physical_ms,
+                max_physical_ms: HLC_MAX_PHYSICAL_MS,
+            })
+    }
+
     /// Physical milliseconds component.
     pub fn physical_ms(self) -> u64 {
         self.0 >> HLC_COUNTER_BITS
@@ -145,7 +175,8 @@ impl TxTime {
 
 impl From<u64> for TxTime {
     fn from(physical_ms: u64) -> Self {
-        Self::new(physical_ms, 0)
+        Self::from_physical_ms(physical_ms)
+            .expect("TxTime::from requires a physical millisecond in the packed HLC range")
     }
 }
 
@@ -223,6 +254,23 @@ mod tests {
         assert_eq!(
             time.tick_after(),
             Ok(TxTime::new(0x1234_5678_9abc, 0x2_def1))
+        );
+    }
+
+    /// Public Unix-millisecond provenance reconstructs only the zero logical
+    /// counter and rejects values that cannot fit the 46-bit HLC layout.
+    #[test]
+    fn physical_millisecond_reconstruction_has_an_explicit_46_bit_boundary() {
+        assert_eq!(
+            TxTime::from_physical_ms(HLC_MAX_PHYSICAL_MS),
+            Ok(TxTime::new(HLC_MAX_PHYSICAL_MS, 0))
+        );
+        assert_eq!(
+            TxTime::from_physical_ms(HLC_MAX_PHYSICAL_MS + 1),
+            Err(HlcPhysicalMsOutOfRange {
+                physical_ms: HLC_MAX_PHYSICAL_MS + 1,
+                max_physical_ms: HLC_MAX_PHYSICAL_MS,
+            })
         );
     }
 

@@ -1518,10 +1518,20 @@ fn decode_typed_version_witness(
         // Current-row provenance is public Unix milliseconds. Witness state
         // needs the corresponding history form only to identify/materialize
         // the authored version, whose provenance HLC always has counter zero.
-        created_at: TxTime::from(record_u64_idx(record, plan.created_at_idx)?),
+        created_at: TxTime::from_physical_ms(record_u64_idx(record, plan.created_at_idx)?)
+            .map_err(|_| {
+                super::Error::InvalidStoredValue(
+                    "maintained witness created_at_ms exceeds packed HLC range",
+                )
+            })?,
         updated_by: AuthorSubject::from_canonical(record.get_str(plan.updated_by_idx)?)
             .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
-        updated_at: TxTime::from(record_u64_idx(record, plan.updated_at_idx)?),
+        updated_at: TxTime::from_physical_ms(record_u64_idx(record, plan.updated_at_idx)?)
+            .map_err(|_| {
+                super::Error::InvalidStoredValue(
+                    "maintained witness updated_at_ms exceeds packed HLC range",
+                )
+            })?,
         cells,
         authored_columns,
         deletion,

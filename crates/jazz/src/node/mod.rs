@@ -1589,6 +1589,11 @@ impl MergeableCommit {
     }
 
     fn validate(&self) -> Result<(), Error> {
+        crate::time::TxTime::from_physical_ms(self.now_ms).map_err(|_| {
+            Error::InvalidMergeableCommit(
+                "commit now_ms exceeds packed HLC physical-millisecond range",
+            )
+        })?;
         validate_mergeable_write_shape(self.cells.is_empty(), self.deletion.is_some())?;
         if self.cells.iter().any(|(column, value)| {
             value_contains_indirect_descriptor(value)

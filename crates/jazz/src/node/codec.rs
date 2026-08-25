@@ -316,6 +316,11 @@ impl VersionRecord {
         table: &TableSchema,
         schema_version: SchemaVersionId,
     ) -> Result<Self, Error> {
+        TxTime::from_physical_ms(commit.now_ms).map_err(|_| {
+            Error::InvalidMergeableCommit(
+                "commit now_ms exceeds packed HLC physical-millisecond range",
+            )
+        })?;
         let positional = positional_cells_from_map(table, &commit.cells)?;
         VersionRecord::encode(
             table,
@@ -560,7 +565,7 @@ impl VersionRow {
                     schema_version_alias,
                     tx_time,
                     deletion,
-                ),
+                )?,
             )
         } else {
             (
@@ -1331,9 +1336,17 @@ fn history_values_from_wire(
     values.push(Value::String(version.created_by().canonical().to_owned()));
     // Wire provenance carries public Unix milliseconds. Reconstruct the
     // internal HLC with logical counter zero at this ingestion boundary.
-    values.push(Value::U64(TxTime::from(version.created_at_ms()).0));
+    values.push(Value::U64(
+        TxTime::from_physical_ms(version.created_at_ms())
+            .map_err(|_| Error::InvalidStoredValue("wire created_at_ms exceeds packed HLC range"))?
+            .0,
+    ));
     values.push(Value::String(version.updated_by().canonical().to_owned()));
-    values.push(Value::U64(TxTime::from(version.updated_at_ms()).0));
+    values.push(Value::U64(
+        TxTime::from_physical_ms(version.updated_at_ms())
+            .map_err(|_| Error::InvalidStoredValue("wire updated_at_ms exceeds packed HLC range"))?
+            .0,
+    ));
     for (idx, column) in table.columns.iter().enumerate() {
         let value = version.optional_cell_at(idx);
         if let Some(value) = value.as_ref() {
@@ -1381,8 +1394,8 @@ fn register_values_from_wire(
     schema_version_alias: SchemaVersionAlias,
     tx_time: TxTime,
     deletion: DeletionEvent,
-) -> Vec<Value> {
-    vec![
+) -> Result<Vec<Value>, Error> {
+    Ok(vec![
         Value::Bytes(version.branch_key().canonical_bytes()),
         Value::Uuid(version.row_uuid().0),
         Value::U64(tx_time.0),
@@ -1396,11 +1409,23 @@ fn register_values_from_wire(
                 .collect(),
         ),
         Value::String(version.created_by().canonical().to_owned()),
-        Value::U64(TxTime::from(version.created_at_ms()).0),
+        Value::U64(
+            TxTime::from_physical_ms(version.created_at_ms())
+                .map_err(|_| {
+                    Error::InvalidStoredValue("wire created_at_ms exceeds packed HLC range")
+                })?
+                .0,
+        ),
         Value::String(version.updated_by().canonical().to_owned()),
-        Value::U64(TxTime::from(version.updated_at_ms()).0),
+        Value::U64(
+            TxTime::from_physical_ms(version.updated_at_ms())
+                .map_err(|_| {
+                    Error::InvalidStoredValue("wire updated_at_ms exceeds packed HLC range")
+                })?
+                .0,
+        ),
         deletion_event_value(deletion),
-    ]
+    ])
 }
 
 pub(super) fn deletion_event_value(deletion: DeletionEvent) -> Value {

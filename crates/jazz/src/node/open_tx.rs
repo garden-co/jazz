@@ -758,6 +758,15 @@ where
             .get(&open_batch_id)
             .cloned()
             .ok_or(Error::MissingOpenBatch(open_batch_id))?;
+        for write in &open_tx.writes {
+            if let Some(provenance_ms) = write.now_ms {
+                TxTime::from_physical_ms(provenance_ms).map_err(|_| {
+                    Error::InvalidMergeableCommit(
+                        "exclusive write now_ms exceeds packed HLC physical-millisecond range",
+                    )
+                })?;
+            }
+        }
         for parent in open_tx.writes.iter().flat_map(|write| write.parents.iter()) {
             self.merge_tx_time(parent.time);
         }
@@ -813,7 +822,12 @@ where
                     .await?;
             }
             let cells = positional_cells_from_map(&table_schema, &cells)?;
-            let provenance_at = TxTime::from(write.now_ms.unwrap_or(now_ms));
+            let provenance_at =
+                TxTime::from_physical_ms(write.now_ms.unwrap_or(now_ms)).map_err(|_| {
+                    Error::InvalidMergeableCommit(
+                        "exclusive write now_ms exceeds packed HLC physical-millisecond range",
+                    )
+                })?;
             let (created_by, created_at) = snapshot_content
                 .as_ref()
                 .map(|version| (version.created_by(), version.created_at()))
