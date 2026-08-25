@@ -725,8 +725,17 @@ struct InFlightChunk {
     /// a request cycle and fails deterministically.
     future: Option<ChunkFuture<'static, Result<Bytes, ChunkError>>>,
     result: Option<Result<Bytes, ChunkError>>,
-    waiters: Vec<Waker>,
+    /// Each consumer has at most one replaceable registered waker. Futures may
+    /// legally be re-polled with a different waker, so retaining a bare list
+    /// would keep every old task allocation alive until completion.
+    waiters: Vec<ChunkWaiter>,
     consumers: usize,
+    next_consumer_id: u64,
+}
+
+struct ChunkWaiter {
+    consumer_id: u64,
+    waker: Waker,
 }
 
 /// One caller's lease-producing view of a shared exact chunk request.
@@ -737,6 +746,7 @@ struct InFlightChunk {
 /// that no executor will ever poll.
 struct CoalescedChunkGet {
     request: ChunkRequest,
+    consumer_id: u64,
     in_flight: Rc<RefCell<InFlightChunks>>,
     leases: Rc<RefCell<ChunkLeaseStats>>,
     done: bool,
@@ -754,6 +764,9 @@ impl CoalescedChunkGet {
                 return;
             };
             entry.consumers = entry.consumers.saturating_sub(1);
+            entry
+                .waiters
+                .retain(|waiter| waiter.consumer_id != self.consumer_id);
             // The consumer which last polled the backing future may be the
             // one being cancelled. Wake remaining consumers so one of them
             // installs its waker on the single shared future.
@@ -768,7 +781,7 @@ impl CoalescedChunkGet {
             self.in_flight.borrow_mut().entries.remove(&self.request);
         }
         for waiter in wake {
-            waiter.wake();
+            waiter.waker.wake();
         }
     }
 }
@@ -816,7 +829,10 @@ impl Future for CoalescedChunkGet {
                         "coalesced chunk request remains registered while a consumer exists",
                     );
                     entry.result = Some(result.clone());
-                    wake = std::mem::take(&mut entry.waiters);
+                    wake = std::mem::take(&mut entry.waiters)
+                        .into_iter()
+                        .filter(|waiter| waiter.consumer_id != self.consumer_id)
+                        .collect();
                     Some(result)
                 }
             },
@@ -827,16 +843,23 @@ impl Future for CoalescedChunkGet {
                 .entries
                 .get_mut(&self.request)
                 .expect("coalesced chunk request remains registered while a consumer exists");
-            if !entry
+            if let Some(waiter) = entry
                 .waiters
-                .iter()
-                .any(|waiter| waiter.will_wake(cx.waker()))
+                .iter_mut()
+                .find(|waiter| waiter.consumer_id == self.consumer_id)
             {
-                entry.waiters.push(cx.waker().clone());
+                if !waiter.waker.will_wake(cx.waker()) {
+                    waiter.waker = cx.waker().clone();
+                }
+            } else {
+                entry.waiters.push(ChunkWaiter {
+                    consumer_id: self.consumer_id,
+                    waker: cx.waker().clone(),
+                });
             }
         }
         for waiter in wake {
-            waiter.wake();
+            waiter.waker.wake();
         }
         let Some(result) = result else {
             return Poll::Pending;
@@ -995,10 +1018,13 @@ impl OwnedChunkProvider {
             if let Some(bytes) = cached {
                 return Ok(ChunkLease::new(bytes, leases));
             }
-            {
+            let consumer_id = {
                 let mut entries = in_flight.borrow_mut();
                 if let Some(entry) = entries.entries.get_mut(&request) {
                     entry.consumers = entry.consumers.saturating_add(1);
+                    let consumer_id = entry.next_consumer_id;
+                    entry.next_consumer_id = entry.next_consumer_id.wrapping_add(1);
+                    consumer_id
                 } else {
                     entries.entries.insert(
                         request.clone(),
@@ -1007,12 +1033,15 @@ impl OwnedChunkProvider {
                             result: None,
                             waiters: Vec::new(),
                             consumers: 1,
+                            next_consumer_id: 1,
                         },
                     );
+                    0
                 }
-            }
+            };
             CoalescedChunkGet {
                 request,
+                consumer_id,
                 in_flight,
                 leases,
                 done: false,
@@ -1352,6 +1381,95 @@ mod tests {
             Pin::new(&mut second).poll(&mut second_context),
             Poll::Ready(Ok(_))
         ));
+    }
+
+    // This must stay internal: public query APIs cannot observe an executor's
+    // replacement waker identity or prove that obsolete task allocations are
+    // released while a shared request remains pending.
+    #[test]
+    fn replacing_a_pending_consumers_waker_drops_stale_wakers() {
+        struct NeverReadyProvider;
+
+        impl ChunkProvider for NeverReadyProvider {
+            fn get(&self, _request: ChunkRequest) -> ChunkFuture<'_, Result<Bytes, ChunkError>> {
+                Box::pin(std::future::pending())
+            }
+        }
+
+        struct WakeToken;
+
+        impl ArcWake for WakeToken {
+            fn wake_by_ref(_: &Arc<Self>) {}
+        }
+
+        let bytes = Bytes::from_static(b"replace stale consumer wakers");
+        let request = ChunkRequest {
+            object_hash: crate::large_values::object_hash(&bytes).0,
+            locator: Locator::from_seed(b"replace-stale-consumer-wakers"),
+        };
+        let chunks = OwnedChunkProvider::new(Rc::new(NeverReadyProvider));
+        let mut first = chunks.get(request.clone());
+        let mut second = chunks.get(request.clone());
+        let mut weak_wakers = Vec::new();
+
+        // Futures may be polled repeatedly by executors which install a fresh
+        // task waker after every suspension. The registry must retain only the
+        // current waker for this one consumer, not one clone per poll.
+        for _ in 0..8 {
+            let token = Arc::new(WakeToken);
+            weak_wakers.push(Arc::downgrade(&token));
+            let waker = waker(token);
+            let mut context = std::task::Context::from_waker(&waker);
+            assert!(matches!(
+                Pin::new(&mut first).poll(&mut context),
+                Poll::Pending
+            ));
+        }
+
+        let second_token = Arc::new(WakeToken);
+        let second_waker = waker(second_token);
+        let mut second_context = std::task::Context::from_waker(&second_waker);
+        assert!(matches!(
+            Pin::new(&mut second).poll(&mut second_context),
+            Poll::Pending
+        ));
+        assert_eq!(
+            chunks
+                .in_flight
+                .borrow()
+                .entries
+                .get(&request)
+                .expect("both pending consumers retain the request")
+                .waiters
+                .len(),
+            2
+        );
+        assert!(
+            weak_wakers[..7]
+                .iter()
+                .all(|waker| waker.upgrade().is_none())
+        );
+        assert!(weak_wakers[7].upgrade().is_some());
+
+        // Dropping the backing poller releases its current waiter and wakes
+        // the remaining consumer to register itself as the new poller.
+        drop(first);
+        assert_eq!(
+            chunks
+                .in_flight
+                .borrow()
+                .entries
+                .get(&request)
+                .expect("remaining consumer retains the request")
+                .waiters
+                .len(),
+            0,
+            "handoff wakes and clears the remaining consumer for re-registration"
+        );
+        assert!(weak_wakers[7].upgrade().is_none());
+
+        drop(second);
+        assert!(chunks.in_flight.borrow().entries.is_empty());
     }
 
     #[test]
