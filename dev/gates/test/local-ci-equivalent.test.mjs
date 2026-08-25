@@ -8,10 +8,13 @@ import { parse } from "yaml";
 import {
   RUST_CI_FEATURES,
   RUST_WORKSPACE_TARGETS,
+  ALLOWED_INHERITED_CI_JAZZ_ENV,
   assertArtifactBoundary,
   assertFullWorkspaceCoverage,
   ciPartitionJobs,
   ciPartitions,
+  commandEnvironment,
+  exactCiEnvironment,
   planFor,
   runPlan,
 } from "../local-ci-equivalent.mjs";
@@ -219,6 +222,34 @@ test("the shared TypeScript runner rejects inherited suite overrides under the C
   });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /JAZZ_NODE_TEST_COMMAND.*forbidden by the CI-equivalent partition/);
+});
+
+test("exact partitions fail closed on ambient Jazz controls and retain only the CI artifact lock", () => {
+  assert.deepEqual(ALLOWED_INHERITED_CI_JAZZ_ENV, ["JAZZ_TEST_ARTIFACT_LOCK_PATH"]);
+  assert.throws(
+    () =>
+      exactCiEnvironment({
+        PATH: "/bin",
+        JAZZ_UPDATE_WIRE_FIXTURES: "1",
+        JAZZ_SKIP_BULK_INGEST_ASSERTS: "1",
+      }),
+    /JAZZ_SKIP_BULK_INGEST_ASSERTS, JAZZ_UPDATE_WIRE_FIXTURES/,
+    "fixture rewrites and assertion skips must fail before any partition starts",
+  );
+
+  const base = exactCiEnvironment({
+    PATH: "/bin",
+    JAZZ_TEST_ARTIFACT_LOCK_PATH: "/tmp/jazz-test-artifacts.lock",
+  });
+  assert.deepEqual(base, {
+    PATH: "/bin",
+    JAZZ_TEST_ARTIFACT_LOCK_PATH: "/tmp/jazz-test-artifacts.lock",
+  });
+  assert.deepEqual(commandEnvironment(base, { JAZZ_REQUIRE_CI_TEST_COMMANDS: "1" }), {
+    PATH: "/bin",
+    JAZZ_TEST_ARTIFACT_LOCK_PATH: "/tmp/jazz-test-artifacts.lock",
+    JAZZ_REQUIRE_CI_TEST_COMMANDS: "1",
+  });
 });
 
 test("planted bench/test/bin/example compile failures are surfaced rather than skipped", async () => {

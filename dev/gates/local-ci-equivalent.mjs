@@ -29,6 +29,12 @@ export const RUST_WORKSPACE_TARGETS = Object.freeze([
 export const RUST_CI_FEATURES =
   "jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test";
 
+// CI setup supplies this one coordination input. Every other JAZZ_* variable
+// is a test, fixture, benchmark, timeout, or assertion control and would make
+// a local exact-partition result mean something different from GitHub CI.
+export const ALLOWED_INHERITED_CI_JAZZ_ENV = Object.freeze(["JAZZ_TEST_ARTIFACT_LOCK_PATH"]);
+const allowedInheritedCiJazzEnv = new Set(ALLOWED_INHERITED_CI_JAZZ_ENV);
+
 /** The CI-suite job that invokes each named partition. */
 export const ciPartitionJobs = Object.freeze({
   lint: "lint",
@@ -182,18 +188,47 @@ export function assertArtifactBoundary(commands) {
     throw new Error("CI-equivalent TypeScript plan runs tests before correctness artifacts.");
 }
 
-export async function runPlan(commands, run = runCommand) {
-  for (const item of commands) await run(item);
+/**
+ * Reject ambient Jazz controls before any exact partition begins.  Command
+ * local controls are appended only after this check, so callers cannot smuggle
+ * an override through a child process environment.
+ */
+export function exactCiEnvironment(parentEnvironment = process.env) {
+  const forbidden = Object.keys(parentEnvironment)
+    .filter((name) => name.startsWith("JAZZ_") && !allowedInheritedCiJazzEnv.has(name))
+    .sort();
+  if (forbidden.length) {
+    throw new Error(
+      `CI-equivalent gate refuses inherited Jazz control(s): ${forbidden.join(", ")}. ` +
+        "Unset them; only JAZZ_TEST_ARTIFACT_LOCK_PATH is inherited from CI setup.",
+    );
+  }
+  return Object.fromEntries(
+    Object.entries(parentEnvironment).filter(
+      ([name]) => !name.startsWith("JAZZ_") || allowedInheritedCiJazzEnv.has(name),
+    ),
+  );
 }
 
-export async function runCommand({ label, executable, args, env = {} }) {
+export function commandEnvironment(baseEnvironment, localEnvironment = {}) {
+  return { ...baseEnvironment, ...localEnvironment };
+}
+
+export async function runPlan(commands, run = runCommand, baseEnvironment = process.env) {
+  for (const item of commands) await run(item, baseEnvironment);
+}
+
+export async function runCommand(
+  { label, executable, args, env = {} },
+  baseEnvironment = process.env,
+) {
   const started = performance.now();
   console.log(`local-ci: start ${label}: ${[executable, ...args].join(" ")}`);
   const status = await new Promise((resolvePromise, reject) => {
     const child = spawn(executable, args, {
       cwd: root,
       stdio: "inherit",
-      env: { ...process.env, ...env },
+      env: commandEnvironment(baseEnvironment, env),
     });
     child.once("error", reject);
     child.once("exit", (code, signal) => resolvePromise({ code, signal }));
@@ -229,14 +264,19 @@ async function main(argv) {
   }
 
   const commands = planFor({ mode, partition });
-  if (mode === "ci-equivalent") {
-    assertFullWorkspaceCoverage(commands);
-    assertArtifactBoundary(commands);
-    console.log("local-ci: CI-equivalent mode; running every CI command partition serially.");
-  } else if (!partition) {
+  const isExactPartition = mode === "ci-equivalent" || partition !== undefined;
+  if (isExactPartition) {
+    const baseEnvironment = exactCiEnvironment();
+    if (mode === "ci-equivalent") {
+      assertFullWorkspaceCoverage(commands);
+      assertArtifactBoundary(commands);
+      console.log("local-ci: CI-equivalent mode; running every CI command partition serially.");
+    }
+    await runPlan(commands, runCommand, baseEnvironment);
+  } else {
     console.log("local-ci: focused mode only; this is NOT CI-equivalent.");
+    await runPlan(commands);
   }
-  await runPlan(commands);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
