@@ -2,6 +2,92 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    pub(super) fn prepared_physical_write_plan(
+        &mut self,
+        schema_version: SchemaVersionId,
+        logical_table: &str,
+        target: PhysicalWriteTarget,
+    ) -> Result<Arc<PreparedPhysicalWritePlan>, Error> {
+        if let Some(plan) = self
+            .catalogue
+            .physical_write_plan_cache
+            .get(&schema_version)
+            .and_then(|tables| tables.get(logical_table))
+            .and_then(|targets| targets.get(&target))
+        {
+            return Ok(Arc::clone(plan));
+        }
+
+        let source_table = Arc::new(self.table_in_schema(logical_table, schema_version)?);
+        let source_mapping = Arc::new(
+            self.catalogue
+                .physical_mappings
+                .get(&schema_version)
+                .and_then(|mapping| mapping.tables.get(logical_table))
+                .cloned()
+                .ok_or(Error::InvalidStoredValue(
+                    "physical write table mapping missing",
+                ))?,
+        );
+        let storage_table = match target {
+            PhysicalWriteTarget::History => physical_history_storage_table(
+                &self.catalogue.physical_mappings,
+                schema_version,
+                logical_table,
+            )?,
+            PhysicalWriteTarget::GlobalCurrent => physical_current_storage_table(
+                &self.catalogue.physical_mappings,
+                schema_version,
+                logical_table,
+                PhysicalCurrentClass::Global,
+            )?,
+            PhysicalWriteTarget::AheadCurrent => physical_current_storage_table(
+                &self.catalogue.physical_mappings,
+                schema_version,
+                logical_table,
+                PhysicalCurrentClass::Ahead,
+            )?,
+        };
+        let physical_table = Arc::new(self.database.table_schema(&storage_table)?.clone());
+        let logical_descriptor = match target {
+            PhysicalWriteTarget::History => source_table.history_storage_table().record_schema(),
+            PhysicalWriteTarget::GlobalCurrent => {
+                source_table.global_current_storage_tables()[0].record_schema()
+            }
+            PhysicalWriteTarget::AheadCurrent => {
+                source_table.ahead_current_storage_tables()[0].record_schema()
+            }
+        };
+        let physical_names = match target {
+            PhysicalWriteTarget::History => {
+                physical_history_field_names(&source_table, &source_mapping)?
+            }
+            PhysicalWriteTarget::GlobalCurrent | PhysicalWriteTarget::AheadCurrent => {
+                physical_current_field_names(&source_table, &source_mapping)?
+            }
+        };
+        let physical_descriptor = physical_write_descriptor(
+            &logical_descriptor,
+            &physical_names,
+            &physical_table,
+        )?;
+        let plan = Arc::new(PreparedPhysicalWritePlan {
+            storage_table,
+            source_table,
+            source_mapping,
+            physical_table,
+            physical_descriptor,
+        });
+        self.catalogue
+            .physical_write_plan_cache
+            .entry(schema_version)
+            .or_default()
+            .entry(logical_table.to_owned())
+            .or_default()
+            .insert(target, Arc::clone(&plan));
+        Ok(plan)
+    }
+
     pub(super) fn version_storage_table_for_row(
         &mut self,
         version: &VersionRow,
@@ -238,33 +324,18 @@ where
             return self.shared_deletion_history_write_binding(version);
         }
 
-        let storage_table = physical_history_storage_table(
-            &self.catalogue.physical_mappings,
+        let plan = self.prepared_physical_write_plan(
             schema_version,
             version.table(),
-        )?;
-        let source_table = self.table_in_schema(version.table(), schema_version)?;
-        let source_mapping = self
-            .catalogue
-            .physical_mappings
-            .get(&schema_version)
-            .and_then(|mapping| mapping.tables.get(version.table()))
-            .ok_or(Error::InvalidStoredValue(
-                "physical history table mapping missing",
-            ))?;
-        let physical_table = self.database.table_schema(&storage_table)?.clone();
-        let descriptor = physical_write_descriptor(
-            &source_table.history_storage_table().record_schema(),
-            &physical_history_field_names(&source_table, source_mapping)?,
-            &physical_table,
+            PhysicalWriteTarget::History,
         )?;
         // The authored row carries declaration-local enum ordinals.  Rewrite
         // those cells through their durable schema-qualified identities before
         // giving the record to the physical table; raw-copying would alias two
         // concurrent siblings which both authored ordinal 2.
         let mut values = version.record.to_values()?;
-        for (column_index, column) in source_table.columns.iter().enumerate() {
-            let column_id = source_mapping.columns.get(&column.name).copied().ok_or(
+        for (column_index, column) in plan.source_table.columns.iter().enumerate() {
+            let column_id = plan.source_mapping.columns.get(&column.name).copied().ok_or(
                 Error::InvalidStoredValue("physical scalar enum write column mapping missing"),
             )?;
             let value_index = HistoryRowRecord::USER_CELLS + column_index;
@@ -274,9 +345,9 @@ where
                     "history scalar enum write field missing",
                 ))?;
             let mut remaps = EnumOccurrenceRemaps::default();
-            if let Some(authored_cases) = source_mapping.scalar_enum_cases.get(&column_id) {
+            if let Some(authored_cases) = plan.source_mapping.scalar_enum_cases.get(&column_id) {
                 let physical_cases =
-                    self.physical_scalar_enum_cases(source_mapping.table_id, column_id)?;
+                    self.physical_scalar_enum_cases(plan.source_mapping.table_id, column_id)?;
                 remaps.scalar.insert(
                     "root".to_owned(),
                     authored_cases
@@ -297,9 +368,9 @@ where
                         .collect::<Result<_, _>>()?,
                 );
             }
-            if let Some(authored_cases) = source_mapping.payload_enum_cases.get(&column_id) {
+            if let Some(authored_cases) = plan.source_mapping.payload_enum_cases.get(&column_id) {
                 let physical_cases =
-                    self.physical_payload_enum_cases(source_mapping.table_id, column_id)?;
+                    self.physical_payload_enum_cases(plan.source_mapping.table_id, column_id)?;
                 remaps.payload.insert(
                     "root".to_owned(),
                     authored_cases
@@ -327,10 +398,10 @@ where
                         .collect(),
                 );
             }
-            if let Some(authored_paths) = source_mapping.nested_scalar_enum_cases.get(&column_id) {
+            if let Some(authored_paths) = plan.source_mapping.nested_scalar_enum_cases.get(&column_id) {
                 for (path, authored_cases) in authored_paths {
                     let physical_cases = self.physical_nested_scalar_enum_cases(
-                        source_mapping.table_id,
+                        plan.source_mapping.table_id,
                         column_id,
                         path,
                     )?;
@@ -355,10 +426,10 @@ where
                     );
                 }
             }
-            if let Some(authored_paths) = source_mapping.nested_payload_enum_cases.get(&column_id) {
+            if let Some(authored_paths) = plan.source_mapping.nested_payload_enum_cases.get(&column_id) {
                 for (path, authored_cases) in authored_paths {
                     let physical_cases = self.physical_nested_payload_enum_cases(
-                        source_mapping.table_id,
+                        plan.source_mapping.table_id,
                         column_id,
                         path,
                     )?;
@@ -393,7 +464,7 @@ where
             if remaps.scalar.is_empty() && remaps.payload.is_empty() {
                 continue;
             }
-            let physical_type = physical_table
+            let physical_type = plan.physical_table
                 .columns
                 .iter()
                 .find(|physical| physical.name == physical_user_column_field(column_id))
@@ -414,9 +485,12 @@ where
                 "root",
             )?)));
         }
-        let record = OwnedRecord::new(descriptor.create(&values)?, descriptor);
+        let record = OwnedRecord::new(
+            plan.physical_descriptor.create(&values)?,
+            plan.physical_descriptor,
+        );
         Ok((
-            groove::Intern::new(storage_table),
+            groove::Intern::new(plan.storage_table.clone()),
             groove::records::VariantRecord::new(
                 groove_variant_tag(version.schema_version_alias())?,
                 record,

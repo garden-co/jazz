@@ -668,6 +668,14 @@ struct SchemaCatalogue {
     lens_path_cache: BTreeMap<LensPathCacheKey, Option<Vec<MigrationLensId>>>,
     /// Table-specific, already-validated lens programs used by hot read/write paths.
     compiled_lens_cache: BTreeMap<CompiledLensCacheKey, Option<CompiledLensPath>>,
+    /// Immutable lowering plans reused by authored-to-physical row writes.
+    physical_write_plan_cache: BTreeMap<
+        SchemaVersionId,
+        BTreeMap<
+            String,
+            BTreeMap<physical::PhysicalWriteTarget, Arc<physical::PreparedPhysicalWritePlan>>,
+        >,
+    >,
     /// Schema version currently used for newly authored writes.
     current_write_schema: CurrentWriteSchema,
 }

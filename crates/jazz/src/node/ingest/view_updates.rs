@@ -1242,44 +1242,29 @@ where
             .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
         match version.layer() {
             VersionLayer::Content => {
-                let table = self.table_in_schema(version.table(), schema_version)?;
-                let storage_table = physical_current_storage_table(
-                    &self.catalogue.physical_mappings,
+                let plan = self.prepared_physical_write_plan(
                     schema_version,
                     version.table(),
-                    PhysicalCurrentClass::Global,
+                    PhysicalWriteTarget::GlobalCurrent,
                 )?;
-                let logical = owned_record_from_storage_values(
-                    &table.global_current_storage_tables()[0],
-                    self.public_current_values(&table, version, Some(global_time))?,
-                )
-                .expect("valid global current row");
-                let mapping = self
-                    .catalogue
-                    .physical_mappings
-                    .get(&schema_version)
-                    .and_then(|mapping| mapping.tables.get(version.table()))
-                    .cloned()
-                    .ok_or(Error::InvalidStoredValue(
-                        "physical global-current table mapping missing",
-                    ))?;
-                let physical_table = self.database.table_schema(&storage_table)?.clone();
-                let descriptor = physical_write_descriptor(
-                    &table.global_current_storage_tables()[0].record_schema(),
-                    &physical_current_field_names(&table, &mapping)?,
-                    &physical_table,
+                let mut values = self.public_current_values(
+                    &plan.source_table,
+                    version,
+                    Some(global_time),
                 )?;
-                let mut values = logical.to_values()?;
                 self.remap_authored_enum_cells_for_physical(
                     &mut values,
-                    &table,
-                    &mapping,
-                    &physical_table,
+                    &plan.source_table,
+                    &plan.source_mapping,
+                    &plan.physical_table,
                     GlobalCurrentRowRecord::USER_CELLS,
                 )?;
-                let physical = OwnedRecord::new(descriptor.create(&values)?, descriptor);
+                let physical = OwnedRecord::new(
+                    plan.physical_descriptor.create(&values)?,
+                    plan.physical_descriptor,
+                );
                 batch.update_raw(
-                    storage_table,
+                    plan.storage_table.clone(),
                     global_current_primary_key(version.branch_key(), version.row_uuid()),
                     groove::records::VariantRecord::new(
                         u32::try_from(version.schema_version_alias().0)
@@ -1344,44 +1329,26 @@ where
             .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
         match version.layer() {
             VersionLayer::Content => {
-                let table = self.table_in_schema(version.table(), schema_version)?;
-                let storage_table = physical_current_storage_table(
-                    &self.catalogue.physical_mappings,
+                let plan = self.prepared_physical_write_plan(
                     schema_version,
                     version.table(),
-                    PhysicalCurrentClass::Ahead,
+                    PhysicalWriteTarget::AheadCurrent,
                 )?;
-                let logical = owned_record_from_storage_values(
-                    &table.ahead_current_storage_tables()[0],
-                    self.public_current_values(&table, version, None)?,
-                )
-                .expect("valid ahead current row");
-                let mapping = self
-                    .catalogue
-                    .physical_mappings
-                    .get(&schema_version)
-                    .and_then(|mapping| mapping.tables.get(version.table()))
-                    .cloned()
-                    .ok_or(Error::InvalidStoredValue(
-                        "physical ahead-current table mapping missing",
-                    ))?;
-                let physical_table = self.database.table_schema(&storage_table)?.clone();
-                let descriptor = physical_write_descriptor(
-                    &table.ahead_current_storage_tables()[0].record_schema(),
-                    &physical_current_field_names(&table, &mapping)?,
-                    &physical_table,
-                )?;
-                let mut values = logical.to_values()?;
+                let mut values =
+                    self.public_current_values(&plan.source_table, version, None)?;
                 self.remap_authored_enum_cells_for_physical(
                     &mut values,
-                    &table,
-                    &mapping,
-                    &physical_table,
+                    &plan.source_table,
+                    &plan.source_mapping,
+                    &plan.physical_table,
                     GlobalCurrentRowRecord::USER_CELLS,
                 )?;
-                let physical = OwnedRecord::new(descriptor.create(&values)?, descriptor);
+                let physical = OwnedRecord::new(
+                    plan.physical_descriptor.create(&values)?,
+                    plan.physical_descriptor,
+                );
                 batch.insert_raw(
-                    storage_table,
+                    plan.storage_table.clone(),
                     history_primary_key(version),
                     groove::records::VariantRecord::new(
                         u32::try_from(version.schema_version_alias().0)
