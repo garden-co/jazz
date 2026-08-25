@@ -22,6 +22,8 @@ export class BrowserConnectionManager extends ConnectionManager {
   private connectionError: Error | null = null;
   private disconnected = false;
   private readonly reconnectWaiters = new Set<() => void>();
+  private transportTransition: Promise<void> = Promise.resolve();
+  private transportRequest = 0;
   private storageReset: Promise<void> | null = null;
   private unregisterInspectorControl: (() => void) | null = null;
 
@@ -57,16 +59,22 @@ export class BrowserConnectionManager extends ConnectionManager {
     void this.connectionReady.catch(() => undefined);
   }
 
-  async ensureReady(tier?: DurabilityTier): Promise<void> {
+  async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
     if (this.host.isShuttingDown) return;
     await this.storageReset;
     if (this.connectionError) throw this.connectionError;
     await this.connectionReady;
     if (this.host.isShuttingDown) return;
     if (this.connectionError) throw this.connectionError;
-    if (this.disconnected && tier !== "local") {
-      await new Promise<void>((resolve) => this.reconnectWaiters.add(resolve));
-      if (this.host.isShuttingDown) return;
+    if (tier !== "local") {
+      for (;;) {
+        while (this.disconnected) {
+          await this.waitForReconnect(signal);
+          if (this.host.isShuttingDown || signal?.aborted) return;
+        }
+        await this.transportTransition;
+        if (!this.disconnected || this.host.isShuttingDown || signal?.aborted) break;
+      }
     }
     if (this.host.config.serverUrl && tier !== "local") {
       await this.connection?.waitForServerConnection();
@@ -80,14 +88,20 @@ export class BrowserConnectionManager extends ConnectionManager {
     return this.disconnected;
   }
   async waitForReconnect(signal?: AbortSignal): Promise<void> {
-    if (!this.disconnected) return;
+    if (signal?.aborted) return;
+    if (!this.disconnected) {
+      await this.transportTransition;
+      if (!this.disconnected) return;
+    }
     await new Promise<void>((resolve) => {
-      const onAbort = () => resolve();
-      signal?.addEventListener("abort", onAbort, { once: true });
-      this.reconnectWaiters.add(() => {
+      const finish = () => {
+        this.reconnectWaiters.delete(finish);
         signal?.removeEventListener("abort", onAbort);
         resolve();
-      });
+      };
+      const onAbort = () => finish();
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.reconnectWaiters.add(finish);
     });
   }
 
@@ -95,22 +109,33 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (!this.host.config.serverUrl) {
       throw new Error("Db.disconnect() requires a configured serverUrl.");
     }
-    await this.connectionReady;
-    await this.connection?.disconnect();
+    const request = ++this.transportRequest;
     this.disconnected = true;
+    try {
+      await this.enqueueTransportTransition(async () => {
+        await this.connectionReady;
+        await this.connection?.disconnect();
+      });
+    } catch (error) {
+      if (this.transportRequest === request) this.disconnected = false;
+      throw error;
+    }
   }
 
   async reconnect(): Promise<void> {
     if (!this.host.config.serverUrl) {
       throw new Error("Db.reconnect() requires a configured serverUrl.");
     }
-    await this.connectionReady;
-    await this.connection?.reconnect(
-      JSON.stringify(runtimeAuth(this.host.config)),
-      runtimeSessionClaims(this.host.config),
-    );
+    ++this.transportRequest;
     this.disconnected = false;
-    this.resolveReconnectWaiters();
+    await this.enqueueTransportTransition(async () => {
+      await this.connectionReady;
+      await this.connection?.reconnect(
+        JSON.stringify(runtimeAuth(this.host.config)),
+        runtimeSessionClaims(this.host.config),
+      );
+    });
+    if (!this.disconnected) this.resolveReconnectWaiters();
   }
 
   override updateAuth(auth: {
@@ -185,6 +210,12 @@ export class BrowserConnectionManager extends ConnectionManager {
     const waiters = [...this.reconnectWaiters];
     this.reconnectWaiters.clear();
     for (const resolve of waiters) resolve();
+  }
+
+  private enqueueTransportTransition(run: () => void | Promise<void>): Promise<void> {
+    const transition = this.transportTransition.then(run, run);
+    this.transportTransition = transition.catch(() => undefined);
+    return transition;
   }
 }
 

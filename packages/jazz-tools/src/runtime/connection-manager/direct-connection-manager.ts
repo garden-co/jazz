@@ -8,7 +8,9 @@ import {
 /** Manages a Db whose runtime connects directly to the configured server. */
 export class DirectConnectionManager extends ConnectionManager {
   private isDisconnected = false;
-  private reconnectWaiters: Array<() => void> = [];
+  private reconnectWaiters = new Set<() => void>();
+  private transportTransition: Promise<void> = Promise.resolve();
+  private transportRequest = 0;
 
   constructor(host: DbForConnection) {
     super(host);
@@ -37,11 +39,16 @@ export class DirectConnectionManager extends ConnectionManager {
     });
   }
 
-  async ensureReady(tier?: DurabilityTier, _signal?: AbortSignal): Promise<void> {
-    if (!this.isDisconnected || tier === "local") return;
-    await new Promise<void>((resolve) => {
-      this.reconnectWaiters.push(resolve);
-    });
+  async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
+    if (tier === "local") return;
+    for (;;) {
+      while (this.isDisconnected) {
+        await this.waitForReconnect(signal);
+        if (signal?.aborted) return;
+      }
+      await this.transportTransition;
+      if (!this.isDisconnected || signal?.aborted) return;
+    }
   }
 
   shouldDeferSubscriptionStart(_tier?: DurabilityTier): boolean {
@@ -51,14 +58,20 @@ export class DirectConnectionManager extends ConnectionManager {
     return this.isDisconnected;
   }
   async waitForReconnect(signal?: AbortSignal): Promise<void> {
-    if (!this.isDisconnected) return;
+    if (signal?.aborted) return;
+    if (!this.isDisconnected) {
+      await this.transportTransition;
+      if (!this.isDisconnected) return;
+    }
     await new Promise<void>((resolve) => {
-      const onAbort = () => resolve();
-      signal?.addEventListener("abort", onAbort, { once: true });
-      this.reconnectWaiters.push(() => {
+      const finish = () => {
+        this.reconnectWaiters.delete(finish);
         signal?.removeEventListener("abort", onAbort);
         resolve();
-      });
+      };
+      const onAbort = () => finish();
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.reconnectWaiters.add(finish);
     });
   }
 
@@ -66,20 +79,39 @@ export class DirectConnectionManager extends ConnectionManager {
     if (!this.host.config.serverUrl) {
       throw new Error("Db.disconnect() requires a configured serverUrl.");
     }
+    const request = ++this.transportRequest;
     this.isDisconnected = true;
-    await this.clientEntry?.client.disconnectTransport();
+    try {
+      await this.enqueueTransportTransition(async () => {
+        await this.clientEntry?.client.disconnectTransport();
+      });
+    } catch (error) {
+      // A failed explicit disconnect must not be mistaken for permission to
+      // fall back locally. A newer control request owns the state if present.
+      if (this.transportRequest === request) this.isDisconnected = false;
+      throw error;
+    }
   }
 
   async reconnect(): Promise<void> {
     if (!this.host.config.serverUrl) {
       throw new Error("Db.reconnect() requires a configured serverUrl.");
     }
+    ++this.transportRequest;
     this.isDisconnected = false;
-    const client = this.clientEntry?.client;
-    if (client) this.connectClient(client);
-    for (const resolve of this.reconnectWaiters.splice(0)) {
-      resolve();
+    await this.enqueueTransportTransition(async () => {
+      const client = this.clientEntry?.client;
+      if (client) this.connectClient(client);
+    });
+    if (!this.isDisconnected) {
+      for (const resolve of [...this.reconnectWaiters]) resolve();
     }
+  }
+
+  private enqueueTransportTransition(run: () => void | Promise<void>): Promise<void> {
+    const transition = this.transportTransition.then(run, run);
+    this.transportTransition = transition.catch(() => undefined);
+    return transition;
   }
 
   async deleteClientStorage(): Promise<void> {

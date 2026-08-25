@@ -4,6 +4,14 @@ import type { BrowserWorkerConnection } from "../runtime-source.js";
 import { BrowserConnectionManager } from "./browser-connection-manager.js";
 import type { DbForConnection } from "./types.js";
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 describe("BrowserConnectionManager.shutdown", () => {
   it("continues teardown after flush fails and preserves the flush error", async () => {
     const flushError = new Error("flush failed");
@@ -42,5 +50,63 @@ describe("BrowserConnectionManager.shutdown", () => {
     expect(client.discard).toHaveBeenCalledOnce();
     expect(disposeRuntimeTelemetry).toHaveBeenCalledOnce();
     expect(connection.shutdown).toHaveBeenCalledOnce();
+  });
+});
+
+describe("BrowserConnectionManager explicit transport transitions", () => {
+  it("serializes disconnect/reconnect and releases remote readiness after the last transition", async () => {
+    const disconnectGate = deferred();
+    const connection = {
+      disconnect: vi.fn(() => disconnectGate.promise),
+      reconnect: vi.fn(async () => undefined),
+      waitForServerConnection: vi.fn(async () => undefined),
+    } as unknown as BrowserWorkerConnection;
+    const manager = new BrowserConnectionManager({
+      config: { serverUrl: "https://example.test" },
+      isShuttingDown: false,
+    } as DbForConnection);
+    Object.assign(
+      manager as unknown as {
+        connection: BrowserWorkerConnection;
+        connectionReady: Promise<void>;
+      },
+      { connection, connectionReady: Promise.resolve() },
+    );
+
+    const disconnect = manager.disconnect();
+    const ready = manager.ensureReady("edge");
+    const reconnect = manager.reconnect();
+    await Promise.resolve();
+    expect(connection.reconnect).not.toHaveBeenCalled();
+
+    disconnectGate.resolve();
+    await Promise.all([disconnect, reconnect, ready]);
+    expect(connection.disconnect).toHaveBeenCalledOnce();
+    expect(connection.reconnect).toHaveBeenCalledOnce();
+    expect(connection.waitForServerConnection).toHaveBeenCalledOnce();
+    expect(manager.isExplicitlyOffline()).toBe(false);
+  });
+
+  it("does not retain explicit-offline state when disconnect fails", async () => {
+    const failure = new Error("worker disconnect failed");
+    const connection = {
+      disconnect: vi.fn(async () => {
+        throw failure;
+      }),
+    } as unknown as BrowserWorkerConnection;
+    const manager = new BrowserConnectionManager({
+      config: { serverUrl: "https://example.test" },
+      isShuttingDown: false,
+    } as DbForConnection);
+    Object.assign(
+      manager as unknown as {
+        connection: BrowserWorkerConnection;
+        connectionReady: Promise<void>;
+      },
+      { connection, connectionReady: Promise.resolve() },
+    );
+
+    await expect(manager.disconnect()).rejects.toBe(failure);
+    expect(manager.isExplicitlyOffline()).toBe(false);
   });
 });
