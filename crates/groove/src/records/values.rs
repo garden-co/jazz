@@ -425,6 +425,29 @@ enum InternalValueTypeRepr {
     StoredScalar(crate::large_values::LargeValueKind),
 }
 
+/// Whether a value can be used as an ordered `collect_by` key.
+///
+/// Nullable values retain the ordering of their inner scalar. Composite values
+/// deliberately do not: collector keys must be independently ordered values.
+pub fn collect_by_ordered_scalar(value_type: &ValueType) -> bool {
+    match value_type {
+        ValueType::Nullable(inner) => collect_by_ordered_scalar(inner),
+        ValueType::U8
+        | ValueType::U16
+        | ValueType::U32
+        | ValueType::U64
+        | ValueType::I32
+        | ValueType::I64
+        | ValueType::F64
+        | ValueType::Bool
+        | ValueType::String
+        | ValueType::Bytes
+        | ValueType::Uuid
+        | ValueType::EnumTag(_) => true,
+        _ => false,
+    }
+}
+
 impl ValueType {
     /// Whether this is an engine-only physical backing type. Public schema and
     /// binding layers use this predicate to reject it without gaining access to

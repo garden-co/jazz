@@ -1054,6 +1054,21 @@ fn append_policy_clause(
     native_select_inherits: bool,
 ) -> Result<Query, SchemaConversionError> {
     match expr {
+        PolicyExpr::And(exprs) => {
+            let mut query = query;
+            for (index, expr) in exprs.iter().enumerate() {
+                query = append_policy_clause(
+                    schema,
+                    table_schema,
+                    table,
+                    &format!("{path}.And[{index}]"),
+                    query,
+                    expr,
+                    native_select_inherits,
+                )?;
+            }
+            Ok(query)
+        }
         PolicyExpr::Inherits {
             operation,
             via_column,
