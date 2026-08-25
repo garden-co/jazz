@@ -1058,7 +1058,7 @@ export function getCollectedMigration(): Lens | null {
           value: op.backwardsDefault,
         };
       case "rename":
-        return { type: "rename" as const, column, value: op.oldName };
+        return { type: "rename" as const, column: op.oldName, value: column };
     }
   });
 
@@ -1086,7 +1086,7 @@ export function getCollectedMigrations(): Lens[] {
             value: op.backwardsDefault,
           };
         case "rename":
-          return { type: "rename" as const, column, value: op.oldName };
+          return { type: "rename" as const, column: op.oldName, value: column };
       }
     });
     return { table: migration.table, operations };
