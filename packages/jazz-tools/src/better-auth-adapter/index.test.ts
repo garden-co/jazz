@@ -239,17 +239,21 @@ describe("jazzAdapter", () => {
       const sessionDb = await context.forRequest({
         headers: { authorization: `Bearer ${token}` },
       });
-      const generatedTables = [
-        fixtureApp.better_auth_user,
-        fixtureApp.better_auth_session,
-        fixtureApp.better_auth_account,
-        fixtureApp.better_auth_verification,
-        fixtureApp.better_auth_jwks,
-      ] as const;
-
-      for (const table of generatedTables) {
-        await expect(sessionDb.all(table, { tier: "edge" })).resolves.toEqual([]);
-      }
+      await expect(sessionDb.all(fixtureApp.better_auth_user, { tier: "edge" })).resolves.toEqual(
+        [],
+      );
+      await expect(
+        sessionDb.all(fixtureApp.better_auth_session, { tier: "edge" }),
+      ).resolves.toEqual([]);
+      await expect(
+        sessionDb.all(fixtureApp.better_auth_account, { tier: "edge" }),
+      ).resolves.toEqual([]);
+      await expect(
+        sessionDb.all(fixtureApp.better_auth_verification, { tier: "edge" }),
+      ).resolves.toEqual([]);
+      await expect(sessionDb.all(fixtureApp.better_auth_jwks, { tier: "edge" })).resolves.toEqual(
+        [],
+      );
 
       await expect(
         sessionDb
