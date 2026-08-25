@@ -110,8 +110,8 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
                     "database storage closed during chunk installation".to_owned(),
                 )
             })?;
-            let node: crate::large_values::ChunkNode = postcard::from_bytes(&encoded)
-                .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
+            let node = crate::large_values::decode_canonical_node(&encoded)
+                .map_err(|_| crate::chunks::ChunkError::Integrity)?;
             let children = match node {
                 crate::large_values::ChunkNode::Leaf { .. } => Vec::new(),
                 crate::large_values::ChunkNode::Branch { children, .. } => children

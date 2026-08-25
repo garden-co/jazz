@@ -2569,7 +2569,7 @@ pub fn decode_node(
     if object_hash(encoded) != expected_hash {
         return Err(Error::ObjectHashMismatch);
     }
-    let node: ChunkNode = postcard::from_bytes(encoded).map_err(|_| Error::MalformedNode)?;
+    let node = decode_canonical_node(encoded)?;
     match &node {
         ChunkNode::Leaf { format, bytes } => {
             check_format(*format)?;
@@ -2606,6 +2606,22 @@ pub fn decode_node(
                 return Err(Error::MalformedNode);
             }
         }
+    }
+    Ok(node)
+}
+
+/// Decode the authenticated chunk payload representation without interpreting
+/// its schema-derived logical kind. Postcard accepts trailing bytes, so an
+/// exact canonical re-encode check is required anywhere node structure is
+/// consumed outside [`decode_node`].
+pub(crate) fn decode_canonical_node(encoded: &[u8]) -> Result<ChunkNode, Error> {
+    if encoded.len() > MAX_ENCODED_NODE_BYTES {
+        return Err(Error::MalformedNode);
+    }
+    let node: ChunkNode = postcard::from_bytes(encoded).map_err(|_| Error::MalformedNode)?;
+    let canonical = postcard::to_allocvec(&node).map_err(|_| Error::MalformedNode)?;
+    if canonical != encoded {
+        return Err(Error::MalformedNode);
     }
     Ok(node)
 }
@@ -4560,6 +4576,34 @@ mod tests {
         assert_eq!(
             decode_node(LargeValueKind::Bytes, root.node_ref.object_hash, &corrupted,),
             Err(Error::ObjectHashMismatch)
+        );
+    }
+
+    #[test]
+    fn node_decode_rejects_trailing_bytes_even_under_their_recomputed_hash() {
+        let prepared =
+            prepare_with_locator(LargeValueKind::Bytes, b"canonical", deterministic_locator)
+                .unwrap();
+        let mut encoded = prepared.staged_chunks[0].encoded.clone();
+        encoded.push(0);
+        let appended_hash = object_hash(&encoded);
+        assert_eq!(
+            decode_node(LargeValueKind::Bytes, appended_hash, &encoded),
+            Err(Error::MalformedNode)
+        );
+    }
+
+    #[test]
+    fn staged_batch_rejects_noncanonical_nodes_before_publication() {
+        let prepared =
+            prepare_with_locator(LargeValueKind::Bytes, b"canonical", deterministic_locator)
+                .unwrap();
+        let mut chunk = prepared.staged_chunks[0].clone();
+        chunk.encoded.push(0);
+        chunk.node_ref.object_hash = object_hash(&chunk.encoded);
+        assert_eq!(
+            validate_staged_chunk_batch(LargeValueKind::Bytes, &[chunk]),
+            Err(Error::MalformedNode)
         );
     }
 

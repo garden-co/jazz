@@ -389,12 +389,13 @@ impl Database {
                     })?;
                 metadata
             } else {
-                let node: crate::large_values::ChunkNode = postcard::from_bytes(&chunk.encoded)
-                    .map_err(|error| {
+                let node = crate::large_values::decode_canonical_node(&chunk.encoded).map_err(
+                    |error| {
                         Error::InvalidLargeValueMetadata(format!(
                             "cannot decode pushed chunk metadata: {error}"
                         ))
-                    })?;
+                    },
+                )?;
                 let children = match node {
                     crate::large_values::ChunkNode::Leaf { .. } => Vec::new(),
                     crate::large_values::ChunkNode::Branch { children, .. } => {
