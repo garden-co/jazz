@@ -319,6 +319,11 @@ where
             .unwrap_or(u64::MAX)
     }
 
+    #[cfg(test)]
+    pub(super) fn set_reassembly_elapsed_for_test(&mut self, elapsed_ms: u64) {
+        self.reassembly_started = Instant::now() - std::time::Duration::from_millis(elapsed_ms);
+    }
+
     fn send_wire_error(&mut self, error: WireError) {
         if let Ok(frame) = encode_frame(&WireFrame::Error(error)) {
             let _ = self.inner.send_frame(frame);

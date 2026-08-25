@@ -255,6 +255,63 @@ fn test_message_fragment(
     }
 }
 
+struct ScriptedSendTransport {
+    send_results: std::collections::VecDeque<Result<(), TransportError>>,
+}
+
+impl WireTransport for ScriptedSendTransport {
+    fn send_frame(&mut self, _frame: Vec<u8>) -> Result<(), TransportError> {
+        self.send_results
+            .pop_front()
+            .expect("send result was scripted")
+    }
+
+    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+        None
+    }
+}
+
+#[test]
+fn send_expires_stale_reassembly_before_pending_outbound_flush_returns_early() {
+    let message = SyncMessage::SessionClaims {
+        identity: AuthorSubject::for_test_bytes([0x76; 16]),
+        claims: BTreeMap::new(),
+    };
+    let fragment = test_message_fragment(1, [1; 32], 2, 0, vec![1]);
+
+    for flush_error in [
+        TransportError::Backpressure,
+        TransportError::Failed("wire closed".to_owned()),
+    ] {
+        let mut adapter = WireTransportAdapter::new(
+            ScriptedSendTransport {
+                send_results: std::collections::VecDeque::from([
+                    Err(TransportError::Backpressure),
+                    Err(flush_error.clone()),
+                ]),
+            },
+            WIRE_PROTOCOL_VERSION,
+            FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_MESSAGE_FRAGMENTATION,
+            None,
+        );
+        assert_eq!(adapter.send(message.clone()), Ok(()));
+        assert_eq!(
+            adapter.reassembler.push(fragment.clone(), 0).unwrap(),
+            None
+        );
+        adapter.set_reassembly_elapsed_for_test(MAX_FRAGMENT_REASSEMBLY_IDLE_MS);
+
+        assert_eq!(adapter.send(message.clone()), Err(flush_error));
+        assert_eq!(
+            (
+                adapter.reassembler.incomplete.len(),
+                adapter.reassembler.staged_bytes,
+            ),
+            (0, 0)
+        );
+    }
+}
+
 #[test]
 fn stale_near_limit_staged_bytes_are_reclaimed_and_duplicates_do_not_extend_expiry() {
     let mut reassembler = LogicalMessageReassembler::with_staging_budget_for_test(8);
