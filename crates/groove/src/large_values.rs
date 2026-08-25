@@ -3704,6 +3704,53 @@ mod tests {
         Locator(hash.0)
     }
 
+    fn encode_v12_chunked_scalar(value: &LargeValueRef) -> Vec<u8> {
+        let primitive = RecordDescriptor::new([("value", ValueType::raw_bytes())]);
+        let root = RecordDescriptor::new([
+            ("object_hash", ValueType::raw_bytes()),
+            ("locator", ValueType::raw_bytes()),
+        ]);
+        let edit = RecordDescriptor::new([
+            ("offset", ValueType::U64),
+            ("delete_length", ValueType::U64),
+            ("insert_bytes", ValueType::raw_bytes()),
+            ("utf16_offset", ValueType::U64),
+            ("delete_utf16_length", ValueType::U64),
+            ("insert_utf16_length", ValueType::U64),
+        ]);
+        let chunked = RecordDescriptor::new([
+            ("format_version", ValueType::U8),
+            ("logical_hash", ValueType::raw_bytes()),
+            ("root", ValueType::Record(Box::new(root))),
+            ("byte_length", ValueType::U64),
+            (
+                "utf16_length",
+                ValueType::Nullable(Box::new(ValueType::U64)),
+            ),
+            (
+                "edit_tail",
+                ValueType::Array(Box::new(ValueType::Record(Box::new(edit)))),
+            ),
+        ]);
+        let schema = EnumSchema::new(
+            "groove.internal.stored_scalar.bytes",
+            [
+                EnumCase::new("Primitive", primitive),
+                EnumCase::new("Chunked", chunked),
+            ],
+        )
+        .unwrap();
+        let mut values = chunked_values(value);
+        let witness = values.remove(1);
+        assert_eq!(witness, Value::U8(large_value_kind_tag(value.kind)));
+        let value = EnumValue::create(1, schema.case(1).unwrap().payload, &values).unwrap();
+        crate::records::encode_single_field_value(
+            &Value::Enum(value),
+            &ValueType::Enum(Box::new(schema)),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn public_preparation_allocates_fresh_full_width_capabilities() {
         let prepare_signature: fn(LargeValueKind, &[u8]) -> Result<PreparedLargeValue, Error> =
@@ -4653,15 +4700,41 @@ mod tests {
             decode_stored_scalar(LargeValueKind::Bytes, &[4, 0]),
             Err(Error::MalformedScalar)
         );
-        // The pre-v13 codec encoded inline bytes as `[0] + payload`. Without
-        // reserved tags, this exact legacy value would be accepted as the new
-        // primitive `\x03abc`, silently treating its leading length byte as data.
+        // The v12 generic enum used tag 0 for Primitive. Its payload is byte-for-byte
+        // the v13 Primitive payload; only the tag changed to 2.
+        let current = encode_stored_scalar(
+            LargeValueKind::Bytes,
+            &StoredScalar::Primitive(b"abc".to_vec()),
+        )
+        .unwrap();
+        assert_eq!(current[0], 2);
+        let mut legacy_primitive = current;
+        legacy_primitive[0] = 0;
         assert_eq!(
-            decode_stored_scalar(LargeValueKind::Bytes, &[0, 3, b'a', b'b', b'c']),
+            decode_stored_scalar(LargeValueKind::Bytes, &legacy_primitive),
             Err(Error::MalformedScalar)
         );
         assert_eq!(
-            inline_scalar_bytes(LargeValueKind::Bytes, &[0, 3, b'a', b'b', b'c']),
+            inline_scalar_bytes(LargeValueKind::Bytes, &legacy_primitive),
+            Err(Error::MalformedScalar)
+        );
+
+        // The v12 generic Chunked case used tag 1 and the same ordinary record
+        // payload except that it had no schema-kind witness.
+        let prepared = prepare_with_locator(
+            LargeValueKind::Bytes,
+            &vec![7; LEAF_MAX_BYTES + 1],
+            deterministic_locator,
+        )
+        .unwrap();
+        let legacy_chunked = encode_v12_chunked_scalar(&prepared.value_ref);
+        assert_eq!(legacy_chunked[0], 1);
+        assert_eq!(
+            decode_stored_scalar(LargeValueKind::Bytes, &legacy_chunked),
+            Err(Error::MalformedScalar)
+        );
+        assert_eq!(
+            inline_scalar_bytes(LargeValueKind::Bytes, &legacy_chunked),
             Err(Error::MalformedScalar)
         );
     }
