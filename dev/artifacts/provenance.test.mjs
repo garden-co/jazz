@@ -28,6 +28,8 @@ function fixture() {
     "crates/jazz-native-transport/src",
     "crates/jazz-storage-rocksdb/src",
     "crates/jazz-otel/src",
+    "crates/jazz-compression/src",
+    "crates/benchmark-guard/src",
   ])
     mkdirSync(join(root, dir), { recursive: true });
   for (const [path, content] of Object.entries({
@@ -182,10 +184,17 @@ test("NAPI provenance excludes only the wrapper's ephemeral staged binding", () 
   assert.match(verifyManifest(root, "napi", "release"), /packageInputs differs/);
 });
 
-test("NAPI provenance covers every direct local Cargo dependency", () => {
+test("NAPI provenance covers every reachable local Cargo dependency", () => {
   const root = fixture();
   writeManifest(root, "napi", "release");
-  for (const crate of ["jazz-server", "jazz-native-transport", "jazz-storage-rocksdb", "jazz-otel"]) {
+  for (const crate of [
+    "jazz-server",
+    "jazz-native-transport",
+    "jazz-storage-rocksdb",
+    "jazz-otel",
+    "jazz-compression",
+    "benchmark-guard",
+  ]) {
     const path = join(root, `crates/${crate}/src/lib.rs`);
     writeFileSync(path, "// planted dependency change\n");
     assert.match(verifyManifest(root, "napi", "release"), /packageInputs differs/, crate);

@@ -154,12 +154,14 @@ const inputsFor = {
     "crates/jazz-napi",
     "crates/jazz",
     "crates/groove",
-    // Keep the direct Cargo source closure explicit. Cargo.lock records the
+    // Keep the reachable local Cargo source closure explicit. Cargo.lock records the
     // selected versions, not edits to these path/workspace crates.
     "crates/jazz-server",
     "crates/jazz-native-transport",
     "crates/jazz-storage-rocksdb",
     "crates/jazz-otel",
+    "crates/jazz-compression",
+    "crates/benchmark-guard",
   ],
 };
 
