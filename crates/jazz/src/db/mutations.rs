@@ -484,6 +484,10 @@ where
             target,
             updated_at_ms,
         } = options;
+        self.reject_attributed_branch_target(
+            identity,
+            matches!(target, ExactWriteTarget::Branch(_)),
+        )?;
         validate_updated_at_ms(updated_at_ms)?;
         let supplied_row_id = row_id.is_some();
         let row = row_id.unwrap_or_else(|| self.row_id_source.borrow_mut().next_row_id());
@@ -632,7 +636,7 @@ where
         match result_rx.await {
             Ok(Ok(())) => {
                 self.finish_streaming_value_upload(
-                    upload, mutation, table, row, cells, column, identity, now_ms, head, base,
+                    upload, mutation, table, row, cells, column, identity, now_ms, head, base, None,
                 )
                 .await
             }
@@ -760,7 +764,27 @@ where
         now_ms: Option<u64>,
         head: Option<BranchSelector>,
         base: Option<BranchViewBase>,
+        attribution: Option<AuthorSubject>,
     ) -> Result<WriteHandle<S>, Error> {
+        let attribution_rejection = match attribution {
+            Some(author) if author != self.identity.author && !self.backend_attribution => {
+                Some("attribution requires a trusted serving node")
+            }
+            Some(_) if identity.is_some() => Some(
+                "backend-attributed streaming mutations cannot override backend admission identity",
+            ),
+            Some(_) if head.is_some() || base.is_some() => {
+                Some("backend-attributed streaming mutations do not support branch targets")
+            }
+            _ => None,
+        };
+        if let Some(message) = attribution_rejection {
+            self.abort_streaming_value_upload(upload).await?;
+            return Err(Error::new(ErrorCode::WriteRejected, message));
+        }
+        // Provenance is external, but trusted backend admission remains this
+        // Db's identity all the way through the final policy-bearing commit.
+        let identity = attribution.map(|_| self.identity.author).or(identity);
         if !upload.initialized {
             self.node
                 .node
@@ -1081,6 +1105,10 @@ where
             target,
             updated_at_ms,
         } = options;
+        self.reject_attributed_branch_target(
+            identity,
+            matches!(target, WriteTarget::BranchView { .. }),
+        )?;
         validate_updated_at_ms(updated_at_ms)?;
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
@@ -1090,8 +1118,12 @@ where
                 if patch.is_empty() {
                     return match identity {
                         WriteIdentity::Database | WriteIdentity::Attribution(_) => {
-                            self.no_op_update_handle_for_client(table, row, made_by)
-                                .await
+                            self.no_op_update_handle_for_client(
+                                table,
+                                row,
+                                permission_subject.unwrap_or(made_by),
+                            )
+                            .await
                         }
                         WriteIdentity::Session(author) => {
                             self.no_op_update_handle_for_identity(table, row, author)
@@ -1195,6 +1227,10 @@ where
             target,
             updated_at_ms,
         } = options;
+        self.reject_attributed_branch_target(
+            identity,
+            matches!(target, ExactWriteTarget::Branch(_)),
+        )?;
         validate_updated_at_ms(updated_at_ms)?;
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
@@ -1287,6 +1323,10 @@ where
             target,
             updated_at_ms,
         } = options;
+        self.reject_attributed_branch_target(
+            identity,
+            matches!(target, WriteTarget::BranchView { .. }),
+        )?;
         validate_updated_at_ms(updated_at_ms)?;
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
@@ -1440,6 +1480,10 @@ where
             target,
             updated_at_ms,
         } = options;
+        self.reject_attributed_branch_target(
+            identity,
+            matches!(target, ExactWriteTarget::Branch(_)),
+        )?;
         validate_updated_at_ms(updated_at_ms)?;
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
         let branch = target.branch();
@@ -1671,6 +1715,20 @@ where
                 "attribution requires a trusted serving node",
             )),
         }
+    }
+
+    fn reject_attributed_branch_target(
+        &self,
+        identity: WriteIdentity,
+        targets_branch: bool,
+    ) -> Result<(), Error> {
+        if matches!(identity, WriteIdentity::Attribution(_)) && targets_branch {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                "backend-attributed writes do not support branch targets",
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn check_catalogue_admin(&self) -> Result<(), Error> {
