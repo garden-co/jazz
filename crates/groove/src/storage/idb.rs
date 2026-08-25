@@ -15,7 +15,8 @@ use super::{
 
 #[derive(Clone)]
 pub struct IdbStorage<S> {
-    tree: IdbTree<S>,
+    tree: Rc<RefCell<IdbTree<S>>>,
+    store: S,
     column_families: Rc<RefCell<BTreeSet<String>>>,
     mutation_gate: Rc<Mutex<()>>,
 }
@@ -26,7 +27,10 @@ where
 {
     pub async fn open(store: S, column_families: &[&str]) -> Result<Self, Error> {
         Ok(Self {
-            tree: IdbTree::open(store, Options::default()).await?,
+            tree: Rc::new(RefCell::new(
+                IdbTree::open(store.clone(), Options::default()).await?,
+            )),
+            store,
             column_families: Rc::new(RefCell::new(
                 column_families.iter().map(|cf| (*cf).to_owned()).collect(),
             )),
@@ -67,6 +71,85 @@ where
         }
         Ok(())
     }
+
+    fn tree(&self) -> IdbTree<S> {
+        self.tree.borrow().clone()
+    }
+
+    async fn reopen_after_generation_conflict(&self) -> Result<(), Error> {
+        // An independent browser tab owns a distinct IdbTree cache and can
+        // commit between our read and flush. Discard this stale cache rather
+        // than replaying its dirty pages, then recompute the whole logical
+        // batch from the newly durable tree.
+        let tree = IdbTree::open(self.store.clone(), Options::default()).await?;
+        *self.tree.borrow_mut() = tree;
+        Ok(())
+    }
+
+    fn is_generation_conflict(error: &Error) -> bool {
+        matches!(
+            error,
+            Error::IdbTree(idb_tree::Error::GenerationConflict(_))
+        )
+    }
+
+    async fn write_many_once(
+        &self,
+        tree: &IdbTree<S>,
+        operations: &[OwnedWriteOperation],
+    ) -> Result<(), Error> {
+        // Resolve each key's prospective value before changing the tree so
+        // deltas observe earlier operations in this ordered batch.
+        let mut planned = BTreeMap::<Vec<u8>, Option<Vec<u8>>>::new();
+        for operation in operations {
+            match operation {
+                OwnedWriteOperation::Set { cf, key, value } => {
+                    planned.insert(self.encoded_key(cf, key)?, Some(value.clone()));
+                }
+                OwnedWriteOperation::Delete { cf, key } => {
+                    planned.insert(self.encoded_key(cf, key)?, None);
+                }
+                OwnedWriteOperation::Delta { cf, key, delta } => {
+                    let key = self.encoded_key(cf, key)?;
+                    let encoded = delta.encode()?;
+                    let value = match planned.get(&key) {
+                        Some(existing) => apply_storage_delta(existing.as_deref(), &encoded)?,
+                        None => {
+                            let existing = tree.get(&key).await?;
+                            apply_storage_delta(existing.as_deref(), &encoded)?
+                        }
+                    };
+                    planned.insert(key, value);
+                }
+            }
+        }
+        let writes = planned
+            .into_iter()
+            .map(|(key, value)| match value {
+                Some(value) => WriteOperation::Set { key, value },
+                None => WriteOperation::Delete { key },
+            })
+            .collect();
+        tree.write_many(writes).await?;
+        tree.flush().await?;
+        Ok(())
+    }
+
+    async fn write_many_replaying_generation_conflicts(
+        &self,
+        operations: &[OwnedWriteOperation],
+    ) -> Result<(), Error> {
+        loop {
+            let tree = self.tree();
+            match self.write_many_once(&tree, operations).await {
+                Ok(()) => return Ok(()),
+                Err(error) if Self::is_generation_conflict(&error) => {
+                    self.reopen_after_generation_conflict().await?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
 }
 
 impl<S> OrderedKvStorage for IdbStorage<S>
@@ -76,7 +159,7 @@ where
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         Box::pin(async move {
             let key = self.encoded_key(&cf, &key)?;
-            Ok(self.tree.get(&key).await?)
+            Ok(self.tree().get(&key).await?)
         })
     }
 
@@ -87,28 +170,28 @@ where
         value: Vec<u8>,
     ) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
-            let key = self.encoded_key(&cf, &key)?;
+            let operations = vec![OwnedWriteOperation::Set { cf, key, value }];
+            self.prevalidate_write_many(&operations)?;
             let _guard = self.mutation_gate.lock().await;
-            self.tree.put(key, value).await?;
-            self.tree.flush().await?;
-            Ok(())
+            self.write_many_replaying_generation_conflicts(&operations)
+                .await
         })
     }
 
     fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
-            let key = self.encoded_key(&cf, &key)?;
+            let operations = vec![OwnedWriteOperation::Delete { cf, key }];
+            self.prevalidate_write_many(&operations)?;
             let _guard = self.mutation_gate.lock().await;
-            self.tree.delete(&key).await?;
-            self.tree.flush().await?;
-            Ok(())
+            self.write_many_replaying_generation_conflicts(&operations)
+                .await
         })
     }
 
     fn close(&self) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
             let _guard = self.mutation_gate.lock().await;
-            self.tree.flush().await?;
+            self.tree().flush().await?;
             Ok(())
         })
     }
@@ -116,7 +199,7 @@ where
     fn flush_write_boundary(&self) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
             let _guard = self.mutation_gate.lock().await;
-            self.tree.flush().await?;
+            self.tree().flush().await?;
             Ok(())
         })
     }
@@ -144,9 +227,10 @@ where
                 }
             };
             let limit = max_items.unwrap_or(usize::MAX);
+            let tree = self.tree();
             let rows = match direction {
-                ScanDirection::Forward => self.tree.range_limit(&start, &end, limit).await?,
-                ScanDirection::Reverse => self.tree.range_reverse(&start, &end, limit).await?,
+                ScanDirection::Forward => tree.range_limit(&start, &end, limit).await?,
+                ScanDirection::Reverse => tree.range_reverse(&start, &end, limit).await?,
             };
             Ok(Box::new(ReadyStorageCursor::new(Self::decode_rows(rows)?)) as StorageScan<'_>)
         })
@@ -161,7 +245,7 @@ where
             let start = self.encoded_key(&cf, &prefix)?;
             let end = key_codec::prefix_upper_bound(&start).unwrap_or_else(|| vec![0xff]);
             let row = self
-                .tree
+                .tree()
                 .range_reverse(&start, &end, 1)
                 .await?
                 .into_iter()
@@ -181,7 +265,7 @@ where
             let mut end = self.encoded_key(&cf, &upper)?;
             end.push(0);
             let row = self
-                .tree
+                .tree()
                 .range_reverse(&start, &end, 1)
                 .await?
                 .into_iter()
@@ -201,41 +285,8 @@ where
         Box::pin(async move {
             self.prevalidate_write_many(&operations)?;
             let _guard = self.mutation_gate.lock().await;
-            // Resolve each key's prospective value before changing the tree so
-            // deltas observe earlier operations in this ordered batch.
-            let mut planned = BTreeMap::<Vec<u8>, Option<Vec<u8>>>::new();
-            for operation in operations {
-                match operation {
-                    OwnedWriteOperation::Set { cf, key, value } => {
-                        planned.insert(self.encoded_key(&cf, &key)?, Some(value));
-                    }
-                    OwnedWriteOperation::Delete { cf, key } => {
-                        planned.insert(self.encoded_key(&cf, &key)?, None);
-                    }
-                    OwnedWriteOperation::Delta { cf, key, delta } => {
-                        let key = self.encoded_key(&cf, &key)?;
-                        let encoded = delta.encode()?;
-                        let value = match planned.get(&key) {
-                            Some(existing) => apply_storage_delta(existing.as_deref(), &encoded)?,
-                            None => {
-                                let existing = self.tree.get(&key).await?;
-                                apply_storage_delta(existing.as_deref(), &encoded)?
-                            }
-                        };
-                        planned.insert(key, value);
-                    }
-                }
-            }
-            let writes = planned
-                .into_iter()
-                .map(|(key, value)| match value {
-                    Some(value) => WriteOperation::Set { key, value },
-                    None => WriteOperation::Delete { key },
-                })
-                .collect();
-            self.tree.write_many(writes).await?;
-            self.tree.flush().await?;
-            Ok(())
+            self.write_many_replaying_generation_conflicts(&operations)
+                .await
         })
     }
 
@@ -415,6 +466,91 @@ mod tests {
             assert_eq!(
                 reopened.get("records".into(), key.clone()).await.unwrap(),
                 memory.get("records".into(), key).await.unwrap(),
+            );
+        });
+    }
+
+    #[test]
+    fn independent_handles_retry_conditional_writes_and_preserve_the_first_winner() {
+        futures::executor::block_on(async {
+            let page_store = MemoryPageStore::default();
+            let first = IdbStorage::open(page_store.clone(), &["records"])
+                .await
+                .unwrap();
+            let second = IdbStorage::open(page_store.clone(), &["records"])
+                .await
+                .unwrap();
+            let first_write = first.write_many(vec![OwnedWriteOperation::delta(
+                "records",
+                b"same-key",
+                StorageDelta::set_if_absent(b"first authenticated bytes".to_vec()),
+            )]);
+            let second_write = second.write_many(vec![OwnedWriteOperation::delta(
+                "records",
+                b"same-key",
+                StorageDelta::set_if_absent(b"second conflicting bytes".to_vec()),
+            )]);
+            let (first_result, second_result) = futures::join!(first_write, second_write);
+            first_result.unwrap();
+            second_result.unwrap();
+
+            let observer = IdbStorage::open(page_store, &["records"]).await.unwrap();
+            assert_eq!(
+                observer
+                    .get("records".into(), b"same-key".to_vec())
+                    .await
+                    .unwrap(),
+                Some(b"first authenticated bytes".to_vec())
+            );
+        });
+    }
+
+    #[test]
+    fn independent_handles_retry_stale_conditional_delete_against_the_new_mapping() {
+        futures::executor::block_on(async {
+            let page_store = MemoryPageStore::default();
+            let seed = IdbStorage::open(page_store.clone(), &["records"])
+                .await
+                .unwrap();
+            let key = b"same-key".to_vec();
+            let old = b"old authenticated bytes".to_vec();
+            let new = b"new authenticated bytes".to_vec();
+            seed.set("records".into(), key.clone(), old.clone())
+                .await
+                .unwrap();
+
+            let stale = IdbStorage::open(page_store.clone(), &["records"])
+                .await
+                .unwrap();
+            assert_eq!(
+                stale.get("records".into(), key.clone()).await.unwrap(),
+                Some(old.clone())
+            );
+            let replacement = IdbStorage::open(page_store.clone(), &["records"])
+                .await
+                .unwrap();
+            let replacement_write = replacement.write_many(vec![
+                OwnedWriteOperation::delete("records", key.clone()),
+                OwnedWriteOperation::delta(
+                    "records",
+                    key.clone(),
+                    StorageDelta::set_if_absent(new.clone()),
+                ),
+            ]);
+            let stale_delete = stale.write_many(vec![OwnedWriteOperation::delta(
+                "records",
+                key.clone(),
+                StorageDelta::delete_if_value_matches(old),
+            )]);
+            let (replacement_result, stale_result) =
+                futures::join!(replacement_write, stale_delete);
+            replacement_result.unwrap();
+            stale_result.unwrap();
+
+            let observer = IdbStorage::open(page_store, &["records"]).await.unwrap();
+            assert_eq!(
+                observer.get("records".into(), key).await.unwrap(),
+                Some(new)
             );
         });
     }
