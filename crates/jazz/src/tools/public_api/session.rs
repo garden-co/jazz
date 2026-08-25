@@ -189,9 +189,12 @@ impl Session {
 /// controls who is recorded as the commit author without changing permission
 /// identity. `updated_at`, when present, overrides the row provenance
 /// physical-millisecond timestamp recorded for update-like writes. Core packs
-/// this value into an HLC with a zero logical counter; public reads expose the
-/// supplied physical millisecond unchanged. It cannot be combined with
-/// `transaction_id`, whose staged-write API has no per-write timestamp slot.
+/// this input into an HLC with a zero logical counter. This write input uses
+/// physical milliseconds, while the higher-level JazzClient public provenance
+/// result uses microseconds: an input of `1_700_000_000_123` is exposed by
+/// JazzClient as `$updatedAt = 1_700_000_000_123_000`. Core Rust provenance APIs retain the
+/// packed HLC. It cannot be combined with `transaction_id`, whose staged-write
+/// API has no per-write timestamp slot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WriteContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
