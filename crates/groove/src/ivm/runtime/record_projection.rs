@@ -1280,9 +1280,7 @@ pub(super) fn apply_index_by(
                 continue;
             }
             deltas.push(RecordDelta {
-                record: index_record_descriptor()
-                    .create(&[Value::Bytes(key), Value::Bytes(value)])?
-                    .into(),
+                record: encode_scalar_index_record(&key, &value)?,
                 weight: delta.weight,
             });
             continue;
@@ -1304,6 +1302,34 @@ pub(super) fn apply_index_by(
         }
     }
     Ok(deltas)
+}
+
+/// Encode the fixed internal `(Bytes, Bytes)` index row without first wrapping
+/// the already-encoded key/value buffers in `Value`s and invoking the generic
+/// descriptor encoder. Both fields are inline stored scalars, and two variable
+/// fields have one little-endian offset followed by their encoded payloads.
+fn encode_scalar_index_record(key: &[u8], value: &[u8]) -> Result<bytes::Bytes, IvmRuntimeError> {
+    const OFFSET_TABLE_SIZE: usize = size_of::<u32>();
+    const INLINE_TAG_SIZE: usize = 1;
+
+    let value_offset = OFFSET_TABLE_SIZE
+        .checked_add(INLINE_TAG_SIZE)
+        .and_then(|offset| offset.checked_add(key.len()))
+        .ok_or(crate::records::Error::LengthOverflow)?;
+    let record_len = value_offset
+        .checked_add(INLINE_TAG_SIZE)
+        .and_then(|len| len.checked_add(value.len()))
+        .ok_or(crate::records::Error::LengthOverflow)?;
+    let value_offset =
+        u32::try_from(value_offset).map_err(|_| crate::records::Error::LengthOverflow)?;
+
+    let mut record = Vec::with_capacity(record_len);
+    record.extend_from_slice(&value_offset.to_le_bytes());
+    record.push(0); // StoredScalar::Inline
+    record.extend_from_slice(key);
+    record.push(0); // StoredScalar::Inline
+    record.extend_from_slice(value);
+    Ok(record.into())
 }
 
 fn index_key_fields_are_scalar(
