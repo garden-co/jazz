@@ -863,21 +863,37 @@ where
                 return Err(error);
             }
         };
-        self.publish_streaming_value_with_id(
-            mutation,
-            table,
-            row,
-            cells,
-            column,
-            staged,
-            nullable,
-            identity,
-            now_ms,
-            head,
-            base,
-            attribution,
-        )
-        .await
+        let staged_id = staged.id;
+        let published = self
+            .publish_streaming_value_with_id(
+                mutation,
+                table,
+                row,
+                cells,
+                column,
+                staged,
+                nullable,
+                identity,
+                now_ms,
+                head,
+                base,
+                attribution,
+            )
+            .await;
+        if published.is_err() {
+            // Finalization transfers the pending journal into a staged root,
+            // but publication is still fallible (for example a duplicate
+            // insert or an invalid branch view). Do not make cleanup mask the
+            // caller-visible admission error.
+            let _ = self
+                .node
+                .node
+                .lock()
+                .await
+                .evict_staged_large_value(staged_id)
+                .await;
+        }
+        published
     }
 
     fn validate_streaming_column(

@@ -196,6 +196,60 @@ fn streaming_update_and_upsert_publish_ordinary_logical_rows() {
 }
 
 #[test]
+fn failed_streaming_publication_evicts_the_finalized_staged_root() {
+    let db = open_db();
+    let row = RowUuid::from_bytes([0x68; 16]);
+    jazz::block_on(db.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("existing".to_owned())),
+            ("done".to_owned(), Value::Bool(false)),
+        ]),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        },
+    ))
+    .expect("seed row");
+
+    let cells = BTreeMap::from([("done".to_owned(), Value::Bool(true))]);
+    let mut upload = db
+        .begin_streaming_value_upload("todos", &cells, "title")
+        .expect("begin upload");
+    jazz::block_on(db.push_streaming_value_upload(&mut upload, b"replacement"))
+        .expect("stage root");
+    let result = jazz::block_on(db.finish_streaming_value_upload(
+        upload,
+        StreamingMutationKind::Insert,
+        "todos",
+        row,
+        cells,
+        "title",
+        None,
+        None,
+        None,
+        None,
+    ));
+    let error = match result {
+        Ok(_) => panic!("duplicate insert unexpectedly published"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("already exists"));
+
+    db.set_large_value_staging_policy(LargeValueStagingPolicy {
+        incoming_bytes_per_window: u64::MAX,
+        window_ms: 60_000,
+        max_age_ms: 0,
+    });
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert_eq!(
+        jazz::block_on(db.evict_expired_staged_large_values()).expect("expiry pass"),
+        0,
+        "failed publication removes the finalized staged root immediately"
+    );
+}
+
+#[test]
 fn push_streaming_stops_at_the_ingress_limit_and_closes_the_upload() {
     let db = open_db();
     db.set_large_value_staging_policy(LargeValueStagingPolicy {

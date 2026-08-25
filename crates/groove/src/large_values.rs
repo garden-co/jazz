@@ -1908,8 +1908,9 @@ pub fn prepare_reusing(
 }
 
 /// Encode the internal stored-scalar enum using Groove's ordinary enum and
-/// record codecs. `kind` comes from the declared column/schema boundary; it is
-/// intentionally absent from the persisted `Chunked` case.
+/// record codecs. Primitive bytes remain contextual, but the persisted
+/// `Chunked` case carries a normal-algebra kind witness which must agree with
+/// the declared column/schema boundary before its root or tail is consumed.
 pub fn encode_stored_scalar(kind: LargeValueKind, value: &StoredScalar) -> Result<Vec<u8>, Error> {
     let schema = stored_scalar_schema(kind);
     let enum_value = match value {
@@ -1943,8 +1944,9 @@ pub fn encode_stored_scalar(kind: LargeValueKind, value: &StoredScalar) -> Resul
 }
 
 /// Decode and canonically validate the internal stored-scalar enum. The
-/// declared kind is supplied by the containing schema, so no stored payload can
-/// relabel bytes as text or JSON.
+/// declared kind is supplied by the containing schema; a `Chunked` witness
+/// must agree with it, so a received descriptor cannot relabel a root/tail as
+/// text or JSON.
 pub fn decode_stored_scalar(kind: LargeValueKind, encoded: &[u8]) -> Result<StoredScalar, Error> {
     let schema = stored_scalar_schema(kind);
     let decoded = crate::records::decode_single_field_value(
