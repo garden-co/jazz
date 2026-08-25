@@ -7,6 +7,8 @@ impl IvmRuntime {
         if self.schema.table(&table.name).is_some() {
             return Err(IvmRuntimeError::TableAlreadyExists(table.name));
         }
+        self.table_storage_descriptors
+            .insert(table.name.clone(), table.record_schema());
         if !table.has_variants() {
             self.table_descriptors
                 .insert(table.name.clone(), table.record_schema());
@@ -65,6 +67,8 @@ impl IvmRuntime {
                 .collect_variant_registries(&mut table_schema.value_variant_registries);
         }
         table_schema.variants.push(variant_tag);
+        self.table_storage_descriptors
+            .insert(table.to_owned(), table_schema.record_schema());
         let descriptor = table_schema
             .record_schema_for_variant(version)
             .expect("the newly registered variant exists");
@@ -145,6 +149,8 @@ impl IvmRuntime {
                 .column_type
                 .collect_variant_registries(&mut table_schema.value_variant_registries);
         }
+        self.table_storage_descriptors
+            .insert(table.to_owned(), table_schema.record_schema());
         let mut descriptors = HashMap::default();
         for variant in &table_schema.variants {
             let descriptor = table_schema

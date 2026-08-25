@@ -630,6 +630,13 @@ impl Database {
             })
     }
 
+    pub(super) fn table_storage_descriptor(&self, table: &str) -> Result<RecordDescriptor, Error> {
+        self.ivm_runtime
+            .table_storage_descriptor(table)
+            .copied()
+            .ok_or_else(|| Error::TableNotFound(table.to_owned()))
+    }
+
     pub(super) fn table(&self, table: &str) -> Result<&TableSchema, Error> {
         self.ensure_not_poisoned()?;
         self.ivm_runtime

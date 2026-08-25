@@ -153,6 +153,7 @@ impl VariantProjectionCase {
 pub struct IvmRuntime {
     schema: DatabaseSchema,
     chunk_provider: crate::chunks::OwnedChunkProvider,
+    table_storage_descriptors: HashMap<String, RecordDescriptor>,
     table_descriptors: HashMap<String, RecordDescriptor>,
     variant_descriptors: HashMap<String, HashMap<u32, RecordDescriptor>>,
     /// Append-only, fixed-output projection families for heterogeneous table
@@ -203,6 +204,11 @@ pub struct IvmRuntime {
 
 impl IvmRuntime {
     pub fn new(schema: DatabaseSchema) -> Result<Self, IvmRuntimeError> {
+        let table_storage_descriptors = schema
+            .tables
+            .iter()
+            .map(|table| (table.name.clone(), table.record_schema()))
+            .collect();
         let table_descriptors = schema
             .tables
             .iter()
@@ -229,6 +235,7 @@ impl IvmRuntime {
         let mut runtime = Self {
             schema,
             chunk_provider: crate::chunks::OwnedChunkProvider::default(),
+            table_storage_descriptors,
             table_descriptors,
             variant_descriptors,
             variant_projections: HashMap::default(),
@@ -304,6 +311,10 @@ impl IvmRuntime {
 
     pub fn table_descriptor(&self, table: &str) -> Option<&RecordDescriptor> {
         self.table_descriptors.get(table)
+    }
+
+    pub(crate) fn table_storage_descriptor(&self, table: &str) -> Option<&RecordDescriptor> {
+        self.table_storage_descriptors.get(table)
     }
 
     pub(crate) fn record_descriptor(
