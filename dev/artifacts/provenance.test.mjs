@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import test from "node:test";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -6,6 +7,7 @@ import { join } from "node:path";
 import {
   expectedManifest,
   manifestPath,
+  nativeArtifactFingerprint,
   verifyManifest,
   verifyPublishedNapiManifest,
   writeManifest,
@@ -22,6 +24,13 @@ function fixture() {
     "crates/groove/src",
     "crates/wasm-tracing/src",
     "crates/jazz-napi/src",
+    "crates/jazz-server/src",
+    "crates/jazz-native-transport/src",
+    "crates/jazz-storage-rocksdb/src",
+    "crates/jazz-otel/src",
+    "crates/jazz-compression/src",
+    "crates/benchmark-guard/src",
+    "crates/idb-tree/src",
   ])
     mkdirSync(join(root, dir), { recursive: true });
   for (const [path, content] of Object.entries({
@@ -36,6 +45,28 @@ function fixture() {
   }))
     writeFileSync(join(root, path), content);
   return root;
+}
+
+function git(root, args) {
+  execFileSync("git", args, { cwd: root, stdio: "ignore" });
+}
+
+function withRepositoryGitProvenance(callback) {
+  const names = [
+    "JAZZ_ARTIFACT_GIT_HEAD",
+    "JAZZ_ARTIFACT_GIT_TREE",
+    "JAZZ_ARTIFACT_GIT_DIRTY_DIFF",
+  ];
+  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  for (const name of names) delete process.env[name];
+  try {
+    return callback();
+  } finally {
+    for (const name of names) {
+      if (previous[name] === undefined) delete process.env[name];
+      else process.env[name] = previous[name];
+    }
+  }
 }
 
 process.env.JAZZ_ARTIFACT_GIT_HEAD = "test-head";
@@ -66,6 +97,18 @@ test("provenance rejects stale tree, lock, toolchain, and profile", () => {
   assert.match(verifyManifest(root, "wasm", "fast"), /rustToolchain differs/);
 });
 
+test("provenance rejects a fingerprint-only sealed manifest drift", () => {
+  const root = fixture();
+  writeManifest(root, "wasm", "fast");
+  const path = manifestPath(root, "wasm");
+  const stale = JSON.parse(readFileSync(path, "utf8"));
+  stale.nativeArtifactFingerprint = "0".repeat(64);
+  writeFileSync(path, JSON.stringify(stale));
+  assert.match(verifyManifest(root, "wasm", "fast"), /nativeArtifactFingerprint differs/);
+  writeManifest(root, "wasm", "fast");
+  assert.equal(verifyManifest(root, "wasm", "fast"), null);
+});
+
 test("dirty source changes invalidate the manifest", () => {
   const root = fixture();
   writeManifest(root, "wasm", "release");
@@ -75,6 +118,32 @@ test("dirty source changes invalidate the manifest", () => {
     /packageInputs differs|git.dirtyDiff differs/,
   );
 });
+
+test("WASM provenance ignores local generated fingerprints but not tracked source changes", () =>
+  withRepositoryGitProvenance(() => {
+    const root = fixture();
+    const runtime = join(root, "packages/jazz-tools/src/runtime");
+    mkdirSync(runtime, { recursive: true });
+    for (const file of [
+      "native-artifact-fingerprint-napi.ts",
+      "native-artifact-fingerprint-wasm.ts",
+    ])
+      writeFileSync(join(runtime, file), "// generated baseline\n");
+    git(root, ["init", "--quiet"]);
+    git(root, ["config", "user.email", "tests@example.invalid"]);
+    git(root, ["config", "user.name", "Jazz tests"]);
+    git(root, ["add", "."]);
+    git(root, ["commit", "--quiet", "-m", "fixture"]);
+
+    const clean = expectedManifest(root, "wasm", "fast").git.dirtyDiff;
+    writeFileSync(join(runtime, "native-artifact-fingerprint-napi.ts"), "// generated NAPI\n");
+    writeFileSync(join(runtime, "native-artifact-fingerprint-wasm.ts"), "// generated WASM\n");
+    assert.equal(expectedManifest(root, "wasm", "fast").git.dirtyDiff, clean);
+
+    writeFileSync(join(root, "crates/jazz-wasm/src/lib.rs"), "// real source change\n");
+    assert.notEqual(expectedManifest(root, "wasm", "fast").git.dirtyDiff, clean);
+    rmSync(root, { recursive: true, force: true });
+  }));
 
 test("NAPI provenance excludes only the wrapper's ephemeral staged binding", () => {
   const root = fixture();
@@ -113,6 +182,38 @@ test("NAPI provenance excludes only the wrapper's ephemeral staged binding", () 
 
   // Planted positive: an actual NAPI source remains a provenance input.
   writeFileSync(join(root, "crates/jazz-napi/src/lib.rs"), "// changed native source\n");
+  assert.match(verifyManifest(root, "napi", "release"), /packageInputs differs/);
+});
+
+test("NAPI provenance covers every reachable local Cargo dependency", () => {
+  const root = fixture();
+  writeManifest(root, "napi", "release");
+  for (const crate of [
+    "jazz-server",
+    "jazz-native-transport",
+    "jazz-storage-rocksdb",
+    "jazz-otel",
+    "jazz-compression",
+    "benchmark-guard",
+    "idb-tree",
+  ]) {
+    const path = join(root, `crates/${crate}/src/lib.rs`);
+    writeFileSync(path, "// planted dependency change\n");
+    assert.match(verifyManifest(root, "napi", "release"), /packageInputs differs/, crate);
+    writeManifest(root, "napi", "release");
+  }
+});
+
+test("tracked NAPI bootstrap changes invalidate sealed provenance and its ABI fingerprint", () => {
+  const root = fixture();
+  const bootstrap = join(root, "crates/jazz-napi/native-binding.cjs");
+  writeFileSync(bootstrap, "module.exports = {};\n");
+  writeManifest(root, "napi", "release");
+  const inputs = expectedManifest(root, "napi", "release").packageInputs;
+  const fingerprint = nativeArtifactFingerprint(root, "napi", "release");
+  writeFileSync(bootstrap, "module.exports = { changed: true };\n");
+  assert.notEqual(expectedManifest(root, "napi", "release").packageInputs, inputs);
+  assert.notEqual(nativeArtifactFingerprint(root, "napi", "release"), fingerprint);
   assert.match(verifyManifest(root, "napi", "release"), /packageInputs differs/);
 });
 
@@ -207,6 +308,8 @@ test("assembled NAPI packages carry only matching manifests and reject stale or 
   mkdirSync(join(root, "crates/jazz-napi/artifacts"), { recursive: true });
   for (const [platform, target] of Object.entries(platforms)) {
     const manifest = expectedManifest(root, "napi", "release", target);
+    manifest.nativeArtifactFingerprint = "a".repeat(64);
+    manifest.packageInputs = "b".repeat(64);
     writeFileSync(
       join(root, "crates/jazz-napi/artifacts", `jazz-napi.${platform}.manifest.json`),
       JSON.stringify(manifest),
@@ -225,6 +328,51 @@ test("assembled NAPI packages carry only matching manifests and reject stale or 
     readFileSync(join(root, "crates/jazz-napi/package.json"), "utf8"),
     /provenance\/\*\.manifest\.json/,
   );
+
+  const darwinManifest = join(
+    root,
+    "crates/jazz-napi/artifacts/jazz-napi.darwin-x64.manifest.json",
+  );
+  const crossTargetMismatch = JSON.parse(readFileSync(darwinManifest, "utf8"));
+  crossTargetMismatch.nativeArtifactFingerprint = "c".repeat(64);
+  writeFileSync(darwinManifest, JSON.stringify(crossTargetMismatch));
+  assert.throws(() => stageNapiManifests(root), /different ABI fingerprint or package inputs/);
+  crossTargetMismatch.nativeArtifactFingerprint = "a".repeat(64);
+  crossTargetMismatch.packageInputs = "d".repeat(64);
+  writeFileSync(darwinManifest, JSON.stringify(crossTargetMismatch));
+  assert.throws(() => stageNapiManifests(root), /different ABI fingerprint or package inputs/);
+  crossTargetMismatch.packageInputs = "b".repeat(64);
+  writeFileSync(darwinManifest, JSON.stringify(crossTargetMismatch));
+
+  for (const [field, value] of [["nativeArtifactFingerprint", "not-a-fingerprint"]]) {
+    // Start every case from the same otherwise-valid sealed manifest. In
+    // particular, a missing packageInputs receipt must not be masked by a
+    // prior invalid fingerprint failure.
+    const malformed = structuredClone(crossTargetMismatch);
+    malformed[field] = value;
+    writeFileSync(darwinManifest, JSON.stringify(malformed));
+    assert.throws(() => stageNapiManifests(root), /missing native fingerprint or package inputs/);
+  }
+  writeFileSync(darwinManifest, JSON.stringify(crossTargetMismatch));
+
+  // Equality alone cannot reject this: every target carries the same missing
+  // value. The field validator must reject it before cross-target comparison.
+  for (const platform of Object.keys(platforms)) {
+    const path = join(root, "crates/jazz-napi/artifacts", `jazz-napi.${platform}.manifest.json`);
+    const missingInputs = JSON.parse(readFileSync(path, "utf8"));
+    delete missingInputs.packageInputs;
+    writeFileSync(path, JSON.stringify(missingInputs));
+  }
+  assert.throws(() => stageNapiManifests(root), /missing native fingerprint or package inputs/);
+  for (const [platform, target] of Object.entries(platforms)) {
+    const restored = expectedManifest(root, "napi", "release", target);
+    restored.nativeArtifactFingerprint = "a".repeat(64);
+    restored.packageInputs = "b".repeat(64);
+    writeFileSync(
+      join(root, "crates/jazz-napi/artifacts", `jazz-napi.${platform}.manifest.json`),
+      JSON.stringify(restored),
+    );
+  }
 
   writeFileSync(node, "stale");
   assert.match(
