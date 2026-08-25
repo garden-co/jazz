@@ -957,13 +957,81 @@ async fn repeated_child_dag_finalizes_once_per_node_and_reclaims_without_leaks()
         );
     }
 
+    // A second descriptor-keyed upload sees a complete local graph. Its
+    // missing-frontier and admission walks must terminate over physical nodes,
+    // not enumerate the 64^32 logical occurrences.
+    let second = match database
+        .begin_large_value_upload(prepared.value_ref.clone())
+        .await
+        .unwrap()
+    {
+        crate::large_values::LargeValueUploadProgress::Staged(staged) => staged,
+        crate::large_values::LargeValueUploadProgress::Missing(_) => {
+            panic!("the complete resident graph has no missing frontier")
+        }
+    };
+
     assert!(database.evict_staged_large_value(staged.id).await.unwrap());
+    assert!(database.evict_staged_large_value(second.id).await.unwrap());
     assert_eq!(
         database
             .reclaim_orphaned_large_value_chunks(usize::MAX)
             .await
             .unwrap(),
         physical_nodes
+    );
+    assert_eq!(chunks.len(), 0);
+}
+
+// Distinct active parents each own one physical edge to a shared descendant.
+// The transition overlay must therefore count the leaf twice on activation and
+// consume both counts before reclaiming it on deactivation.
+#[futures_test::test]
+async fn shared_child_dag_counts_distinct_parent_edges_and_reclaims_once() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(chunks.clone());
+    let prepared = crate::large_values::shared_child_dag_fixture();
+    assert_eq!(prepared.staged_chunks.len(), 4);
+
+    let staged = database
+        .stage_large_value_preparation(prepared.clone())
+        .await
+        .unwrap();
+    for (index, chunk) in prepared.staged_chunks.iter().enumerate() {
+        let encoded = database
+            .storage
+            .get(
+                LARGE_VALUE_METADATA_CF.to_owned(),
+                large_value_node_key(&chunk.node_ref).unwrap(),
+            )
+            .await
+            .unwrap()
+            .expect("every finalized physical node has metadata");
+        let metadata: LargeValueNodeReferences = postcard::from_bytes(&encoded).unwrap();
+        assert_eq!(
+            metadata.references,
+            if index == 0 { 2 } else { 1 },
+            "the shared leaf has one inbound edge from each distinct parent"
+        );
+    }
+
+    assert!(database.evict_staged_large_value(staged.id).await.unwrap());
+    assert_eq!(
+        database
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap(),
+        prepared.staged_chunks.len()
     );
     assert_eq!(chunks.len(), 0);
 }
