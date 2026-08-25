@@ -109,13 +109,18 @@ fn unique_large_value_children(
 
 /// Apply physical-node ownership transitions against one read-your-own-write
 /// overlay. Each active parent contributes one reference to each distinct
-/// child node, regardless of how many logical occurrences that child has.
-async fn large_value_node_transition_operations(
-    storage: &LayoutStorage,
+/// child node, regardless of how many logical occurrences of that child the
+/// parent's branch contains. Shared descendants reached through distinct
+/// active parents still receive one reference from each parent.
+async fn large_value_node_transition_operations<S>(
+    storage: &S,
     mut node_updates: BTreeMap<crate::large_values::NodeRef, LargeValueNodeReferences>,
     mut pending: Vec<(crate::large_values::NodeRef, i8)>,
     allow_missing_positive_metadata: bool,
-) -> Result<Vec<OwnedWriteOperation>, Error> {
+) -> Result<Vec<OwnedWriteOperation>, Error>
+where
+    S: OrderedKvStorage + ?Sized,
+{
     let mut reclaim_candidates = BTreeSet::new();
     while let Some((node_ref, delta)) = pending.pop() {
         let mut metadata = if let Some(metadata) = node_updates.remove(&node_ref) {

@@ -230,8 +230,7 @@ impl Database {
         let mut node_transitions = Vec::<(crate::large_values::NodeRef, i8)>::new();
         for root in roots {
             let key = large_value_root_key(&root)?;
-            let mut references = match self
-                .storage
+            let mut references = match overlay
                 .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
                 .await?
             {
@@ -260,8 +259,7 @@ impl Database {
                 })?;
             let next_total = references.durable.saturating_add(references.staged);
             if previous_total == 0 && next_total > 0 && !references.node_active {
-                if self
-                    .storage
+                if overlay
                     .get(
                         LARGE_VALUE_METADATA_CF.to_owned(),
                         large_value_node_key(&root)?,
@@ -288,7 +286,7 @@ impl Database {
         }
         staged_operations.extend(
             large_value_node_transition_operations(
-                &self.storage,
+                &overlay,
                 BTreeMap::new(),
                 node_transitions,
                 false,
