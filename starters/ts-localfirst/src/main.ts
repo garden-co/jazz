@@ -1,10 +1,4 @@
-import {
-  BrowserAuthSecretStore,
-  createJazzClient,
-  subscribeAll,
-  type JazzClient,
-  type JazzClientConfig,
-} from "jazz-tools/client";
+import { BrowserAuthSecretStore, createJazzClient, type JazzClientConfig } from "jazz-tools/client";
 import { mountApp } from "./app.js";
 import "./app.css";
 
@@ -27,11 +21,7 @@ async function boot() {
   if (!root) throw new Error("#root not found");
   const secret = await BrowserAuthSecretStore.getOrCreateSecret();
   const client = await createJazzClient(buildConfig(secret));
-  mountApp(root, {
-    db: client.db,
-    subscribeAll: (query, callback, options) =>
-      subscribeAll(client as JazzClient, query, callback, options),
-  });
+  mountApp(root, client.db);
 }
 
 boot();

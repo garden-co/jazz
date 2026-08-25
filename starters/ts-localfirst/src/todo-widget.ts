@@ -12,13 +12,12 @@ export interface TodoDb {
   insert<T, Init>(table: unknown, data: Init): MaybePromise<MutationResult<T>>;
   update(table: unknown, id: string, data: Partial<unknown>): MaybePromise<MutationResult<void>>;
   delete(table: unknown, id: string): MaybePromise<MutationResult<void>>;
+  subscribeAll<T extends { id: string }>(
+    query: QueryBuilder<T>,
+    callback: (delta: SubscriptionDelta<T>) => void,
+    options?: QueryOptions,
+  ): () => void;
 }
-
-export type TodoSubscribeAll = <T extends { id: string }>(
-  query: QueryBuilder<T>,
-  callback: (delta: SubscriptionDelta<T>) => void,
-  options?: QueryOptions,
-) => () => void;
 
 function renderRow(todo: Todo): HTMLLIElement {
   const li = document.createElement("li");
@@ -44,11 +43,7 @@ function renderRow(todo: Todo): HTMLLIElement {
   return li;
 }
 
-export function mountTodoWidget(
-  parent: HTMLElement,
-  db: TodoDb,
-  subscribeAll: TodoSubscribeAll,
-): () => void {
+export function mountTodoWidget(parent: HTMLElement, db: TodoDb): () => void {
   parent.innerHTML = `
     <section class="todo-widget">
       <h2>Your todos</h2>
@@ -135,7 +130,7 @@ export function mountTodoWidget(
     );
   });
 
-  return subscribeAll(app.todos, (delta) => {
+  return db.subscribeAll(app.todos, (delta) => {
     // The simplest possible approach: rebuild the whole list on every tick.
     // It's fine here — the list is small and there's no DOM state to preserve
     // (no inline editing, no focused inputs inside rows).
