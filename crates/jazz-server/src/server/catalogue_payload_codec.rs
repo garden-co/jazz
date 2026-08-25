@@ -203,6 +203,7 @@ fn decode_current_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> 
         schema.insert(name, table_schema);
     }
 
+    ensure_consumed(data, offset)?;
     Ok(schema)
 }
 
@@ -678,6 +679,7 @@ fn decode_current_lens_transform(
         draft_ops.push(read_u32(data, &mut offset)? as usize);
     }
 
+    ensure_consumed(data, offset)?;
     Ok(LensTransform { ops, draft_ops })
 }
 
@@ -798,6 +800,7 @@ pub fn decode_permissions(
         permissions.insert(table_name, policies);
     }
 
+    ensure_consumed(data, offset)?;
     Ok(permissions)
 }
 
@@ -877,6 +880,7 @@ fn decode_current_permissions_bundle(
     let payload_len = read_u32(data, &mut offset)? as usize;
     let payload = read_bytes(data, &mut offset, payload_len)?;
     let permissions = decode_permissions(payload)?;
+    ensure_consumed(data, offset)?;
     Ok((schema_hash, version, parent_bundle_object_id, permissions))
 }
 
@@ -952,6 +956,7 @@ fn decode_current_permissions_head(
                 message: format!("invalid permissions bundle object id: {err}"),
             }
         })?;
+    ensure_consumed(data, offset)?;
     Ok((
         schema_hash,
         version,
@@ -1641,6 +1646,18 @@ fn read_bytes<'a>(
     let bytes = &data[*offset..*offset + len];
     *offset += len;
     Ok(bytes)
+}
+
+fn ensure_consumed(data: &[u8], offset: usize) -> Result<(), CatalogueEncodingError> {
+    if offset == data.len() {
+        return Ok(());
+    }
+    Err(CatalogueEncodingError::DecodeError {
+        message: format!(
+            "trailing data after decoded payload: {} bytes remain",
+            data.len() - offset
+        ),
+    })
 }
 
 fn write_string(buf: &mut Vec<u8>, s: &str) {
