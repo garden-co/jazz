@@ -603,7 +603,6 @@ async fn recursive_inherits_respects_max_depth_boundaries_inner() {
 ///              └► cycle rows remain hidden
 /// ```
 #[tokio::test]
-#[ignore = "#1763: recursive INHERITS cycles currently overflow the server evaluator stack"]
 async fn recursive_inherits_cycles_fail_closed_without_poisoning_acyclic_branch() {
     tokio::task::LocalSet::new()
         .run_until(recursive_inherits_cycles_fail_closed_without_poisoning_acyclic_branch_inner())
