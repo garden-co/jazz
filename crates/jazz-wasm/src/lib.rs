@@ -57,6 +57,14 @@ pub fn init() {
     console_error_panic_hook::set_once();
 }
 
+/// Exact build/ABI fingerprint for this generated WASM artifact.
+#[wasm_bindgen(js_name = nativeArtifactFingerprint)]
+pub fn native_artifact_fingerprint() -> String {
+    option_env!("JAZZ_NATIVE_ARTIFACT_FINGERPRINT")
+        .unwrap_or("missing-build-fingerprint")
+        .to_owned()
+}
+
 /// Generate a new UUID v7 (time-ordered).
 ///
 /// Useful when a caller wants the default generated row-id shape.

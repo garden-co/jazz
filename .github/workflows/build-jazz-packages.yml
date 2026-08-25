@@ -201,7 +201,7 @@ jobs:
         run: |
           node dev/artifacts/build.mjs napi release --target ${{ matrix.target }}
           node dev/artifacts/provenance.mjs verify napi release --target ${{ matrix.target }}
-          cp crates/jazz-napi/.jazz-artifact-manifest.json crates/jazz-napi/jazz-napi.${{ matrix.platform }}.manifest.json
+          node dev/artifacts/stage-napi-loader.mjs ${{ matrix.platform }}
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -218,6 +218,8 @@ jobs:
           path: |
             crates/jazz-napi/index.js
             crates/jazz-napi/index.d.ts
+            crates/jazz-napi/native-loader.cjs
+            crates/jazz-napi/native-artifact-fingerprint.cjs
           if-no-files-found: error
 
   assemble-packages:
@@ -281,6 +283,9 @@ jobs:
 
       - name: Stage and verify jazz-napi provenance manifests
         run: node dev/artifacts/stage-napi-manifests.mjs
+
+      - name: Derive Jazz artifact expectations from sealed manifests
+        run: node dev/artifacts/stage-native-fingerprints.mjs
 
       - name: Build jazz-tools TypeScript package
         run: pnpm --filter jazz-tools build

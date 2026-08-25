@@ -178,6 +178,9 @@ export interface InsertOptions {
 
 export declare function mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
 
+/** Exact build/ABI fingerprint for the generated native artifact. */
+export declare function nativeArtifactFingerprint(): string
+
 export interface RestoreOptions {
   author?: Uint8Array
   branch?: JsonValue

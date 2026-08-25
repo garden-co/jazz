@@ -91,6 +91,14 @@ use jazz_server::{
 };
 use jazz_storage_rocksdb::RocksDbStorage as CoreRocksDbStorage;
 
+/// Exact build/ABI fingerprint for the generated native artifact.
+#[napi]
+pub fn native_artifact_fingerprint() -> String {
+    option_env!("JAZZ_NATIVE_ARTIFACT_FINGERPRINT")
+        .unwrap_or("missing-build-fingerprint")
+        .to_owned()
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct CoreOpenDbConfig {
     identity: CoreOpenDbIdentity,
