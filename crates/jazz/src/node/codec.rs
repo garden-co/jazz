@@ -212,9 +212,9 @@ groove::define_record! {
         0 => row_uuid: RowUuid,
         1 => parents: ParentRefs,
         2 => created_by: AuthorSubject,
-        3 => created_at: TxTime,
+        3 => created_at: u64,
         4 => updated_by: AuthorSubject,
-        5 => updated_at: TxTime,
+        5 => updated_at: u64,
         6 => _deletion: Option<Value>,
         .. user_cells,
     }
@@ -323,9 +323,9 @@ impl VersionRecord {
             commit.row_uuid,
             commit.parents.clone(),
             commit.made_by,
-            TxTime::from(commit.now_ms),
+            commit.now_ms,
             commit.made_by,
-            TxTime::from(commit.now_ms),
+            commit.now_ms,
             &positional,
             commit.deletion,
         )
@@ -353,9 +353,9 @@ impl VersionRecord {
             stored.row_uuid(),
             stored.parents(),
             stored.created_by(),
-            stored.created_at(),
+            stored.created_at().physical_ms(),
             stored.updated_by(),
-            stored.updated_at(),
+            stored.updated_at().physical_ms(),
             &cells,
             stored.deletion(),
         )
@@ -1329,9 +1329,11 @@ fn history_values_from_wire(
             .collect(),
     ));
     values.push(Value::String(version.created_by().canonical().to_owned()));
-    values.push(Value::U64(version.created_at().0));
+    // Wire provenance carries public Unix milliseconds. Reconstruct the
+    // internal HLC with logical counter zero at this ingestion boundary.
+    values.push(Value::U64(TxTime::from(version.created_at_ms()).0));
     values.push(Value::String(version.updated_by().canonical().to_owned()));
-    values.push(Value::U64(version.updated_at().0));
+    values.push(Value::U64(TxTime::from(version.updated_at_ms()).0));
     for (idx, column) in table.columns.iter().enumerate() {
         let value = version.optional_cell_at(idx);
         if let Some(value) = value.as_ref() {
@@ -1394,9 +1396,9 @@ fn register_values_from_wire(
                 .collect(),
         ),
         Value::String(version.created_by().canonical().to_owned()),
-        Value::U64(version.created_at().0),
+        Value::U64(TxTime::from(version.created_at_ms()).0),
         Value::String(version.updated_by().canonical().to_owned()),
-        Value::U64(version.updated_at().0),
+        Value::U64(TxTime::from(version.updated_at_ms()).0),
         deletion_event_value(deletion),
     ]
 }

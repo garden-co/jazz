@@ -76,12 +76,16 @@ replace row encoding. The same split applies at the binding ABI (ch. 13):
 commands, acks, and event metadata are postcard envelopes, while row-shaped
 payloads are descriptor/raw `Record` bytes at the hot boundary.
 
-**Decision, 2026-08-23 — wire v12 is a breaking authorship cut.** Transaction,
+**Decision, 2026-08-24 — wire v13 is a breaking provenance cut.** Transaction,
 row-version, session, and claim authors use the exact canonical `[iss,sub]` JSON
-string. Wire v11 UUID/hash/subject-only author encodings are rejected, not
-decoded or migrated. Every endpoint advertises exactly v12 and negotiation with
-v11 fails with `UnsupportedProtocolVersion`; the `jazz-wire-message-frames-v12`
-golden fixture set is the only supported message layout.
+string. Wire row-version `$createdAt` and `$updatedAt` values are Unix
+milliseconds; the packed HLC is an internal ordering representation and is not
+protocol data. Wire v12's packed provenance and v11's UUID/hash/subject-only
+author encodings are rejected, not decoded or migrated. Every endpoint
+advertises exactly v13 and negotiation with an earlier version fails with
+`UnsupportedProtocolVersion`; the `jazz-wire-message-frames-v13` golden fixture
+set is the current layout. The v12 fixture set is historical only and must not
+be accepted by a v13 endpoint.
 
 Inside Rust, `Db` and `PeerConnection` keep the semantic `Transport` surface over
 `SyncMessage`. Binding/server byte transports use `WireFrame` and are bridged at

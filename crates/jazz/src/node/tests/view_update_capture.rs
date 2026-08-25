@@ -24,9 +24,9 @@ struct CanonicalVersionRecord {
     row_uuid: RowUuid,
     parents: Vec<TxId>,
     created_by: AuthorSubject,
-    created_at: TxTime,
+    created_at: u64,
     updated_by: AuthorSubject,
-    updated_at: TxTime,
+    updated_at: u64,
     deletion: Option<DeletionEvent>,
     cells: Vec<String>,
 }
@@ -60,9 +60,9 @@ fn canonical_version_record(record: VersionRecord) -> CanonicalVersionRecord {
         row_uuid: record.row_uuid(),
         parents,
         created_by: record.created_by(),
-        created_at: record.created_at(),
+        created_at: record.created_at_ms(),
         updated_by: record.updated_by(),
-        updated_at: record.updated_at(),
+        updated_at: record.updated_at_ms(),
         deletion: record.deletion(),
         cells,
     }

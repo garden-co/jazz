@@ -817,9 +817,9 @@ where
                 write.row_uuid,
                 write.parents,
                 created_by,
-                created_at,
+                created_at.physical_ms(),
                 made_by,
-                provenance_at,
+                provenance_at.physical_ms(),
                 &cells,
                 write.deletion,
             )?);
