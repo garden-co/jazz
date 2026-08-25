@@ -111,7 +111,7 @@ function toRuntimeTimestampValue(value: unknown): number {
 /**
  * Translate a JavaScript value to the runtime value format.
  */
-function toRuntimeValue(value: unknown, columnType: ColumnType, columnName?: string): object {
+function toRuntimeValue(value: unknown, columnType: ColumnType): object {
   if (value === null || value === undefined) {
     return { type: "Null" };
   }
@@ -245,7 +245,7 @@ function conditionToArraySubqueryFilter(
 
   const valueTypeForCondition =
     cond.op === "contains" && columnType.type === "Array" ? columnType.element : columnType;
-  const literalValue = toRuntimeValue(cond.value, valueTypeForCondition, column);
+  const literalValue = toRuntimeValue(cond.value, valueTypeForCondition);
   const isNullValue = cond.value === undefined ? true : cond.value;
 
   switch (cond.op) {
@@ -392,7 +392,7 @@ function conditionToRelPredicate(
           Cmp: {
             left: relColumn(field),
             op: "Eq" as const,
-            right: { Literal: toRuntimeValue(value, descriptor.column_type, field) },
+            right: { Literal: toRuntimeValue(value, descriptor.column_type) },
           },
         } satisfies RelPredicateExpr;
       },
@@ -414,7 +414,7 @@ function conditionToRelPredicate(
       In: {
         left: columnRef,
         values: cond.value.map((value) => ({
-          Literal: toRuntimeValue(value, columnType, column),
+          Literal: toRuntimeValue(value, columnType),
         })),
       },
     };
@@ -425,7 +425,7 @@ function conditionToRelPredicate(
     isFrontierRowIdToken(cond.value) && cond.op === "eq"
       ? { RowId: "Frontier" as const }
       : {
-          Literal: toRuntimeValue(cond.value, valueTypeForCondition, column),
+          Literal: toRuntimeValue(cond.value, valueTypeForCondition),
         };
   const isNullValue = cond.value === undefined ? true : cond.value;
   if (columnType.type === "Bytea" && ["gt", "gte", "lt", "lte"].includes(cond.op)) {
