@@ -26,7 +26,7 @@ fn query_bounded_activity_page_profile_s_memory(bencher: divan::Bencher<'_, '_>)
     bencher.bench_local(|| fixture.bounded_activity_page_count());
 }
 
-#[divan::bench(args = [9_000, 90_000], sample_count = 3)]
+#[divan::bench(args = [9_000, 30_000], sample_count = 3)]
 fn query_bounded_activity_page_scaling_memory(
     bencher: divan::Bencher<'_, '_>,
     activity_events: usize,
