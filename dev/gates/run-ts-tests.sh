@@ -18,7 +18,11 @@ browser_tests_log="${log_dir}/jazz-browser-tests-$$.log"
 # them once before either suite starts: otherwise an example's fallback build
 # can clean that shared directory while a sibling browser suite imports it.
 if [[ "${JAZZ_SKIP_JAZZ_TOOLS_BUILD:-0}" != "1" ]]; then
-  pnpm --filter jazz-tools build
+  pnpm --filter jazz-tools build || {
+    status=$?
+    echo "jazz-tools prebuild failed; refusing to launch suites against stale exports" >&2
+    exit "${status}"
+  }
 fi
 
 terminate_children() {

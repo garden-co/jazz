@@ -1507,6 +1507,33 @@ test("parallel TypeScript runner waits for both suites and combines their failur
   }
 });
 
+test("a failed jazz-tools prebuild prevents both TypeScript suites from starting", () => {
+  const runner = path.join(root, "dev/gates/run-ts-tests.sh");
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-ts-ci-prebuild-"));
+  const fakePnpm = path.join(fixture, "pnpm");
+  const nodeMarker = path.join(fixture, "node");
+  const browserMarker = path.join(fixture, "browser");
+  try {
+    fs.writeFileSync(fakePnpm, "#!/bin/sh\nexit 23\n", { mode: 0o755 });
+    const result = spawnSync("bash", [runner], {
+      cwd: root,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${fixture}:${process.env.PATH}`,
+        JAZZ_NODE_TEST_COMMAND: `touch ${JSON.stringify(nodeMarker)}`,
+        JAZZ_BROWSER_TEST_COMMAND: `touch ${JSON.stringify(browserMarker)}`,
+      },
+    });
+    assert.equal(result.status, 23, result.stderr);
+    assert.equal(fs.existsSync(nodeMarker), false, "node suite started after failed prebuild");
+    assert.equal(fs.existsSync(browserMarker), false, "browser suite started after failed prebuild");
+    assert.match(result.stderr, /refusing to launch suites against stale exports/);
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
 test("parallel TypeScript runner terminates both child process groups", async () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-ts-ci-interrupt-"));
   const nodeMarker = path.join(fixture, "node-orphan");
