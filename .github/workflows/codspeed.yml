@@ -87,7 +87,7 @@ jobs:
 
   w1-read-walltime:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')
-    name: W1 local read wall time
+    name: W1 read wall time (memory + RocksDB)
     runs-on: codspeed-macro
     timeout-minutes: 20
     steps:
@@ -106,11 +106,11 @@ jobs:
       - name: Install cargo-codspeed
         run: cargo install cargo-codspeed --version 5.0.1 --locked
 
-      - name: Build W1 local read wall-time benchmarks
-        run: cargo codspeed build --measurement-mode walltime --package jazz-example-w1-benchmark --bench reads_walltime
+      - name: Build W1 memory and RocksDB read benchmarks
+        run: cargo codspeed build --measurement-mode walltime --package jazz-example-w1-benchmark --bench reads_memory_walltime --bench reads_rocksdb_walltime
 
-      - name: Run W1 local read wall-time benchmarks
+      - name: Run W1 memory and RocksDB read benchmarks
         uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3
         with:
           mode: walltime
-          run: cargo codspeed run --package jazz-example-w1-benchmark --bench reads_walltime
+          run: cargo codspeed run --package jazz-example-w1-benchmark --bench reads_memory_walltime --bench reads_rocksdb_walltime
