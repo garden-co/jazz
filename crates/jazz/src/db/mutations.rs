@@ -1180,6 +1180,19 @@ where
                         "branch update requires at least one authored column",
                     ));
                 }
+                let visible_to_session = match identity {
+                    WriteIdentity::Session(author) => {
+                        self.visible_branch_view_cells_for_identity(
+                            table,
+                            &head,
+                            base.as_ref(),
+                            row,
+                            author,
+                        )
+                        .await?
+                    }
+                    WriteIdentity::Database | WriteIdentity::Attribution(_) => None,
+                };
                 let local = self
                     .node
                     .node
@@ -1187,7 +1200,8 @@ where
                     .await
                     .visible_current_cells_in_branch(table, &head, row)
                     .await?;
-                let (mut cells, parents, authored_columns) = if let Some(cells) = local {
+                let authored_columns = patch.keys().cloned().collect();
+                let (mut cells, parents) = if let Some(local) = local {
                     let parent = self
                         .node
                         .node
@@ -1195,11 +1209,11 @@ where
                         .await
                         .local_content_winner_tx_id_in_branch(table, &head, row)
                         .await?;
-                    (
-                        cells,
-                        parent.into_iter().collect(),
-                        Some(patch.keys().cloned().collect()),
-                    )
+                    let cells = match identity {
+                        WriteIdentity::Session(_) => visible_to_session.unwrap_or_default(),
+                        WriteIdentity::Database | WriteIdentity::Attribution(_) => local,
+                    };
+                    (cells, parent.into_iter().collect())
                 } else {
                     let inherited = self
                         .node
@@ -1214,7 +1228,11 @@ where
                                 format!("row is not visible in branch view: {}", row.0),
                             )
                         })?;
-                    (inherited, Vec::new(), None)
+                    let cells = match identity {
+                        WriteIdentity::Session(_) => visible_to_session.unwrap_or_default(),
+                        WriteIdentity::Database | WriteIdentity::Attribution(_) => inherited,
+                    };
+                    (cells, Vec::new())
                 };
                 cells.extend(patch);
                 self.write_mergeable_at_ms_with_authorship_in_branch(
@@ -1225,7 +1243,7 @@ where
                     cells,
                     parents,
                     None,
-                    authored_columns,
+                    Some(authored_columns),
                     now_ms,
                     head,
                 )
@@ -2137,6 +2155,39 @@ where
             .await?
             .into_iter()
             .find(|candidate| candidate.row_uuid() == row))
+    }
+
+    async fn visible_branch_view_cells_for_identity(
+        &self,
+        table: &str,
+        head: &BranchSelector,
+        base: Option<&BranchViewBase>,
+        row: RowUuid,
+        identity: AuthorSubject,
+    ) -> Result<Option<RowCells>, Error> {
+        let table_schema = self.table_schema(table)?.clone();
+        let query = self.prepare_query(&Query::from(table))?;
+        let opts = ReadOpts {
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        }
+        .branch_view(head.clone(), base.cloned());
+        Ok(self
+            .all_for_identity(&query, opts, identity)
+            .await?
+            .into_iter()
+            .find(|candidate| candidate.row_uuid() == row)
+            .map(|candidate| {
+                table_schema
+                    .columns
+                    .iter()
+                    .filter_map(|column| {
+                        candidate
+                            .cell(&table_schema, &column.name)
+                            .map(|value| (column.name.clone(), value))
+                    })
+                    .collect()
+            }))
     }
 
     async fn no_op_update_handle_for_client(
