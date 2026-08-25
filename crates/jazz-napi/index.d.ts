@@ -176,6 +176,9 @@ export interface RestoreOptions {
   updatedAtMs?: number
 }
 
+/** Exact build/ABI fingerprint for the generated native artifact. */
+export declare function nativeArtifactFingerprint(): string
+
 export interface SubscriptionClosedEvent {
   type: 'closed'
 }

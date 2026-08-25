@@ -304,12 +304,13 @@ test("test artifact pipeline overlaps independent bindings and repairs NAPI only
     "release NAPI",
     "CLI",
     "fast WASM",
+    "derive local artifact expectations",
     "jazz-tools",
-    "verify fast WASM provenance",
   ]);
   assert.equal(labels.filter((label) => label === "release NAPI").length, 1);
   assert.equal(labels.filter((label) => label === "repair release NAPI").length, 1);
   assert.ok(labels.indexOf("jazz-tools") > labels.indexOf("fast WASM"));
+  assert.ok(labels.indexOf("derive local artifact expectations") < labels.indexOf("jazz-tools"));
   assert.ok(labels.indexOf("verify fast WASM provenance") < labels.indexOf("load release NAPI"));
   assert.ok(labels.indexOf("load repaired release NAPI") > labels.indexOf("repair release NAPI"));
   assert.ok(
