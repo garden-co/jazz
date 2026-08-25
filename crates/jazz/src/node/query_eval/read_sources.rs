@@ -3303,9 +3303,9 @@ fn inline_current_record(
     }
     if let Some(provenance) = row.provenance()? {
         values.push(Value::String(provenance.created_by.canonical().to_owned()));
-        values.push(Value::U64(provenance.created_at.0));
+        values.push(Value::U64(provenance.created_at));
         values.push(Value::String(provenance.updated_by.canonical().to_owned()));
-        values.push(Value::U64(provenance.updated_at.0));
+        values.push(Value::U64(provenance.updated_at));
     } else {
         values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
         values.push(Value::U64(0));
@@ -3471,15 +3471,15 @@ fn inline_current_record_with_source_metadata(
     }
     let provenance = row.provenance()?.unwrap_or(RowProvenance {
         created_by: AuthorSubject::SYSTEM,
-        created_at: TxTime(0),
+        created_at: 0,
         updated_by: AuthorSubject::SYSTEM,
-        updated_at: TxTime(0),
+        updated_at: 0,
     });
     values.extend([
         Value::String(provenance.created_by.canonical().to_owned()),
-        Value::U64(provenance.created_at.0),
+        Value::U64(provenance.created_at),
         Value::String(provenance.updated_by.canonical().to_owned()),
-        Value::U64(provenance.updated_at.0),
+        Value::U64(provenance.updated_at),
     ]);
     let (tx_time, tx_node_alias) = row
         .projected_tx_alias()
@@ -3493,9 +3493,9 @@ fn inline_current_record_with_source_metadata(
             Value::Array(Vec::new()),
             Value::Nullable(None),
             Value::String(provenance.created_by.canonical().to_owned()),
-            Value::U64(provenance.created_at.0),
+            Value::U64(provenance.created_at),
             Value::String(provenance.updated_by.canonical().to_owned()),
-            Value::U64(provenance.updated_at.0),
+            Value::U64(provenance.updated_at),
         ]);
     }
     if let Some((_, branch_key)) = branch_witness {
@@ -3524,9 +3524,9 @@ fn inline_snapshot_include_deleted_current_graph(
         }
         if let Some(provenance) = row.provenance()? {
             values.push(Value::String(provenance.created_by.canonical().to_owned()));
-            values.push(Value::U64(provenance.created_at.0));
+            values.push(Value::U64(provenance.created_at));
             values.push(Value::String(provenance.updated_by.canonical().to_owned()));
-            values.push(Value::U64(provenance.updated_at.0));
+            values.push(Value::U64(provenance.updated_at));
         } else {
             values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
             values.push(Value::U64(0));

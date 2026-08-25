@@ -311,9 +311,13 @@ fn wire_record_round_trips_through_history_bytes() {
         panic!("expected commit unit");
     };
     let original = versions[0].clone();
+    assert_eq!(original.created_at_ms(), 10);
+    assert_eq!(original.updated_at_ms(), 10);
     core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
     let stored = core.query_row_versions("todos", row).unwrap();
+    assert_eq!(stored[0].created_at(), TxTime::from(10));
+    assert_eq!(stored[0].updated_at(), TxTime::from(10));
     let projected = core.version_record_from_row(&stored[0]).unwrap();
     assert_eq!(projected.table(), original.table());
     assert_eq!(projected.record().raw(), original.record().raw());

@@ -105,7 +105,7 @@ where
         );
         if !matches!(stored.fate, Fate::Rejected(_)) {
             for version in &content_versions {
-                self.update_merge_heads_for_content_version(&mut batch, version)
+                self.update_merge_heads_for_content_version(&mut batch, version, false)
                     .await?;
             }
         }

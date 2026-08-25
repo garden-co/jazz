@@ -414,9 +414,9 @@ fn ingest_direct_version(
             row_uuid,
             parents,
             AuthorSubject::SYSTEM,
-            TxTime(10),
+            10,
             AuthorSubject::SYSTEM,
-            TxTime(10),
+            10,
             &cells,
             None,
         )
