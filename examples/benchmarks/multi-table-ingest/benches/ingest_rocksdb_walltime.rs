@@ -20,3 +20,11 @@ fn next_1k_jobs_public_client_persistent(bencher: divan::Bencher<'_, '_>, existi
         .with_inputs(|| ClientIngestFixture::persistent(existing_jobs))
         .bench_local_values(ClientIngestFixture::insert_next_1k);
 }
+
+/// Adopter-profile reproduction: one host-driven tick per offline write.
+#[divan::bench(args = [0, 1_000, 3_000, 5_000], sample_count = 1)]
+fn next_1k_jobs_rocksdb_tick_per_write(bencher: divan::Bencher<'_, '_>, existing_jobs: usize) {
+    bencher
+        .with_inputs(|| IngestFixture::<RocksDbStorage>::rocksdb_with_tick(existing_jobs))
+        .bench_local_values(|(_dir, fixture)| fixture.insert_next_1k());
+}

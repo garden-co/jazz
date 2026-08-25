@@ -26,6 +26,7 @@ pub struct IngestFixture<S: OrderedKvStorage> {
     next_job: usize,
     write_identity: WriteIdentity,
     check_write_state: bool,
+    tick_after_write: bool,
 }
 
 impl IngestFixture<MemoryStorage> {
@@ -47,6 +48,7 @@ impl IngestFixture<MemoryStorage> {
             existing_jobs,
             true,
             false,
+            false,
         )
     }
 
@@ -60,6 +62,7 @@ impl IngestFixture<MemoryStorage> {
             existing_jobs,
             false,
             true,
+            false,
         )
     }
 
@@ -72,6 +75,7 @@ impl IngestFixture<MemoryStorage> {
             MemoryStorage::new(&refs),
             existing_jobs,
             attributed,
+            false,
             false,
         )
     }
@@ -86,7 +90,24 @@ impl IngestFixture<RocksDbStorage> {
         let storage =
             RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync)
                 .expect("open ingest benchmark RocksDB");
-        (dir, Self::new(schema, storage, existing_jobs, false, false))
+        (
+            dir,
+            Self::new(schema, storage, existing_jobs, false, false, false),
+        )
+    }
+
+    pub fn rocksdb_with_tick(existing_jobs: usize) -> (TempDir, Self) {
+        let schema = schema(false);
+        let families = schema.column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let dir = tempfile::tempdir().expect("create ingest benchmark directory");
+        let storage =
+            RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync)
+                .expect("open ingest benchmark RocksDB");
+        (
+            dir,
+            Self::new(schema, storage, existing_jobs, false, false, true),
+        )
     }
 }
 
@@ -97,6 +118,7 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> IngestFixture<S> {
         existing_jobs: usize,
         attributed: bool,
         check_write_state: bool,
+        tick_after_write: bool,
     ) -> Self {
         let config = DbConfig::new(
             schema,
@@ -127,6 +149,7 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> IngestFixture<S> {
             next_job: 0,
             write_identity,
             check_write_state,
+            tick_after_write,
         };
         fixture.seed_dimensions();
         fixture.insert_jobs(existing_jobs);
@@ -257,6 +280,10 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> IngestFixture<S> {
         }
         block_on(write.wait(DurabilityTier::Local))
             .unwrap_or_else(|error| panic!("wait for synthetic {table} row: {error}"));
+        if self.tick_after_write {
+            block_on(self.db.tick())
+                .unwrap_or_else(|error| panic!("tick after synthetic {table} row: {error}"));
+        }
     }
 }
 
