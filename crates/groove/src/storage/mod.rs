@@ -307,17 +307,19 @@ pub fn compact_storage_delta_operand(
 }
 
 /// Whether an operand's transition depends on the eventual durable base.
+///
 /// RocksDB must defer these operands to a full merge rather than compacting
-/// them without that base. Conditional inserts are base-dependent too: they
-/// can only be compacted safely with another conditional insert, and the
-/// generic ordered-KV seam permits later deltas of other kinds for the key.
+/// them without that base. Current-winner deltas are base-dependent because a
+/// lower-ordered candidate can still replace its parent. Conditional inserts
+/// and deletes likewise depend on the value the full merge eventually sees.
 pub fn storage_delta_requires_full_merge(encoded_delta: &[u8]) -> Result<bool, Error> {
     Ok(matches!(
         StorageDelta::decode(encoded_delta)?.kind,
-        StorageDeltaKind::SetIfAbsentV1 | StorageDeltaKind::DeleteIfValueMatchesV1
+        StorageDeltaKind::CurrentWinnerV1
+            | StorageDeltaKind::SetIfAbsentV1
+            | StorageDeltaKind::DeleteIfValueMatchesV1
     ))
 }
-
 pub fn apply_storage_delta(
     existing: Option<&[u8]>,
     encoded_delta: &[u8],

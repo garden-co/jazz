@@ -876,8 +876,8 @@ fn rocksdb_full_merge_delta(
 
 fn rocksdb_partial_merge_delta(
     _key: &[u8],
-    left_operand: Option<&[u8]>,
-    operands: &MergeOperands,
+    _left_operand: Option<&[u8]>,
+    _operands: &MergeOperands,
 ) -> Option<Vec<u8>> {
     if left_operand
         .is_some_and(|operand| !matches!(storage_delta_requires_full_merge(operand), Ok(false)))
@@ -935,7 +935,9 @@ mod tests {
         RocksDbStorage, WriteBufferManager, any_available, rocksdb_class_profile, rocksdb_options,
         rocksdb_options_for_cf, sum_available,
     };
-    use groove::storage::{OwnedWriteOperation, StorageDelta, storage_delta_requires_full_merge};
+    use groove::storage::{
+        CurrentWinnerDelta, OwnedWriteOperation, StorageDelta, storage_delta_requires_full_merge,
+    };
 
     fn ready<F: Future>(future: F) -> F::Output {
         let mut future = pin!(future);
@@ -1053,7 +1055,23 @@ mod tests {
     }
 
     #[test]
-    fn conditional_operands_defer_to_full_merges() {
+    fn base_dependent_operands_defer_to_full_merges() {
+        assert!(
+            storage_delta_requires_full_merge(
+                &StorageDelta::current_winner(CurrentWinnerDelta {
+                    tx_time: 5,
+                    tx_node_uuid: [3; 16],
+                    parents: vec![(30, [1; 16])],
+                    tx_time_offset: 0,
+                    tx_node_uuid_offset: 8,
+                    record: vec![0; 24],
+                })
+                .unwrap()
+                .encode()
+                .unwrap()
+            )
+            .unwrap()
+        );
         assert!(
             storage_delta_requires_full_merge(
                 &StorageDelta::set_if_absent(b"first authenticated bytes".to_vec())
@@ -1305,6 +1323,73 @@ mod tests {
             ready(storage.approximate_class_bytes("records".into()))
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn compaction_preserves_parent_sensitive_delta_order() {
+        use groove::storage::{
+            CurrentWinnerDelta, OrderedKvStorage, OwnedWriteOperation, StorageDelta,
+        };
+
+        fn record(time: u64, node: u8, payload: &[u8]) -> Vec<u8> {
+            let mut record = Vec::new();
+            record.extend(time.to_le_bytes());
+            record.extend([node; 16]);
+            record.extend(payload);
+            record
+        }
+
+        fn delta(
+            time: u64,
+            node: u8,
+            parents: Vec<(u64, [u8; 16])>,
+            record: Vec<u8>,
+        ) -> StorageDelta {
+            StorageDelta::current_winner(CurrentWinnerDelta {
+                tx_time: time,
+                tx_node_uuid: [node; 16],
+                parents,
+                tx_time_offset: 0,
+                tx_node_uuid_offset: 8,
+                record,
+            })
+            .unwrap()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        let base = record(30, 1, b"base");
+        let unrelated = record(20, 2, b"unrelated");
+        let child = record(5, 3, b"child");
+        ready(storage.set("records".into(), b"row".to_vec(), base)).unwrap();
+        storage
+            .db
+            .flush_cf(storage.db.cf_handle("records").unwrap())
+            .unwrap();
+
+        ready(storage.write_many(vec![
+            OwnedWriteOperation::Delta {
+                cf: "records".to_owned(),
+                key: b"row".to_vec(),
+                delta: delta(20, 2, Vec::new(), unrelated),
+            },
+            OwnedWriteOperation::Delta {
+                cf: "records".to_owned(),
+                key: b"row".to_vec(),
+                delta: delta(5, 3, vec![(30, [1; 16])], child.clone()),
+            },
+        ]))
+        .unwrap();
+        let records = storage.db.cf_handle("records").unwrap();
+        storage.db.flush_cf(records).unwrap();
+        storage
+            .db
+            .compact_range_cf::<&[u8], &[u8]>(records, None, None);
+
+        assert_eq!(
+            ready(storage.get("records".into(), b"row".to_vec())).unwrap(),
+            Some(child)
         );
     }
 
