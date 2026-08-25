@@ -57,6 +57,7 @@ pub(crate) struct CurrentPermissionsSummary {
 pub enum CatalogueError {
     QueryError(String),
     WriteError(String),
+    StorageError(String),
     NotFound,
     LockError,
 }
@@ -66,6 +67,7 @@ impl std::fmt::Display for CatalogueError {
         match self {
             CatalogueError::QueryError(message) => write!(f, "Query error: {message}"),
             CatalogueError::WriteError(message) => write!(f, "Write error: {message}"),
+            CatalogueError::StorageError(message) => write!(f, "Storage error: {message}"),
             CatalogueError::NotFound => write!(f, "Not found"),
             CatalogueError::LockError => write!(f, "Lock error"),
         }
@@ -121,12 +123,12 @@ impl StoredCatalogue {
         app_id: AppId,
         initial_schema: Option<Schema>,
         storage: DynCatalogueStorage,
-    ) -> Self {
-        let mut index = CatalogueIndex::from_storage(storage.as_ref(), app_id).unwrap_or_default();
+    ) -> Result<Self, CatalogueError> {
+        let mut index = CatalogueIndex::from_storage(storage.as_ref(), app_id)?;
         if let Some(schema) = initial_schema {
             index.add_schema(schema);
         }
-        Self {
+        Ok(Self {
             app_id,
             index: Mutex::new(index),
             #[cfg(test)]
@@ -134,7 +136,7 @@ impl StoredCatalogue {
             #[cfg(test)]
             test_local_durability_tiers: Mutex::new(HashSet::new()),
             storage: Mutex::new(storage),
-        }
+        })
     }
 
     #[cfg(test)]
@@ -144,8 +146,8 @@ impl StoredCatalogue {
         storage: DynCatalogueStorage,
         schema_branches: Vec<String>,
         local_durability_tiers: HashSet<DurabilityTier>,
-    ) -> Self {
-        let store = Self::new(app_id, initial_schema, storage);
+    ) -> Result<Self, CatalogueError> {
+        let store = Self::new(app_id, initial_schema, storage)?;
         *store
             .test_schema_branches
             .lock()
@@ -154,7 +156,7 @@ impl StoredCatalogue {
             .test_local_durability_tiers
             .lock()
             .expect("durability tiers lock") = local_durability_tiers;
-        store
+        Ok(store)
     }
 
     #[cfg(any(test, feature = "embedded-server"))]
@@ -240,7 +242,7 @@ impl StoredCatalogue {
 
 impl From<CatalogueStorageError> for CatalogueError {
     fn from(error: CatalogueStorageError) -> Self {
-        CatalogueError::WriteError(error.to_string())
+        CatalogueError::StorageError(error.to_string())
     }
 }
 

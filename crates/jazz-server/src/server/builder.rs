@@ -277,9 +277,11 @@ impl ServerBuilder {
                 schema_branches,
                 local_durability_tiers,
             )
+            .map_err(|error| format!("failed to read durable catalogue: {error}"))?
         };
         #[cfg(not(test))]
-        let store = StoredCatalogue::new(self.app_id, initial_schema, storage);
+        let store = StoredCatalogue::new(self.app_id, initial_schema, storage)
+            .map_err(|error| format!("failed to read durable catalogue: {error}"))?;
 
         let latest_catalogue_schema = store
             .latest_published_schema()
@@ -622,8 +624,8 @@ pub fn upstream_http_url(base_url: &str, app_id: AppId) -> Result<String, String
 mod tests {
     use super::*;
     use crate::server::catalogue::CatalogueStore;
-    use jazz::tools::AppId;
     use jazz::groove::storage::OrderedKvStorage;
+    use jazz::tools::AppId;
 
     fn dynamic_bootstrap_schema() -> jazz::tools::public_schema::Schema {
         jazz::tools::public_schema::SchemaBuilder::new()
@@ -954,9 +956,8 @@ mod tests {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let catalogue_path = data_dir.path().join(CATALOGUE_ROCKSDB_DIR);
         {
-            let storage =
-                jazz_storage_rocksdb::RocksDbStorage::open(&catalogue_path, &["default"])
-                    .expect("open raw catalogue storage");
+            let storage = jazz_storage_rocksdb::RocksDbStorage::open(&catalogue_path, &["default"])
+                .expect("open raw catalogue storage");
             jazz::db::block_on(storage.set(
                 "default".to_owned(),
                 b"cat:not-a-uuid".to_vec(),
@@ -974,9 +975,14 @@ mod tests {
             .build()
             .await;
 
+        let error = result.err().expect(
+            "server startup must fail rather than treating a corrupt durable catalogue as empty",
+        );
         assert!(
-            result.is_err(),
-            "server startup must fail rather than treating a corrupt durable catalogue as empty"
+            error.contains(
+                "failed to read durable catalogue: Storage error: IO error: catalogue key uuid"
+            ),
+            "startup error retains the catalogue-read context and storage corruption: {error}"
         );
     }
 
