@@ -9,7 +9,17 @@ It creates a file row from the browser's `File.stream()` through `db.insertStrea
 pnpm --filter epic-drop dev
 ```
 
+The configured Jazz Vite plugin starts the local Jazz development server as
+well as Vite, and supplies `VITE_JAZZ_APP_ID` and `VITE_JAZZ_SERVER_URL` to the
+browser automatically. No hand-written `.env` file is needed for local use.
+
 Create a folder, choose a file, and see its metadata appear in the live file list.
+
+Run the example's browser receipts with:
+
+```bash
+pnpm --filter epic-drop test
+```
 
 ## Shape shared with the benchmark
 
