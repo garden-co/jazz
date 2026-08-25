@@ -4,29 +4,74 @@ use std::collections::BTreeMap;
 
 use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, MergeableTxOps, PreparedQuery, block_on};
 use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
+use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
-
-type BenchDb = Db<MemoryStorage>;
+use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+use tempfile::TempDir;
 
 const USERS: usize = 10;
 const PROJECTS: usize = 30;
 
 /// Seeded W1 read fixture. Setup is deliberately outside measured closures.
-pub struct Fixture {
-    db: BenchDb,
+pub struct Fixture<S: OrderedKvStorage> {
+    db: Db<S>,
     board: PreparedQuery,
     comments: PreparedQuery,
     activity: PreparedQuery,
 }
 
-impl Fixture {
-    pub fn new(tasks: usize, comments: usize, activity_events: usize) -> Self {
+impl Fixture<MemoryStorage> {
+    pub fn memory(tasks: usize, comments: usize, activity_events: usize) -> Self {
+        let schema = schema();
+        let families = schema.column_families();
+        let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        Self::new(
+            tasks,
+            comments,
+            activity_events,
+            schema,
+            MemoryStorage::new(&family_refs),
+        )
+    }
+
+    pub fn memory_profile_s() -> Self {
+        Self::memory(3_000, 12_000, 9_000)
+    }
+}
+
+impl Fixture<RocksDbStorage> {
+    pub fn rocksdb(tasks: usize, comments: usize, activity_events: usize) -> (TempDir, Self) {
+        let schema = schema();
+        let families = schema.column_families();
+        let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        let dir = tempfile::tempdir().expect("create W1 RocksDB benchmark directory");
+        let storage =
+            RocksDbStorage::open_with_durability(dir.path(), &family_refs, Durability::WalNoSync)
+                .expect("open W1 RocksDB benchmark storage");
+        (
+            dir,
+            Self::new(tasks, comments, activity_events, schema, storage),
+        )
+    }
+
+    pub fn rocksdb_profile_s() -> (TempDir, Self) {
+        Self::rocksdb(3_000, 12_000, 9_000)
+    }
+}
+
+impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
+    fn new(
+        tasks: usize,
+        comments: usize,
+        activity_events: usize,
+        schema: JazzSchema,
+        storage: S,
+    ) -> Self {
         assert!(tasks > 0 && comments > 0 && activity_events > 0);
-        let db = open_db();
+        let db = open_db(schema, storage);
         let users = (0..USERS).map(|i| row_id(1, i)).collect::<Vec<_>>();
         let projects = (0..PROJECTS).map(|i| row_id(2, i)).collect::<Vec<_>>();
         let task_ids = (0..tasks).map(|i| row_id(3, i)).collect::<Vec<_>>();
@@ -151,10 +196,6 @@ impl Fixture {
         fixture
     }
 
-    pub fn profile_s() -> Self {
-        Self::new(3_000, 12_000, 9_000)
-    }
-
     pub fn board_count(&self) -> usize {
         self.read_count(&self.board)
     }
@@ -210,13 +251,13 @@ fn schema() -> JazzSchema {
     JazzSchema::new(&public).expect("W1 public schema compiles")
 }
 
-fn open_db() -> BenchDb {
-    let schema = schema();
-    let families = schema.column_families();
-    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+fn open_db<S: OrderedKvStorage + ReopenableStorage + 'static>(
+    schema: JazzSchema,
+    storage: S,
+) -> Db<S> {
     block_on(Db::open(DbConfig::new(
         schema,
-        MemoryStorage::new(&family_refs),
+        storage,
         DbIdentity {
             node: NodeUuid::from_bytes([0x71; 16]),
             author: AuthorSubject::SYSTEM,
@@ -225,8 +266,8 @@ fn open_db() -> BenchDb {
     .expect("open W1 benchmark database")
 }
 
-fn prepare_page(
-    db: &BenchDb,
+fn prepare_page<S: OrderedKvStorage + ReopenableStorage + 'static>(
+    db: &Db<S>,
     table: &str,
     filter_column: &str,
     filter_value: RowUuid,

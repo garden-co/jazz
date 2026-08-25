@@ -2124,6 +2124,8 @@ version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
  "jazz",
+ "jazz-storage-rocksdb",
+ "tempfile",
 ]
 
 [[package]]
