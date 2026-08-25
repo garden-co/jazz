@@ -31,7 +31,7 @@ Transactions use `.wait(...)` and report errors in the same way as individual mu
 ## Read tiers
 
 Read choices control when the **first result** of a query or subscription is delivered.
-They are intentionally separate from write durability: write APIs and wait({ tier })
+They are intentionally separate from write durability: write APIs and `wait({ tier })`
 continue to use local, edge, and global.
 
 | Option         | Values                                                  | Default         | What it does                                                                                                                                                                                                                                                                     |
