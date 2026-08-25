@@ -34,9 +34,9 @@ export function acquireClient<T extends RegisteredClient>(
   holder: object,
 ): Promise<T> {
   let entry = registry.get(key);
-  if (entry?.closing) {
+  const previousClosing = entry?.closing;
+  if (entry && previousClosing) {
     const previous = entry;
-    const previousClosing = previous.closing;
     let teardownSucceeded = false;
     const created: Entry = {
       promise: previousClosing.then(() => {
