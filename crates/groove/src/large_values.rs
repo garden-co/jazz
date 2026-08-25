@@ -2597,58 +2597,23 @@ pub fn decode_node(
         return Err(Error::ObjectHashMismatch);
     }
     let node = decode_canonical_node(encoded)?;
-    match &node {
-        ChunkNode::Leaf {
-            format,
-            kind: encoded_kind,
-            bytes,
-        } => {
-            check_format(*format)?;
-            if *encoded_kind != kind {
-                return Err(Error::DescriptorMismatch);
-            }
-            if bytes.len() > LEAF_MAX_BYTES {
-                return Err(Error::MalformedNode);
-            }
-            match kind {
-                LargeValueKind::Bytes => {}
-                LargeValueKind::String | LargeValueKind::Json => {
-                    std::str::from_utf8(bytes).map_err(|_| Error::InvalidUtf8)?;
-                }
-            }
-        }
-        ChunkNode::Branch {
-            format,
-            kind: encoded_kind,
-            children,
-        } => {
-            check_format(*format)?;
-            if *encoded_kind != kind {
-                return Err(Error::DescriptorMismatch);
-            }
-            if children.is_empty() || children.len() > BRANCH_MAX_CHILDREN {
-                return Err(Error::MalformedNode);
-            }
-            let mut child_metrics = children.iter().map(|child| child.metrics);
-            let first_metrics = child_metrics.next().ok_or(Error::MalformedNode)?;
-            let _ = child_metrics.try_fold(first_metrics, add_metrics)?;
-            if kind == LargeValueKind::Bytes
-                && children
-                    .iter()
-                    .any(|child| child.metrics.utf16_length.is_some())
-            {
-                return Err(Error::MalformedNode);
-            }
-            if kind != LargeValueKind::Bytes
-                && children
-                    .iter()
-                    .any(|child| child.metrics.utf16_length.is_none())
-            {
-                return Err(Error::MalformedNode);
-            }
-        }
+    let encoded_kind = match &node {
+        ChunkNode::Leaf { kind, .. } | ChunkNode::Branch { kind, .. } => *kind,
+    };
+    if encoded_kind != kind {
+        return Err(Error::DescriptorMismatch);
     }
     Ok(node)
+}
+
+pub(crate) fn decode_authenticated_node(
+    expected_hash: ContentHash,
+    encoded: &[u8],
+) -> Result<ChunkNode, Error> {
+    if object_hash(encoded) != expected_hash {
+        return Err(Error::ObjectHashMismatch);
+    }
+    decode_canonical_node(encoded)
 }
 
 /// Encode a chunk node using Groove's ordinary canonical enum/record algebra.
@@ -2766,6 +2731,7 @@ pub(crate) fn decode_canonical_node(encoded: &[u8]) -> Result<ChunkNode, Error> 
         return Err(Error::MalformedNode);
     }
     let schema = chunk_node_schema();
+    preflight_node_bounds(encoded, &schema)?;
     let value =
         crate::records::decode_single_field_value(encoded, &ValueType::Enum(Box::new(schema)))
             .map_err(|_| Error::MalformedNode)?;
@@ -2834,7 +2800,75 @@ pub(crate) fn decode_canonical_node(encoded: &[u8]) -> Result<ChunkNode, Error> 
     if canonical != encoded {
         return Err(Error::MalformedNode);
     }
+    validate_untyped_node_structure(&node)?;
     Ok(node)
+}
+
+fn preflight_node_bounds(encoded: &[u8], schema: &EnumSchema) -> Result<(), Error> {
+    let (tag, payload) =
+        crate::records::split_variant_record(encoded).map_err(|_| Error::MalformedNode)?;
+    if tag == 1 {
+        let descriptor = schema.case(1).map_err(|_| Error::MalformedNode)?.payload;
+        let span = descriptor
+            .field_span(payload, 2)
+            .map_err(|_| Error::MalformedNode)?;
+        let array = &payload[span];
+        let count = array
+            .get(..4)
+            .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+            .map(u32::from_le_bytes)
+            .ok_or(Error::MalformedNode)?;
+        if usize::try_from(count).map_err(|_| Error::MalformedNode)? > BRANCH_MAX_CHILDREN {
+            return Err(Error::MalformedNode);
+        }
+    }
+    Ok(())
+}
+
+fn validate_untyped_node_structure(node: &ChunkNode) -> Result<(), Error> {
+    match node {
+        ChunkNode::Leaf {
+            format,
+            kind,
+            bytes,
+        } => {
+            check_format(*format)?;
+            if bytes.len() > LEAF_MAX_BYTES {
+                return Err(Error::MalformedNode);
+            }
+            if *kind != LargeValueKind::Bytes {
+                std::str::from_utf8(bytes).map_err(|_| Error::InvalidUtf8)?;
+            }
+        }
+        ChunkNode::Branch {
+            format,
+            kind,
+            children,
+        } => {
+            check_format(*format)?;
+            if children.is_empty() || children.len() > BRANCH_MAX_CHILDREN {
+                return Err(Error::MalformedNode);
+            }
+            let mut child_metrics = children.iter().map(|child| child.metrics);
+            let first_metrics = child_metrics.next().ok_or(Error::MalformedNode)?;
+            let _ = child_metrics.try_fold(first_metrics, add_metrics)?;
+            if *kind == LargeValueKind::Bytes
+                && children
+                    .iter()
+                    .any(|child| child.metrics.utf16_length.is_some())
+            {
+                return Err(Error::MalformedNode);
+            }
+            if *kind != LargeValueKind::Bytes
+                && children
+                    .iter()
+                    .any(|child| child.metrics.utf16_length.is_none())
+            {
+                return Err(Error::MalformedNode);
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn object_hash(encoded: &[u8]) -> ContentHash {
@@ -4920,6 +4954,36 @@ mod tests {
         encoded.push(0);
         assert_eq!(
             decode_node(LargeValueKind::Bytes, object_hash(&encoded), &encoded),
+            Err(Error::MalformedNode)
+        );
+    }
+
+    #[test]
+    fn oversized_branch_fanout_is_rejected_before_metadata_decode() {
+        let child = BranchChild {
+            node_ref: NodeRef {
+                object_hash: ContentHash([1; 32]),
+                locator: Locator([2; 32]),
+            },
+            metrics: NodeMetrics {
+                byte_length: 1,
+                utf16_length: None,
+            },
+            logical_hash: ContentHash([3; 32]),
+        };
+        let encoded = encode_node(&ChunkNode::Branch {
+            format: FORMAT_VERSION,
+            kind: LargeValueKind::Bytes,
+            children: vec![child; BRANCH_MAX_CHILDREN + 1],
+        })
+        .unwrap();
+        assert!(encoded.len() <= MAX_ENCODED_NODE_BYTES);
+        assert_eq!(
+            preflight_node_bounds(&encoded, &chunk_node_schema()),
+            Err(Error::MalformedNode)
+        );
+        assert_eq!(
+            decode_authenticated_node(object_hash(&encoded), &encoded),
             Err(Error::MalformedNode)
         );
     }

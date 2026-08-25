@@ -174,6 +174,10 @@ serialization envelope. A leaf is `{ format, kind, bytes }`; a branch is
 `{ object_hash, locator, byte_length, utf16_length?, logical_hash }`. The exact
 canonical bytes are object-hashed. A byte appended to a leaf's raw-bytes field
 is therefore authenticated content, not ignorable trailing data.
+Branch array counts are bounded before allocating or decoding child records.
+The same untyped authenticated structural validator (object hash, canonical
+encoding, format, kind-shaped metrics, leaf bounds, fanout, and overflow) is
+used by traversal, upload admission, and metadata-only storage observers.
 
 Text leaf boundaries are valid UTF-8 code-point boundaries. Text branches also
 carry exact aggregate UTF-16 code-unit lengths. JSON uses literal validated
