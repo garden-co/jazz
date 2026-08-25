@@ -612,18 +612,18 @@ mod variant_case_tests {
             physical_storage_value_type(&json),
         )]);
         let same_json_shaped_bytes = Value::String(r#"{"title":"same bytes"}"#.to_owned());
-        assert_ne!(
+        assert_eq!(
             text_cell.create(std::slice::from_ref(&same_json_shaped_bytes)).unwrap(),
             json_cell.create(std::slice::from_ref(&same_json_shaped_bytes)).unwrap(),
-            "the schema-derived kind is redundantly authenticated in physical storage"
+            "inline payloads stay compact because the containing schema supplies their kind"
         );
 
-        let json_root = groove::large_values::prepare(
+        let json_prepared = groove::large_values::prepare(
             groove::large_values::LargeValueKind::Json,
             br#"{"title":"same bytes"}"#,
         )
-        .unwrap()
-        .value_ref;
+        .unwrap();
+        let json_root = json_prepared.value_ref.clone();
         assert!(
             json_cell.create(&[Value::Large(json_root.clone())]).is_ok(),
             "the JSON physical descriptor accepts its schema-derived large value"
@@ -634,24 +634,25 @@ mod variant_case_tests {
         );
 
         let json_record = json_cell
-            .create(&[Value::Large(json_root)])
+            .create(&[Value::Large(json_root.clone())])
             .expect("encode JSON physical cell");
-        assert!(
-            text_cell.bind(&json_record).to_values().is_err(),
-            "a received JSON physical record cannot replay as text"
-        );
-        let text_root = groove::large_values::prepare(
-            groove::large_values::LargeValueKind::String,
-            br#"{"title":"same bytes"}"#,
-        )
-        .unwrap()
-        .value_ref;
-        let text_record = text_cell
-            .create(&[Value::Large(text_root)])
-            .expect("encode text physical cell");
-        assert!(
-            json_cell.bind(&text_record).to_values().is_err(),
-            "a received text physical record cannot replay as JSON"
+        let replayed_values = text_cell.bind(&json_record).to_values().unwrap();
+        let [Value::Large(replayed)] = replayed_values.as_slice() else {
+            panic!("chunked physical arm must decode")
+        };
+        let root = json_prepared
+            .staged_chunks
+            .iter()
+            .find(|chunk| chunk.node_ref == json_root.root)
+            .unwrap();
+        assert_eq!(
+            groove::large_values::decode_node(
+                replayed.kind,
+                root.node_ref.object_hash,
+                &root.encoded,
+            ),
+            Err(groove::large_values::Error::DescriptorMismatch),
+            "the independently addressed root authenticates its semantic kind"
         );
     }
 }
