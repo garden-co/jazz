@@ -295,10 +295,7 @@ fn send_expires_stale_reassembly_before_pending_outbound_flush_returns_early() {
             None,
         );
         assert_eq!(adapter.send(message.clone()), Ok(()));
-        assert_eq!(
-            adapter.reassembler.push(fragment.clone(), 0).unwrap(),
-            None
-        );
+        assert_eq!(adapter.reassembler.push(fragment.clone(), 0).unwrap(), None);
         adapter.set_reassembly_elapsed_for_test(MAX_FRAGMENT_REASSEMBLY_IDLE_MS);
 
         assert_eq!(adapter.send(message.clone()), Err(flush_error));

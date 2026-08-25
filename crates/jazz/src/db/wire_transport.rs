@@ -134,8 +134,8 @@ impl LogicalMessageReassembler {
                 return Err("too many incomplete logical messages for peer".to_owned());
             }
             let absolute_deadline_ms = now_ms.saturating_add(MAX_FRAGMENT_REASSEMBLY_AGE_MS);
-            let deadline_ms = absolute_deadline_ms
-                .min(now_ms.saturating_add(MAX_FRAGMENT_REASSEMBLY_IDLE_MS));
+            let deadline_ms =
+                absolute_deadline_ms.min(now_ms.saturating_add(MAX_FRAGMENT_REASSEMBLY_IDLE_MS));
             self.incomplete.insert(
                 fragment.message_id,
                 IncompleteLogicalMessage {
@@ -532,9 +532,9 @@ where
     T: WireTransport,
 {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        self.flush_pending_outbound()?;
         let now_ms = self.reassembly_now_ms();
         self.reassembler.expire(now_ms);
+        self.flush_pending_outbound()?;
         let payload = match encode_sync_message_for_features(&message, self.features) {
             Ok(payload) => payload,
             Err(error) => {
