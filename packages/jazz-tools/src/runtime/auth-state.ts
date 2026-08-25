@@ -30,7 +30,9 @@ function authStateEquals(a: AuthState, b: AuthState): boolean {
   const bs = b.session;
   if (as === bs) return true;
   if (!as || !bs) return false;
-  if (as.user_id !== bs.user_id || as.authMode !== bs.authMode) return false;
+  if (as.issuer !== bs.issuer || as.user_id !== bs.user_id || as.authMode !== bs.authMode) {
+    return false;
+  }
   return JSON.stringify(as.claims) === JSON.stringify(bs.claims);
 }
 
@@ -90,7 +92,7 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
       return state;
     },
 
-    applyJwtToken(jwtToken?: string): AuthState {
+    applyJwtToken(jwtToken?: string, trustedReservedSession?: Session): AuthState {
       if (options?.lockAuthenticatedState) {
         return state;
       }
@@ -99,11 +101,14 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
         appId: input.appId,
         jwtToken,
         cookieSession: input.cookieSession,
+        trustedReservedSession,
       });
 
-      const currentUserId = state.session?.user_id ?? null;
-      const nextUserId = resolved.session?.user_id ?? null;
-      if (currentUserId !== nextUserId) {
+      const currentAuthor = state.session ? [state.session.issuer, state.session.user_id] : null;
+      const nextAuthor = resolved.session
+        ? [resolved.session.issuer, resolved.session.user_id]
+        : null;
+      if (JSON.stringify(currentAuthor) !== JSON.stringify(nextAuthor)) {
         throw new Error(
           "Changing auth principal on a live client is not supported. Recreate the Db.",
         );
@@ -130,9 +135,11 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
         cookieSession,
       });
 
-      const currentUserId = state.session?.user_id ?? null;
-      const nextUserId = resolved.session?.user_id ?? null;
-      if (currentUserId !== nextUserId) {
+      const currentAuthor = state.session ? [state.session.issuer, state.session.user_id] : null;
+      const nextAuthor = resolved.session
+        ? [resolved.session.issuer, resolved.session.user_id]
+        : null;
+      if (JSON.stringify(currentAuthor) !== JSON.stringify(nextAuthor)) {
         throw new Error(
           "Changing auth principal on a live client is not supported. Recreate the Db.",
         );

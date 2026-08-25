@@ -10,7 +10,7 @@ use jazz::db::{
     SubscriptionStream,
 };
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, MergeableCommit, NodeState};
 use jazz::peer::{MaintainedSubscriptionViewMetrics, PeerState};
 use jazz::protocol::{RegisterShapeOptions, ShapeAst, Subscribe, SubscriptionKey, SyncMessage};
@@ -221,7 +221,11 @@ pub fn db_surface_smoke() {
     let schema = schema();
     let fixture = build_fixture(&config);
     let plan = representative_plan(&fixture);
-    let (_dir, db) = open_db(node(70), AuthorId(plan.user.0), schema.clone());
+    let (_dir, db) = open_db(
+        node(70),
+        AuthorSubject::for_test_uuid(plan.user.0),
+        schema.clone(),
+    );
     let mut oracle = DbS1Oracle::default();
 
     let query1 = db_query1(&plan);
@@ -507,7 +511,7 @@ fn edge_acceptance_phase(
     let (tx_id, unit) = commit_mergeable_unit_settled(
         client,
         MergeableCommit::new(ISSUES, issue, 950_000)
-            .made_by(AuthorId::SYSTEM)
+            .made_by(AuthorSubject::SYSTEM)
             .cells(BTreeMap::from([(
                 "title".to_owned(),
                 Value::String("edge-acceptance-probe".to_owned()),
@@ -578,7 +582,7 @@ fn execute(ctx: &mut dyn DriverContext, config: &Config) -> Summary {
             FixtureCommitApply {
                 writer_name: "writer",
                 core_name: "core",
-                made_by: AuthorId::SYSTEM,
+                made_by: AuthorSubject::SYSTEM,
                 now_ms: 1_000 + idx as u64,
             },
         )
@@ -749,7 +753,7 @@ fn reconnect_summaries(config: &Config, profile: PeerProfile) -> Vec<ReconnectSu
             FixtureCommitApply {
                 writer_name: "writer",
                 core_name: "core",
-                made_by: AuthorId::SYSTEM,
+                made_by: AuthorSubject::SYSTEM,
                 now_ms: 1_000 + idx as u64,
             },
         )
@@ -936,7 +940,7 @@ fn subscriber_sweep_summary(config: &Config, subscribers: usize) -> SweepSummary
             FixtureCommitApply {
                 writer_name: "writer",
                 core_name: "core",
-                made_by: AuthorId::SYSTEM,
+                made_by: AuthorSubject::SYSTEM,
                 now_ms: 1_000 + idx as u64,
             },
         )
@@ -1241,7 +1245,7 @@ fn commit_hydration_row(
     let (_tx_id, unit) = commit_mergeable_unit_settled(
         writer,
         MergeableCommit::new(table, row_uuid, now_ms)
-            .made_by(AuthorId::SYSTEM)
+            .made_by(AuthorSubject::SYSTEM)
             .cells(cells),
     )
     .expect("hydration commit");
@@ -1428,7 +1432,7 @@ fn apply_one_issue_edit(
         FixtureCommitApply {
             writer_name: "writer",
             core_name: "core",
-            made_by: AuthorId(user.0),
+            made_by: AuthorSubject::for_test_uuid(user.0),
             now_ms,
         },
     )
@@ -1463,7 +1467,7 @@ fn apply_issue_edit_to_user(
         FixtureCommitApply {
             writer_name: "writer",
             core_name: "core",
-            made_by: AuthorId(user.0),
+            made_by: AuthorSubject::for_test_uuid(user.0),
             now_ms,
         },
     )
@@ -1499,7 +1503,7 @@ fn apply_write_stream(
             FixtureCommitApply {
                 writer_name: "writer",
                 core_name: "core",
-                made_by: AuthorId(user.0),
+                made_by: AuthorSubject::for_test_uuid(user.0),
                 now_ms: 100_000 + idx as u64,
             },
         )
@@ -1711,9 +1715,9 @@ fn naive_refetch_ceiling_bytes(schema: &JazzSchema, fixture: &Fixture) -> u64 {
                 schema.version_id(),
                 commit.row_uuid,
                 Vec::new(),
-                AuthorId::SYSTEM,
+                AuthorSubject::SYSTEM,
                 TxTime(0),
-                AuthorId::SYSTEM,
+                AuthorSubject::SYSTEM,
                 TxTime(0),
                 &positional,
                 None,
@@ -2136,7 +2140,7 @@ fn open_node(
 
 fn open_db(
     node_uuid: NodeUuid,
-    author: AuthorId,
+    author: AuthorSubject,
     schema: JazzSchema,
 ) -> (tempfile::TempDir, Db<RocksDbStorage>) {
     let temp_dir = tempfile::tempdir().expect("tempdir");

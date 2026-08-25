@@ -6,6 +6,7 @@ import type {
   WasmRow,
 } from "../../drivers/types.js";
 import { isProvenanceMagicColumn, isProvenanceMagicTimestampColumn } from "../../magic-columns.js";
+import { decodeCanonicalAuthorSubjectBytes } from "../author-id.js";
 
 const textDecoder = new TextDecoder();
 const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
@@ -541,14 +542,10 @@ function terminalLayoutValueTypeMatchesColumn(
   // public value. Rust collector descriptors have already removed it.
   const logicalColumn = logicalStorageColumns([column])[0]!;
   // Provenance lives in fixed CurrentRow system fields, not nullable user_
-  // carriers. Authors are UUIDs internally and public strings; timestamps
-  // retain their native scalar storage type.
+  // carriers. Author subjects are already canonical text at the native/public
+  // boundary; timestamps retain their native scalar storage type.
   if (isProvenanceMagicColumn(column.name)) {
-    const storageColumn =
-      column.name === "$createdBy" || column.name === "$updatedBy"
-        ? { ...logicalColumn, column_type: { type: "Uuid" as const } }
-        : logicalColumn;
-    return terminalValueTypeMatchesColumn(valueType, storageColumn, false);
+    return terminalValueTypeMatchesColumn(valueType, logicalColumn, false);
   }
   if (carrier === "Logical") {
     return terminalValueTypeMatchesColumn(valueType, logicalColumn, false);
@@ -646,12 +643,6 @@ function terminalValueTypeMatchesColumn(
       terminalValueTypeMatchesColumn(valueType.inner, { ...column, nullable: false }, false)
     );
   }
-  if (
-    (column.name === "$createdBy" || column.name === "$updatedBy") &&
-    column.column_type.type === "Text"
-  ) {
-    return valueType.tag === 10;
-  }
   switch (column.column_type.type) {
     case "Boolean":
       return valueType.tag === 7;
@@ -729,16 +720,23 @@ function decodeTerminalColumnBytes(
   bytes: Uint8Array,
   valueType: ValueType | undefined,
 ): Value {
-  let storageType = valueType;
-  while (storageType?.tag === 14) storageType = storageType.inner;
   if (
-    (column.name === "$createdBy" || column.name === "$updatedBy") &&
+    isProvenanceMagicColumn(column.name) &&
     column.column_type.type === "Text" &&
-    storageType?.tag === 10
+    nonNullableValueType(valueType)?.tag === 8
   ) {
-    return { type: "Text", value: formatUuid(bytes) };
+    return { type: "Text", value: decodeProvenanceText(bytes) };
   }
   return decodeTerminalBytes(column.column_type, bytes, column.name);
+}
+
+function decodeProvenanceText(bytes: Uint8Array): string {
+  return decodeCanonicalAuthorSubjectBytes(bytes);
+}
+
+function nonNullableValueType(valueType: ValueType | undefined): ValueType | undefined {
+  while (valueType?.tag === 14) valueType = valueType.inner;
+  return valueType;
 }
 
 function isKnownValueType(valueType: ValueType): boolean {

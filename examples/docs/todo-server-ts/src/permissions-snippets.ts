@@ -39,7 +39,7 @@ s.definePermissions(exampleApp, ({ policy, allOf, session }) => {
 
 // #region permissions-created-by-ts
 s.definePermissions(exampleApp, ({ policy }) => {
-  // Sugar for applying `$createdBy === session.user_id` to read/insert/update/delete.
+  // Sugar for applying `$createdBy === session.author` to read/insert/update/delete.
   policy.todos.managedByCreator();
 });
 // #endregion permissions-created-by-ts

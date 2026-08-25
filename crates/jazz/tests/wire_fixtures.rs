@@ -5,7 +5,7 @@ use groove::records::{RecordDescriptor, Value, ValueType};
 use jazz::binding_codec::{
     RelationSnapshotPayload, RemovedRowPayload, Row, RowBatch, SubscriptionDeltaPayload,
 };
-use jazz::ids::{AuthorId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
+use jazz::ids::{AuthorSubject, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
 use jazz::protocol::{
     CatalogueAck, CatalogueSnapshot, CurrentWriteSchema, LensOp, MigrationLens,
     PeerPayloadInventory, RegisterShapeOptions, ResultRowEntry, RowVersionRef,
@@ -136,7 +136,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
     let binding_id = BindingId(uuid::Uuid::from_bytes([0x33; 16]));
     let schema_version = SchemaVersionId::from_bytes([0x44; 16]);
     let target_schema_version = SchemaVersionId::from_bytes([0x45; 16]);
-    let author = AuthorId::from_bytes([0x55; 16]);
+    let author = AuthorSubject::for_test_bytes([0x55; 16]);
     let row = RowUuid::from_bytes([0x77; 16]);
     let subscription = SubscriptionKey {
         shape_id,
@@ -475,7 +475,7 @@ fn result_row_entry(tx_id: TxId) -> ResultRowEntry {
 
 fn mixed_version_carriers(
     schema_version: SchemaVersionId,
-    author: AuthorId,
+    author: AuthorSubject,
 ) -> Vec<VersionCarrier> {
     let schema = compiled_todos_schema(&["title"]);
     let table = &schema.tables()[0];

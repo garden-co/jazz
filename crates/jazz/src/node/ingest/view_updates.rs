@@ -161,7 +161,7 @@ where
             tx_id: merge_tx,
             kind: TxKind::Mergeable,
             n_total_writes: 1,
-            made_by: AuthorId::SYSTEM,
+            made_by: AuthorSubject::SYSTEM,
             permission_subject: None,
             base_snapshot: None,
             row_read_set: None,

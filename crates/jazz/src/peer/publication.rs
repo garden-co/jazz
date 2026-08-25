@@ -101,7 +101,7 @@ impl PeerState {
     }
 
     /// Construct a peer link that terminates one client author identity.
-    pub fn client_link(identity: AuthorId) -> Self {
+    pub fn client_link(identity: AuthorSubject) -> Self {
         Self {
             role: PeerRole::ClientLink { identity },
             ..Self::default()
@@ -109,7 +109,7 @@ impl PeerState {
     }
 
     /// Construct an edge-boundary peer that terminates one client author identity.
-    pub fn edge_client(identity: AuthorId) -> Self {
+    pub fn edge_client(identity: AuthorSubject) -> Self {
         Self::client_link(identity)
     }
 
@@ -118,8 +118,8 @@ impl PeerState {
     /// Trusted backend websocket links still speak as their concrete peer identity
     /// for session/resume validation, but served reads must bypass row policies.
     pub fn edge_client_with_permission_identity(
-        identity: AuthorId,
-        permission_identity: AuthorId,
+        identity: AuthorSubject,
+        permission_identity: AuthorSubject,
     ) -> Self {
         Self {
             role: PeerRole::ClientLink { identity },
@@ -134,12 +134,12 @@ impl PeerState {
     }
 
     /// Return the wire/session identity for this peer link.
-    pub fn link_identity(&self) -> AuthorId {
+    pub fn link_identity(&self) -> AuthorSubject {
         self.role.identity()
     }
 
     /// Return the identity used to evaluate reads on this peer link.
-    pub fn identity(&self) -> AuthorId {
+    pub fn identity(&self) -> AuthorSubject {
         self.permission_identity
             .unwrap_or_else(|| self.role.identity())
     }
@@ -1304,9 +1304,15 @@ impl PeerState {
         .await
     }
 
-    pub(crate) async fn rehydrate_authorization_support_query<S>(
+    /// Hydrate an authority-owned authorization proof using its admitted
+    /// permission subject. A trusted backend link normally serves ordinary
+    /// reads as SYSTEM, but that bypass must not leak into a proof of a
+    /// particular session's policy clauses.
+    pub(crate) async fn rehydrate_authorization_support_query_for_identity<S>(
         &mut self,
         node: &mut NodeState<S>,
+        identity: AuthorSubject,
+        subscription: SubscriptionKey,
         shape: &ValidatedQuery,
         binding: &Binding,
         opts: RegisterShapeOptions,
@@ -1314,23 +1320,28 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        let subscription = SubscriptionKey {
-            shape_id: shape.shape_id(),
-            binding_id: binding.binding_id(),
-            read_view: opts.read_view_key(),
-        };
-        self.rehydrate_query_for_subscription_with_purpose(
-            node,
-            subscription,
-            shape,
-            binding,
-            opts,
-            RehydratePurpose::AuthorizationSupport,
-        )
-        .await?
-        .ok_or(Error::InvalidStoredValue(
-            "authorization hydration suspended outside an owner-loop subscription",
-        ))
+        let previous_role = self.role;
+        let previous_permission_identity = self.permission_identity;
+        self.role = PeerRole::ClientLink { identity };
+        self.permission_identity = Some(identity);
+        let update = self
+            .rehydrate_query_for_subscription_with_purpose(
+                node,
+                subscription,
+                shape,
+                binding,
+                opts,
+                RehydratePurpose::AuthorizationSupport,
+            )
+            .await
+            .and_then(|update| {
+                update.ok_or(Error::InvalidStoredValue(
+                    "authorization hydration suspended outside an owner-loop subscription",
+                ))
+            });
+        self.role = previous_role;
+        self.permission_identity = previous_permission_identity;
+        update
     }
 
     /// Build a usage-site update from an already-maintained canonical subscription.

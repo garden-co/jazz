@@ -16,10 +16,9 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{ArraySubquery, Query};
 use jazz::schema::JazzSchema;
-use jazz::serving::auth_admission::author_id_from_subject;
 use jazz::tools::{
     ColumnType as PublicColumnType, SchemaBuilder as PublicSchemaBuilder,
     TableSchemaBuilder as PublicTableSchemaBuilder,
@@ -171,7 +170,14 @@ fn empty_schema() -> JazzSchema {
 fn identity_for_subject(node: u8, subject: &str) -> DbIdentity {
     DbIdentity {
         node: NodeUuid::from_bytes([node; 16]),
-        author: author_id_from_subject(subject),
+        // The loopback server authenticates this handshake using the configured
+        // static bearer, so the local runtime must use the exact same reserved
+        // issuer-and-subject identity as the authority.
+        author: AuthorSubject::from_canonical(
+            &serde_json::to_string(&(jazz::serving::auth_admission::STATIC_BEARER_ISSUER, subject))
+                .expect("serialize canonical static-bearer test identity"),
+        )
+        .expect("parse canonical static-bearer test identity"),
     }
 }
 

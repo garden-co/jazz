@@ -276,8 +276,27 @@ fn todos_member_read_schema() -> JazzSchema {
             ),
     )
 }
-fn user(byte: u8) -> AuthorId {
-    AuthorId::from_bytes([byte; 16])
+fn user(byte: u8) -> AuthorSubject {
+    AuthorSubject::for_test_bytes([byte; 16])
+}
+
+/// Attach the application-owned UUID `sub` used by legacy fixture schemas.
+///
+/// Authorship is deliberately separate: callers opt in at the exact fixture
+/// boundary instead of deriving a provider claim from `AuthorSubject` in core.
+pub(super) fn install_test_uuid_sub_claim<S>(
+    node: &mut NodeState<S>,
+    identity: AuthorSubject,
+) where
+    S: OrderedKvStorage + ReopenableStorage,
+{
+    if identity == AuthorSubject::SYSTEM {
+        return;
+    }
+    node.set_session_claims(
+        identity,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(identity.test_uuid()))]),
+    );
 }
 fn publish_schema_lineage<S>(
     core: &mut NodeState<S>,
@@ -297,23 +316,23 @@ where
     );
     let outcome = crate::db::block_on(core.apply_trusted_catalogue_message(
         SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             catalogue_seq: core.active_catalogue_seq().saturating_add(1),
             publication: Box::new(publication),
         },
     ))?;
     settle_outcome(core, outcome)
 }
-fn owner_cells(author: AuthorId, title: impl Into<String>) -> BTreeMap<String, Value> {
+fn owner_cells(author: AuthorSubject, title: impl Into<String>) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.into())),
-        ("owner".to_owned(), Value::Uuid(author.0)),
+        ("owner".to_owned(), Value::Uuid(author.test_uuid())),
     ])
 }
-fn owner_cells_with_author(owner: AuthorId, title: impl Into<String>) -> BTreeMap<String, Value> {
+fn owner_cells_with_author(owner: AuthorSubject, title: impl Into<String>) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.into())),
-        ("owner".to_owned(), Value::Uuid(owner.0)),
+        ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
     ])
 }
 fn v(value: impl Into<String>) -> Value {
@@ -337,9 +356,9 @@ fn version_record<V: Into<Value> + Clone>(
         schema.version_id(),
         row_uuid,
         parents,
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         TxTime(1),
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         TxTime(1),
         &cells,
         deletion,
@@ -379,7 +398,7 @@ fn run_lens_parallel_materialization_seed(seed: u64) {
         .unwrap();
     }
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 4,
             schema: schemas[3].version_id(),
@@ -859,7 +878,7 @@ fn assert_subscription_rows_match_policy_oracle(
     _subscription_ordinal: u64,
     oracle: &Oracle,
     delivered: &PerNodeKnowledge,
-    identity: AuthorId,
+    identity: AuthorSubject,
 ) {
     let actual = node
         .subscription_current_rows("todos", DurabilityTier::Global)
@@ -1018,7 +1037,7 @@ impl PerNodeKnowledge {
 fn local_policy_oracle_rows(
     _oracle: &Oracle,
     delivered: &PerNodeKnowledge,
-    _identity: AuthorId,
+    _identity: AuthorSubject,
 ) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     delivered
         .subscription_entries
@@ -1126,13 +1145,13 @@ fn commit_from_rng(rng: &mut Lcg, step: u64, rows: &[RowUuid]) -> MergeableCommi
 }
 fn seeded_author_and_owner(
     rng: &mut Lcg,
-    default_author: AuthorId,
-    author_a: AuthorId,
-    author_b: AuthorId,
-) -> (AuthorId, AuthorId) {
+    default_author: AuthorSubject,
+    author_a: AuthorSubject,
+    author_b: AuthorSubject,
+) -> (AuthorSubject, AuthorSubject) {
     if rng.chance(1, 5) {
         let owner = if rng.chance(1, 2) { author_a } else { author_b };
-        (AuthorId::SYSTEM, owner)
+        (AuthorSubject::SYSTEM, owner)
     } else {
         (default_author, default_author)
     }
@@ -1206,7 +1225,7 @@ fn assert_exclusive_serialization_matches_oracle(
     oracle: &Oracle,
     txs: &[Transaction],
     owner_shape_id: ShapeId,
-    owner_bindings: &BTreeMap<BindingId, AuthorId>,
+    owner_bindings: &BTreeMap<BindingId, AuthorSubject>,
 ) {
     for tx in txs {
         let Some(state) = oracle.tx_state(tx.tx_id) else {
@@ -1301,7 +1320,7 @@ fn ingest_relay_version(
             tx_id,
             kind: TxKind::Mergeable,
             n_total_writes: 1,
-            made_by: AuthorId::SYSTEM,
+            made_by: AuthorSubject::SYSTEM,
             permission_subject: None,
             base_snapshot: None,
             row_read_set: None,
@@ -1362,11 +1381,13 @@ fn commit_owner_policy_global(
     writer: &mut NodeState<RocksDbStorage>,
     core: &mut NodeState<RocksDbStorage>,
     row_uuid: RowUuid,
-    made_by: AuthorId,
-    owner: AuthorId,
+    made_by: AuthorSubject,
+    owner: AuthorSubject,
     title: &str,
     now_ms: u64,
 ) -> TxId {
+    install_test_uuid_sub_claim(writer, made_by);
+    install_test_uuid_sub_claim(core, made_by);
     let (published, unit) = writer
         .commit_mergeable_unit(
             MergeableCommit::new("todos", row_uuid, now_ms)
@@ -1395,10 +1416,11 @@ fn commit_owner_policy_global(
 fn commit_core_owner_fixture(
     core: &mut NodeState<RocksDbStorage>,
     row_uuid: RowUuid,
-    owner: AuthorId,
+    owner: AuthorSubject,
     title: &str,
     now_ms: u64,
 ) -> TxId {
+    install_test_uuid_sub_claim(core, owner);
     let published = core
         .commit_mergeable(
             MergeableCommit::new("todos", row_uuid, now_ms)
@@ -1445,7 +1467,7 @@ fn assert_view_update_only_ships_rows(update: &SyncMessage, expected_rows: BTree
 fn assert_policy_subscription_rows(
     reader: &mut NodeState<RocksDbStorage>,
     _subscription_ordinal: u64,
-    identity: AuthorId,
+    identity: AuthorSubject,
 ) {
     let rows = reader
         .subscription_current_rows("todos", DurabilityTier::Local)
@@ -1454,7 +1476,7 @@ fn assert_policy_subscription_rows(
     assert!(rows
         .iter()
         .all(|row| row.cell(&owner_policy_schema().tables[0], "owner")
-            == Some(Value::Uuid(identity.0))));
+            == Some(Value::Uuid(identity.test_uuid()))));
 }
 fn enqueue_rehydrate_with_dedup_assertion(
     peer: &mut PeerState,
@@ -1559,13 +1581,13 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
     let owner_binding_a = owner_shape
         .bind(BTreeMap::from([(
             "owner".to_owned(),
-            Value::Uuid(author_a.0),
+            Value::Uuid(author_a.test_uuid()),
         )]))
         .unwrap();
     let owner_binding_b = owner_shape
         .bind(BTreeMap::from([(
             "owner".to_owned(),
-            Value::Uuid(author_b.0),
+            Value::Uuid(author_b.test_uuid()),
         )]))
         .unwrap();
     let owner_bindings = BTreeMap::from([
@@ -1676,7 +1698,7 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 let (made_by, owner) =
                     seeded_author_and_owner(&mut rng, default_author, author_a, author_b);
                 let tx_id = OpenTransactionId::new();
-                writer.open_exclusive(tx_id).unwrap();
+                writer.open_exclusive_for_identity(tx_id, made_by).unwrap();
                 writer
                     .tx_read(tx_id, "todos", rows[rng.choose(rows.len())])
                     .unwrap();
@@ -1746,7 +1768,7 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 let commit =
                     MergeableCommit::new("todos", row_uuid, now_ms + SKEW_TOLERANCE_MS + 1_000)
                         .made_by(if rng.chance(1, 2) {
-                            AuthorId::SYSTEM
+                            AuthorSubject::SYSTEM
                         } else {
                             owner
                         })
@@ -1802,7 +1824,7 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 let (made_by, owner) =
                     seeded_author_and_owner(&mut rng, default_author, author_a, author_b);
                 let tx_id = OpenTransactionId::new();
-                writer.open_exclusive(tx_id).unwrap();
+                writer.open_exclusive_for_identity(tx_id, made_by).unwrap();
                 writer
                     .tx_read(tx_id, "todos", rows[rng.choose(rows.len())])
                     .unwrap();

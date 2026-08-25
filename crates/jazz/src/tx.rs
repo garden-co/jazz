@@ -5,7 +5,7 @@
 //! [`crate::node::open_tx`], and [`crate::protocol`]. Merge and currency rules
 //! are grounded in `jazz/README.md`.
 
-use crate::ids::{AuthorId, NodeUuid, RowUuid};
+use crate::ids::{AuthorSubject, NodeUuid, RowUuid};
 use crate::protocol::BranchKey;
 use crate::query::{BindingId, Query, ShapeId};
 use crate::schema::TableSchema;
@@ -23,13 +23,13 @@ pub struct Transaction {
     /// Number of row-version records in the original commit unit.
     pub n_total_writes: u32,
     /// Author that made the transaction.
-    pub made_by: AuthorId,
+    pub made_by: AuthorSubject,
     /// Optional identity used for write-policy evaluation.
     ///
     /// When absent, policy is evaluated as `made_by`. Trusted serving-node
     /// flows use this to preserve user provenance while validating writes
     /// under a terminated request/session identity.
-    pub permission_subject: Option<AuthorId>,
+    pub permission_subject: Option<AuthorSubject>,
     /// Exclusive transaction snapshot, if any.
     pub base_snapshot: Option<Snapshot>,
     /// Exclusive point reads, if any.
@@ -333,7 +333,7 @@ pub struct TransactionRecord {
     /// Transaction id.
     pub tx_id: TxId,
     /// Author that made the transaction.
-    pub made_by: AuthorId,
+    pub made_by: AuthorSubject,
     /// Transaction kind.
     pub kind: TxKind,
     /// Number of row-version records in the original commit unit.
@@ -389,7 +389,7 @@ impl HistoryEntry {
     }
 
     /// Author that made the transaction.
-    pub fn made_by(&self) -> AuthorId {
+    pub fn made_by(&self) -> AuthorSubject {
         self.transaction.made_by
     }
 
@@ -539,13 +539,14 @@ impl RejectedTransaction {
     }
 
     /// Author that made the transaction.
-    pub fn made_by(&self) -> AuthorId {
-        AuthorId(
+    pub fn made_by(&self) -> AuthorSubject {
+        AuthorSubject::from_canonical(
             self.record
                 .borrowed()
-                .get_uuid(RejectedTransactionRowRecord::FIELD_MADE_BY_IDX)
+                .get_str(RejectedTransactionRowRecord::FIELD_MADE_BY_IDX)
                 .expect("valid rejected author"),
         )
+        .expect("canonical rejected author")
     }
 
     /// Transaction HLC timestamp.
@@ -752,9 +753,9 @@ groove::define_record! {
         2 => tx_node_id: u64,
         3 => schema_version: u64,
         4 => parents: ParentRefs,
-        5 => created_by: AuthorId,
+        5 => created_by: AuthorSubject,
         6 => created_at: u64,
-        7 => updated_by: AuthorId,
+        7 => updated_by: AuthorSubject,
         8 => updated_at: u64,
         .. user_cells,
     }
@@ -767,9 +768,9 @@ groove::define_record! {
         2 => tx_node_id: u64,
         3 => schema_version: u64,
         4 => parents: ParentRefs,
-        5 => created_by: AuthorId,
+        5 => created_by: AuthorSubject,
         6 => created_at: u64,
-        7 => updated_by: AuthorId,
+        7 => updated_by: AuthorSubject,
         8 => updated_at: u64,
         9 => _deletion: Value,
     }
@@ -780,7 +781,7 @@ groove::define_record! {
         0 => time: u64,
         1 => node_id: u64,
         2 => kind: TxKind,
-        3 => made_by: AuthorId,
+        3 => made_by: AuthorSubject,
         4 => rejection_reason: RejectionReasonTag,
         5 => cascade_root: Option<Value>,
         6 => reason_detail: Option<String>,

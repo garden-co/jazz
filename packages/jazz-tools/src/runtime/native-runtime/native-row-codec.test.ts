@@ -90,7 +90,7 @@ describe("native row codec", () => {
       { name: "row_uuid", valueType: { tag: 10 } },
       { name: "user_title", valueType: { tag: 14, inner: { tag: 8 } } },
       { name: "user_done", valueType: { tag: 14, inner: { tag: 7 } } },
-      { name: "$createdBy", valueType: { tag: 10 } },
+      { name: "$createdBy", valueType: { tag: 8 } },
     ];
     const nullableLogicalNames = [
       { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },

@@ -4,7 +4,7 @@ import type { AuthState } from "./auth-state.js";
 import type { Session } from "./context.js";
 import type { JazzClient } from "./client.js";
 import { RuntimeSource, type RuntimeClientContext } from "./runtime-source.js";
-import type { WasmSchema } from "../drivers/types.js";
+import { LOCAL_FIRST_JWT_ISSUER, sessionFromVerifiedReservedJwtPayload } from "./client-session.js";
 
 class TestRuntimeSource extends RuntimeSource<DbConfig> {
   constructor(private readonly client: JazzClient) {
@@ -46,7 +46,7 @@ function toBase64Url(value: unknown): string {
 
 function makeJwt(payload: Record<string, unknown>): string {
   const header = { alg: "HS256", typ: "JWT" };
-  return `${toBase64Url(header)}.${toBase64Url(payload)}.signature`;
+  return `${toBase64Url(header)}.${toBase64Url({ iss: "https://issuer.example", ...payload })}.signature`;
 }
 
 function makeDbWithJwt(jwtToken: string) {
@@ -85,6 +85,59 @@ function makeDbWithCookieSession(cookieSession: Session) {
 }
 
 describe("Db auth state", () => {
+  it("refreshes a dedicated local-first session without entering generic JWT admission", () => {
+    const initialToken = makeJwt({ iss: LOCAL_FIRST_JWT_ISSUER, sub: "alice", version: 1 });
+    const initialSession = sessionFromVerifiedReservedJwtPayload(
+      { iss: LOCAL_FIRST_JWT_ISSUER, sub: "alice" },
+      "local-first",
+    )!;
+    const refreshedToken = makeJwt({
+      iss: LOCAL_FIRST_JWT_ISSUER,
+      sub: "alice",
+      version: 2,
+    });
+    const runtimeClient = {
+      updateTrustedAuthToken: vi.fn(),
+      onMutationError: vi.fn(),
+    };
+    const runtimeSource = new (class extends TestRuntimeSource {
+      override mintLocalFirstToken = vi.fn(() => refreshedToken);
+    })(runtimeClient as any);
+    const db = new (class extends Db {
+      constructor() {
+        super(
+          {
+            appId: "test-app",
+            jwtToken: initialToken,
+            trustedReservedSession: initialSession,
+          },
+          runtimeSource,
+        );
+      }
+
+      refreshForTest(): void {
+        this.initLocalFirstAuth("alice-secret", 3600, false);
+        (this as unknown as { refreshLocalFirstToken(): void }).refreshLocalFirstToken();
+      }
+
+      touchClient(): void {
+        this.getClient({ auth_state_touch: { columns: [] } });
+      }
+    })();
+    db.touchClient();
+
+    db.refreshForTest();
+
+    expect(db.getAuthState()).toMatchObject({
+      authMode: "local-first",
+      session: { issuer: LOCAL_FIRST_JWT_ISSUER, user_id: "alice" },
+    });
+    expect(runtimeClient.updateTrustedAuthToken).toHaveBeenCalledWith(
+      refreshedToken,
+      expect.objectContaining({ issuer: LOCAL_FIRST_JWT_ISSUER, user_id: "alice" }),
+    );
+  });
+
   it("returns the initial cookie auth state", () => {
     const { db } = makeDbWithCookieSession({
       user_id: "alice",
@@ -94,6 +147,7 @@ describe("Db auth state", () => {
         subject: "alice-subject",
         issuer: "https://issuer.example",
       },
+      issuer: "https://issuer.example",
       authMode: "external",
     });
 
@@ -108,6 +162,7 @@ describe("Db auth state", () => {
 
   it("reports backend-scoped auth state for session-backed dbs", () => {
     const session = {
+      issuer: "https://issuer.example",
       user_id: "alice",
       claims: { role: "writer" },
       authMode: "external" as const,
@@ -161,7 +216,12 @@ describe("Db auth state", () => {
       runtimeClient as any,
       {
         authMode: "external",
-        session: { user_id: "bob", claims: { role: "writer" }, authMode: "external" },
+        session: {
+          issuer: "https://issuer.example",
+          user_id: "bob",
+          claims: { role: "writer" },
+          authMode: "external",
+        },
       },
     );
 
@@ -271,6 +331,7 @@ describe("Db auth state", () => {
         subject: "alice-subject",
         issuer: "https://issuer.example",
       },
+      issuer: "https://issuer.example",
       authMode: "external",
     });
     const refreshed: Session = {
@@ -281,6 +342,7 @@ describe("Db auth state", () => {
         subject: "alice-subject",
         issuer: "https://issuer.example",
       },
+      issuer: "https://issuer.example",
       authMode: "external",
     };
     const states: AuthState[] = [];

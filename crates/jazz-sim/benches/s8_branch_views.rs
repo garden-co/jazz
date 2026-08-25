@@ -5,7 +5,7 @@ use jazz::block_on;
 use jazz::db::{Db, DbConfig, DbIdentity, MergeableTxOps, ReadOpts, SeededRowIdSource};
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::ContributionMergeRow;
 use jazz::protocol::{BranchSelector, BranchViewBase, SnapshotRef};
 use jazz::query::{Query, col, eq, lit};
@@ -34,7 +34,7 @@ pub(crate) fn run(row_count: usize) {
             MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>()),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x58; 16]),
-                author: AuthorId::SYSTEM,
+                author: AuthorSubject::SYSTEM,
             },
         )
         .with_id_source(SeededRowIdSource::new(0x5800)),

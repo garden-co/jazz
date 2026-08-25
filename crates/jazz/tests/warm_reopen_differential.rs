@@ -8,7 +8,7 @@ use jazz::db::{
     SubscriptionEvent,
 };
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, RelationEdge, RelationSnapshot};
 use jazz::query::{ArraySubquery, OrderDirection, Query};
 use jazz::schema::{JazzSchema, TableSchema};
@@ -54,8 +54,8 @@ fn row(seed: u64) -> RowUuid {
     RowUuid::from_bytes(bytes)
 }
 
-fn author() -> AuthorId {
-    AuthorId::from_bytes([0xa7; 16])
+fn author() -> AuthorSubject {
+    AuthorSubject::for_test_bytes([0xa7; 16])
 }
 
 fn schema() -> JazzSchema {

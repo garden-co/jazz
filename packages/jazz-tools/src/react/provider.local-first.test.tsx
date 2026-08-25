@@ -20,6 +20,7 @@ const SECRET = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const SESSION: Session = {
   user_id: "local-user",
   claims: {},
+  issuer: "urn:jazz:local-first",
   authMode: "local-first",
 };
 

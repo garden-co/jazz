@@ -16,14 +16,14 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
 type BenchDb = Db<MemoryStorage>;
 
-const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
+const AUTHOR_UUID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-0000000000a1");
 
 fn schema() -> JazzSchema {
     schema_fixture::compile(
@@ -50,7 +50,7 @@ fn open_db(seed: u64) -> BenchDb {
             MemoryStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([seed as u8; 16]),
-                author: AUTHOR,
+                author: AuthorSubject::for_test_uuid(AUTHOR_UUID),
             },
         )
         .with_id_source(SeededRowIdSource::new(seed)),

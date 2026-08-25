@@ -13,10 +13,16 @@ fn query_subscription_result_sets_track_bindings_and_rehydrate() {
         .validate(&schema())
         .unwrap();
     let alice_binding = shape
-        .bind(BTreeMap::from([("user".to_owned(), Value::Uuid(alice.0))]))
+        .bind(BTreeMap::from([(
+            "user".to_owned(),
+            Value::Uuid(alice.test_uuid()),
+        )]))
         .unwrap();
     let bob_binding = shape
-        .bind(BTreeMap::from([("user".to_owned(), Value::Uuid(bob.0))]))
+        .bind(BTreeMap::from([(
+            "user".to_owned(),
+            Value::Uuid(bob.test_uuid()),
+        )]))
         .unwrap();
 
     register_query_shape(&mut server, &shape, RegisterShapeOptions::default());
@@ -154,7 +160,7 @@ fn settled_binding_view_sources_provide_source_coverage_metadata() {
             &shape,
             &binding,
             DurabilityTier::Global,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             CurrentQueryProgramOutput::AppRows,
             &ReadViewSpec::default(),
             Some(settled_binding_view),
@@ -200,7 +206,10 @@ fn settled_binding_view_root_with_reference_include_sources_lowers() {
         .validate(&schema())
         .unwrap();
     let binding = shape
-        .bind(BTreeMap::from([("user".to_owned(), Value::Uuid(alice.0))]))
+        .bind(BTreeMap::from([(
+            "user".to_owned(),
+            Value::Uuid(alice.test_uuid()),
+        )]))
         .unwrap();
 
     register_query_shape(&mut server, &shape, RegisterShapeOptions::default());
@@ -211,7 +220,7 @@ fn settled_binding_view_root_with_reference_include_sources_lowers() {
     commit_global_cells(
         &mut server,
         "users",
-        RowUuid(alice.0),
+        RowUuid(alice.test_uuid()),
         BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
         1,
         1,
@@ -271,7 +280,10 @@ fn query_subscription_ships_provenance_closure_for_local_evaluation() {
         .validate(&schema())
         .unwrap();
     let binding = shape
-        .bind(BTreeMap::from([("user".to_owned(), Value::Uuid(alice.0))]))
+        .bind(BTreeMap::from([(
+            "user".to_owned(),
+            Value::Uuid(alice.test_uuid()),
+        )]))
         .unwrap();
     register_shape_binding_for_receiver(&mut reader, &shape, &binding);
     let mut peer = PeerState::new();

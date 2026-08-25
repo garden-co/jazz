@@ -134,7 +134,7 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
         storage: doctest_support::MemoryStorage::new(&refs),
         identity: DbIdentity {
             node: NodeUuid::from_bytes([0x91; 16]),
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(91))),
     }))
@@ -621,7 +621,7 @@ fn exclusive_tx_overlay_scopes_same_row_uuid_by_table() {
             .table(table_schema("table_a"))
             .table(table_schema("table_b")),
     );
-    let db = open_db(0x5e, AuthorId::SYSTEM, &schema);
+    let db = open_db(0x5e, AuthorSubject::SYSTEM, &schema);
     let table_a = schema
         .tables
         .iter()
@@ -1238,8 +1238,8 @@ fn exclusive_tx_ref_survives_handle_reconstruction_until_explicit_commit() {
 #[test]
 fn identity_bound_exclusive_transaction_rejects_cross_identity_reads_and_commits_as_bound_author() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
-    let alice = AuthorId::from_bytes([0xc1; 16]);
-    let bob = AuthorId::from_bytes([0xb2; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
     let open = OpenTransactionId::new();
     let row = row(0xa1);
     assert_ne!(alice, db.identity.author);
@@ -1296,21 +1296,15 @@ fn identity_bound_exclusive_transaction_rejects_cross_identity_reads_and_commits
 #[test]
 fn mergeable_transaction_identity_reads_are_not_forced_to_begin_author() {
     let schema = owner_read_schema();
-    let db = open_db(0xd3, AuthorId::SYSTEM, &schema);
-    let alice = AuthorId::from_bytes([0xa3; 16]);
-    let bob = AuthorId::from_bytes([0xb3; 16]);
+    let db = open_db(0xd3, AuthorSubject::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa3; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb3; 16]);
     let open = OpenTransactionId::new();
     let prepared = db
-        .prepare_query(&db.table("todos").filter(eq(col("owner"), claim("sub"))))
+        .prepare_query(&db.table("todos").filter(eq(col("owner"), claim("user_id"))))
         .unwrap();
-    db.set_identity_claims(
-        alice,
-        BTreeMap::from([("sub".to_owned(), Value::Uuid(alice.0))]),
-    );
-    db.set_identity_claims(
-        bob,
-        BTreeMap::from([("sub".to_owned(), Value::Uuid(bob.0))]),
-    );
+    db.set_identity_claims(alice, test_provider_claims(alice));
+    db.set_identity_claims(bob, test_provider_claims(bob));
     let alice_row = row(0xa3);
     let bob_row = row(0xb3);
     db.insert(
@@ -1372,8 +1366,8 @@ fn mergeable_transaction_identity_reads_are_not_forced_to_begin_author() {
 #[test]
 fn exclusive_tx_rejects_conflicting_concurrent_update() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let core = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let core = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let table = &schema.tables[0];
     let row = row(1);
 
@@ -1418,8 +1412,8 @@ fn exclusive_tx_blind_writes_are_first_committer_wins() {
     // (INV-TX-20) can catch the conflict — this is the exact case the earlier
     // broken validator let through (it short-circuited to "ok" on empty reads).
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let core = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let core = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let table = &schema.tables[0];
     let row = row(1);
 

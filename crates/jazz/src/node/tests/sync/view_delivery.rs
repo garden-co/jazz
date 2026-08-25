@@ -140,7 +140,7 @@ fn global_read_ignores_a_newer_unacknowledged_local_write() {
         BTreeMap::from([(target, title_cells("authoritative remote"))])
     );
 
-    let mut link = PeerState::client_link(AuthorId::SYSTEM);
+    let mut link = PeerState::client_link(AuthorSubject::SYSTEM);
     let update = link.current_rows_update(&mut core, "todos").unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         settled_through, ..
@@ -221,7 +221,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             [tx_id],
             [],
             [],
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
         )
         .unwrap();
     let version_bundles = version_bundles_for_update(&deduped);
@@ -361,7 +361,7 @@ fn duplicate_commit_units_compare_versions_without_wire_order() {
         tx_id: TxId::new(TxTime::from(10), node(1)),
         kind: TxKind::Mergeable,
         n_total_writes: 2,
-        made_by: AuthorId::SYSTEM,
+        made_by: AuthorSubject::SYSTEM,
         permission_subject: None,
         base_snapshot: None,
         row_read_set: None,

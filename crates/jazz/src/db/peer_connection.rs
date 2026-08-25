@@ -70,7 +70,7 @@ where
             .apply_sync_message_with_ingest_context(
                 message,
                 Some(CommitUnitIngestContext {
-                    identity: AuthorId::SYSTEM,
+                    identity: AuthorSubject::SYSTEM,
                     trust: CommitUnitTrust::TrustedBackend,
                     edge_authority: false,
                 }),
@@ -302,7 +302,7 @@ pub(super) struct UpstreamConnectionState {
     pub(super) pending: Vec<PendingUpstreamCommand>,
     pub(super) upstream_subscriptions: PendingUpstreamCommands,
     pub(super) announced_shapes: BTreeSet<ShapeRegistrationKey>,
-    pub(super) sent_session_claim_revisions: BTreeMap<AuthorId, u64>,
+    pub(super) sent_session_claim_revisions: BTreeMap<AuthorSubject, u64>,
     pub(super) outbox: Outbox,
     pub(super) uploaded: BTreeSet<TxId>,
     pub(super) large_value_uploads: LargeValueUploadQueues,
@@ -1527,7 +1527,7 @@ where
                                     .unwrap_or_default();
                                 if clause_count == 0
                                     || clause_index >= clause_count
-                                    || key.subject.as_bytes() != &expected.link
+                                    || key.subject != expected.link
                                 {
                                     drop_peer_request(&self.node);
                                     continue;
@@ -1651,7 +1651,7 @@ where
                                 };
                                 let observed = self.node.borrow();
                                 let observed_claims = observed
-                                    .session_claim_revision(AuthorId::from_bytes(expected.link));
+                                    .session_claim_revision(expected.link);
                                 let observed_policy = observed.active_catalogue_seq();
                                 drop(observed);
                                 // Context components are monotonic per admitted
@@ -3311,7 +3311,7 @@ fn transport_error(error: TransportError) -> Error {
 
 async fn evaluate_authoritative_permission_advice<S>(
     node: &mut NodeState<S>,
-    identity: AuthorId,
+    identity: AuthorSubject,
     action: PermissionAdviceAction,
 ) -> PermissionAdvice
 where
@@ -3381,7 +3381,7 @@ async fn serve_authorization_scope_intent<S>(
     node: &SharedNodeState<S>,
     peer: &mut PeerState,
     transport: &mut dyn Transport,
-    identity: AuthorId,
+    identity: AuthorSubject,
     connection_epoch: u64,
     request_id: PermissionAdviceRequestId,
     action: PermissionAdviceAction,
@@ -3597,7 +3597,7 @@ where
     let receipt = AuthorizationScopeReceipt {
         key: scope.key.clone(),
         authority: *node.borrow().node_uuid().as_bytes(),
-        link: *identity.as_bytes(),
+        link: identity,
         authority_epoch: connection_epoch,
         claims_revision: current_claims_revision,
         policy_epoch: current_policy_epoch,
@@ -3634,7 +3634,7 @@ where
 fn authorization_scope_receipt_for_view<S>(
     node: &NodeState<S>,
     peer: &PeerState,
-    link_identity: AuthorId,
+    link_identity: AuthorSubject,
     connection_epoch: u64,
     purpose: &AuthorizedScopePurpose,
     update: &SyncMessage,
@@ -3655,7 +3655,7 @@ where
         AuthorizationScopeReceipt {
             key: purpose.key.clone(),
             authority: *node.node_uuid().as_bytes(),
-            link: *link_identity.as_bytes(),
+            link: link_identity,
             authority_epoch: connection_epoch,
             claims_revision: node.session_claim_revision(link_identity),
             policy_epoch: node.active_catalogue_seq(),
@@ -3672,7 +3672,7 @@ fn aggregate_authorization_scope_receipt_for_view<S>(
     >,
     node: &NodeState<S>,
     peer: &PeerState,
-    link_identity: AuthorId,
+    link_identity: AuthorSubject,
     connection_epoch: u64,
     purpose: &AuthorizedScopePurpose,
     update: &SyncMessage,
@@ -3726,7 +3726,7 @@ pub(super) fn authorization_scope_receipt_matches_transport_context(
     applied_cut: Option<crate::time::GlobalTime>,
 ) -> bool {
     receipt.link == expected.link
-        && receipt.link == *receipt.key.subject.as_bytes()
+        && receipt.link == receipt.key.subject
         && receipt.authority == expected.authority
         && receipt.authority_epoch == expected.connection_epoch
         && receipt.claims_revision == expected.claims_revision
@@ -3801,7 +3801,7 @@ pub(super) fn remove_scope_aggregate_member(
 
 fn refresh_authorized_scope_purpose<S>(
     node: &NodeState<S>,
-    link_identity: AuthorId,
+    link_identity: AuthorSubject,
     subscription: SubscriptionKey,
     shape: &ValidatedQuery,
     binding: &Binding,

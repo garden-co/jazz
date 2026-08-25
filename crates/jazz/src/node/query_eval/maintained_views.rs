@@ -179,7 +179,7 @@ where
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
-        identity: AuthorId,
+        identity: AuthorSubject,
         tier: DurabilityTier,
         read_view: &ReadViewSpec,
         retained_prepared_plan: Option<SubscriptionPreparedPlan>,

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use axum::Router;
 use jazz::groove::storage::StorageFactory;
-use jazz::ids::AuthorId;
+use jazz::ids::AuthorSubject;
 use jazz::node::EdgeCacheBudget;
 use jazz::schema::JazzSchema;
 use jazz::serving::{NodeRole, StorageConfig};
@@ -425,7 +425,7 @@ fn spawn_edge_upstream_connector(
                 .bootstrap_catalogue(NativeTransportRequest {
                     server_url: upstream_url.clone(),
                     app_id,
-                    peer_identity: AuthorId::SYSTEM,
+                    peer_identity: AuthorSubject::SYSTEM,
                     auth: auth.clone(),
                     wake: Arc::new(|| {}),
                 })
@@ -462,7 +462,7 @@ fn spawn_edge_upstream_connector(
                 .connect(NativeTransportRequest {
                     server_url: upstream_url.clone(),
                     app_id,
-                    peer_identity: AuthorId::SYSTEM,
+                    peer_identity: AuthorSubject::SYSTEM,
                     auth,
                     wake,
                 })

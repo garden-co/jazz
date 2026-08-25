@@ -19,7 +19,7 @@ fn exclusive_join_shape_uses_shared_snapshot_lowering() {
         .commit_mergeable_settled(MergeableCommit::new("issue_members", row(2), 11).cells(
             BTreeMap::from([
                 ("issue".to_owned(), Value::Uuid(row(1).0)),
-                ("user".to_owned(), Value::Uuid(alice.0)),
+                ("user".to_owned(), Value::Uuid(alice.test_uuid())),
             ]),
         ))
         .unwrap();
@@ -29,7 +29,10 @@ fn exclusive_join_shape_uses_shared_snapshot_lowering() {
         .validate(&schema)
         .unwrap();
     let binding = shape
-        .bind(BTreeMap::from([("user".to_owned(), Value::Uuid(alice.0))]))
+        .bind(BTreeMap::from([(
+            "user".to_owned(),
+            Value::Uuid(alice.test_uuid()),
+        )]))
         .unwrap();
 
     let open = OpenTransactionId::new();

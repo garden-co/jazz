@@ -154,7 +154,7 @@ impl PeerState {
     pub(crate) async fn prove_terminal_commit_authorization<S>(
         &mut self,
         node: &mut NodeState<S>,
-        writer: AuthorId,
+        writer: AuthorSubject,
         versions: &[VersionRecord],
         candidate_tx_id: TxId,
     ) -> Result<(), Error>
@@ -195,25 +195,16 @@ impl PeerState {
                         self.authorization_progress_for_subscription(subscription),
                     )
                 } else {
-                    let previous_role = self.role;
-                    let previous_permission_identity = self.permission_identity;
-                    self.role = PeerRole::ClientLink { identity: writer };
-                    // The support proof must evaluate claims as the commit's
-                    // permission subject. Trusted backend links normally use
-                    // `SYSTEM` for their served reads, so changing only the
-                    // transient client role would still bind policy claims as
-                    // `SYSTEM` here.
-                    self.permission_identity = Some(writer);
                     let update = self
-                        .rehydrate_authorization_support_query(
-                        node,
-                        &shape,
-                        &binding,
-                        scope.options.clone(),
-                    )
-                    .await;
-                    self.role = previous_role;
-                    self.permission_identity = previous_permission_identity;
+                        .rehydrate_authorization_support_query_for_identity(
+                            node,
+                            writer,
+                            subscription,
+                            &shape,
+                            &binding,
+                            scope.options.clone(),
+                        )
+                        .await;
                     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                         settled_through, ..
                     }) = update?
@@ -251,7 +242,7 @@ impl PeerState {
     async fn unsettled_authority_scope_subscriptions<S>(
         &mut self,
         node: &mut NodeState<S>,
-        writer: AuthorId,
+        writer: AuthorSubject,
         versions: &[VersionRecord],
         candidate_tx_id: Option<TxId>,
         retained_scope_is_unsettled: bool,
@@ -310,20 +301,16 @@ impl PeerState {
                     );
                     continue;
                 }
-                let previous_role = self.role;
-                let previous_permission_identity = self.permission_identity;
-                self.role = PeerRole::ClientLink { identity: writer };
-                self.permission_identity = Some(writer);
                 let rehydrate = self
-                    .rehydrate_authorization_support_query(
+                    .rehydrate_authorization_support_query_for_identity(
                         node,
+                        writer,
+                        subscription,
                         &shape,
                         &binding,
                         scope.options.clone(),
                     )
                     .await;
-                self.role = previous_role;
-                self.permission_identity = previous_permission_identity;
                 let update = rehydrate?;
                 let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     settled_through, ..

@@ -235,7 +235,7 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
         tx_id,
         kind: TxKind::Exclusive,
         n_total_writes: 2,
-        made_by: AuthorId::SYSTEM,
+        made_by: AuthorSubject::SYSTEM,
         permission_subject: None,
         base_snapshot: None,
         row_read_set: None,
@@ -509,7 +509,7 @@ fn sequential_partial_exclusive_bundles_index_the_complete_transaction() {
         tx_id,
         kind: TxKind::Exclusive,
         n_total_writes: 2,
-        made_by: AuthorId::SYSTEM,
+        made_by: AuthorSubject::SYSTEM,
         permission_subject: None,
         base_snapshot: None,
         row_read_set: None,
@@ -554,7 +554,7 @@ fn completing_partial_exclusive_transaction_rejects_conflicting_metadata() {
         tx_id,
         kind: TxKind::Exclusive,
         n_total_writes: 2,
-        made_by: AuthorId::SYSTEM,
+        made_by: AuthorSubject::SYSTEM,
         permission_subject: None,
         base_snapshot: None,
         row_read_set: None,
@@ -573,7 +573,7 @@ fn completing_partial_exclusive_transaction_rejects_conflicting_metadata() {
         .unwrap();
 
     let mut conflicting_tx = tx;
-    conflicting_tx.made_by = AuthorId::from_bytes([0xa1; 16]);
+    conflicting_tx.made_by = AuthorSubject::for_test_bytes([0xa1; 16]);
     assert!(matches!(
         reader.apply_view_update(partial_exclusive_view_update(
             subscription,
@@ -591,7 +591,7 @@ fn completing_partial_exclusive_transaction_rejects_conflicting_metadata() {
     );
     assert_eq!(
         reader.query_transaction(tx_id).unwrap().unwrap().tx.made_by,
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         "the original transaction metadata must remain authoritative"
     );
 }
@@ -754,7 +754,7 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
         tx_id,
         kind: TxKind::Mergeable,
         n_total_writes: 2,
-        made_by: AuthorId::SYSTEM,
+        made_by: AuthorSubject::SYSTEM,
         permission_subject: None,
         base_snapshot: None,
         row_read_set: None,
@@ -843,7 +843,7 @@ fn view_scoped_cardinality_survives_reopen_and_upgrades_to_complete_payload() {
         tx_id,
         kind: TxKind::Mergeable,
         n_total_writes: 2,
-        made_by: AuthorId::SYSTEM,
+        made_by: AuthorSubject::SYSTEM,
         permission_subject: None,
         base_snapshot: None,
         row_read_set: None,

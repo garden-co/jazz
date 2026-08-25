@@ -328,7 +328,12 @@ fn reachable_relation_seed_hydrates_from_primary_key_scan() {
 
     node.reset_query_engine_read_metrics();
     let selected = node
-        .query_rows_for_link(&shape, &binding, DurabilityTier::Global, AuthorId::SYSTEM)
+        .query_rows_for_link(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            AuthorSubject::SYSTEM,
+        )
         .unwrap()
         .into_iter()
         .map(|row| row.row_uuid())
@@ -340,7 +345,7 @@ fn reachable_relation_seed_hydrates_from_primary_key_scan() {
             &shape,
             &binding,
             DurabilityTier::Global,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
         )
         .unwrap()
         .into_iter()
@@ -474,7 +479,10 @@ fn query_filter_matches_naive_local_scan() {
         .validate(&schema())
         .unwrap();
     let binding = shape
-        .bind(BTreeMap::from([("user".to_owned(), Value::Uuid(alice.0))]))
+        .bind(BTreeMap::from([(
+            "user".to_owned(),
+            Value::Uuid(alice.test_uuid()),
+        )]))
         .unwrap();
     let actual = node
         .query_rows(&shape, &binding, DurabilityTier::Local)
@@ -675,7 +683,10 @@ fn aggregate_count_over_filtered_query() {
         .validate(&schema())
         .unwrap();
     let binding = shape
-        .bind(BTreeMap::from([("user".to_owned(), Value::Uuid(alice.0))]))
+        .bind(BTreeMap::from([(
+            "user".to_owned(),
+            Value::Uuid(alice.test_uuid()),
+        )]))
         .unwrap();
     let rows = node
         .query_rows(&shape, &binding, DurabilityTier::Local)
@@ -703,7 +714,10 @@ fn aggregate_sum_min_max_over_filtered_query() {
         .validate(&schema())
         .unwrap();
     let binding = shape
-        .bind(BTreeMap::from([("user".to_owned(), Value::Uuid(alice.0))]))
+        .bind(BTreeMap::from([(
+            "user".to_owned(),
+            Value::Uuid(alice.test_uuid()),
+        )]))
         .unwrap();
     let rows = node
         .query_rows(&shape, &binding, DurabilityTier::Local)
@@ -813,10 +827,16 @@ fn query_join_via_matches_junction_semantics() {
         .validate(&schema())
         .unwrap();
     let alice_binding = shape
-        .bind(BTreeMap::from([("user".to_owned(), Value::Uuid(alice.0))]))
+        .bind(BTreeMap::from([(
+            "user".to_owned(),
+            Value::Uuid(alice.test_uuid()),
+        )]))
         .unwrap();
     let bob_binding = shape
-        .bind(BTreeMap::from([("user".to_owned(), Value::Uuid(bob.0))]))
+        .bind(BTreeMap::from([(
+            "user".to_owned(),
+            Value::Uuid(bob.test_uuid()),
+        )]))
         .unwrap();
     let alice_rows = node
         .query_rows(&shape, &alice_binding, DurabilityTier::Local)

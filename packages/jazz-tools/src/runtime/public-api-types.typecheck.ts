@@ -15,7 +15,12 @@ import type { CreateOptions as RuntimeCreateOptions } from "./index.js";
 
 const packageInsertOptions: PackageInsertOptions = { id: "row-1", updatedAt: 1 };
 const runtimeInsertOptions: RuntimeInsertOptions = { id: "row-1", updatedAt: 1 };
-const session: Session = { user_id: "user", claims: {}, authMode: "external" };
+const session: Session = {
+  issuer: "https://issuer.example",
+  user_id: "user",
+  claims: {},
+  authMode: "external",
+};
 
 const unauthenticated: PackageDbConfig = { appId: "app" };
 const localFirst: PackageDbConfig = { appId: "app", secret: "secret" };

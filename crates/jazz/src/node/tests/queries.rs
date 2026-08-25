@@ -21,9 +21,9 @@ fn policy_indexed_access_path_schema(policy: PublicPolicyExpr) -> JazzSchema {
     ))
 }
 
-fn access_path_doc_cells(owner: AuthorId, status: &str, body: &str) -> BTreeMap<String, Value> {
+fn access_path_doc_cells(owner: AuthorSubject, status: &str, body: &str) -> BTreeMap<String, Value> {
     BTreeMap::from([
-        ("owner".to_owned(), Value::Uuid(owner.0)),
+        ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
         ("status".to_owned(), Value::String(status.to_owned())),
         ("body".to_owned(), Value::String(body.to_owned())),
     ])
@@ -32,7 +32,7 @@ fn access_path_doc_cells(owner: AuthorId, status: &str, body: &str) -> BTreeMap<
 fn seed_access_path_docs(
     writer: &mut NodeState<RocksDbStorage>,
     core: &mut NodeState<RocksDbStorage>,
-) -> (RowUuid, RowUuid, AuthorId) {
+) -> (RowUuid, RowUuid, AuthorSubject) {
     let owner_a = user(0xa1);
     let owner_b = user(0xb2);
     let first = row(0x11);
@@ -61,7 +61,7 @@ fn query_rows_by_uuid(
     let binding = shape.bind(BTreeMap::new()).unwrap();
     node.reset_query_engine_read_metrics();
     let rows = node
-        .query_rows_for_link(&shape, &binding, tier, AuthorId::SYSTEM)
+        .query_rows_for_link(&shape, &binding, tier, AuthorSubject::SYSTEM)
         .unwrap()
         .into_iter()
         .map(|row| row.row_uuid())
@@ -73,8 +73,17 @@ fn query_rows_by_uuid_for_identity(
     node: &mut NodeState<RocksDbStorage>,
     query: Query,
     tier: DurabilityTier,
-    identity: AuthorId,
+    identity: AuthorSubject,
 ) -> (Vec<RowUuid>, QueryEngineReadMetrics) {
+    // This harness models a UUID-backed application `sub` claim separately
+    // from the canonical authenticated author used to select the session.
+    if identity != AuthorSubject::SYSTEM {
+        let mut claims = node.session_claims.get(&identity).cloned().unwrap_or_default();
+        claims
+            .entry("sub".to_owned())
+            .or_insert_with(|| Value::Uuid(identity.test_uuid()));
+        node.set_session_claims(identity, claims);
+    }
     let shape = query.validate(&node.catalogue.schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     node.reset_query_engine_read_metrics();
@@ -215,7 +224,7 @@ fn policy_access_path_receipt_is_not_reused_across_claim_bindings() {
 
     core.set_session_claims(
         reader,
-        BTreeMap::from([("tenant".to_owned(), Value::Uuid(first_owner.0))]),
+        BTreeMap::from([("tenant".to_owned(), Value::Uuid(first_owner.test_uuid()))]),
     );
     let (first_rows, first_metrics) = query_rows_by_uuid_for_identity(
         &mut core,
@@ -225,7 +234,7 @@ fn policy_access_path_receipt_is_not_reused_across_claim_bindings() {
     );
     core.set_session_claims(
         reader,
-        BTreeMap::from([("tenant".to_owned(), Value::Uuid(second_owner.0))]),
+        BTreeMap::from([("tenant".to_owned(), Value::Uuid(second_owner.test_uuid()))]),
     );
     let (second_rows, second_metrics) =
         query_rows_by_uuid_for_identity(&mut core, query, DurabilityTier::Global, reader);
@@ -319,7 +328,7 @@ fn policy_access_path_planner_falls_back_for_missing_or_nullable_claims_and_join
         MergeableCommit::new("docs", row(0x41), 10).cells(BTreeMap::from([
             (
                 "owner".to_owned(),
-                Value::Nullable(Some(Box::new(Value::Uuid(user(0xa1).0)))),
+                Value::Nullable(Some(Box::new(Value::Uuid(user(0xa1).test_uuid())))),
             ),
             ("status".to_owned(), Value::String("open".to_owned())),
         ])),
@@ -383,7 +392,7 @@ fn policy_access_path_planner_falls_back_for_missing_or_nullable_claims_and_join
         &mut core,
         MergeableCommit::new("memberships", row(0x44), 12).cells(BTreeMap::from([
             ("document".to_owned(), Value::Uuid(first.0)),
-            ("reader".to_owned(), Value::Uuid(reader.0)),
+            ("reader".to_owned(), Value::Uuid(reader.test_uuid())),
         ])),
     );
     let query = Query::from("docs");
@@ -610,7 +619,7 @@ fn one_shot_filtered_read_uses_declared_index_for_indexed_column_equality() {
     let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let (first, _second, owner) = seed_access_path_docs(&mut writer, &mut core);
-    let query = Query::from("docs").filter(eq(col("owner"), lit(Value::Uuid(owner.0))));
+    let query = Query::from("docs").filter(eq(col("owner"), lit(Value::Uuid(owner.test_uuid()))));
 
     let (selected, selected_metrics) =
         query_rows_by_uuid(&mut core, query.clone(), DurabilityTier::Global);
@@ -637,13 +646,13 @@ fn parameterized_one_shot_index_read_does_not_fall_back_to_cached_full_scan() {
     let binding = shape
         .bind(BTreeMap::from([(
             "owner".to_owned(),
-            Value::Uuid(owner.0),
+            Value::Uuid(owner.test_uuid()),
         )]))
         .expect("bind owner parameter");
 
     core.reset_storage_read_metrics();
     let rows = core
-        .query_rows_for_link(&shape, &binding, DurabilityTier::Global, AuthorId::SYSTEM)
+        .query_rows_for_link(&shape, &binding, DurabilityTier::Global, AuthorSubject::SYSTEM)
         .expect("run parameterized indexed one-shot");
     let metrics = core.take_storage_read_metrics();
 
@@ -677,7 +686,7 @@ fn include_deleted_global_index_limit_bounds_the_physical_index_source() {
         );
     }
     let shape = Query::from("docs")
-        .filter(eq(col("owner"), lit(Value::Uuid(owner.0))))
+        .filter(eq(col("owner"), lit(Value::Uuid(owner.test_uuid()))))
         .limit(1)
         .validate(&core.catalogue.schema)
         .unwrap();
@@ -689,7 +698,7 @@ fn include_deleted_global_index_limit_bounds_the_physical_index_source() {
             &binding,
             DurabilityTier::Global,
             None,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
@@ -739,7 +748,7 @@ fn physical_index_backfills_existing_rows_and_read_cost_ignores_schema_variant_c
         "physical indexes are deliberately outside content-addressed schema identity"
     );
     core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         schema: Box::new(indexed.clone()),
     })
     .unwrap();
@@ -766,7 +775,7 @@ fn physical_index_backfills_existing_rows_and_read_cost_ignores_schema_variant_c
             &shape,
             &binding,
             DurabilityTier::Global,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
         )
         .unwrap();
     let indexed_reads = core.take_storage_read_metrics();
@@ -800,7 +809,7 @@ fn physical_index_backfills_existing_rows_and_read_cost_ignores_schema_variant_c
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 2,
             schema: extended.id,
@@ -820,7 +829,7 @@ fn physical_index_backfills_existing_rows_and_read_cost_ignores_schema_variant_c
             &shape,
             &binding,
             DurabilityTier::Global,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
         )
         .unwrap();
     let three_variant_reads = core.take_storage_read_metrics();
@@ -850,7 +859,7 @@ fn one_shot_filtered_read_keeps_residual_filters_after_pushdown() {
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let (first, _second, owner) = seed_access_path_docs(&mut writer, &mut core);
     let query = Query::from("docs")
-        .filter(eq(col("owner"), lit(Value::Uuid(owner.0))))
+        .filter(eq(col("owner"), lit(Value::Uuid(owner.test_uuid()))))
         .filter(eq(col("status"), lit("open")));
 
     let (selected, selected_metrics) =
@@ -1135,7 +1144,7 @@ fn filterless_shape_and_degenerate_predicate_validation_agree() {
         .tx_write(tx_id, "todos", row(2), title_cells("mine"), None)
         .unwrap();
     let (_tx_id, unit) = client
-        .commit_exclusive_settled(tx_id, AuthorId::SYSTEM, 11)
+        .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 11)
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("expected commit unit");
@@ -1598,7 +1607,7 @@ fn required_forward_include_allows_null_scalar_but_requires_every_array_member()
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let rows = node
-        .query_rows_for_link(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
+        .query_rows_for_link(&shape, &binding, DurabilityTier::Local, AuthorSubject::SYSTEM)
         .unwrap();
 
     assert_eq!(
@@ -1659,7 +1668,7 @@ fn nested_required_include_checks_every_array_member_recursively() {
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let rows = node
-        .query_rows_for_link(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
+        .query_rows_for_link(&shape, &binding, DurabilityTier::Local, AuthorSubject::SYSTEM)
         .unwrap();
 
     assert_eq!(
@@ -1728,7 +1737,7 @@ fn array_subquery_match_correlation_cardinality_requires_every_referenced_member
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let snapshot = node
-        .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
+        .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorSubject::SYSTEM)
         .unwrap();
 
     assert_eq!(
@@ -1813,7 +1822,7 @@ fn rows_skipped_by_require_includes_affect_limit_offset_pagination() {
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let snapshot = node
-        .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
+        .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorSubject::SYSTEM)
         .unwrap();
 
     assert_eq!(
@@ -1870,7 +1879,7 @@ fn relation_snapshot_single_level_array_uses_query_engine_edges() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
     let snapshot = node
-        .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
+        .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorSubject::SYSTEM)
         .unwrap();
 
     assert_eq!(snapshot.rows.len(), 1);
@@ -1943,7 +1952,7 @@ fn relation_snapshot_materializes_reverse_array_edges() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
     let snapshot = node
-        .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
+        .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorSubject::SYSTEM)
         .unwrap();
 
     assert_eq!(snapshot.rows.len(), 1);
@@ -2021,7 +2030,7 @@ fn relation_snapshot_array_subquery_filters_use_parent_binding_params() {
         .unwrap();
 
     let snapshot = node
-        .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
+        .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorSubject::SYSTEM)
         .unwrap();
 
     assert_eq!(
@@ -2053,6 +2062,8 @@ fn relation_snapshot_filters_unreadable_children_and_required_parents() {
     let child = row(0x11);
     let alice = user(0xa1);
     let bob = user(0xb1);
+    install_test_uuid_sub_claim(&mut node, alice);
+    install_test_uuid_sub_claim(&mut node, bob);
 
     node.commit_mergeable_settled(
         MergeableCommit::new("users", parent, 10).cells(BTreeMap::from([(
@@ -2064,7 +2075,7 @@ fn relation_snapshot_filters_unreadable_children_and_required_parents() {
     node.commit_mergeable_settled(
         MergeableCommit::new("todos", child, 11).cells(BTreeMap::from([
             ("title".to_owned(), v("hidden")),
-            ("owner_id".to_owned(), Value::Uuid(alice.0)),
+            ("owner_id".to_owned(), Value::Uuid(alice.test_uuid())),
         ])),
     )
     .unwrap();
@@ -2125,6 +2136,8 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
     let (_temp_dir, mut node) = open_node_with_schema(node(0x46), schema.clone());
     let alice = user(0xa1);
     let bob = user(0xb1);
+    install_test_uuid_sub_claim(&mut node, alice);
+    install_test_uuid_sub_claim(&mut node, bob);
     let alice_parent = row(0xa1);
     let bob_parent = row(0xb1);
     let visible_child = row(0x11);
@@ -2152,7 +2165,7 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
         node.commit_mergeable_settled(
             MergeableCommit::new("todos", child, time).cells(BTreeMap::from([
                 ("title".to_owned(), v(title)),
-                ("owner_id".to_owned(), Value::Uuid(owner.0)),
+                ("owner_id".to_owned(), Value::Uuid(owner.test_uuid())),
             ])),
         )
         .unwrap();
@@ -2228,7 +2241,7 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
     node.commit_mergeable_settled(
         MergeableCommit::new("todos", row(0x13), 15).cells(BTreeMap::from([
             ("title".to_owned(), v("new visible")),
-            ("owner_id".to_owned(), Value::Uuid(alice.0)),
+            ("owner_id".to_owned(), Value::Uuid(alice.test_uuid())),
         ])),
     )
     .unwrap();
@@ -2275,6 +2288,7 @@ fn maintained_nested_collector_keeps_two_route_keys_internal_across_sibling_arra
     let schema = routed_nested_collector_schema();
     let (_temp_dir, mut node) = open_node_with_schema(node(0x47), schema.clone());
     let alice = user(0xa1);
+    install_test_uuid_sub_claim(&mut node, alice);
     let parent = row(0xa1);
     let todo_row = row(0x11);
     let comment = row(0x21);
@@ -2288,7 +2302,7 @@ fn maintained_nested_collector_keeps_two_route_keys_internal_across_sibling_arra
     node.commit_mergeable_settled(
         MergeableCommit::new("todos", todo_row, 11).cells(BTreeMap::from([
             ("title".to_owned(), v("owned")),
-            ("owner_id".to_owned(), Value::Uuid(alice.0)),
+            ("owner_id".to_owned(), Value::Uuid(alice.test_uuid())),
         ])),
     )
     .unwrap();
@@ -2440,7 +2454,7 @@ fn include_deleted_one_shot_read_uses_lowered_literal_filters() {
             &binding,
             DurabilityTier::Local,
             None,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
@@ -2484,7 +2498,7 @@ fn include_deleted_one_shot_read_uses_lowered_param_filters() {
             &binding,
             DurabilityTier::Local,
             None,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
@@ -2541,7 +2555,7 @@ fn include_deleted_one_shot_read_join_matches_visible_join_rows() {
             &binding,
             DurabilityTier::Local,
             None,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
@@ -2589,7 +2603,7 @@ fn include_deleted_one_shot_read_join_ignores_deleted_join_rows() {
             &binding,
             DurabilityTier::Local,
             None,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
@@ -2686,7 +2700,7 @@ fn include_deleted_one_shot_read_reachable_matches_deleted_roots_through_visible
             &binding,
             DurabilityTier::Local,
             None,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
@@ -2750,7 +2764,7 @@ fn include_deleted_one_shot_read_reachable_ignores_deleted_edge_rows() {
             &binding,
             DurabilityTier::Local,
             None,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();

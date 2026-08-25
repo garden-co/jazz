@@ -5,14 +5,14 @@ mod common;
 use jazz::db::{Db, DbConfig, DbIdentity, MergeableTxOps, ReadOpts};
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, OpenTransactionId, SchemaBuilder, TableSchemaBuilder};
 
 use common::{allow_all_writes, compile_schema};
 
-fn author(byte: u8) -> AuthorId {
-    AuthorId::from_bytes([byte; 16])
+fn author(byte: u8) -> AuthorSubject {
+    AuthorSubject::for_test_bytes([byte; 16])
 }
 
 fn schema() -> JazzSchema {
@@ -27,7 +27,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_db(identity: AuthorId) -> Db<TestStorage> {
+fn open_db(identity: AuthorSubject) -> Db<TestStorage> {
     let schema = schema();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
