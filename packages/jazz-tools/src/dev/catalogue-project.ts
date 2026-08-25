@@ -449,6 +449,40 @@ function createTimestamp(now: Date = new Date()): string {
   return `${year}${month}${day}T${hours}${minutes}${seconds}`;
 }
 
+function timestampDate(timestamp: string): Date {
+  const match = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})$/.exec(timestamp);
+  if (!match) {
+    throw new Error(`Invalid migration timestamp: ${timestamp}`);
+  }
+  return new Date(
+    Date.UTC(
+      Number(match[1]),
+      Number(match[2]) - 1,
+      Number(match[3]),
+      Number(match[4]),
+      Number(match[5]),
+      Number(match[6]),
+    ),
+  );
+}
+
+async function nextCommittedSnapshotTimestamp(
+  migrationsDir: string,
+  now: Date = new Date(),
+): Promise<string> {
+  const current = createTimestamp(now);
+  const latest = (await listSnapshotEntriesForMigrations(migrationsDir))
+    .filter((entry) => isCommittedSnapshotFileName(entry.fileName))
+    .map((entry) => /^([0-9]{8}T[0-9]{6})-/.exec(entry.fileName)?.[1])
+    .filter((timestamp): timestamp is string => timestamp !== undefined)
+    .sort()
+    .at(-1);
+  if (!latest || current > latest) {
+    return current;
+  }
+  return createTimestamp(new Date(timestampDate(latest).getTime() + 1000));
+}
+
 function createSnapshotTimestampFromPublishedAt(
   publishedAt: number | null | undefined,
   fallbackNow: Date = new Date(),
@@ -731,7 +765,10 @@ export async function createMigration(
   let fromSchema: ResolvedSchemaInput;
   let toSchema: ResolvedSchemaInput;
   let shouldWriteCommittedSnapshot = false;
-  const timestamp = createTimestamp();
+  // Snapshot filenames are the ordering source for the implicit migration
+  // baseline. Treat their second-resolution timestamp as a logical clock so
+  // rapid successive schema edits cannot let the hash suffix pick the winner.
+  const timestamp = await nextCommittedSnapshotTimestamp(options.migrationsDir);
 
   if (explicitHashFlow) {
     if (options.fromHash) {

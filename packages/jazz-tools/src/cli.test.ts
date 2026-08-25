@@ -968,48 +968,58 @@ describe("cli migrations", () => {
     const snapshotsDir = join(migrationsDir, "snapshots");
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
 
-    await createMigration({
-      schemaDir: root,
-      serverUrl: "http://localhost:1625",
-      adminSecret: "admin-secret",
-      migrationsDir,
-    });
-
-    await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
-    // Wait for 1s to avoid migration timestamp collisions
-    await new Promise((resolve) => setTimeout(resolve, 1100));
-
-    const { result: filePath, logs } = await captureConsoleLogs(() =>
-      createMigration({
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-08-25T06:00:00.000Z"));
+    try {
+      await createMigration({
         schemaDir: root,
         serverUrl: "http://localhost:1625",
         adminSecret: "admin-secret",
         migrationsDir,
-      }),
-    );
+      });
 
-    expect(filePath).not.toBeNull();
-    if (!filePath) {
-      throw new Error("Expected createMigration() to return a migration file path.");
+      await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
+
+      const { result: filePath, logs } = await captureConsoleLogs(() =>
+        createMigration({
+          schemaDir: root,
+          serverUrl: "http://localhost:1625",
+          adminSecret: "admin-secret",
+          migrationsDir,
+        }),
+      );
+
+      expect(filePath).not.toBeNull();
+      if (!filePath) {
+        throw new Error("Expected createMigration() to return a migration file path.");
+      }
+      const generated = await readFile(filePath, "utf8");
+      expect(generated).toContain('"notes": s.add.string({ default: null }),');
+      const snapshotFiles = (await readdir(snapshotsDir))
+        .filter((name) => name.endsWith(".json"))
+        .sort();
+      expect(snapshotFiles).toEqual([
+        expect.stringMatching(/^20260825T060000-[0-9a-f]{12}\.json$/i),
+        expect.stringMatching(/^20260825T060001-[0-9a-f]{12}\.json$/i),
+      ]);
+      expect(logs.some((line) => line.startsWith("Generated:"))).toBe(true);
+
+      const filesBeforeNoop = await readdir(snapshotsDir);
+      const { result: noopResult, logs: noopLogs } = await captureConsoleLogs(() =>
+        createMigration({
+          schemaDir: root,
+          serverUrl: "http://localhost:1625",
+          adminSecret: "admin-secret",
+          migrationsDir,
+        }),
+      );
+
+      expect(noopResult).toBeNull();
+      expect(await readdir(snapshotsDir)).toEqual(filesBeforeNoop);
+      expect(noopLogs).toContain("No structural schema changes detected.");
+    } finally {
+      vi.useRealTimers();
     }
-    const generated = await readFile(filePath, "utf8");
-    expect(generated).toContain('"notes": s.add.string({ default: null }),');
-    expect((await readdir(snapshotsDir)).filter((name) => name.endsWith(".json"))).toHaveLength(2);
-    expect(logs.some((line) => line.startsWith("Generated:"))).toBe(true);
-
-    const filesBeforeNoop = await readdir(snapshotsDir);
-    const { result: noopResult, logs: noopLogs } = await captureConsoleLogs(() =>
-      createMigration({
-        schemaDir: root,
-        serverUrl: "http://localhost:1625",
-        adminSecret: "admin-secret",
-        migrationsDir,
-      }),
-    );
-
-    expect(noopResult).toBeNull();
-    expect(await readdir(snapshotsDir)).toEqual(filesBeforeNoop);
-    expect(noopLogs).toContain("No structural schema changes detected.");
   });
 
   it("skips creating a migration file when hashes differ but no row transforms are required", async () => {
