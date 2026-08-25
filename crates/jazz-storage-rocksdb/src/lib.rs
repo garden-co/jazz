@@ -526,6 +526,9 @@ impl OrderedKvStorage for RocksDbStorage {
             }
         })
     }
+    fn close(&self) -> StorageFuture<'_, Result<(), Error>> {
+        self.flush_write_boundary()
+    }
 
     fn set_write_flush_cadence(&self, every: usize) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
