@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Debug;
 use std::future::Future;
 use std::rc::Rc;
@@ -8,17 +8,62 @@ mod common;
 
 use jazz::db::{
     Db, DbConfig, DbIdentity, Propagation, ReadOpts, SubscriptionEvent, TickScheduler, TickUrgency,
-    block_on,
+    Transport, block_on,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid};
+use jazz::protocol::{SubscribeRejectReason, SyncMessage};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::{DurabilityTier, Fate};
 use jazz_storage_rocksdb::RocksDbStorage;
 use jazz_testkit::duplex_transport::duplex;
+
+#[derive(Default)]
+struct AuthorityTransportState {
+    inbound: VecDeque<SyncMessage>,
+    outbound: Vec<SyncMessage>,
+    rejection: Option<SubscribeRejectReason>,
+}
+
+/// Minimal scripted authority used to make relay lifecycle tests independent
+/// of timing and of the authority's query evaluator.
+struct ScriptedAuthorityTransport(Rc<RefCell<AuthorityTransportState>>);
+
+impl Transport for ScriptedAuthorityTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), jazz::wire::TransportError> {
+        let mut state = self.0.borrow_mut();
+        if let SyncMessage::Subscribe(subscribe) = &message
+            && let Some(reason) = state.rejection.clone()
+        {
+            state.inbound.push_back(SyncMessage::SubscribeRejected {
+                subscription: subscribe.subscription,
+                reason,
+            });
+        }
+        state.outbound.push(message);
+        Ok(())
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.0.borrow_mut().inbound.pop_front()
+    }
+}
+
+fn scripted_authority(
+    rejection: Option<SubscribeRejectReason>,
+) -> (Box<dyn Transport>, Rc<RefCell<AuthorityTransportState>>) {
+    let state = Rc::new(RefCell::new(AuthorityTransportState {
+        rejection,
+        ..Default::default()
+    }));
+    (
+        Box::new(ScriptedAuthorityTransport(Rc::clone(&state))),
+        state,
+    )
+}
 
 use common::compile_schema;
 
@@ -652,6 +697,170 @@ fn one_shot_edge_read_does_not_retire_live_browser_subscription_coverage() {
             SubscriptionEvent::Delta { added, .. } if added.len() == 1
         )),
         "retiring the one-shot Edge read also retired live Local subscription coverage: {events:?}",
+    );
+}
+
+/// Dropping a downstream relay link has no stream `Drop` to clean up. Each
+/// connection-scoped upstream owner must therefore be retired exactly once,
+/// while an identical coverage request on a sibling connection remains live.
+#[test]
+fn worker_relay_abrupt_detach_and_reconnect_keep_upstream_owners_bounded() {
+    let schema = schema();
+    let worker = open_db(0x60, AuthorSubject::SYSTEM, &schema);
+    let (authority, authority_state) = scripted_authority(None);
+    let _worker_upstream = block_on(worker.connect_upstream(authority));
+
+    let attach_browser = |node, author| {
+        let browser = open_db(node, author, &schema);
+        browser.set_non_durable_client();
+        let (browser_transport, worker_transport) = duplex();
+        let browser_connection = block_on(browser.connect_upstream(browser_transport));
+        let worker_connection = worker.accept_subscriber(worker_transport, author);
+        let todos = browser
+            .prepare_query(&browser.table("todos"))
+            .expect("prepare browser todos query");
+        let subscription = block_on(browser.subscribe(&todos, ReadOpts::default()))
+            .expect("open browser subscription");
+        (browser, browser_connection, worker_connection, subscription)
+    };
+
+    let alice = AuthorSubject::for_test_bytes([0x61; 16]);
+    let (alice_browser, alice_upstream, alice_downstream, _alice_subscription) =
+        attach_browser(0x61, alice);
+    for _ in 0..3 {
+        alice_browser.tick().expect("send Alice subscription");
+        worker.tick().expect("relay Alice subscription");
+    }
+    assert_eq!(worker.relay_upstream_subscription_owner_count_for_test(), 1);
+
+    let bob = AuthorSubject::for_test_bytes([0x62; 16]);
+    let (bob_browser, bob_upstream, bob_downstream, _bob_subscription) = attach_browser(0x62, bob);
+    for _ in 0..3 {
+        bob_browser.tick().expect("send Bob subscription");
+        worker.tick().expect("relay Bob subscription");
+    }
+    assert_eq!(worker.relay_upstream_subscription_owner_count_for_test(), 2);
+
+    assert!(worker.detach_connection(&alice_downstream));
+    assert_eq!(
+        worker.relay_upstream_subscription_owner_count_for_test(),
+        1,
+        "abruptly detaching Alice must retain Bob's identical coverage owner",
+    );
+    worker.tick().expect("retire only Alice upstream owner");
+    assert!(!worker.detach_connection(&alice_downstream));
+    assert!(alice_browser.detach_connection(&alice_upstream));
+
+    for (node, author) in [(0x63, [0x63; 16]), (0x64, [0x64; 16]), (0x65, [0x65; 16])] {
+        let author = AuthorSubject::for_test_bytes(author);
+        let (browser, upstream, downstream, _subscription) = attach_browser(node, author);
+        for _ in 0..3 {
+            browser
+                .tick()
+                .expect("send reconnected browser subscription");
+            worker
+                .tick()
+                .expect("relay reconnected browser subscription");
+        }
+        assert_eq!(
+            worker.relay_upstream_subscription_owner_count_for_test(),
+            2,
+            "one reconnect owner plus Bob's still-live owner",
+        );
+        assert!(worker.detach_connection(&downstream));
+        worker.tick().expect("retire reconnect owner");
+        assert_eq!(
+            worker.relay_upstream_subscription_owner_count_for_test(),
+            1,
+            "a detached reconnect must not accumulate an orphaned owner",
+        );
+        assert!(browser.detach_connection(&upstream));
+    }
+
+    assert!(worker.detach_connection(&bob_downstream));
+    worker.tick().expect("retire final sibling owner");
+    assert_eq!(worker.relay_upstream_subscription_owner_count_for_test(), 0);
+    assert!(bob_browser.detach_connection(&bob_upstream));
+
+    let messages = &authority_state.borrow().outbound;
+    let subscribes = messages
+        .iter()
+        .filter(|message| matches!(message, SyncMessage::Subscribe(_)))
+        .count();
+    let unsubscribes = messages
+        .iter()
+        .filter(|message| matches!(message, SyncMessage::Unsubscribe { .. }))
+        .count();
+    assert_eq!(subscribes, 5, "one upstream owner per downstream session");
+    assert_eq!(
+        unsubscribes, 5,
+        "each propagated owner is retired exactly once across detach/reconnect",
+    );
+}
+
+/// A rejected relay-owned upstream usage site can represent multiple active
+/// downstream subscription keys in one coverage group. The authority result
+/// must reach every key before the relay retires the group and its owner.
+#[test]
+fn worker_relay_forwards_upstream_subscription_rejection_to_every_group_member() {
+    let schema = schema();
+    let worker = open_db(0x70, AuthorSubject::SYSTEM, &schema);
+    let rejection = SubscribeRejectReason::UnsupportedShapeCapability {
+        detail: "scripted authority rejection".to_owned(),
+    };
+    let (authority, authority_state) = scripted_authority(Some(rejection.clone()));
+    let _worker_upstream = block_on(worker.connect_upstream(authority));
+
+    let browser = open_db(0x71, AuthorSubject::for_test_bytes([0x71; 16]), &schema);
+    browser.set_non_durable_client();
+    let (browser_transport, worker_transport) = duplex();
+    let _browser_upstream = block_on(browser.connect_upstream(browser_transport));
+    let _worker_downstream =
+        worker.accept_subscriber(worker_transport, AuthorSubject::for_test_bytes([0x71; 16]));
+    let todos = browser
+        .prepare_query(&browser.table("todos"))
+        .expect("prepare browser todos query");
+    let mut first = block_on(browser.subscribe(&todos, ReadOpts::default()))
+        .expect("open first browser subscription");
+    let mut second = block_on(browser.subscribe(&todos, ReadOpts::default()))
+        .expect("open second browser subscription");
+    assert_truthful_empty_local_opening(first.try_next_event());
+    assert_truthful_empty_local_opening(second.try_next_event());
+
+    for _ in 0..5 {
+        browser.tick().expect("send grouped browser subscriptions");
+        worker
+            .tick()
+            .expect("receive authority rejection and forward it");
+    }
+
+    for events in [&mut first, &mut second] {
+        let events = std::iter::from_fn(|| events.try_next_event()).collect::<Vec<_>>();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                SubscriptionEvent::Rejected { reason } if reason == &rejection
+            )),
+            "every active downstream key must receive the authority rejection: {events:?}",
+        );
+    }
+    assert_eq!(worker.relay_upstream_subscription_owner_count_for_test(), 0);
+    let messages = &authority_state.borrow().outbound;
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| matches!(message, SyncMessage::Subscribe(_)))
+            .count(),
+        1,
+        "both browser keys share one relay coverage-group owner",
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| matches!(message, SyncMessage::Unsubscribe { .. }))
+            .count(),
+        1,
+        "the rejected relay owner is retired exactly once",
     );
 }
 
