@@ -15,6 +15,7 @@ use std::rc::Rc;
 use std::str;
 use std::task::{Poll, Waker};
 
+use futures::lock::Mutex as AsyncMutex;
 use web_time::{Duration, Instant};
 
 use crate::ivm::runtime::{durable_index_key_prefix, encode_key_part};
@@ -37,6 +38,182 @@ use crate::storage::{
 };
 use thiserror::Error;
 
+/// Reserved Groove-owned metadata plane for staged roots and persisted
+/// reference accounting. It is never exposed as an application table.
+pub const LARGE_VALUE_METADATA_CF: &str = "__groove_large_values";
+
+fn staged_large_value_key(id: crate::large_values::StagedLargeValueId) -> Vec<u8> {
+    let mut key = b"staged/".to_vec();
+    key.extend_from_slice(&id.0);
+    key
+}
+
+fn pending_large_value_upload_key(id: crate::large_values::StagedLargeValueId) -> Vec<u8> {
+    let mut key = b"upload/".to_vec();
+    key.extend_from_slice(&id.0);
+    key
+}
+
+fn large_value_root_key(node_ref: &crate::large_values::NodeRef) -> Result<Vec<u8>, Error> {
+    let mut key = b"root/".to_vec();
+    key.extend(postcard::to_allocvec(node_ref).map_err(|error| {
+        Error::InvalidLargeValueMetadata(format!("cannot encode root identity: {error}"))
+    })?);
+    Ok(key)
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
+struct LargeValueRootReferences {
+    durable: u64,
+    staged: u64,
+    node_active: bool,
+}
+
+fn large_value_node_key(node_ref: &crate::large_values::NodeRef) -> Result<Vec<u8>, Error> {
+    let mut key = b"node/".to_vec();
+    key.extend(postcard::to_allocvec(node_ref).map_err(|error| {
+        Error::InvalidLargeValueMetadata(format!("cannot encode node identity: {error}"))
+    })?);
+    Ok(key)
+}
+
+fn large_value_reclaim_key(node_ref: &crate::large_values::NodeRef) -> Result<Vec<u8>, Error> {
+    let mut key = b"reclaim/".to_vec();
+    key.extend(postcard::to_allocvec(node_ref).map_err(|error| {
+        Error::InvalidLargeValueMetadata(format!("cannot encode reclaim identity: {error}"))
+    })?);
+    Ok(key)
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
+struct LargeValueNodeReferences {
+    references: u64,
+    #[serde(default)]
+    upload_references: u64,
+    children: Vec<crate::large_values::NodeRef>,
+}
+
+#[derive(Clone)]
+struct MetadataChunkInstallObserver {
+    storage: std::rc::Weak<LayoutStorage>,
+}
+
+impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
+    fn installed(
+        &self,
+        node_ref: crate::large_values::NodeRef,
+        encoded: bytes::Bytes,
+    ) -> crate::chunks::ChunkFuture<'_, Result<(), crate::chunks::ChunkError>> {
+        Box::pin(async move {
+            let storage = self.storage.upgrade().ok_or_else(|| {
+                crate::chunks::ChunkError::Backend(
+                    "database storage closed during chunk installation".to_owned(),
+                )
+            })?;
+            let node: crate::large_values::ChunkNode = postcard::from_bytes(&encoded)
+                .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
+            let children = match node {
+                crate::large_values::ChunkNode::Leaf { .. } => Vec::new(),
+                crate::large_values::ChunkNode::Branch { children, .. } => children
+                    .into_iter()
+                    .map(|child| child.node_ref)
+                    .collect::<Vec<_>>(),
+            };
+            let node_key = large_value_node_key(&node_ref)
+                .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
+            let existing = storage
+                .get(LARGE_VALUE_METADATA_CF.to_owned(), node_key.clone())
+                .await
+                .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
+            let mut metadata: LargeValueNodeReferences = existing
+                .as_deref()
+                .map(postcard::from_bytes)
+                .transpose()
+                .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?
+                .unwrap_or_default();
+            if !metadata.children.is_empty() && metadata.children != children {
+                return Err(crate::chunks::ChunkError::Integrity);
+            }
+            let newly_discovered_active_children =
+                metadata.references > 0 && metadata.children.is_empty() && !children.is_empty();
+            metadata.children = children.clone();
+
+            let root_key = large_value_root_key(&node_ref)
+                .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
+            let root_encoded = storage
+                .get(LARGE_VALUE_METADATA_CF.to_owned(), root_key.clone())
+                .await
+                .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
+            let mut root_references: LargeValueRootReferences = root_encoded
+                .as_deref()
+                .map(postcard::from_bytes)
+                .transpose()
+                .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?
+                .unwrap_or_default();
+            let activate_root = root_references
+                .durable
+                .saturating_add(root_references.staged)
+                > 0
+                && !root_references.node_active;
+            if activate_root {
+                root_references.node_active = true;
+                metadata.references = metadata.references.checked_add(1).ok_or_else(|| {
+                    crate::chunks::ChunkError::Backend("node reference count overflow".to_owned())
+                })?;
+            }
+            let activate_children =
+                newly_discovered_active_children || (activate_root && metadata.references == 1);
+            let mut operations = vec![OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: node_key,
+                value: postcard::to_allocvec(&metadata)
+                    .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?,
+            }];
+            if activate_root {
+                operations.push(OwnedWriteOperation::Set {
+                    cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                    key: root_key,
+                    value: postcard::to_allocvec(&root_references)
+                        .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?,
+                });
+            }
+            if activate_children {
+                for child in children {
+                    let child_key = large_value_node_key(&child)
+                        .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
+                    let encoded = storage
+                        .get(LARGE_VALUE_METADATA_CF.to_owned(), child_key.clone())
+                        .await
+                        .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
+                    let mut child_metadata: LargeValueNodeReferences = encoded
+                        .as_deref()
+                        .map(postcard::from_bytes)
+                        .transpose()
+                        .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?
+                        .unwrap_or_default();
+                    child_metadata.references =
+                        child_metadata.references.checked_add(1).ok_or_else(|| {
+                            crate::chunks::ChunkError::Backend(
+                                "child reference count overflow".to_owned(),
+                            )
+                        })?;
+                    operations.push(OwnedWriteOperation::Set {
+                        cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                        key: child_key,
+                        value: postcard::to_allocvec(&child_metadata).map_err(|error| {
+                            crate::chunks::ChunkError::Backend(error.to_string())
+                        })?,
+                    });
+                }
+            }
+            storage
+                .write_many(operations)
+                .await
+                .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))
+        })
+    }
+}
+
 pub use crate::ivm::{
     CollectByField, GraphBuilder, IvmRuntimeError, MultisinkDeltas, MultisinkSubscription,
     PredicateExpr, PreparedShapeId, ProjectField, PublicationUpdate, RoutedMultisinkTerminal,
@@ -46,6 +223,8 @@ pub use crate::ivm::{
 /// Schema-aware database facade over storage and IVM subscriptions.
 pub struct Database {
     storage: Rc<LayoutStorage>,
+    chunk_storage: Rc<dyn crate::chunks::ChunkStorage>,
+    chunk_resolver: Rc<dyn crate::chunks::MissingChunkResolver>,
     /// Owns query/index maintenance over the storage-backed base tables.
     ivm_runtime: IvmRuntime,
     last_commit_metrics: Option<CommitMetrics>,
@@ -57,6 +236,11 @@ pub struct Database {
     persisted_publications: BTreeSet<PublicationId>,
     resident_writes: Rc<RefCell<StagedWriteState>>,
     publication_persistence: Rc<RefCell<PersistenceOrder>>,
+    /// Serializes the durable upload journal, separate blob staging, expiry,
+    /// promotion, and reclamation lifecycle. The blob backend may be separate
+    /// from metadata storage, so this boundary prevents both intent eviction
+    /// during an in-flight put and lost reference-count updates across uploads.
+    large_value_lifecycle: Rc<AsyncMutex<()>>,
     abandoned_application: Rc<Cell<bool>>,
     poisoned: bool,
 }
@@ -162,6 +346,7 @@ impl AppliedBatch {
             },
             receipt: PersistenceReceipt {
                 lifecycle: Rc::clone(&self.lifecycle),
+                order: Rc::clone(&self.order),
                 abandoned_application: Rc::clone(&self.abandoned_application),
             },
         }
@@ -208,6 +393,7 @@ pub struct PersistedBatch {
 
 struct PersistenceReceipt {
     lifecycle: Rc<Cell<AppliedBatchLifecycle>>,
+    order: Rc<RefCell<PersistenceOrder>>,
     abandoned_application: Rc<Cell<bool>>,
 }
 
@@ -269,6 +455,10 @@ pub enum Error {
     IvmRuntime(#[from] IvmRuntimeError),
     #[error("invalid persisted index contents: {0}")]
     InvalidPersistedIndex(String),
+    #[error("invalid persisted large-value metadata: {0}")]
+    InvalidLargeValueMetadata(String),
+    #[error("pending large-value upload limit reached: {limit}")]
+    PendingLargeValueUploadLimitExceeded { limit: usize },
     #[error("index key arity mismatch for {index}: expected at most {expected}, got {actual}")]
     IndexKeyArity {
         index: String,
@@ -313,6 +503,8 @@ pub enum Error {
     TableFieldDefinitionMismatch { table: String, field: String },
     #[error("index definition does not match the live catalogue: {table}.{index}")]
     TableIndexDefinitionMismatch { table: String, index: String },
+    #[error("cannot register index {table}.{index} while database publications remain resident")]
+    TableIndexRegistrationWhilePublicationsResident { table: String, index: String },
     #[error("index {table}.{index} references unknown field {field}")]
     TableIndexFieldNotFound {
         table: String,

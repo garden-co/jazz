@@ -33,7 +33,7 @@ use crate::authorization_scope::{
     AuthorizationScopeInstall, AuthorizationScopeLease, AuthorizationScopeOwnerToken,
     AuthorizationScopeReadiness, AuthorizationScopeRegistry, MAX_AUTHORIZATION_SCOPES,
 };
-use crate::ids::{AuthorId, NodeUuid, RowUuid, SchemaVersionId};
+use crate::ids::{AuthorSubject, NodeUuid, RowUuid, SchemaVersionId};
 pub use crate::node::CommitUnitTrust;
 #[cfg(feature = "testing")]
 pub use crate::node::NodeOpenReceipt as DbOpenReceipt;
@@ -49,14 +49,15 @@ pub use crate::protocol::PermissionAdvice;
 #[cfg(feature = "sync-autopsy")]
 use crate::protocol::expand_version_carriers;
 use crate::protocol::{
-    AuthorizationScopeReceipt, BindingViewKey, BranchSelector, BranchViewBase, CoverageKey,
+    AuthorizationScopeReceipt, BindingViewKey, BranchSelector, BranchViewBase, ChunkRequestBatch,
+    ChunkRequestEntry, ChunkResponse, ChunkResponseBatch, ChunkResponseEntry, CoverageKey,
     CurrentWriteSchema, LensOp, MigrationLens, PermissionAdviceAction, PermissionAdviceRequestId,
     ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, SchemaLineagePublication,
     SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode,
     SubscriptionKey, SyncMessage, TableLens,
 };
 use crate::protocol_limits::{
-    validate_fetch_row_versions, validate_known_state_declaration, validate_shape_ast_size,
+    validate_fetch_row_versions, validate_known_state_declaration, validate_shape_registration_size,
 };
 use crate::query::{
     Binding, BindingId, Operand, Predicate, Query, QueryError, RelationQuery, ShapeId,
@@ -88,6 +89,693 @@ pub use wire_transport::WireTransportAdapter;
 /// async facade. A future operation scheduler may replace it with finer-grained
 /// owned sessions once the async lifecycle has settled.
 pub(crate) type SharedNodeState<S> = Rc<LocalMutex<NodeState<S>>>;
+
+const DEFAULT_CHUNK_FORWARD_HOPS: u8 = 8;
+const MAX_PENDING_CHUNK_DEMANDS: usize = 4096;
+
+enum ChunkDemandWaiter {
+    Local {
+        waiter_id: u64,
+        sender: oneshot::Sender<Result<bytes::Bytes, groove::chunks::ChunkError>>,
+    },
+    Relay {
+        connection: u64,
+        request_id: u64,
+    },
+}
+
+struct PendingChunkDemand {
+    upstream_id: u64,
+    remaining_hops: u8,
+    waiters: Vec<ChunkDemandWaiter>,
+}
+
+#[derive(Default)]
+struct ChunkDemandState {
+    next_request_id: u64,
+    next_waiter_id: u64,
+    pending_by_chunk: BTreeMap<groove::chunks::ChunkRequest, PendingChunkDemand>,
+    chunk_by_upstream_id: BTreeMap<u64, groove::chunks::ChunkRequest>,
+    outbound: VecDeque<ChunkRequestEntry>,
+    relay_responses: BTreeMap<u64, Vec<ChunkResponseEntry>>,
+    outbound_wakers: BTreeMap<u64, Waker>,
+    disconnected_connections: BTreeSet<u64>,
+    upstream_connection: Option<u64>,
+    upstream_connections: BTreeSet<u64>,
+    completion_generation: u64,
+}
+
+#[derive(Clone, Default)]
+struct PeerChunkResolver {
+    state: Rc<RefCell<ChunkDemandState>>,
+}
+
+impl PeerChunkResolver {
+    fn has_pending_local_demand(&self) -> bool {
+        self.state
+            .borrow()
+            .pending_by_chunk
+            .values()
+            .any(|pending| {
+                pending
+                    .waiters
+                    .iter()
+                    .any(|waiter| matches!(waiter, ChunkDemandWaiter::Local { .. }))
+            })
+    }
+
+    fn completion_generation(&self) -> u64 {
+        self.state.borrow().completion_generation
+    }
+
+    fn register_connection(&self, connection: u64, upstream: bool) {
+        let mut state = self.state.borrow_mut();
+        state.disconnected_connections.remove(&connection);
+        if upstream {
+            state.upstream_connections.insert(connection);
+            state.upstream_connection.get_or_insert(connection);
+        }
+    }
+
+    fn wake_connection(state: &mut ChunkDemandState, connection: u64) {
+        if let Some(waker) = state.outbound_wakers.remove(&connection) {
+            waker.wake();
+        }
+    }
+
+    fn enqueue(
+        &self,
+        request: groove::chunks::ChunkRequest,
+        remaining_hops: u8,
+        waiter: ChunkDemandWaiter,
+    ) -> Result<(), ChunkDemandWaiter> {
+        let mut state = self.state.borrow_mut();
+        if let Some(pending) = state.pending_by_chunk.get_mut(&request) {
+            pending.waiters.push(waiter);
+            return Ok(());
+        }
+        if state.pending_by_chunk.len() >= MAX_PENDING_CHUNK_DEMANDS {
+            return Err(waiter);
+        }
+        state.next_request_id = state.next_request_id.wrapping_add(1).max(1);
+        let upstream_id = state.next_request_id;
+        state.outbound.push_back(ChunkRequestEntry {
+            request_id: upstream_id,
+            locator: request.locator.clone(),
+            expected_hash: request.object_hash,
+            remaining_hops,
+        });
+        state
+            .chunk_by_upstream_id
+            .insert(upstream_id, request.clone());
+        state.pending_by_chunk.insert(
+            request,
+            PendingChunkDemand {
+                upstream_id,
+                remaining_hops,
+                waiters: vec![waiter],
+            },
+        );
+        if let Some(connection) = state.upstream_connection {
+            Self::wake_connection(&mut state, connection);
+        }
+        Ok(())
+    }
+
+    fn enqueue_relay(&self, connection: u64, request: ChunkRequestEntry) {
+        if request.remaining_hops == 0 {
+            let mut state = self.state.borrow_mut();
+            state
+                .relay_responses
+                .entry(connection)
+                .or_default()
+                .push(ChunkResponseEntry {
+                    request_id: request.request_id,
+                    result: ChunkResponse::Unavailable,
+                });
+            Self::wake_connection(&mut state, connection);
+            return;
+        }
+        if let Err(ChunkDemandWaiter::Relay {
+            connection,
+            request_id,
+        }) = self.enqueue(
+            groove::chunks::ChunkRequest {
+                object_hash: request.expected_hash,
+                locator: request.locator,
+            },
+            request.remaining_hops - 1,
+            ChunkDemandWaiter::Relay {
+                connection,
+                request_id: request.request_id,
+            },
+        ) {
+            let mut state = self.state.borrow_mut();
+            state
+                .relay_responses
+                .entry(connection)
+                .or_default()
+                .push(ChunkResponseEntry {
+                    request_id,
+                    result: ChunkResponse::Retryable { retry_after_ms: 25 },
+                });
+            Self::wake_connection(&mut state, connection);
+        }
+    }
+
+    fn take_outbound(&self, limit: usize) -> Vec<ChunkRequestEntry> {
+        let mut state = self.state.borrow_mut();
+        // The wire decoder rejects batches above this cardinality, so never let
+        // an eager host-side drain construct a message that another Jazz peer
+        // would reject.
+        let count = limit
+            .min(crate::protocol_limits::MAX_CHUNK_REQUEST_BATCH_ENTRIES)
+            .min(state.outbound.len());
+        state.outbound.drain(..count).collect()
+    }
+
+    fn take_relay_responses(&self, connection: u64, limit: usize) -> Vec<ChunkResponseEntry> {
+        let mut state = self.state.borrow_mut();
+        let (responses, exhausted) = match state.relay_responses.get_mut(&connection) {
+            Some(queued) => {
+                let count = limit.min(queued.len());
+                (queued.drain(..count).collect(), queued.is_empty())
+            }
+            None => return Vec::new(),
+        };
+        if exhausted {
+            state.relay_responses.remove(&connection);
+        }
+        responses
+    }
+
+    fn is_active_upstream(&self, connection: u64) -> bool {
+        self.state.borrow().upstream_connection == Some(connection)
+    }
+
+    fn complete(&self, response: ChunkResponseEntry) {
+        let mut state = self.state.borrow_mut();
+        let Some(request) = state.chunk_by_upstream_id.remove(&response.request_id) else {
+            return;
+        };
+        let Some(pending) = state.pending_by_chunk.remove(&request) else {
+            return;
+        };
+        state.completion_generation = state.completion_generation.wrapping_add(1);
+        debug_assert_eq!(pending.upstream_id, response.request_id);
+        for waiter in pending.waiters {
+            match waiter {
+                ChunkDemandWaiter::Local { sender, .. } => {
+                    let result = match &response.result {
+                        ChunkResponse::Found(bytes) => Ok(bytes::Bytes::copy_from_slice(bytes)),
+                        ChunkResponse::Unavailable => Err(groove::chunks::ChunkError::Unavailable),
+                        ChunkResponse::Retryable { retry_after_ms } => {
+                            Err(groove::chunks::ChunkError::Retryable {
+                                retry_after_ms: *retry_after_ms,
+                            })
+                        }
+                    };
+                    let _ = sender.send(result);
+                }
+                ChunkDemandWaiter::Relay {
+                    connection,
+                    request_id,
+                } => {
+                    state
+                        .relay_responses
+                        .entry(connection)
+                        .or_default()
+                        .push(ChunkResponseEntry {
+                            request_id,
+                            result: response.result.clone(),
+                        });
+                    Self::wake_connection(&mut state, connection);
+                }
+            }
+        }
+    }
+
+    fn cancel_local(&self, request: &groove::chunks::ChunkRequest, waiter_id: u64) {
+        let mut state = self.state.borrow_mut();
+        let Some(pending) = state.pending_by_chunk.get_mut(request) else {
+            return;
+        };
+        pending.waiters.retain(|waiter| {
+            !matches!(waiter, ChunkDemandWaiter::Local { waiter_id: id, .. } if *id == waiter_id)
+        });
+        if pending.waiters.is_empty() {
+            let upstream_id = pending.upstream_id;
+            state.pending_by_chunk.remove(request);
+            state.chunk_by_upstream_id.remove(&upstream_id);
+            state
+                .outbound
+                .retain(|outbound| outbound.request_id != upstream_id);
+        }
+    }
+
+    fn disconnect(&self, connection: u64, upstream: bool) {
+        let mut state = self.state.borrow_mut();
+        state.disconnected_connections.insert(connection);
+        let disconnected_waker = state.outbound_wakers.remove(&connection);
+        state.relay_responses.remove(&connection);
+        if upstream {
+            state.upstream_connections.remove(&connection);
+            if state.upstream_connection == Some(connection) {
+                state.upstream_connection = state.upstream_connections.iter().next().copied();
+                if let Some(successor) = state.upstream_connection {
+                    let queued = state
+                        .outbound
+                        .iter()
+                        .map(|entry| entry.request_id)
+                        .collect::<BTreeSet<_>>();
+                    let retries = state
+                        .pending_by_chunk
+                        .iter()
+                        .filter(|(_, pending)| !queued.contains(&pending.upstream_id))
+                        .map(|(request, pending)| ChunkRequestEntry {
+                            request_id: pending.upstream_id,
+                            locator: request.locator.clone(),
+                            expected_hash: request.object_hash,
+                            remaining_hops: pending.remaining_hops,
+                        })
+                        .collect::<Vec<_>>();
+                    state.outbound.extend(retries);
+                    Self::wake_connection(&mut state, successor);
+                }
+            }
+            drop(state);
+            if let Some(waker) = disconnected_waker {
+                waker.wake();
+            }
+            return;
+        }
+        let requests = state.pending_by_chunk.keys().cloned().collect::<Vec<_>>();
+        for request in requests {
+            let Some(pending) = state.pending_by_chunk.get_mut(&request) else {
+                continue;
+            };
+            pending.waiters.retain(|waiter| {
+                !matches!(waiter, ChunkDemandWaiter::Relay { connection: relay, .. } if *relay == connection)
+            });
+            if pending.waiters.is_empty() {
+                let upstream_id = pending.upstream_id;
+                state.pending_by_chunk.remove(&request);
+                state.chunk_by_upstream_id.remove(&upstream_id);
+                state
+                    .outbound
+                    .retain(|entry| entry.request_id != upstream_id);
+            }
+        }
+        drop(state);
+        if let Some(waker) = disconnected_waker {
+            waker.wake();
+        }
+    }
+}
+
+struct ChunkResolutionFuture {
+    resolver: PeerChunkResolver,
+    request: groove::chunks::ChunkRequest,
+    waiter_id: u64,
+    receiver: oneshot::Receiver<Result<bytes::Bytes, groove::chunks::ChunkError>>,
+    completed: bool,
+}
+
+impl Future for ChunkResolutionFuture {
+    type Output = Result<bytes::Bytes, groove::chunks::ChunkError>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        match Pin::new(&mut self.receiver).poll(context) {
+            Poll::Ready(result) => {
+                self.completed = true;
+                Poll::Ready(result.unwrap_or(Err(groove::chunks::ChunkError::Unavailable)))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl Drop for ChunkResolutionFuture {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.resolver.cancel_local(&self.request, self.waiter_id);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PeerIoPumpRole {
+    Upstream,
+    Subscriber,
+}
+
+/// Executor-neutral auxiliary peer-I/O endpoint.
+///
+/// Bindings retain this clone beside their socket. It never acquires Jazz's
+/// semantic node lock, so chunk traffic can progress while a Groove evaluation
+/// is suspended inside `Node::tick`.
+#[derive(Clone)]
+pub struct PeerIoPump {
+    resolver: PeerChunkResolver,
+    local_chunks: groove::chunks::LocalChunkReader,
+    connection: u64,
+    role: PeerIoPumpRole,
+}
+
+impl PeerIoPump {
+    fn new(
+        resolver: PeerChunkResolver,
+        local_chunks: groove::chunks::LocalChunkReader,
+        connection: u64,
+        role: PeerIoPumpRole,
+    ) -> Self {
+        resolver.register_connection(connection, matches!(role, PeerIoPumpRole::Upstream));
+        Self {
+            resolver,
+            local_chunks,
+            connection,
+            role,
+        }
+    }
+
+    /// Route an auxiliary message received by the binding. Returns `false` for
+    /// canonical Jazz messages, which the binding must enqueue on its ordinary
+    /// transport before scheduling a semantic tick.
+    pub async fn route_incoming(&self, message: SyncMessage) -> Result<(), SyncMessage> {
+        match (self.role, message) {
+            (PeerIoPumpRole::Upstream, SyncMessage::ChunkResponseBatch(batch)) => {
+                // A disconnected or superseded upstream can still have a late
+                // frame in its binding's receive queue. Demand has already
+                // moved to the successor, so only that link may complete it.
+                if !self.resolver.is_active_upstream(self.connection) {
+                    return Ok(());
+                }
+                for response in batch.responses {
+                    self.resolver.complete(response);
+                }
+                Ok(())
+            }
+            (PeerIoPumpRole::Subscriber, SyncMessage::ChunkRequestBatch(batch)) => {
+                let mut responses = Vec::new();
+                for request in batch.requests {
+                    match self
+                        .local_chunks
+                        .get(
+                            request.locator.clone(),
+                            groove::large_values::ContentHash(request.expected_hash),
+                        )
+                        .await
+                    {
+                        Ok(bytes) => responses.push(ChunkResponseEntry {
+                            request_id: request.request_id,
+                            result: ChunkResponse::Found(bytes.to_vec()),
+                        }),
+                        Err(groove::chunks::ChunkStorageError::Unavailable) => {
+                            self.resolver.enqueue_relay(self.connection, request)
+                        }
+                        Err(_) => responses.push(ChunkResponseEntry {
+                            request_id: request.request_id,
+                            result: ChunkResponse::Unavailable,
+                        }),
+                    }
+                }
+                if !responses.is_empty() {
+                    let mut state = self.resolver.state.borrow_mut();
+                    state
+                        .relay_responses
+                        .entry(self.connection)
+                        .or_default()
+                        .extend(responses);
+                    PeerChunkResolver::wake_connection(&mut state, self.connection);
+                }
+                Ok(())
+            }
+            (_, SyncMessage::ChunkRequestBatch(_) | SyncMessage::ChunkResponseBatch(_)) => Ok(()),
+            (_, message) => Err(message),
+        }
+    }
+
+    /// Decode and route one payload from the dedicated auxiliary protocol
+    /// channel. Canonical payloads are returned unchanged for the ordinary wire
+    /// adapter, allowing bindings to demultiplex without taking a peer lock.
+    pub async fn route_incoming_payload(
+        &self,
+        payload: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let message = crate::wire::decode_sync_message(&payload)
+            .map_err(|error| format!("malformed auxiliary chunk payload: {error}"))?;
+        match self.route_incoming(message).await {
+            Ok(()) => Ok(None),
+            Err(_) => Ok(Some(payload)),
+        }
+    }
+
+    /// Demultiplex one complete wire frame without taking the Jazz node lock.
+    /// Auxiliary messages are consumed; canonical and fragmented frames are
+    /// returned byte-for-byte for the ordinary semantic transport.
+    pub async fn route_incoming_wire_frame(
+        &self,
+        frame: Vec<u8>,
+        negotiated_features: crate::wire::WireFeatures,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let decoded = crate::wire::decode_frame(&frame)
+            .map_err(|error| format!("malformed auxiliary wire frame: {error}"))?;
+        let crate::wire::WireFrame::Message(envelope) = decoded else {
+            return Ok(Some(frame));
+        };
+        let payload = crate::wire::decompress_sync_payload(&envelope.payload, envelope.features)
+            .map_err(|error| format!("malformed auxiliary wire payload: {error}"))?;
+        let message = crate::wire::decode_sync_message_for_features(&payload, negotiated_features)
+            .map_err(|error| format!("malformed auxiliary sync payload: {error:?}"))?;
+        match self.route_incoming(message).await {
+            Ok(()) => Ok(None),
+            Err(_) => Ok(Some(frame)),
+        }
+    }
+
+    /// Encode one bounded auxiliary batch as an ordinary complete wire frame.
+    /// Bindings request one chunk per frame, keeping the maximum 256 KiB node
+    /// response below the non-fragmented wire-frame bound.
+    pub fn take_outbound_wire_frame(
+        &self,
+        protocol_version: u16,
+        negotiated_features: crate::wire::WireFeatures,
+        session: Option<crate::wire::WireSession>,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let mut frames = self.take_outbound_wire_frames(
+            protocol_version,
+            negotiated_features,
+            session,
+            1,
+            crate::protocol_limits::MAX_WIRE_FRAME_BYTES,
+        )?;
+        Ok(frames.pop())
+    }
+
+    /// Drain a bounded FIFO prefix of the auxiliary lane into complete wire
+    /// frames. If the next complete frame would exceed `max_bytes`, it remains
+    /// queued for a later drain; no response is dropped merely because a host
+    /// transport chooses a smaller batch boundary.
+    pub fn take_outbound_wire_frames(
+        &self,
+        protocol_version: u16,
+        negotiated_features: crate::wire::WireFeatures,
+        session: Option<crate::wire::WireSession>,
+        max_frames: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<Vec<u8>>, String> {
+        if max_frames == 0 || max_bytes == 0 {
+            return Ok(Vec::new());
+        }
+        let mut frames = Vec::new();
+        let mut total_bytes: usize = 0;
+        while frames.len() < max_frames {
+            let Some(message) = self.take_outbound(1) else {
+                break;
+            };
+            let frame = Self::encode_outbound_wire_frame(
+                message.clone(),
+                protocol_version,
+                negotiated_features,
+                session.clone(),
+            )?;
+            let Some(next_total) = total_bytes.checked_add(frame.len()) else {
+                self.restore_outbound(message);
+                break;
+            };
+            if next_total > max_bytes {
+                self.restore_outbound(message);
+                if frames.is_empty() {
+                    return Err(format!(
+                        "auxiliary wire frame exceeds bounded drain budget: frame={} budget={max_bytes}",
+                        frame.len()
+                    ));
+                }
+                break;
+            }
+            total_bytes = next_total;
+            frames.push(frame);
+        }
+        Ok(frames)
+    }
+
+    fn encode_outbound_wire_frame(
+        message: SyncMessage,
+        protocol_version: u16,
+        negotiated_features: crate::wire::WireFeatures,
+        session: Option<crate::wire::WireSession>,
+    ) -> Result<Vec<u8>, String> {
+        let payload = crate::wire::encode_sync_message_for_features(&message, negotiated_features)
+            .map_err(|error| format!("cannot encode auxiliary sync payload: {error:?}"))?;
+        let active_features = negotiated_features
+            & !(crate::wire::FEATURE_PAYLOAD_LZ4 | crate::wire::FEATURE_PAYLOAD_ZSTD);
+        let mut envelope =
+            crate::wire::WireEnvelope::new(protocol_version, active_features, payload);
+        if let Some(session) = session {
+            envelope = envelope.with_session(session);
+        }
+        crate::wire::encode_frame(&crate::wire::WireFrame::Message(envelope))
+            .map_err(|error| format!("cannot encode auxiliary wire frame: {error}"))
+    }
+
+    /// Drain one bounded auxiliary batch for immediate transmission.
+    pub fn take_outbound(&self, limit: usize) -> Option<SyncMessage> {
+        match self.role {
+            PeerIoPumpRole::Upstream => {
+                let requests = self.resolver.take_outbound(limit);
+                (!requests.is_empty()).then_some(SyncMessage::ChunkRequestBatch(
+                    ChunkRequestBatch { requests },
+                ))
+            }
+            PeerIoPumpRole::Subscriber => {
+                let responses = self.resolver.take_relay_responses(self.connection, limit);
+                (!responses.is_empty()).then_some(SyncMessage::ChunkResponseBatch(
+                    ChunkResponseBatch { responses },
+                ))
+            }
+        }
+    }
+
+    fn restore_outbound(&self, message: SyncMessage) {
+        let mut state = self.resolver.state.borrow_mut();
+        match (self.role, message) {
+            (PeerIoPumpRole::Upstream, SyncMessage::ChunkRequestBatch(batch)) => {
+                for request in batch.requests.into_iter().rev() {
+                    state.outbound.push_front(request);
+                }
+            }
+            (PeerIoPumpRole::Subscriber, SyncMessage::ChunkResponseBatch(batch)) => {
+                let queued = state.relay_responses.entry(self.connection).or_default();
+                queued.splice(0..0, batch.responses);
+            }
+            _ => {}
+        }
+    }
+
+    /// Encode one bounded auxiliary payload for a binding-owned socket channel.
+    pub fn take_outbound_payload(&self, limit: usize) -> Result<Option<Vec<u8>>, String> {
+        self.take_outbound(limit)
+            .map(|message| {
+                crate::wire::encode_sync_message(&message)
+                    .map_err(|error| format!("cannot encode auxiliary chunk payload: {error}"))
+            })
+            .transpose()
+    }
+
+    /// Wait until auxiliary output is ready without polling or driving a Jazz
+    /// semantic tick. Browser microtasks, NAPI async notifications, and native
+    /// socket tasks can all await this same executor-independent future.
+    pub fn outbound_ready(&self) -> PeerIoOutboundReady {
+        PeerIoOutboundReady { pump: self.clone() }
+    }
+
+    /// Non-blocking readiness probe for hosts that drive local futures by
+    /// repeated callbacks rather than awaiting a Rust future directly.
+    pub fn outbound_is_ready(&self) -> bool {
+        self.has_outbound()
+    }
+
+    /// Detach this link's hop-local routing state. Bindings call this when the
+    /// socket closes; another registered upstream inherits unsent demand.
+    pub fn disconnect(&self) {
+        self.resolver.disconnect(
+            self.connection,
+            matches!(self.role, PeerIoPumpRole::Upstream),
+        );
+    }
+
+    fn has_outbound(&self) -> bool {
+        let state = self.resolver.state.borrow();
+        match self.role {
+            PeerIoPumpRole::Upstream => !state.outbound.is_empty(),
+            PeerIoPumpRole::Subscriber => state
+                .relay_responses
+                .get(&self.connection)
+                .is_some_and(|responses| !responses.is_empty()),
+        }
+    }
+
+    fn is_disconnected(&self) -> bool {
+        self.resolver
+            .state
+            .borrow()
+            .disconnected_connections
+            .contains(&self.connection)
+    }
+}
+
+/// Future completed when a [`PeerIoPump`] has outbound auxiliary traffic.
+pub struct PeerIoOutboundReady {
+    pump: PeerIoPump,
+}
+
+impl Future for PeerIoOutboundReady {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.pump.has_outbound() || self.pump.is_disconnected() {
+            Poll::Ready(())
+        } else {
+            self.pump
+                .resolver
+                .state
+                .borrow_mut()
+                .outbound_wakers
+                .insert(self.pump.connection, context.waker().clone());
+            Poll::Pending
+        }
+    }
+}
+
+impl groove::chunks::MissingChunkResolver for PeerChunkResolver {
+    fn resolve(
+        &self,
+        request: groove::chunks::ChunkRequest,
+    ) -> groove::chunks::ChunkFuture<'_, Result<bytes::Bytes, groove::chunks::ChunkError>> {
+        let (sender, receiver) = oneshot::channel();
+        let waiter_id = {
+            let mut state = self.state.borrow_mut();
+            state.next_waiter_id = state.next_waiter_id.wrapping_add(1).max(1);
+            state.next_waiter_id
+        };
+        if let Err(ChunkDemandWaiter::Local { sender, .. }) = self.enqueue(
+            request.clone(),
+            DEFAULT_CHUNK_FORWARD_HOPS,
+            ChunkDemandWaiter::Local { waiter_id, sender },
+        ) {
+            let _ = sender.send(Err(groove::chunks::ChunkError::Backend(
+                "chunk request backpressure".to_owned(),
+            )));
+        }
+        Box::pin(ChunkResolutionFuture {
+            resolver: self.clone(),
+            request,
+            waiter_id,
+            receiver,
+            completed: false,
+        })
+    }
+}
 pub(crate) type WeakNodeState<S> = Weak<LocalMutex<NodeState<S>>>;
 
 /// Temporary source-compatibility for node operations that are still wholly
@@ -138,6 +826,14 @@ pub enum TickUrgency {
 pub trait TickScheduler {
     /// Schedule a future [`Db::tick`] for pending peer-connection work.
     fn schedule_tick(&self, urgency: TickUrgency);
+
+    /// Schedule one future tick no earlier than the supplied delay.
+    ///
+    /// This is deliberately distinct from [`TickUrgency::Deferred`]: callers
+    /// use it for protocol admission windows, where turning a deadline into a
+    /// microtask would create a resend hot loop. Every host therefore supplies
+    /// a real timer implementation.
+    fn schedule_tick_after(&self, delay_ms: u64);
 }
 
 /// A locally-originated transaction rejection that was not consumed by an
@@ -344,6 +1040,45 @@ type ActiveAuthorityViewReceipts = Rc<RefCell<Option<AuthorityViewReceipts>>>;
 type UpstreamSubscriptionOwners =
     Rc<RefCell<BTreeMap<SubscriptionKey, Vec<Weak<RefCell<SubscriptionState>>>>>>;
 type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
+
+/// Authenticated logical destination for an upstream upload retry.
+///
+/// A transport epoch may change during reconnect, but replaying a receiver's
+/// missing-node frontier is only sound to the same remote authority under the
+/// same authenticated link identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct UpstreamUploadDestination {
+    remote_node: [u8; 16],
+    link_identity: AuthorSubject,
+}
+
+pub(crate) trait UploadRetryClock {
+    fn now_ms(&self) -> u64;
+}
+
+struct MonotonicUploadRetryClock {
+    started: web_time::Instant,
+}
+
+impl MonotonicUploadRetryClock {
+    fn new() -> Self {
+        Self {
+            started: web_time::Instant::now(),
+        }
+    }
+}
+
+impl UploadRetryClock for MonotonicUploadRetryClock {
+    fn now_ms(&self) -> u64 {
+        web_time::Instant::now()
+            .duration_since(self.started)
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX)
+    }
+}
+
+type SharedUploadRetryClock = Rc<RefCell<Rc<dyn UploadRetryClock>>>;
 type WriteStateWaiters = Rc<RefCell<BTreeMap<TxId, Vec<WriteStateWaiter>>>>;
 type PermissionAdviceWaiters =
     Rc<RefCell<BTreeMap<PermissionAdviceRequestId, oneshot::Sender<PermissionAdvice>>>>;
@@ -708,7 +1443,7 @@ struct PendingUpstreamSubscription {
     shape: ValidatedQuery,
     binding: Binding,
     opts: RegisterShapeOptions,
-    identity: AuthorId,
+    identity: AuthorSubject,
 }
 
 struct QueryCoverageRegistration {
@@ -950,7 +1685,10 @@ impl Drop for PermissionAdviceFuture {
 mod catalogue;
 mod lifecycle;
 mod mutations;
+pub use mutations::{StreamingMutationKind, StreamingValueUpload};
 mod reads;
+#[doc(hidden)]
+pub use reads::BindingHydrationError;
 mod subscriptions;
 mod transactions;
 
@@ -1128,7 +1866,7 @@ pub mod doctest_support {
     pub use groove::storage::MemoryStorage;
 
     use crate::db::{Db, DbConfig, DbIdentity, Error, RowCells, SeededRowIdSource};
-    use crate::ids::{AuthorId, NodeUuid};
+    use crate::ids::{AuthorSubject, NodeUuid};
     use crate::schema::JazzSchema;
     use crate::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
@@ -1159,7 +1897,7 @@ pub mod doctest_support {
             storage: MemoryStorage::new(&refs),
             identity: DbIdentity {
                 node: NodeUuid::from_bytes([0x11; 16]),
-                author: AuthorId::from_bytes([0xa1; 16]),
+                author: AuthorSubject::for_test_bytes([0xa1; 16]),
             },
             id_source: Some(Box::new(SeededRowIdSource::new(0x1111))),
         })
@@ -1405,7 +2143,7 @@ fn subscriber_inbound_message_is_authority_only(
         SyncMessage::FateUpdate { .. }
             | SyncMessage::SubscribeRejected { .. }
             | SyncMessage::CatalogueAck(_)
-            | SyncMessage::ViewUpdate { .. }
+            | SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. })
             | SyncMessage::RowVersionPayloads { .. }
             | SyncMessage::CatalogueSnapshot(_)
             | SyncMessage::PermissionAdviceResponse { .. }
@@ -1417,15 +2155,149 @@ fn subscriber_inbound_message_is_authority_only(
     ) || (trust == CommitUnitTrust::Session && matches!(message, SyncMessage::SessionClaims { .. }))
 }
 
-fn subscriber_permission_subject(ingest: CommitUnitIngestContext) -> AuthorId {
+fn subscriber_permission_subject(ingest: CommitUnitIngestContext) -> AuthorSubject {
     match ingest.trust {
         CommitUnitTrust::Session => ingest.identity,
-        CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAdmin => AuthorId::SYSTEM,
+        CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAdmin => AuthorSubject::SYSTEM,
     }
 }
 
 /// Row cells supplied to write methods.
 pub type RowCells = BTreeMap<String, Value>;
+
+/// Identity used to author and authorize a standalone write.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WriteIdentity {
+    /// Use the identity that opened the database.
+    #[default]
+    Database,
+    /// Author and authorize the write as this trusted session identity.
+    Session(AuthorSubject),
+    /// Attribute provenance while retaining the database identity as policy subject.
+    /// Client databases reject attribution to a different author.
+    Attribution(AuthorSubject),
+}
+
+/// Exact branch selected by an insert, upsert, or restore.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum ExactWriteTarget {
+    /// Write to the database's current root branch.
+    #[default]
+    Root,
+    /// Write to one exact branch key.
+    Branch(BranchSelector),
+}
+
+impl ExactWriteTarget {
+    fn branch(&self) -> BranchSelector {
+        match self {
+            Self::Root => BranchSelector::default(),
+            Self::Branch(branch) => branch.clone(),
+        }
+    }
+}
+
+/// Root or head-over-base view selected by an update or delete.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum WriteTarget {
+    /// Write to the database's current root branch.
+    #[default]
+    Root,
+    /// Write through a branch view, materializing inherited state in `head`.
+    BranchView {
+        /// Exact branch receiving the local write.
+        head: BranchSelector,
+        /// Optional inherited base view visible below `head`.
+        base: Option<BranchViewBase>,
+    },
+}
+
+/// Options for [`Db::insert`] and mergeable transaction inserts.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct InsertOptions {
+    /// Caller-supplied row id, or a generated UUIDv7 row id when omitted.
+    pub row_id: Option<RowUuid>,
+    /// Standalone-write identity. Transactions use the identity chosen when opened.
+    pub identity: WriteIdentity,
+    /// Exact branch receiving the row.
+    pub target: ExactWriteTarget,
+    /// Explicit provenance timestamp, or the database clock when omitted.
+    pub updated_at_ms: Option<u64>,
+}
+
+/// Options for [`Db::update`] and mergeable transaction updates.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UpdateOptions {
+    /// Standalone-write identity. Transactions use the identity chosen when opened.
+    pub identity: WriteIdentity,
+    /// Root or branch view through which the patch is applied.
+    pub target: WriteTarget,
+    /// Explicit provenance timestamp, or the database clock when omitted.
+    pub updated_at_ms: Option<u64>,
+}
+
+/// Options for [`Db::upsert`] and mergeable transaction upserts.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UpsertOptions {
+    /// Standalone-write identity. Transactions use the identity chosen when opened.
+    pub identity: WriteIdentity,
+    /// Exact branch receiving the insert or update.
+    pub target: ExactWriteTarget,
+    /// Explicit provenance timestamp, or the database clock when omitted.
+    pub updated_at_ms: Option<u64>,
+}
+
+/// Options for [`Db::delete`] and mergeable transaction deletes.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DeleteOptions {
+    /// Standalone-write identity. Transactions use the identity chosen when opened.
+    pub identity: WriteIdentity,
+    /// Root or branch view through which the row is deleted.
+    pub target: WriteTarget,
+    /// Explicit provenance timestamp, or the database clock when omitted.
+    pub updated_at_ms: Option<u64>,
+}
+
+/// Options for [`Db::restore`] and mergeable transaction restores.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RestoreOptions {
+    /// Standalone-write identity. Transactions use the identity chosen when opened.
+    pub identity: WriteIdentity,
+    /// Exact branch whose deletion register is restored.
+    pub target: ExactWriteTarget,
+    /// Explicit provenance timestamp, or the database clock when omitted.
+    pub updated_at_ms: Option<u64>,
+}
+
+fn ensure_transaction_identity(identity: WriteIdentity) -> Result<(), Error> {
+    if identity == WriteIdentity::Database {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorCode::Schema,
+        "transaction identity is selected when the transaction is opened",
+    ))
+}
+
+fn ensure_exclusive_target(target: &ExactWriteTarget) -> Result<(), Error> {
+    if *target != ExactWriteTarget::Root {
+        return Err(Error::new(
+            ErrorCode::Schema,
+            "exclusive transactions do not support branch writes",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_exclusive_view_target(target: &WriteTarget) -> Result<(), Error> {
+    if *target != WriteTarget::Root {
+        return Err(Error::new(
+            ErrorCode::Schema,
+            "exclusive transactions do not support branch writes",
+        ));
+    }
+    Ok(())
+}
 
 /// Build [`RowCells`] with bare identifier column names.
 ///
@@ -1443,6 +2315,7 @@ pub type RowCells = BTreeMap<String, Value>;
 ///         title: "Ship it",
 ///         done: false,
 ///     },
+///     Default::default(),
 /// ))?;
 /// block_on(write.wait(DurabilityTier::Local))?;
 ///
@@ -1479,127 +2352,168 @@ where
     /// The id of the already-open transaction.
     fn tx_id(&self) -> OpenTransactionId;
 
-    /// Stage an insert with a generated row id.
-    async fn insert(&self, table: &str, cells: RowCells) -> Result<RowUuid, Error> {
-        let row = self.db().row_id_source.borrow_mut().next_row_id();
-        self.insert_with_id(table, row, cells).await?;
+    /// Stage one insert. Transaction identity is fixed when the transaction opens.
+    async fn insert(
+        &self,
+        table: &str,
+        cells: RowCells,
+        options: InsertOptions,
+    ) -> Result<RowUuid, Error> {
+        ensure_transaction_identity(options.identity)?;
+        let row = options
+            .row_id
+            .unwrap_or_else(|| self.db().row_id_source.borrow_mut().next_row_id());
+        match options.target {
+            ExactWriteTarget::Root => {
+                self.db()
+                    .stage_mergeable_insert(self.tx_id(), table, row, cells, options.updated_at_ms)
+                    .await?;
+            }
+            ExactWriteTarget::Branch(branch) => {
+                self.db()
+                    .stage_mergeable_insert_in_branch(
+                        self.tx_id(),
+                        table,
+                        branch,
+                        row,
+                        cells,
+                        options.updated_at_ms,
+                    )
+                    .await?;
+            }
+        }
         Ok(row)
     }
 
-    /// Stage an insert with a caller-supplied row id.
-    async fn insert_with_id(
+    /// Stage one update; omitted fields keep the transaction-local value.
+    async fn update(
         &self,
         table: &str,
-        row: RowUuid,
-        cells: RowCells,
-    ) -> Result<(), Error> {
-        self.insert_with_id_at_ms_option(table, row, cells, None)
-            .await
-    }
-
-    /// Stage an insert in one exact branch-local row.
-    async fn insert_with_id_in_branch(
-        &self,
-        table: &str,
-        branch: BranchSelector,
-        row: RowUuid,
-        cells: RowCells,
-    ) -> Result<(), Error> {
-        self.db()
-            .stage_mergeable_insert_in_branch(self.tx_id(), table, branch, row, cells, None)
-            .await
-    }
-
-    /// Stage an insert with a caller-supplied row id and explicit millisecond provenance time.
-    async fn insert_with_id_at_ms(
-        &self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: u64,
-    ) -> Result<(), Error> {
-        self.insert_with_id_at_ms_option(table, row, cells, Some(now_ms))
-            .await
-    }
-
-    /// Stage an update; omitted fields keep the transaction-local value.
-    async fn update(&self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
-        self.update_at_ms_option(table, row, patch, None).await
-    }
-
-    /// Stage an update through a head-over-base branch view.
-    async fn update_in_branch_view(
-        &self,
-        table: &str,
-        head: BranchSelector,
-        base: Option<BranchViewBase>,
         row: RowUuid,
         patch: RowCells,
+        options: UpdateOptions,
     ) -> Result<(), Error> {
-        self.db()
-            .stage_mergeable_update_in_branch_view(
-                self.tx_id(),
-                table,
-                head,
-                base,
-                row,
-                patch,
-                None,
+        ensure_transaction_identity(options.identity)?;
+        match options.target {
+            WriteTarget::Root => {
+                self.db()
+                    .stage_mergeable_update(self.tx_id(), table, row, patch, options.updated_at_ms)
+                    .await
+            }
+            WriteTarget::BranchView { head, base } => {
+                self.db()
+                    .stage_mergeable_update_in_branch_view(
+                        self.tx_id(),
+                        table,
+                        head,
+                        base,
+                        row,
+                        patch,
+                        options.updated_at_ms,
+                    )
+                    .await
+            }
+        }
+    }
+
+    /// Stage one upsert.
+    async fn upsert(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        options: UpsertOptions,
+    ) -> Result<(), Error> {
+        ensure_transaction_identity(options.identity)?;
+        match options.target {
+            ExactWriteTarget::Root => {
+                if self.read(table, row).await?.is_some() {
+                    self.db()
+                        .stage_mergeable_update(
+                            self.tx_id(),
+                            table,
+                            row,
+                            cells,
+                            options.updated_at_ms,
+                        )
+                        .await
+                } else {
+                    self.db()
+                        .stage_mergeable_insert(
+                            self.tx_id(),
+                            table,
+                            row,
+                            cells,
+                            options.updated_at_ms,
+                        )
+                        .await
+                }
+            }
+            ExactWriteTarget::Branch(_) => Err(Error::new(
+                ErrorCode::Schema,
+                "branch upserts are not supported inside transactions",
+            )),
+        }
+    }
+
+    /// Stage one soft delete.
+    async fn delete(&self, table: &str, row: RowUuid, options: DeleteOptions) -> Result<(), Error> {
+        ensure_transaction_identity(options.identity)?;
+        match options.target {
+            WriteTarget::Root => {
+                self.db()
+                    .stage_mergeable_delete(self.tx_id(), table, row, options.updated_at_ms)
+                    .await
+            }
+            WriteTarget::BranchView { head, base } => {
+                self.db()
+                    .stage_mergeable_delete_in_branch_view(
+                        self.tx_id(),
+                        table,
+                        head,
+                        base,
+                        row,
+                        options.updated_at_ms,
+                    )
+                    .await
+            }
+        }
+    }
+
+    /// Stage one restore, optionally replacing row content.
+    async fn restore(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: Option<RowCells>,
+        options: RestoreOptions,
+    ) -> Result<(), Error> {
+        ensure_transaction_identity(options.identity)?;
+        let cells = cells.ok_or_else(|| {
+            Error::new(
+                ErrorCode::Schema,
+                "transaction restores currently require replacement cells",
             )
-            .await
-    }
-
-    /// Stage an update with an explicit millisecond provenance time.
-    async fn update_at_ms(
-        &self,
-        table: &str,
-        row: RowUuid,
-        patch: RowCells,
-        now_ms: u64,
-    ) -> Result<(), Error> {
-        self.update_at_ms_option(table, row, patch, Some(now_ms))
-            .await
-    }
-
-    /// Stage a soft delete.
-    async fn delete(&self, table: &str, row: RowUuid) -> Result<(), Error> {
-        self.delete_at_ms_option(table, row, None).await
-    }
-
-    /// Stage a deletion through a head-over-base branch view.
-    async fn delete_in_branch_view(
-        &self,
-        table: &str,
-        head: BranchSelector,
-        base: Option<BranchViewBase>,
-        row: RowUuid,
-    ) -> Result<(), Error> {
-        self.db()
-            .stage_mergeable_delete_in_branch_view(self.tx_id(), table, head, base, row, None)
-            .await
-    }
-
-    /// Stage a soft delete with explicit millisecond provenance time.
-    async fn delete_at_ms(&self, table: &str, row: RowUuid, now_ms: u64) -> Result<(), Error> {
-        self.delete_at_ms_option(table, row, Some(now_ms)).await
-    }
-
-    /// Stage a restore, applying defaults for omitted columns.
-    async fn restore(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
-        self.restore_at_ms_option(table, row, cells, None).await
-    }
-
-    /// Stage a restore in one exact branch-local row.
-    async fn restore_in_branch(
-        &self,
-        table: &str,
-        branch: BranchSelector,
-        row: RowUuid,
-        cells: RowCells,
-    ) -> Result<(), Error> {
-        self.db()
-            .stage_mergeable_restore_in_branch(self.tx_id(), table, branch, row, cells, None)
-            .await
+        })?;
+        match options.target {
+            ExactWriteTarget::Root => {
+                self.db()
+                    .stage_mergeable_restore(self.tx_id(), table, row, cells, options.updated_at_ms)
+                    .await
+            }
+            ExactWriteTarget::Branch(branch) => {
+                self.db()
+                    .stage_mergeable_restore_in_branch(
+                        self.tx_id(),
+                        table,
+                        branch,
+                        row,
+                        cells,
+                        options.updated_at_ms,
+                    )
+                    .await
+            }
+        }
     }
 
     /// Stage an atomic move of one object branch-local row between exact branch
@@ -1645,32 +2559,33 @@ where
             .project_branch_selector(table_schema, &target)
             .map_err(|message| Error::new(ErrorCode::Schema, message))?;
         cells.extend(target_cells);
-        self.restore_in_branch(table, target, row, cells).await?;
-        self.delete_in_branch_view(table, source, None, row).await
-    }
-
-    /// Stage a restore with explicit millisecond provenance time, applying defaults for omitted columns.
-    async fn restore_at_ms(
-        &self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: u64,
-    ) -> Result<(), Error> {
-        self.restore_at_ms_option(table, row, cells, Some(now_ms))
-            .await
+        self.restore(
+            table,
+            row,
+            Some(cells),
+            RestoreOptions {
+                target: ExactWriteTarget::Branch(target),
+                ..Default::default()
+            },
+        )
+        .await?;
+        self.delete(
+            table,
+            row,
+            DeleteOptions {
+                target: WriteTarget::BranchView {
+                    head: source,
+                    base: None,
+                },
+                ..Default::default()
+            },
+        )
+        .await
     }
 
     /// Read one row with this transaction's pending writes overlaid.
     async fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
-        self.db()
-            .node
-            .node
-            .lock()
-            .await
-            .tx_read_in_schema(self.tx_id(), self.db().schema_version_id, table, row)
-            .await
-            .map_err(Into::into)
+        self.db().transaction_read(self.tx_id(), table, row).await
     }
 
     /// Read a prepared query with this transaction's pending writes overlaid.
@@ -1694,7 +2609,7 @@ where
     async fn all_prepared_for_identity(
         &self,
         prepared: &PreparedQuery,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.all_prepared_for_identity_with_opts(prepared, author, ReadOpts::default())
             .await
@@ -1704,62 +2619,11 @@ where
     async fn all_prepared_for_identity_with_opts(
         &self,
         prepared: &PreparedQuery,
-        author: AuthorId,
+        author: AuthorSubject,
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.db()
             .transaction_all_for_identity(self.tx_id(), prepared, author, opts)
-            .await
-    }
-
-    /// Stage an insert with an optional explicit provenance time.
-    async fn insert_with_id_at_ms_option(
-        &self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        self.db()
-            .stage_mergeable_insert(self.tx_id(), table, row, cells, now_ms)
-            .await
-    }
-
-    /// Stage an update with an optional explicit provenance time.
-    async fn update_at_ms_option(
-        &self,
-        table: &str,
-        row: RowUuid,
-        patch: RowCells,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        self.db()
-            .stage_mergeable_update(self.tx_id(), table, row, patch, now_ms)
-            .await
-    }
-
-    /// Stage a deletion with an optional explicit provenance time.
-    async fn delete_at_ms_option(
-        &self,
-        table: &str,
-        row: RowUuid,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        self.db()
-            .stage_mergeable_delete(self.tx_id(), table, row, now_ms)
-            .await
-    }
-
-    /// Stage a restore with an optional explicit provenance time.
-    async fn restore_at_ms_option(
-        &self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        self.db()
-            .stage_mergeable_restore(self.tx_id(), table, row, cells, now_ms)
             .await
     }
 }
@@ -1868,19 +2732,14 @@ where
 
     /// Read one row inside the exclusive transaction.
     async fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
-        self.db().exclusive_read(self.tx_id(), table, row).await
+        self.db().transaction_read(self.tx_id(), table, row).await
     }
 
     /// Read all current rows in a table inside the exclusive transaction.
     async fn all(&self, table: &str) -> Result<Vec<CurrentRow>, Error> {
         self.db()
-            .node
-            .node
-            .lock()
+            .transaction_current_rows(self.tx_id(), table)
             .await
-            .tx_current_rows(self.tx_id(), table)
-            .await
-            .map_err(Into::into)
     }
 
     /// Read a prepared query inside the exclusive transaction.
@@ -1904,7 +2763,7 @@ where
     async fn all_prepared_for_identity(
         &self,
         prepared: &PreparedQuery,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.all_prepared_for_identity_with_opts(prepared, author, ReadOpts::default())
             .await
@@ -1914,7 +2773,7 @@ where
     async fn all_prepared_for_identity_with_opts(
         &self,
         prepared: &PreparedQuery,
-        author: AuthorId,
+        author: AuthorSubject,
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.db()
@@ -1922,43 +2781,81 @@ where
             .await
     }
 
-    /// Stage an insert with a generated row id.
-    async fn insert(&self, table: &str, cells: RowCells) -> Result<RowUuid, Error> {
-        let row = self.db().row_id_source.borrow_mut().next_row_id();
-        self.insert_with_id(table, row, cells).await?;
+    /// Stage one insert.
+    async fn insert(
+        &self,
+        table: &str,
+        cells: RowCells,
+        options: InsertOptions,
+    ) -> Result<RowUuid, Error> {
+        ensure_transaction_identity(options.identity)?;
+        ensure_exclusive_target(&options.target)?;
+        let row = options
+            .row_id
+            .unwrap_or_else(|| self.db().row_id_source.borrow_mut().next_row_id());
+        self.db()
+            .stage_exclusive_insert(self.tx_id(), table, row, cells, options.updated_at_ms)
+            .await?;
         Ok(row)
     }
 
-    /// Stage an insert with a caller-supplied row id.
-    async fn insert_with_id(
+    /// Stage an update; omitted fields keep the transaction-local value.
+    async fn update(
+        &self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        options: UpdateOptions,
+    ) -> Result<(), Error> {
+        ensure_transaction_identity(options.identity)?;
+        ensure_exclusive_view_target(&options.target)?;
+        self.db()
+            .stage_exclusive_update(self.tx_id(), table, row, patch, options.updated_at_ms)
+            .await
+    }
+
+    /// Stage one upsert.
+    async fn upsert(
         &self,
         table: &str,
         row: RowUuid,
         cells: RowCells,
+        options: UpsertOptions,
     ) -> Result<(), Error> {
+        ensure_transaction_identity(options.identity)?;
+        ensure_exclusive_target(&options.target)?;
         self.db()
-            .stage_exclusive_insert(self.tx_id(), table, row, cells)
+            .stage_exclusive_upsert(self.tx_id(), table, row, cells, options.updated_at_ms)
             .await
     }
 
-    /// Stage an update; omitted fields keep the transaction-local value.
-    async fn update(&self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
-        let mut cells = self.read(table, row).await?.unwrap_or_default();
-        cells.extend(patch);
-        self.insert_with_id(table, row, cells).await
-    }
-
     /// Stage a soft delete.
-    async fn delete(&self, table: &str, row: RowUuid) -> Result<(), Error> {
+    async fn delete(&self, table: &str, row: RowUuid, options: DeleteOptions) -> Result<(), Error> {
+        ensure_transaction_identity(options.identity)?;
+        ensure_exclusive_view_target(&options.target)?;
         self.db()
-            .stage_exclusive_delete(self.tx_id(), table, row)
+            .stage_exclusive_delete(self.tx_id(), table, row, options.updated_at_ms)
             .await
     }
 
     /// Stage a restore, applying defaults for omitted columns.
-    async fn restore(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
+    async fn restore(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: Option<RowCells>,
+        options: RestoreOptions,
+    ) -> Result<(), Error> {
+        ensure_transaction_identity(options.identity)?;
+        ensure_exclusive_target(&options.target)?;
+        let cells = cells.ok_or_else(|| {
+            Error::new(
+                ErrorCode::Schema,
+                "exclusive transaction restores require replacement cells",
+            )
+        })?;
         self.db()
-            .stage_exclusive_restore(self.tx_id(), table, row, cells)
+            .stage_exclusive_restore(self.tx_id(), table, row, cells, options.updated_at_ms)
             .await
     }
 }
@@ -2070,7 +2967,11 @@ where
     /// ```rust
     /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
     /// let db = block_on(open_todos_db())?;
-    /// let write = block_on(db.insert("todos", todo_cells("has id", false)))?;
+    /// let write = block_on(db.insert(
+    ///     "todos",
+    ///     todo_cells("has id", false),
+    ///     Default::default(),
+    /// ))?;
     ///
     /// let _row_id = write.row_uuid();
     /// let _tx_id = write.mergeable_tx_id();
@@ -2086,7 +2987,11 @@ where
     /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
     /// # use jazz::tx::DurabilityTier;
     /// let db = block_on(open_todos_db())?;
-    /// let write = block_on(db.insert("todos", todo_cells("wait locally", false)))?;
+    /// let write = block_on(db.insert(
+    ///     "todos",
+    ///     todo_cells("wait locally", false),
+    ///     Default::default(),
+    /// ))?;
     ///
     /// let tx_id = block_on(write.wait(DurabilityTier::Local))?;
     /// assert_eq!(tx_id, write.mergeable_tx_id());
@@ -2245,7 +3150,7 @@ struct SubscriptionState {
     /// closure, so finalization always retires the currently live state.
     upstream_subscription_handles: Vec<UpstreamCoverageHandle>,
     propagates_upstream: bool,
-    author: AuthorId,
+    author: AuthorSubject,
     authorization_mode: QueryAuthorizationMode,
     read_tier: DurabilityTier,
     remote_read_tier: Option<DurabilityTier>,

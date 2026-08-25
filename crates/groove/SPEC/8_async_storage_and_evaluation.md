@@ -32,6 +32,11 @@ Groove.
 7. No storage miss, load request, retry outcome, or reset protocol escapes
    Groove.
 
+Chapter 9 extends the owned evaluation-request registry with immutable chunk
+requests for large values. That extension does not weaken this boundary:
+Groove still owns dependency discovery, suspension, sharing, resumption and
+failure scope, while the host supplies only the request capability.
+
 ## Storage contract
 
 `OrderedKvStorage` evolves in place. Point reads, scans, writes, explicit

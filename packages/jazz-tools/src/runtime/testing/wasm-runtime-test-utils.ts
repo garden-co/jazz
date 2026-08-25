@@ -7,7 +7,15 @@ import type { WasmSchema } from "../../drivers/types.js";
 import { onTestFinished } from "vitest";
 import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 
-export type TestRuntime = Runtime & { free?(): void };
+export type TestRuntime = Runtime & {
+  free?(): void;
+  setLargeValueStagingPolicy?(
+    incomingBytesPerWindow: number,
+    windowMs: number,
+    maxAgeMs?: number | null,
+  ): void;
+  evictExpiredStagedLargeValues?(): Promise<number>;
+};
 
 let wasmModulePromise: Promise<any> | null = null;
 
@@ -101,7 +109,7 @@ export async function createWasmRuntime(
     wasmModule.WasmDb,
     schema,
     deterministicBytes(`${appId}:${env}:${peerId}:node`),
-    deterministicBytes(`${appId}:${env}:${peerId}:author`),
+    testAuthorBytes(`${appId}:${env}:${peerId}:author`),
     1,
     true,
   );
@@ -110,6 +118,10 @@ export async function createWasmRuntime(
   });
 
   return runtime;
+}
+
+function testAuthorBytes(seed: string): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify(["urn:jazz:test", seed]));
 }
 
 function deterministicBytes(seed: string): Uint8Array {

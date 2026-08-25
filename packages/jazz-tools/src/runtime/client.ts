@@ -9,7 +9,11 @@ import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
 import type { InsertValues, Value, SubscriptionWireDelta, WasmSchema } from "../drivers/types.js";
 import { normalizeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { AuthFailureReason } from "./auth-state.js";
-import { resolveClientSessionStateSync } from "./client-session.js";
+import {
+  TRUSTED_RESERVED_SESSION_TOKEN_FIELD,
+  resolveClientSessionStateSync,
+  trustedReservedSessionToken,
+} from "./client-session.js";
 import { mapAuthReason } from "./auth-state.js";
 import {
   resolveRuntimeConfigSyncInitInput,
@@ -17,6 +21,15 @@ import {
 } from "./runtime-config.js";
 import { httpUrlToWs } from "./url.js";
 import { PostcardWriter } from "./native-runtime/native-codec.js";
+
+type RuntimeSerializedSession = Session & {
+  [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]?: string;
+};
+
+function serializeRuntimeSession(session: Session): RuntimeSerializedSession {
+  const token = trustedReservedSessionToken(session);
+  return token ? { ...session, [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: token } : session;
+}
 
 function encodeBranchColumnValue(value: Value): Uint8Array {
   const writer = new PostcardWriter();
@@ -29,7 +42,7 @@ function encodeBranchColumnValue(value: Value): Uint8Array {
       ) {
         throw new Error("branch Integer values must be signed 32-bit integers");
       }
-      writer.enumUnit(14); // groove::Value::I32
+      writer.enumUnit(15); // groove::Value::I32
       writer.i64(value.value);
       break;
     case "BigInt": {
@@ -40,12 +53,12 @@ function encodeBranchColumnValue(value: Value): Uint8Array {
       if (integer < -(1n << 63n) || integer > (1n << 63n) - 1n) {
         throw new Error("branch BigInt values must be signed 64-bit integers");
       }
-      writer.enumUnit(13); // groove::Value::I64
+      writer.enumUnit(14); // groove::Value::I64
       writer.i64(integer);
       break;
     }
     case "Uuid": {
-      writer.enumUnit(8); // groove::Value::Uuid
+      writer.enumUnit(9); // groove::Value::Uuid
       const hex = value.value.replaceAll("-", "");
       if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new Error(`invalid branch UUID ${value.value}`);
       writer.bytes(
@@ -112,6 +125,15 @@ export interface Runtime {
     write_context_json?: string | null,
     object_id?: string | null,
   ): InsertResult;
+  streamingMutation?(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    write_context_json?: string | null,
+    object_id?: string | null,
+  ): Promise<StreamingInsertResult>;
   restore(
     table: string,
     object_id: string,
@@ -131,6 +153,40 @@ export interface Runtime {
     write_context_json?: string | null,
   ): MutationResult;
   delete(table: string, object_id: string, write_context_json?: string | null): MutationResult;
+  readValueRange?(
+    table: string,
+    objectId: string,
+    column: string,
+    start: number,
+    end: number,
+  ): Promise<Uint8Array>;
+  readTextUtf16Range?(
+    table: string,
+    objectId: string,
+    column: string,
+    start: number,
+    end: number,
+  ): Promise<string>;
+  readJsonPointer?(
+    table: string,
+    objectId: string,
+    column: string,
+    pointer: string,
+  ): Promise<unknown>;
+  appendValue?(
+    table: string,
+    objectId: string,
+    column: string,
+    bytes: Uint8Array,
+  ): Promise<MutationResult>;
+  spliceValue?(
+    table: string,
+    objectId: string,
+    column: string,
+    offset: number,
+    deleteLength: number,
+    insert: Uint8Array,
+  ): Promise<MutationResult>;
   canInsertLocally?(table: string, values: InsertValues, session?: Session): PermissionAdvice;
   canReadLocally?(table: string, objectId: string, session?: Session): PermissionAdvice;
   canUpdateLocally?(
@@ -408,6 +464,12 @@ export type WriteReceipt =
   | { readonly kind: "staged"; readonly openBatchId: OpenBatchId };
 
 export type InsertResult = Row & WriteReceipt;
+export type StreamingValueChunk = Uint8Array | string;
+export type StreamingValueSource =
+  | ReadableStream<StreamingValueChunk>
+  | AsyncIterable<StreamingValueChunk>;
+export type StreamingInsertResult = { id: string } & WriteReceipt;
+export type StreamingMutationKind = "insert" | "update" | "upsert";
 export type MutationResult = WriteReceipt;
 
 interface WriteContextPayload {
@@ -730,6 +792,7 @@ export class JazzClient {
       appId: this.context.appId,
       jwtToken: this.context.jwtToken,
       cookieSession: this.context.cookieSession,
+      trustedReservedSession: this.context.trustedReservedSession,
     }).session;
   }
 
@@ -812,6 +875,71 @@ export class JazzClient {
     this.runtime.onMutationError(listener);
   }
 
+  async readValueRange(
+    table: string,
+    objectId: string,
+    column: string,
+    start: number,
+    end: number,
+  ): Promise<Uint8Array> {
+    if (!this.runtime.readValueRange) throw new Error("Runtime does not support value ranges");
+    return await this.runtime.readValueRange(table, objectId, column, start, end);
+  }
+
+  async readTextUtf16Range(
+    table: string,
+    objectId: string,
+    column: string,
+    start: number,
+    end: number,
+  ): Promise<string> {
+    if (!this.runtime.readTextUtf16Range) {
+      throw new Error("Runtime does not support UTF-16 value ranges");
+    }
+    return await this.runtime.readTextUtf16Range(table, objectId, column, start, end);
+  }
+
+  async readJsonPointer(
+    table: string,
+    objectId: string,
+    column: string,
+    pointer: string,
+  ): Promise<unknown> {
+    if (!this.runtime.readJsonPointer) throw new Error("Runtime does not support JSON pointers");
+    return await this.runtime.readJsonPointer(table, objectId, column, pointer);
+  }
+
+  async appendValue(
+    table: string,
+    objectId: string,
+    column: string,
+    bytes: Uint8Array,
+  ): Promise<WriteHandle<{ id: string }>> {
+    if (!this.runtime.appendValue) throw new Error("Runtime does not support value append");
+    const result = await this.runtime.appendValue(table, objectId, column, bytes);
+    return new WriteHandle(committedBatchId(result), this);
+  }
+
+  async spliceValue(
+    table: string,
+    objectId: string,
+    column: string,
+    offset: number,
+    deleteLength: number,
+    insert: Uint8Array,
+  ): Promise<WriteHandle<{ id: string }>> {
+    if (!this.runtime.spliceValue) throw new Error("Runtime does not support value splice");
+    const result = await this.runtime.spliceValue(
+      table,
+      objectId,
+      column,
+      offset,
+      deleteLength,
+      insert,
+    );
+    return new WriteHandle(committedBatchId(result), this);
+  }
+
   commitTransaction(id: OpenBatchId): WriteHandle {
     const batchId = requireTransactionalRuntime(this.runtime).commitTransaction(id);
     return new WriteHandle(batchId, this);
@@ -839,11 +967,20 @@ export class JazzClient {
 
   updateAuthToken(jwtToken?: string): void {
     this.context.jwtToken = jwtToken;
+    this.context.trustedReservedSession = undefined;
     this.resolvedSession = this.resolveSessionFromContext();
     // Push the refreshed credentials into the Rust transport.
     // Carry forward admin/backend secrets from context — omitting them here
     // would deserialise to None on the Rust side and silently erase any
     // privileged credentials the transport was connected with.
+    this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
+  }
+
+  /** @internal Update a token minted by a dedicated first-party reserved auth flow. */
+  updateTrustedAuthToken(jwtToken: string, session: Session): void {
+    this.context.jwtToken = jwtToken;
+    this.context.trustedReservedSession = session;
+    this.resolvedSession = this.resolveSessionFromContext();
     this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
   }
 
@@ -892,12 +1029,12 @@ export class JazzClient {
       updatedAt === undefined &&
       !branch
     ) {
-      return JSON.stringify(session);
+      return JSON.stringify(serializeRuntimeSession(session));
     }
 
     const payload: WriteContextPayload = {};
     if (session) {
-      payload.session = session;
+      payload.session = serializeRuntimeSession(session);
     }
     if (attribution !== undefined) {
       payload.attribution = attribution;
@@ -939,6 +1076,119 @@ export class JazzClient {
   ): WriteResult<Row> {
     const row = this.insertInternal(table, values, options, session, attribution);
     return new WriteResult(row, committedBatchId(row), this);
+  }
+
+  /**
+   * Consume one host byte/text stream and atomically insert the resulting
+   * scalar with the other row values. The streamed value is intentionally not
+   * copied back into the returned handle.
+   */
+  async insertStreaming(
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    options?: InsertOptions,
+    session?: Session,
+    attribution?: string,
+  ): Promise<WriteHandle<{ id: string }>> {
+    return this.streamingMutation(
+      "insert",
+      table,
+      values,
+      column,
+      source,
+      options,
+      session,
+      attribution,
+    );
+  }
+
+  async updateStreaming(
+    table: string,
+    objectId: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    options?: UpdateOptions,
+    session?: Session,
+    attribution?: string,
+  ): Promise<WriteHandle<{ id: string }>> {
+    return this.streamingMutation(
+      "update",
+      table,
+      values,
+      column,
+      source,
+      options,
+      session,
+      attribution,
+      objectId,
+    );
+  }
+
+  async upsertStreaming(
+    table: string,
+    objectId: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    options?: UpdateOptions,
+    session?: Session,
+    attribution?: string,
+  ): Promise<WriteHandle<{ id: string }>> {
+    return this.streamingMutation(
+      "upsert",
+      table,
+      values,
+      column,
+      source,
+      options,
+      session,
+      attribution,
+      objectId,
+    );
+  }
+
+  private async streamingMutation(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    options?: InsertOptions | UpdateOptions,
+    session?: Session,
+    attribution?: string,
+    objectId?: string,
+  ): Promise<WriteHandle<{ id: string }>> {
+    if (!this.runtime.streamingMutation) {
+      throw new Error("This runtime does not support streaming mutations");
+    }
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    const writeContext = this.encodeWriteContext(
+      effectiveSession,
+      attribution,
+      undefined,
+      options?.updatedAt,
+      options?.branch
+        ? mutation === "insert"
+          ? { head: options.branch as BranchSelector }
+          : (options.branch as BranchView)
+        : undefined,
+    );
+    const result = await this.runtime.streamingMutation(
+      mutation,
+      table,
+      values,
+      column,
+      source,
+      writeContext,
+      objectId ?? ("id" in (options ?? {}) ? (options as InsertOptions).id : undefined),
+    );
+    if (result.kind !== "committed") {
+      throw new Error("Streaming mutations cannot be staged inside an open transaction");
+    }
+    return new WriteHandle(result.batchId, this, { id: result.id });
   }
 
   /**
@@ -1060,7 +1310,9 @@ export class JazzClient {
   ): Promise<Row[]> {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
     const effectiveSession = session ?? this.resolvedSession;
-    const sessionJson = effectiveSession ? JSON.stringify(effectiveSession) : undefined;
+    const sessionJson = effectiveSession
+      ? JSON.stringify(serializeRuntimeSession(effectiveSession))
+      : undefined;
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
     const results = await this.runtime.query(
       query,
@@ -1290,7 +1542,9 @@ export class JazzClient {
   ): number {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
     const effectiveSession = session ?? this.resolvedSession;
-    const sessionJson = effectiveSession ? JSON.stringify(effectiveSession) : undefined;
+    const sessionJson = effectiveSession
+      ? JSON.stringify(serializeRuntimeSession(effectiveSession))
+      : undefined;
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
 
     const handle = this.runtime.createSubscription(

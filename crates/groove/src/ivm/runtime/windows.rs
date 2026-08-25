@@ -1100,7 +1100,7 @@ fn encode_runtime_primary_key_part(
             key.push(1);
             encode_runtime_primary_key_part(key, value)?;
         }
-        Value::Array(_) | Value::Record(_) | Value::Enum(_) => {
+        Value::Array(_) | Value::Record(_) | Value::Enum(_) | Value::Large(_) => {
             return Err(IvmRuntimeError::UnsupportedJoinKey);
         }
     }

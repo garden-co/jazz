@@ -146,6 +146,7 @@ describe("JazzClient write attribution", () => {
     const session: Session = {
       user_id: "backend-user",
       claims: { role: "admin" },
+      issuer: "https://issuer.example",
       authMode: "external",
     };
 
@@ -182,6 +183,7 @@ describe("JazzClient write attribution", () => {
     const session: Session = {
       user_id: "backend-user",
       claims: { role: "admin" },
+      issuer: "https://issuer.example",
       authMode: "external",
     };
     const insertValues = { title: { type: "Text" as const, value: "Attributed" } };

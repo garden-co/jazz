@@ -4,9 +4,8 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use axum::Router;
-use jazz::db::WireTransportAdapter;
 use jazz::groove::storage::StorageFactory;
-use jazz::ids::AuthorId;
+use jazz::ids::AuthorSubject;
 use jazz::node::EdgeCacheBudget;
 use jazz::schema::JazzSchema;
 use jazz::serving::{NodeRole, StorageConfig};
@@ -426,7 +425,7 @@ fn spawn_edge_upstream_connector(
                 .bootstrap_catalogue(NativeTransportRequest {
                     server_url: upstream_url.clone(),
                     app_id,
-                    peer_identity: AuthorId::SYSTEM,
+                    peer_identity: AuthorSubject::SYSTEM,
                     auth: auth.clone(),
                     wake: Arc::new(|| {}),
                 })
@@ -463,7 +462,7 @@ fn spawn_edge_upstream_connector(
                 .connect(NativeTransportRequest {
                     server_url: upstream_url.clone(),
                     app_id,
-                    peer_identity: AuthorId::SYSTEM,
+                    peer_identity: AuthorSubject::SYSTEM,
                     auth,
                     wake,
                 })
@@ -471,13 +470,12 @@ fn spawn_edge_upstream_connector(
             {
                 Ok(transport) => {
                     if shell
-                        .connect_upstream(Box::new(WireTransportAdapter::new_with_session_context(
+                        .connect_upstream_wire(
                             transport.transport,
                             transport.protocol_version,
                             transport.features,
-                            None,
                             transport.session_context,
-                        )))
+                        )
                         .await
                         .is_ok()
                     {

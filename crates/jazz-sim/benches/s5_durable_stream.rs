@@ -14,7 +14,7 @@ use jazz::db::{
     SubscriptionStream, Transport,
 };
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::peer::PeerState;
 use jazz::protocol::SyncMessage;
@@ -324,7 +324,7 @@ fn run_jazz(config: &Config) -> JazzSummary {
             let before = Instant::now();
             append_tokens(config, content, stream, seq);
             let commit = MergeableCommit::new(STREAM_DOCS, stream_doc_row(stream), now_ms)
-                .made_by(AuthorId::SYSTEM)
+                .made_by(AuthorSubject::SYSTEM)
                 .cells(cells([
                     ("stream", Value::Uuid(stream_row(stream).0)),
                     ("content", Value::Bytes(content.clone())),
@@ -421,10 +421,13 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
     let mut edge_acceptance = Histogram::new(3).unwrap();
     let mut contents = vec![Vec::<u8>::new(); config.streams];
     for stream in 0..config.streams {
-        let stream_write = block_on(db.insert_with_id(
+        let stream_write = block_on(db.insert(
             STREAMS,
-            stream_row(stream),
             cells([("name", Value::String(format!("stream-{stream}")))]),
+            jazz::db::InsertOptions {
+                row_id: Some(stream_row(stream)),
+                ..Default::default()
+            },
         ))
         .expect("db stream insert");
         block_on(stream_write.wait(DurabilityTier::Local)).expect("db stream local wait");
@@ -437,13 +440,16 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
             &mut core,
             &mut edge_acceptance,
         );
-        let doc_write = block_on(db.insert_with_id(
+        let doc_write = block_on(db.insert(
             STREAM_DOCS,
-            stream_doc_row(stream),
             cells([
                 ("stream", Value::Uuid(stream_row(stream).0)),
                 ("content", Value::Bytes(Vec::new())),
             ]),
+            jazz::db::InsertOptions {
+                row_id: Some(stream_doc_row(stream)),
+                ..Default::default()
+            },
         ))
         .expect("db stream doc insert");
         block_on(doc_write.wait(DurabilityTier::Local)).expect("db stream doc local wait");
@@ -498,6 +504,7 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
                 STREAM_DOCS,
                 stream_doc_row(stream),
                 cells([("content", Value::Bytes(content))]),
+                Default::default(),
             ))
             .expect("db stream doc update");
             update_latencies.push(update_start.elapsed().as_micros() as u64);
@@ -577,7 +584,7 @@ async fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary
 
     let (client_transport, server_transport) = queue_duplex();
     let upstream = block_on(client.connect_upstream(client_transport));
-    let subscriber = server.accept_subscriber(server_transport, AuthorId::SYSTEM);
+    let subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
     let query = Query::from(STREAM_DOCS);
     let prepared = client
         .prepare_query(&query)
@@ -646,7 +653,8 @@ async fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary
 
     let (client_transport, server_transport) = queue_duplex();
     let _resumed_upstream = block_on(client.connect_upstream(client_transport));
-    let resumed = server.accept_subscriber_with_resume(server_transport, AuthorId::SYSTEM, cursor);
+    let resumed =
+        server.accept_subscriber_with_resume(server_transport, AuthorSubject::SYSTEM, cursor);
 
     client.tick().await.expect("client resumed subscribe tick");
     resumed
@@ -1121,7 +1129,7 @@ fn open_db(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, Db<RocksDbStora
         storage,
         identity: DbIdentity {
             node: node_uuid,
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(u64::from_le_bytes(
             node_uuid.as_bytes()[..8]
@@ -1160,13 +1168,13 @@ fn commit_unit_bytes(update: &SyncMessage) -> u64 {
 
 fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
             ..
-        } => {
+        }) => {
             version_bundles
                 .iter()
                 .flat_map(|bundle| bundle.versions.iter())
@@ -1181,11 +1189,11 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
 
 fn result_row_count(update: &SyncMessage) -> usize {
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             result_member_adds,
             result_member_removes,
             ..
-        } => result_member_adds.len() + result_member_removes.len(),
+        }) => result_member_adds.len() + result_member_removes.len(),
         _ => 0,
     }
 }

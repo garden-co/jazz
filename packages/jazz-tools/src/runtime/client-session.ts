@@ -5,6 +5,8 @@ export interface ClientSessionInput {
   appId: string;
   jwtToken?: string;
   cookieSession?: Session;
+  /** @internal Session produced by a first-party reserved-issuer auth flow. */
+  trustedReservedSession?: Session;
 }
 
 export type ClientSessionTransport = "bearer" | "cookie";
@@ -16,6 +18,73 @@ export interface ClientSessionState {
 
 export const LOCAL_FIRST_JWT_ISSUER = "urn:jazz:local-first";
 export const ANONYMOUS_JWT_ISSUER = "urn:jazz:anonymous";
+export const SYSTEM_SESSION_ISSUER = "urn:jazz:system";
+export const STATIC_BEARER_SESSION_ISSUER = "urn:jazz:static-bearer";
+export const RESERVED_JAZZ_SESSION_ISSUERS = [
+  SYSTEM_SESSION_ISSUER,
+  LOCAL_FIRST_JWT_ISSUER,
+  STATIC_BEARER_SESSION_ISSUER,
+  ANONYMOUS_JWT_ISSUER,
+] as const;
+
+export function isReservedJazzIssuer(issuer: string): boolean {
+  return (RESERVED_JAZZ_SESSION_ISSUERS as readonly string[]).includes(issuer);
+}
+
+export const TRUSTED_RESERVED_SESSION_TOKEN_FIELD = "__jazz_trusted_reserved_session";
+const trustedReservedSessions = new WeakSet<Session>();
+const trustedReservedSessionTokens = new WeakMap<Session, string>();
+const trustedReservedSessionTokenValues = new Map<
+  string,
+  { issuer: string; user_id: string; authMode: Session["authMode"] }
+>();
+
+function newTrustedReservedSessionToken(): string {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  if (globalThis.crypto?.getRandomValues) {
+    const bytes = new Uint8Array(16);
+    globalThis.crypto.getRandomValues(bytes);
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+  throw new Error("Trusted reserved sessions require a cryptographically secure runtime");
+}
+
+export function markTrustedReservedSession(session: Session): Session {
+  if (isReservedJazzIssuer(session.issuer)) {
+    trustedReservedSessions.add(session);
+  }
+  return session;
+}
+
+export function trustedReservedSessionToken(session: Session): string | undefined {
+  if (!trustedReservedSessions.has(session) || !isReservedJazzIssuer(session.issuer)) {
+    return undefined;
+  }
+  let token = trustedReservedSessionTokens.get(session);
+  if (!token) {
+    token = newTrustedReservedSessionToken();
+    trustedReservedSessionTokens.set(session, token);
+  }
+  trustedReservedSessionTokenValues.set(token, {
+    issuer: session.issuer,
+    user_id: session.user_id,
+    authMode: session.authMode,
+  });
+  return token;
+}
+
+export function isTrustedReservedSession(
+  session: Pick<Session, "issuer" | "user_id" | "authMode">,
+  token: unknown,
+): boolean {
+  if (!isReservedJazzIssuer(session.issuer) || typeof token !== "string") return false;
+  const trusted = trustedReservedSessionTokenValues.get(token);
+  return (
+    trusted?.issuer === session.issuer &&
+    trusted.user_id === session.user_id &&
+    trusted.authMode === session.authMode
+  );
+}
 
 export interface JwtPayload {
   sub?: unknown;
@@ -32,10 +101,6 @@ function trimOptional(value?: string): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
-}
-
-function asNonEmptyString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }
 
 function asUsableSubjectString(value: unknown): string | undefined {
@@ -105,29 +170,37 @@ export function parseJwtPayload(jwtToken: string): JwtPayload | null {
 
 export function sessionFromJwtPayload(payload: JwtPayload): Session | null {
   const subject = asUsableSubjectString(payload.sub);
-  if (!subject) return null;
-
-  const issuer = asNonEmptyString(payload.iss);
+  const issuer = asUsableSubjectString(payload.iss);
+  if (!subject || !issuer || isReservedJazzIssuer(issuer)) return null;
 
   const claimsSource = payload.claims;
   const claims: Record<string, unknown> = isRecord(claimsSource) ? { ...claimsSource } : {};
-  claims.subject = subject;
-  if (issuer) claims.issuer = issuer;
-
-  let authMode: Session["authMode"];
-  if (issuer === LOCAL_FIRST_JWT_ISSUER) {
-    authMode = "local-first";
-  } else if (issuer === ANONYMOUS_JWT_ISSUER) {
-    authMode = "anonymous";
-  } else {
-    authMode = "external";
-  }
 
   return {
+    issuer,
+    user_id: subject,
+    claims,
+    authMode: "external",
+  };
+}
+
+export function sessionFromVerifiedReservedJwtPayload(
+  payload: JwtPayload,
+  authMode: Extract<Session["authMode"], "local-first" | "anonymous">,
+): Session | null {
+  const subject = asUsableSubjectString(payload.sub);
+  const issuer = asUsableSubjectString(payload.iss);
+  const expectedIssuer = authMode === "local-first" ? LOCAL_FIRST_JWT_ISSUER : ANONYMOUS_JWT_ISSUER;
+  if (!subject || issuer !== expectedIssuer) return null;
+
+  const claimsSource = payload.claims;
+  const claims: Record<string, unknown> = isRecord(claimsSource) ? { ...claimsSource } : {};
+  return markTrustedReservedSession({
+    issuer,
     user_id: subject,
     claims,
     authMode,
-  };
+  });
 }
 
 export function resolveJwtSession(jwtToken: string): Session | null {
@@ -142,6 +215,20 @@ export function resolveJwtSession(jwtToken: string): Session | null {
  * Resolves the JWT bearer token to a session, or returns no session.
  */
 export function resolveClientSessionStateSync(config: ClientSessionInput): ClientSessionState {
+  if (
+    config.jwtToken &&
+    config.trustedReservedSession &&
+    isTrustedReservedSession(
+      config.trustedReservedSession,
+      trustedReservedSessionToken(config.trustedReservedSession),
+    )
+  ) {
+    return {
+      transport: "bearer",
+      session: config.trustedReservedSession,
+    };
+  }
+
   const jwtSession = resolveJwtSession(config.jwtToken ?? "");
   if (jwtSession) {
     return {
@@ -150,7 +237,12 @@ export function resolveClientSessionStateSync(config: ClientSessionInput): Clien
     };
   }
 
-  if (config.cookieSession) {
+  if (
+    config.cookieSession &&
+    !isReservedJazzIssuer(config.cookieSession.issuer) &&
+    isUsableSubject(config.cookieSession.issuer) &&
+    isUsableSubject(config.cookieSession.user_id)
+  ) {
     return {
       transport: "cookie",
       session: config.cookieSession,

@@ -26,11 +26,11 @@ fn assert_view_update_rows<const A: usize, const R: usize>(
     expected_adds: [(&str, RowUuid, TxId); A],
     expected_removes: [(&str, RowUuid, TxId); R],
 ) {
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -130,7 +130,7 @@ fn assert_query_engine_maintained_seed_matches_public_rows_and_witnesses(
     core: &mut NodeState<RocksDbStorage>,
     shape: &ValidatedQuery,
     binding: &Binding,
-    identity: AuthorId,
+    identity: AuthorSubject,
     expected_witnesses: impl IntoIterator<Item = (TxId, RowUuid, VersionLayer)>,
     expected_replacements: impl IntoIterator<Item = (RowUuid, VersionLayer, bool)>,
 ) {
@@ -190,7 +190,7 @@ fn assert_maintained_view_cold_snapshot_seed_matches_one_shot(
     core: &mut NodeState<RocksDbStorage>,
     shape: &ValidatedQuery,
     binding: &Binding,
-    identity: AuthorId,
+    identity: AuthorSubject,
 ) {
     let expected_rows = core
         .query_rows_for_link(shape, binding, DurabilityTier::Global, identity)
@@ -198,7 +198,7 @@ fn assert_maintained_view_cold_snapshot_seed_matches_one_shot(
         .into_iter()
         .map(|row| (groove::Intern::new(row.table().to_owned()), row.row_uuid()))
         .collect::<BTreeSet<_>>();
-    let mut peer = if identity == AuthorId::SYSTEM {
+    let mut peer = if identity == AuthorSubject::SYSTEM {
         PeerState::new()
     } else {
         PeerState::client_link(identity)

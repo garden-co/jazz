@@ -39,6 +39,7 @@ import {
   type OpenBatchId,
   type BatchId,
   type PermissionAdvice,
+  type StreamingValueSource,
 } from "./client.js";
 import { type RuntimeSource, type RuntimeTokenOptions } from "./runtime-source.js";
 import { DefaultRuntimeSource } from "./default-runtime-source.js";
@@ -48,7 +49,13 @@ import { transformRow, transformRows } from "./row-transformer.js";
 import { toValue, toWriteRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
-import { resolveClientSessionSync } from "./client-session.js";
+import {
+  parseJwtPayload,
+  resolveClientSessionSync,
+  sessionFromVerifiedReservedJwtPayload,
+  type ClientSessionInput,
+} from "./client-session.js";
+import { canonicalAuthorSubject } from "./author-id.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { isPermissionIntrospectionColumn, magicColumnType } from "../magic-columns.js";
 import {
@@ -101,6 +108,8 @@ export type DbConfig = {
   telemetryCollectorUrl?: string;
   /** Enable runtime tracing for DevTools-only diagnostics. */
   devMode?: boolean;
+  /** @internal Session produced by a first-party reserved-issuer auth flow. */
+  trustedReservedSession?: ClientSessionInput["trustedReservedSession"];
 } & (
   | {
       /** Local-first auth via a local seed. */
@@ -149,13 +158,14 @@ export function resolveDefaultPersistentDbName(config: DbConfig): string {
     appId: config.appId,
     jwtToken: config.jwtToken,
     cookieSession: config.cookieSession,
+    trustedReservedSession: config.trustedReservedSession,
   });
 
   if (!session?.user_id || session.authMode === "anonymous") {
     return config.appId;
   }
 
-  return `${config.appId}::${encodeURIComponent(session.user_id)}`;
+  return `${config.appId}::${encodeURIComponent(canonicalAuthorSubject(session.issuer, session.user_id))}`;
 }
 
 /**
@@ -195,6 +205,7 @@ export interface InsertOptions extends TimestampOverrideOptions {
   id?: string;
   branch?: Branch;
 }
+export type StreamingInsertOptions = Omit<InsertOptions, "branch">;
 
 export interface RestoreOptions extends TimestampOverrideOptions {
   branch?: Branch;
@@ -554,10 +565,22 @@ function resolveNativeSubscriptionColumns(
   rootTerminal = true,
 ): ColumnDescriptor[] {
   const wildcard = projection === undefined || projection.length === 0;
-  const columns = resolveSelectedColumns(tableName, schema, projection)
+  const selectedColumns = resolveSelectedColumns(tableName, schema, projection);
+  // IDs are implicit in query results, so an explicit `select("id")` resolves
+  // to no ordinary public columns. The native query projection represents that
+  // state with its empty/default sentinel and therefore retains the full
+  // physical record; decode that carrier fully before the row transformer
+  // applies the public ID-only projection.
+  const usesDefaultNativeProjection = wildcard || selectedColumns.length === 0;
+  const nativeColumns = usesDefaultNativeProjection
+    ? resolveSelectedColumns(tableName, schema, undefined)
+    : selectedColumns;
+  const columns = nativeColumns
     .map((columnName) => {
       const column = resolveOutputColumnDescriptor(tableName, schema, columnName);
-      return column && wildcard && rootTerminal ? { ...column, sparse: true } : column;
+      return column && usesDefaultNativeProjection && rootTerminal
+        ? { ...column, sparse: true }
+        : column;
     })
     .filter((column): column is ColumnDescriptor => column !== undefined);
 
@@ -603,7 +626,7 @@ function resolveNativeSubscriptionColumns(
  * @typeParam T - The row type (e.g., `{ id: string; title: string; done: boolean }`)
  * @typeParam Init - The init type for inserts (e.g., `{ title: string; done: boolean }`)
  */
-export interface TableProxy<T, Init> {
+export interface TableProxy<T, Init, StreamingInit = unknown, StreamingUpdate = unknown> {
   /** Table name */
   readonly _table: string;
   /** Schema reference */
@@ -614,6 +637,10 @@ export interface TableProxy<T, Init> {
   readonly _rowType: T;
   /** @internal Phantom brand — enables TypeScript to infer Init from usage */
   readonly _initType: Init;
+  /** @internal Phantom brand — enables exact streaming-insert inference. */
+  readonly _streamingInitType?: StreamingInit;
+  /** @internal Phantom brand — enables exact streaming update/upsert inference. */
+  readonly _streamingUpdateType?: StreamingUpdate;
 }
 
 export interface ColumnTransform {
@@ -665,7 +692,7 @@ function transformOutputColumns(
 }
 
 function transformInputColumns(
-  table: TableProxy<unknown, unknown>,
+  table: TableProxy<unknown, unknown, unknown>,
   data: unknown,
 ): Record<string, unknown> {
   const record = data as Record<string, unknown>;
@@ -680,6 +707,69 @@ function transformInputColumns(
     }
   }
   return transformed;
+}
+
+function splitStreamingMutation(
+  table: TableProxy<unknown, unknown, unknown>,
+  data: unknown,
+): {
+  column: string;
+  source: StreamingValueSource;
+  values: Record<string, unknown>;
+} {
+  if (typeof data !== "object" || data === null) {
+    throw new Error("Streaming insert data must be an object");
+  }
+  const record = data as Record<string, unknown>;
+  const streamableColumns = table._schema[table._table]?.columns.filter((column) =>
+    ["Text", "Json", "Bytea"].includes(column.column_type.type),
+  );
+  const streamed = streamableColumns?.filter(
+    (column) => Object.hasOwn(record, column.name) && isStreamingValueSource(record[column.name]),
+  );
+  if (streamed?.length !== 1) {
+    throw new Error("Streaming insert requires exactly one streamed Text, Json, or Bytea column");
+  }
+  const column = streamed[0]!.name;
+  if (table._schema[table._table]?.branchBy?.includes(column)) {
+    throw new Error(`Streaming a branchBy column is not supported: ${table._table}.${column}`);
+  }
+  const source = record[column] as StreamingValueSource;
+  const values = { ...record };
+  delete values[column];
+  return { column, source, values };
+}
+
+function isStreamingValueSource(value: unknown): value is StreamingValueSource {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as {
+    getReader?: unknown;
+    [Symbol.asyncIterator]?: unknown;
+  };
+  return (
+    typeof candidate.getReader === "function" ||
+    typeof candidate[Symbol.asyncIterator] === "function"
+  );
+}
+
+function deriveStreamingInsertBranch(
+  table: TableProxy<unknown, unknown, unknown, unknown>,
+  values: Record<string, unknown>,
+): Branch | undefined {
+  const branchColumns = table._schema[table._table]?.branchBy ?? [];
+  if (branchColumns.length === 0) return undefined;
+  const branch: QualifiedBranch = {};
+  for (const column of branchColumns) {
+    const value = values[column];
+    if (isStreamingValueSource(value)) {
+      throw new Error(`Streaming a branchBy column is not supported: ${table._table}.${column}`);
+    }
+    if (typeof value !== "string" && typeof value !== "number" && typeof value !== "bigint") {
+      throw new Error(`Streaming insert requires branch column ${table._table}.${column}`);
+    }
+    branch[column] = value;
+  }
+  return branch;
 }
 
 export type { TransactionKind } from "./client.js";
@@ -1169,7 +1259,14 @@ export class Db {
         this.config.appId,
         ttlSeconds,
       );
-      this.updateAuthToken(newToken);
+      const trustedReservedSession = sessionFromVerifiedReservedJwtPayload(
+        parseJwtPayload(newToken) ?? {},
+        "local-first",
+      );
+      if (!trustedReservedSession) {
+        throw new Error("Minted local-first token is missing its reserved session identity");
+      }
+      this.applyAuthUpdate(newToken, trustedReservedSession);
       this.scheduleLocalFirstRefresh(ttlSeconds);
     } catch (e) {
       console.error("Failed to refresh local-first token:", e);
@@ -1189,11 +1286,11 @@ export class Db {
     this.authStateStore.markUnauthenticated(reason);
   }
 
-  protected applyAuthUpdate(token: string | null): boolean {
+  protected applyAuthUpdate(token: string | null, trustedReservedSession?: Session): boolean {
     const jwtToken = token ?? undefined;
     const previousToken = this.config.jwtToken;
     const previousState = this.authStateStore.getState();
-    const nextState = this.authStateStore.applyJwtToken(jwtToken);
+    const nextState = this.authStateStore.applyJwtToken(jwtToken, trustedReservedSession);
     const tokenChanged = previousToken !== jwtToken;
 
     if (!tokenChanged && nextState === previousState) {
@@ -1201,8 +1298,9 @@ export class Db {
     }
 
     this.config.jwtToken = jwtToken;
+    this.config.trustedReservedSession = trustedReservedSession;
 
-    this.connection.updateAuth({ jwtToken });
+    this.connection.updateAuth({ jwtToken, trustedReservedSession });
 
     return true;
   }
@@ -1452,6 +1550,101 @@ export class Db {
       inserted.mapValue((row) =>
         transformOutputRow(table, transformRow(row, table._schema, table._table)),
       ),
+    );
+  }
+
+  /**
+   * Stream one Text, Json, or Bytea column into a new row. The column's runtime
+   * schema determines encoding; callers never pass a large-value kind.
+   *
+   * Unlike {@link insert}, this is asynchronous because it consumes the source
+   * before publishing. Its handle returns only the generated id so the complete
+   * streamed value is not copied back into JavaScript memory.
+   */
+  async insertStreaming<T, Init, StreamingInit>(
+    table: TableProxy<T, Init, StreamingInit>,
+    data: StreamingInit,
+    options?: StreamingInsertOptions,
+  ): Promise<WriteHandle<{ id: string }>> {
+    const client = this.getClient(table._schema);
+    const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
+    const transformedData = transformInputColumns(table, ordinaryData);
+    const values = toWriteRecordForOperation(
+      "Insert",
+      transformedData,
+      table._schema,
+      table._table,
+    );
+    const context = this.getRuntimeOperationContext();
+    const branch = deriveStreamingInsertBranch(table, ordinaryData);
+    return client.insertStreaming(
+      table._table,
+      values,
+      column,
+      source,
+      normalizeInsertOptions(
+        table._schema,
+        table._table,
+        branch ? { ...options, branch } : options,
+      ),
+      context?.session,
+      context?.attribution,
+    );
+  }
+
+  async updateStreaming<T, Init, StreamingInit, StreamingUpdate>(
+    table: TableProxy<T, Init, StreamingInit, StreamingUpdate>,
+    id: string,
+    data: StreamingUpdate,
+    options?: UpdateOptions,
+  ): Promise<WriteHandle<{ id: string }>> {
+    const client = this.getClient(table._schema);
+    const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
+    const transformedData = transformInputColumns(table, ordinaryData);
+    const values = toWriteRecordForOperation(
+      "Update",
+      transformedData,
+      table._schema,
+      table._table,
+    );
+    const context = this.getRuntimeOperationContext();
+    return client.updateStreaming(
+      table._table,
+      id,
+      values,
+      column,
+      source,
+      normalizeUpdateOptions(table._schema, table._table, options),
+      context?.session,
+      context?.attribution,
+    );
+  }
+
+  async upsertStreaming<T, Init, StreamingInit, StreamingUpdate>(
+    table: TableProxy<T, Init, StreamingInit, StreamingUpdate>,
+    id: string,
+    data: StreamingUpdate,
+    options?: UpdateOptions,
+  ): Promise<WriteHandle<{ id: string }>> {
+    const client = this.getClient(table._schema);
+    const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
+    const transformedData = transformInputColumns(table, ordinaryData);
+    const values = toWriteRecordForOperation(
+      "Upsert",
+      transformedData,
+      table._schema,
+      table._table,
+    );
+    const context = this.getRuntimeOperationContext();
+    return client.upsertStreaming(
+      table._table,
+      id,
+      values,
+      column,
+      source,
+      normalizeUpdateOptions(table._schema, table._table, options),
+      context?.session,
+      context?.attribution,
     );
   }
 
@@ -2094,7 +2287,11 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
       const jwtToken = runtimeSource.mintLocalFirstToken(
         createRuntimeTokenOptions(secret, config.appId, 3600),
       );
-      resolvedConfig = { ...configWithoutAuth, jwtToken };
+      const trustedReservedSession = sessionFromVerifiedReservedJwtPayload(
+        parseJwtPayload(jwtToken) ?? {},
+        "local-first",
+      );
+      resolvedConfig = { ...configWithoutAuth, jwtToken, trustedReservedSession };
     }
   } else if (!config.jwtToken && !config.cookieSession && !config.adminSecret) {
     // Anonymous: mint an ephemeral keypair + anonymous JWT.
@@ -2104,7 +2301,11 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
     const jwtToken = runtimeSource.mintAnonymousToken(
       createRuntimeTokenOptions(ephemeralSeed, config.appId, 3600),
     );
-    resolvedConfig = { ...configWithoutAuth, jwtToken };
+    const trustedReservedSession = sessionFromVerifiedReservedJwtPayload(
+      parseJwtPayload(jwtToken) ?? {},
+      "anonymous",
+    );
+    resolvedConfig = { ...configWithoutAuth, jwtToken, trustedReservedSession };
   }
 
   const driver = resolveStorageDriver(resolvedConfig.driver);

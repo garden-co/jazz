@@ -80,7 +80,7 @@ fn catalogue_current_write_schema_revision_is_core_ordered() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 2,
             schema: evolved_payload.id,
@@ -91,7 +91,7 @@ fn catalogue_current_write_schema_revision_is_core_ordered() {
     assert_eq!(core.current_write_schema().unwrap().schema, evolved_payload.id);
 
     let stale = core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: base.version_id(),
@@ -108,7 +108,7 @@ fn catalogue_current_write_schema_revision_is_core_ordered() {
     assert_eq!(core.current_write_schema().unwrap().revision, 2);
 
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 3,
             schema: base.version_id(),
@@ -145,7 +145,7 @@ fn durable_catalogue_values_pointer_and_physical_mappings_survive_restart() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 4,
             schema: evolved_payload.id,
@@ -260,7 +260,7 @@ fn publishing_schema_registers_new_physical_tables_live() {
     assert!(core.database.primary_key_scan_raw(&register, &[]).is_ok());
 
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved_payload.id,
@@ -295,7 +295,7 @@ fn publishing_schema_registers_new_tables_without_storage_reopen() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved_payload.id,
@@ -354,9 +354,9 @@ fn publishing_schema_registers_new_tables_without_storage_reopen() {
     .unwrap();
     let update = peer.current_rows_update(&mut core, "notes").unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds, ..
-    } = update
+    }) = update
     else {
         panic!("current-row subscription should produce a view update");
     };
@@ -388,7 +388,7 @@ fn transaction_version_scans_recover_table_names_from_physical_mappings() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved_payload.id,

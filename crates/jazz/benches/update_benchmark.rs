@@ -16,14 +16,14 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource, block_on};
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
 type CoreDb = Db<MemoryStorage>;
 
-const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
+const AUTHOR_UUID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-0000000000a1");
 
 fn schema() -> JazzSchema {
     let author = schema_fixture::session_user_id_column("author");
@@ -56,7 +56,7 @@ fn open_core_db(seed: u64) -> CoreDb {
             MemoryStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([seed as u8; 16]),
-                author: AUTHOR,
+                author: AuthorSubject::for_test_uuid(AUTHOR_UUID),
             },
         )
         .with_id_source(SeededRowIdSource::new(seed)),
@@ -75,7 +75,7 @@ fn document_cells(index: usize, folder: RowUuid) -> BTreeMap<String, Value> {
             "content".to_owned(),
             Value::String(format!("Content body for document {index}")),
         ),
-        ("author".to_owned(), Value::Uuid(AUTHOR.0)),
+        ("author".to_owned(), Value::Uuid(AUTHOR_UUID)),
         ("created_at".to_owned(), Value::U64(index as u64)),
     ])
 }
@@ -90,7 +90,7 @@ fn update_cells(
         ("folder".to_owned(), Value::Uuid(folder.0)),
         ("title".to_owned(), Value::String(title)),
         ("content".to_owned(), Value::String(content.to_owned())),
-        ("author".to_owned(), Value::Uuid(AUTHOR.0)),
+        ("author".to_owned(), Value::Uuid(AUTHOR_UUID)),
         ("created_at".to_owned(), Value::U64(index)),
     ])
 }
@@ -108,6 +108,7 @@ fn seed_fixture(db: &CoreDb, count: usize) -> Fixture {
                 .insert(
                     "folders",
                     BTreeMap::from([("name".to_owned(), Value::String(format!("Folder {index}")))]),
+                    Default::default(),
                 )
                 .expect("seed folder");
             block_on(write.wait(DurabilityTier::Local)).expect("folder seed should be local");
@@ -119,7 +120,11 @@ fn seed_fixture(db: &CoreDb, count: usize) -> Fixture {
         .map(|index| {
             let folder = owned_folders[index % owned_folders.len()];
             let write = db
-                .insert("documents", document_cells(index, folder))
+                .insert(
+                    "documents",
+                    document_cells(index, folder),
+                    Default::default(),
+                )
                 .expect("seed owned document");
             block_on(write.wait(DurabilityTier::Local)).expect("document seed should be local");
             write.row_uuid()
@@ -159,6 +164,7 @@ fn update_own_documents(c: &mut Criterion) {
                             format!("Updated Title {update_counter}"),
                             "Updated content",
                         ),
+                        Default::default(),
                     )
                     .expect("update own document should succeed");
                 block_on(write.wait(DurabilityTier::Local)).expect("update should be local");
@@ -206,6 +212,7 @@ fn update_batch(c: &mut Criterion) {
                                     format!("Batch {batch_counter} Update {i}"),
                                     "Batch updated content",
                                 ),
+                                Default::default(),
                             )
                             .expect("batch update should succeed");
                         block_on(write.wait(DurabilityTier::Local))

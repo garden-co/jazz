@@ -768,8 +768,8 @@ fn encodes_nullable_variable_size_null_as_only_flag_byte() {
         .unwrap();
 
     let mut expected = Vec::new();
-    expected.extend(8_u32.to_le_bytes());
-    expected.extend([1]);
+    expected.extend(9_u32.to_le_bytes());
+    expected.extend([1, 0]);
     expected.extend(b"yes");
     expected.extend([0]);
     assert_eq!(record, expected);
@@ -1064,9 +1064,10 @@ fn encodes_record_offsets_relative_to_record_start() {
         .unwrap();
 
     let mut expected = vec![9];
-    expected.extend(8_u32.to_le_bytes());
+    expected.extend(9_u32.to_le_bytes());
+    expected.extend([0]);
     expected.extend(b"abc");
-    expected.extend([4, 5]);
+    expected.extend([0, 4, 5]);
 
     assert_eq!(record, expected);
 }
@@ -1133,8 +1134,10 @@ fn encodes_variable_array_offsets_relative_to_array_start() {
 
     let mut expected = Vec::new();
     expected.extend(2_u32.to_le_bytes());
-    expected.extend(10_u32.to_le_bytes());
+    expected.extend(11_u32.to_le_bytes());
+    expected.extend([0]);
     expected.extend(b"hi");
+    expected.extend([0]);
     expected.extend(b"j");
 
     assert_eq!(record, expected);
@@ -1735,8 +1738,30 @@ fn lookup_rejects_invalid_utf8_string() {
     let descriptor = descriptor([ValueType::String]);
 
     assert_eq!(
-        descriptor.get_idx(&[0xff], 0).unwrap_err(),
+        descriptor.get_idx(&[0, 0xff], 0).unwrap_err(),
         Error::InvalidUtf8
+    );
+}
+
+#[test]
+fn indirect_string_uses_the_same_logical_value_type_with_an_explicit_physical_arm() {
+    let descriptor = descriptor([ValueType::String]);
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::String,
+        b"large logical text",
+    )
+    .unwrap();
+    let record = descriptor
+        .create(&[Value::Large(prepared.value_ref.clone())])
+        .unwrap();
+
+    assert_eq!(
+        descriptor.get_idx(&record, 0).unwrap(),
+        Value::Large(prepared.value_ref)
+    );
+    assert_eq!(
+        descriptor.bind(&record).get_str(0).unwrap_err(),
+        Error::LargeValue(crate::large_values::Error::RequiresEvaluation)
     );
 }
 

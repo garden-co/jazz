@@ -120,13 +120,13 @@ function parseFilterValue(
     return parsed;
   }
 
-  if (operator === "in") {
+  if (operator === "in" || operator === "notIn") {
     const items = value
       .split(",")
       .map((item) => item.trim())
       .filter((item) => item.length > 0);
     if (items.length === 0) {
-      throw new Error('The "in" operator requires at least one value.');
+      throw new Error(`The "${operator}" operator requires at least one value.`);
     }
     return items.map((item) => parseScalarValue(column.columnType, item));
   }
@@ -287,7 +287,11 @@ export function TableFilterBuilder({
                   aria-label="Value"
                   className={styles.input}
                   value={draft.valueText}
-                  placeholder={draft.operator === "in" ? "value1,value2" : "value"}
+                  placeholder={
+                    draft.operator === "in" || draft.operator === "notIn"
+                      ? "value1,value2"
+                      : "value"
+                  }
                   onChange={handleValueChange}
                 />
               </div>

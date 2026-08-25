@@ -6,6 +6,7 @@ import { describe, it, expect } from "vitest";
 import { SubscriptionManager, applySubscriptionDelta } from "./subscription-manager.js";
 import type { SubscriptionDelta } from "./subscription-manager.js";
 import {
+  createRecord,
   encodeNativeRowValues,
   logicalStorageColumns,
   storageColumnValueType,
@@ -98,9 +99,10 @@ function pushU32(target: number[], value: number): void {
 
 function nativeRowData(name: string, count: number): Uint8Array {
   const text = new TextEncoder().encode(name);
-  const data = new Uint8Array(4 + text.byteLength);
+  const data = new Uint8Array(5 + text.byteLength);
   new DataView(data.buffer).setInt32(0, count, true);
-  data.set(text, 4);
+  data[4] = 0;
+  data.set(text, 5);
   return data;
 }
 
@@ -119,16 +121,16 @@ function terminalRootWithEmptyChildren(id: string, title: string): Uint8Array {
   const bytes: number[] = [...uuidBytes(id)];
   // The root uses CurrentRow's nullable carrier. The child collection stays a
   // terminal record when it is populated by a descendant operation.
-  pushU32(bytes, 21 + text.byteLength);
-  bytes.push(1, ...text, 1, 0, 0, 0, 0);
+  pushU32(bytes, 22 + text.byteLength);
+  bytes.push(1, 0, ...text, 1, 0, 0, 0, 0);
   return Uint8Array.from(bytes);
 }
 
 function nativeRootWithEmptyChildren(title: string): Uint8Array {
   const text = new TextEncoder().encode(title);
   const bytes: number[] = [];
-  pushU32(bytes, 4 + text.byteLength);
-  bytes.push(...text);
+  pushU32(bytes, 5 + text.byteLength);
+  bytes.push(0, ...text);
   pushU32(bytes, 0);
   return Uint8Array.from(bytes);
 }
@@ -175,7 +177,7 @@ function collectorTerminalDescriptor(columns: readonly ColumnDescriptor[]): numb
 }
 
 function terminalTextChild(id: string, name: string): Uint8Array {
-  return Uint8Array.from([...uuidBytes(id), ...new TextEncoder().encode(name)]);
+  return Uint8Array.from([...uuidBytes(id), 0, ...new TextEncoder().encode(name)]);
 }
 
 function nativeAddedRecord(id: string, index: number, name: string, count: number): Uint8Array {
@@ -1191,14 +1193,10 @@ describe("SubscriptionManager", () => {
     expect(result.all).toEqual([{ id, name: "layout", count: 9 }]);
   });
 
-  it("decodes UUID provenance through reordered public text columns", () => {
+  it("decodes canonical text provenance through reordered public text columns", () => {
     const id = "00000000-0000-4000-8000-000000000001";
-    const author = "00000000-0000-4000-8000-0000000000aa";
+    const author = JSON.stringify(["https://issuer.example", "user-1"]);
     const key = [10, ...uuidBytes(id)];
-    const producerColumns: ColumnDescriptor[] = [
-      { name: "$createdBy", column_type: { type: "Uuid" }, nullable: false },
-      { name: "$createdAt", column_type: { type: "Timestamp" }, nullable: false },
-    ];
     const publicColumns: ColumnDescriptor[] = [
       { name: "$createdAt", column_type: { type: "Timestamp" }, nullable: false },
       { name: "$createdBy", column_type: { type: "Text" }, nullable: false },
@@ -1206,15 +1204,18 @@ describe("SubscriptionManager", () => {
     const descriptorWriter = new PostcardWriter();
     writeDescriptor(descriptorWriter, [
       { name: "row_uuid", valueType: { tag: 10 } },
-      { name: "$createdBy", valueType: { tag: 10 } },
+      { name: "$createdBy", valueType: { tag: 8 } },
       { name: "$createdAt", valueType: { tag: 3 } },
     ]);
     const value = Uint8Array.from([
       ...uuidBytes(id),
-      ...encodeNativeRowValues(producerColumns, [
-        { type: "Uuid", value: author },
-        { type: "Timestamp", value: 42 },
-      ]),
+      ...createRecord(
+        [
+          { name: "$createdBy", valueType: { tag: 8 } },
+          { name: "$createdAt", valueType: { tag: 3 } },
+        ],
+        [new TextEncoder().encode(author), Uint8Array.of(42, 0, 0, 0, 0, 0, 0, 0)],
+      ),
     ]);
     const result = new SubscriptionManager<WasmRow>().handleDelta(
       {

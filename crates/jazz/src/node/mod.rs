@@ -6,7 +6,9 @@
 //! [`views`] for sync view payloads. In the layer map it is the core between the
 //! `Db` facade and groove storage/IVM.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "testing")]
@@ -29,8 +31,8 @@ use thiserror::Error;
 
 use self::query_engine::{QueryAuthorizationMode, user_column_field};
 use crate::ids::{
-    AuthorId, MigrationLensId, NodeAlias, NodeUuid, PhysicalColumnId, PhysicalTableId, RowUuid,
-    SchemaFamilyId, SchemaLineagePublicationId, SchemaVersionAlias, SchemaVersionId,
+    AuthorSubject, MigrationLensId, NodeAlias, NodeUuid, PhysicalColumnId, PhysicalTableId,
+    RowUuid, SchemaFamilyId, SchemaLineagePublicationId, SchemaVersionAlias, SchemaVersionId,
 };
 use crate::protocol::{
     BindingViewKey, BranchKey, BranchSelector, CurrentWriteSchema, LensOp, MigrationLens,
@@ -540,6 +542,12 @@ pub struct NodeState<S> {
     rejections: RejectionTracking,
     /// Groove database slot over this node's storage.
     database: DatabaseSlot,
+    local_chunk_reader: groove::chunks::LocalChunkReader,
+    chunk_resolver: Rc<dyn groove::chunks::MissingChunkResolver>,
+    large_value_staging_policy: LargeValueStagingPolicy,
+    large_value_ingress: RefCell<LargeValueIngressState>,
+    /// Groove-owned verified cache retained across internal database rebuilds.
+    content_runtime_provider: groove::chunks::OwnedChunkProvider,
     storage_type: std::marker::PhantomData<fn() -> S>,
     /// Process-local identity for runtime-local Groove handles such as prepared shape ids.
     groove_runtime_token: u64,
@@ -566,9 +574,9 @@ pub struct NodeState<S> {
     /// Runtime counters for query-engine read authorization paths.
     query_engine_read_metrics: QueryEngineReadMetrics,
     /// Process-local claims attached to authenticated subscriber sessions.
-    session_claims: BTreeMap<AuthorId, BTreeMap<String, Value>>,
+    session_claims: BTreeMap<AuthorSubject, BTreeMap<String, Value>>,
     /// Monotone revision for each identity's process-local session claims.
-    session_claim_revisions: BTreeMap<AuthorId, u64>,
+    session_claim_revisions: BTreeMap<AuthorSubject, u64>,
     /// Whether this authority has installed the permissions head that governs
     /// session-scoped reads and writes.
     permissions_ready: bool,
@@ -585,6 +593,44 @@ pub struct NodeState<S> {
     /// Once the initial snapshot has completed, ordinary writes return to their
     /// existing per-write durability boundaries.
     initial_sync_flush_completed: bool,
+}
+
+// A descriptor-only start performs durable work despite carrying no chunk
+// bytes. Charge one MiB of the existing ingress budget to bound that work rate.
+pub(crate) const LARGE_VALUE_UPLOAD_START_INGRESS_CHARGE_BYTES: u64 = 1 << 20;
+
+/// Jazz-owned limits for unpublished Groove staging roots.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LargeValueStagingPolicy {
+    /// Incoming upload-work budget. Chunk batches charge encoded bytes;
+    /// descriptor-only starts charge a fixed nonzero amount.
+    pub incoming_bytes_per_window: u64,
+    /// Fixed rate-limit window duration.
+    pub window_ms: u64,
+    /// Maximum staging age used by explicit maintenance eviction.
+    pub max_age_ms: u64,
+}
+
+impl Default for LargeValueStagingPolicy {
+    fn default() -> Self {
+        Self {
+            // Admit one maximum-size logical wire message per second by
+            // default. Deployments can tighten this without changing Groove's
+            // policy-blind storage contract.
+            incoming_bytes_per_window: 256 * 1024 * 1024,
+            window_ms: 1_000,
+            // Completed uploads are deliberately short-lived claims. Ten
+            // minutes tolerates slow authority synchronization while bounding
+            // abandoned staging on an otherwise unconfigured host.
+            max_age_ms: 10 * 60 * 1_000,
+        }
+    }
+}
+
+#[derive(Default)]
+struct LargeValueIngressState {
+    window_started_ms: u64,
+    admitted_bytes: u64,
 }
 
 /// Schema catalogue and schema-version storage layout known by the node.
@@ -782,7 +828,7 @@ enum ParamBindingModeCacheKey {
 struct ReadPolicyAuthorizationRequestCacheKey {
     policy_schema_version: SchemaVersionId,
     table_name: String,
-    identity: AuthorId,
+    identity: AuthorSubject,
     param_binding_mode: ParamBindingModeCacheKey,
     tier: DurabilityTier,
     binding_source_shape: Option<String>,
@@ -806,7 +852,7 @@ struct OpenTxState {
     /// Identities consumed by commit or rollback; never reusable in this runtime.
     closed_batches: BTreeSet<OpenTransactionId>,
     /// Local-only permission subjects for transactions whose `made_by` keeps provenance.
-    local_permission_subjects: BTreeMap<TxId, AuthorId>,
+    local_permission_subjects: BTreeMap<TxId, AuthorSubject>,
 }
 
 /// Rejection records and derived indexes used for pending-cascade handling.
@@ -822,7 +868,7 @@ struct RejectionTracking {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CommitUnitIngestContext {
     /// Identity authenticated by the connection carrying the upload.
-    pub identity: AuthorId,
+    pub identity: AuthorSubject,
     /// Whether the connection may attribute writes to a different `made_by`.
     pub trust: CommitUnitTrust,
     /// Whether this subscriber link is hosted by an edge authority.
@@ -1001,11 +1047,11 @@ struct PendingTransactionScan {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RowProvenance {
     /// Principal that created the row.
-    pub created_by: AuthorId,
+    pub created_by: AuthorSubject,
     /// Commit time of the row's first retained content version.
     pub created_at: TxTime,
     /// Principal that authored the visible row version.
-    pub updated_by: AuthorId,
+    pub updated_by: AuthorSubject,
     /// Commit time of the visible row version.
     pub updated_at: TxTime,
 }
@@ -1139,9 +1185,11 @@ impl CurrentRow {
             return Ok(None);
         };
         Ok(Some(RowProvenance {
-            created_by: AuthorId(borrowed.get_uuid(created_by_idx)?),
+            created_by: AuthorSubject::from_canonical(borrowed.get_str(created_by_idx)?)
+                .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
             created_at: TxTime(borrowed.get_u64(created_at_idx)?),
-            updated_by: AuthorId(borrowed.get_uuid(updated_by_idx)?),
+            updated_by: AuthorSubject::from_canonical(borrowed.get_str(updated_by_idx)?)
+                .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
             updated_at: TxTime(borrowed.get_u64(updated_at_idx)?),
         }))
     }
@@ -1162,9 +1210,9 @@ impl CurrentRow {
                     )
                 }))
                 .chain([
-                    ("$createdBy".to_owned(), records::ValueType::Uuid),
+                    ("$createdBy".to_owned(), records::ValueType::String),
                     ("$createdAt".to_owned(), records::ValueType::U64),
-                    ("$updatedBy".to_owned(), records::ValueType::Uuid),
+                    ("$updatedBy".to_owned(), records::ValueType::String),
                     ("$updatedAt".to_owned(), records::ValueType::U64),
                     ("tx_time".to_owned(), records::ValueType::U64),
                     ("tx_node_id".to_owned(), records::ValueType::U64),
@@ -1187,14 +1235,14 @@ impl CurrentRow {
             values.push(projected);
         }
         if let Some(provenance) = self.provenance()? {
-            values.push(Value::Uuid(provenance.created_by.0));
+            values.push(Value::String(provenance.created_by.canonical().to_owned()));
             values.push(Value::U64(provenance.created_at.0));
-            values.push(Value::Uuid(provenance.updated_by.0));
+            values.push(Value::String(provenance.updated_by.canonical().to_owned()));
             values.push(Value::U64(provenance.updated_at.0));
         } else {
-            values.push(Value::Uuid(AuthorId::SYSTEM.0));
+            values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
             values.push(Value::U64(0));
-            values.push(Value::Uuid(AuthorId::SYSTEM.0));
+            values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
             values.push(Value::U64(0));
         }
         if let Some((time, node)) = self.projected_tx_alias() {
@@ -1397,9 +1445,9 @@ pub struct ContributionMergeRequest {
     /// Rows calculated and committed atomically.
     pub rows: Vec<ContributionMergeRow>,
     /// Author of the ordinary output transaction.
-    pub made_by: AuthorId,
+    pub made_by: AuthorSubject,
     /// Identity used by ordinary target write policy.
-    pub permission_subject: Option<AuthorId>,
+    pub permission_subject: Option<AuthorSubject>,
     /// Abstract wall clock at the calculating node.
     pub now_ms: u64,
 }
@@ -1414,9 +1462,9 @@ pub struct MergeableCommit {
     /// Exact named branch coordinate for this row branch-local row.
     pub branch: BranchSelector,
     /// Author making the commit.
-    pub made_by: AuthorId,
+    pub made_by: AuthorSubject,
     /// Identity used for write-policy evaluation.
-    pub permission_subject: Option<AuthorId>,
+    pub permission_subject: Option<AuthorSubject>,
     /// Abstract wall clock at the committing node.
     pub now_ms: u64,
     /// User cells for content versions.
@@ -1429,6 +1477,10 @@ pub struct MergeableCommit {
     pub parents: Vec<TxId>,
     /// Optional application metadata.
     pub user_metadata_json: Option<String>,
+    /// Columns carrying Groove preparations staged through this node. Private
+    /// provenance prevents callers from handcrafting physical descriptors.
+    prepared_large_columns: BTreeSet<String>,
+    staged_large_values: Vec<groove::large_values::StagedLargeValueId>,
 }
 
 impl MergeableCommit {
@@ -1438,7 +1490,7 @@ impl MergeableCommit {
             table: table.into(),
             row_uuid,
             branch: BranchSelector::default(),
-            made_by: AuthorId::SYSTEM,
+            made_by: AuthorSubject::SYSTEM,
             permission_subject: None,
             now_ms,
             cells: BTreeMap::new(),
@@ -1446,6 +1498,8 @@ impl MergeableCommit {
             deletion: None,
             parents: Vec::new(),
             user_metadata_json: None,
+            prepared_large_columns: BTreeSet::new(),
+            staged_large_values: Vec::new(),
         }
     }
 
@@ -1456,18 +1510,18 @@ impl MergeableCommit {
     }
 
     /// Set the commit author.
-    pub fn made_by(mut self, made_by: AuthorId) -> Self {
+    pub fn made_by(mut self, made_by: AuthorSubject) -> Self {
         self.made_by = made_by;
         self
     }
 
     /// Set the authenticated identity used for write policy.
-    pub fn permission_subject(mut self, permission_subject: AuthorId) -> Self {
+    pub fn permission_subject(mut self, permission_subject: AuthorSubject) -> Self {
         self.permission_subject = Some(permission_subject);
         self
     }
 
-    pub(crate) fn effective_permission_subject(&self) -> AuthorId {
+    pub(crate) fn effective_permission_subject(&self) -> AuthorSubject {
         self.permission_subject.unwrap_or(self.made_by)
     }
 
@@ -1483,6 +1537,30 @@ impl MergeableCommit {
     /// Set one user cell for a content version.
     pub fn cell(mut self, column: impl Into<String>, value: Value) -> Self {
         self.cells.insert(column.into(), value);
+        self
+    }
+
+    /// Attach Jazz-private provenance for a Groove-staged large scalar. This
+    /// remains crate-private so public callers cannot bless handcrafted
+    /// descriptors.
+    pub(crate) fn staged_large_cell(
+        mut self,
+        column: impl Into<String>,
+        staged: groove::large_values::StagedLargeValue,
+        nullable: bool,
+    ) -> Self {
+        let column = column.into();
+        let value = Value::Large(staged.value_ref);
+        self.cells.insert(
+            column.clone(),
+            if nullable {
+                Value::Nullable(Some(Box::new(value)))
+            } else {
+                value
+            },
+        );
+        self.prepared_large_columns.insert(column);
+        self.staged_large_values.push(staged.id);
         self
     }
 
@@ -1512,8 +1590,83 @@ impl MergeableCommit {
     }
 
     fn validate(&self) -> Result<(), Error> {
-        validate_mergeable_write_shape(self.cells.is_empty(), self.deletion.is_some())
+        validate_mergeable_write_shape(self.cells.is_empty(), self.deletion.is_some())?;
+        if self.cells.iter().any(|(column, value)| {
+            value_contains_indirect_descriptor(value)
+                && !self.prepared_large_columns.contains(column)
+        }) {
+            return Err(Error::InvalidMergeableCommit(
+                "callers must author logical scalar values, not physical large descriptors",
+            ));
+        }
+        Ok(())
     }
+}
+
+fn value_contains_indirect_descriptor(value: &Value) -> bool {
+    match value {
+        Value::Large(_) => true,
+        Value::Tuple(values) | Value::Array(values) => {
+            values.iter().any(value_contains_indirect_descriptor)
+        }
+        Value::Nullable(Some(value)) => value_contains_indirect_descriptor(value),
+        Value::Record(record) => record
+            .to_values()
+            .is_ok_and(|values| values.iter().any(value_contains_indirect_descriptor)),
+        Value::Enum(value) => value
+            .record()
+            .to_values()
+            .is_ok_and(|values| values.iter().any(value_contains_indirect_descriptor)),
+        _ => false,
+    }
+}
+
+fn collect_indirect_descriptors(
+    value: &Value,
+    descriptors: &mut Vec<groove::large_values::LargeValueRef>,
+) {
+    match value {
+        Value::Large(value_ref) => {
+            if !descriptors.contains(value_ref) {
+                descriptors.push(value_ref.clone());
+            }
+        }
+        Value::Tuple(values) | Value::Array(values) => {
+            for value in values {
+                collect_indirect_descriptors(value, descriptors);
+            }
+        }
+        Value::Nullable(Some(value)) => collect_indirect_descriptors(value, descriptors),
+        Value::Record(record) => {
+            if let Ok(values) = record.to_values() {
+                for value in values {
+                    collect_indirect_descriptors(&value, descriptors);
+                }
+            }
+        }
+        Value::Enum(value) => {
+            if let Ok(values) = value.record().to_values() {
+                for value in values {
+                    collect_indirect_descriptors(&value, descriptors);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn version_indirect_descriptors(
+    versions: &[VersionRecord],
+) -> Vec<groove::large_values::LargeValueRef> {
+    let mut descriptors = Vec::new();
+    for version in versions {
+        for position in 0..version.application_cell_count() {
+            if let Some(value) = version.cell_at(position) {
+                collect_indirect_descriptors(&value, &mut descriptors);
+            }
+        }
+    }
+    descriptors
 }
 
 pub(crate) struct ViewUpdateParts {
@@ -1801,6 +1954,21 @@ pub enum Error {
     /// Error returned by groove.
     #[error(transparent)]
     Groove(#[from] GrooveDbError),
+    /// Error returned by Groove-owned chunk storage.
+    #[error(transparent)]
+    ChunkStorage(#[from] groove::chunks::ChunkStorageError),
+    /// Groove rejected a malformed logical value or indirect descriptor.
+    #[error(transparent)]
+    LargeValue(#[from] groove::large_values::Error),
+    /// Groove could not authenticate/export a locally referenced tree.
+    #[error(transparent)]
+    LargeValueReachability(#[from] groove::large_values::ReachabilityError),
+    /// Jazz staging policy rejected an otherwise valid Groove preparation.
+    #[error("large-value upload rate limit exceeded")]
+    LargeValueIngressRateLimited,
+    /// Required staging state was removed by TTL maintenance before use.
+    #[error("large-value staging root expired; upload again")]
+    LargeValueStageExpired,
     /// Error returned by groove records.
     #[error(transparent)]
     Record(#[from] records::Error),

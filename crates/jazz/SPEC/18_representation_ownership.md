@@ -63,6 +63,10 @@ TypeScript subscription result
    column-level permission patches. A query's `select` is application-result
    presentation only. It must not introduce hidden cells, per-column access
    rules, or a second partial-row sync format.
+   A Groove large-value descriptor (ch. 19) is the complete atomic cell carried
+   by that row. Its immutable backing chunks may be fetched lazily through the
+   authorized root capability; they are neither hidden Jazz cells nor partial
+   row-sync facts.
 2. **Projection is downstream of row semantics.** The source resolver preserves
    the complete current-row material needed by query, policy, and maintenance;
    node materialization may then apply the requested app projection. A terminal

@@ -26,6 +26,15 @@ as soon as work begins or that first commit exists; the PR may be red/WIP and
 must not wait for completion or review. Lanes remain local-only: they must not
 push, create or modify PRs, comment on GitHub, or merge.
 
+### Pull-request descriptions
+
+Every behavior-changing PR description explains the before/after behavior,
+the governing invariants, and important non-goals or unchanged cases. Include
+worked examples for the normal path and meaningful edge, failure, retry, or
+handoff cases. For nuanced or large changes, make these concrete enough for an
+adversarial reviewer to verify the behavior and for a future reader to recover
+the decision without reconstructing it from the diff or conversation history.
+
 **Testing:** prefer black-boxed integration tests over unit tests or white-box tests.
 Do not use JSON-like schema/permissions/query definitions. Always use the public API to build them in the tests.
 Before writing any test in Rust crates, always read `crates/jazz/TESTING_GUIDELINES.md` in full and follow it.

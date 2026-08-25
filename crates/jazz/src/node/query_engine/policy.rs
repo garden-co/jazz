@@ -10,11 +10,11 @@ pub(crate) enum PolicyContext {
         /// Missing-policy behavior.
         mode: PolicyEnforcementMode,
         /// Identity whose permissions are being evaluated.
-        permission_subject: AuthorId,
+        permission_subject: AuthorSubject,
         /// Trusted claims available to policy queries.
         claims: BTreeMap<String, Value>,
         /// Author recorded on writes, when it differs from the permission subject.
-        attribution: Option<AuthorId>,
+        attribution: Option<AuthorSubject>,
     },
     /// A policy-authorization subplan evaluates claim-dependent policy logic
     /// for an identity. Its sources are system-authorized so dependency-table
@@ -31,11 +31,11 @@ pub(crate) enum PolicyContext {
         /// Missing-policy behavior.
         mode: PolicyEnforcementMode,
         /// Identity whose permissions are being evaluated.
-        permission_subject: AuthorId,
+        permission_subject: AuthorSubject,
         /// Trusted claims available to policy queries.
         claims: BTreeMap<String, Value>,
         /// Author recorded on writes, when it differs from the permission subject.
-        attribution: Option<AuthorId>,
+        attribution: Option<AuthorSubject>,
     },
 }
 
@@ -59,9 +59,9 @@ pub(crate) enum PolicySharingKey {
         /// Missing-policy behavior.
         mode: PolicyEnforcementMode,
         /// Identity whose permissions are being evaluated.
-        permission_subject: AuthorId,
+        permission_subject: AuthorSubject,
         /// Identity recorded on writes, when it differs from the permission subject.
-        attribution: Option<AuthorId>,
+        attribution: Option<AuthorSubject>,
         /// Trusted claim paths referenced by the lowered graph.
         claim_paths: BTreeSet<ClaimPath>,
     },

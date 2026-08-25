@@ -1638,6 +1638,284 @@ fn prepared_policy_union_joins_claimless_arm_to_binding_route() {
     )));
 }
 
+/// Keeps a public assignment occurrence address through an inherited-policy
+/// semi-join while Alice's allowed release and tenant-correlated checks are
+/// lowered as consecutive joins.
+///
+/// ```text
+/// alice ──insert assignment──► release + membership + organization checks
+///                                  │
+///                                  └──► public assignment result occurrence
+/// ```
+///
+/// The matching authorization subplan keeps the same join inputs internal:
+/// its policy proof must never expose public occurrence carriers.
+#[test]
+fn authorization_subplan_with_correlated_allowed_to_joins_lowers_without_occurrence_carriers() {
+    let root = RowSetNodeId("assignment".to_owned());
+    let release_input = RowSetNodeId("release-source".to_owned());
+    let release_join = RowSetNodeId("release-allowed-to".to_owned());
+    let membership_input = RowSetNodeId("membership-source".to_owned());
+    let membership_join = RowSetNodeId("membership-tenant-check".to_owned());
+    let organization_input = RowSetNodeId("organization-source".to_owned());
+    let policy_root = RowSetNodeId("organization-tenant-check".to_owned());
+    let assignment = source("assignments", SourceRole::Root);
+    let release = source(
+        "releases",
+        SourceRole::Alias("allowed-to:release".to_owned()),
+    );
+    let membership = source(
+        "memberships",
+        SourceRole::Alias("exists:membership-tenant".to_owned()),
+    );
+    let organization = source(
+        "organizations",
+        SourceRole::Alias("exists:organization-tenant".to_owned()),
+    );
+    let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
+        reads: QueryReadSet::primary(ReadView {
+            read_schema: schema(0x91),
+            policy_schema: schema(0x92),
+            sources: BTreeMap::from([
+                (
+                    assignment.clone(),
+                    requested_current_source(DurabilityTier::Global),
+                ),
+                (
+                    release.clone(),
+                    requested_current_source(DurabilityTier::Global),
+                ),
+                (
+                    membership.clone(),
+                    requested_current_source(DurabilityTier::Global),
+                ),
+                (
+                    organization.clone(),
+                    requested_current_source(DurabilityTier::Global),
+                ),
+            ]),
+        }),
+        policy: PolicyContext::AuthorizationSubplan {
+            protected_source: assignment.clone(),
+            role: PolicyDecisionRole::Write,
+            mode: PolicyEnforcementMode::Enforcing,
+            permission_subject: author(0x91),
+            claims: BTreeMap::new(),
+            attribution: None,
+        },
+        input: RowSetProgramInput {
+            shape: NormalizedRowSetShape {
+                identity: NormalizedShapeIdentity {
+                    shape_id: shape(0x91),
+                    canonical: vec![0x91],
+                },
+                root: policy_root.clone(),
+                result: ResultId::RealRow {
+                    table: "assignments".to_owned(),
+                    row: ResultRowRef::Source(assignment.clone()),
+                },
+                auxiliary_sources: BTreeSet::new(),
+                closure_paths: Vec::new(),
+                join_contributions: Vec::new(),
+                reachable_contributions: Vec::new(),
+                nodes: BTreeMap::from([
+                    (
+                        root.clone(),
+                        RowSetExpr::Source {
+                            source: assignment.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        release_input,
+                        RowSetExpr::Source {
+                            source: release.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        release_join.clone(),
+                        RowSetExpr::Join {
+                            left: root,
+                            right: RowSetNodeId("release-source".to_owned()),
+                            mode: JoinMode::Inner,
+                            on: PredicateExpr::Compare {
+                                left: NormalizedValueRef::RowId(RowIdRef::Source(
+                                    assignment.clone(),
+                                )),
+                                op: ComparisonOp::Eq,
+                                right: NormalizedValueRef::SourceField {
+                                    source: release.clone(),
+                                    field: "todo".to_owned(),
+                                },
+                            },
+                        },
+                    ),
+                    (
+                        membership_input,
+                        RowSetExpr::Source {
+                            source: membership.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        membership_join,
+                        RowSetExpr::Join {
+                            left: release_join,
+                            right: RowSetNodeId("membership-source".to_owned()),
+                            mode: JoinMode::Inner,
+                            on: PredicateExpr::Compare {
+                                left: NormalizedValueRef::RowId(RowIdRef::Source(
+                                    assignment.clone(),
+                                )),
+                                op: ComparisonOp::Eq,
+                                right: NormalizedValueRef::SourceField {
+                                    source: membership,
+                                    field: "todo".to_owned(),
+                                },
+                            },
+                        },
+                    ),
+                    (
+                        organization_input,
+                        RowSetExpr::Source {
+                            source: organization.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        policy_root,
+                        RowSetExpr::Join {
+                            left: RowSetNodeId("membership-tenant-check".to_owned()),
+                            right: RowSetNodeId("organization-source".to_owned()),
+                            mode: JoinMode::Inner,
+                            on: PredicateExpr::Compare {
+                                left: NormalizedValueRef::RowId(RowIdRef::Source(
+                                    assignment.clone(),
+                                )),
+                                op: ComparisonOp::Eq,
+                                right: NormalizedValueRef::SourceField {
+                                    source: organization,
+                                    field: "todo".to_owned(),
+                                },
+                            },
+                        },
+                    ),
+                ]),
+            },
+            binding: ProgramBinding {
+                id: BindingId(uuid::Uuid::from_bytes([0x91; 16])),
+                source_shape: None,
+                extra_user_params: BTreeMap::new(),
+                param_types: BTreeMap::new(),
+                claim_params: BTreeMap::new(),
+                values: BTreeMap::new(),
+            },
+        },
+        output: RowSetOutputRequest {
+            app_rows: None,
+            facts: BTreeSet::from([ProgramFactKey::ResultMembership]),
+        },
+    };
+
+    let program = lower_query_program(request, &mut FakeSourceResolver::default())
+        .expect("correlated write authorization should lower");
+    let graph = format!("{:?}", program.lowered.terminals);
+    assert!(
+        !graph.contains("__flat_join_source_"),
+        "authorization decision graph must not request public occurrence carriers: {graph}"
+    );
+    assert!(
+        graph.contains("__policy_join_source_0_"),
+        "the next correlated predicate still needs the first join's internal values: {graph}"
+    );
+    let OutputTerminalSchema::Fact(ProgramFactOutput {
+        schema: ProgramFactSchema::ResultMembership(schema),
+        ..
+    }) = program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == "maintained.result_current")
+        .map(|terminal| &terminal.output)
+        .expect("result-membership terminal")
+    else {
+        panic!("result-membership terminal must retain its schema");
+    };
+    assert_eq!(schema.occurrence_id_fields, vec!["row_uuid"]);
+
+    // The source-read terminal uses an ordinary identity context, not the
+    // authorization-subplan context above. Its trailing inherited-policy
+    // semi-join must keep the first two public join carriers.
+    let mut public_input = program.request.input.clone();
+    let public_root = public_input.shape.root.clone();
+    let RowSetExpr::Join { mode, .. } = public_input
+        .shape
+        .nodes
+        .get_mut(&public_root)
+        .expect("public assignment root join")
+    else {
+        panic!("public assignment root must be a join");
+    };
+    *mode = JoinMode::Semi;
+    let public_request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
+        reads: program.request.reads.clone(),
+        policy: PolicyContext::Identity {
+            mode: PolicyEnforcementMode::Enforcing,
+            permission_subject: author(0x91),
+            claims: BTreeMap::new(),
+            attribution: None,
+        },
+        input: public_input,
+        output: row_set_output(BTreeSet::new()),
+    };
+    let public_program = lower_query_program(public_request, &mut FakeSourceResolver::default())
+        .expect("public correlated assignment read should lower");
+    let public_terminal = public_program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| matches!(terminal.output, OutputTerminalSchema::AppRows(_)))
+        .expect("public app-rows terminal");
+    let public_graph = format!("{:#?}", public_terminal.graph);
+    assert!(
+        !public_graph.contains("__policy_join_source_"),
+        "policy-proof carriers must not reach a public query terminal: {public_graph}"
+    );
+    let OutputTerminalSchema::AppRows(public_schema) = &public_terminal.output else {
+        panic!("public app-rows terminal must retain its public descriptor");
+    };
+    assert!(
+        public_schema
+            .descriptor
+            .fields()
+            .iter()
+            .filter_map(|field| field.name.as_deref())
+            .all(|field| !field.starts_with("__policy_join_source_")),
+        "private policy carriers must not appear in the public descriptor: {public_schema:#?}"
+    );
+    let collector_inputs = BTreeSet::from([
+        "__collect_root___flat_join_source_0_row_uuid".to_owned(),
+        "__collect_root___flat_join_source_1_row_uuid".to_owned(),
+    ]);
+    assert!(
+        graph_any(&public_terminal.graph, &|graph| matches!(
+            graph,
+            GraphBuilder::Project { fields, .. }
+                if collector_inputs.is_subset(
+                    &fields
+                        .iter()
+                        .map(|field| field.output_name.clone())
+                        .collect()
+                )
+        )),
+        "the collector must receive every projected public occurrence carrier: {:#?}",
+        public_terminal.graph
+    );
+}
+
 #[test]
 fn claim_filter_lowers_from_identity_policy_context() {
     let request = QueryProgramRequest {
@@ -1834,7 +2112,7 @@ fn nested_binding_value_source_keeps_sibling_nullable_claim_route() {
 }
 
 #[test]
-fn built_in_sub_claim_lowers_to_permission_subject() {
+fn missing_sub_claim_lowers_to_deny_predicate() {
     let subject = author(0xa5);
     let request = QueryProgramRequest {
         authorization_mode: QueryAuthorizationMode::TrustedServing,
@@ -1850,9 +2128,10 @@ fn built_in_sub_claim_lowers_to_permission_subject() {
     };
 
     let program = lower_query_program(request, &mut FakeSourceResolver::default())
-        .expect("built-in sub claim lowers");
+        .expect("missing sub claim lowers");
     let graph = format!("{:?}", program.lowered.terminals[0].graph);
-    assert!(graph.contains(&subject.0.to_string()), "{graph}");
+    assert!(graph.contains("Filter"), "{graph}");
+    assert!(graph.contains("Or([])"), "{graph}");
 }
 
 #[test]

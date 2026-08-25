@@ -20,7 +20,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, param};
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
@@ -31,7 +31,7 @@ const TEAMS: usize = 1_001;
 const HOT_TEAM_DOCUMENTS: usize = 1_000;
 const PAGE_SIZE: usize = 100;
 const MAX_ROUTES: usize = 1_000;
-const WRITER: AuthorId = AuthorId::SYSTEM;
+const WRITER: AuthorSubject = AuthorSubject::SYSTEM;
 
 type BenchDb = Db<MemoryStorage>;
 
@@ -349,9 +349,8 @@ fn seed_fixture(db: &BenchDb) {
 }
 
 fn insert_document(db: &BenchDb, row: RowUuid, team: usize, updated_at: u64) {
-    block_on(db.insert_with_id(
+    block_on(db.insert(
         DOCUMENTS,
-        row,
         BTreeMap::from([
             ("team".to_owned(), Value::Uuid(team_row(team).0)),
             ("updated_at".to_owned(), Value::U64(updated_at)),
@@ -360,6 +359,10 @@ fn insert_document(db: &BenchDb, row: RowUuid, team: usize, updated_at: u64) {
                 Value::String(format!("route {team} document {updated_at}")),
             ),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        },
     ))
     .expect("insert route curve document");
 }

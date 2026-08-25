@@ -161,13 +161,11 @@ Milestone: **integrators can adopt jazz incrementally without bespoke glue.**
    WebSocket/byte-transport listener, publish health/metrics, and drain
    connections on shutdown while all product behavior still flows through the
    client API and shared sync protocol. The current `jazz-server` surface has
-   three canaries: `cargo run -p jazz-cli --bin jazz-server -- dry-run`, which validates the
-   default local shell plan without opening sockets;
-   `jazz_server::loopback_http::LoopbackHttpServer`, which starts a
-   loopback-only HTTP bridge around `InMemoryServerShell` for health, metrics,
-   session admission, and newline-separated hex frame request plumbing; and
+   two canaries: `cargo run -p jazz-cli --bin jazz-server -- dry-run`, which validates the
+   default local shell plan without opening sockets; and
    `jazz_server::loopback_websocket::LoopbackWebSocketServer`, which sends
    postcard batches of raw ABI `WireFrame` bytes as binary WebSocket messages.
+   HTTP schema routes are exercised through the production Axum router.
    The alpha TS/WASM gate now spawns the WebSocket listener as a Rust process
    and proves two-client todo convergence through that boundary.
 4. **Storage slice** — prove the storage contract with durable and in-memory
@@ -183,19 +181,10 @@ Milestone: **integrators can adopt jazz incrementally without bespoke glue.**
 
 ### 17.6 Recorded packaging decision
 
-- ✅ **Conformance storage backends (decided 2026-07-02):** the alpha
-  conformance matrix covers the canonical topology's backends — in-memory
-  (client main thread), IndexedDB (client worker relay), and RocksDB (edge and
-  core). SQLite is conditionally in scope as the **last** alpha item, paired
-  with React Native support: it is needed only if RocksDB proves unworkable in
-  the RN environment. It is deliberately scheduled last because it is pure
-  tooling — a clean additional `OrderedKvStorage` backend behind the existing
-  storage contract, with no design decisions attached.
-
-**Implementation status.** The alpha conformance matrix covers in-memory
-(client main thread), IndexedDB (client worker relay), and RocksDB (edge and core).
-SQLite is conditionally last in scope with React Native, only if RocksDB is
-unsuitable there; this is a tooling decision rather than a semantic contract.
+- ✅ **Conformance storage backends:** the alpha matrix covers in-memory,
+  IndexedDB, RocksDB, and SQLite through Groove's ordered-KV contract. Native mobile
+  hosts use SQLite through a process-local native relay (chapter 19); that is a
+  storage adapter and host boundary, not a new Jazz query or sync runtime.
 
 ## Open Questions
 

@@ -5,9 +5,9 @@ use super::*;
 #[test]
 fn subscription_emits_when_remote_coverage_settles_without_row_changes() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
 
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
 
     let (client_transport, server_transport) = duplex();
@@ -35,9 +35,9 @@ fn subscription_emits_when_remote_coverage_settles_without_row_changes() {
 #[test]
 fn edge_global_settlement_requires_a_fresh_current_connection_view_receipt() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
     seed(&server, "todos", cells("cached", false, owner));
 
@@ -82,9 +82,9 @@ fn edge_global_settlement_requires_a_fresh_current_connection_view_receipt() {
 #[test]
 fn nonselected_upstream_update_demotes_selected_receipt_before_publication() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
     seed(&server, "todos", cells("initial", false, owner));
 
@@ -130,22 +130,24 @@ fn nonselected_upstream_update_demotes_selected_receipt_before_publication() {
 #[test]
 fn nonselected_view_update_demotes_receipts_for_other_recomputed_views() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     let all_query = Query::from("todos");
     let filtered_query = Query::from("todos").filter(eq(col("title"), lit("matching")));
-    let view_update = |subscription, settled_through| SyncMessage::ViewUpdate {
-        subscription,
-        settled_through,
-        reset_result_set: true,
-        version_carriers: Vec::new(),
-        version_bundles: Vec::new(),
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
+    let view_update = |subscription, settled_through| {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+            subscription,
+            settled_through,
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
     };
 
     let (old_client_transport, mut old_authority) = duplex();
@@ -227,9 +229,9 @@ fn nonselected_view_update_demotes_receipts_for_other_recomputed_views() {
 #[test]
 fn stale_old_upstream_epoch_cannot_settle_after_edge_switch_or_fallback() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
     seed(
         &server,
@@ -310,21 +312,23 @@ fn stale_old_upstream_epoch_cannot_settle_after_edge_switch_or_fallback() {
 #[test]
 fn fallback_staged_cut_blocks_older_selected_confirmation() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     let query = Query::from("todos");
-    let update = |subscription, settled_through| SyncMessage::ViewUpdate {
-        subscription,
-        settled_through,
-        reset_result_set: true,
-        version_carriers: Vec::new(),
-        version_bundles: Vec::new(),
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
+    let update = |subscription, settled_through| {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+            subscription,
+            settled_through,
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
     };
 
     let (old_client_transport, mut old_authority) = duplex();
@@ -372,7 +376,7 @@ fn fallback_staged_cut_blocks_older_selected_confirmation() {
 #[test]
 fn fallback_replay_of_preselection_row_repair_cannot_settle() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     let query = Query::from("todos");
 
@@ -387,18 +391,20 @@ fn fallback_replay_of_preselection_row_repair_cannot_settle() {
             _ => continue,
         }
     };
-    let view_update = |subscription, settled_through| SyncMessage::ViewUpdate {
-        subscription,
-        settled_through,
-        reset_result_set: true,
-        version_carriers: Vec::new(),
-        version_bundles: Vec::new(),
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
+    let view_update = |subscription, settled_through| {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+            subscription,
+            settled_through,
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
     };
     old_authority_transport
         .send(view_update(old_subscription, GlobalTime(1)))
@@ -458,10 +464,10 @@ fn fallback_replay_of_preselection_row_repair_cannot_settle() {
 #[test]
 fn restarted_client_reuses_durable_cursor_but_waits_for_current_authority_receipt() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
     let client_node = NodeUuid::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     seed(&server, "todos", cells("durable cache", false, owner));
     let dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();

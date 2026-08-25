@@ -125,7 +125,7 @@ async fn apply_index_persist_delta(
     for record_delta in &delta.deltas {
         let record = record_delta.borrowed(&delta.descriptor);
         let logical_key = record
-            .field_bytes_unchecked(0)
+            .get_bytes(0)
             .map_err(IvmRuntimeError::RecordEncoding)?;
         let key = persisted_index_record_key(durable_storage, logical_key);
 

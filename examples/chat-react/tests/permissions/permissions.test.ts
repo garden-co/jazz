@@ -169,6 +169,99 @@ describe("chat permissions", () => {
     );
   });
 
+  it("binds message attribution to the authenticated user's profile", async () => {
+    const aliceProfile = await testApp.seed((db) =>
+      db.insert(app.profiles, {
+        userId: "alice",
+        name: "Alice",
+      }),
+    );
+    const bobProfile = await testApp.seed((db) =>
+      db.insert(app.profiles, {
+        userId: "bob",
+        name: "Bob",
+      }),
+    );
+    const chat = await testApp.seed((db) =>
+      db.insert(app.chats, {
+        name: "Members only",
+        isPublic: false,
+        joinCode: "invite-authors",
+      }),
+    );
+    await testApp.seed((db) =>
+      db.insert(app.chatMembers, {
+        chatId: chat.id,
+        userId: "alice",
+        joinCode: "invite-authors",
+      }),
+    );
+
+    const aliceDb = testApp.as({ user_id: "alice", claims: {}, authMode: "local-first" });
+
+    aliceDb.expectAllowed((db) =>
+      db.insert(app.messages, {
+        chatId: chat.id,
+        text: "hello from alice",
+        senderId: aliceProfile.id,
+      }),
+    );
+    await aliceDb.expectDenied((db) =>
+      db.insert(app.messages, {
+        chatId: chat.id,
+        text: "forged message from bob",
+        senderId: bobProfile.id,
+      }),
+    );
+  });
+
+  it("binds reaction attribution to the authenticated user", async () => {
+    const aliceProfile = await testApp.seed((db) =>
+      db.insert(app.profiles, {
+        userId: "alice",
+        name: "Alice",
+      }),
+    );
+    const chat = await testApp.seed((db) =>
+      db.insert(app.chats, {
+        name: "Members only",
+        isPublic: false,
+        joinCode: "invite-reactions",
+      }),
+    );
+    await testApp.seed((db) =>
+      db.insert(app.chatMembers, {
+        chatId: chat.id,
+        userId: "alice",
+        joinCode: "invite-reactions",
+      }),
+    );
+    const message = await testApp.seed((db) =>
+      db.insert(app.messages, {
+        chatId: chat.id,
+        text: "react to this",
+        senderId: aliceProfile.id,
+      }),
+    );
+
+    const aliceDb = testApp.as({ user_id: "alice", claims: {}, authMode: "local-first" });
+
+    aliceDb.expectAllowed((db) =>
+      db.insert(app.reactions, {
+        messageId: message.id,
+        userId: "alice",
+        emoji: "thumbs-up",
+      }),
+    );
+    await aliceDb.expectDenied((db) =>
+      db.insert(app.reactions, {
+        messageId: message.id,
+        userId: "bob",
+        emoji: "fire",
+      }),
+    );
+  });
+
   it("inherits reaction reads from the parent message/chat chain", async () => {
     const aliceProfile = await testApp.seed((db) =>
       db.insert(app.profiles, {

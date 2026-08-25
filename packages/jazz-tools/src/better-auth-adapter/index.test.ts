@@ -1,13 +1,95 @@
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, test, vi } from "vitest";
 import { betterAuth, type BetterAuthOptions, type DBAdapter } from "better-auth";
+import { mintLocalFirstToken } from "jazz-napi";
 import { createJazzContext, type JazzContext } from "../backend/index.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
 import { deploy as deployProject } from "../dev/catalogue-project.js";
-import { wasmSchema as wasmSchemaExample } from "./fixtures/schema.js";
+import {
+  app as fixtureApp,
+  permissions as fixturePermissions,
+  schema as fixtureSchema,
+  wasmSchema as wasmSchemaExample,
+} from "./fixtures/schema.js";
 import { jazzAdapter } from "./index.js";
 
 describe("jazzAdapter", () => {
+  describe("generated auth-table permissions", () => {
+    it("denies client CRUD for every generated Better Auth table", () => {
+      expect(Object.keys(fixturePermissions).sort()).toEqual(Object.keys(fixtureSchema).sort());
+
+      for (const tableName of Object.keys(fixtureSchema)) {
+        const tablePermissions = fixturePermissions[tableName]!;
+
+        expect(tablePermissions.select?.using).toEqual({ type: "False" });
+        expect(tablePermissions.insert?.with_check).toEqual({ type: "False" });
+        expect(tablePermissions.update?.using).toEqual({ type: "False" });
+        expect(tablePermissions.update?.with_check).toEqual({ type: "False" });
+        expect(tablePermissions.delete?.using).toEqual({ type: "False" });
+      }
+    });
+  });
+
+  it("rejects ordinary-session reads and writes to Better Auth tables", async () => {
+    const server = await startLocalJazzServer({
+      allowLocalFirstAuth: true,
+    });
+    await deployProject({
+      serverUrl: server.url,
+      appId: server.appId,
+      adminSecret: server.adminSecret,
+      schemaDir: join(import.meta.dirname, "fixtures"),
+    });
+    const context = createJazzContext({
+      appId: server.appId,
+      app: fixtureApp,
+      permissions: fixturePermissions,
+      driver: { type: "memory" },
+      serverUrl: server.url,
+      backendSecret: server.backendSecret,
+    });
+
+    try {
+      const adapter = jazzAdapter({
+        db: () => context.asBackend(fixtureApp),
+        schema: fixtureApp.wasmSchema,
+      })({});
+      await adapter.create({
+        model: "user",
+        data: {
+          name: "Backend user",
+          email: "backend@example.com",
+          emailVerified: false,
+          image: null,
+        },
+      });
+
+      const localFirstSecret = Buffer.alloc(32, 7).toString("base64url");
+      const token = mintLocalFirstToken(localFirstSecret, server.appId, 60);
+      const sessionDb = await context.forRequest({
+        headers: { authorization: `Bearer ${token}` },
+      });
+
+      await expect(sessionDb.all(fixtureApp.better_auth_user, { tier: "edge" })).resolves.toEqual(
+        [],
+      );
+      await expect(
+        sessionDb
+          .insert(fixtureApp.better_auth_user, {
+            name: "Client user",
+            email: "client@example.com",
+            emailVerified: false,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .wait({ tier: "edge" }),
+      ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
+    } finally {
+      await context.shutdown();
+      await server.stop();
+    }
+  }, 30_000);
+
   describe("adapter methods", () => {
     let adapter: DBAdapter<BetterAuthOptions>;
     let context: JazzContext;
@@ -43,7 +125,7 @@ describe("jazzAdapter", () => {
       await server.stop();
     });
 
-    it("creates records with Jazz ids", async () => {
+    it("backend access can insert and read despite deny-all client policies", async () => {
       const created = await adapter.create({
         model: "user",
         data: {
@@ -132,9 +214,44 @@ describe("jazzAdapter", () => {
           ],
         }),
       ).resolves.toBe(3);
+
+      const withoutFirst = await adapter.findMany<any>({
+        model: "user",
+        where: [
+          {
+            field: "id",
+            operator: "not_in",
+            value: [createdUsers[0]!.id],
+            connector: "AND",
+          },
+        ],
+        sortBy: { field: "id", direction: "asc" },
+      });
+      expect(withoutFirst.map((row) => row.id)).toEqual(
+        createdUsers
+          .slice(1)
+          .map((row) => row.id)
+          .sort(),
+      );
+
+      const withoutOneEmail = await adapter.findMany<any>({
+        model: "user",
+        where: [
+          {
+            field: "email",
+            operator: "not_in",
+            value: [createdUsers[1]!.email],
+            connector: "AND",
+          },
+        ],
+        sortBy: { field: "id", direction: "asc" },
+      });
+      expect(withoutOneEmail.map((row) => row.id)).toEqual(
+        [createdUsers[0]!.id, createdUsers[2]!.id].sort(),
+      );
     });
 
-    it("updates and deletes records using non-id filters", async () => {
+    it("backend access can update and delete despite deny-all client policies", async () => {
       const alpha = await adapter.create<any>({
         model: "user",
         data: {
@@ -455,8 +572,13 @@ describe("jazzAdapter", () => {
       });
       expect(generated.code).toContain('import { schema as s } from "jazz-tools";');
       expect(generated.code).toContain("export const app: s.App<AppSchema> = s.defineApp(schema);");
-      expect(generated.code).not.toContain("definePermissions");
-      expect(generated.code).not.toContain("allowRead");
+      expect(generated.code).toContain(
+        "export const permissions = s.definePermissions(app, ({ policy }) => {",
+      );
+      expect(generated.code).toContain("policy.better_auth_user.allowRead.never();");
+      expect(generated.code).toContain("policy.better_auth_user.allowInsert.never();");
+      expect(generated.code).toContain("policy.better_auth_user.allowUpdate.never();");
+      expect(generated.code).toContain("policy.better_auth_user.allowDelete.never();");
     });
   });
 

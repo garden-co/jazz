@@ -6,12 +6,22 @@ impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    /// Configure Jazz-owned ingress and expiry policy for unpublished large values.
+    pub fn set_large_value_staging_policy(&self, policy: crate::node::LargeValueStagingPolicy) {
+        self.node.set_large_value_staging_policy(policy);
+    }
+
+    /// Run one host-driven staging-expiry maintenance pass.
+    pub async fn evict_expired_staged_large_values(&self) -> Result<usize, Error> {
+        self.node.evict_expired_staged_large_values().await
+    }
+
     /// Open a database over the supplied storage and recover local state.
     ///
     /// ```rust
     /// # use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource};
     /// # use jazz::db::doctest_support::{block_on, schema, MemoryStorage};
-    /// # use jazz::ids::{AuthorId, NodeUuid};
+    /// # use jazz::ids::{AuthorSubject, NodeUuid};
     /// let schema = schema();
     /// let column_families = schema.column_families();
     /// let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
@@ -22,7 +32,7 @@ where
     ///     storage,
     ///     identity: DbIdentity {
     ///         node: NodeUuid::from_bytes([1; 16]),
-    ///         author: AuthorId::from_bytes([2; 16]),
+    ///         author: AuthorSubject::for_test_bytes([2; 16]),
     ///     },
     ///     id_source: Some(Box::new(SeededRowIdSource::new(1))),
     /// }))?;
@@ -324,7 +334,7 @@ where
         let outcome = {
             let mut node = self.node.node.lock().await;
             node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
-                author: AuthorId::SYSTEM,
+                author: AuthorSubject::SYSTEM,
                 catalogue_seq,
                 publication: Box::new(publication),
             })
@@ -335,7 +345,7 @@ where
             let outcome = {
                 let mut node = self.node.node.lock().await;
                 node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
-                    author: AuthorId::SYSTEM,
+                    author: AuthorSubject::SYSTEM,
                     pointer: CurrentWriteSchema {
                         revision: 1,
                         schema: target_id,
@@ -404,7 +414,7 @@ where
         &self,
         table: &str,
         row: RowUuid,
-        made_by: AuthorId,
+        made_by: AuthorSubject,
         cells: RowCells,
     ) -> Result<TxId, Error> {
         let cells = self.apply_insert_defaults(table, cells)?;
@@ -577,7 +587,7 @@ where
     pub fn accept_subscriber(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node.accept_subscriber(transport, identity)
     }
@@ -586,7 +596,7 @@ where
     pub fn accept_subscriber_with_claims(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node
@@ -597,7 +607,7 @@ where
     pub fn accept_subscriber_with_claims_and_trust(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
         trust: CommitUnitTrust,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
@@ -609,7 +619,7 @@ where
     pub fn accept_edge_subscriber_with_claims(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node
@@ -620,7 +630,7 @@ where
     pub fn accept_edge_authority_subscriber_with_claims(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node
@@ -631,7 +641,7 @@ where
     pub fn accept_subscriber_with_resume(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         cursor: ResumeCursor,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node
@@ -1006,7 +1016,7 @@ fn size_row<'a>(row: &CurrentRow, raw: &'a [u8]) -> SizeRow<'a> {
 fn validation_tuple_estimate_bytes(
     shape: &ValidatedQuery,
     binding: &Binding,
-    author: AuthorId,
+    author: AuthorSubject,
     tier: DurabilityTier,
     read_view: &ReadViewSpec,
 ) -> usize {
@@ -1017,7 +1027,7 @@ fn validation_tuple_estimate_bytes(
         schema_version: SchemaVersionId,
         canonical_query: &'a [u8],
         canonical_binding: &'a [u8],
-        author: AuthorId,
+        author: AuthorSubject,
         tier: DurabilityTier,
         read_view: &'a ReadViewSpec,
     }

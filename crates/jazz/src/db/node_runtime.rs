@@ -32,6 +32,10 @@ where
     pub(super) upstream_subscription_owners: UpstreamSubscriptionOwners,
     pub(super) connections: RefCell<Vec<Rc<LocalMutex<PeerConnection<S>>>>>,
     pub(super) scheduler: SharedTickScheduler,
+    pub(super) upload_retry_clock: SharedUploadRetryClock,
+    pub(super) detached_large_value_uploads:
+        Rc<RefCell<BTreeMap<UpstreamUploadDestination, peer_connection::LargeValueUploadQueues>>>,
+    pub(super) large_value_upload_retry_deadlines: Rc<RefCell<BTreeMap<TxId, u64>>>,
     pub(super) write_state_waiters: WriteStateWaiters,
     pub(super) permission_advice_waiters: PermissionAdviceWaiters,
     pub(super) edge_fate_routes: EdgeFateRoutes,
@@ -45,6 +49,9 @@ where
     pub(super) edge_cache_budget: Cell<Option<EdgeCacheBudget>>,
     pub(super) upstream_durability_floor: Cell<DurabilityTier>,
     pub(super) defer_local_persistence: Cell<bool>,
+    pub(super) chunk_resolver: PeerChunkResolver,
+    pub(super) local_chunk_reader: groove::chunks::LocalChunkReader,
+    pub(super) observed_chunk_completion_generation: Cell<u64>,
 }
 
 impl<S> Node<S>
@@ -52,11 +59,14 @@ where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     /// Wrap a node for serving subscriber links.
-    pub fn new(node: NodeState<S>) -> Self {
+    pub fn new(mut node: NodeState<S>) -> Self {
         // History completeness is a structural property of the opened node,
         // not evaluator state. Cache it so connection attachment never needs
         // to synchronously borrow storage-owning state during evaluation.
         let receives_commits_as_local = !node.is_history_complete();
+        let chunk_resolver = PeerChunkResolver::default();
+        let local_chunk_reader = node.local_chunk_reader_handle();
+        node.set_missing_chunk_resolver(Rc::new(chunk_resolver.clone()));
         let pending_mutation_errors = node
             .rejected_transactions()
             .into_iter()
@@ -84,6 +94,9 @@ where
             upstream_subscription_owners: Rc::new(RefCell::new(BTreeMap::new())),
             connections: RefCell::new(Vec::new()),
             scheduler: Rc::new(RefCell::new(None)),
+            upload_retry_clock: Rc::new(RefCell::new(Rc::new(MonotonicUploadRetryClock::new()))),
+            detached_large_value_uploads: Rc::new(RefCell::new(BTreeMap::new())),
+            large_value_upload_retry_deadlines: Rc::new(RefCell::new(BTreeMap::new())),
             write_state_waiters: Rc::new(RefCell::new(BTreeMap::new())),
             mutation_errors: Rc::new(RefCell::new(MutationErrorState {
                 callback: None,
@@ -100,6 +113,9 @@ where
             edge_cache_budget: Cell::new(None),
             upstream_durability_floor: Cell::new(DurabilityTier::Global),
             defer_local_persistence: Cell::new(false),
+            chunk_resolver,
+            local_chunk_reader,
+            observed_chunk_completion_generation: Cell::new(0),
         }
     }
 
@@ -126,6 +142,27 @@ where
     /// Borrow the served node.
     pub fn node(&self) -> SharedNodeState<S> {
         Rc::clone(&self.node)
+    }
+
+    /// Configure Jazz-owned ingress and expiry policy for unpublished large
+    /// values. Groove persists timestamps and performs eviction, but does not
+    /// choose these product limits.
+    pub fn set_large_value_staging_policy(&self, policy: crate::node::LargeValueStagingPolicy) {
+        self.node
+            .borrow_mut()
+            .set_large_value_staging_policy(policy);
+    }
+
+    /// Run one host-driven staging-expiry maintenance pass.
+    ///
+    /// Browser, NAPI, and server hosts call this from their own timer cadence;
+    /// it is idempotent and does not make Groove own an executor or clock.
+    pub async fn evict_expired_staged_large_values(&self) -> Result<usize, Error> {
+        self.node
+            .borrow()
+            .evict_expired_staged_large_values()
+            .await
+            .map_err(Into::into)
     }
 
     pub(super) fn set_non_durable_client(&self) {
@@ -220,7 +257,7 @@ where
 
     fn restore_local_subscriber(
         &self,
-        author: AuthorId,
+        author: AuthorSubject,
         downstream_fates: &PendingDownstreamFates,
     ) -> Result<(), Error> {
         let mut node = self.node.borrow_mut();
@@ -319,6 +356,11 @@ where
 
     pub(super) fn set_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {
         *self.scheduler.borrow_mut() = scheduler;
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_upload_retry_clock_for_test(&self, clock: Rc<dyn UploadRetryClock>) {
+        *self.upload_retry_clock.borrow_mut() = clock;
     }
 
     pub(super) fn set_edge_cache_budget(&self, budget: Option<EdgeCacheBudget>) {
@@ -675,6 +717,18 @@ where
         let confirmation_floor = node.committed_global_time();
         drop(node);
         let session_context = transport.connection_session_context();
+        let upstream_upload_destination =
+            session_context.map(|context| UpstreamUploadDestination {
+                remote_node: *context.remote.node.as_bytes(),
+                link_identity: context.link_identity,
+            });
+        let transferred_large_value_uploads = upstream_upload_destination
+            .and_then(|destination| {
+                self.detached_large_value_uploads
+                    .borrow_mut()
+                    .remove(&destination)
+            })
+            .unwrap_or_default();
         let connection_epoch = session_context
             .map(|context| context.local.epoch)
             .unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u64);
@@ -696,7 +750,7 @@ where
             })
             .map(|context| AuthorityContext {
                 authority: *context.remote.node.as_bytes(),
-                link: *context.link_identity.as_bytes(),
+                link: context.link_identity,
                 connection_id: connection_epoch,
                 connection_epoch: context.remote.epoch,
                 claims_revision: 0,
@@ -819,6 +873,9 @@ where
             ),
             active_authority_view_receipts: Rc::clone(&self.active_authority_view_receipts),
             scheduler: Rc::clone(&self.scheduler),
+            upload_retry_clock: Rc::clone(&self.upload_retry_clock),
+            upstream_upload_destination,
+            large_value_upload_retry_deadlines: Rc::clone(&self.large_value_upload_retry_deadlines),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
             edge_fate_routes: Rc::clone(&self.edge_fate_routes),
@@ -839,6 +896,9 @@ where
                 sent_session_claim_revisions: BTreeMap::new(),
                 outbox: Rc::clone(&self.outbox),
                 uploaded: BTreeSet::new(),
+                large_value_uploads: transferred_large_value_uploads,
+                awaiting_large_value_uploads: BTreeMap::new(),
+                failed_large_value_uploads: BTreeSet::new(),
                 pending_row_version_repairs: VecDeque::new(),
                 scope_view_cuts: BTreeMap::new(),
                 scope_receipts: BTreeMap::new(),
@@ -846,6 +906,12 @@ where
                 scope_lease_manager: AuthorizationScopeLeaseManager::default(),
             }),
             last_resume_bytes: None,
+            auxiliary_pump: PeerIoPump::new(
+                self.chunk_resolver.clone(),
+                self.local_chunk_reader.clone(),
+                connection_epoch,
+                PeerIoPumpRole::Upstream,
+            ),
         }));
         self.connections.borrow_mut().push(Rc::clone(&connection));
         self.schedule_tick(TickUrgency::Immediate);
@@ -859,7 +925,7 @@ where
     pub fn accept_subscriber(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.accept_subscriber_with_trust(transport, identity, CommitUnitTrust::Session)
     }
@@ -868,7 +934,7 @@ where
     pub fn accept_subscriber_with_claims(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.accept_subscriber_with_claims_and_trust(
@@ -883,7 +949,7 @@ where
     pub fn accept_subscriber_with_trust(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         trust: CommitUnitTrust,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.accept_subscriber_with_resume_and_trust(
@@ -899,7 +965,7 @@ where
     pub fn accept_subscriber_with_claims_and_trust(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
         trust: CommitUnitTrust,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
@@ -910,7 +976,7 @@ where
     pub fn accept_edge_subscriber_with_claims(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.accept_subscriber_with_peer(
@@ -928,7 +994,7 @@ where
     pub fn accept_edge_authority_subscriber_with_claims(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.accept_subscriber_with_peer(
@@ -946,7 +1012,7 @@ where
     pub fn accept_subscriber_with_resume(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         cursor: ResumeCursor,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.accept_subscriber_with_resume_and_trust(
@@ -961,7 +1027,7 @@ where
     fn accept_subscriber_with_resume_and_trust(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         trust: CommitUnitTrust,
         claims: BTreeMap<String, Value>,
         cursor: Option<ResumeCursor>,
@@ -971,7 +1037,7 @@ where
         } else {
             match trust {
                 CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAdmin => {
-                    PeerState::edge_client_with_permission_identity(identity, AuthorId::SYSTEM)
+                    PeerState::edge_client_with_permission_identity(identity, AuthorSubject::SYSTEM)
                 }
                 CommitUnitTrust::Session => PeerState::client_link(identity),
             }
@@ -982,7 +1048,7 @@ where
     fn accept_subscriber_with_peer(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         trust: CommitUnitTrust,
         claims: BTreeMap<String, Value>,
         cursor: Option<ResumeCursor>,
@@ -1034,6 +1100,9 @@ where
             ),
             active_authority_view_receipts: Rc::clone(&self.active_authority_view_receipts),
             scheduler: Rc::clone(&self.scheduler),
+            upload_retry_clock: Rc::clone(&self.upload_retry_clock),
+            upstream_upload_destination: None,
+            large_value_upload_retry_deadlines: Rc::clone(&self.large_value_upload_retry_deadlines),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
             edge_fate_routes: Rc::clone(&self.edge_fate_routes),
@@ -1066,6 +1135,12 @@ where
                 serve_dirty: true,
             }),
             last_resume_bytes: None,
+            auxiliary_pump: PeerIoPump::new(
+                self.chunk_resolver.clone(),
+                self.local_chunk_reader.clone(),
+                connection_epoch,
+                PeerIoPumpRole::Subscriber,
+            ),
         }));
         self.connections.borrow_mut().push(Rc::clone(&connection));
         self.schedule_tick(TickUrgency::Immediate);
@@ -1074,23 +1149,46 @@ where
 
     /// Detach a previously attached peer connection from this node.
     pub fn detach_connection(&self, connection: &Rc<LocalMutex<PeerConnection<S>>>) -> bool {
-        let connection_ref = connection.borrow();
-        let (authority, upstream_epoch) = match &connection_ref.link {
+        if !self
+            .connections
+            .borrow()
+            .iter()
+            .any(|candidate| Rc::ptr_eq(candidate, connection))
+        {
+            return false;
+        }
+        let mut connection_ref = connection.borrow_mut();
+        let connection_epoch = connection_ref.connection_epoch;
+        let upstream_upload_destination = connection_ref.upstream_upload_destination;
+        let (authority, upstream_epoch, transferable_uploads) = match &mut connection_ref.link {
             ConnectionLink::Upstream(UpstreamConnectionState {
                 expected_scope_authority,
+                large_value_uploads,
+                awaiting_large_value_uploads,
                 ..
             }) => (
                 *expected_scope_authority,
-                Some(connection_ref.connection_epoch),
+                Some(connection_epoch),
+                Some(peer_connection::take_reconnectable_large_value_uploads(
+                    large_value_uploads,
+                    awaiting_large_value_uploads,
+                )),
             ),
-            ConnectionLink::Subscriber(_) => (None, None),
+            ConnectionLink::Subscriber(_) => (None, None, None),
         };
         drop(connection_ref);
         let mut connections = self.connections.borrow_mut();
-        let before = connections.len();
         connections.retain(|candidate| !Rc::ptr_eq(candidate, connection));
-        let detached = connections.len() != before;
         drop(connections);
+        let detached = true;
+        if let (Some(destination), Some(uploads)) =
+            (upstream_upload_destination, transferable_uploads)
+            && !uploads.is_empty()
+        {
+            let mut detached_uploads = self.detached_large_value_uploads.borrow_mut();
+            let destination_uploads = detached_uploads.entry(destination).or_default();
+            peer_connection::merge_reconnectable_large_value_uploads(destination_uploads, uploads);
+        }
         if detached
             && let Some(epoch) = upstream_epoch
             && self
@@ -1213,6 +1311,19 @@ where
         self.drain_subscription_finalizations().await?;
         self.deliver_pending_mutation_errors();
         let mut stats = DbTickStats::default();
+        let chunk_completion_generation = self.chunk_resolver.completion_generation();
+        if self.chunk_resolver.has_pending_local_demand()
+            || chunk_completion_generation != self.observed_chunk_completion_generation.get()
+        {
+            stats.subscription_events += Box::pin(refresh_subscriptions_in(
+                &self.node,
+                &self.subscriptions,
+                &self.active_authority_view_receipts,
+            ))
+            .await?;
+            self.observed_chunk_completion_generation
+                .set(chunk_completion_generation);
+        }
         let mut remote_sync_applied = false;
         // A later subscriber can mutate Core state after an earlier peer link
         // has already had its turn in this pass.  Remember that generation so
@@ -1263,21 +1374,41 @@ where
             return;
         }
         let mut node = self.node.borrow_mut();
+        let mut released_tx_ids = BTreeSet::new();
         outbox.retain(|pending| {
             let state = crate::db::block_on(node.transaction_state(pending.tx_id));
             let Some((fate, _, durability)) = state else {
                 return true;
             };
-            matches!(fate, Fate::Pending | Fate::Accepted) && durability < DurabilityTier::Global
+            let retain = matches!(fate, Fate::Pending | Fate::Accepted)
+                && durability < DurabilityTier::Global;
+            if !retain {
+                released_tx_ids.insert(pending.tx_id);
+            }
+            retain
         });
+        drop(node);
+        drop(outbox);
+        if released_tx_ids.is_empty() {
+            return;
+        }
+        self.large_value_upload_retry_deadlines
+            .borrow_mut()
+            .retain(|tx_id, _| !released_tx_ids.contains(tx_id));
+        self.detached_large_value_uploads
+            .borrow_mut()
+            .retain(|_, uploads| {
+                uploads.retain(|tx_id, _| !released_tx_ids.contains(tx_id));
+                !uploads.is_empty()
+            });
     }
 }
 
 async fn optimistic_transaction_row_keys_for_query<S>(
     node: &SharedNodeState<S>,
-    cache: &mut BTreeMap<AuthorId, BTreeSet<(String, RowUuid)>>,
+    cache: &mut BTreeMap<AuthorSubject, BTreeSet<(String, RowUuid)>>,
     shape: &ValidatedQuery,
-    author: AuthorId,
+    author: AuthorSubject,
 ) -> Result<BTreeSet<(String, RowUuid)>, Error>
 where
     S: OrderedKvStorage,
@@ -2528,6 +2659,14 @@ pub(super) fn unregister_upstream_subscription_owner(
     }
 }
 
+pub(super) fn register_shape_rejection_matches(
+    subscription: SubscriptionKey,
+    shape: &ValidatedQuery,
+    opts: &RegisterShapeOptions,
+) -> bool {
+    shape.shape_id() == subscription.shape_id && opts.read_view_key() == subscription.read_view
+}
+
 pub(super) fn route_upstream_subscription_rejection(
     subscriptions: &SubscriptionList,
     owners: &UpstreamSubscriptionOwners,
@@ -2556,13 +2695,12 @@ pub(super) fn route_upstream_subscription_rejection(
             continue;
         }
         let SubscriptionKind::Prepared { shape, binding, .. } = &state_ref.kind;
-        let read_view = RegisterShapeOptions {
+        let opts = RegisterShapeOptions {
             tier: state_ref.remote_read_tier.unwrap_or(state_ref.read_tier),
             read_view: state_ref.read_view.clone(),
             propagate_upstream: state_ref.remote_propagate_upstream,
-        }
-        .read_view_key();
-        if shape.shape_id() != subscription.shape_id || read_view != subscription.read_view {
+        };
+        if !register_shape_rejection_matches(subscription, shape, &opts) {
             continue;
         }
         if subscription.binding_id != BindingId(uuid::Uuid::nil())
@@ -2609,7 +2747,7 @@ pub struct ConnectionSessionContext {
     /// Authenticated remote authority identity and fresh epoch.
     pub remote: WireAuthorityEndpoint,
     /// Authenticated session identity terminated by this link.
-    pub link_identity: AuthorId,
+    pub link_identity: AuthorSubject,
     /// Features accepted for this connection.
     pub negotiated_features: WireFeatures,
 }

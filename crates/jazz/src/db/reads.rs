@@ -2,6 +2,54 @@
 
 use super::*;
 
+/// Binding-only classification for a value whose referenced immutable content
+/// has not arrived locally yet. This deliberately preserves the distinction
+/// between an ordinary, retryable chunk absence and corrupted/permanent
+/// storage errors before they are flattened into a public [`Error`].
+#[doc(hidden)]
+pub enum BindingHydrationError {
+    RetryableChunkUnavailable { retry_after_ms: u32 },
+    Error(Error),
+}
+
+fn binding_hydration_error(error: crate::node::Error) -> BindingHydrationError {
+    use groove::chunks::ChunkError;
+    use groove::ivm::runtime::IvmRuntimeError;
+
+    let retry_after_ms = match &error {
+        crate::node::Error::LargeValueReachability(
+            groove::large_values::ReachabilityError::Chunk(ChunkError::Retryable {
+                retry_after_ms,
+            }),
+        )
+        | crate::node::Error::Groove(groove::db::Error::IvmRuntime(IvmRuntimeError::Chunk(
+            ChunkError::Retryable { retry_after_ms },
+        ))) => Some(*retry_after_ms),
+        _ => None,
+    };
+    if let Some(retry_after_ms) = retry_after_ms {
+        return BindingHydrationError::RetryableChunkUnavailable { retry_after_ms };
+    }
+    let unavailable = matches!(
+        &error,
+        crate::node::Error::ChunkStorage(groove::chunks::ChunkStorageError::Unavailable)
+            | crate::node::Error::LargeValueReachability(
+                groove::large_values::ReachabilityError::Chunk(ChunkError::Unavailable)
+            )
+            | crate::node::Error::Groove(groove::db::Error::IvmRuntime(IvmRuntimeError::Chunk(
+                ChunkError::Unavailable
+            )))
+    );
+    if unavailable {
+        BindingHydrationError::Error(Error::new(
+            ErrorCode::NotObserved,
+            "large-value chunk is permanently unavailable",
+        ))
+    } else {
+        BindingHydrationError::Error(error.into())
+    }
+}
+
 impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
@@ -30,7 +78,11 @@ where
     /// ```rust
     /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
     /// let db = block_on(open_todos_db())?;
-    /// let write = block_on(db.insert("todos", todo_cells("write docs", false)))?;
+    /// let write = block_on(db.insert(
+    ///     "todos",
+    ///     todo_cells("write docs", false),
+    ///     Default::default(),
+    /// ))?;
     /// let todo = write.row_uuid();
     ///
     /// let query = db.prepare_query(&db.table("todos"))?;
@@ -88,13 +140,13 @@ where
                     &shape,
                     &binding,
                     DurabilityTier::Local,
-                    AuthorId::SYSTEM,
+                    AuthorSubject::SYSTEM,
                 ))?),
                 Some(super::block_on(node.prepared_query_plan(
                     &shape,
                     &binding,
                     DurabilityTier::Global,
-                    AuthorId::SYSTEM,
+                    AuthorSubject::SYSTEM,
                 ))?),
             )
         } else {
@@ -160,7 +212,12 @@ where
     /// ```rust
     /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
     /// let db = block_on(open_todos_db())?;
-    /// let todo = block_on(db.insert("todos", todo_cells("first item", false)))?.row_uuid();
+    /// let todo = block_on(db.insert(
+    ///     "todos",
+    ///     todo_cells("first item", false),
+    ///     Default::default(),
+    /// ))?
+    /// .row_uuid();
     ///
     /// let todos = db.prepare_query(&db.table("todos"))?;
     /// let found = db.one(&todos)?;
@@ -215,7 +272,11 @@ where
     /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
     /// # use jazz::tx::DurabilityTier;
     /// let db = block_on(open_todos_db())?;
-    /// block_on(db.insert("todos", todo_cells("visible locally", false)))?;
+    /// block_on(db.insert(
+    ///     "todos",
+    ///     todo_cells("visible locally", false),
+    ///     Default::default(),
+    /// ))?;
     ///
     /// let opts = ReadOpts {
     ///     tier: DurabilityTier::Local,
@@ -252,7 +313,7 @@ where
         &self,
         prepared: &PreparedQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.all_for_identity_in_authorization_mode(
             prepared,
@@ -267,7 +328,7 @@ where
         &self,
         prepared: &PreparedQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        author: AuthorSubject,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
         let tier = effective_read_tier(&opts);
@@ -340,6 +401,99 @@ where
         .map_err(Into::into)
     }
 
+    /// Resolve physical indirect scalars before a subscription event crosses
+    /// a language binding boundary.
+    #[doc(hidden)]
+    pub async fn hydrate_subscription_event_for_binding(
+        &self,
+        event: &mut SubscriptionEvent,
+    ) -> Result<(), Error> {
+        self.hydrate_subscription_event_for_binding_outcome(event)
+            .await
+            .map_err(|error| match error {
+                BindingHydrationError::RetryableChunkUnavailable { .. } => Error::new(
+                    ErrorCode::NotObserved,
+                    "large-value chunk is temporarily unavailable",
+                ),
+                BindingHydrationError::Error(error) => error,
+            })
+    }
+
+    /// Like [`Self::hydrate_subscription_event_for_binding`], but retains the
+    /// sole retryable cause for host bindings that can await chunk delivery.
+    #[doc(hidden)]
+    pub async fn hydrate_subscription_event_for_binding_outcome(
+        &self,
+        event: &mut SubscriptionEvent,
+    ) -> Result<(), BindingHydrationError> {
+        let SubscriptionEvent::Delta {
+            added,
+            updated,
+            terminal_operations,
+            ..
+        } = event
+        else {
+            return Ok(());
+        };
+        let node = self.node.node.lock().await;
+        if terminal_operations.is_empty() {
+            for output in added.iter_mut().chain(updated.iter_mut()) {
+                node.hydrate_current_rows(std::slice::from_mut(&mut output.row))
+                    .await
+                    .map_err(binding_hydration_error)?;
+            }
+        } else {
+            // Structured terminal edits replace the row batches at this
+            // binding. Do not fetch discarded rows just because the internal
+            // event happened to retain them for its own reconciliation.
+            for operation in terminal_operations {
+                if matches!(
+                    &operation.edit,
+                    groove::ivm::TerminalEdit::Remove { .. }
+                        | groove::ivm::TerminalEdit::Move { .. }
+                ) {
+                    continue;
+                }
+                let descriptor = terminal_operation_value_descriptor(operation)?;
+                let value = match &mut operation.edit {
+                    groove::ivm::TerminalEdit::Insert { value, .. }
+                    | groove::ivm::TerminalEdit::Update { value, .. } => value,
+                    groove::ivm::TerminalEdit::Remove { .. }
+                    | groove::ivm::TerminalEdit::Move { .. } => unreachable!(
+                        "terminal operation payload shape changed after classification"
+                    ),
+                };
+                node.hydrate_encoded_record(&descriptor, value)
+                    .await
+                    .map_err(binding_hydration_error)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve physical indirect scalars in ordinary row output immediately
+    /// before a language binding encodes it.
+    #[doc(hidden)]
+    pub async fn hydrate_rows_for_binding(&self, rows: &mut [CurrentRow]) -> Result<(), Error> {
+        self.node
+            .node
+            .lock()
+            .await
+            .hydrate_current_rows(rows)
+            .await?;
+        Ok(())
+    }
+
+    /// Resolve physical indirect scalars in a relation snapshot immediately
+    /// before a language binding encodes it.
+    #[doc(hidden)]
+    pub async fn hydrate_relation_snapshot_for_binding(
+        &self,
+        snapshot: &mut RelationSnapshot,
+    ) -> Result<(), Error> {
+        self.hydrate_rows_for_binding(&mut snapshot.rows).await
+    }
+
     /// Tier-gated one-shot relation read evaluated as the database identity.
     pub async fn all_relation_snapshot(
         &self,
@@ -374,7 +528,7 @@ where
         &self,
         prepared: &PreparedQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<RelationSnapshot, Error> {
         ensure_supported_read_view(&opts)?;
         if opts.include_deleted {
@@ -439,7 +593,7 @@ where
         &self,
         query: &RelationQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<RelationSnapshot, Error> {
         ensure_default_read_view(&opts)?;
         let query = relation_query_to_query(query)?;
@@ -455,4 +609,65 @@ where
             edges: Vec::new(),
         })
     }
+}
+
+/// The descriptor on a terminal operation describes its root record. Nested
+/// insertions and updates carry only their child record bytes, so follow the
+/// operation path to find the descriptor which actually owns `edit.value`.
+///
+/// Terminal paths deliberately omit a child key for insertions: the edit owns
+/// that key. A key segment therefore validates the path shape but does not
+/// change the descriptor.
+fn terminal_operation_value_descriptor(
+    operation: &groove::ivm::TerminalOperation,
+) -> Result<RecordDescriptor, BindingHydrationError> {
+    use groove::ivm::TerminalPathSegment;
+    use groove::records::ValueType;
+
+    let mut descriptor = operation.root_descriptor;
+    let mut expect_collection = true;
+    for segment in &operation.path {
+        match (expect_collection, segment) {
+            (true, TerminalPathSegment::Collection(name)) => {
+                let Some(field) = descriptor
+                    .fields()
+                    .iter()
+                    .find(|field| field.name.as_deref() == Some(name))
+                else {
+                    return Err(BindingHydrationError::Error(Error::new(
+                        ErrorCode::Protocol,
+                        "terminal operation references an unknown collection field",
+                    )));
+                };
+                let ValueType::Array(element) = &field.value_type else {
+                    return Err(BindingHydrationError::Error(Error::new(
+                        ErrorCode::Protocol,
+                        "terminal operation collection field is not an array",
+                    )));
+                };
+                let ValueType::Record(child) = element.as_ref() else {
+                    return Err(BindingHydrationError::Error(Error::new(
+                        ErrorCode::Protocol,
+                        "terminal operation collection does not contain records",
+                    )));
+                };
+                descriptor = **child;
+                expect_collection = false;
+            }
+            (false, TerminalPathSegment::Key(_)) => expect_collection = true,
+            (true, TerminalPathSegment::Key(_)) => {
+                return Err(BindingHydrationError::Error(Error::new(
+                    ErrorCode::Protocol,
+                    "terminal operation path starts with a key",
+                )));
+            }
+            (false, TerminalPathSegment::Collection(_)) => {
+                return Err(BindingHydrationError::Error(Error::new(
+                    ErrorCode::Protocol,
+                    "terminal operation path is missing a child key",
+                )));
+            }
+        }
+    }
+    Ok(descriptor)
 }

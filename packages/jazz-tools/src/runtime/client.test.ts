@@ -213,6 +213,7 @@ describe("JazzClient.updateCookieSession", () => {
           subject: "alice-subject",
           issuer: "https://issuer.example",
         },
+        issuer: "https://issuer.example",
         authMode: "external",
       },
     });
@@ -225,6 +226,7 @@ describe("JazzClient.updateCookieSession", () => {
         subject: "alice-subject",
         issuer: "https://issuer.example",
       },
+      issuer: "https://issuer.example",
       authMode: "external",
     });
 
@@ -242,11 +244,13 @@ describe("JazzClient.updateCookieSession", () => {
       cookieSession: {
         user_id: "00000000-0000-0000-0000-000000000001",
         claims: { role: "reader" },
+        issuer: "https://issuer.example",
         authMode: "external",
       },
     });
 
     const refreshed = {
+      issuer: "https://issuer.example",
       user_id: "00000000-0000-0000-0000-000000000001",
       claims: { role: "writer" },
       authMode: "external" as const,
@@ -308,12 +312,12 @@ describe("JazzClient transaction query plumbing", () => {
     );
 
     expect(JSON.parse(runtime.insert.mock.calls[0][2] as string)).toMatchObject({
-      branch_view: { head: { values: { workspace: [14, 14] } } },
+      branch_view: { head: { values: { workspace: [15, 14] } } },
     });
     expect(JSON.parse(runtime.update.mock.calls[0][3] as string)).toMatchObject({
       branch_view: {
-        head: { values: { workspace: [14, 14] } },
-        base: { Current: { values: { workspace: [14, 2] } } },
+        head: { values: { workspace: [15, 14] } },
+        base: { Current: { values: { workspace: [15, 2] } } },
       },
     });
   });
@@ -343,12 +347,12 @@ describe("JazzClient transaction query plumbing", () => {
       read_view: {
         source: {
           BranchView: {
-            head: { values: { workspace: [14, 14] } },
+            head: { values: { workspace: [15, 14] } },
             base: {
               Current: {
                 values: {
-                  workspace: [14, 2],
-                  tenant: [8, 16, ...Array(16).fill(0x42)],
+                  workspace: [15, 2],
+                  tenant: [9, 16, ...Array(16).fill(0x42)],
                 },
               },
             },

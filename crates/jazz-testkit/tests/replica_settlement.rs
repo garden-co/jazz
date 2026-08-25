@@ -16,7 +16,7 @@ mod relay_topology {
     use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SubscriptionEvent, block_on};
     use jazz::groove::records::Value;
     use jazz::groove::storage::MemoryStorage;
-    use jazz::ids::{AuthorId, NodeUuid};
+    use jazz::ids::{AuthorSubject, NodeUuid};
     use jazz::schema::JazzSchema;
     use jazz::tools::{ColumnType, SchemaBuilder, TableSchema};
     use jazz::tx::DurabilityTier;
@@ -29,7 +29,7 @@ mod relay_topology {
         JazzSchema::new(&source).expect("replica settlement public schema compiles")
     }
 
-    fn open_db(node: u8, author: AuthorId) -> Db<MemoryStorage> {
+    fn open_db(node: u8, author: AuthorSubject) -> Db<MemoryStorage> {
         let schema = schema();
         let column_families = schema.column_families();
         let refs = column_families
@@ -59,7 +59,7 @@ mod relay_topology {
             MemoryStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([node; 16]),
-                author: AuthorId::SYSTEM,
+                author: AuthorSubject::SYSTEM,
             },
         )))
         .expect("open authority database")
@@ -97,8 +97,8 @@ mod relay_topology {
     /// ```
     #[test]
     fn relay_holds_downstream_settlement_until_upstream_frontier_confirms() {
-        let alice = AuthorId::from_bytes([0xa1; 16]);
-        let bob = AuthorId::from_bytes([0xb1; 16]);
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let bob = AuthorSubject::for_test_bytes([0xb1; 16]);
         let client = open_db(0x11, alice);
         let relay = open_db(0x21, alice);
         let authority = open_authority(0x31);
@@ -109,9 +109,12 @@ mod relay_topology {
         let (seeder_transport, authority_seed_transport) = duplex();
         let _seeder_connection = block_on(seeder.connect_upstream(seeder_transport));
         let _authority_seed_subscriber = authority.accept_subscriber(authority_seed_transport, bob);
-        let seeded =
-            block_on(seeder.insert("documents", document_cells("settled at the authority")))
-                .expect("seed authority document");
+        let seeded = block_on(seeder.insert(
+            "documents",
+            document_cells("settled at the authority"),
+            Default::default(),
+        ))
+        .expect("seed authority document");
         tick(&seeder, "upload seeded document");
         tick(&authority, "accept seeded document");
         tick(&seeder, "apply seeded document fate");
@@ -195,7 +198,7 @@ mod relay_topology {
     /// ```
     #[test]
     fn relay_with_installed_but_unanswered_upstream_holds_downstream_settlement() {
-        let alice = AuthorId::from_bytes([0xa2; 16]);
+        let alice = AuthorSubject::for_test_bytes([0xa2; 16]);
         let client = open_db(0x12, alice);
         let relay = open_db(0x22, alice);
         let authority = open_authority(0x32);
@@ -268,10 +271,14 @@ mod relay_topology {
     /// ```
     #[test]
     fn relay_without_any_upstream_settles_downstream_local_reads() {
-        let alice = AuthorId::from_bytes([0xa3; 16]);
-        let relay = open_db(0x23, AuthorId::SYSTEM);
-        block_on(relay.insert("documents", document_cells("stored before alice opens")))
-            .expect("seed relay document");
+        let alice = AuthorSubject::for_test_bytes([0xa3; 16]);
+        let relay = open_db(0x23, AuthorSubject::SYSTEM);
+        block_on(relay.insert(
+            "documents",
+            document_cells("stored before alice opens"),
+            Default::default(),
+        ))
+        .expect("seed relay document");
 
         let client = open_db(0x13, alice);
         client.set_non_durable_client();
@@ -322,13 +329,17 @@ mod relay_topology {
     /// Actors: alice holds a Global subscription while reading locally.
     #[test]
     fn one_shot_local_reads_resolve_while_authority_subscription_is_held() {
-        let alice = AuthorId::from_bytes([0xa4; 16]);
+        let alice = AuthorSubject::for_test_bytes([0xa4; 16]);
         let node = open_db(0x14, alice);
         let (upstream_transport, _held_far_end) = duplex();
         let _upstream = block_on(node.connect_upstream(upstream_transport));
 
-        let written = block_on(node.insert("documents", document_cells("locally visible")))
-            .expect("insert local document");
+        let written = block_on(node.insert(
+            "documents",
+            document_cells("locally visible"),
+            Default::default(),
+        ))
+        .expect("insert local document");
 
         let documents = node
             .prepare_query(&node.table("documents"))
@@ -366,7 +377,7 @@ mod relay_topology {
     /// Actors: alice's node; the authority attaches only later.
     #[test]
     fn node_subscription_with_unanswered_upstream_holds_authority_tier() {
-        let alice = AuthorId::from_bytes([0xa5; 16]);
+        let alice = AuthorSubject::for_test_bytes([0xa5; 16]);
         let node = open_db(0x15, alice);
         let authority = open_authority(0x35);
 
@@ -417,10 +428,14 @@ mod relay_topology {
     /// Actors: alice's stand-alone node with one stored document.
     #[test]
     fn node_subscription_without_any_upstream_settles_locally() {
-        let alice = AuthorId::from_bytes([0xa6; 16]);
+        let alice = AuthorSubject::for_test_bytes([0xa6; 16]);
         let node = open_db(0x16, alice);
-        let written = block_on(node.insert("documents", document_cells("settles locally")))
-            .expect("insert local document");
+        let written = block_on(node.insert(
+            "documents",
+            document_cells("settles locally"),
+            Default::default(),
+        ))
+        .expect("insert local document");
 
         let documents = node
             .prepare_query(&node.table("documents"))
@@ -454,7 +469,7 @@ mod relay_topology {
     /// ```
     #[test]
     fn client_subscription_waits_for_connected_upstream_frontier() {
-        let alice = AuthorId::from_bytes([0xa7; 16]);
+        let alice = AuthorSubject::for_test_bytes([0xa7; 16]);
         let client = open_db(0x17, alice);
         let authority = open_authority(0x37);
 
@@ -522,14 +537,17 @@ mod relay_topology {
     #[test]
     #[ignore = "#1766: detaching the upstream never releases a held authority-tier subscription: no local settlement is delivered and the read stays pending forever instead of settling from the local store exactly once"]
     fn detaching_the_upstream_settles_held_subscription_locally_exactly_once() {
-        let alice = AuthorId::from_bytes([0xa8; 16]);
+        let alice = AuthorSubject::for_test_bytes([0xa8; 16]);
         let node = open_db(0x18, alice);
         let (upstream_transport, _held_far_end) = duplex();
         let upstream = block_on(node.connect_upstream(upstream_transport));
 
-        let written =
-            block_on(node.insert("documents", document_cells("local answer after detach")))
-                .expect("insert local document");
+        let written = block_on(node.insert(
+            "documents",
+            document_cells("local answer after detach"),
+            Default::default(),
+        ))
+        .expect("insert local document");
 
         let documents = node
             .prepare_query(&node.table("documents"))

@@ -8,7 +8,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid};
+use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
@@ -45,7 +45,7 @@ fn open_db(seed: u64) -> Result<Db<MemoryStorage>, Box<dyn std::error::Error>> {
         storage,
         identity: DbIdentity {
             node: NodeUuid::from_bytes([0x44; 16]),
-            author: AuthorId::from_bytes([0x55; 16]),
+            author: AuthorSubject::for_test_bytes([0x55; 16]),
         },
         id_source: Some(Box::new(SeededRowIdSource::new(seed))),
     }))?)
@@ -82,7 +82,11 @@ fn run_case(max_rows: usize, subscribed: bool) -> Result<(), Box<dyn std::error:
         let tx = block_on(db.mergeable_tx())?;
         let stage_start = Instant::now();
         for row in rows_before..rows_after {
-            block_on(tx.insert("todos", todo_cells(format!("todo {row:06}"), false)))?;
+            block_on(tx.insert(
+                "todos",
+                todo_cells(format!("todo {row:06}"), false),
+                Default::default(),
+            ))?;
         }
         let stage_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 

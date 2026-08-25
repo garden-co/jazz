@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid};
+use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::node::{CurrentRow, NodeState};
 use jazz::peer::PeerState;
 use jazz::schema::{JazzSchema, TableSchema};
@@ -88,7 +88,7 @@ fn execute_fixture_smoke(ctx: &mut dyn DriverContext, seed: u64) -> Summary {
             FixtureCommitApply {
                 writer_name,
                 core_name: "core",
-                made_by: AuthorId::SYSTEM,
+                made_by: AuthorSubject::SYSTEM,
                 now_ms: 1_000 + idx as u64,
             },
         )

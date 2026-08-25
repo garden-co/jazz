@@ -3,7 +3,7 @@ mod common;
 use jazz::db::{Db, DbConfig, DbIdentity, ExclusiveTxOps, MergeableTxOps, SeededRowIdSource};
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, col, gt, lit};
 use jazz::schema::JazzSchema;
 use jazz::tools::{
@@ -137,7 +137,7 @@ async fn open_owner(schema: JazzSchema) -> Db<TestStorage> {
             TestStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x31; 16]),
-                author: AuthorId::from_bytes([0xa1; 16]),
+                author: AuthorSubject::for_test_bytes([0xa1; 16]),
             },
         )
         .with_id_source(SeededRowIdSource::new(7)),
@@ -166,12 +166,26 @@ fn registered_schema_views_share_one_open_batch() {
         owner.begin_mergeable(batch).await.unwrap();
         old_view
             .mergeable_tx_ref(batch)
-            .insert_with_id("items", RowUuid::from_bytes([1; 16]), Default::default())
+            .insert(
+                "items",
+                Default::default(),
+                jazz::db::InsertOptions {
+                    row_id: Some(RowUuid::from_bytes([1; 16])),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         new_view
             .mergeable_tx_ref(batch)
-            .insert_with_id("items", RowUuid::from_bytes([2; 16]), Default::default())
+            .insert(
+                "items",
+                Default::default(),
+                jazz::db::InsertOptions {
+                    row_id: Some(RowUuid::from_bytes([2; 16])),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         owner.commit_mergeable_handle(batch).await.unwrap();
@@ -278,7 +292,14 @@ fn empty_owner_accepts_first_typed_schema_view() {
         owner.begin_mergeable(batch).await.unwrap();
         let view = owner.register_schema_view(schema("first")).await.unwrap();
         view.mergeable_tx_ref(batch)
-            .insert_with_id("items", RowUuid::from_bytes([3; 16]), Default::default())
+            .insert(
+                "items",
+                Default::default(),
+                jazz::db::InsertOptions {
+                    row_id: Some(RowUuid::from_bytes([3; 16])),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         let prepared = view.prepare_query(&view.table("items")).unwrap();
@@ -304,7 +325,14 @@ fn one_batch_accepts_writes_from_structurally_distinct_views() {
         let first = owner.register_schema_view(schema("same")).await.unwrap();
         first
             .mergeable_tx_ref(batch)
-            .insert_with_id("items", RowUuid::from_bytes([4; 16]), Default::default())
+            .insert(
+                "items",
+                Default::default(),
+                jazz::db::InsertOptions {
+                    row_id: Some(RowUuid::from_bytes([4; 16])),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         let second = owner
@@ -313,7 +341,14 @@ fn one_batch_accepts_writes_from_structurally_distinct_views() {
             .unwrap();
         second
             .mergeable_tx_ref(batch)
-            .insert_with_id("items", RowUuid::from_bytes([5; 16]), Default::default())
+            .insert(
+                "items",
+                Default::default(),
+                jazz::db::InsertOptions {
+                    row_id: Some(RowUuid::from_bytes([5; 16])),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
 
@@ -340,7 +375,14 @@ fn typed_view_reads_and_updates_preexisting_snapshot_rows() {
         let seed = OpenTransactionId::new();
         owner.begin_mergeable(seed).await.unwrap();
         view.mergeable_tx_ref(seed)
-            .insert_with_id("items", row, Default::default())
+            .insert(
+                "items",
+                Default::default(),
+                jazz::db::InsertOptions {
+                    row_id: Some(row),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         owner.commit_mergeable_handle(seed).await.unwrap();
@@ -372,6 +414,7 @@ fn typed_view_reads_and_updates_preexisting_snapshot_rows() {
             "items",
             row,
             [("label".to_owned(), Value::String("updated".to_owned()))].into(),
+            Default::default(),
         )
         .await
         .unwrap();
@@ -393,9 +436,16 @@ fn ordinary_view_write_does_not_enter_open_owner_snapshot() {
         owner.begin_exclusive(batch).await.unwrap();
         let view = owner.register_schema_view(schema("direct")).await.unwrap();
         let row = RowUuid::from_bytes([7; 16]);
-        view.insert_with_id("items", row, Default::default())
-            .await
-            .unwrap();
+        view.insert(
+            "items",
+            Default::default(),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
 
         let prepared = view.prepare_query(&view.table("items")).unwrap();
         assert!(
@@ -418,9 +468,16 @@ fn exclusive_view_commit_rejects_concurrent_local_row_change() {
         let owner = open_owner(empty_schema()).await;
         let view = owner.register_schema_view(schema("base")).await.unwrap();
         let row = RowUuid::from_bytes([8; 16]);
-        view.insert_with_id("items", row, Default::default())
-            .await
-            .unwrap();
+        view.insert(
+            "items",
+            Default::default(),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
 
         let batch = OpenTransactionId::new();
         owner.begin_exclusive(batch).await.unwrap();
@@ -430,6 +487,7 @@ fn exclusive_view_commit_rejects_concurrent_local_row_change() {
             "items",
             row,
             [("label".to_owned(), Value::String("alice".to_owned()))].into(),
+            Default::default(),
         )
         .await
         .unwrap();
@@ -437,6 +495,7 @@ fn exclusive_view_commit_rejects_concurrent_local_row_change() {
             "items",
             row,
             [("label".to_owned(), Value::String("bob".to_owned()))].into(),
+            Default::default(),
         )
         .await
         .unwrap();

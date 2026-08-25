@@ -92,7 +92,7 @@ fn scalar_enum_later_sibling_appends_without_retagging_deeper_cases() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: a2.id,
@@ -153,7 +153,7 @@ fn scalar_enum_later_sibling_appends_without_retagging_deeper_cases() {
         ],
     );
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 2,
             schema: b.id,
@@ -250,7 +250,7 @@ fn direct_payload_enum_append_activates_and_recovers() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved.id,
@@ -310,7 +310,7 @@ fn payload_enum_unknown_case_is_ignored_only_when_unselected() {
     let base = schema(false); let evolved = SchemaVersion::new(schema(true));
     let (_dir, mut core) = open_node_with_schema(node(0x76), base.clone());
     publish_schema_lineage(&mut core, evolved.clone(), MigrationLens::new(base.version_id(), evolved.id, vec![TableLens { source_table: "items".into(), target_table: "items".into(), ops: vec![LensOp::TransformColumn { column: "status".into(), transform: "jazz.identity".into() }] }]), Vec::<String>::new(), Vec::<String>::new()).unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema { author: AuthorId::SYSTEM, pointer: CurrentWriteSchema { revision: 1, schema: evolved.id } }).unwrap();
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema { author: AuthorSubject::SYSTEM, pointer: CurrentWriteSchema { revision: 1, schema: evolved.id } }).unwrap();
     let payload = groove::records::RecordDescriptor::new([("x", groove::records::ValueType::String)]);
     let unknown = row(0x76);
     core.commit_mergeable_settled(MergeableCommit::new("items", unknown, 1).cells(BTreeMap::from([
@@ -367,7 +367,7 @@ fn nested_scalar_enum_unknown_case_omits_only_that_row() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved.id,
@@ -442,7 +442,7 @@ fn nested_payload_enum_unknown_case_omits_only_that_row() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved.id,
@@ -523,7 +523,7 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema { revision: 1, schema: evolved.id },
     })
     .unwrap();
@@ -543,7 +543,7 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
     let initial = title_peer
         .rehydrate_query(&mut core, &title_only, &title_binding)
         .expect("old-schema title subscription opens over known case");
-    let SyncMessage::ViewUpdate { reset_result_set, result_member_adds, .. } = initial else {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { reset_result_set, result_member_adds, .. }) = initial else {
         panic!("expected initial maintained view update");
     };
     assert!(reset_result_set);
@@ -554,13 +554,13 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
     let unchanged = title_peer
         .query_update(&mut core, &title_only, &title_binding)
         .expect("identical projection target remains registered");
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         result_member_adds,
         result_member_removes,
         terminal_operations,
         ..
-    } = unchanged else {
+    }) = unchanged else {
         panic!("expected maintained view update");
     };
     assert!(!reset_result_set, "idempotent target registration must not reset");
@@ -579,7 +579,7 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
     let update = title_peer
         .query_update(&mut core, &title_only, &title_binding)
         .expect("unused unknown enum must not break maintained title output");
-    let SyncMessage::ViewUpdate { reset_result_set, result_member_adds, .. } = update else {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { reset_result_set, result_member_adds, .. }) = update else {
         panic!("expected maintained view update");
     };
     assert!(!reset_result_set);
@@ -620,7 +620,7 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
             status_options.clone(),
         )
         .expect("required unknown enum case is a row exclusion");
-    let SyncMessage::ViewUpdate { result_member_adds, .. } = update else {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { result_member_adds, .. }) = update else {
         panic!("expected initial maintained view update");
     };
     assert_eq!(result_member_adds.len(), 1);
@@ -648,7 +648,7 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
         )
         .expect("newly incompatible delta removes the row")
         .expect("expected view update");
-    let SyncMessage::ViewUpdate { result_member_removes, .. } = update else {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { result_member_removes, .. }) = update else {
         panic!("expected maintained view update");
     };
     assert!(result_member_removes.iter().any(|member| {
@@ -671,7 +671,7 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
         )
         .expect("newly compatible delta re-adds the row")
         .expect("expected view update");
-    let SyncMessage::ViewUpdate { result_member_adds, .. } = update else {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { result_member_adds, .. }) = update else {
         panic!("expected maintained view update");
     };
     assert!(result_member_adds.iter().any(|member| {
@@ -704,7 +704,7 @@ fn maintained_old_payload_enum_subscription_omits_new_case_without_aliasing() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema { revision: 1, schema: evolved.id },
     })
     .unwrap();
@@ -736,7 +736,7 @@ fn maintained_old_payload_enum_subscription_omits_new_case_without_aliasing() {
     let update = required_peer
         .rehydrate_query(&mut core, &required, &binding)
         .expect("unknown payload case is a row exclusion");
-    let SyncMessage::ViewUpdate { result_member_adds, .. } = update else {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { result_member_adds, .. }) = update else {
         panic!("expected initial maintained view update");
     };
     assert!(result_member_adds.is_empty());
@@ -781,7 +781,7 @@ fn old_enum_schema_only_decodes_cases_required_by_the_query() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved.id,
@@ -914,7 +914,7 @@ fn enum_projection_requirement_closure_includes_hidden_policy_fields() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema { revision: 1, schema: evolved.id },
     })
     .unwrap();
@@ -1032,7 +1032,7 @@ fn old_enum_schema_omits_unknown_rows_from_materialized_query_sources() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema { revision: 1, schema: evolved.id },
     })
     .unwrap();
@@ -1068,7 +1068,7 @@ fn old_enum_schema_omits_unknown_rows_from_materialized_query_sources() {
             &old_binding,
             DurabilityTier::Local,
             None,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             QueryAuthorizationMode::TrustedServing,
         )
         .unwrap()
@@ -1101,7 +1101,7 @@ fn old_enum_winner_projection_refreshes_after_later_registry_append() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema { revision: 1, schema: middle.id },
     })
     .unwrap();
@@ -1132,7 +1132,7 @@ fn old_enum_winner_projection_refreshes_after_later_registry_append() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema { revision: 2, schema: latest.id },
     })
     .unwrap();
@@ -1175,7 +1175,7 @@ fn old_enum_index_read_uses_global_index_before_post_winner_omission() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema { revision: 1, schema: evolved.id },
     })
     .unwrap();
@@ -1227,7 +1227,7 @@ fn enum_projection_requirement_none_allows_unused_relation_enum() {
             TableLens { source_table: "states".into(), target_table: "states".into(), ops: vec![LensOp::TransformColumn { column: "status".into(), transform: "jazz.identity".into() }] },
         ],
     ), Vec::<String>::new(), Vec::<String>::new()).unwrap();
-    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema { author: AuthorId::SYSTEM, pointer: CurrentWriteSchema { revision: 1, schema: evolved.id } }).unwrap();
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema { author: AuthorSubject::SYSTEM, pointer: CurrentWriteSchema { revision: 1, schema: evolved.id } }).unwrap();
     let state = row(0x79);
     core.commit_mergeable_settled(MergeableCommit::new("states", state, 1).cells(BTreeMap::from([("status".into(), Value::EnumTag(1))]))).unwrap();
     core.commit_mergeable_settled(MergeableCommit::new("items", row(0x7a), 2).cells(BTreeMap::from([
@@ -1280,7 +1280,7 @@ fn independent_column_enum_registries_evolve_additively_across_reopen() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: a_evolved.id,
@@ -1326,7 +1326,7 @@ fn independent_column_enum_registries_evolve_additively_across_reopen() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 2,
             schema: b_evolved.id,

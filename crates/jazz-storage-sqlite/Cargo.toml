@@ -1,0 +1,12 @@
+[package]
+name = "jazz-storage-sqlite"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+groove.workspace = true
+rusqlite = { version = "0.34", features = ["bundled"] }
+
+[dev-dependencies]
+futures = "0.3"
+tempfile = "3.27.0"

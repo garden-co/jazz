@@ -18,11 +18,25 @@ import type {
   OpenBatchId,
   PermissionAdvice,
   Runtime,
+  StreamingInsertResult,
+  StreamingMutationKind,
+  StreamingValueSource,
   TransactionKind,
 } from "../client.js";
 import type { Session } from "../context.js";
 import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
-import { authorBytesForSubject } from "../author-id.js";
+import {
+  TRUSTED_RESERVED_SESSION_TOKEN_FIELD,
+  isReservedJazzIssuer,
+  isTrustedReservedSession,
+} from "../client-session.js";
+import {
+  authorBytesForSession,
+  canonicalAuthorSubject,
+  decodeCanonicalAuthorSubjectBytes,
+  isUsableSubject,
+  parseCanonicalAuthorSubject,
+} from "../author-id.js";
 import {
   PostcardReader,
   PostcardWriter,
@@ -34,6 +48,7 @@ import {
   type NativeRelationSubscriptionSnapshot,
   type NativeRowBatch,
   type NativeSubscriptionDelta,
+  type NativeSelfSignedClientProof,
   type QueryArraySubquery,
   type DescriptorField,
   type QueryLiteral,
@@ -44,7 +59,12 @@ import {
 } from "./native-codec.js";
 import { encodeSchema } from "./schema-codec.js";
 import { nativeRowFieldPlanCacheKey, valueTypeCacheKey } from "./native-row-descriptor-key.js";
-import { WebSocketCarrier, type WebSocketNegotiation, wireAuthFailureReason } from "./websocket.js";
+import {
+  WebSocketCarrier,
+  peerIdentityForWebSocketAuth,
+  type WebSocketNegotiation,
+  wireAuthFailureReason,
+} from "./websocket.js";
 import {
   createNativeRowValueEncoder,
   createRecord,
@@ -74,11 +94,51 @@ const SERVER_PUMP_DEBOUNCE_MS = 16;
 const MAX_CORE_TICKS_PER_TURN = 4;
 
 type ReadAuthorizationHost = "client-local" | "trusted-serving";
+type CoreTickWake = "immediate" | "deferred" | `after:${number}`;
 
 type NativeDbConstructor = {
   openMemory(schema: Uint8Array, config: Uint8Array): NativeDb;
+  openMemoryAsBackend?(schema: Uint8Array, config: Uint8Array): NativeDb;
   openPersistent?(dataPath: string, schema: Uint8Array, config: Uint8Array): NativeDb;
+  openPersistentAsBackend?(dataPath: string, schema: Uint8Array, config: Uint8Array): NativeDb;
+  openMemoryWithSelfSignedProof?(
+    schema: Uint8Array,
+    config: Uint8Array,
+    token: string,
+    appId: string,
+    claimedAuthor: string,
+  ): NativeDb;
+  openPersistentWithSelfSignedProof?(
+    dataPath: string,
+    schema: Uint8Array,
+    config: Uint8Array,
+    token: string,
+    appId: string,
+    claimedAuthor: string,
+  ): NativeDb;
 };
+
+type NativeWriteOptions = {
+  author?: Uint8Array;
+  updatedAtMs?: number;
+};
+
+type NativeInsertOptions = NativeWriteOptions & {
+  rowId?: Uint8Array;
+  branch?: unknown;
+};
+
+type NativeUpdateOptions = NativeWriteOptions & {
+  head?: unknown;
+  base?: unknown;
+};
+
+type NativeUpsertOptions = NativeWriteOptions & {
+  branch?: unknown;
+};
+
+type NativeDeleteOptions = NativeUpdateOptions;
+type NativeRestoreOptions = NativeUpsertOptions;
 
 type NativeDb = {
   // Native runtime adapters may close synchronously or asynchronously and may
@@ -123,126 +183,38 @@ type NativeDb = {
     author: Uint8Array,
     opts: unknown,
   ): ReadableStream<unknown> | Subscription;
-  insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): Write;
-  insertWithIdEncodedForIdentity(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    author: Uint8Array,
-    updatedAtMs?: number | null,
-  ): Write;
-  insertWithIdEncoded(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    updatedAtMs?: number | null,
-  ): Write;
-  insertWithIdEncodedInBranch?(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    branch: unknown,
-  ): Write;
-  insertWithIdEncodedInBranchForIdentity?(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    branch: unknown,
-    author: Uint8Array,
-  ): Write;
-  restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): Write;
-  restoreEncodedForIdentity(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    author: Uint8Array,
-    updatedAtMs?: number | null,
-  ): Write;
-  restoreEncoded(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    updatedAtMs?: number | null,
-  ): Write;
-  restoreInBranch?(table: string, rowId: Uint8Array, branch: unknown): Write;
-  restoreEncodedInBranch?(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    branch: unknown,
-  ): Write;
-  restoreEncodedInBranchForIdentity?(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    branch: unknown,
-    author: Uint8Array,
-  ): Write;
-  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): Write;
-  updateEncodedForIdentity(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    author: Uint8Array,
-    updatedAtMs?: number | null,
-  ): Write;
+  insertEncoded(table: string, cells: Uint8Array, options?: NativeInsertOptions): Write;
   updateEncoded(
     table: string,
     rowId: Uint8Array,
     patch: Uint8Array,
-    updatedAtMs?: number | null,
-  ): Write;
-  updateEncodedInBranch?(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    branch: unknown,
-  ): Write;
-  updateEncodedInBranchView?(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    head: unknown,
-    base?: unknown,
-  ): Write;
-  updateEncodedInBranchViewForIdentity?(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    head: unknown,
-    base: unknown,
-    author: Uint8Array,
-  ): Write;
-  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): Write;
-  upsertEncodedForIdentity(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    author: Uint8Array,
-    updatedAtMs?: number | null,
+    options?: NativeUpdateOptions,
   ): Write;
   upsertEncoded(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
-    updatedAtMs?: number | null,
+    options?: NativeUpsertOptions,
   ): Write;
-  delete(table: string, rowId: Uint8Array, updatedAtMs?: number | null): Write;
-  deleteForIdentity(
+  deleteEncoded(table: string, rowId: Uint8Array, options?: NativeDeleteOptions): Write;
+  restoreEncoded(
     table: string,
     rowId: Uint8Array,
-    author: Uint8Array,
-    updatedAtMs?: number | null,
+    cells: Uint8Array,
+    options?: NativeRestoreOptions,
   ): Write;
-  deleteInBranch?(table: string, rowId: Uint8Array, branch: unknown): Write;
-  deleteInBranchView?(table: string, rowId: Uint8Array, head: unknown, base?: unknown): Write;
-  deleteInBranchViewForIdentity?(
+  beginStreamingMutationEncoded?(
     table: string,
     rowId: Uint8Array,
-    head: unknown,
-    base: unknown,
-    author: Uint8Array,
-  ): Write;
+    cells: Uint8Array,
+    column: string,
+    kind: "Text" | "Json" | "Bytea",
+    mutation?: StreamingMutationKind,
+    author?: Uint8Array,
+    updatedAtMs?: number,
+    head?: unknown,
+    base?: unknown,
+  ): NativeStreamingMutation;
   requestInsertPermissionAdviceEncoded?(
     table: string,
     cells: Uint8Array,
@@ -265,6 +237,46 @@ type NativeDb = {
   ): void;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
   setNonDurableClient?(): void;
+  setLargeValueStagingPolicy?(
+    incomingBytesPerWindow: number,
+    windowMs: number,
+    maxAgeMs?: number | null,
+  ): void;
+  evictExpiredStagedLargeValues?(): number | Promise<number>;
+  readValueRange?(
+    table: string,
+    rowId: Uint8Array,
+    column: string,
+    start: number,
+    end: number,
+  ): Uint8Array | Promise<Uint8Array>;
+  readTextUtf16Range?(
+    table: string,
+    rowId: Uint8Array,
+    column: string,
+    start: number,
+    end: number,
+  ): string | Promise<string>;
+  readJsonPointer?(
+    table: string,
+    rowId: Uint8Array,
+    column: string,
+    pointer: string,
+  ): unknown | Promise<unknown>;
+  appendValue?(
+    table: string,
+    rowId: Uint8Array,
+    column: string,
+    bytes: Uint8Array,
+  ): Write | Promise<Write>;
+  spliceValue?(
+    table: string,
+    rowId: Uint8Array,
+    column: string,
+    offset: number,
+    deleteLength: number,
+    insert: Uint8Array,
+  ): Write | Promise<Write>;
   connectUpstream(): Transport;
   connectUpstreamWithSession?(
     protocolVersion: number,
@@ -278,6 +290,12 @@ type NativeDb = {
   tick(): void | Promise<void>;
   close?(): void;
   free?(): void;
+};
+
+type NativeStreamingMutation = {
+  push(chunk: Uint8Array): void | Promise<void>;
+  finish(): Write | Promise<Write>;
+  abort(): boolean | Promise<boolean>;
 };
 
 type NativePermissionAdviceRequest = {
@@ -295,7 +313,8 @@ type Subscription = {
 
 type Write = {
   readonly batchId: string;
-  payload: Uint8Array;
+  readonly payload: Uint8Array;
+  readonly rowId: Uint8Array;
   wait(tier: string): Promise<void>;
   writeState(): unknown;
   close?(): boolean;
@@ -304,51 +323,26 @@ type Write = {
 type Tx = {
   commit(): Write;
   rollback(): void;
-  insertWithIdEncoded(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    updatedAtMs?: number | null,
-  ): void;
-  insertWithIdEncodedInBranch?(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    branch: unknown,
-  ): void;
-  restoreEncoded(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    updatedAtMs?: number | null,
-  ): void;
-  restoreEncodedInBranch?(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    branch: unknown,
-  ): void;
+  insertEncoded(table: string, cells: Uint8Array, options?: NativeInsertOptions): Uint8Array;
   updateEncoded(
     table: string,
     rowId: Uint8Array,
     patch: Uint8Array,
-    updatedAtMs?: number | null,
-  ): void;
-  updateEncodedInBranchView?(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    head: unknown,
-    base?: unknown,
+    options?: NativeUpdateOptions,
   ): void;
   upsertEncoded(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
-    updatedAtMs?: number | null,
+    options?: NativeUpsertOptions,
   ): void;
-  delete(table: string, rowId: Uint8Array, updatedAtMs?: number | null): void;
-  deleteInBranchView?(table: string, rowId: Uint8Array, head: unknown, base?: unknown): void;
+  deleteEncoded(table: string, rowId: Uint8Array, options?: NativeDeleteOptions): void;
+  restoreEncoded(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    options?: NativeRestoreOptions,
+  ): void;
 };
 
 export type Transport = {
@@ -358,6 +352,9 @@ export type Transport = {
   sendWireFrames?(frames: readonly Uint8Array[]): void;
   setOutboundScheduler?(callback: () => void): void;
   clearOutboundScheduler?(): void;
+  routeAuxiliaryWireFrame?(frame: Uint8Array): unknown | Promise<unknown>;
+  recvAuxiliaryWireFrames?(maxFrames?: number, maxBytes?: number): unknown[];
+  auxiliaryOutboundReady?(): boolean | Promise<void>;
   tick(): number | Promise<number>;
   updateAuthenticatedClaims?(claims: Record<string, unknown>): void | Promise<void>;
   free?(): void;
@@ -400,7 +397,9 @@ type ServerTransportWorkWaiter = {
 };
 
 type RuntimeSession = {
+  issuer: string;
   user_id: string;
+  authMode?: string;
   claims: Record<string, unknown>;
   identity: Uint8Array;
 };
@@ -471,11 +470,72 @@ function openPersistentDb(
   dataPath: string,
   schema: Uint8Array,
   config: Uint8Array,
+  selfSignedClientProof?: NativeSelfSignedClientProof,
+  backendMode = false,
 ): NativeDb {
+  if (selfSignedClientProof && backendMode) {
+    throw new Error("A native runtime cannot be both self-signed and backend-scoped");
+  }
+  if (backendMode) {
+    if (!Runtime.openPersistentAsBackend) {
+      throw new Error(
+        "Native runtime does not support explicit backend opens; rebuild the matching Jazz native artifact",
+      );
+    }
+    return Runtime.openPersistentAsBackend(dataPath, schema, config);
+  }
+  if (selfSignedClientProof) {
+    if (!Runtime.openPersistentWithSelfSignedProof) {
+      throw new Error(
+        "Native runtime does not support self-signed client opens; rebuild the matching Jazz native artifact",
+      );
+    }
+    return Runtime.openPersistentWithSelfSignedProof(
+      dataPath,
+      schema,
+      config,
+      selfSignedClientProof.token,
+      selfSignedClientProof.appId,
+      selfSignedClientProof.claimedAuthor,
+    );
+  }
   if (!Runtime.openPersistent) {
     throw new Error("Native runtime does not expose persistent storage");
   }
   return Runtime.openPersistent(dataPath, schema, config);
+}
+
+function openMemoryDb(
+  Runtime: NativeDbConstructor,
+  schema: Uint8Array,
+  config: Uint8Array,
+  selfSignedClientProof?: NativeSelfSignedClientProof,
+  backendMode = false,
+): NativeDb {
+  if (selfSignedClientProof && backendMode) {
+    throw new Error("A native runtime cannot be both self-signed and backend-scoped");
+  }
+  if (backendMode) {
+    if (!Runtime.openMemoryAsBackend) {
+      throw new Error(
+        "Native runtime does not support explicit backend opens; rebuild the matching Jazz native artifact",
+      );
+    }
+    return Runtime.openMemoryAsBackend(schema, config);
+  }
+  if (!selfSignedClientProof) return Runtime.openMemory(schema, config);
+  if (!Runtime.openMemoryWithSelfSignedProof) {
+    throw new Error(
+      "Native runtime does not support self-signed client opens; rebuild the matching Jazz native artifact",
+    );
+  }
+  return Runtime.openMemoryWithSelfSignedProof(
+    schema,
+    config,
+    selfSignedClientProof.token,
+    selfSignedClientProof.appId,
+    selfSignedClientProof.claimedAuthor,
+  );
 }
 
 export class NativeRuntimeAdapter implements Runtime {
@@ -484,6 +544,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly configBytes: Uint8Array;
   private readonly peerIdentity: Uint8Array;
   private readonly schemaHash: string;
+  private readonly trustedBackend: boolean;
   private readonly preparedQueries = new Map<string, PreparedQuery>();
   private readonly transactionOwner: TransactionOwnerState;
   private readonly pendingTxs: Map<string, PendingTx>;
@@ -509,6 +570,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverEndpointUrl: string | null = null;
   private readonly queuedServerFrames: Uint8Array[] = [];
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
+  private serverInboundRouting: Promise<void> = Promise.resolve();
+  private serverInboundProcessed = false;
   private readonly peerTransportWorkListeners = new Set<() => void>();
   private peerTransportActivityEpoch = 0;
   private coreTickScheduled = false;
@@ -549,13 +612,16 @@ export class NativeRuntimeAdapter implements Runtime {
     private readonly schema: WasmSchema,
     private readonly node: Uint8Array,
     author: Uint8Array,
-    sourceId: number,
+    // Retained for constructor compatibility; production row IDs must use the core clock source.
+    _sourceId: number,
     historyComplete: boolean,
     opts?: {
       persistentPath?: string;
       db?: NativeDb;
       initialSyncFlushEvery?: number;
+      selfSignedClientProof?: NativeSelfSignedClientProof;
       readAuthorizationHost?: ReadAuthorizationHost;
+      backendMode?: boolean;
       owner?: NativeRuntimeAdapter;
     },
   ) {
@@ -571,10 +637,11 @@ export class NativeRuntimeAdapter implements Runtime {
     this.completedTxs = this.transactionOwner.completedTxs;
     this.writes = this.transactionOwner.writes;
     this.schemaBytes = encodeSchema(schema);
+    this.trustedBackend = opts?.backendMode === true;
     this.configBytes = openConfig(
       node,
       author,
-      sourceId,
+      undefined,
       historyComplete,
       opts?.initialSyncFlushEvery,
     );
@@ -586,12 +653,25 @@ export class NativeRuntimeAdapter implements Runtime {
       if (!Runtime) {
         throw new Error("Native runtime constructor required for persistent storage");
       }
-      this.db = openPersistentDb(Runtime, opts.persistentPath, this.schemaBytes, this.configBytes);
+      this.db = openPersistentDb(
+        Runtime,
+        opts.persistentPath,
+        this.schemaBytes,
+        this.configBytes,
+        opts?.selfSignedClientProof,
+        opts?.backendMode,
+      );
     } else {
       if (!Runtime) {
         throw new Error("Native runtime constructor required for memory storage");
       }
-      this.db = Runtime.openMemory(this.schemaBytes, this.configBytes);
+      this.db = openMemoryDb(
+        Runtime,
+        this.schemaBytes,
+        this.configBytes,
+        opts?.selfSignedClientProof,
+        opts?.backendMode,
+      );
     }
     if (opts?.owner) return;
     if (typeof this.db.setTickScheduler !== "function") {
@@ -599,8 +679,12 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     this.db.setTickScheduler(((first: Error | string | null, second?: string) => {
       const urgency = typeof first === "string" ? first : second;
-      if (urgency === "immediate" || urgency === "deferred") {
-        this.scheduleCoreWake(urgency);
+      if (
+        urgency === "immediate" ||
+        urgency === "deferred" ||
+        (typeof urgency === "string" && urgency.startsWith("after:"))
+      ) {
+        this.scheduleCoreWake(urgency as CoreTickWake);
       }
     }) as (error: Error | null, urgency: string) => void);
   }
@@ -649,6 +733,119 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     this.db.setNonDurableClient();
     this.nonDurableClient = true;
+  }
+
+  /** Configure Jazz-owned upload rate and unpublished-tree expiry policy. */
+  setLargeValueStagingPolicy(
+    incomingBytesPerWindow: number,
+    windowMs: number,
+    maxAgeMs?: number | null,
+  ): void {
+    if (this !== this.ownerRuntime) {
+      return this.ownerRuntime.setLargeValueStagingPolicy(
+        incomingBytesPerWindow,
+        windowMs,
+        maxAgeMs,
+      );
+    }
+    if (!this.db.setLargeValueStagingPolicy) {
+      throw new Error("Native runtime does not expose large-value staging policy");
+    }
+    this.db.setLargeValueStagingPolicy(incomingBytesPerWindow, windowMs, maxAgeMs);
+  }
+
+  /** Run one idempotent expiry pass from an environment-owned timer. */
+  async evictExpiredStagedLargeValues(): Promise<number> {
+    if (this !== this.ownerRuntime) {
+      return await this.ownerRuntime.evictExpiredStagedLargeValues();
+    }
+    if (!this.db.evictExpiredStagedLargeValues) {
+      throw new Error("Native runtime does not expose large-value staging maintenance");
+    }
+    return await this.db.evictExpiredStagedLargeValues();
+  }
+
+  async readValueRange(
+    table: string,
+    objectId: string,
+    column: string,
+    start: number,
+    end: number,
+  ): Promise<Uint8Array> {
+    if (this !== this.ownerRuntime) {
+      return await this.ownerRuntime.readValueRange(table, objectId, column, start, end);
+    }
+    if (!this.db.readValueRange) throw new Error("Native runtime does not expose value ranges");
+    return await this.db.readValueRange(table, parseUuid(objectId), column, start, end);
+  }
+
+  async readTextUtf16Range(
+    table: string,
+    objectId: string,
+    column: string,
+    start: number,
+    end: number,
+  ): Promise<string> {
+    if (this !== this.ownerRuntime) {
+      return await this.ownerRuntime.readTextUtf16Range(table, objectId, column, start, end);
+    }
+    if (!this.db.readTextUtf16Range) {
+      throw new Error("Native runtime does not expose UTF-16 value ranges");
+    }
+    return await this.db.readTextUtf16Range(table, parseUuid(objectId), column, start, end);
+  }
+
+  async readJsonPointer(
+    table: string,
+    objectId: string,
+    column: string,
+    pointer: string,
+  ): Promise<unknown> {
+    if (this !== this.ownerRuntime) {
+      return await this.ownerRuntime.readJsonPointer(table, objectId, column, pointer);
+    }
+    if (!this.db.readJsonPointer) throw new Error("Native runtime does not expose JSON pointers");
+    const value = await this.db.readJsonPointer(table, parseUuid(objectId), column, pointer);
+    return typeof value === "string" ? JSON.parse(value) : value;
+  }
+
+  async appendValue(
+    table: string,
+    objectId: string,
+    column: string,
+    bytes: Uint8Array,
+  ): Promise<MutationResult> {
+    if (this !== this.ownerRuntime) {
+      return await this.ownerRuntime.appendValue(table, objectId, column, bytes);
+    }
+    if (!this.db.appendValue) throw new Error("Native runtime does not expose value append");
+    return this.finishMutation(
+      await this.db.appendValue(table, parseUuid(objectId), column, bytes),
+    );
+  }
+
+  async spliceValue(
+    table: string,
+    objectId: string,
+    column: string,
+    offset: number,
+    deleteLength: number,
+    insert: Uint8Array,
+  ): Promise<MutationResult> {
+    if (this !== this.ownerRuntime) {
+      return await this.ownerRuntime.spliceValue(
+        table,
+        objectId,
+        column,
+        offset,
+        deleteLength,
+        insert,
+      );
+    }
+    if (!this.db.spliceValue) throw new Error("Native runtime does not expose value splice");
+    return this.finishMutation(
+      await this.db.spliceValue(table, parseUuid(objectId), column, offset, deleteLength, insert),
+    );
   }
 
   acceptPeer(claims: Record<string, unknown> = {}): Transport {
@@ -762,7 +959,7 @@ export class NativeRuntimeAdapter implements Runtime {
     _writeContext?: string | null,
     objectId?: string | null,
   ): InsertResult {
-    const rowId = objectId ? parseUuid(objectId) : crypto.getRandomValues(new Uint8Array(16));
+    const suppliedRowId = objectId ? parseUuid(objectId) : undefined;
     const cells = encodeCellsForRow(this.table(table), values);
     const writeSession = sessionFromWriteContext(_writeContext);
     this.applySessionClaims(writeSession);
@@ -772,14 +969,11 @@ export class NativeRuntimeAdapter implements Runtime {
     const tx = this.currentTx(_writeContext, "Insert");
     if (tx) {
       const nativeTx = this.txForWrite(tx, writeIdentity);
-      if (branchView) {
-        requireBranchMethod(
-          nativeTx.insertWithIdEncodedInBranch,
-          "transaction branch inserts",
-        ).call(nativeTx, table, rowId, cells, branchView.head);
-      } else {
-        nativeTx.insertWithIdEncoded(table, rowId, cells, updatedAtMs);
-      }
+      const rowId = nativeTx.insertEncoded(table, cells, {
+        rowId: suppliedRowId,
+        branch: branchView?.head,
+        updatedAtMs: updatedAtMs ?? undefined,
+      });
       const row = this.rowStateFromValues(table, rowId, values);
       tx.writes.push({ table, rowId, row });
       return {
@@ -790,24 +984,101 @@ export class NativeRuntimeAdapter implements Runtime {
       };
     }
     const write = writeOrNormalizeRejection("Insert", () =>
-      branchView
-        ? writeIdentity
-          ? requireBranchMethod(
-              this.db.insertWithIdEncodedInBranchForIdentity,
-              "identity-scoped branch inserts",
-            ).call(this.db, table, rowId, cells, branchView.head, writeIdentity)
-          : requireBranchMethod(this.db.insertWithIdEncodedInBranch, "branch inserts").call(
-              this.db,
-              table,
-              rowId,
-              cells,
-              branchView.head,
-            )
-        : writeIdentity
-          ? this.db.insertWithIdEncodedForIdentity(table, rowId, cells, writeIdentity, updatedAtMs)
-          : this.db.insertWithIdEncoded(table, rowId, cells, updatedAtMs),
+      this.db.insertEncoded(table, cells, {
+        rowId: suppliedRowId,
+        author: writeIdentity,
+        branch: branchView?.head,
+        updatedAtMs: updatedAtMs ?? undefined,
+      }),
     );
-    return this.finishInsert(table, rowId, values, write);
+    return this.finishInsert(table, suppliedRowId ?? write.rowId, values, write);
+  }
+
+  async streamingMutation(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    writeContext?: string | null,
+    objectId?: string | null,
+  ): Promise<StreamingInsertResult> {
+    const begin = this.db.beginStreamingMutationEncoded;
+    if (!begin) throw new Error("Native runtime does not expose streaming mutations");
+    const operation =
+      mutation === "insert" ? "Insert" : mutation === "update" ? "Update" : "Upsert";
+    if (this.currentTx(writeContext, operation)) {
+      throw new Error("Streaming mutations are not supported inside a transaction");
+    }
+    const writeSession = sessionFromWriteContext(writeContext);
+    this.applySessionClaims(writeSession);
+    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const branchView = branchViewFromWriteContext(writeContext);
+    const updatedAtMs = effectiveUpdatedAtMs(writeContext);
+
+    const definition = this.table(table);
+    const descriptor = definition.columns.find((candidate) => candidate.name === column);
+    const kind = descriptor?.column_type.type;
+    if (kind !== "Text" && kind !== "Json" && kind !== "Bytea") {
+      throw new Error(
+        `Streaming insert requires a Text, Json, or Bytea column: ${table}.${column}`,
+      );
+    }
+    const rowId = objectId ? parseUuid(objectId) : crypto.getRandomValues(new Uint8Array(16));
+    const cells =
+      mutation === "insert"
+        ? encodeCellsForStreamingRow(definition, values, column, table)
+        : encodeCellsForStreamingPatch(definition, values, column);
+    const upload = begin.call(
+      this.db,
+      table,
+      rowId,
+      cells,
+      column,
+      kind,
+      mutation,
+      writeIdentity,
+      updatedAtMs ?? undefined,
+      branchView?.head,
+      branchView?.base,
+    );
+    const encoder = new TextEncoder();
+    const pushBounded = async (bytes: Uint8Array): Promise<void> => {
+      const hostWindowBytes = 64 * 1024;
+      for (let offset = 0; offset < bytes.byteLength; offset += hostWindowBytes) {
+        await upload.push(bytes.subarray(offset, offset + hostWindowBytes));
+      }
+    };
+    let pendingHighSurrogate = "";
+    try {
+      for await (const chunk of streamingChunks(source)) {
+        if (typeof chunk === "string") {
+          if (kind === "Bytea") throw new Error("Bytea streams require Uint8Array chunks");
+          let text = pendingHighSurrogate + chunk;
+          pendingHighSurrogate = "";
+          const trailing = text.charCodeAt(text.length - 1);
+          if (trailing >= 0xd800 && trailing <= 0xdbff) {
+            pendingHighSurrogate = text.slice(-1);
+            text = text.slice(0, -1);
+          }
+          if (text.length > 0) await pushBounded(encoder.encode(text));
+        } else if (chunk instanceof Uint8Array) {
+          if (pendingHighSurrogate) {
+            await pushBounded(encoder.encode(pendingHighSurrogate));
+            pendingHighSurrogate = "";
+          }
+          await pushBounded(chunk);
+        } else {
+          throw new Error("Streaming insert chunks must be strings or Uint8Array values");
+        }
+      }
+      if (pendingHighSurrogate) await pushBounded(encoder.encode(pendingHighSurrogate));
+      const receipt = this.finishMutation(await upload.finish());
+      return { id: formatUuid(rowId), ...receipt };
+    } catch (error) {
+      await upload.abort();
+      throw error;
+    }
   }
 
   restore(
@@ -826,17 +1097,10 @@ export class NativeRuntimeAdapter implements Runtime {
     const tx = this.currentTx(writeContext, "Restore");
     if (tx) {
       const nativeTx = this.txForWrite(tx, writeIdentity);
-      if (branchView) {
-        requireBranchMethod(nativeTx.restoreEncodedInBranch, "transaction branch restores").call(
-          nativeTx,
-          table,
-          rowId,
-          cells,
-          branchView.head,
-        );
-      } else {
-        nativeTx.restoreEncoded(table, rowId, cells, updatedAtMs);
-      }
+      nativeTx.restoreEncoded(table, rowId, cells, {
+        branch: branchView?.head,
+        updatedAtMs: updatedAtMs ?? undefined,
+      });
       const row = this.rowStateFromValues(table, rowId, values);
       tx.writes.push({ table, rowId, row });
       return {
@@ -847,22 +1111,11 @@ export class NativeRuntimeAdapter implements Runtime {
       };
     }
     const write = writeOrNormalizeRejection("Restore", () =>
-      branchView
-        ? writeIdentity
-          ? requireBranchMethod(
-              this.db.restoreEncodedInBranchForIdentity,
-              "identity-scoped branch restores",
-            ).call(this.db, table, rowId, cells, branchView.head, writeIdentity)
-          : requireBranchMethod(this.db.restoreEncodedInBranch, "branch restores").call(
-              this.db,
-              table,
-              rowId,
-              cells,
-              branchView.head,
-            )
-        : writeIdentity
-          ? this.db.restoreEncodedForIdentity(table, rowId, cells, writeIdentity, updatedAtMs)
-          : this.db.restoreEncoded(table, rowId, cells, updatedAtMs),
+      this.db.restoreEncoded(table, rowId, cells, {
+        author: writeIdentity,
+        branch: branchView?.head,
+        updatedAtMs: updatedAtMs ?? undefined,
+      }),
     );
     return this.finishInsert(table, rowId, values, write);
   }
@@ -883,18 +1136,11 @@ export class NativeRuntimeAdapter implements Runtime {
     const tx = this.currentTx(writeContext, "Update");
     if (tx) {
       const nativeTx = this.txForWrite(tx, writeIdentity);
-      if (branchView) {
-        requireBranchMethod(nativeTx.updateEncodedInBranchView, "transaction branch updates").call(
-          nativeTx,
-          table,
-          rowId,
-          patch,
-          branchView.head,
-          branchView.base,
-        );
-      } else {
-        nativeTx.updateEncoded(table, rowId, patch, updatedAtMs);
-      }
+      nativeTx.updateEncoded(table, rowId, patch, {
+        head: branchView?.head,
+        base: branchView?.base,
+        updatedAtMs: updatedAtMs ?? undefined,
+      });
       tx.writes.push({
         table,
         rowId,
@@ -903,31 +1149,12 @@ export class NativeRuntimeAdapter implements Runtime {
       return { kind: "staged", openBatchId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Update", () =>
-      branchView
-        ? writeIdentity
-          ? requireBranchMethod(
-              this.db.updateEncodedInBranchViewForIdentity,
-              "identity-scoped branch updates",
-            ).call(this.db, table, rowId, patch, branchView.head, branchView.base, writeIdentity)
-          : branchView.base === undefined
-            ? requireBranchMethod(this.db.updateEncodedInBranch, "exact branch updates").call(
-                this.db,
-                table,
-                rowId,
-                patch,
-                branchView.head,
-              )
-            : requireBranchMethod(this.db.updateEncodedInBranchView, "branch-view updates").call(
-                this.db,
-                table,
-                rowId,
-                patch,
-                branchView.head,
-                branchView.base,
-              )
-        : writeIdentity
-          ? this.db.updateEncodedForIdentity(table, rowId, patch, writeIdentity, updatedAtMs)
-          : this.db.updateEncoded(table, rowId, patch, updatedAtMs),
+      this.db.updateEncoded(table, rowId, patch, {
+        author: writeIdentity,
+        head: branchView?.head,
+        base: branchView?.base,
+        updatedAtMs: updatedAtMs ?? undefined,
+      }),
     );
     return this.finishMutation(write);
   }
@@ -944,6 +1171,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.applySessionClaims(writeSession);
     const writeIdentity = this.trustedWriteIdentity(writeSession);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
+    const branchView = branchViewFromWriteContext(writeContext);
     const tx = this.currentTx(writeContext, "Upsert");
     const existing = tx
       ? (this.stagedRowForWriteMerge(tx, table, rowId) ?? this.readRowForWriteMerge(table, rowId))
@@ -957,7 +1185,10 @@ export class NativeRuntimeAdapter implements Runtime {
       throw writeError("Upsert", normalizeWriteSetupMessage(errorMessage(error)));
     }
     if (tx) {
-      this.txForWrite(tx, writeIdentity).upsertEncoded(table, rowId, cells, updatedAtMs);
+      this.txForWrite(tx, writeIdentity).upsertEncoded(table, rowId, cells, {
+        branch: branchView?.head,
+        updatedAtMs: updatedAtMs ?? undefined,
+      });
       tx.writes.push({
         table,
         rowId,
@@ -968,9 +1199,11 @@ export class NativeRuntimeAdapter implements Runtime {
       return { kind: "staged", openBatchId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Upsert", () =>
-      writeIdentity
-        ? this.db.upsertEncodedForIdentity(table, rowId, cells, writeIdentity, updatedAtMs)
-        : this.db.upsertEncoded(table, rowId, cells, updatedAtMs),
+      this.db.upsertEncoded(table, rowId, cells, {
+        author: writeIdentity,
+        branch: branchView?.head,
+        updatedAtMs: updatedAtMs ?? undefined,
+      }),
     );
     return this.finishMutation(write);
   }
@@ -986,44 +1219,21 @@ export class NativeRuntimeAdapter implements Runtime {
     const tx = this.currentTx(writeContext, "Delete");
     if (tx) {
       const nativeTx = this.txForWrite(tx, writeIdentity);
-      if (branchView) {
-        requireBranchMethod(nativeTx.deleteInBranchView, "transaction branch deletes").call(
-          nativeTx,
-          table,
-          rowId,
-          branchView.head,
-          branchView.base,
-        );
-      } else {
-        nativeTx.delete(table, rowId, updatedAtMs);
-      }
+      nativeTx.deleteEncoded(table, rowId, {
+        head: branchView?.head,
+        base: branchView?.base,
+        updatedAtMs: updatedAtMs ?? undefined,
+      });
       tx.writes.push({ table, rowId, deleted: true });
       return { kind: "staged", openBatchId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Delete", () =>
-      branchView
-        ? writeIdentity
-          ? requireBranchMethod(
-              this.db.deleteInBranchViewForIdentity,
-              "identity-scoped branch deletes",
-            ).call(this.db, table, rowId, branchView.head, branchView.base, writeIdentity)
-          : branchView.base === undefined
-            ? requireBranchMethod(this.db.deleteInBranch, "exact branch deletes").call(
-                this.db,
-                table,
-                rowId,
-                branchView.head,
-              )
-            : requireBranchMethod(this.db.deleteInBranchView, "branch-view deletes").call(
-                this.db,
-                table,
-                rowId,
-                branchView.head,
-                branchView.base,
-              )
-        : writeIdentity
-          ? this.db.deleteForIdentity(table, rowId, writeIdentity, updatedAtMs)
-          : this.db.delete(table, rowId, updatedAtMs),
+      this.db.deleteEncoded(table, rowId, {
+        author: writeIdentity,
+        head: branchView?.head,
+        base: branchView?.base,
+        updatedAtMs: updatedAtMs ?? undefined,
+      }),
     );
     return this.finishMutation(write);
   }
@@ -1275,13 +1485,14 @@ export class NativeRuntimeAdapter implements Runtime {
         );
       }
       const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
+      const projectedColumns = subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns;
       let rows = this.readPlainRows(query, opts, session ?? undefined, pendingTx);
-      let rowStates = rowsFromBatches(readRowBatches(rows), this.schema);
+      let rowStates = rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
       if (!pendingTx && (tier === "edge" || tier === "global") && rowStates.length > 0) {
         await this.refreshRowsFromEdge(session, rowStates);
         if (this.closed) return [];
         rows = this.readPlainRows(query, opts, session ?? undefined, pendingTx);
-        rowStates = rowsFromBatches(readRowBatches(rows), this.schema);
+        rowStates = rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
       }
       return rowStates;
     } finally {
@@ -1415,17 +1626,29 @@ export class NativeRuntimeAdapter implements Runtime {
     // shutdown is allowed to reject them.
     void this.disconnect({ rejectWaiters: false });
     const generation = ++this.serverConnectionGeneration;
+    const transportIdentity = peerIdentityForWebSocketAuth(authJson, this.peerIdentity);
     this.serverTransportError = null;
     this.serverEndpointUrl = url;
     const carrier = new WebSocketCarrier({
       endpointUrl: url,
-      peerIdentity: this.peerIdentity,
+      peerIdentity: transportIdentity,
       authJson,
       onFrame: (frame) => {
         if (generation !== this.serverConnectionGeneration) return;
         this.pendingInboundServerFrames.push(frame);
         this.notifyServerTransportWork();
         this.scheduleServerPump();
+        // A normal idle connection lets the debounced pump coalesce frames.
+        // If the pump is already suspended in a core tick waiting for a chunk,
+        // route the frame independently so the response can wake that tick.
+        if (this.serverPumpRunning) {
+          queueMicrotask(() => {
+            if (!this.serverPumpRunning || this.pendingInboundServerFrames.length === 0) return;
+            void this.routePendingInboundServerFrames().catch((error) =>
+              this.handleServerTransportError(error, generation),
+            );
+          });
+        }
       },
       onError: (error) => {
         this.handleServerTransportError(error, generation);
@@ -1446,6 +1669,7 @@ export class NativeRuntimeAdapter implements Runtime {
         throw contextualError("connecting the negotiated upstream transport", error);
       }
       this.serverTransport = transport;
+      void this.watchAuxiliaryOutbound(transport, carrier, generation);
       this.flushQueuedServerFrames(carrier);
       await this.pumpServerTransport();
       this.pumpSubscriptions();
@@ -1467,7 +1691,7 @@ export class NativeRuntimeAdapter implements Runtime {
       negotiation.features,
       authority.node,
       authority.epoch,
-      this.peerIdentity,
+      this.node,
       localEpoch,
     );
   }
@@ -1669,6 +1893,7 @@ export class NativeRuntimeAdapter implements Runtime {
    * point, with a request session supplying its subject when present.
    */
   private readRowsForHost(query: PreparedQuery, opts: unknown, identity?: Uint8Array): Uint8Array {
+    if (this.trustedBackend && identity === undefined) return this.db.all(query, opts);
     return this.readAuthorizationHost === "trusted-serving"
       ? this.db.allForIdentity(query, identity ?? this.peerIdentity, opts)
       : this.db.all(query, opts);
@@ -1679,6 +1904,7 @@ export class NativeRuntimeAdapter implements Runtime {
    * an ordinary client mutation into a policy-enforcing local admission.
    */
   private trustedWriteIdentity(session: RuntimeSession | null | undefined): Uint8Array | undefined {
+    if (this.trustedBackend && !session) return undefined;
     return this.readAuthorizationHost === "trusted-serving"
       ? (session?.identity ?? this.peerIdentity)
       : undefined;
@@ -1820,7 +2046,21 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private applySessionClaims(session: RuntimeSession | null | undefined): void {
-    if (!session || !this.db.setIdentityClaims) return;
+    // Client runtimes only evaluate their already-settled local replica. They
+    // never select the policy-enforcing native entry points, so there is no
+    // reason to serialize a session subject into the public native ABI here.
+    // In particular, local-first and anonymous subjects are admitted by the
+    // first-party TypeScript flow, while raw native identity ingress must keep
+    // rejecting their reserved issuers. Claims are required only by the
+    // explicitly selected trusted-serving host, where every identity call is
+    // part of that serving boundary.
+    if (
+      !session ||
+      this.readAuthorizationHost !== "trusted-serving" ||
+      !this.db.setIdentityClaims
+    ) {
+      return;
+    }
     this.db.setIdentityClaims(session.identity, session.claims);
   }
 
@@ -1962,8 +2202,17 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
-  private scheduleCoreWake(urgency: "immediate" | "deferred"): void {
+  private scheduleCoreWake(urgency: CoreTickWake): void {
     if (this.closed) return;
+    if (urgency.startsWith("after:")) {
+      const delayMs = Number(urgency.slice("after:".length));
+      if (!Number.isSafeInteger(delayMs) || delayMs < 0) return;
+      // A protocol admission deadline is not a deferred microtask. Keep the
+      // host event loop live and only wake the thread-affine core after the
+      // promised window has elapsed.
+      setTimeout(() => this.scheduleCoreWake("immediate"), delayMs);
+      return;
+    }
     this.notifyPeerTransportWork();
     if (urgency === "immediate") {
       this.scheduleCoreTick();
@@ -2387,15 +2636,26 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     this.serverPumpRunning = true;
     try {
-      let processedInbound = this.drainPendingInboundServerFrames(transport);
+      let processedInbound =
+        this.pendingInboundServerFrames.length > 0
+          ? await this.routePendingInboundServerFrames()
+          : false;
+      processedInbound ||= this.serverInboundProcessed;
+      this.serverInboundProcessed = false;
       for (let round = 0; round < 32; round += 1) {
         await this.runCoreTick();
-        if (processedInbound) {
+        this.flushAuxiliaryOutbound(transport, carrier, generation);
+        if (processedInbound || this.serverInboundProcessed) {
           // Frame arrival wakes waiters promptly, but the observable write or
           // coverage state changes only after the evaluator consumes it.
           // Publish that second edge so waiters re-read settled state.
           processedInbound = false;
+          this.serverInboundProcessed = false;
           this.notifyServerTransportWork();
+          // A frame can be routed by the auxiliary path while the waiter is
+          // still consuming the arrival edge. Publish once more after those
+          // promise continuations have had a chance to re-arm.
+          queueMicrotask(() => this.notifyServerTransportWork());
         }
         if (
           this.closed ||
@@ -2424,15 +2684,66 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
-  private drainPendingInboundServerFrames(transport: Transport): boolean {
-    if (this.pendingInboundServerFrames.length === 0) return false;
-    const frames = this.pendingInboundServerFrames.splice(0);
-    if (transport.sendWireFrames) {
-      transport.sendWireFrames(frames);
-      return true;
+  private async routePendingInboundServerFrames(): Promise<boolean> {
+    let processedInbound = false;
+    const operation = this.serverInboundRouting.then(async () => {
+      const transport = this.serverTransport;
+      if (!transport || this.pendingInboundServerFrames.length === 0) return;
+      const frames = this.pendingInboundServerFrames.splice(0);
+      processedInbound = true;
+      this.serverInboundProcessed = true;
+      const canonical: Uint8Array[] = [];
+      for (const frame of frames) {
+        const routed = transport.routeAuxiliaryWireFrame
+          ? await transport.routeAuxiliaryWireFrame(frame)
+          : frame;
+        if (routed != null) canonical.push(normalizeTransportFrame(routed));
+      }
+      if (canonical.length > 0) {
+        if (transport.sendWireFrames) transport.sendWireFrames(canonical);
+        else for (const frame of canonical) transport.sendWireFrame(frame);
+      }
+      const carrier = this.serverCarrier;
+      if (carrier) {
+        this.flushAuxiliaryOutbound(transport, carrier, this.serverConnectionGeneration);
+      }
+    });
+    this.serverInboundRouting = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    await operation;
+    return processedInbound;
+  }
+
+  private flushAuxiliaryOutbound(
+    transport: Transport,
+    carrier: WebSocketCarrier,
+    generation: number,
+  ): void {
+    const receive = transport.recvAuxiliaryWireFrames;
+    if (!receive) return;
+    const frames = normalizeTransportFrames(receive.call(transport));
+    if (frames.length > 0) this.sendServerFrames(frames, carrier, generation);
+  }
+
+  private async watchAuxiliaryOutbound(
+    transport: Transport,
+    carrier: WebSocketCarrier,
+    generation: number,
+  ): Promise<void> {
+    while (
+      !this.closed &&
+      transport === this.serverTransport &&
+      carrier === this.serverCarrier &&
+      generation === this.serverConnectionGeneration
+    ) {
+      const readiness = transport.auxiliaryOutboundReady?.();
+      if (!readiness || typeof readiness === "boolean") return;
+      await readiness;
+      if (transport !== this.serverTransport || carrier !== this.serverCarrier) return;
+      this.flushAuxiliaryOutbound(transport, carrier, generation);
     }
-    for (const frame of frames) transport.sendWireFrame(frame);
-    return true;
   }
 
   private sendServerFrames(
@@ -2609,6 +2920,12 @@ function normalizeTransportFrames(frames: unknown[]): Uint8Array[] {
   );
 }
 
+function normalizeTransportFrame(frame: unknown): Uint8Array {
+  const normalized = normalizeTransportFrames([frame])[0];
+  if (!normalized) throw new Error("native transport returned a non-byte wire frame");
+  return normalized;
+}
+
 function recordWrite(write: Write, writes: Map<string, Write>): BatchId {
   const id = write.batchId as BatchId;
   writes.set(id, write);
@@ -2639,44 +2956,112 @@ function branchViewFromWriteContext(writeContext?: string | null): EncodedBranch
   }
 }
 
-function requireBranchMethod<T>(method: T | undefined, name: string): T {
-  if (method === undefined) throw new Error(`native runtime does not support ${name}`);
-  return method;
-}
-
 function sessionFromWriteContext(writeContext?: string | null): RuntimeSession | null {
   if (!writeContext) return null;
   try {
     const parsed = JSON.parse(writeContext) as {
+      issuer?: unknown;
       user_id?: unknown;
+      claims?: unknown;
+      authMode?: unknown;
       attribution?: unknown;
-      session?: { user_id?: unknown; claims?: unknown };
+      [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]?: unknown;
+      session?: {
+        issuer?: unknown;
+        user_id?: unknown;
+        claims?: unknown;
+        authMode?: unknown;
+        [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]?: unknown;
+      };
     };
+    if (parsed.attribution === SYSTEM_AUTHOR_ID) {
+      throw new Error("Native runtime public session uses reserved issuer");
+    }
+    const attributedAuthor =
+      typeof parsed.attribution === "string"
+        ? parsePublicCanonicalAuthor(parsed.attribution)
+        : null;
     const userId =
-      typeof parsed.user_id === "string"
+      attributedAuthor?.user_id ??
+      (typeof parsed.user_id === "string"
         ? parsed.user_id
         : typeof parsed.session?.user_id === "string"
           ? parsed.session.user_id
-          : parsed.attribution === SYSTEM_AUTHOR_ID
-            ? SYSTEM_AUTHOR_ID
-            : undefined;
-    if (!userId) return null;
-    const claims = sessionClaims(userId, parsed.session?.claims);
-    return { user_id: userId, claims, identity: authorBytesForSubject(userId) };
-  } catch {
+          : undefined);
+    if (!userId || !isUsableSubject(userId)) return null;
+    const issuer = attributedAuthor?.issuer ?? parsed.session?.issuer ?? parsed.issuer;
+    if (typeof issuer !== "string" || !isUsableSubject(issuer)) {
+      throw new Error("session is missing issuer");
+    }
+    const session = {
+      issuer,
+      user_id: userId,
+      authMode:
+        typeof parsed.session?.authMode === "string"
+          ? parsed.session.authMode
+          : typeof parsed.authMode === "string"
+            ? parsed.authMode
+            : undefined,
+    };
+    assertPublicSessionIssuer(
+      session.issuer,
+      session.user_id,
+      session.authMode,
+      parsed.session?.[TRUSTED_RESERVED_SESSION_TOKEN_FIELD] ??
+        parsed[TRUSTED_RESERVED_SESSION_TOKEN_FIELD],
+    );
+    const claims = sessionClaims(parsed.session?.claims ?? parsed.claims, session);
+    return { ...session, claims, identity: authorBytesForSession(session) };
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message === "session is missing issuer" ||
+        error.message === "Native runtime public session uses reserved issuer")
+    ) {
+      throw error;
+    }
     return null;
+  }
+}
+
+function parsePublicCanonicalAuthor(value: string): { issuer: string; user_id: string } | null {
+  const parsed = parseCanonicalAuthorSubject(value);
+  if (parsed && isReservedJazzIssuer(parsed.issuer)) {
+    throw new Error("Native runtime public session uses reserved issuer");
+  }
+  return parsed ? { issuer: parsed.issuer, user_id: parsed.user_id } : null;
+}
+
+function assertPublicSessionIssuer(
+  issuer: string,
+  userId: string,
+  authMode: string | undefined,
+  trustedToken?: unknown,
+): void {
+  if (
+    isReservedJazzIssuer(issuer) &&
+    !(
+      (authMode === "local-first" || authMode === "anonymous" || authMode === "external") &&
+      isTrustedReservedSession({ issuer, user_id: userId, authMode }, trustedToken)
+    )
+  ) {
+    throw new Error("Native runtime public session uses reserved issuer");
   }
 }
 
 function updatedAtMsFromWriteContext(writeContext?: string | null): number | undefined {
   if (!writeContext) return undefined;
+  let parsed: { updated_at?: unknown };
   try {
-    const parsed = JSON.parse(writeContext) as { updated_at?: unknown };
-    if (typeof parsed.updated_at !== "number") return undefined;
-    return Math.trunc(parsed.updated_at / 1_000);
+    parsed = JSON.parse(writeContext) as { updated_at?: unknown };
   } catch {
     return undefined;
   }
+  if (typeof parsed.updated_at !== "number") return undefined;
+  if (!Number.isSafeInteger(parsed.updated_at) || parsed.updated_at < 0) {
+    throw new Error("updatedAt must be a nonnegative safe integer");
+  }
+  return Math.trunc(parsed.updated_at / 1_000);
 }
 
 function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
@@ -2775,14 +3160,34 @@ function assertSupportedReadOptions(tier?: string | null, optionsJson?: string |
 
 function readSession(sessionJson?: string | null): RuntimeSession | null {
   if (sessionJson == null) return null;
-  const parsed = JSON.parse(sessionJson) as { user_id?: unknown; claims?: unknown };
-  if (typeof parsed.user_id !== "string") {
+  const parsed = JSON.parse(sessionJson) as {
+    issuer?: unknown;
+    user_id?: unknown;
+    claims?: unknown;
+    authMode?: unknown;
+    [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]?: unknown;
+  };
+  if (typeof parsed.user_id !== "string" || !isUsableSubject(parsed.user_id)) {
     throw new Error("Native runtime session is missing user_id");
   }
-  return {
+  if (typeof parsed.issuer !== "string" || !isUsableSubject(parsed.issuer)) {
+    throw new Error("Native runtime session is missing issuer");
+  }
+  const session = {
+    issuer: parsed.issuer,
     user_id: parsed.user_id,
-    claims: sessionClaims(parsed.user_id, parsed.claims),
-    identity: authorBytesForSubject(parsed.user_id),
+    authMode: typeof parsed.authMode === "string" ? parsed.authMode : undefined,
+  };
+  assertPublicSessionIssuer(
+    session.issuer,
+    session.user_id,
+    session.authMode,
+    parsed[TRUSTED_RESERVED_SESSION_TOKEN_FIELD],
+  );
+  return {
+    ...session,
+    claims: sessionClaims(parsed.claims, session),
+    identity: authorBytesForSession(session),
   };
 }
 
@@ -2790,11 +3195,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function sessionClaims(userId: string, rawClaims: unknown): Record<string, unknown> {
+function sessionClaims(
+  rawClaims: unknown,
+  session: { issuer: string; user_id: string; authMode?: string },
+): Record<string, unknown> {
+  const canonical = canonicalAuthorSubject(session.issuer, session.user_id);
   return {
     ...(isRecord(rawClaims) ? rawClaims : {}),
-    user_id: userId,
-    userId,
+    iss: session.issuer,
+    issuer: session.issuer,
+    sub: session.user_id,
+    user_id: session.user_id,
+    userId: session.user_id,
+    author: canonical,
+    ...(session.authMode ? { authMode: session.authMode, auth_mode: session.authMode } : {}),
   };
 }
 
@@ -2878,17 +3292,7 @@ function queryContainsPermissionIntrospection(queryJson: string): boolean {
 }
 
 function relationIrContainsPermissionPredicate(value: unknown): boolean {
-  if (!value || typeof value !== "object") return false;
-  if (Array.isArray(value)) return value.some(relationIrContainsPermissionPredicate);
-  const record = value as Record<string, unknown>;
-  const column =
-    readMagicPredicateColumn(record.Cmp) ??
-    readMagicPredicateColumn(record.In) ??
-    readMagicPredicateColumn(record.IsNull) ??
-    readMagicPredicateColumn(record.IsNotNull) ??
-    readMagicPredicateColumn(record.Contains);
-  if (column && isPermissionIntrospectionColumn(column)) return true;
-  return Object.values(record).some(relationIrContainsPermissionPredicate);
+  return predicateIrContainsPermissionIntrospection(value);
 }
 
 function relationIrContainsPermissionProjection(value: unknown): boolean {
@@ -2934,11 +3338,7 @@ function selectedColumnsContainPermissionIntrospection(value: unknown): boolean 
 
 function flatConditionsContainPermissionIntrospection(value: unknown): boolean {
   if (!Array.isArray(value)) return false;
-  return value.some((entry) => {
-    if (!entry || typeof entry !== "object") return false;
-    const column = (entry as { column?: unknown }).column;
-    return typeof column === "string" && isPermissionIntrospectionColumn(unqualifiedColumn(column));
-  });
+  return value.some(predicateIrContainsPermissionIntrospection);
 }
 
 function arraySubqueriesContainPermissionIntrospection(value: unknown): boolean {
@@ -2961,22 +3361,48 @@ function arraySubqueriesContainPermissionIntrospection(value: unknown): boolean 
 
 function arrayFiltersContainPermissionIntrospection(value: unknown): boolean {
   if (!Array.isArray(value)) return false;
-  return value.some((entry) => {
-    if (!entry || typeof entry !== "object") return false;
-    const record = entry as Record<string, unknown>;
-    for (const key of ["Eq", "Ne", "Gt", "Ge", "Lt", "Le", "IsNull", "IsNotNull", "Contains"]) {
-      const predicate = record[key];
-      if (!predicate || typeof predicate !== "object") continue;
-      const column = (predicate as { column?: unknown }).column;
-      if (
-        typeof column === "string" &&
-        isPermissionIntrospectionColumn(unqualifiedColumn(column))
-      ) {
-        return true;
-      }
+  return value.some(predicateIrContainsPermissionIntrospection);
+}
+
+function predicateIrContainsPermissionIntrospection(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some(predicateIrContainsPermissionIntrospection);
+  const record = value as Record<string, unknown>;
+
+  // Preserve support for the legacy flat/array predicate envelopes while the
+  // query adapter emits canonical predicate IR for all new queries.
+  if (
+    typeof record.op === "string" &&
+    typeof record.column === "string" &&
+    isPermissionIntrospectionColumn(unqualifiedColumn(record.column))
+  ) {
+    return true;
+  }
+
+  for (const key of ["Eq", "Ne", "Gt", "Ge", "Lt", "Le", "IsNull", "IsNotNull", "Contains"]) {
+    const legacyPredicate = record[key];
+    if (!legacyPredicate || typeof legacyPredicate !== "object") continue;
+    const column = (legacyPredicate as { column?: unknown }).column;
+    if (typeof column === "string" && isPermissionIntrospectionColumn(unqualifiedColumn(column))) {
+      return true;
     }
-    return false;
-  });
+  }
+
+  const canonicalColumn =
+    readMagicPredicateColumn(record.Cmp) ??
+    readMagicPredicateColumn(record.In) ??
+    readMagicPredicateColumn(record.IsNull) ??
+    readMagicPredicateColumn(record.IsNotNull) ??
+    readMagicPredicateColumn(record.Contains);
+  if (canonicalColumn && isPermissionIntrospectionColumn(unqualifiedColumn(canonicalColumn))) {
+    return true;
+  }
+
+  // This recursive walk deliberately includes And/Or/Not and nested array
+  // filters. A forbidden column must be rejected regardless of predicate shape.
+  return Object.entries(record).some(
+    ([key, child]) => key !== "Literal" && predicateIrContainsPermissionIntrospection(child),
+  );
 }
 
 function unqualifiedColumn(column: string): string {
@@ -3389,6 +3815,9 @@ function coerceQueryPredicate(
       ),
     };
   }
+  if (filter.op === "Not") {
+    return { op: "Not", predicate: coerceQueryPredicate(table, filter.predicate, schema) };
+  }
   if (filter.op === "In") {
     const columnType =
       filter.column === "id"
@@ -3465,6 +3894,9 @@ function coerceEnumPayloadPredicate(
       ...predicate,
       predicates: predicate.predicates.map((child) => coerceEnumPayloadPredicate(child, fields)),
     };
+  }
+  if (predicate.op === "Not") {
+    return { ...predicate, predicate: coerceEnumPayloadPredicate(predicate.predicate, fields) };
   }
   if (predicate.op === "EnumMatch") {
     throw new Error("payload enum matches cannot be nested");
@@ -3616,6 +4048,8 @@ function readArraySubqueryFilters(
 }
 
 function arraySubqueryFilterToPredicates(value: unknown): QueryPredicate[] | null {
+  const canonical = predicateToFilterTree(value);
+  if (canonical) return [canonical];
   if (!value || typeof value !== "object") return null;
   const record = value as Record<string, unknown>;
   for (const [key, op] of [
@@ -3781,6 +4215,11 @@ function readFlatConditions(conditions: unknown): QueryPredicate[] | null {
   const predicates: QueryPredicate[] = [];
   for (const condition of conditions) {
     if (!condition || typeof condition !== "object") return null;
+    const canonical = predicateToFilterTree(condition);
+    if (canonical) {
+      predicates.push(canonical);
+      continue;
+    }
     const record = condition as { column?: unknown; op?: unknown; value?: unknown };
     if (typeof record.column !== "string" || typeof record.op !== "string") return null;
     const column = record.column.split(".").at(-1) ?? record.column;
@@ -3848,7 +4287,10 @@ function predicateToFilters(predicate: unknown): QueryPredicate[] | null {
     return filters;
   }
   if (Array.isArray(record.Or)) return null;
-  if (record.Not) return null;
+  if (record.Not) {
+    const predicate = predicateToFilterTree(record.Not);
+    return predicate ? [{ op: "Not", predicate }] : null;
+  }
   const enumMatch = record.EnumMatch;
   if (enumMatch && typeof enumMatch === "object") {
     const match = enumMatch as { column?: unknown; case?: unknown; payload?: unknown };
@@ -3908,7 +4350,10 @@ function predicateToFilterTree(predicate: unknown): QueryPredicate | null {
       ? { op, predicates }
       : null;
   }
-  if (record.Not) return null;
+  if (record.Not) {
+    const predicate = predicateToFilterTree(record.Not);
+    return predicate ? { op: "Not", predicate } : null;
+  }
   const filters = predicateToFilters(predicate);
   return filters?.length === 1 ? filters[0]! : null;
 }
@@ -4047,6 +4492,60 @@ export function encodeCellsForRow(
   return encodeCells(columns, (column) => row[column.name], true);
 }
 
+function encodeCellsForStreamingRow(
+  definition: { columns: ColumnDescriptor[]; policies?: TablePolicies },
+  row: InsertValues,
+  streamedColumn: string,
+  table?: string,
+): Uint8Array {
+  assertRequiredRowColumnsPresent(
+    definition.columns.filter((column) => column.name !== streamedColumn),
+    row,
+    table,
+  );
+  const columns = definition.columns.filter(
+    (column) =>
+      column.name !== streamedColumn &&
+      (Object.hasOwn(row, column.name) ||
+        (column.column_type.type === "Array" && column.default == null)),
+  );
+  return encodeCells(columns, (column) => row[column.name], true);
+}
+
+function encodeCellsForStreamingPatch(
+  definition: { columns: ColumnDescriptor[]; policies?: TablePolicies },
+  row: InsertValues,
+  streamedColumn: string,
+): Uint8Array {
+  const columns = definition.columns.filter(
+    (column) => column.name !== streamedColumn && Object.hasOwn(row, column.name),
+  );
+  return encodeCells(columns, (column) => row[column.name], false);
+}
+
+async function* streamingChunks(source: StreamingValueSource): AsyncGenerator<Uint8Array | string> {
+  const readable = source as ReadableStream<Uint8Array | string>;
+  if (typeof readable.getReader !== "function") {
+    yield* source as AsyncIterable<Uint8Array | string>;
+    return;
+  }
+  const reader = readable.getReader();
+  let completed = false;
+  try {
+    while (true) {
+      const result = await reader.read();
+      if (result.done) {
+        completed = true;
+        return;
+      }
+      yield result.value;
+    }
+  } finally {
+    if (!completed) await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+}
+
 export function encodeCellsForPatch(
   definition: { columns: ColumnDescriptor[]; policies?: TablePolicies },
   patch: Record<string, Value>,
@@ -4176,6 +4675,9 @@ function nativeRowFieldPlans(
 
   const columns = projectedColumns ?? schema[batch.table]?.columns ?? [];
   const columnsByName = new Map(columns.map((column) => [column.name, column]));
+  const projectedNames = projectedColumns
+    ? new Set(projectedColumns.map((column) => column.name))
+    : null;
   const plans: NativeRowFieldPlan[] = [];
 
   for (let index = 0; index < batch.descriptor.length; index += 1) {
@@ -4183,16 +4685,15 @@ function nativeRowFieldPlans(
     if (!fieldName || isInternalField(fieldName) || isCurrentRowPhysicalField(fieldName)) continue;
 
     const name = publicFieldName(fieldName);
-    const type =
-      name === "$createdBy" || name === "$updatedBy"
-        ? ({ type: "Uuid" } as const)
-        : (magicColumnType(name) ?? columnsByName.get(name)?.column_type);
+    const type = magicColumnType(name) ?? columnsByName.get(name)?.column_type;
     plans.push({
       name,
       index,
       type,
       storageType: batch.descriptor[index]!.valueType,
-      includeInValues: !isHiddenIncludeColumn(name) && !isProvenanceMagicColumn(name),
+      includeInValues:
+        !isHiddenIncludeColumn(name) &&
+        (!isProvenanceMagicColumn(name) || projectedNames?.has(name) === true),
     });
   }
 
@@ -4551,13 +5052,23 @@ function decodeBytes(
     case "Text":
     case "Json":
     case "Enum":
-      return { type: "Text", value: textDecoder.decode(bytes) };
+      if (
+        fieldName !== undefined &&
+        isProvenanceMagicColumn(fieldName) &&
+        type.type === "Text" &&
+        storageType?.tag === 8
+      ) {
+        return { type: "Text", value: decodeProvenanceText(bytes) };
+      }
+      if (bytes[0] !== 0) throw new Error("indirect scalar crossed a logical binding boundary");
+      return { type: "Text", value: textDecoder.decode(bytes.subarray(1)) };
     case "EnumPayload":
       return decodePayloadEnumBytes(type, bytes, storageType, nestedRowCarrier);
     case "Uuid":
       return { type: "Uuid", value: formatUuid(bytes) };
     case "Bytea":
-      return { type: "Bytea", value: bytes.slice() };
+      if (bytes[0] !== 0) throw new Error("indirect scalar crossed a logical binding boundary");
+      return { type: "Bytea", value: bytes.subarray(1).slice() };
     case "Array":
       return {
         type: "Array",
@@ -4579,6 +5090,10 @@ function decodeBytes(
         ),
       };
   }
+}
+
+function decodeProvenanceText(bytes: Uint8Array): string {
+  return decodeCanonicalAuthorSubjectBytes(bytes);
 }
 
 function decodePayloadEnumBytes(
@@ -5001,7 +5516,29 @@ function plainResetChunkCanStayPacked(
   const sourceRowKeysOnly = chunk.delta.addedOccurrenceKeys.every(
     (key) => key.length === 17 && key[0] === 1,
   );
-  const canStayPacked = reset && noUpdated && noRemoved && identityProjection && sourceRowKeysOnly;
+  // Packed resets bypass `rowsFromBatches`, so their raw records may only go
+  // straight to the public delta decoder when every producer descriptor is
+  // already the exact public logical frame. Relation queries can return a
+  // different table (for example a hop target) or a CurrentRow carrier; both
+  // need the normal decode/re-encode bridge before publication.
+  const directPublicFrames = chunk.delta.added.every((batch) => {
+    const columns = subscription.outputColumns
+      ? batch.table === subscription.outputColumns.rootTable
+        ? subscription.outputColumns.rootColumns
+        : undefined
+      : schema[batch.table]?.columns;
+    return (
+      columns !== undefined &&
+      nativeDescriptorMatchesColumns(batch.descriptor, logicalStorageColumns(columns))
+    );
+  });
+  const canStayPacked =
+    reset &&
+    noUpdated &&
+    noRemoved &&
+    identityProjection &&
+    sourceRowKeysOnly &&
+    directPublicFrames;
   return canStayPacked;
 }
 
@@ -5213,12 +5750,7 @@ function valuesForNativeFrame(row: RowState, columns: readonly ColumnDescriptor[
     const value =
       row.valuesByColumn.get(column.name) ??
       (column.column_type.type === "Array" ? { type: "Array", value: [] } : { type: "Null" });
-    values[index] =
-      (column.name === "$createdBy" || column.name === "$updatedBy") &&
-      column.column_type.type === "Text" &&
-      value.type === "Uuid"
-        ? { type: "Text", value: value.value }
-        : value;
+    values[index] = value;
   }
   return values;
 }

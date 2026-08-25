@@ -5,9 +5,9 @@ use super::*;
 #[test]
 fn one_shot_propagated_query_records_empty_remote_coverage() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
 
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
 
     let (client_transport, server_transport) = duplex();
@@ -33,8 +33,8 @@ fn one_shot_propagated_query_records_empty_remote_coverage() {
 #[test]
 fn one_shot_edge_global_coverage_requires_current_authority_after_reconnect() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
 
     let (first_client_transport, first_server_transport) = duplex();
@@ -94,7 +94,7 @@ fn one_shot_edge_global_coverage_requires_current_authority_after_reconnect() {
 #[test]
 fn one_shot_local_coverage_does_not_require_authority_continuity() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     client.node.set_non_durable_client();
     let (client_transport, mut authority_transport) = duplex();
@@ -119,19 +119,21 @@ fn one_shot_local_coverage_does_not_require_authority_continuity() {
         }
     };
     authority_transport
-        .send(SyncMessage::ViewUpdate {
-            subscription,
-            settled_through: GlobalTime(1),
-            reset_result_set: true,
-            version_carriers: Vec::new(),
-            version_bundles: Vec::new(),
-            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-            result_member_adds: Vec::new(),
-            result_member_removes: Vec::new(),
-            terminal_operations: Vec::new(),
-            program_fact_adds: Vec::new(),
-            program_fact_removes: Vec::new(),
-        })
+        .send(SyncMessage::ViewUpdate(
+            crate::protocol::ViewUpdatePayload {
+                subscription,
+                settled_through: GlobalTime(1),
+                reset_result_set: true,
+                version_carriers: Vec::new(),
+                version_bundles: Vec::new(),
+                peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+                result_member_adds: Vec::new(),
+                result_member_removes: Vec::new(),
+                terminal_operations: Vec::new(),
+                program_fact_adds: Vec::new(),
+                program_fact_removes: Vec::new(),
+            },
+        ))
         .unwrap();
     client.tick().unwrap();
     assert!(client.query_attachment_is_covered(&attachment));
@@ -147,10 +149,10 @@ fn one_shot_local_coverage_does_not_require_authority_continuity() {
 #[test]
 fn one_shot_propagated_query_attaches_fresh_usage_subscription_for_covered_binding() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
 
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
 
     seed(&server, "todos", cells("first", false, owner));
@@ -202,9 +204,9 @@ fn one_shot_propagated_query_attaches_fresh_usage_subscription_for_covered_bindi
 #[test]
 fn final_query_coverage_drop_releases_server_maintained_receiver_before_reopen() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
     seed(&server, "todos", cells("initial", false, owner));
 
@@ -271,9 +273,9 @@ fn final_query_coverage_drop_releases_server_maintained_receiver_before_reopen()
 #[test]
 fn one_shot_borrowed_stream_coverage_stays_pinned_until_query_detach() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
     seed(&server, "todos", cells("pinned", false, owner));
     let (client_transport, server_transport) = duplex();
@@ -359,8 +361,8 @@ fn one_shot_borrowed_stream_coverage_stays_pinned_until_query_detach() {
 #[test]
 fn reconnect_replays_each_distinct_usage_subscription_key() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
     let query = Query::from("todos");
     let prepared = prepared(&client, &query);
@@ -443,10 +445,10 @@ fn reconnect_replays_each_distinct_usage_subscription_key() {
 #[test]
 fn subscriber_connection_groups_duplicate_usage_subscriptions_by_coverage_key() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
 
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
 
     seed(&server, "todos", cells("first", false, owner));
@@ -513,9 +515,9 @@ fn subscriber_connection_groups_duplicate_usage_subscriptions_by_coverage_key() 
 #[test]
 fn subscription_opening_publication_follows_upstream_coverage_lifecycle() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
     let seeded = seed(&server, "todos", cells("first", false, owner));
     let (client_transport, server_transport) = duplex();
@@ -597,7 +599,7 @@ fn subscription_opening_publication_follows_upstream_coverage_lifecycle() {
 #[test]
 fn local_tier_full_propagation_publishes_truthful_empty_opening() {
     let schema = schema();
-    let client = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let client = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
     let query = Query::from("todos");
 
     let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
@@ -627,7 +629,7 @@ fn local_tier_full_propagation_publishes_truthful_empty_opening() {
 #[test]
 fn malformed_authority_opening_keeps_shared_coverage_provisional() {
     let schema = schema();
-    let client = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let client = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
     let (client_transport, mut authority_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let query = Query::from("todos");
@@ -639,18 +641,20 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
             _ => continue,
         }
     };
-    let update = |version_bundles| SyncMessage::ViewUpdate {
-        subscription,
-        settled_through: GlobalTime(1),
-        reset_result_set: true,
-        version_carriers: Vec::new(),
-        version_bundles,
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
+    let update = |version_bundles| {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+            subscription,
+            settled_through: GlobalTime(1),
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles,
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
     };
     authority_transport
         .send(update(vec![crate::protocol::VersionBundle {
@@ -659,7 +663,7 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
                 tx_id: TxId::new(TxTime::from(44), NodeUuid::from_bytes([0x44; 16])),
                 kind: crate::tx::TxKind::Mergeable,
                 n_total_writes: 0,
-                made_by: AuthorId::SYSTEM,
+                made_by: AuthorSubject::SYSTEM,
                 permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,
@@ -703,10 +707,10 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
 #[test]
 fn dropping_live_subscriptions_detaches_usage_subscriptions() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
 
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
 
     let seeded = seed(&server, "todos", cells("first", false, owner));
@@ -786,10 +790,10 @@ fn dropping_live_subscriptions_detaches_usage_subscriptions() {
 #[test]
 fn one_shot_edge_query_attaches_fresh_usage_subscription_for_covered_binding() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
 
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
 
     seed(&server, "todos", cells("first", false, owner));
@@ -831,10 +835,10 @@ fn missing_permissions_head_gates_sessions_but_not_trusted_backend_query_coverag
     // the authenticated link's trust discriminator, which the public query API
     // deliberately does not expose.
     let schema = schema();
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     server.server.set_permissions_ready(false).unwrap();
 
-    let backend_author = AuthorId::from_bytes([0xb0; 16]);
+    let backend_author = AuthorSubject::for_test_bytes([0xb0; 16]);
     let backend = open_db(0xb0, backend_author, &schema);
     let (backend_transport, server_backend_transport) = duplex();
     let _backend_upstream = crate::db::block_on(backend.connect_upstream(backend_transport));
@@ -844,7 +848,7 @@ fn missing_permissions_head_gates_sessions_but_not_trusted_backend_query_coverag
         CommitUnitTrust::TrustedBackend,
     );
 
-    let session_author = AuthorId::from_bytes([0xc1; 16]);
+    let session_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let session = open_db(0xc1, session_author, &schema);
     let (session_transport, server_session_transport) = duplex();
     let _session_upstream = crate::db::block_on(session.connect_upstream(session_transport));
@@ -887,8 +891,8 @@ fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered
                 ),
         ),
     );
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let reader = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let reader = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, reader, &schema);
     let join_code = "invite-code-123";
     client.set_identity_claims(
@@ -972,8 +976,8 @@ fn edge_subscription_with_claim_bound_policy_emits_later_matching_server_write()
                 ),
         ),
     );
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let reader = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let reader = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, reader, &schema);
     let join_code = "invite-code-123";
     let claims = BTreeMap::from([("join_code".to_owned(), Value::String(join_code.to_owned()))]);

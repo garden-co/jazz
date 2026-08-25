@@ -8,6 +8,12 @@ export function makeFakeClient(params: {
   claims: Record<string, unknown>;
 }) {
   const session: Session = {
+    issuer:
+      params.authMode === "local-first"
+        ? "urn:jazz:local-first"
+        : params.authMode === "anonymous"
+          ? "urn:jazz:anonymous"
+          : "https://issuer.example",
     user_id: params.userId,
     claims: params.claims,
     authMode: params.authMode,
