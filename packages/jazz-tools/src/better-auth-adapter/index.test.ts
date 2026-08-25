@@ -1,7 +1,7 @@
+import { createHmac } from "node:crypto";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, test, vi } from "vitest";
 import { betterAuth, type BetterAuthOptions, type DBAdapter } from "better-auth";
-import { mintLocalFirstToken } from "jazz-napi";
 import { createJazzContext, type JazzContext } from "../backend/index.js";
 import {
   startLocalJazzServer,
@@ -50,6 +50,24 @@ type AtomicUser = {
   transitionStatus: string;
 };
 
+const TEST_EXTERNAL_JWT_SECRET = "better-auth-adapter-test-secret";
+const TEST_EXTERNAL_JWT_KID = "better-auth-adapter-test";
+
+function signedExternalTestToken(subject: string): string {
+  const header = Buffer.from(
+    JSON.stringify({ alg: "HS256", typ: "JWT", kid: TEST_EXTERNAL_JWT_KID }),
+    "utf8",
+  ).toString("base64url");
+  const payload = Buffer.from(
+    JSON.stringify({ iss: "https://better-auth-test.example", sub: subject }),
+    "utf8",
+  ).toString("base64url");
+  const signature = createHmac("sha256", TEST_EXTERNAL_JWT_SECRET)
+    .update(`${header}.${payload}`, "utf8")
+    .digest("base64url");
+  return `${header}.${payload}.${signature}`;
+}
+
 describe("jazzAdapter", () => {
   describe("generated auth-table permissions", () => {
     it("denies client CRUD for every generated Better Auth table", () => {
@@ -67,7 +85,7 @@ describe("jazzAdapter", () => {
     });
   });
 
-  it("rejects local-first sessions before they can access Better Auth tables", async () => {
+  it("rejects ordinary-session reads and writes to Better Auth tables", async () => {
     const server = await startLocalJazzServer({
       allowLocalFirstAuth: true,
     });
@@ -84,6 +102,12 @@ describe("jazzAdapter", () => {
       driver: { type: "memory" },
       serverUrl: server.url,
       backendSecret: server.backendSecret,
+      jwtPublicKey: {
+        kty: "oct",
+        kid: TEST_EXTERNAL_JWT_KID,
+        alg: "HS256",
+        k: Buffer.from(TEST_EXTERNAL_JWT_SECRET, "utf8").toString("base64url"),
+      },
     });
 
     try {
@@ -101,17 +125,25 @@ describe("jazzAdapter", () => {
         },
       });
 
-      const localFirstSecret = Buffer.alloc(32, 7).toString("base64url");
-      const token = mintLocalFirstToken(localFirstSecret, server.appId, 60);
+      const token = signedExternalTestToken("ordinary-session-user");
       const sessionDb = await context.forRequest({
         headers: { authorization: `Bearer ${token}` },
       });
 
-      // Local-first is a reserved issuer and is not admitted through a
-      // backend-held native runtime. It therefore cannot reach these tables.
-      await expect(sessionDb.all(fixtureApp.better_auth_user, { tier: "edge" })).rejects.toThrow(
-        /author issuer is reserved: urn:jazz:local-first/,
+      await expect(sessionDb.all(fixtureApp.better_auth_user, { tier: "edge" })).resolves.toEqual(
+        [],
       );
+      await expect(
+        sessionDb
+          .insert(fixtureApp.better_auth_user, {
+            name: "Client user",
+            email: "client@example.com",
+            emailVerified: false,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .wait({ tier: "edge" }),
+      ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
     } finally {
       await context.shutdown();
       await server.stop();

@@ -353,16 +353,16 @@ describe("createPolicyTestApp", () => {
       });
 
       const alice = policyTestApp.as({
-        issuer: "urn:jazz:local-first",
+        issuer: "https://policy-test.example",
         user_id: "alice",
         claims: {},
-        authMode: "local-first",
+        authMode: "external",
       });
       const bob = policyTestApp.as({
-        issuer: "urn:jazz:local-first",
+        issuer: "https://policy-test.example",
         user_id: "bob",
         claims: {},
-        authMode: "local-first",
+        authMode: "external",
       });
 
       await expect(alice.all(testApp.todos.where({ id: seeded.id }))).resolves.toEqual([
@@ -407,16 +407,16 @@ describe("createPolicyTestApp", () => {
 
     try {
       const alice = policyTestApp.as({
-        issuer: "urn:jazz:local-first",
+        issuer: "https://policy-test.example",
         user_id: "alice",
         claims: {},
-        authMode: "local-first",
+        authMode: "external",
       });
       const bob = policyTestApp.as({
-        issuer: "urn:jazz:local-first",
+        issuer: "https://policy-test.example",
         user_id: "bob",
         claims: {},
-        authMode: "local-first",
+        authMode: "external",
       });
 
       alice.expectAllowed((db) => {
