@@ -48,14 +48,14 @@ describe("schema-fetch", () => {
     });
   });
 
-  it("normalizes microsecond publishedAt values to epoch milliseconds", async () => {
+  it("preserves millisecond publishedAt values", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
       statusText: "OK",
       json: async () => ({
         schema: { tables: { users: { columns: [] } } },
-        publishedAt: 1_744_011_200_000_000,
+        publishedAt: 1_744_011_200_000,
       }),
     });
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
@@ -129,7 +129,7 @@ describe("schema-fetch", () => {
         schemas: [
           {
             hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            publishedAt: 1_744_011_200_000_000,
+            publishedAt: 1_744_011_200_000,
           },
         ],
       }),

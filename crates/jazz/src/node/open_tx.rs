@@ -293,9 +293,9 @@ where
                     (
                         RowProvenance {
                             created_by: created.created_by(),
-                            created_at: created.created_at(),
+                            created_at: created.created_at().physical_ms(),
                             updated_by: updated.updated_by(),
-                            updated_at: updated.updated_at(),
+                            updated_at: updated.updated_at().physical_ms(),
                         },
                         (updated.tx_time(), updated.tx_node_alias()),
                     )
@@ -305,7 +305,7 @@ where
                     let Some(now_ms) = write.now_ms else {
                         continue;
                     };
-                    let updated_at = TxTime(now_ms);
+                    let updated_at = now_ms;
                     provenance = Some(match provenance {
                         Some(existing) => RowProvenance {
                             updated_by: provisional_author,
@@ -761,7 +761,7 @@ where
         for parent in open_tx.writes.iter().flat_map(|write| write.parents.iter()) {
             self.merge_tx_time(parent.time);
         }
-        let made_at = self.mint_tx_time(now_ms);
+        let made_at = self.mint_tx_time(now_ms)?;
         let tx_id = TxId::new(made_at, self.node_uuid);
         let provenance_snapshot = open_tx.base_snapshot.clone();
         let mut versions = Vec::with_capacity(open_tx.writes.len());
@@ -806,7 +806,7 @@ where
                 self.prepare_and_stage_large_scalar(value).await?;
             }
             let cells = positional_cells_from_map(&table_schema, &cells)?;
-            let provenance_at = TxTime(write.now_ms.unwrap_or(now_ms));
+            let provenance_at = TxTime::from(write.now_ms.unwrap_or(now_ms));
             let (created_by, created_at) = snapshot_content
                 .as_ref()
                 .map(|version| (version.created_by(), version.created_at()))
@@ -1019,7 +1019,7 @@ where
         let first = commits.first().ok_or(Error::InvalidMergeableCommit(
             "mergeable transaction requires at least one write",
         ))?;
-        let made_at = self.mint_tx_time(first.1.now_ms);
+        let made_at = self.mint_tx_time(first.1.now_ms)?;
         let committed = self
             .commit_mergeable_many_at_with_schema_versions(commits, made_at)
             .await?;

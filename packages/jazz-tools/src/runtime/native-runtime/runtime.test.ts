@@ -3371,11 +3371,11 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     expect(row?.valuesByColumn?.get("$createdAt")).toEqual({
       type: "Timestamp",
-      value: createdAtMs * 1_000,
+      value: createdAtMs,
     });
     expect(row?.valuesByColumn?.get("$updatedAt")).toEqual({
       type: "Timestamp",
-      value: updatedAtMs * 1_000,
+      value: updatedAtMs,
     });
   });
 
@@ -4334,7 +4334,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       { type: "Text", value: "public title" },
       { type: "Text", value: "public note" },
       { type: "Text", value: JSON.stringify(["https://issuer.example", "user-1"]) },
-      { type: "Timestamp", value: 123_000 },
+      { type: "Timestamp", value: 123 },
     ]);
   });
 
@@ -4742,7 +4742,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
           user_id: "user-1",
           claims: { role: "editor" },
         },
-        updated_at: 1_234_000,
+        updated_at: 1_234,
         branch_view: { head, base },
       }),
       "00000000-0000-0000-0000-000000000123",
@@ -6557,7 +6557,7 @@ function doubleBytes(value: number): Uint8Array {
 
 function txTimeBytes(value: number): Uint8Array {
   const bytes = new Uint8Array(8);
-  new DataView(bytes.buffer).setBigUint64(0, BigInt(value) << 16n, true);
+  new DataView(bytes.buffer).setBigUint64(0, BigInt(value) << 18n, true);
   return bytes;
 }
 

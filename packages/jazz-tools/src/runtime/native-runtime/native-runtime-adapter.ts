@@ -3257,7 +3257,7 @@ function updatedAtMsFromWriteContext(writeContext?: string | null): number | und
   if (!Number.isSafeInteger(parsed.updated_at) || parsed.updated_at < 0) {
     throw new Error("updatedAt must be a nonnegative safe integer");
   }
-  return Math.trunc(parsed.updated_at / 1_000);
+  return parsed.updated_at;
 }
 
 function effectiveUpdatedAtMs(writeContext?: string | null): number | null {

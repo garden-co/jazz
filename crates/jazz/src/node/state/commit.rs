@@ -9,7 +9,7 @@ where
     ) -> Result<PublishedTransaction, Error> {
         commit.validate()?;
         self.merge_commit_parent_times(std::slice::from_ref(&commit))?;
-        let made_at = self.mint_tx_time(commit.now_ms);
+        let made_at = self.mint_tx_time(commit.now_ms)?;
         self.commit_mergeable_at(commit, made_at).await
     }
 
@@ -47,7 +47,7 @@ where
             }
         }
         self.merge_commit_parent_times(&commits)?;
-        let made_at = self.mint_tx_time(commits[0].now_ms);
+        let made_at = self.mint_tx_time(commits[0].now_ms)?;
         self.commit_mergeable_many_at(commits, made_at).await
     }
 
@@ -151,7 +151,7 @@ where
             ));
         }
         self.merge_commit_parent_times(&commits)?;
-        let made_at = self.mint_tx_time(commits[0].now_ms);
+        let made_at = self.mint_tx_time(commits[0].now_ms)?;
         self.commit_mergeable_many_at_with_schema_versions_and_provenance(
             commits
                 .into_iter()
@@ -193,7 +193,7 @@ where
             }
         }
         self.merge_commit_parent_times(&commits)?;
-        let made_at = self.mint_tx_time(commits[0].now_ms);
+        let made_at = self.mint_tx_time(commits[0].now_ms)?;
         self.commit_mergeable_many_at_with_schema_versions(
             commits
                 .into_iter()
