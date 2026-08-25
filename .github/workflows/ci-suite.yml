@@ -57,12 +57,11 @@ jobs:
         with:
           sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
 
-      - run: pnpm format:check
-      - run: pnpm lint
-      # Keep workflow assertions required without adding another Rust build.
-      - run: pnpm test:ci-workflow
-      - name: Verify Turbo artifact cache inputs
-        run: pnpm test:turbo-cache-inputs
+      # This named partition is also the local source of truth. Do not copy
+      # individual commands here: local `--ci-equivalent` must execute the
+      # same complete partition rather than a drifting approximation.
+      - name: Run CI-equivalent lint and metadata partition
+        run: node dev/gates/local-ci-equivalent.mjs --ci-partition lint
       - name: Report sccache statistics
         if: always()
         run: sccache --show-stats
@@ -102,12 +101,8 @@ jobs:
       - uses: ./.github/actions/setup-blacksmith
         with:
           sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
-      - name: Workspace Rust tests (bounded, sharded, receipted)
-        run: node dev/gates/run-rust-tests.mjs --timeout-seconds 780 --nextest-profile jazz-ci -- --workspace --lib --bins --tests --features jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test
-      - name: Benchmark deterministic scenario smoke
-        run: dev/gates/benchmark-smoke.sh --ci
-      - name: Verify Nextest partition coverage
-        run: node --test dev/gates/test/nextest-partitions.test.mjs
+      - name: Run CI-equivalent workspace Rust partition
+        run: node dev/gates/local-ci-equivalent.mjs --ci-partition rust-workspace
       - name: Upload Rust test receipt
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -162,40 +157,10 @@ jobs:
         with:
           sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
           rust-cache: "false"
-      # Compile only the library test binary first. The semantic oracle timeout
-      # below must not charge a cold compile or unrelated integration binaries.
-      - name: Compile M3 differential oracle libtest
-        shell: bash
-        run: |
-          set -euo pipefail
-          test_binary="$(cargo test -p jazz --lib --features testing,transport-compression-zstd --no-run --message-format=json | node -e '
-            const readline = require("node:readline");
-            let executable;
-            const lines = readline.createInterface({ input: process.stdin });
-            lines.on("line", (line) => {
-              try {
-                const message = JSON.parse(line);
-                if (message.reason === "compiler-artifact" && message.target.name === "jazz" && message.executable)
-                  executable = message.executable;
-              } catch {}
-            });
-            lines.on("close", () => {
-              if (!executable) process.exitCode = 1;
-              else console.log(executable);
-            });
-          ')"
-          test -x "${test_binary}"
-          echo "M3_ORACLE_TEST_BINARY=${test_binary}" >> "${GITHUB_ENV}"
-      # The smallest stable real oracle smoke: fixed seed 11, the two smallest
-      # aggregate churn depths, and the normal three differential steps.
-      - name: Run maintained-vs-one-shot differential oracle smoke
-        shell: bash
-        run: |
-          timeout 60s env \
-            JAZZ_SEED=11 \
-            JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000 \
-            JAZZ_DIFFERENTIAL_STEP_COUNT=3 \
-            "${M3_ORACLE_TEST_BINARY}" node::tests::harness::m3_maintained_one_shot_differential_oracle --exact --ignored
+      # The shared partition compiles the exact libtest first; its semantic
+      # watchdog still measures execution only, never a cold compile.
+      - name: Run CI-equivalent M3 differential partition
+        run: node dev/gates/local-ci-equivalent.mjs --ci-partition rust-differential
       - name: Report sccache statistics
         if: always()
         run: sccache --show-stats
@@ -277,23 +242,11 @@ jobs:
       # PR-level checks cannot catch two independently green PRs whose merged
       # tree no longer compiles. This runs on every push to the integration
       # branch before building the TypeScript correctness artifacts.
-      - name: Check integration workspace
-        run: cargo check --workspace --all-targets
-
-      # Correctness tests use an unoptimised, provenance-checked WASM build.
-      # Package/publish workflows continue to use jazz-wasm's release build.
-      # The script reuses the restored default Cargo target, runs NAPI alone,
-      # then overlaps CLI with fast WASM. Each deterministic build is a signed
-      # Turbo task; the nondeterministic test suites below remain uncached.
-      - name: Build correctness-test artifacts
-        run: pnpm build:test-artifacts
-      - name: Verify preinstalled Chromium
-        run: pnpm exec playwright install --dry-run chromium
-      # Both suites consume the already-built artifacts and do not write shared
-      # outputs. Running them together avoids extending the PR critical path
-      # while retaining the complete Node and browser coverage in this gate.
-      - name: Run Node and browser test suites in parallel
-        run: dev/gates/run-ts-tests.sh
+      # This starts with the exhaustive workspace target-class check, then
+      # builds provenance-checked test artifacts and retains parallel Node /
+      # browser suites. The local CI-equivalent gate calls this exact partition.
+      - name: Run CI-equivalent TypeScript and workspace partition
+        run: node dev/gates/local-ci-equivalent.mjs --ci-partition typescript
       - name: Report sccache statistics
         if: always()
         run: sccache --show-stats

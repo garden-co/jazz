@@ -62,7 +62,7 @@ describe("TS Delete API", () => {
   });
 
   it("can use caller-supplied updatedAt on delete", async () => {
-    const updatedAt = 1_704_067_200_123_000;
+    const updatedAt = 1_704_067_200_123;
     const project = insertProject(db);
 
     db.delete(app.projects, project.id, { updatedAt });
@@ -76,7 +76,7 @@ describe("TS Delete API", () => {
     expect(deleted).toEqual({
       id: project.id,
       name: project.name,
-      $updatedAt: new Date(Math.trunc(updatedAt / 1_000)),
+      $updatedAt: new Date(updatedAt),
     });
   });
 

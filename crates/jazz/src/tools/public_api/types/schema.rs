@@ -113,7 +113,7 @@ pub enum ColumnType {
     /// Discriminated enum whose selected case carries a named record payload.
     /// This is a column type, never a top-level Jazz row union.
     EnumPayload { cases: Vec<EnumCaseDescriptor> },
-    /// 8-byte unsigned timestamp (microseconds since Unix epoch).
+    /// 8-byte unsigned timestamp (Unix milliseconds).
     Timestamp,
     /// 8-byte IEEE 754 double-precision float (f64).
     Double,

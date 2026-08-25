@@ -1659,7 +1659,7 @@ fn local_missing_upload_body_still_kills_sync_driver() {
     let (client_transport, _server_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let missing_tx = TxId::new(
-        crate::time::TxTime(client.next_now_ms()),
+        crate::time::TxTime::from(client.next_now_ms()),
         NodeUuid::from_bytes([0xee; 16]),
     );
     client.node.outbox.borrow_mut().push(PendingUpload {
