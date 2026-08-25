@@ -800,6 +800,70 @@ fn worker_relay_abrupt_detach_and_reconnect_keep_upstream_owners_bounded() {
     );
 }
 
+/// Replacing the authority link must replay every still-owned relay coverage
+/// group. The downstream browser remains connected throughout, so it has no
+/// reason to send another Subscribe after the worker reconnects upstream.
+#[test]
+fn worker_relay_replays_live_coverage_after_upstream_reconnect() {
+    let schema = schema();
+    let worker = open_db(0x66, AuthorSubject::SYSTEM, &schema);
+    let (first_authority, first_authority_state) = scripted_authority(None);
+    let first_upstream = block_on(worker.connect_upstream(first_authority));
+
+    let alice = AuthorSubject::for_test_bytes([0x66; 16]);
+    let browser = open_db(0x67, alice, &schema);
+    browser.set_non_durable_client();
+    let (browser_transport, worker_transport) = duplex();
+    let _browser_upstream = block_on(browser.connect_upstream(browser_transport));
+    let _worker_downstream = worker.accept_subscriber(worker_transport, alice);
+    let todos = browser
+        .prepare_query(&browser.table("todos"))
+        .expect("prepare browser todos query");
+    let _subscription = block_on(browser.subscribe(&todos, ReadOpts::default()))
+        .expect("open browser subscription");
+
+    for _ in 0..3 {
+        browser.tick().expect("send browser subscription");
+        worker.tick().expect("relay browser subscription");
+    }
+    assert_eq!(
+        first_authority_state
+            .borrow()
+            .outbound
+            .iter()
+            .filter(|message| matches!(message, SyncMessage::Subscribe(_)))
+            .count(),
+        1,
+        "the original authority receives the live relay coverage",
+    );
+    assert_eq!(worker.relay_upstream_subscription_owner_count_for_test(), 1);
+
+    assert!(worker.detach_connection(&first_upstream));
+    let (second_authority, second_authority_state) = scripted_authority(None);
+    let _second_upstream = block_on(worker.connect_upstream(second_authority));
+    for _ in 0..3 {
+        worker
+            .tick()
+            .expect("replay relay coverage after reconnect");
+    }
+
+    assert_eq!(
+        second_authority_state
+            .borrow()
+            .outbound
+            .iter()
+            .filter(|message| matches!(message, SyncMessage::Subscribe(_)))
+            .count(),
+        1,
+        "a still-connected browser must retain authority coverage across worker reconnect",
+    );
+    assert_eq!(
+        worker.relay_upstream_subscription_owner_count_for_test(),
+        1,
+        "reconnect must retain the downstream relay owner",
+    );
+}
+
 /// A rejected relay-owned upstream usage site can represent multiple active
 /// downstream subscription keys in one coverage group. The authority result
 /// must reach every key before the relay retires the group and its owner.

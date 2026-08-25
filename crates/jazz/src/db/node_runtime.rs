@@ -869,6 +869,52 @@ where
                 }
             }
         }
+        // Relay-owned coverage is not represented by the public subscription
+        // list above: it is retained by the downstream connection that it
+        // serves. Replacing an upstream transport drops that transport's wire
+        // subscriptions, while the downstream browser is still connected and
+        // therefore will not send a fresh Subscribe. Replay every live relay
+        // owner onto the successor authority, using its stable usage-site key.
+        //
+        // The owner map is the lifecycle authority here. A rejected coverage
+        // group can briefly remain on its downstream link while its rejection
+        // waits to be delivered; replaying that orphan would resurrect a
+        // subscription that is already being retired.
+        let relay_subscriptions = {
+            let owners = self.relay_upstream_subscription_owners.borrow();
+            self.connections
+                .borrow()
+                .iter()
+                .flat_map(|connection| {
+                    let connection = connection.borrow();
+                    let ConnectionLink::Subscriber(subscriber) = &connection.link else {
+                        return Vec::new();
+                    };
+                    subscriber
+                        .coverage_groups
+                        .iter()
+                        .filter_map(|(coverage, group)| {
+                            let owner = owners.get(&group.upstream_subscription)?;
+                            (group.upstream_opts.propagate_upstream
+                                && owner.downstream_connection_epoch == connection.connection_epoch
+                                && owner.coverage == *coverage)
+                                .then(|| PendingUpstreamSubscription {
+                                    subscription: group.upstream_subscription,
+                                    shape: group.shape.clone(),
+                                    binding: group.binding.clone(),
+                                    opts: group.upstream_opts.clone(),
+                                    identity: subscriber.peer.link_identity(),
+                                })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        for subscription in relay_subscriptions {
+            if pending_subscriptions.insert(subscription.subscription) {
+                pending.push(PendingUpstreamCommand::Subscribe(subscription));
+            }
+        }
         let connection = Rc::new(LocalMutex::new(PeerConnection {
             transport,
             staged_inbound: VecDeque::new(),
