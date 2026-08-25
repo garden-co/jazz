@@ -235,7 +235,7 @@ fn historical_cut_reads_only_table_global_time_range() {
 }
 
 #[test]
-fn denormalized_current_content_witness_matches_history_payload_bytes() {
+fn denormalized_current_content_witness_projects_history_provenance_to_unix_milliseconds() {
     let (_dir, mut node) = open_node();
     let first = commit_global_cells(
         &mut node,
@@ -287,7 +287,16 @@ fn denormalized_current_content_witness_matches_history_payload_bytes() {
     let current_rows = current_deltas
         .iter()
         .filter(|(_, weight)| *weight > 0)
-        .map(|(record, _)| record.raw().to_vec())
+        .map(|(record, _)| {
+            (
+                record
+                    .get_u64(record.descriptor().field_index("created_at").unwrap())
+                    .unwrap(),
+                record
+                    .get_u64(record.descriptor().field_index("updated_at").unwrap())
+                    .unwrap(),
+            )
+        })
         .collect::<Vec<_>>();
     assert_eq!(current_rows.len(), 1);
 
@@ -311,11 +320,26 @@ fn denormalized_current_content_witness_matches_history_payload_bytes() {
     let history_rows = history_deltas
         .iter()
         .filter(|(_, weight)| *weight > 0)
-        .map(|(record, _)| record.raw().to_vec())
+        .map(|(record, _)| {
+            (
+                record
+                    .get_u64(record.descriptor().field_index("created_at").unwrap())
+                    .unwrap(),
+                record
+                    .get_u64(record.descriptor().field_index("updated_at").unwrap())
+                    .unwrap(),
+            )
+        })
         .collect::<Vec<_>>();
     assert_eq!(history_rows.len(), 1);
     assert_eq!(
-        current_rows[0], history_rows[0],
-        "denormalized current witness payload must byte-match canonical history payload"
+        current_rows[0].0,
+        TxTime(history_rows[0].0).physical_ms(),
+        "current created_at must expose the history HLC's physical milliseconds"
+    );
+    assert_eq!(
+        current_rows[0].1,
+        TxTime(history_rows[0].1).physical_ms(),
+        "current updated_at must expose the history HLC's physical milliseconds"
     );
 }

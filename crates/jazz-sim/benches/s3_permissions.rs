@@ -1510,9 +1510,9 @@ fn seed_block_tree_fixture_bulk(
                 page,
                 Vec::new(),
                 AuthorSubject::SYSTEM,
-                jazz::time::TxTime(0),
+                0,
                 AuthorSubject::SYSTEM,
-                jazz::time::TxTime(0),
+                0,
                 &page_cells,
                 None,
             )
@@ -1561,9 +1561,9 @@ fn seed_block_tree_fixture_bulk(
                     row,
                     Vec::new(),
                     AuthorSubject::SYSTEM,
-                    jazz::time::TxTime(0),
+                    0,
                     AuthorSubject::SYSTEM,
-                    jazz::time::TxTime(0),
+                    0,
                     &cells,
                     None,
                 )

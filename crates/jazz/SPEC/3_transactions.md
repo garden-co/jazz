@@ -134,14 +134,14 @@ to local reads, but a `Local` wait remains pending until a durable peer explicit
 returns `Pending`/`Local`. When the global authority accepts it, the transaction
 becomes `Accepted`, receives a strictly increasing core-assigned `GlobalTime`,
 and reaches `DurabilityTier::Global` (`INV-TX-11`). `GlobalTime` is a packed
-authority HLC: 48 bits of physical milliseconds followed by a 16-bit logical
+authority HLC: 46 bits of physical milliseconds followed by an 18-bit logical
 counter. It is ordered and monotone but intentionally not dense. Skipped values
 after failed speculative allocation carry no missing-transaction meaning.
 The authority uses its own wall-clock sample for both the forward-skew check and
 HLC allocation; an uploaded transaction timestamp is never the authority clock.
-If all 65,536 values in one physical millisecond are consumed, allocation fails
-without wrapping or reusing a value. At the packed maximum physical millisecond,
-that exhaustion is permanent.
+If all 262,144 values in one physical millisecond are consumed, allocation
+advances to the next physical millisecond without wrapping or reusing a value.
+Only exhaustion at the packed maximum physical millisecond is a typed failure.
 
 The core maintains an HLC register separately from its committed frontier. The
 register may advance speculatively; the accepted transaction, global-current

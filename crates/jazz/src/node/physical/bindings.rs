@@ -181,9 +181,27 @@ pub(super) fn physical_history_binding(
                 "physical history schema alias missing",
             ))?;
     Ok(PhysicalHistoryBinding {
-        storage_table: physical_history_table_name(mapping.table_id),
+        storage_table: physical_history_storage_table(
+            physical_mappings,
+            schema_version,
+            logical_table,
+        )?,
         descriptor: physical_history_descriptor(table, mapping, alias)?,
     })
+}
+
+pub(super) fn physical_history_storage_table(
+    physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    schema_version: SchemaVersionId,
+    logical_table: &str,
+) -> Result<String, Error> {
+    let mapping = physical_mappings
+        .get(&schema_version)
+        .and_then(|mapping| mapping.tables.get(logical_table))
+        .ok_or(Error::InvalidStoredValue(
+            "physical history table mapping missing",
+        ))?;
+    Ok(physical_history_table_name(mapping.table_id))
 }
 
 pub(super) fn physical_current_binding(
@@ -208,13 +226,32 @@ pub(super) fn physical_current_binding(
         .ok_or(Error::InvalidStoredValue(
             "physical current table mapping missing",
         ))?;
-    let storage_table = match class {
+    Ok(PhysicalHistoryBinding {
+        storage_table: physical_current_storage_table(
+            physical_mappings,
+            schema_version,
+            logical_table,
+            class,
+        )?,
+        descriptor: physical_current_descriptor(table, mapping)?,
+    })
+}
+
+pub(super) fn physical_current_storage_table(
+    physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    schema_version: SchemaVersionId,
+    logical_table: &str,
+    class: PhysicalCurrentClass,
+) -> Result<String, Error> {
+    let mapping = physical_mappings
+        .get(&schema_version)
+        .and_then(|mapping| mapping.tables.get(logical_table))
+        .ok_or(Error::InvalidStoredValue(
+            "physical current table mapping missing",
+        ))?;
+    Ok(match class {
         PhysicalCurrentClass::Global => physical_global_current_table_name(mapping.table_id),
         PhysicalCurrentClass::Ahead => physical_ahead_current_table_name(mapping.table_id),
-    };
-    Ok(PhysicalHistoryBinding {
-        storage_table,
-        descriptor: physical_current_descriptor(table, mapping)?,
     })
 }
 

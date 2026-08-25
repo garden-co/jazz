@@ -5,11 +5,7 @@
 import type { Value as WasmValue, WasmRow, WasmSchema } from "../drivers/types.js";
 import type { ColumnType } from "../drivers/types.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
-import {
-  isPermissionIntrospectionColumn,
-  isProvenanceMagicTimestampColumn,
-  magicColumnType,
-} from "../magic-columns.js";
+import { isPermissionIntrospectionColumn, magicColumnType } from "../magic-columns.js";
 import { normalizeIncludeEntries, type NormalizedIncludeSpec } from "./query-builder-shape.js";
 import { hiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
 
@@ -207,10 +203,7 @@ function transformRowValues(
   return obj;
 }
 
-function timestampToDate(value: number, columnName?: string): Date {
-  if (columnName && isProvenanceMagicTimestampColumn(columnName)) {
-    return new Date(Math.trunc(value / 1_000));
-  }
+function timestampToDate(value: number, _columnName?: string): Date {
   return new Date(value);
 }
 

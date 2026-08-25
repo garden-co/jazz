@@ -264,9 +264,12 @@ describe("Todo Server Integration", () => {
         0,
       );
 
-      const listRes = await fetch(`${server2.baseUrl}/todos`);
-      expect(listRes.status).toBe(200);
-      const todos: Todo[] = await listRes.json();
+      // This receipt is specifically about the local Fjall store surviving a
+      // cold restart. Read it explicitly at Local: an Edge read asks the
+      // upstream for canonical membership, and its read-your-writes behavior
+      // immediately after reopening is intentionally tracked separately in
+      // https://github.com/garden-co/jazz/issues/1995.
+      const todos = await server2.db.all(app.todos, { tier: "local" });
 
       // Both todos should be present
       expect(todos.length).toBe(2);

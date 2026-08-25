@@ -80,11 +80,15 @@ fn row_provenance_preserves_created_fields_and_advances_updated_at() {
         .row_provenance(&rows[0])
         .expect("resolve provenance")
         .expect("row has provenance");
+    // `Db::row_provenance` exposes physical Unix milliseconds, like every
+    // public-facing provenance boundary. Packed HLC remains version-internal.
+    let created_at = 1_000;
+    let updated_at = 2_000;
 
     assert_eq!(provenance.created_by, alice);
-    assert_eq!(provenance.created_at.0, 1_000);
+    assert_eq!(provenance.created_at, created_at);
     assert_eq!(provenance.updated_by, alice);
-    assert_eq!(provenance.updated_at.0, 2_000);
+    assert_eq!(provenance.updated_at, updated_at);
     assert!(provenance.created_at < provenance.updated_at);
 
     let (descriptor, raw) = rows[0].encoded_record();
@@ -97,11 +101,11 @@ fn row_provenance_preserves_created_fields_and_advances_updated_at() {
         .expect("updatedAt field");
     assert_eq!(
         encoded.get_u64(created_at_idx).expect("createdAt value"),
-        1_000
+        created_at
     );
     assert_eq!(
         encoded.get_u64(updated_at_idx).expect("updatedAt value"),
-        2_000
+        updated_at
     );
 }
 
@@ -152,9 +156,9 @@ fn deletion_advances_updated_provenance_without_replacing_creation_provenance() 
         .expect("resolve provenance")
         .expect("row has provenance");
     assert_eq!(provenance.created_by, alice);
-    assert_eq!(provenance.created_at.0, 1_000);
+    assert_eq!(provenance.created_at, 1_000);
     assert_eq!(provenance.updated_by, alice);
-    assert_eq!(provenance.updated_at.0, 3_000);
+    assert_eq!(provenance.updated_at, 3_000);
 }
 
 /// Empty mergeable-batch updates remain no-ops only after validating both the
