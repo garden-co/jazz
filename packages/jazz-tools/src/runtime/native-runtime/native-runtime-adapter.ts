@@ -234,7 +234,6 @@ type NativeDb = {
     rowId: Uint8Array,
     cells: Uint8Array,
     column: string,
-    kind: "Text" | "Json" | "Bytea",
     mutation?: StreamingMutationKind,
     author?: Uint8Array,
     updatedAtMs?: number,
@@ -246,7 +245,6 @@ type NativeDb = {
     rowId: Uint8Array,
     cells: Uint8Array,
     column: string,
-    kind: "Text" | "Json" | "Bytea",
     mutation: StreamingMutationKind | undefined,
     author: Uint8Array | undefined,
     attribution: Uint8Array,
@@ -1101,7 +1099,6 @@ export class NativeRuntimeAdapter implements Runtime {
           rowId,
           cells,
           column,
-          kind,
           mutation,
           undefined,
           attribution,
@@ -1113,7 +1110,6 @@ export class NativeRuntimeAdapter implements Runtime {
           rowId,
           cells,
           column,
-          kind,
           mutation,
           writeIdentity,
           updatedAtMs ?? undefined,
@@ -3257,7 +3253,7 @@ function updatedAtMsFromWriteContext(writeContext?: string | null): number | und
   if (!Number.isSafeInteger(parsed.updated_at) || parsed.updated_at < 0) {
     throw new Error("updatedAt must be a nonnegative safe integer");
   }
-  return Math.trunc(parsed.updated_at / 1_000);
+  return parsed.updated_at;
 }
 
 function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
@@ -5241,9 +5237,9 @@ function decodeBytes(
     case "Timestamp":
       return {
         type: "Timestamp",
-        value:
-          Number(view.getBigUint64(0, true)) *
-          (fieldName && isProvenanceMagicColumn(fieldName) ? 1_000 : 1),
+        // Current-row provenance and ordinary timestamp columns both cross the
+        // public binding boundary as Unix milliseconds.
+        value: Number(view.getBigUint64(0, true)),
       };
     case "Text":
     case "Json":
@@ -5256,14 +5252,14 @@ function decodeBytes(
       ) {
         return { type: "Text", value: decodeProvenanceText(bytes) };
       }
-      if (bytes[0] !== 0) throw new Error("indirect scalar crossed a logical binding boundary");
+      if (bytes[0] !== 2) throw new Error("indirect scalar crossed a logical binding boundary");
       return { type: "Text", value: textDecoder.decode(bytes.subarray(1)) };
     case "EnumPayload":
       return decodePayloadEnumBytes(type, bytes, storageType, nestedRowCarrier);
     case "Uuid":
       return { type: "Uuid", value: formatUuid(bytes) };
     case "Bytea":
-      if (bytes[0] !== 0) throw new Error("indirect scalar crossed a logical binding boundary");
+      if (bytes[0] !== 2) throw new Error("indirect scalar crossed a logical binding boundary");
       return { type: "Bytea", value: bytes.subarray(1).slice() };
     case "Array":
       return {
@@ -5307,7 +5303,7 @@ function decodePayloadEnumBytes(
   if (!entry) throw new Error("unknown Enum payload case");
   const enumStorage = nonNullableStorageType(storageType);
   const payloadDescriptor =
-    enumStorage?.tag === 16
+    enumStorage?.tag === 17
       ? enumStorage.enumSchema?.cases?.find((candidate) => candidate.name === caseName)?.payload
       : undefined;
   if (!payloadDescriptor || payloadDescriptor.length !== entry.fields.length) {
@@ -5337,18 +5333,18 @@ function decodePayloadEnumBytes(
 
 function nonNullableStorageType(storageType?: ValueType): ValueType | undefined {
   let current = storageType;
-  while (current?.tag === 14) current = current.inner;
+  while (current?.tag === 15) current = current.inner;
   return current;
 }
 
 function arrayElementStorageType(storageType?: ValueType): ValueType | undefined {
   const array = nonNullableStorageType(storageType);
-  return array?.tag === 13 ? array.inner : undefined;
+  return array?.tag === 14 ? array.inner : undefined;
 }
 
 function recordStorageDescriptor(storageType?: ValueType): DescriptorField[] | undefined {
   const record = nonNullableStorageType(storageType);
-  return record?.tag === 15 ? record.record : undefined;
+  return record?.tag === 16 ? record.record : undefined;
 }
 
 export type NestedRowCarrier = "full-record" | "keyed-terminal";

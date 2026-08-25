@@ -20,6 +20,22 @@ type PushPreparation = groove::large_values::PushStreamingPreparation<
     Box<dyn FnMut(groove::large_values::StagedChunk) -> Result<(), groove::large_values::Error>>,
 >;
 
+const MAX_PHYSICAL_TIMESTAMP_MS: u64 = crate::time::HLC_MAX_PHYSICAL_MS;
+
+pub(super) fn validate_updated_at_ms(updated_at_ms: Option<u64>) -> Result<(), Error> {
+    if let Some(updated_at_ms) = updated_at_ms
+        && updated_at_ms > MAX_PHYSICAL_TIMESTAMP_MS
+    {
+        return Err(Error::new(
+            ErrorCode::WriteRejected,
+            format!(
+                "updated_at_ms {updated_at_ms} exceeds the packed-HLC physical millisecond range"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Resumable host-driven upload used by asynchronous bindings such as WASM.
 pub struct StreamingValueUpload {
     id: groove::large_values::StagedLargeValueId,
@@ -472,6 +488,7 @@ where
             identity,
             matches!(target, ExactWriteTarget::Branch(_)),
         )?;
+        validate_updated_at_ms(updated_at_ms)?;
         let supplied_row_id = row_id.is_some();
         let row = row_id.unwrap_or_else(|| self.row_id_source.borrow_mut().next_row_id());
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
@@ -544,14 +561,13 @@ where
         table: &str,
         cells: RowCells,
         column: &str,
-        kind: groove::large_values::LargeValueKind,
         reader: R,
     ) -> Result<WriteHandle<S>, Error>
     where
         R: std::io::Read + Send + 'static,
     {
         let row = self.row_id_source.borrow_mut().next_row_id();
-        self.insert_streaming_value_with_id(table, row, cells, column, kind, reader)
+        self.insert_streaming_value_with_id(table, row, cells, column, reader)
             .await
     }
 
@@ -565,7 +581,6 @@ where
         row: RowUuid,
         cells: RowCells,
         column: &str,
-        kind: groove::large_values::LargeValueKind,
         reader: R,
     ) -> Result<WriteHandle<S>, Error>
     where
@@ -577,7 +592,6 @@ where
             row,
             cells,
             column,
-            kind,
             reader,
             None,
             None,
@@ -599,7 +613,6 @@ where
         row: RowUuid,
         cells: RowCells,
         column: &str,
-        kind: groove::large_values::LargeValueKind,
         reader: R,
         identity: Option<AuthorSubject>,
         now_ms: Option<u64>,
@@ -611,7 +624,7 @@ where
     {
         use futures::{SinkExt, StreamExt};
 
-        let mut upload = self.begin_streaming_value_upload(table, &cells, column, kind)?;
+        let mut upload = self.begin_streaming_value_upload(table, &cells, column)?;
         let (mut bytes_tx, mut bytes_rx) = futures::channel::mpsc::channel::<Vec<u8>>(8);
         let (result_tx, result_rx) = futures::channel::oneshot::channel();
         std::thread::spawn(move || {
@@ -665,9 +678,8 @@ where
         table: &str,
         cells: &RowCells,
         column: &str,
-        kind: groove::large_values::LargeValueKind,
     ) -> Result<StreamingValueUpload, Error> {
-        self.validate_streaming_column(table, cells, column, kind)?;
+        let (kind, _) = self.validate_streaming_column(table, cells, column)?;
         let emitted = Rc::new(RefCell::new(Vec::new()));
         let emitted_for_stage = Rc::clone(&emitted);
         let preparation = groove::large_values::PushStreamingPreparation::new(
@@ -845,35 +857,60 @@ where
                 return Err(error.into());
             }
         };
-        let nullable =
-            match self.validate_streaming_column(table, &cells, column, staged.value_ref.kind) {
-                Ok(nullable) => nullable,
-                Err(error) => {
-                    let _ = self
-                        .node
-                        .node
-                        .lock()
-                        .await
-                        .evict_staged_large_value(staged.id)
-                        .await;
-                    return Err(error);
-                }
-            };
-        self.publish_streaming_value_with_id(
-            mutation,
-            table,
-            row,
-            cells,
-            column,
-            staged,
-            nullable,
-            identity,
-            now_ms,
-            head,
-            base,
-            attribution,
-        )
-        .await
+        let nullable = match self.validate_streaming_column(table, &cells, column) {
+            Ok((expected_kind, nullable)) if expected_kind == staged.value_ref.kind => nullable,
+            Ok(_) => {
+                let _ = self
+                    .node
+                    .node
+                    .lock()
+                    .await
+                    .evict_staged_large_value(staged.id)
+                    .await;
+                return Err(large_value_cell_type_error(table, column));
+            }
+            Err(error) => {
+                let _ = self
+                    .node
+                    .node
+                    .lock()
+                    .await
+                    .evict_staged_large_value(staged.id)
+                    .await;
+                return Err(error);
+            }
+        };
+        let staged_id = staged.id;
+        let published = self
+            .publish_streaming_value_with_id(
+                mutation,
+                table,
+                row,
+                cells,
+                column,
+                staged,
+                nullable,
+                identity,
+                now_ms,
+                head,
+                base,
+                attribution,
+            )
+            .await;
+        if published.is_err() {
+            // Finalization transfers the pending journal into a staged root,
+            // but publication is still fallible (for example a duplicate
+            // insert or an invalid branch view). Do not make cleanup mask the
+            // caller-visible admission error.
+            let _ = self
+                .node
+                .node
+                .lock()
+                .await
+                .evict_staged_large_value(staged_id)
+                .await;
+        }
+        published
     }
 
     fn validate_streaming_column(
@@ -881,8 +918,7 @@ where
         table: &str,
         cells: &RowCells,
         column: &str,
-        kind: groove::large_values::LargeValueKind,
-    ) -> Result<bool, Error> {
+    ) -> Result<(groove::large_values::LargeValueKind, bool), Error> {
         if cells.contains_key(column) {
             return Err(Error::new(
                 ErrorCode::Schema,
@@ -890,7 +926,7 @@ where
             ));
         }
         let table_schema = self.table_schema(table)?;
-        let column_type = &table_schema
+        let column = table_schema
             .columns
             .iter()
             .find(|candidate| candidate.name == column)
@@ -899,25 +935,30 @@ where
                     ErrorCode::Schema,
                     format!("unknown streamed column {table}.{column}"),
                 )
-            })?
-            .column_type;
-        let (column_type, nullable) = match column_type {
+            })?;
+        let (column_type, nullable) = match &column.column_type {
             groove::records::ValueType::Nullable(inner) => (inner.as_ref(), true),
             column_type => (column_type, false),
         };
-        let kind_matches = match kind {
-            groove::large_values::LargeValueKind::Bytes => {
-                matches!(column_type, groove::records::ValueType::Bytes)
+        let kind = match column.large_value_kind {
+            crate::schema::LargeValueSemanticKind::Bytes
+                if matches!(column_type, groove::records::ValueType::Bytes) =>
+            {
+                groove::large_values::LargeValueKind::Bytes
             }
-            groove::large_values::LargeValueKind::String
-            | groove::large_values::LargeValueKind::Json => {
-                matches!(column_type, groove::records::ValueType::String)
+            crate::schema::LargeValueSemanticKind::String
+                if matches!(column_type, groove::records::ValueType::String) =>
+            {
+                groove::large_values::LargeValueKind::String
             }
+            crate::schema::LargeValueSemanticKind::Json
+                if matches!(column_type, groove::records::ValueType::String) =>
+            {
+                groove::large_values::LargeValueKind::Json
+            }
+            _ => return Err(large_value_cell_type_error(table, &column.name)),
         };
-        if !kind_matches {
-            return Err(large_value_cell_type_error(table, column));
-        }
-        Ok(nullable)
+        Ok((kind, nullable))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1130,6 +1171,7 @@ where
             identity,
             matches!(target, WriteTarget::BranchView { .. }),
         )?;
+        validate_updated_at_ms(updated_at_ms)?;
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
 
@@ -1271,6 +1313,7 @@ where
             identity,
             matches!(target, ExactWriteTarget::Branch(_)),
         )?;
+        validate_updated_at_ms(updated_at_ms)?;
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         let branch = target.branch();
@@ -1390,6 +1433,7 @@ where
             identity,
             matches!(target, WriteTarget::BranchView { .. }),
         )?;
+        validate_updated_at_ms(updated_at_ms)?;
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
 
@@ -1564,6 +1608,7 @@ where
             identity,
             matches!(target, ExactWriteTarget::Branch(_)),
         )?;
+        validate_updated_at_ms(updated_at_ms)?;
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
         let branch = target.branch();
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());

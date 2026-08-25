@@ -366,9 +366,9 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
         full.row_uuid(),
         full.parents(),
         full.created_by(),
-        full.created_at(),
+        full.created_at_ms(),
         full.updated_by(),
-        full.updated_at(),
+        full.updated_at_ms(),
         &[
             Some(Value::String("conflicting title".to_owned())),
             full.cell_at(1),
