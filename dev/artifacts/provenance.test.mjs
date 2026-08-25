@@ -24,6 +24,10 @@ function fixture() {
     "crates/groove/src",
     "crates/wasm-tracing/src",
     "crates/jazz-napi/src",
+    "crates/jazz-server/src",
+    "crates/jazz-native-transport/src",
+    "crates/jazz-storage-rocksdb/src",
+    "crates/jazz-otel/src",
   ])
     mkdirSync(join(root, dir), { recursive: true });
   for (const [path, content] of Object.entries({
@@ -176,6 +180,17 @@ test("NAPI provenance excludes only the wrapper's ephemeral staged binding", () 
   // Planted positive: an actual NAPI source remains a provenance input.
   writeFileSync(join(root, "crates/jazz-napi/src/lib.rs"), "// changed native source\n");
   assert.match(verifyManifest(root, "napi", "release"), /packageInputs differs/);
+});
+
+test("NAPI provenance covers every direct local Cargo dependency", () => {
+  const root = fixture();
+  writeManifest(root, "napi", "release");
+  for (const crate of ["jazz-server", "jazz-native-transport", "jazz-storage-rocksdb", "jazz-otel"]) {
+    const path = join(root, `crates/${crate}/src/lib.rs`);
+    writeFileSync(path, "// planted dependency change\n");
+    assert.match(verifyManifest(root, "napi", "release"), /packageInputs differs/, crate);
+    writeManifest(root, "napi", "release");
+  }
 });
 
 test("tracked NAPI bootstrap changes invalidate sealed provenance and its ABI fingerprint", () => {

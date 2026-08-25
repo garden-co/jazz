@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -70,6 +70,25 @@ test("release NAPI staging rejects a valid sealed manifest whose fingerprint dis
     readFileSync(join(packageDir, "native-binding.pointer.cjs"), "utf8").includes(fingerprint),
     true,
   );
+});
+
+test("release NAPI staging rejects a symlinked active native binding", () => {
+  const root = releaseFixture();
+  const packageDir = join(root, "crates/jazz-napi");
+  const generation = join(packageDir, ".native-artifacts/generation-test");
+  writeFileSync(
+    join(packageDir, "native-binding.pointer.cjs"),
+    `const nativeBinding = require("./.native-artifacts/generation-test/index.js");\nmodule.exports = { nativeBinding, expectedNativeArtifactFingerprint: "${fingerprint}" };\n`,
+  );
+  const outside = join(root, "outside.node");
+  writeFileSync(outside, "outside native bytes");
+  symlinkSync(outside, join(generation, "jazz-napi.linux-x64-gnu.node"));
+  writeFileSync(join(generation, "index.js"), "module.exports = {};\n");
+  writeFileSync(
+    join(generation, ".jazz-artifact-manifest.json"),
+    JSON.stringify({ kind: "napi", profile: "release", nativeArtifactFingerprint: fingerprint }),
+  );
+  assert.throws(() => stageNapiLoader(root, "linux-x64-gnu"), /real regular file/);
 });
 
 test("release fingerprint staging verifies downloaded WASM bytes before deriving expectations", () => {

@@ -5,7 +5,7 @@
  * platform-specific stat/hash utilities.
  */
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -154,6 +154,12 @@ const inputsFor = {
     "crates/jazz-napi",
     "crates/jazz",
     "crates/groove",
+    // Keep the direct Cargo source closure explicit. Cargo.lock records the
+    // selected versions, not edits to these path/workspace crates.
+    "crates/jazz-server",
+    "crates/jazz-native-transport",
+    "crates/jazz-storage-rocksdb",
+    "crates/jazz-otel",
   ],
 };
 
@@ -193,9 +199,17 @@ function activeNapiBindings(root) {
   );
   if (!match) return undefined;
   const generation = join(packageDir, ".native-artifacts", match[1]);
-  if (!existsSync(generation) || !statSync(generation).isDirectory()) return undefined;
+  if (
+    !existsSync(generation) ||
+    !lstatSync(generation).isDirectory() ||
+    lstatSync(generation).isSymbolicLink()
+  )
+    return undefined;
   return readdirSync(generation, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".node"))
+    .filter((entry) => {
+      const path = join(generation, entry.name);
+      return entry.name.endsWith(".node") && lstatSync(path).isFile() && !lstatSync(path).isSymbolicLink();
+    })
     .map((entry) => join(generation, entry.name));
 }
 

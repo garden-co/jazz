@@ -263,6 +263,24 @@ function atomicWrite(path, contents) {
   writeFileSync(temporary, contents, { mode: 0o600 });
   renameSync(temporary, path);
 }
+function realRegularFile(path, label) {
+  if (!existsSync(path)) throw new Error(`NAPI generation is missing ${label}`);
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.isSymbolicLink())
+    throw new Error(`NAPI generation ${label} must be a real regular file`);
+}
+function assertRealNapiGeneration(path, expectedBinding, { sealed = true } = {}) {
+  if (!existsSync(path) || !lstatSync(path).isDirectory() || lstatSync(path).isSymbolicLink())
+    throw new Error("NAPI generation stage is not a real directory");
+  const required = [
+    [join(path, expectedBinding), expectedBinding],
+    [join(path, "index.js"), "generated loader"],
+    [join(path, "index.d.ts"), "generated declarations"],
+  ];
+  if (sealed) required.push([join(path, ".jazz-artifact-manifest.json"), "sealed manifest"]);
+  for (const [candidate, label] of required)
+    realRegularFile(candidate, label);
+}
 function publishExpectedFingerprint(kind, fingerprint) {
   // Producer tasks never mutate jazz-tools source. Release assembly derives
   // its expectation modules from the sealed downloaded manifests.
@@ -285,24 +303,12 @@ export function publishNapiGeneration(
   const held = lease ? { lease: verifyArtifactBuildLease(lease) } : acquireArtifactLease();
   let generationPath;
   try {
-    if (
-      !existsSync(stagePath) ||
-      !lstatSync(stagePath).isDirectory() ||
-      lstatSync(stagePath).isSymbolicLink()
-    )
-      throw new Error("NAPI generation stage is not a real directory");
-    const hasNativeBinding = readdirSync(stagePath, { withFileTypes: true }).some(
-      (entry) => entry.isFile() && entry.name.endsWith(".node"),
-    );
-    if (
-      !hasNativeBinding ||
-      !existsSync(join(stagePath, "index.js")) ||
-      !existsSync(join(stagePath, "index.d.ts")) ||
-      !existsSync(join(stagePath, ".jazz-artifact-manifest.json"))
-    )
-      throw new Error(
-        "NAPI generation is missing its generated loader, declarations, or sealed manifest",
-      );
+    const bindings = readdirSync(stagePath, { withFileTypes: true })
+      .map((entry) => entry.name)
+      .filter((name) => name.endsWith(".node"));
+    if (bindings.length !== 1)
+      throw new Error("NAPI generation must contain exactly one target native binding");
+    assertRealNapiGeneration(stagePath, bindings[0]);
     const generationRoot = join(packageDir, ".native-artifacts");
     mkdirSync(generationRoot, { recursive: true });
     generationPath = join(
@@ -337,10 +343,7 @@ export function validateNapiStage(
   const binding = join(stagePath, expectedBinding);
   const loader = join(stagePath, "index.js");
   const declarations = join(stagePath, "index.d.ts");
-  if (!existsSync(binding) || !existsSync(loader) || !existsSync(declarations))
-    throw new Error(
-      `NAPI build produced an incomplete staged generation (expected ${expectedBinding}, index.js and index.d.ts)`,
-    );
+  assertRealNapiGeneration(stagePath, expectedBinding, { sealed: false });
   if (readFileSync(declarations, "utf8") !== readFileSync(stableDeclarationsPath, "utf8"))
     throw new Error(
       "NAPI build generated declarations that differ from the public package type surface; update the checked-in declaration before activating",
