@@ -5252,14 +5252,14 @@ function decodeBytes(
       ) {
         return { type: "Text", value: decodeProvenanceText(bytes) };
       }
-      if (bytes[0] !== 0) throw new Error("indirect scalar crossed a logical binding boundary");
+      if (bytes[0] !== 2) throw new Error("indirect scalar crossed a logical binding boundary");
       return { type: "Text", value: textDecoder.decode(bytes.subarray(1)) };
     case "EnumPayload":
       return decodePayloadEnumBytes(type, bytes, storageType, nestedRowCarrier);
     case "Uuid":
       return { type: "Uuid", value: formatUuid(bytes) };
     case "Bytea":
-      if (bytes[0] !== 0) throw new Error("indirect scalar crossed a logical binding boundary");
+      if (bytes[0] !== 2) throw new Error("indirect scalar crossed a logical binding boundary");
       return { type: "Bytea", value: bytes.subarray(1).slice() };
     case "Array":
       return {
@@ -5285,7 +5285,8 @@ function decodeBytes(
 }
 
 function decodeProvenanceText(bytes: Uint8Array): string {
-  return decodeCanonicalAuthorSubjectBytes(bytes);
+  if (bytes[0] !== 2) throw new Error("invalid canonical author subject scalar encoding");
+  return decodeCanonicalAuthorSubjectBytes(bytes.subarray(1));
 }
 
 function decodePayloadEnumBytes(

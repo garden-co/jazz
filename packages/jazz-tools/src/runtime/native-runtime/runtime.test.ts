@@ -4341,18 +4341,18 @@ describe("NativeRuntimeAdapter server transport", () => {
   it.each([
     {
       name: "arbitrary text",
-      provenanceBytes: new TextEncoder().encode("not-json"),
+      provenanceBytes: inlineScalar("not-json"),
     },
     {
       name: "double stored-scalar wrapper",
       provenanceBytes: Uint8Array.from([
-        0,
+        2,
         ...inlineScalar(JSON.stringify(["https://issuer.example", "user-1"])),
       ]),
     },
     {
       name: "noncanonical JSON whitespace",
-      provenanceBytes: new TextEncoder().encode(`[ "https://issuer.example", "user-1" ]`),
+      provenanceBytes: inlineScalar(`[ "https://issuer.example", "user-1" ]`),
     },
     {
       name: "ASCII-blank component",
@@ -6385,7 +6385,7 @@ function presentBytes(bytes: Uint8Array): Uint8Array {
 }
 
 function inlineScalar(value: string): Uint8Array {
-  return Uint8Array.from([0, ...new TextEncoder().encode(value)]);
+  return Uint8Array.from([2, ...new TextEncoder().encode(value)]);
 }
 
 function encodeArrayRows(): Uint8Array {

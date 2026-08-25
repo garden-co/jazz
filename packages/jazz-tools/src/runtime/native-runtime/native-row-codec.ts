@@ -1118,7 +1118,7 @@ function encodeNativeNonNullValue(type: ColumnType, value: Value): Uint8Array {
     case "Json":
     case "Enum":
       if (value.type !== "Text") throw new Error(`expected ${type.type} value`);
-      return concatBytes([Uint8Array.of(0), new TextEncoder().encode(value.value)]);
+      return concatBytes([Uint8Array.of(2), new TextEncoder().encode(value.value)]);
     case "EnumPayload": {
       if (value.type !== "Enum") throw new Error("expected Enum payload value");
       const entry = type.cases.find((candidate) => candidate.name === value.value.case);
@@ -1134,7 +1134,7 @@ function encodeNativeNonNullValue(type: ColumnType, value: Value): Uint8Array {
       return parseUuid(value.value);
     case "Bytea":
       if (value.type !== "Bytea") throw new Error("expected Bytea value");
-      return concatBytes([Uint8Array.of(0), value.value]);
+      return concatBytes([Uint8Array.of(2), value.value]);
     case "Array":
       if (value.type !== "Array") throw new Error("expected Array value");
       return encodeNativeArrayValue(type.element, value.value);
@@ -1312,7 +1312,7 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
 }
 
 function decodeInlineScalar(bytes: Uint8Array): Uint8Array {
-  if (bytes[0] !== 0) {
+  if (bytes[0] !== 2) {
     throw new Error("indirect scalar crossed a logical binding boundary");
   }
   return bytes.subarray(1);

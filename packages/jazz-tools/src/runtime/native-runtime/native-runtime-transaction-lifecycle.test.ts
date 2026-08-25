@@ -52,7 +52,7 @@ function encodeRows(rows: EncodedTestRow[]): Uint8Array {
       row.bytes(source.rowId);
       row.bool(false);
       row.bytes(
-        createRecord(descriptor, [Uint8Array.from([0, ...new TextEncoder().encode(source.title)])]),
+        createRecord(descriptor, [Uint8Array.from([2, ...new TextEncoder().encode(source.title)])]),
       );
     }, tableRows.length);
   }, byTable.size);

@@ -4655,7 +4655,7 @@ mod tests {
         );
         // The pre-v13 codec encoded inline bytes as `[0] + payload`. Without
         // reserved tags, this exact legacy value would be accepted as the new
-        // primitive `abc`, silently dropping its leading length-like byte.
+        // primitive `\x03abc`, silently treating its leading length byte as data.
         assert_eq!(
             decode_stored_scalar(LargeValueKind::Bytes, &[0, 3, b'a', b'b', b'c']),
             Err(Error::MalformedScalar)

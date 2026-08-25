@@ -3701,12 +3701,21 @@ mod dynamic_schema_view_tests {
             inner: WasmDbInner::Memory(db),
             owns_runtime: false,
         };
-        let transport = binding
-            .accept_subscriber(vec![0x73; 16], JsValue::NULL)
+        let subscriber = AuthorSubject::from_canonical(
+            &serde_json::to_string(&("https://wasm.test", "subscriber")).unwrap(),
+        )
+        .unwrap();
+        let mut transport = binding
+            .accept_subscriber(subscriber.canonical().as_bytes().to_vec(), JsValue::NULL)
             .expect("accept a real wasm subscriber transport");
 
-        let features = jazz::wire::current_wire_features()
-            & !(jazz::wire::FEATURE_PAYLOAD_LZ4 | jazz::wire::FEATURE_PAYLOAD_ZSTD);
+        // Encode against the exact binding-local negotiation surface. The
+        // subscriber transport intentionally omits authorization-scope
+        // extensions, whose feature-gated enum layout must not leak into this
+        // auxiliary frame.
+        transport.features &=
+            !(jazz::wire::FEATURE_PAYLOAD_LZ4 | jazz::wire::FEATURE_PAYLOAD_ZSTD);
+        let features = transport.features;
         let request = |request_id| jazz::protocol::ChunkRequestEntry {
             request_id,
             locator: jazz::groove::large_values::Locator::random(),
@@ -3720,15 +3729,11 @@ mod dynamic_schema_view_tests {
             jazz::protocol::SyncMessage::ChunkRequestBatch(jazz::protocol::ChunkRequestBatch {
                 requests: (1..=5).map(request).collect(),
             });
-        let payload = jazz::wire::encode_sync_message_for_features(&incoming, features)
-            .expect("encode auxiliary chunk request batch");
-        let incoming_frame = jazz::wire::encode_frame(&jazz::wire::WireFrame::Message(
-            jazz::wire::WireEnvelope::new(jazz::wire::WIRE_PROTOCOL_VERSION, features, payload),
-        ))
-        .expect("frame auxiliary chunk request batch");
-        wasm_bindgen_futures::JsFuture::from(transport.route_auxiliary_wire_frame(incoming_frame))
+        transport
+            .auxiliary_pump
+            .route_incoming(incoming)
             .await
-            .expect("route actual auxiliary request through wasm binding");
+            .expect("route actual auxiliary request through the binding pump");
 
         let one_response =
             jazz::protocol::SyncMessage::ChunkResponseBatch(jazz::protocol::ChunkResponseBatch {
