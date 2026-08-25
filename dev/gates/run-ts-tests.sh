@@ -14,15 +14,22 @@ log_dir=${RUNNER_TEMP:-/tmp}
 node_tests_log="${log_dir}/jazz-node-tests-$$.log"
 browser_tests_log="${log_dir}/jazz-browser-tests-$$.log"
 
-# Every example resolves the public `jazz-tools/*` exports from `dist`. Build
-# them once before either suite starts: otherwise an example's fallback build
-# can clean that shared directory while a sibling browser suite imports it.
+# The workflow's top-level artifact gate prepares the release NAPI loader and
+# Jazz Tools public exports before either suite starts. Test children only
+# consume those immutable artifacts: allowing an example pretest to rebuild
+# either package races a sibling importer and can delete its dist files.
 if [[ "${JAZZ_SKIP_JAZZ_TOOLS_BUILD:-0}" != "1" ]]; then
-  pnpm --filter jazz-tools build || {
-    status=$?
-    echo "jazz-tools prebuild failed; refusing to launch suites against stale exports" >&2
-    exit "${status}"
-  }
+  if ! node -e "require('./crates/jazz-napi')"; then
+    echo "prepared release jazz-napi artifact did not load; run pnpm build:test-artifacts before test-ts" >&2
+    exit 1
+  fi
+  if ! node dev/gates/verify-jazz-tools-exports.mjs; then
+    echo "prepared jazz-tools public export surface is incomplete; refusing to launch suites" >&2
+    exit 1
+  fi
+  # Test children share this prepared public surface. A child that tries to
+  # rebuild it fails before clean-dist can remove files another suite imports.
+  export JAZZ_TEST_SEALED_TOOLS_DIST=1
 fi
 
 terminate_children() {

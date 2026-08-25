@@ -526,12 +526,19 @@ test("CI uses the correctness artifact path while package builds keep release WA
     "JAZZ_TEST_ARTIFACT_LOCK_PATH",
     "JAZZ_ARTIFACT_BUILD_LEASE",
     "JAZZ_ARTIFACT_BUILD_LOCK_PATH",
+    "JAZZ_TEST_SEALED_TOOLS_DIST",
   ];
   for (const task of ["jazz-napi#build", "jazz-wasm#build", "jazz-wasm#build:fast"])
     assert.deepEqual(
       turbo.tasks[task].passThroughEnv,
       expectedLease,
       `${task} must preserve the aggregate parent's selected artifact lock`,
+    );
+  for (const task of ["build", "jazz-tools#build", "test"])
+    assert.deepEqual(
+      turbo.tasks[task].passThroughEnv,
+      ["JAZZ_TEST_SEALED_TOOLS_DIST"],
+      `${task} must preserve the sealed shared test surface for child package scripts`,
     );
 });
 
