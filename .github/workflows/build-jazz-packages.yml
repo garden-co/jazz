@@ -8,6 +8,11 @@ on:
         required: false
         type: string
         default: ""
+      napi_matrix:
+        description: JSON matrix for NAPI platform packages. Release callers use every platform; preview callers may omit expensive optional platforms.
+        required: false
+        type: string
+        default: '[{"os":"blacksmith-4vcpu-ubuntu-2404","target":"x86_64-unknown-linux-gnu","platform":"linux-x64-gnu","use_sccache":true},{"os":"blacksmith-6vcpu-macos-15","target":"x86_64-apple-darwin","platform":"darwin-x64","use_sccache":false},{"os":"blacksmith-6vcpu-macos-15","target":"aarch64-apple-darwin","platform":"darwin-arm64","use_sccache":false},{"os":"blacksmith-2vcpu-windows-2025","target":"x86_64-pc-windows-msvc","platform":"win32-x64-msvc","use_sccache":false}]'
     outputs:
       tools_artifact:
         description: Artifact name for the assembled jazz-tools package.
@@ -153,23 +158,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: blacksmith-4vcpu-ubuntu-2404
-            target: x86_64-unknown-linux-gnu
-            platform: linux-x64-gnu
-            use_sccache: true
-          - os: blacksmith-6vcpu-macos-15
-            target: x86_64-apple-darwin
-            platform: darwin-x64
-            use_sccache: false
-          - os: blacksmith-6vcpu-macos-15
-            target: aarch64-apple-darwin
-            platform: darwin-arm64
-            use_sccache: false
-          - os: blacksmith-2vcpu-windows-2025
-            target: x86_64-pc-windows-msvc
-            platform: win32-x64-msvc
-            use_sccache: false
+        include: ${{ fromJSON(inputs.napi_matrix) }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -268,12 +257,19 @@ jobs:
           pnpm exec napi create-npm-dirs
           pnpm exec napi artifacts -d artifacts --npm-dir npm
 
+      - name: Remove Windows package omitted by this build
+        if: ${{ !contains(inputs.napi_matrix, 'win32-x64-msvc') }}
+        run: |
+          node -e 'require("node:fs").rmSync("crates/jazz-napi/npm/win32-x64-msvc", { recursive: true, force: true })'
+
       - name: Verify staged jazz-napi platform artifacts
         run: |
           test -f crates/jazz-napi/npm/linux-x64-gnu/jazz-napi.linux-x64-gnu.node
           test -f crates/jazz-napi/npm/darwin-x64/jazz-napi.darwin-x64.node
           test -f crates/jazz-napi/npm/darwin-arm64/jazz-napi.darwin-arm64.node
-          test -f crates/jazz-napi/npm/win32-x64-msvc/jazz-napi.win32-x64-msvc.node
+          if [[ '${{ inputs.napi_matrix }}' == *'win32-x64-msvc'* ]]; then
+            test -f crates/jazz-napi/npm/win32-x64-msvc/jazz-napi.win32-x64-msvc.node
+          fi
 
       - name: Sync jazz-napi platform package versions and optional deps
         run: |
