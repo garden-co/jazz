@@ -2769,6 +2769,18 @@ fn verify_self_signed_runtime_author_core(
         .duration_since(web_time::UNIX_EPOCH)
         .map_err(|error| error.to_string())?
         .as_secs();
+    verify_self_signed_runtime_author_at(token, app_id, claimed_author, now_seconds)
+}
+
+// This stays internal because it is a binding boundary receipt: the public
+// WASM API obtains time from the browser above, while this form lets the
+// binding prove that it passes that clock into Jazz's normal proof verifier.
+fn verify_self_signed_runtime_author_at(
+    token: &str,
+    app_id: &str,
+    claimed_author: &str,
+    now_seconds: u64,
+) -> Result<AuthorSubject, String> {
     jazz::tools::identity::verify_client_runtime_author_at(
         token,
         app_id,
@@ -3840,6 +3852,25 @@ mod dynamic_schema_view_tests {
             std::str::from_utf8(&bad_signature).unwrap(),
             app_id,
             claimed.canonical(),
+        )
+        .is_err());
+
+        // This binding-level receipt is intentionally not a public database
+        // test: it proves that the WASM boundary supplies its browser clock
+        // to the same expiry validation as native bindings.
+        let expired = jazz::tools::identity::mint_jazz_self_signed_token_at(
+            &seed,
+            AuthorSubject::LOCAL_FIRST_ISSUER,
+            app_id,
+            1,
+            1_000_000,
+        )
+        .unwrap();
+        assert!(verify_self_signed_runtime_author_at(
+            &expired,
+            app_id,
+            claimed.canonical(),
+            1_000_100,
         )
         .is_err());
     }
