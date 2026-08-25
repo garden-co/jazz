@@ -1740,6 +1740,14 @@ where
                     let (update, suppressed) = drained?;
                     debug_assert!(suppressed);
                     if let Some(update) = update {
+                        let state_ref = state.borrow();
+                        let SubscriptionKind::Prepared {
+                            maintained_subscription,
+                            ..
+                        } = &state_ref.kind;
+                        let terminal_layout = maintained_subscription
+                            .as_ref()
+                            .and_then(LocalMaintainedViewSubscription::terminal_root_layout);
                         let mut snapshot_index = RelationSnapshotIndex::from_snapshot(&snapshot);
                         let _ = apply_maintained_update_to_snapshot(
                             &mut snapshot,
@@ -1748,6 +1756,7 @@ where
                             read_tier,
                             previous_settled,
                             terminal_rows,
+                            terminal_layout,
                         )?;
                     }
                     consumed_authoritative_resets.insert(binding_view);
@@ -2139,6 +2148,10 @@ where
                         (fallback, false)
                     };
                 if let Some(update) = maintained_update {
+                    let terminal_layout = refresh
+                        .maintained
+                        .as_ref()
+                        .and_then(LocalMaintainedViewSubscription::terminal_root_layout);
                     let mut snapshot_index = RelationSnapshotIndex::from_snapshot(&snapshot);
                     let _ = apply_maintained_update_to_snapshot(
                         &mut snapshot,
@@ -2147,6 +2160,7 @@ where
                         snapshot_tier,
                         previous_settled,
                         terminal_rows,
+                        terminal_layout,
                     )?;
                 }
                 let settled = subscription_is_settled(
@@ -2168,10 +2182,6 @@ where
                 )
             } else {
                 if terminal_rows && !peer_terminal_operations.is_empty() {
-                    let terminal_layout = refresh
-                        .maintained
-                        .as_ref()
-                        .and_then(|maintained| maintained.terminal_root_layout().cloned());
                     if let Some(maintained) = refresh.maintained.as_mut() {
                         // The serving terminal is authoritative for
                         // structural publication. Advance the local
@@ -2192,16 +2202,19 @@ where
                         remote_propagate_upstream,
                         requires_authority_receipt,
                     );
-                    let state_ref = &mut refresh;
-                    let terminal_layout = terminal_layout.ok_or_else(|| {
-                        Error::new(
-                            ErrorCode::Protocol,
-                            "terminal operation arrived without a prepared root layout",
-                        )
-                    })?;
+                    let terminal_layout = refresh
+                        .maintained
+                        .as_ref()
+                        .and_then(LocalMaintainedViewSubscription::terminal_root_layout)
+                        .ok_or_else(|| {
+                            Error::new(
+                                ErrorCode::Protocol,
+                                "terminal operation arrived without a prepared root layout",
+                            )
+                        })?;
                     let event = apply_terminal_operations_to_subscription_snapshot(
-                        &mut state_ref.snapshot,
-                        &mut state_ref.snapshot_index,
+                        &mut refresh.snapshot,
+                        &mut refresh.snapshot_index,
                         peer_terminal_operations,
                         None,
                         terminal_layout,
@@ -2209,9 +2222,9 @@ where
                         snapshot_tier,
                         settled,
                     )?;
-                    state_ref.settled = settled;
+                    refresh.settled = settled;
                     retained.push(Rc::downgrade(&state));
-                    if state_ref.sender.unbounded_send(event).is_ok() {
+                    if refresh.sender.unbounded_send(event).is_ok() {
                         changed += 1;
                     }
                     continue;
@@ -2266,16 +2279,19 @@ where
                                 remote_propagate_upstream,
                                 requires_authority_receipt,
                             );
-                            let state_ref = &mut refresh;
-                            let terminal_layout = update.terminal_layout.ok_or_else(|| {
-                                Error::new(
-                                    ErrorCode::Protocol,
-                                    "terminal operation arrived without a prepared root layout",
-                                )
-                            })?;
+                            let terminal_layout = refresh
+                                .maintained
+                                .as_ref()
+                                .and_then(LocalMaintainedViewSubscription::terminal_root_layout)
+                                .ok_or_else(|| {
+                                    Error::new(
+                                        ErrorCode::Protocol,
+                                        "terminal operation arrived without a prepared root layout",
+                                    )
+                                })?;
                             let event = apply_terminal_operations_to_subscription_snapshot(
-                                &mut state_ref.snapshot,
-                                &mut state_ref.snapshot_index,
+                                &mut refresh.snapshot,
+                                &mut refresh.snapshot_index,
                                 update.terminal_operations,
                                 None,
                                 terminal_layout,
@@ -2283,9 +2299,9 @@ where
                                 snapshot_tier,
                                 settled,
                             )?;
-                            state_ref.settled = settled;
+                            refresh.settled = settled;
                             retained.push(Rc::downgrade(&state));
-                            if state_ref.sender.unbounded_send(event).is_ok() {
+                            if refresh.sender.unbounded_send(event).is_ok() {
                                 changed += 1;
                             }
                             continue;
@@ -2353,6 +2369,7 @@ where
                             snapshot_tier,
                             previous_settled,
                             terminal_rows,
+                            None,
                         )?;
                         if authoritative_membership_changed {
                             order_maintained_snapshot_roots(

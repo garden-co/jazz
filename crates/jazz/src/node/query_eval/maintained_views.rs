@@ -150,7 +150,6 @@ pub(crate) struct LocalMaintainedViewSubscriptionUpdate {
     pub(crate) added: Vec<(OutputOccurrenceId, CurrentRow)>,
     pub(crate) removed: Vec<OutputOccurrenceId>,
     pub(crate) terminal_operations: Vec<groove::ivm::TerminalOperation>,
-    pub(crate) terminal_layout: Option<crate::db::TerminalRootLayout>,
 }
 
 fn result_member_matches_row_keys(
@@ -786,9 +785,6 @@ where
         let authoritative_member_adds = transitions.authoritative_member_adds;
         let structured_app_row_changes = transitions.structured_app_row_changes.clone();
         let terminal_operations = transitions.terminal_operations.clone();
-        let terminal_layout = (!terminal_operations.is_empty())
-            .then(|| local.terminal_schemas.terminal_root_layout().cloned())
-            .flatten();
         let aggregate_replacements = transitions
             .adds
             .iter()
@@ -910,7 +906,6 @@ where
             added,
             removed,
             terminal_operations,
-            terminal_layout,
         })
     }
 }

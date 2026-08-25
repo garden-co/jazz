@@ -3740,6 +3740,7 @@ fn apply_maintained_update_to_snapshot(
     tier: DurabilityTier,
     settled: bool,
     terminal_rows: bool,
+    terminal_layout: Option<&TerminalRootLayout>,
 ) -> Result<SubscriptionEvent, Error> {
     let root_operations = update
         .terminal_operations
@@ -3784,7 +3785,7 @@ fn apply_maintained_update_to_snapshot(
         ));
     }
 
-    let layout = update.terminal_layout.clone().ok_or_else(|| {
+    let layout = terminal_layout.ok_or_else(|| {
         Error::new(
             ErrorCode::Protocol,
             "terminal root operation arrived without a prepared root layout",
@@ -4069,7 +4070,6 @@ fn apply_maintained_membership_update_to_snapshot(
         added: update_added,
         removed: update_removed,
         terminal_operations,
-        terminal_layout: _,
     } = update;
     // Root edits were applied by the wrapper either as complete terminal rows
     // or as ordering for membership-owned root groups. Only descendant edits
@@ -4201,7 +4201,7 @@ fn apply_terminal_operations_to_subscription_snapshot(
     snapshot_index: &mut RelationSnapshotIndex,
     operations: Vec<groove::ivm::TerminalOperation>,
     occurrence_overrides: Option<&BTreeMap<Vec<u8>, OutputOccurrenceId>>,
-    layout: TerminalRootLayout,
+    layout: &TerminalRootLayout,
     table: &str,
     tier: DurabilityTier,
     settled: bool,
@@ -4270,7 +4270,7 @@ fn apply_terminal_operations_to_subscription_snapshot(
                     table,
                     occurrence_id.clone(),
                     &value,
-                    &layout,
+                    layout,
                     None,
                     index,
                 )?
@@ -4293,7 +4293,7 @@ fn apply_terminal_operations_to_subscription_snapshot(
                     table,
                     occurrence_id,
                     &value,
-                    &layout,
+                    layout,
                     Some(index),
                     index,
                 )?
