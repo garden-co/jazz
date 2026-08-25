@@ -417,6 +417,17 @@ fn validate_value_size(
         (Value::TransactionId(_), ColumnType::TransactionId) => Ok(()),
         (Value::Bytea(bytes), ColumnType::Bytea) => validate_bytea_size(column, bytes),
         (
+            Value::Enum { case, values },
+            ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. },
+        ) => {
+            if let Some(case_descriptor) = cases.iter().find(|entry| entry.name == *case) {
+                for (inner_value, field) in values.iter().zip(&case_descriptor.fields) {
+                    validate_value_size(inner_value, &field.column_type, field.name_str())?;
+                }
+            }
+            Ok(())
+        }
+        (
             Value::Array(values),
             ColumnType::Array {
                 element: element_type,
@@ -1636,6 +1647,33 @@ mod tests {
 
         let err = encode_row(&descriptor, &[Value::Bytea(over_limit)]).unwrap_err();
         assert!(matches!(err, EncodingError::ByteaTooLarge { .. }));
+    }
+
+    #[test]
+    fn encode_row_rejects_oversized_bytea_nested_in_enum_payload() {
+        let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new(
+            "event",
+            ColumnType::EnumPayload {
+                cases: vec![EnumCaseDescriptor {
+                    name: "attachment".into(),
+                    fields: vec![ColumnDescriptor::new("contents", ColumnType::Bytea)],
+                }],
+            },
+        )]);
+
+        let err = encode_row(
+            &descriptor,
+            &[Value::Enum {
+                case: "attachment".into(),
+                values: vec![Value::Bytea(vec![7; BYTEA_MAX_BYTES + 1])],
+            }],
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            EncodingError::ByteaTooLarge { column, .. } if column == "contents"
+        ));
     }
 
     #[test]
