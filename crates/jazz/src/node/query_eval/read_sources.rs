@@ -497,13 +497,12 @@ where
                     .projected_branch_deletion_source_graph(request, tier, &head_keys)
                     .await?;
                 let head_content_presence = head_content.clone().project(["row_uuid"]);
-                let head_deletion_presence = head_deletions.clone().project(["row_uuid"]);
                 let deleted = head_deletions
                     .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
                     .project(["row_uuid"]);
                 let selected_head = GraphBuilder::anti_join(
                     head_content.clone(),
-                    deleted,
+                    deleted.clone(),
                     ["row_uuid"],
                     ["row_uuid"],
                 )
@@ -571,12 +570,8 @@ where
                     ["row_uuid"],
                     ["row_uuid"],
                 );
-                let inherited = GraphBuilder::anti_join(
-                    inherited,
-                    head_deletion_presence,
-                    ["row_uuid"],
-                    ["row_uuid"],
-                );
+                let inherited =
+                    GraphBuilder::anti_join(inherited, deleted, ["row_uuid"], ["row_uuid"]);
                 let unfiltered = GraphBuilder::union([live_head, inherited]);
                 let graph = match &authorization {
                     SourceAuthorizationRequest::System => unfiltered,

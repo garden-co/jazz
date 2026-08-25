@@ -180,6 +180,66 @@ fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
 }
 
 #[test]
+fn frozen_base_row_reappears_after_head_deletion_is_restored() {
+    let schema = branch_view_schema();
+    let node_id = NodeUuid::from_bytes([0x4a; 16]);
+    let (_dir, mut node) = open_history_complete_node_with_schema(node_id, schema.clone());
+    let row_uuid = row(0x4b);
+    let base = branch_selector(0x4c);
+    let head = branch_selector(0x4d);
+    let owner = AuthorSubject::for_test_bytes([0x4e; 16]);
+    let base_tx = node
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 10)
+                .branch(base.clone())
+                .cells(BTreeMap::from([
+                    ("title".to_owned(), v("frozen base")),
+                    ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
+                ])),
+        )
+        .unwrap();
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row_uuid, 20)
+            .branch(head.clone())
+            .deletion(DeletionEvent::Deleted),
+    )
+    .unwrap();
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row_uuid, 30)
+            .branch(head.clone())
+            .deletion(DeletionEvent::Restored),
+    )
+    .unwrap();
+
+    let read_view = crate::protocol::ReadViewSpec::branch_view(
+        head,
+        Some(crate::protocol::BranchViewBase::snapshot(
+            base,
+            crate::protocol::SnapshotRef {
+                owner: node_id,
+                global_base: GlobalTime(0),
+                local_base: base_tx.time,
+                dots: Vec::new(),
+            },
+        )),
+    );
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let snapshot = node
+        .query_relation_snapshot_for_serving_in_read_view(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            AuthorSubject::SYSTEM,
+            &read_view,
+        )
+        .unwrap();
+
+    assert_eq!(snapshot.root_count, 1);
+    assert_eq!(snapshot.rows[0].row_uuid(), row_uuid);
+}
+
+#[test]
 fn version_parents_cannot_cross_branch_keys() {
     let schema = branch_view_schema();
     let (_dir, mut node) =
