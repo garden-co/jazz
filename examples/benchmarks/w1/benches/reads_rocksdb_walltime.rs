@@ -19,6 +19,22 @@ fn query_task_detail_profile_s_rocksdb(bencher: divan::Bencher<'_, '_>) {
     bencher.bench_local(|| fixture.task_detail_count());
 }
 
+/// Persistent-backend two-equality LIMIT 50 receipt for deletion-safe bounds.
+#[divan::bench(sample_count = 5)]
+fn query_bounded_activity_page_profile_s_rocksdb(bencher: divan::Bencher<'_, '_>) {
+    let (_dir, fixture) = Fixture::<RocksDbStorage>::rocksdb_profile_s();
+    bencher.bench_local(|| fixture.bounded_activity_page_count());
+}
+
+#[divan::bench(args = [9_000, 90_000], sample_count = 3)]
+fn query_bounded_activity_page_scaling_rocksdb(
+    bencher: divan::Bencher<'_, '_>,
+    activity_events: usize,
+) {
+    let (_dir, fixture) = Fixture::<RocksDbStorage>::rocksdb(3_000, 12_000, activity_events);
+    bencher.bench_local(|| fixture.bounded_activity_page_count());
+}
+
 /// Fixed-result RocksDB scaling receipt with the same fixture as the memory lane.
 #[divan::bench(args = [(300, 1_200, 900), (3_000, 12_000, 9_000)], sample_count = 5)]
 fn query_comments_scaling_rocksdb(
