@@ -52,6 +52,19 @@ core gate's `-p jazz --no-default-features --features testing,transport-compress
 **Canonical gates:** do not let born-red or rotted targets accumulate silently.
 For ordinary Rust/core work, the full gate set is:
 
+**Local CI-equivalent gate.** `node dev/gates/local-ci-equivalent.mjs
+--ci-equivalent` is the only local command that may be described as
+_CI-equivalent_. It executes the exact named correctness/build command
+partitions invoked by `.github/workflows/ci-suite.yml` (serialized locally;
+CI schedules them in parallel). It fails closed on a missing partition and
+includes the exhaustive workspace `--lib --bins --tests --examples --benches`
+compile with CI's required features before TypeScript artifacts or suites.
+The default `node dev/gates/local-ci-equivalent.mjs` is deliberately a faster
+**focused** iteration mode and prints that it is **not CI-equivalent**. Lanes
+must never call a focused, crate-only, or partial-artifact receipt
+CI-equivalent. Use `--ci-partition <name>` only when reproducing one named CI
+job during diagnosis; it is likewise not a full CI-equivalent result.
+
 - `cargo test -p jazz`
 - `cargo test -p groove`
 - `cargo test -p jazz --no-default-features --features testing,transport-compression-zstd` (matches `crates/jazz/TESTING_GUIDELINES.md`).

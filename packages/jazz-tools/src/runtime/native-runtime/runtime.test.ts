@@ -3371,11 +3371,11 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     expect(row?.valuesByColumn?.get("$createdAt")).toEqual({
       type: "Timestamp",
-      value: createdAtMs * 1_000,
+      value: createdAtMs,
     });
     expect(row?.valuesByColumn?.get("$updatedAt")).toEqual({
       type: "Timestamp",
-      value: updatedAtMs * 1_000,
+      value: updatedAtMs,
     });
   });
 
@@ -3394,7 +3394,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const descriptor = [
       {
         name: "assigneesIds",
-        valueType: { tag: 14, inner: { tag: 13, inner: { tag: 10 } } },
+        valueType: { tag: 15, inner: { tag: 14, inner: { tag: 11 } } },
       },
     ];
     const writer = new PostcardWriter();
@@ -4334,25 +4334,25 @@ describe("NativeRuntimeAdapter server transport", () => {
       { type: "Text", value: "public title" },
       { type: "Text", value: "public note" },
       { type: "Text", value: JSON.stringify(["https://issuer.example", "user-1"]) },
-      { type: "Timestamp", value: 123_000 },
+      { type: "Timestamp", value: 123 },
     ]);
   });
 
   it.each([
     {
       name: "arbitrary text",
-      provenanceBytes: new TextEncoder().encode("not-json"),
+      provenanceBytes: inlineScalar("not-json"),
     },
     {
       name: "double stored-scalar wrapper",
       provenanceBytes: Uint8Array.from([
-        0,
+        2,
         ...inlineScalar(JSON.stringify(["https://issuer.example", "user-1"])),
       ]),
     },
     {
       name: "noncanonical JSON whitespace",
-      provenanceBytes: new TextEncoder().encode(`[ "https://issuer.example", "user-1" ]`),
+      provenanceBytes: inlineScalar(`[ "https://issuer.example", "user-1" ]`),
     },
     {
       name: "ASCII-blank component",
@@ -4645,7 +4645,6 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
         _rowId: Uint8Array,
         _cells: Uint8Array,
         _column: string,
-        _kind: string,
         _mutation?: string,
         _author?: Uint8Array,
         _updatedAtMs?: number,
@@ -4699,7 +4698,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
 
     expect(beginStreamingMutationEncoded).toHaveBeenCalledOnce();
     expect(beginStreamingMutationEncoded.mock.calls[0]?.[3]).toBe("title");
-    expect(beginStreamingMutationEncoded.mock.calls[0]?.[4]).toBe("Text");
+    expect(beginStreamingMutationEncoded.mock.calls[0]?.[4]).toBe("insert");
     expect(pushed.map((chunk) => new TextDecoder().decode(chunk))).toEqual(["hello ", "world"]);
     expect(finished).toBe(true);
     expect(result.id).toBe("00000000-0000-0000-0000-000000000123");
@@ -4742,18 +4741,18 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
           user_id: "user-1",
           claims: { role: "editor" },
         },
-        updated_at: 1_234_000,
+        updated_at: 1_234,
         branch_view: { head, base },
       }),
       "00000000-0000-0000-0000-000000000123",
     );
 
     const call = beginStreamingMutationEncoded.mock.calls[0] as unknown[];
-    expect(call[5]).toBe("update");
-    expect(call[6]).toBeInstanceOf(Uint8Array);
-    expect(call[7]).toBe(1234);
-    expect(call[8]).toEqual(head);
-    expect(call[9]).toEqual(base);
+    expect(call[4]).toBe("update");
+    expect(call[5]).toBeInstanceOf(Uint8Array);
+    expect(call[6]).toBe(1234);
+    expect(call[7]).toEqual(head);
+    expect(call[8]).toEqual(base);
   });
 
   it.each([
@@ -4780,7 +4779,6 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
         _rowId: Uint8Array,
         _cells: Uint8Array,
         _column: string,
-        _kind: "Text" | "Json" | "Bytea",
         _mutation?: "insert" | "update" | "upsert",
         _author?: Uint8Array,
         _updatedAtMs?: number,
@@ -4819,7 +4817,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       "00000000-0000-0000-0000-000000000123",
     );
 
-    const author = beginStreamingMutationEncoded.mock.calls[0]?.[6];
+    const author = beginStreamingMutationEncoded.mock.calls[0]?.[5];
     expect(author instanceof Uint8Array ? new TextDecoder().decode(author) : undefined).toBe(
       testCase.expectedAuthor ?? ownerAuthor,
     );
@@ -5118,7 +5116,6 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
         _rowId: Uint8Array,
         _cells: Uint8Array,
         _column: string,
-        _kind: "Text" | "Json" | "Bytea",
         _mutation?: "insert" | "update" | "upsert",
         _author?: Uint8Array,
         _updatedAtMs?: number,
@@ -5166,7 +5163,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       "00000000-0000-0000-0000-000000000123",
     );
 
-    const author = beginStreamingMutationEncoded.mock.calls[0]?.[6];
+    const author = beginStreamingMutationEncoded.mock.calls[0]?.[5];
     expect(author instanceof Uint8Array ? new TextDecoder().decode(author) : undefined).toBe(
       '["urn:jazz:local-first","verified-writer"]',
     );
@@ -5901,14 +5898,14 @@ function encodeTerminalRelationSnapshot(schema: WasmSchema): Uint8Array {
     },
   ];
   const childDescriptor = [
-    { name: "row_uuid", valueType: { tag: 10 } },
+    { name: "row_uuid", valueType: { tag: 11 } },
     { name: "title", valueType: storageColumnValueType(childColumns[0]!) },
   ];
   const descriptor = [
     { name: "title", valueType: storageColumnValueType(rootColumns[0]!) },
     {
       name: "todosViaOwner",
-      valueType: { tag: 13, inner: { tag: 15, record: childDescriptor } },
+      valueType: { tag: 14, inner: { tag: 16, record: childDescriptor } },
     },
   ];
   const childRecord = concatBytes([
@@ -6269,9 +6266,9 @@ function encodeUserWrappedSubscriptionDelta(row: {
   provenanceBytes?: Uint8Array;
 }): Uint8Array {
   const descriptor = [
-    { name: "row_uuid", valueType: { tag: 10 } },
-    { name: "user_title", valueType: { tag: 14, inner: { tag: 8 } } },
-    { name: "user_note", valueType: { tag: 14, inner: { tag: 14, inner: { tag: 8 } } } },
+    { name: "row_uuid", valueType: { tag: 11 } },
+    { name: "user_title", valueType: { tag: 15, inner: { tag: 8 } } },
+    { name: "user_note", valueType: { tag: 15, inner: { tag: 15, inner: { tag: 8 } } } },
     { name: "$createdBy", valueType: { tag: 8 } },
     { name: "$createdAt", valueType: { tag: 3 } },
   ];
@@ -6308,10 +6305,10 @@ function encodeTeamGatherSubscriptionDelta(delta: {
   updatedOccurrenceKeys?: Uint8Array[];
 }): Uint8Array {
   const descriptor = [
-    { name: "row_uuid", valueType: { tag: 10 } },
-    { name: "user_name", valueType: { tag: 14, inner: { tag: 8 } } },
-    { name: "user_org_id", valueType: { tag: 14, inner: { tag: 10 } } },
-    { name: "user_parent_id", valueType: { tag: 14, inner: { tag: 10 } } },
+    { name: "row_uuid", valueType: { tag: 11 } },
+    { name: "user_name", valueType: { tag: 15, inner: { tag: 8 } } },
+    { name: "user_org_id", valueType: { tag: 15, inner: { tag: 11 } } },
+    { name: "user_parent_id", valueType: { tag: 15, inner: { tag: 11 } } },
     { name: "$createdBy", valueType: { tag: 8 } },
     { name: "$createdAt", valueType: { tag: 3 } },
     { name: "$updatedBy", valueType: { tag: 8 } },
@@ -6388,13 +6385,13 @@ function presentBytes(bytes: Uint8Array): Uint8Array {
 }
 
 function inlineScalar(value: string): Uint8Array {
-  return Uint8Array.from([0, ...new TextEncoder().encode(value)]);
+  return Uint8Array.from([2, ...new TextEncoder().encode(value)]);
 }
 
 function encodeArrayRows(): Uint8Array {
   const descriptor = [
-    { name: "chunk_refs", valueType: { tag: 13, inner: { tag: 10 } } },
-    { name: "chunk_sizes", valueType: { tag: 13, inner: { tag: 6 } } },
+    { name: "chunk_refs", valueType: { tag: 14, inner: { tag: 11 } } },
+    { name: "chunk_sizes", valueType: { tag: 14, inner: { tag: 6 } } },
   ];
   const writer = new PostcardWriter();
   writer.vec((batch) => {
@@ -6557,7 +6554,7 @@ function doubleBytes(value: number): Uint8Array {
 
 function txTimeBytes(value: number): Uint8Array {
   const bytes = new Uint8Array(8);
-  new DataView(bytes.buffer).setBigUint64(0, BigInt(value) << 16n, true);
+  new DataView(bytes.buffer).setBigUint64(0, BigInt(value) << 18n, true);
   return bytes;
 }
 

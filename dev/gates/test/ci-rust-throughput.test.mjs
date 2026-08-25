@@ -93,7 +93,7 @@ const assertUsesBlacksmithRunner = (jobName, jobSource) => {
   assert.doesNotMatch(jobSource, /^    runs-on: jazz-ci$/m);
 };
 const integrationCheckStep = (typescriptJob) => {
-  const start = typescriptJob.indexOf("name: Check integration workspace");
+  const start = typescriptJob.indexOf("name: Run CI-equivalent TypeScript and workspace partition");
   assert.notEqual(start, -1, "missing integration workspace check");
   const end = typescriptJob.indexOf("\n      - ", start + 1);
   return typescriptJob.slice(start, end === -1 ? typescriptJob.length : end);
@@ -457,141 +457,39 @@ test("trusted runners consume the validated immutable tool bundle", () => {
   );
 });
 
-test("Rust CI splits a bounded real differential-oracle smoke behind a stable aggregate", () => {
+test("Rust CI keeps the bounded real differential oracle in its shared command partition", () => {
   const workspace = job("test-rust-workspace");
   const differential = job("test-rust-differential");
   const aggregate = job("test-rust");
-  const compileStepName = "name: Compile M3 differential oracle libtest";
-  const runStepName = "name: Run maintained-vs-one-shot differential oracle smoke";
-  const assertM3CompileThenRun = (source) => {
-    const compileStart = source.indexOf(compileStepName);
-    const runStart = source.indexOf(runStepName);
-    assert.ok(compileStart !== -1, "missing M3 libtest compile step");
-    assert.ok(runStart !== -1, "missing M3 semantic execution step");
-    assert.ok(compileStart < runStart, "compile the M3 libtest before its semantic execution");
-    assert.match(
-      source.slice(compileStart, runStart),
-      /shell: bash/,
-      "the M3 compile step must not inherit the container's sh default",
-    );
-    assert.doesNotMatch(
-      source.slice(compileStart, runStart),
-      /\btimeout\b/,
-      "cold compilation must not consume the semantic-execution timeout",
-    );
-    assert.match(
-      source.slice(runStart),
-      /timeout 60s env/,
-      "the direct libtest execution must remain bounded",
-    );
-    assert.match(
-      source.slice(runStart),
-      /shell: bash/,
-      "the M3 semantic execution step must not inherit the container's sh default",
-    );
-  };
+  const localCi = fs.readFileSync(path.join(root, "dev/gates/local-ci-equivalent.mjs"), "utf8");
 
+  assert.match(workspace, /local-ci-equivalent\.mjs --ci-partition rust-workspace/);
+  assert.match(differential, /local-ci-equivalent\.mjs --ci-partition rust-differential/);
   assert.match(
-    workspace,
-    /run-rust-tests\.mjs --timeout-seconds 780 --nextest-profile jazz-ci -- --workspace --lib --bins --tests --features jazz\/testing,jazz\/transport-compression-zstd,jazz-server\/test,jazz-cli\/test/,
+    localCi,
+    /run-rust-tests\.mjs[\s\S]*--timeout-seconds[\s\S]*780[\s\S]*--nextest-profile[\s\S]*jazz-ci/,
   );
-  for (const testTarget of [
-    "incremental_delivery_canary",
-    "shared_coverage_differential",
-    "warm_reopen_differential",
-  ]) {
-    assert.doesNotMatch(workspace, new RegExp(`cargo test -p jazz --test ${testTarget}`));
-  }
   assert.match(
-    differential,
+    localCi,
     /cargo test -p jazz --lib --features testing,transport-compression-zstd --no-run --message-format=json/,
   );
-  assert.match(differential, /message\.target\.name === "jazz"/);
+  assert.match(localCi, /message\.target\.name === "jazz"/);
   assert.match(
-    differential,
-    /echo "M3_ORACLE_TEST_BINARY=\$\{test_binary\}" >> "\$\{GITHUB_ENV\}"/,
+    localCi,
+    /timeout 60s env[\s\S]*JAZZ_SEED=11[\s\S]*JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000[\s\S]*JAZZ_DIFFERENTIAL_STEP_COUNT=3[\s\S]*m3_maintained_one_shot_differential_oracle --exact --ignored/,
   );
-  assert.match(
-    differential,
-    /timeout 60s env[\s\\]+JAZZ_SEED=11[\s\\]+JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000[\s\\]+JAZZ_DIFFERENTIAL_STEP_COUNT=3[\s\\]+"\$\{M3_ORACLE_TEST_BINARY\}" node::tests::harness::m3_maintained_one_shot_differential_oracle --exact --ignored/,
-  );
-  assertM3CompileThenRun(differential);
-  assert.match(differential, /full randomized matrix[\s\S]*long-running manual soak/);
-  assert.doesNotMatch(differential, /tracked red debt/);
   assert.match(
     m3Differential,
     /#\[ignore = "#\d+: manual randomized differential soak; bounded seed 11 runs in CI"\]\n(?:pub )?fn m3_maintained_one_shot_differential_oracle/,
   );
-  assert.doesNotMatch(workspace, /m3_maintained_one_shot_differential_oracle/);
   assert.match(aggregate, /if: always\(\)/);
   assert.match(aggregate, /needs: \[test-rust-workspace, test-rust-differential\]/);
-  assert.match(aggregate, /WORKSPACE_RESULT: \$\{\{ needs\.test-rust-workspace\.result \}\}/);
-  assert.match(aggregate, /DIFFERENTIAL_RESULT: \$\{\{ needs\.test-rust-differential\.result \}\}/);
   assert.match(aggregate, /test "\$\{WORKSPACE_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{DIFFERENTIAL_RESULT\}" = success/);
   assert.match(differential, /rust-cache: "false"/);
   assert.throws(
-    () =>
-      assert.match(
-        differential.replace('rust-cache: "false"', 'rust-cache: "true"'),
-        /rust-cache: "false"/,
-      ),
-    /rust-cache/,
-  );
-  assert.throws(
-    () =>
-      assert.match(
-        differential.replace(
-          "cargo test -p jazz --lib --features testing,transport-compression-zstd --no-run --message-format=json",
-          "cargo test -p jazz --no-run --message-format=json",
-        ),
-        /cargo test -p jazz --lib --features testing,transport-compression-zstd --no-run --message-format=json/,
-      ),
-    /--lib/,
-  );
-  assert.throws(
-    () => assert.match(differential.replace("--exact --ignored", "--ignored"), /--exact --ignored/),
+    () => assert.match(localCi.replace("--exact --ignored", "--ignored"), /--exact --ignored/),
     /exact/,
-  );
-  assert.throws(
-    () =>
-      assertM3CompileThenRun(
-        differential.replace(
-          `${compileStepName}\n        shell: bash\n        run:`,
-          `${compileStepName}\n        run:`,
-        ),
-      ),
-    /compile step must not inherit the container's sh default/,
-  );
-  assert.throws(
-    () =>
-      assertM3CompileThenRun(
-        differential.replace(
-          `${runStepName}\n        shell: bash\n        run:`,
-          `${runStepName}\n        run:`,
-        ),
-      ),
-    /semantic execution step must not inherit the container's sh default/,
-  );
-  assert.throws(
-    () =>
-      assertM3CompileThenRun(
-        differential.replace(
-          "cargo test -p jazz --lib --features testing,transport-compression-zstd --no-run --message-format=json",
-          "timeout 60s cargo test -p jazz --lib --features testing,transport-compression-zstd --no-run --message-format=json",
-        ),
-      ),
-    /cold compilation must not consume the semantic-execution timeout/,
-  );
-  assert.throws(
-    () =>
-      assertM3CompileThenRun(
-        differential
-          .replace(compileStepName, "__M3_STEP_SWAP__")
-          .replace(runStepName, compileStepName)
-          .replace("__M3_STEP_SWAP__", runStepName),
-      ),
-    /compile the M3 libtest before its semantic execution/,
   );
 });
 
@@ -657,6 +555,20 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
   assert.match(rustShadowLauncher, /test belongs to more than one shard/);
   assert.match(rustShadowLauncher, /hash shards do not cover the exact executable inventory/);
   assert.match(rustShadowLauncher, /sourceIdentity\(root\)/);
+  assert.match(rustShadowLauncher, /clean-source-baseline RECEIPT EXPECTED_COMMIT/);
+  assert.match(
+    rustShadowLauncher,
+    /dependency setup changed the checked-out source after the shadow baseline/,
+  );
+  assert.match(
+    rustShadowLauncher,
+    /shadow execution changed the checked-out source after the baseline/,
+  );
+  assert.match(rustShadowWorkflow, /Seal clean checked-out source baseline/);
+  assert.match(
+    rustShadowWorkflow,
+    /RUST_SHADOW_SOURCE_BASELINE: \$\{\{ runner\.temp \}\}\/rust-shadow-source\.json/,
+  );
   assert.match(rustShadowLauncher, /shards disagree on the checked-out source identity/);
   assert.match(rustShadowLauncher, /workflow event commit/);
   assert.match(
@@ -911,13 +823,12 @@ test("the TypeScript CI job checks the integration workspace before TypeScript a
   assert.doesNotMatch(workflowSuite, /^  build-integration:/m);
   assert.match(
     typescript,
-    /name: Check integration workspace\s+run: cargo check --workspace --all-targets/,
+    /name: Run CI-equivalent TypeScript and workspace partition\s+run: node dev\/gates\/local-ci-equivalent\.mjs --ci-partition typescript/,
   );
   assertIntegrationCheckIsGating(typescript);
   assert.ok(
-    typescript.indexOf("name: Check integration workspace") <
-      typescript.indexOf("name: Build correctness-test artifacts"),
-    "workspace check must fail before the expensive correctness artifact build",
+    typescript.indexOf("name: Run CI-equivalent TypeScript and workspace partition") !== -1,
+    "workspace check and artifacts must use the shared CI-equivalent partition",
   );
   assertUsesBlacksmithRunner("test-ts", typescript);
 });
@@ -1126,7 +1037,7 @@ test("Blacksmith and cache trust contracts reject planted unsafe changes", () =>
 test("integration workspace check contract rejects planted failure suppression", () => {
   const typescript = job("test-ts");
   const check =
-    "name: Check integration workspace\n        run: cargo check --workspace --all-targets";
+    "name: Run CI-equivalent TypeScript and workspace partition\n        run: node dev/gates/local-ci-equivalent.mjs --ci-partition typescript";
 
   assert.throws(
     () =>
@@ -1149,7 +1060,7 @@ test("integration workspace check contract rejects planted failure suppression",
 
 test("lint keeps its one workspace Clippy invocation inside pnpm lint", () => {
   const lint = job("lint");
-  assert.match(lint, /run: pnpm lint/);
+  assert.match(lint, /local-ci-equivalent\.mjs --ci-partition lint/);
   assert.doesNotMatch(lint, /^\s*- run: cargo clippy/m);
 });
 
@@ -1157,9 +1068,9 @@ test("CI runs the workflow contract test through its package script", () => {
   const lint = job("lint");
   assert.equal(
     packageJson.scripts["test:ci-workflow"],
-    "node --test dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/ci-tool-bundle.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs dev/gates/test/release-gates.test.mjs dev/gates/test/jazz-rn-packaging.test.mjs dev/artifacts/provenance.test.mjs dev/artifacts/wasm-build-contract.test.mjs dev/artifacts/napi-build-contract.test.mjs dev/artifacts/release-staging-contract.test.mjs && node dev/gates/ignored-tests.mjs --self-test",
+    "node --test dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/local-ci-equivalent.test.mjs dev/gates/test/ci-tool-bundle.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs dev/gates/test/release-gates.test.mjs dev/gates/test/jazz-rn-packaging.test.mjs dev/artifacts/provenance.test.mjs dev/artifacts/wasm-build-contract.test.mjs dev/artifacts/napi-build-contract.test.mjs dev/artifacts/release-staging-contract.test.mjs && node dev/gates/ignored-tests.mjs --self-test",
   );
-  assert.match(lint, /run: pnpm test:ci-workflow/);
+  assert.match(lint, /local-ci-equivalent\.mjs --ci-partition lint/);
 });
 
 test("CodSpeed caches the root-workspace Cargo target", () => {
@@ -1271,10 +1182,7 @@ test("benchmark correctness stays on ordinary CI while API compilation uses real
   const workspace = job("test-rust-workspace");
   const scenarioMode = benchmarkSmokeMode("ci");
   const compileMode = benchmarkSmokeMode("compile-ci");
-  assert.match(
-    workspace,
-    /name: Benchmark deterministic scenario smoke\s+run: dev\/gates\/benchmark-smoke\.sh --ci/,
-  );
+  assert.match(workspace, /local-ci-equivalent\.mjs --ci-partition rust-workspace/);
   assert.match(
     realisticWorkflow,
     /name: Compile maintained benchmark APIs\s+run: dev\/gates\/benchmark-smoke\.sh --compile-ci/,
@@ -1446,12 +1354,10 @@ test("Windows NAPI release builds provision libclang for RocksDB bindgen", () =>
 test("TypeScript CI overlaps independent Node and browser suites after one artifact build", () => {
   const typescript = job("test-ts");
   const runner = fs.readFileSync(path.join(root, "dev/gates/run-ts-tests.sh"), "utf8");
-  assert.match(
-    typescript,
-    /name: Build correctness-test artifacts\s+run: pnpm build:test-artifacts/,
-  );
-  assert.match(typescript, /name: Run Node and browser test suites in parallel/);
-  assert.match(typescript, /run: dev\/gates\/run-ts-tests\.sh/);
+  const localCi = fs.readFileSync(path.join(root, "dev/gates/local-ci-equivalent.mjs"), "utf8");
+  assert.match(typescript, /local-ci-equivalent\.mjs --ci-partition typescript/);
+  assert.match(localCi, /correctness-test artifacts[\s\S]*build:test-artifacts/);
+  assert.match(localCi, /parallel Node and browser suites[\s\S]*run-ts-tests\.sh/);
   assert.match(runner, /require\('\.\/crates\/jazz-napi'\)/);
   assert.match(runner, /JAZZ_TEST_SEALED_TOOLS_DIST=1/);
   assert.match(runner, /verify-jazz-tools-exports\.mjs/);
