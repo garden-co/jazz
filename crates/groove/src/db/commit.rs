@@ -28,18 +28,20 @@ impl Database {
     /// ```
     pub async fn flush(&mut self) -> Result<(), Error> {
         self.ensure_not_poisoned()?;
-        self.ivm_runtime
-            .drive_pending_incremental()
-            .await
-            .map_err(Error::IvmRuntime)?;
+        if let Err(error) = self.ivm_runtime.drive_pending_incremental().await {
+            self.poisoned = true;
+            return Err(Error::IvmRuntime(error));
+        }
         self.refresh_resident_writes();
         let resident = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
         let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
-        let tick = self
-            .ivm_runtime
-            .tick(Vec::new(), &storage)
-            .await
-            .map_err(Error::IvmRuntime)?;
+        let tick = match self.ivm_runtime.tick(Vec::new(), &storage).await {
+            Ok(tick) => tick,
+            Err(error) => {
+                self.poisoned = true;
+                return Err(Error::IvmRuntime(error));
+            }
+        };
         self.last_tick_metrics = Some(tick);
         Ok(())
     }

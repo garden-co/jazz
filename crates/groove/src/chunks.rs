@@ -610,6 +610,10 @@ pub enum ChunkError {
     Retryable { retry_after_ms: u32 },
     #[error("chunk retrieval failed: {0}")]
     Backend(String),
+    /// A publication-scoped install completed after its owning snapshot and
+    /// could not durably record the resulting lifecycle metadata.
+    #[error("chunk publication metadata durability failed: {0}")]
+    PublicationMetadataDurability(String),
     #[error("chunk bytes do not match the requested object hash")]
     Integrity,
     #[error("chunk request re-entered while its backing request was being polled")]

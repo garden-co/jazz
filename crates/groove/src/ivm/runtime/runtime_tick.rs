@@ -406,8 +406,16 @@ impl EvaluationWorkQueue {
         request: &EvaluationRequestKey,
         error: IvmRuntimeError,
     ) -> EvaluationFailure {
+        let kind = if matches!(
+            &error,
+            IvmRuntimeError::Chunk(crate::chunks::ChunkError::PublicationMetadataDurability(_))
+        ) {
+            EvaluationFailureKind::Fatal
+        } else {
+            EvaluationFailureKind::Scoped
+        };
         EvaluationFailure {
-            kind: EvaluationFailureKind::Scoped,
+            kind,
             affected_nodes: self.downstream_closure(
                 self.request_dependents
                     .get(request)
@@ -1283,6 +1291,18 @@ impl IvmRuntime {
         }
     }
 
+    fn fail_all_subscriptions(&mut self, error: Arc<IvmRuntimeError>) {
+        for subscription in self.multisink_subscriptions.values_mut() {
+            if subscription.failed {
+                continue;
+            }
+            subscription.failed = true;
+            subscription
+                .sender
+                .fail(SubscriptionError::new(Arc::clone(&error)));
+        }
+    }
+
     pub async fn tick<S>(
         &mut self,
         table_deltas: Vec<TableDelta>,
@@ -1569,6 +1589,14 @@ impl IvmRuntime {
                         self.unsubscribe(hydration.subscription_id);
                     }
                     if failure.kind == EvaluationFailureKind::Fatal {
+                        if let IvmRuntimeError::Chunk(
+                            error @ crate::chunks::ChunkError::PublicationMetadataDurability(_),
+                        ) = failure.error.as_ref()
+                        {
+                            self.fail_all_subscriptions(Arc::new(IvmRuntimeError::Chunk(
+                                error.clone(),
+                            )));
+                        }
                         state.order = retained_order;
                         *slot.borrow_mut() = state;
                         return Poll::Ready(Err(failure.into_error()));

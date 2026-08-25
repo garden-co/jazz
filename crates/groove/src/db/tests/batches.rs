@@ -2106,6 +2106,121 @@ async fn suspended_resident_chunk_install_joins_assigned_publication() {
     );
 }
 
+/// A late lifecycle metadata write is part of publication durability, not an
+/// ordinary query-local chunk failure. If it fails after B's table snapshot is
+/// durable, database progress and the affected subscription both terminate.
+#[futures_test::test]
+async fn late_publication_metadata_write_failure_is_fatal_and_observable() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let (storage, control) = TestStorage::controlled(&schema.column_families());
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(chunks.clone());
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![6; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
+    )
+    .unwrap();
+    let staged = database
+        .stage_large_value_preparation(prepared.clone())
+        .await
+        .unwrap();
+    let root = prepared
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref == prepared.value_ref.root)
+        .unwrap()
+        .clone();
+    crate::chunks::ChunkStorage::delete(&*chunks, root.node_ref.locator, root.node_ref.object_hash)
+        .await
+        .unwrap();
+    database
+        .storage
+        .delete(
+            LARGE_VALUE_METADATA_CF.to_owned(),
+            large_value_node_key(&root.node_ref).unwrap(),
+        )
+        .await
+        .unwrap();
+    let resolver_ready = Rc::new(Cell::new(false));
+    database.set_missing_chunk_resolver(Rc::new(DeferredFixtureChunkResolver {
+        chunks: Rc::new(std::collections::BTreeMap::from([(
+            crate::chunks::ChunkRequest {
+                object_hash: root.node_ref.object_hash.0,
+                locator: root.node_ref.locator,
+            },
+            Bytes::from(root.encoded),
+        )])),
+        ready: Rc::clone(&resolver_ready),
+    }));
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("objects"))
+        .await
+        .unwrap();
+    assert!(
+        database
+            .next_subscription(&subscription)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let mut first = database.open_batch();
+    first.insert("objects", vec![Value::U64(1), Value::Bytes(vec![1])]);
+    let first = database.apply_batch(first).await.unwrap();
+    assert_eq!(
+        subscription
+            .try_recv_with_publication()
+            .unwrap()
+            .publication,
+        Some(first.publication())
+    );
+    database.finish_persistence(first.persist().await).unwrap();
+
+    let mut second = database.open_batch();
+    second.insert(
+        "objects",
+        vec![Value::U64(2), Value::Large(staged.value_ref)],
+    );
+    second.accept_large_value(staged.id);
+    let second = database.apply_batch(second).await.unwrap();
+    assert!(subscription.try_recv().is_err());
+    database.finish_persistence(second.persist().await).unwrap();
+
+    control.fail_next(TestStorageOperation::WriteMany);
+    resolver_ready.set(true);
+    let error = database.flush().await.unwrap_err();
+    assert!(matches!(
+        error,
+        Error::IvmRuntime(IvmRuntimeError::Chunk(
+            crate::chunks::ChunkError::PublicationMetadataDurability(ref message)
+        )) if message.contains("injected WriteMany failure")
+    ));
+    assert!(database.poisoned);
+
+    let event = std::future::poll_fn(|cx| subscription.poll_next_event(cx)).await;
+    let SubscriptionEvent::Error(error) = event else {
+        panic!("late metadata failure left the subscription unresolved");
+    };
+    assert!(matches!(
+        error.source_error(),
+        Some(IvmRuntimeError::Chunk(
+            crate::chunks::ChunkError::PublicationMetadataDurability(message)
+        )) if message.contains("injected WriteMany failure")
+    ));
+    assert!(matches!(
+        database.flush().await,
+        Err(Error::DatabasePoisoned)
+    ));
+}
+
 #[futures_test::test]
 async fn root_first_upload_requests_only_authenticated_missing_frontier() {
     let schema = DatabaseSchema::new([TableSchema::new(

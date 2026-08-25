@@ -348,10 +348,9 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
             }
             if let Some(install) = resident_install {
                 if install.durable.get() {
-                    storage
-                        .write_many(operations)
-                        .await
-                        .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))
+                    storage.write_many(operations).await.map_err(|error| {
+                        crate::chunks::ChunkError::PublicationMetadataDurability(error.to_string())
+                    })
                 } else {
                     install.staged.borrow_mut().extend(operations);
                     Ok(())
