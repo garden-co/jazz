@@ -768,8 +768,8 @@ fn encodes_nullable_variable_size_null_as_only_flag_byte() {
         .unwrap();
 
     let mut expected = Vec::new();
-    expected.extend(10_u32.to_le_bytes());
-    expected.extend([1, 2, 1]);
+    expected.extend(9_u32.to_le_bytes());
+    expected.extend([1, 2]);
     expected.extend(b"yes");
     expected.extend([0]);
     assert_eq!(record, expected);
@@ -1064,10 +1064,10 @@ fn encodes_record_offsets_relative_to_record_start() {
         .unwrap();
 
     let mut expected = vec![9];
-    expected.extend(10_u32.to_le_bytes());
-    expected.extend([2, 1]);
+    expected.extend(9_u32.to_le_bytes());
+    expected.extend([2]);
     expected.extend(b"abc");
-    expected.extend([2, 0, 4, 5]);
+    expected.extend([2, 4, 5]);
 
     assert_eq!(record, expected);
 }
@@ -1134,10 +1134,10 @@ fn encodes_variable_array_offsets_relative_to_array_start() {
 
     let mut expected = Vec::new();
     expected.extend(2_u32.to_le_bytes());
-    expected.extend(12_u32.to_le_bytes());
-    expected.extend([2, 1]);
+    expected.extend(11_u32.to_le_bytes());
+    expected.extend([2]);
     expected.extend(b"hi");
-    expected.extend([2, 1]);
+    expected.extend([2]);
     expected.extend(b"j");
 
     assert_eq!(record, expected);

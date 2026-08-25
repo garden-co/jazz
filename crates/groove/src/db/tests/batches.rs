@@ -2083,7 +2083,7 @@ async fn direct_record_store_stores_ordered_records_independent_of_tables() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(raw_value, b"\x02\x00one");
+        assert_eq!(raw_value, b"\x02one");
 
         store
             .delete(&[
