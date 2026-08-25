@@ -235,16 +235,8 @@ fn permission_advice_uses_authenticated_link_identity_without_mutating() {
         .insert("todos", cells("secret", false, alice))
         .unwrap()
         .row_uuid();
-    server
-        .node()
-        .borrow_mut()
-        .set_session_claims(alice, test_provider_claims(alice));
-    server
-        .node()
-        .borrow_mut()
-        .set_session_claims(mallory, test_provider_claims(mallory));
-
     let alice_client = open_db(0xa1, alice, &schema);
+    alice_client.set_identity_claims(alice, test_provider_claims(alice));
     let (alice_transport, alice_server_transport) = duplex_with_admitted_session_context(
         alice,
         NodeUuid::from_bytes([0xa1; 16]),
@@ -254,16 +246,13 @@ fn permission_advice_uses_authenticated_link_identity_without_mutating() {
     );
     let _alice_upstream = crate::db::block_on(alice_client.connect_upstream(alice_transport));
     let _alice_subscriber = server.accept_subscriber(alice_server_transport, alice);
-    server
-        .node()
-        .borrow_mut()
-        .set_session_claims(alice, test_provider_claims(alice));
     let alice_advice = alice_client.request_permission_advice(PermissionAdviceAction::Read {
         table: "todos".to_owned(),
         row: owned,
     });
 
     let mallory_client = open_db(0xb2, mallory, &schema);
+    mallory_client.set_identity_claims(mallory, test_provider_claims(mallory));
     let (mallory_transport, mallory_server_transport) = duplex_with_admitted_session_context(
         mallory,
         NodeUuid::from_bytes([0xb2; 16]),
@@ -273,10 +262,6 @@ fn permission_advice_uses_authenticated_link_identity_without_mutating() {
     );
     let _mallory_upstream = crate::db::block_on(mallory_client.connect_upstream(mallory_transport));
     let _mallory_subscriber = server.accept_subscriber(mallory_server_transport, mallory);
-    server
-        .node()
-        .borrow_mut()
-        .set_session_claims(mallory, test_provider_claims(mallory));
     let mallory_advice = mallory_client.request_permission_advice(PermissionAdviceAction::Read {
         table: "todos".to_owned(),
         row: owned,
@@ -309,11 +294,8 @@ fn distinct_advice_actions_with_one_compiled_scope_hydrate_once() {
         )
         .unwrap()
         .row_uuid();
-    server
-        .node()
-        .borrow_mut()
-        .set_session_claims(alice, test_provider_claims(alice));
     let client = open_db(0xa1, alice, &schema);
+    client.set_identity_claims(alice, test_provider_claims(alice));
     let (client_transport, server_transport) = duplex_with_admitted_session_context(
         alice,
         NodeUuid::from_bytes([0xa1; 16]),
@@ -323,10 +305,6 @@ fn distinct_advice_actions_with_one_compiled_scope_hydrate_once() {
     );
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, alice);
-    server
-        .node()
-        .borrow_mut()
-        .set_session_claims(alice, test_provider_claims(alice));
 
     let first = client.request_permission_advice(PermissionAdviceAction::Read {
         table: "todos".to_owned(),
@@ -368,11 +346,8 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
         .insert("todos", cells("owned", false, alice))
         .unwrap()
         .row_uuid();
-    server
-        .node()
-        .borrow_mut()
-        .set_session_claims(alice, test_provider_claims(alice));
     let client = open_db(0xa1, alice, &schema);
+    client.set_identity_claims(alice, test_provider_claims(alice));
     let (client_transport, server_transport) = duplex_with_admitted_session_context(
         alice,
         NodeUuid::from_bytes([0xa1; 16]),
@@ -382,10 +357,6 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
     );
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, alice);
-    server
-        .node()
-        .borrow_mut()
-        .set_session_claims(alice, test_provider_claims(alice));
 
     let first = client.request_permission_advice(PermissionAdviceAction::Read {
         table: "todos".to_owned(),
@@ -396,13 +367,18 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
     client.tick().unwrap();
     assert_eq!(block_on(first), PermissionAdvice::Allowed);
 
-    server.node().borrow_mut().set_session_claims(
-        alice,
-        BTreeMap::from([
-            ("user_id".to_owned(), Value::Uuid(alice.test_uuid())),
-            ("fresh".to_owned(), Value::Bool(true)),
-        ]),
-    );
+    let refreshed_claims = BTreeMap::from([
+        ("user_id".to_owned(), Value::Uuid(alice.test_uuid())),
+        ("fresh".to_owned(), Value::Bool(true)),
+    ]);
+    // The client needs its own authenticated snapshot to evaluate the
+    // authority-supplied support rows. The authority separately receives the
+    // same refresh at its trusted connection-admission boundary; it must not
+    // trust the client's queued SessionClaims frame.
+    client.set_identity_claims(alice, refreshed_claims.clone());
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(refreshed_claims);
     server.tick().unwrap();
     client.tick().unwrap();
 
@@ -415,13 +391,14 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
     client.tick().unwrap();
     assert_eq!(block_on(refreshed), PermissionAdvice::Allowed);
 
-    server.node().borrow_mut().set_session_claims(
-        alice,
-        BTreeMap::from([
-            ("user_id".to_owned(), Value::Uuid(alice.test_uuid())),
-            ("fresh".to_owned(), Value::Bool(false)),
-        ]),
-    );
+    let advanced_claims = BTreeMap::from([
+        ("user_id".to_owned(), Value::Uuid(alice.test_uuid())),
+        ("fresh".to_owned(), Value::Bool(false)),
+    ]);
+    client.set_identity_claims(alice, advanced_claims.clone());
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(advanced_claims);
     server.tick().unwrap();
     client.tick().unwrap();
     let advanced = client.request_permission_advice(PermissionAdviceAction::Read {
