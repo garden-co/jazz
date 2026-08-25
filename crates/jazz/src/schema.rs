@@ -645,6 +645,19 @@ pub(crate) fn registered_column_transform(key: &str) -> Option<ColumnTransformSe
     }
 }
 
+/// Internal schema-derived physical interpretation for a scalar column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum LargeValueSemanticKind {
+    /// The column never uses the hidden large-scalar representation.
+    NotLarge,
+    /// Byte scalar semantics.
+    Bytes,
+    /// UTF-8 text scalar semantics.
+    String,
+    /// Canonical JSON-in-string scalar semantics.
+    Json,
+}
+
 /// Application column declaration.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ColumnSchema {
@@ -652,6 +665,10 @@ pub struct ColumnSchema {
     pub name: String,
     /// Groove storage type used for this column's cell value.
     pub column_type: GrooveColumnType,
+    /// Immutable, schema-derived semantic kind used only by the hidden
+    /// physical large-scalar envelope. JSON remains logically string-shaped in
+    /// Groove, but cannot be decoded or staged as text at this boundary.
+    pub large_value_kind: LargeValueSemanticKind,
     /// Literal value used when an insert omits this column.
     #[serde(default)]
     pub default: Option<Value>,
@@ -660,8 +677,13 @@ pub struct ColumnSchema {
 impl ColumnSchema {
     /// Construct an ordinary column from a groove storage type.
     pub fn new(name: impl Into<String>, column_type: GrooveColumnType) -> Self {
+        assert!(
+            !contains_internal_storage_type(&column_type),
+            "raw and stored-scalar value types are physical-only and cannot be declared in a Jazz schema"
+        );
         Self {
             name: name.into(),
+            large_value_kind: large_value_kind_for_type(&column_type),
             column_type,
             default: None,
         }
@@ -674,10 +696,43 @@ impl ColumnSchema {
     }
 }
 
+fn contains_internal_storage_type(column_type: &GrooveColumnType) -> bool {
+    match column_type {
+        GrooveColumnType::RawString
+        | GrooveColumnType::RawBytes
+        | GrooveColumnType::StoredScalar(_) => true,
+        GrooveColumnType::Nullable(inner) | GrooveColumnType::Array(inner) => {
+            contains_internal_storage_type(inner)
+        }
+        GrooveColumnType::Tuple(members) => members.iter().any(contains_internal_storage_type),
+        GrooveColumnType::Record(descriptor) => descriptor
+            .fields()
+            .iter()
+            .any(|field| contains_internal_storage_type(&field.value_type)),
+        GrooveColumnType::Enum(schema) => schema.cases.iter().any(|case| {
+            case.payload
+                .fields()
+                .iter()
+                .any(|field| contains_internal_storage_type(&field.value_type))
+        }),
+        _ => false,
+    }
+}
+
+fn large_value_kind_for_type(column_type: &GrooveColumnType) -> LargeValueSemanticKind {
+    match column_type {
+        GrooveColumnType::String => LargeValueSemanticKind::String,
+        GrooveColumnType::Bytes => LargeValueSemanticKind::Bytes,
+        GrooveColumnType::Nullable(inner) => large_value_kind_for_type(inner),
+        _ => LargeValueSemanticKind::NotLarge,
+    }
+}
+
 impl From<groove::schema::ColumnSchema> for ColumnSchema {
     fn from(column: groove::schema::ColumnSchema) -> Self {
         Self {
             name: column.name,
+            large_value_kind: large_value_kind_for_type(&column.column_type),
             column_type: column.column_type,
             default: None,
         }
@@ -1426,7 +1481,7 @@ fn transactions_table() -> GrooveTableSchema {
 
 fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
     let mut bytes = Vec::new();
-    put_str(&mut bytes, "jazz-schema-v2-branch-columns");
+    put_str(&mut bytes, "jazz-schema-v3-large-value-kinds");
     let mut tables = schema.tables.iter().collect::<Vec<_>>();
     tables.sort_by(|left, right| left.name.cmp(&right.name));
     put_u64(&mut bytes, tables.len() as u64);
@@ -1436,6 +1491,12 @@ fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
         for column in &table.columns {
             put_str(&mut bytes, &column.name);
             put_column_type(&mut bytes, &column.column_type);
+            bytes.push(match column.large_value_kind {
+                LargeValueSemanticKind::NotLarge => 0,
+                LargeValueSemanticKind::Bytes => 1,
+                LargeValueSemanticKind::String => 2,
+                LargeValueSemanticKind::Json => 3,
+            });
             put_merge_strategy(&mut bytes, table.merge_strategy(&column.name));
         }
         put_u64(&mut bytes, table.references.len() as u64);
@@ -1529,6 +1590,11 @@ fn put_column_type(bytes: &mut Vec<u8>, column_type: &GrooveColumnType) {
                     put_column_type(bytes, &field.value_type);
                 }
             }
+        }
+        GrooveColumnType::RawString
+        | GrooveColumnType::RawBytes
+        | GrooveColumnType::StoredScalar(_) => {
+            panic!("raw stored-scalar backing types cannot appear in a Jazz schema")
         }
     }
 }

@@ -775,9 +775,7 @@ pub(super) fn physical_version_storage_tables(
                         )?
                         .nullable()
                     }
-                    _ => column
-                        .column_type
-                        .clone()
+                    _ => physical_storage_value_type(column)
                         .nullable()
                         .rebind_variant_registries(&format!("physical-column/{}", column_id.0)),
                 };
@@ -941,6 +939,22 @@ pub(super) fn physical_version_storage_tables(
         tables.push(rejected);
     }
     Ok(tables)
+}
+
+/// Physical history/current rows carry an engine-owned stored-scalar context
+/// rather than the logical String/Bytes type. The semantic kind is frozen in
+/// `ColumnSchema` by schema lowering; raw cells and public query bindings never
+/// choose it.
+fn physical_storage_value_type(column: &ColumnSchema) -> records::ValueType {
+    match column.large_value_kind {
+        // Text and bytes already have their own contextual scalar codecs at
+        // the Groove logical type boundary. JSON shares String logically, so
+        // only it needs an internal physical descriptor context.
+        crate::schema::LargeValueSemanticKind::Json => {
+            records::ValueType::StoredScalar(groove::large_values::LargeValueKind::Json)
+        }
+        _ => column.column_type.clone(),
+    }
 }
 
 fn variant_payload_fields_for_names(

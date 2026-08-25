@@ -76,12 +76,14 @@ replace row encoding. The same split applies at the binding ABI (ch. 13):
 commands, acks, and event metadata are postcard envelopes, while row-shaped
 payloads are descriptor/raw `Record` bytes at the hot boundary.
 
-**Decision, 2026-08-23 — wire v12 is a breaking authorship cut.** Transaction,
+**Decision, 2026-08-24 — wire v13 is a breaking authorship/storage cut.** Transaction,
 row-version, session, and claim authors use the exact canonical `[iss,sub]` JSON
-string. Wire v11 UUID/hash/subject-only author encodings are rejected, not
-decoded or migrated. Every endpoint advertises exactly v12 and negotiation with
-v11 fails with `UnsupportedProtocolVersion`; the `jazz-wire-message-frames-v12`
-golden fixture set is the only supported message layout.
+string. Large scalar descriptors use Groove's canonical internal enum/record
+encoding rather than the former private tagged/postcard payload. Wire v12 and
+earlier encodings are rejected, not decoded or migrated. Every endpoint
+advertises exactly v13 and negotiation with an older peer fails with
+`UnsupportedProtocolVersion`; the v13 golden fixture set is the only supported
+message layout.
 
 Inside Rust, `Db` and `PeerConnection` keep the semantic `Transport` surface over
 `SyncMessage`. Binding/server byte transports use `WireFrame` and are bridged at

@@ -3027,7 +3027,8 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
         Value::Large(value) => {
             bytes.push(15);
             let encoded = groove::large_values::encode_stored_scalar(
-                &groove::large_values::StoredScalar::Large(value.clone()),
+                value.kind,
+                &groove::large_values::StoredScalar::Chunked(value.clone()),
             )
             .expect("admitted large descriptor has canonical encoding");
             put_bytes(bytes, &encoded);

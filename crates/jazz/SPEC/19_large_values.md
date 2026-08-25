@@ -16,6 +16,14 @@ view-specific grant check. Jazz never parses content trees, applies edit
 tails, computes UTF-16 metrics, interprets JSON, or decides which chunks an IVM
 operator needs.
 
+Each runtime column also freezes an internal large-value semantic kind at
+schema lowering: bytes, text, or JSON. JSON remains the existing logical
+string-shaped Groove value, but the physical-row descriptor carries its
+schema-derived JSON context so a JSON root cannot be staged or encoded as text
+(or vice versa). This context is immutable schema metadata, never a
+client-provided descriptor field and never visible to logical queries, policies,
+indices, or application results.
+
 Invariant digest:
 
 - `INV-CONTENT-1`: Jazz does not duplicate Groove's large-value semantics.

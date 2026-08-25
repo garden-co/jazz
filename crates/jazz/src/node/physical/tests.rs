@@ -576,4 +576,47 @@ mod variant_case_tests {
             assert_eq!(detail.cases.len(), 1);
         }
     }
+
+    #[test]
+    fn physical_large_scalar_kind_is_schema_derived_and_json_is_not_text() {
+        let text = ColumnSchema::new("body", records::ValueType::String);
+        let mut json = ColumnSchema::new("body", records::ValueType::String);
+        json.large_value_kind = crate::schema::LargeValueSemanticKind::Json;
+
+        assert_eq!(
+            physical_storage_value_type(&text),
+            records::ValueType::String
+        );
+        assert_eq!(
+            physical_storage_value_type(&json),
+            records::ValueType::StoredScalar(groove::large_values::LargeValueKind::Json)
+        );
+        assert_ne!(physical_storage_value_type(&text), physical_storage_value_type(&json));
+
+        let text_cell = records::RecordDescriptor::new([(
+            "cell",
+            physical_storage_value_type(&text),
+        )]);
+        let json_cell = records::RecordDescriptor::new([(
+            "cell",
+            physical_storage_value_type(&json),
+        )]);
+        let same_json_shaped_bytes = Value::String(r#"{"title":"same bytes"}"#.to_owned());
+        assert_eq!(
+            text_cell.create(std::slice::from_ref(&same_json_shaped_bytes)).unwrap(),
+            json_cell.create(std::slice::from_ref(&same_json_shaped_bytes)).unwrap(),
+            "the kind is contextual schema metadata, not a redundant cell witness"
+        );
+
+        let json_root = groove::large_values::prepare(
+            groove::large_values::LargeValueKind::Json,
+            br#"{"title":"same bytes"}"#,
+        )
+        .unwrap()
+        .value_ref;
+        assert!(
+            text_cell.create(&[Value::Large(json_root)]).is_err(),
+            "a JSON descriptor must not enter text physical storage"
+        );
+    }
 }

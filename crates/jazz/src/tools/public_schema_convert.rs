@@ -600,6 +600,12 @@ fn convert_column(
         column_type = column_type.nullable();
     }
     let mut converted = CoreColumnSchema::new(column.name.as_str(), column_type);
+    if matches!(column.column_type, ColumnType::Json { .. }) {
+        // JSON is logically represented as Groove's canonical string value,
+        // but its physical large-scalar interpretation is schema-derived and
+        // deliberately distinct from text.
+        converted.large_value_kind = crate::schema::LargeValueSemanticKind::Json;
+    }
     if let Some(default) = &column.default {
         converted.default = Some(convert_column_default(table, column, default)?);
     }
@@ -3106,6 +3112,15 @@ mod tests {
             crate::groove::records::ValueType::Bool => GrooveValue::Bool(true),
             crate::groove::records::ValueType::String => GrooveValue::String("value".to_owned()),
             crate::groove::records::ValueType::Bytes => GrooveValue::Bytes(vec![8]),
+            crate::groove::records::ValueType::RawString => GrooveValue::String("raw".to_owned()),
+            crate::groove::records::ValueType::RawBytes => GrooveValue::Bytes(vec![8]),
+            crate::groove::records::ValueType::StoredScalar(kind) => match kind {
+                crate::groove::large_values::LargeValueKind::Bytes => GrooveValue::Bytes(vec![8]),
+                crate::groove::large_values::LargeValueKind::String
+                | crate::groove::large_values::LargeValueKind::Json => {
+                    GrooveValue::String("stored".to_owned())
+                }
+            },
             crate::groove::records::ValueType::Uuid => GrooveValue::Uuid(Uuid::from_bytes([9; 16])),
             crate::groove::records::ValueType::EnumTag(_) => GrooveValue::EnumTag(0),
             crate::groove::records::ValueType::Tuple(members) => {
@@ -3176,10 +3191,29 @@ mod tests {
             table
                 .columns
                 .iter()
+                .find(|column| column.name == "payload")
+                .unwrap()
+                .large_value_kind,
+            crate::schema::LargeValueSemanticKind::Json,
+            "JSON keeps its logical String type but freezes a distinct physical kind"
+        );
+        assert_eq!(
+            table
+                .columns
+                .iter()
                 .find(|column| column.name == "metadata")
                 .unwrap()
                 .column_type,
             GrooveColumnType::String.nullable()
+        );
+        assert_eq!(
+            table
+                .columns
+                .iter()
+                .find(|column| column.name == "metadata")
+                .unwrap()
+                .large_value_kind,
+            crate::schema::LargeValueSemanticKind::Json
         );
     }
 
