@@ -23,16 +23,10 @@ if [[ "${JAZZ_SKIP_JAZZ_TOOLS_BUILD:-0}" != "1" ]]; then
     echo "prepared release jazz-napi artifact did not load; run pnpm build:test-artifacts before test-ts" >&2
     exit 1
   fi
-  for required in \
-    packages/jazz-tools/dist/cli.js \
-    packages/jazz-tools/dist/testing/index.js \
-    packages/jazz-tools/dist/runtime/client-session.js \
-    packages/jazz-tools/dist/backend/request-auth.js; do
-    if [[ ! -f "${required}" ]]; then
-      echo "jazz-tools prebuild omitted required test export ${required}; refusing to launch suites" >&2
-      exit 1
-    fi
-  done
+  if ! node dev/gates/verify-jazz-tools-exports.mjs; then
+    echo "prepared jazz-tools public export surface is incomplete; refusing to launch suites" >&2
+    exit 1
+  fi
   # Test children share this prepared public surface. A child that tries to
   # rebuild it fails before clean-dist can remove files another suite imports.
   export JAZZ_TEST_SEALED_TOOLS_DIST=1

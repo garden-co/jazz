@@ -7,6 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { parse } from "yaml";
 import { cleanDist } from "../../../packages/jazz-tools/scripts/clean-dist.mjs";
+import { missingJazzToolsTestSurface } from "../verify-jazz-tools-exports.mjs";
 
 const root = path.resolve(import.meta.dirname, "../../..");
 const workflow = fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8");
@@ -1453,8 +1454,8 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   assert.match(typescript, /run: dev\/gates\/run-ts-tests\.sh/);
   assert.match(runner, /require\('\.\/crates\/jazz-napi'\)/);
   assert.match(runner, /JAZZ_TEST_SEALED_TOOLS_DIST=1/);
-  assert.match(runner, /dist\/testing\/index\.js/);
-  assert.match(runner, /dist\/runtime\/client-session\.js/);
+  assert.match(runner, /verify-jazz-tools-exports\.mjs/);
+  assert.match(runner, /public export surface is incomplete/);
   assert.match(runner, /Test children only\s+# consume those immutable artifacts/);
   assert.match(runner, /--concurrency=2/);
   assert.match(runner, /setsid bash -c "\$\{node_tests_command\}" >"\$\{node_tests_log\}" 2>&1 &/);
@@ -1571,6 +1572,79 @@ test("a missing prepared native artifact prevents both TypeScript suites from st
     assert.match(result.stderr, /prepared release jazz-napi artifact did not load/);
   } finally {
     fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("the Jazz Tools preflight derives public exports and keeps test-only entrypoints explicit", () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-tools-test-surface-"));
+  const packageRoot = path.join(fixture, "packages/jazz-tools");
+  const write = (relative, contents = "export {};") => {
+    const target = path.join(packageRoot, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, contents);
+  };
+  try {
+    write(
+      "package.json",
+      JSON.stringify({
+        exports: {
+          ".": { types: "./dist/index.d.ts", default: "./dist/index.js" },
+          "./react": { types: "./dist/react/index.d.ts", default: "./dist/react/index.js" },
+          "./testing": { default: "./dist/testing/index.js" },
+        },
+      }),
+    );
+    for (const file of [
+      "dist/index.d.ts",
+      "dist/index.js",
+      "dist/react/index.d.ts",
+      "dist/react/index.js",
+      "dist/testing/index.js",
+      "dist/cli.js",
+      "dist/runtime/client-session.js",
+      "dist/backend/request-auth.js",
+    ])
+      write(file);
+    assert.deepEqual(missingJazzToolsTestSurface(fixture), []);
+
+    fs.rmSync(path.join(packageRoot, "dist/index.js"));
+    assert.deepEqual(missingJazzToolsTestSurface(fixture), ["dist/index.js"]);
+    write("dist/index.js");
+
+    fs.rmSync(path.join(packageRoot, "dist/react/index.js"));
+    assert.deepEqual(missingJazzToolsTestSurface(fixture), ["dist/react/index.js"]);
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("missing public root or framework exports prevent both TypeScript suites from starting", () => {
+  const runner = path.join(root, "dev/gates/run-ts-tests.sh");
+  for (const relative of ["dist/index.js", "dist/react/index.js"]) {
+    const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-ts-ci-public-export-"));
+    const target = path.join(root, "packages/jazz-tools", relative);
+    const backup = `${target}.preflight-backup-${process.pid}`;
+    const nodeMarker = path.join(fixture, "node-suite-ran");
+    const browserMarker = path.join(fixture, "browser-suite-ran");
+    try {
+      fs.renameSync(target, backup);
+      const result = spawnSync("bash", [runner], {
+        cwd: root,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          JAZZ_NODE_TEST_COMMAND: `touch ${JSON.stringify(nodeMarker)}`,
+          JAZZ_BROWSER_TEST_COMMAND: `touch ${JSON.stringify(browserMarker)}`,
+        },
+      });
+      assert.equal(result.status, 1, `${relative}: ${result.stderr}`);
+      assert.equal(fs.existsSync(nodeMarker), false, `${relative}: node suite started`);
+      assert.equal(fs.existsSync(browserMarker), false, `${relative}: browser suite started`);
+      assert.match(`${result.stdout}\n${result.stderr}`, new RegExp(`public export is missing: ${relative}`));
+    } finally {
+      if (fs.existsSync(backup)) fs.renameSync(backup, target);
+      fs.rmSync(fixture, { recursive: true, force: true });
+    }
   }
 });
 
