@@ -4771,6 +4771,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
   it("uses the explicit backend NAPI ABI for provenance without passing it as admission", () => {
     const insertWithIdEncodedAttributed = vi.fn(() => fakeWrite());
     const beginTransaction = vi.fn();
+    const beginTransactionAttributed = vi.fn();
     const beginStreamingMutationEncoded = vi.fn(() => ({
       push: () => undefined,
       finish: () => fakeWrite(),
@@ -4779,6 +4780,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     const nativeDb = fakeDb({
       insertWithIdEncodedAttributed,
       beginTransaction,
+      beginTransactionAttributed,
       beginStreamingMutationEncoded,
     });
     const runtime = new NativeRuntimeAdapter(
@@ -4812,11 +4814,10 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     expect(new TextDecoder().decode(insertCall?.[3])).toBe(attribution);
 
     runtime.beginTransaction("mergeable", "attributed-batch", context);
-    const transactionCall = beginTransaction.mock.calls[0];
+    expect(beginTransaction).not.toHaveBeenCalled();
+    const transactionCall = beginTransactionAttributed.mock.calls[0];
     expect(transactionCall?.[0]).toBe("attributed-batch");
-    expect(transactionCall?.[1]).toBe("mergeable");
-    expect(transactionCall?.[2]).toBeUndefined();
-    expect(new TextDecoder().decode(transactionCall?.[3])).toBe(attribution);
+    expect(new TextDecoder().decode(transactionCall?.[1])).toBe(attribution);
 
     const branched = JSON.stringify({ attribution, branch_view: { head: { values: {} } } });
     expect(() =>
@@ -4828,6 +4829,153 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       ),
     ).toThrow("do not support branch views");
     expect(insertWithIdEncodedAttributed).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed when a backend-attributed NAPI ABI method is absent", async () => {
+    const insertEncoded = vi.fn(() => fakeWrite());
+    const updateEncoded = vi.fn(() => fakeWrite());
+    const upsertEncoded = vi.fn(() => fakeWrite());
+    const deleteEncoded = vi.fn(() => fakeWrite());
+    const restoreEncoded = vi.fn(() => fakeWrite());
+    const beginStreamingMutationEncoded = vi.fn(() => ({
+      push: () => undefined,
+      finish: () => fakeWrite(),
+      abort: () => undefined,
+    }));
+    const beginTransaction = vi.fn();
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => {
+          throw new Error("not used");
+        },
+        openMemoryAsBackend: () =>
+          fakeDb({
+            insertEncoded,
+            updateEncoded,
+            upsertEncoded,
+            deleteEncoded,
+            restoreEncoded,
+            beginStreamingMutationEncoded,
+            beginTransaction,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+      { backendMode: true, readAuthorizationHost: "trusted-serving" },
+    );
+    const context = JSON.stringify({
+      attribution: JSON.stringify(["https://issuer.example", "alice"]),
+    });
+    const id = "00000000-0000-0000-0000-000000000123";
+    const values = { title: { type: "Text", value: "must not become SYSTEM" } } as const;
+
+    expect(() => runtime.insert("todos", values, context, id)).toThrow("backend-attributed insert");
+    expect(() =>
+      runtime.insert("todos", { title: { type: "Boolean", value: false } } as never, context, id),
+    ).toThrow("backend-attributed insert");
+    expect(() => runtime.update("todos", id, values, context)).toThrow("backend-attributed update");
+    expect(() => runtime.upsert("todos", id, values, context)).toThrow("backend-attributed upsert");
+    expect(() => runtime.delete("todos", id, context)).toThrow("backend-attributed delete");
+    expect(() => runtime.restore("todos", id, values, context)).toThrow(
+      "backend-attributed restore",
+    );
+    await expect(
+      runtime.streamingMutation(
+        "insert",
+        "todos",
+        {},
+        "title",
+        (async function* () {
+          yield "must not begin";
+        })(),
+        context,
+        id,
+      ),
+    ).rejects.toThrow("backend-attributed streaming mutations");
+    expect(() => runtime.beginTransaction("mergeable", "missing-abi", context)).toThrow(
+      "backend-attributed mergeable transactions",
+    );
+
+    expect(insertEncoded).not.toHaveBeenCalled();
+    expect(updateEncoded).not.toHaveBeenCalled();
+    expect(upsertEncoded).not.toHaveBeenCalled();
+    expect(deleteEncoded).not.toHaveBeenCalled();
+    expect(restoreEncoded).not.toHaveBeenCalled();
+    expect(beginStreamingMutationEncoded).not.toHaveBeenCalled();
+    expect(beginTransaction).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed backend attribution instead of falling back to SYSTEM", () => {
+    const insertEncoded = vi.fn(() => fakeWrite());
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => {
+          throw new Error("not used");
+        },
+        openMemoryAsBackend: () => fakeDb({ insertEncoded }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+      { backendMode: true, readAuthorizationHost: "trusted-serving" },
+    );
+    expect(() =>
+      runtime.insert(
+        "todos",
+        { title: { type: "Text", value: "must not become SYSTEM" } },
+        JSON.stringify({ attribution: `[ "https://issuer.example", "alice" ]` }),
+        "00000000-0000-0000-0000-000000000123",
+      ),
+    ).toThrow("backend attribution must be a canonical author subject string");
+    expect(insertEncoded).not.toHaveBeenCalled();
+  });
+
+  it("does not mix per-write provenance into a transaction opened without it", () => {
+    const beginTransaction = vi.fn();
+    const attachMergeableTx = vi.fn(() => fakeTx());
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => {
+          throw new Error("not used");
+        },
+        openMemoryAsBackend: () => fakeDb({ beginTransaction, attachMergeableTx }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+      { backendMode: true, readAuthorizationHost: "trusted-serving" },
+    );
+    const id = "ordinary-batch" as never;
+    runtime.beginTransaction("mergeable", id);
+
+    expect(() =>
+      runtime.insert(
+        "todos",
+        { title: { type: "Text", value: "must not lose provenance" } },
+        JSON.stringify({
+          batch_id: id,
+          attribution: JSON.stringify(["https://issuer.example", "alice"]),
+        }),
+        "00000000-0000-0000-0000-000000000123",
+      ),
+    ).toThrow("opened without backend attribution");
+    expect(attachMergeableTx).not.toHaveBeenCalled();
   });
 
   it("rejects reserved public write-context sessions and attributions", async () => {

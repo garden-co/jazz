@@ -54,7 +54,9 @@ export declare class NapiDb {
   /** Attach a schema view to an existing owner-wide exclusive batch. */
   attachExclusiveTx(openBatchId: string): Tx
   /** Begin one owner-wide transaction without creating an owning per-schema Tx. */
-  beginTransaction(openBatchId: string, kind: string, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null): void
+  beginTransaction(openBatchId: string, kind: string, author?: Uint8Array | undefined | null): void
+  /** Begin the only supported backend-attributed transaction shape: mergeable root writes. */
+  beginTransactionAttributed(openBatchId: string, attribution: Uint8Array): void
   /** Commit an owner-wide transaction by id and optional kind. */
   commitTransaction(openBatchId: string, kind?: string | undefined | null): Write
   /** Roll back an owner-wide open transaction by id. */

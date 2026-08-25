@@ -135,6 +135,25 @@ where
         MergeableTxRef { db: self, tx_id }
     }
 
+    async fn reject_attributed_mergeable_branch(
+        &self,
+        tx_id: OpenTransactionId,
+    ) -> Result<(), Error> {
+        if self
+            .node
+            .node
+            .lock()
+            .await
+            .mergeable_transaction_is_attributed(tx_id)?
+        {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                "backend-attributed transactions do not support branch targets",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) async fn stage_mergeable_insert(
         &self,
         tx_id: OpenTransactionId,
@@ -173,6 +192,7 @@ where
         cells: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        self.reject_attributed_mergeable_branch(tx_id).await?;
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
         self.node
@@ -222,6 +242,7 @@ where
         patch: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        self.reject_attributed_mergeable_branch(tx_id).await?;
         if patch.is_empty() {
             return Err(Error::new(
                 ErrorCode::Schema,
@@ -307,6 +328,7 @@ where
         row: RowUuid,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        self.reject_attributed_mergeable_branch(tx_id).await?;
         if self
             .node
             .node
@@ -349,6 +371,7 @@ where
         cells: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        self.reject_attributed_mergeable_branch(tx_id).await?;
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.node.node.lock().await;

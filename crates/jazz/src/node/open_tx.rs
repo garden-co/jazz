@@ -66,6 +66,24 @@ where
         .await
     }
 
+    /// Whether an open mergeable batch separates durable provenance from its
+    /// permission subject. Such batches are deliberately root-only until
+    /// branch attribution has a complete representation.
+    pub(crate) fn mergeable_transaction_is_attributed(
+        &self,
+        id: OpenTransactionId,
+    ) -> Result<bool, Error> {
+        match self.open_tx(id)?.kind {
+            OpenTransactionKind::Mergeable {
+                made_by,
+                permission_subject: Some(subject),
+            } => Ok(subject != made_by),
+            OpenTransactionKind::Mergeable { .. } | OpenTransactionKind::Exclusive { .. } => {
+                Ok(false)
+            }
+        }
+    }
+
     async fn open_transaction(
         &mut self,
         id: OpenTransactionId,

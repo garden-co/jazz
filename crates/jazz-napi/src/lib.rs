@@ -1740,6 +1740,15 @@ impl NapiDb {
         open_batch_id: String,
         kind: String,
         author: Option<Uint8Array>,
+    ) -> napi::Result<()> {
+        self.begin_transaction_inner(open_batch_id, kind, author, None)
+    }
+
+    fn begin_transaction_inner(
+        &self,
+        open_batch_id: String,
+        kind: String,
+        author: Option<Uint8Array>,
         attribution: Option<Uint8Array>,
     ) -> napi::Result<()> {
         let open_batch_id = open_batch_id
@@ -1815,6 +1824,23 @@ impl NapiDb {
                 .insert(open_batch_id);
         }
         Ok(())
+    }
+
+    /// Begin the only supported attributed transaction shape. Keeping this a
+    /// distinct native ABI makes an older binding fail closed rather than
+    /// silently treating provenance as ordinary SYSTEM authorship.
+    #[napi(js_name = "beginTransactionAttributed")]
+    pub fn begin_transaction_attributed(
+        &self,
+        open_batch_id: String,
+        attribution: Uint8Array,
+    ) -> napi::Result<()> {
+        self.begin_transaction_inner(
+            open_batch_id,
+            "mergeable".to_owned(),
+            None,
+            Some(attribution),
+        )
     }
 
     /// Commit an owner-wide transaction by id and optional kind.
@@ -4502,11 +4528,9 @@ mod tests {
 
         let attributed_batch = CoreOpenBatchId::new().to_string();
         backend
-            .begin_transaction(
+            .begin_transaction_attributed(
                 attributed_batch.clone(),
-                "mergeable".to_owned(),
-                None,
-                Some(Uint8Array::from(alice.canonical().as_bytes().to_vec())),
+                Uint8Array::from(alice.canonical().as_bytes().to_vec()),
             )
             .expect("an attributed mergeable batch is the supported transaction shape");
         let mut tx = backend
@@ -4530,35 +4554,10 @@ mod tests {
         assert!(err.reason.contains("do not support branch writes"));
         backend.rollback_transaction(attributed_batch).unwrap();
 
-        let batch = CoreOpenBatchId::new().to_string();
-        let err = backend
-            .begin_transaction(
-                batch.clone(),
-                "exclusive".to_owned(),
-                None,
-                Some(Uint8Array::from(alice_bytes.clone())),
-            )
-            .expect_err("attributed exclusive transactions must fail closed");
-        assert!(err.reason.contains("require mergeable kind"));
-        let err = backend
-            .begin_transaction(
-                batch,
-                "mergeable".to_owned(),
-                Some(Uint8Array::from(alice_bytes.clone())),
-                Some(Uint8Array::from(alice_bytes.clone())),
-            )
-            .expect_err("backend admission and external provenance cannot be mixed");
-        assert!(
-            err.reason
-                .contains("cannot override backend admission identity")
-        );
-
         let err = ordinary
-            .begin_transaction(
+            .begin_transaction_attributed(
                 CoreOpenBatchId::new().to_string(),
-                "mergeable".to_owned(),
-                None,
-                Some(Uint8Array::from(alice_bytes.clone())),
+                Uint8Array::from(alice_bytes.clone()),
             )
             .expect_err("ordinary transactions cannot claim backend attribution");
         assert!(err.reason.contains("explicit backend runtime"));
@@ -5148,7 +5147,6 @@ mod tests {
                 bound.to_string(),
                 "exclusive".to_owned(),
                 Some(Uint8Array::new(alice.canonical().as_bytes().to_vec())),
-                None,
             )
             .unwrap();
         let tx = binding.attach_exclusive_tx(bound.to_string()).unwrap();
@@ -5201,7 +5199,6 @@ mod tests {
                 bound.to_string(),
                 "exclusive".to_owned(),
                 Some(Uint8Array::new(alice.canonical().as_bytes().to_vec())),
-                None,
             )
             .unwrap();
         core_block_on(other_owner.exclusive_tx_ref(bound).insert(

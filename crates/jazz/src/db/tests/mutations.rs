@@ -1724,6 +1724,21 @@ fn backend_attribution_survives_mergeable_and_streaming_publication() {
     };
     assert_eq!(tx.made_by, alice);
 
+    // An empty attributed patch only checks whether the trusted backend may
+    // observe the row. It must not reinterpret external provenance as the
+    // admission identity and hide this backend-owned row from itself.
+    let no_op = block_on(backend.update(
+        "todos",
+        row(0xb7),
+        BTreeMap::new(),
+        crate::db::UpdateOptions {
+            identity: crate::db::WriteIdentity::Attribution(alice),
+            ..Default::default()
+        },
+    ))
+    .expect("an attributed no-op update uses backend admission for visibility");
+    assert_eq!(no_op.mergeable_tx_id(), batch_tx);
+
     let streaming_cells = BTreeMap::from([
         ("done".to_owned(), Value::Bool(false)),
         ("owner".to_owned(), Value::Uuid(backend_author.test_uuid())),
@@ -1762,6 +1777,263 @@ fn backend_attribution_survives_mergeable_and_streaming_publication() {
     };
     assert_eq!(tx.made_by, alice);
     assert_eq!(prepared_read(&backend, &backend.table("todos")).len(), 2);
+
+    let branch = BranchSelector::new([("draft", Value::String("alice".to_owned()))]);
+    let attributed = crate::db::WriteIdentity::Attribution(alice);
+    for result in [
+        block_on(backend.insert(
+            "todos",
+            BTreeMap::new(),
+            crate::db::InsertOptions {
+                identity: attributed,
+                target: crate::db::ExactWriteTarget::Branch(branch.clone()),
+                ..Default::default()
+            },
+        )),
+        block_on(backend.upsert(
+            "todos",
+            row(0xb9),
+            BTreeMap::new(),
+            crate::db::UpsertOptions {
+                identity: attributed,
+                target: crate::db::ExactWriteTarget::Branch(branch.clone()),
+                ..Default::default()
+            },
+        )),
+        block_on(backend.restore(
+            "todos",
+            row(0xb9),
+            None,
+            crate::db::RestoreOptions {
+                identity: attributed,
+                target: crate::db::ExactWriteTarget::Branch(branch.clone()),
+                ..Default::default()
+            },
+        )),
+    ] {
+        let err = match result {
+            Ok(_) => panic!("generic attributed branch writes must fail before lookup"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code, ErrorCode::WriteRejected);
+    }
+    for result in [
+        block_on(backend.update(
+            "todos",
+            row(0xb9),
+            BTreeMap::new(),
+            crate::db::UpdateOptions {
+                identity: attributed,
+                target: crate::db::WriteTarget::BranchView {
+                    head: branch.clone(),
+                    base: None,
+                },
+                ..Default::default()
+            },
+        )),
+        block_on(backend.delete(
+            "todos",
+            row(0xb9),
+            crate::db::DeleteOptions {
+                identity: attributed,
+                target: crate::db::WriteTarget::BranchView {
+                    head: branch.clone(),
+                    base: None,
+                },
+                ..Default::default()
+            },
+        )),
+    ] {
+        let err = match result {
+            Ok(_) => panic!("generic attributed branch views must fail before lookup"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code, ErrorCode::WriteRejected);
+    }
+
+    let transaction = OpenTransactionId::new();
+    block_on(backend.begin_mergeable_attributed(transaction, alice)).unwrap();
+    let err = match block_on(backend.mergeable_tx_ref(transaction).insert(
+        "todos",
+        BTreeMap::new(),
+        crate::db::InsertOptions {
+            target: crate::db::ExactWriteTarget::Branch(branch.clone()),
+            ..Default::default()
+        },
+    )) {
+        Ok(_) => panic!("attributed batches must reject branch staging before defaults or lookup"),
+        Err(err) => err,
+    };
+    assert_eq!(err.code, ErrorCode::WriteRejected);
+    backend.abandon_transaction_handle(transaction).unwrap();
+
+    let upload_cells = BTreeMap::from([
+        ("done".to_owned(), Value::Bool(false)),
+        ("owner".to_owned(), Value::Uuid(backend_author.test_uuid())),
+    ]);
+    let upload = backend
+        .begin_streaming_value_upload(
+            "todos",
+            &upload_cells,
+            "title",
+            groove::large_values::LargeValueKind::String,
+        )
+        .unwrap();
+    let err = match block_on(backend.finish_streaming_value_upload(
+        upload,
+        crate::db::StreamingMutationKind::Insert,
+        "todos",
+        row(0xba),
+        upload_cells,
+        "title",
+        None,
+        None,
+        Some(branch),
+        None,
+        Some(alice),
+    )) {
+        Ok(_) => panic!("attributed streaming branch targets must fail before final staging"),
+        Err(err) => err,
+    };
+    assert_eq!(err.code, ErrorCode::WriteRejected);
+
+    let mixed_cells = BTreeMap::from([
+        ("done".to_owned(), Value::Bool(false)),
+        ("owner".to_owned(), Value::Uuid(backend_author.test_uuid())),
+    ]);
+    let mixed_upload = backend
+        .begin_streaming_value_upload(
+            "todos",
+            &mixed_cells,
+            "title",
+            groove::large_values::LargeValueKind::String,
+        )
+        .unwrap();
+    let err = match block_on(backend.finish_streaming_value_upload(
+        mixed_upload,
+        crate::db::StreamingMutationKind::Insert,
+        "todos",
+        row(0xbb),
+        mixed_cells,
+        "title",
+        Some(backend_author),
+        None,
+        None,
+        None,
+        Some(alice),
+    )) {
+        Ok(_) => panic!("attributed streaming cannot mix an admission override"),
+        Err(err) => err,
+    };
+    assert_eq!(err.code, ErrorCode::WriteRejected);
+    assert_eq!(prepared_read(&backend, &backend.table("todos")).len(), 2);
+}
+
+/// A trusted backend admits a streamed value as `SYSTEM` while retaining the
+/// externally supplied canonical subject in the resulting commit provenance.
+///
+/// ```text
+/// SYSTEM (editor claim) ──authorizes upload──► commit.made_by = alice
+/// alice (no editor claim) ──cannot authorize the equivalent direct write
+/// ```
+#[test]
+fn attributed_streaming_uses_system_admission_without_losing_provenance() {
+    let schema = editor_claim_write_schema();
+    let alice = AuthorSubject::for_test_bytes([0xab; 16]);
+    let server = open_core(0xac, AuthorSubject::SYSTEM, &schema);
+    server.node().borrow_mut().set_session_claims(
+        AuthorSubject::SYSTEM,
+        BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
+    );
+    server
+        .node()
+        .borrow_mut()
+        .set_session_claims(alice, BTreeMap::new());
+    let backend = block_on(unsafe {
+        // SAFETY: this is the explicit trusted-backend constructor exercised by
+        // the native binding, with SYSTEM as its admission identity.
+        Db::open_with_backend_attribution(DbConfig {
+            schema: schema.clone(),
+            storage: rocks_storage(&schema),
+            identity: DbIdentity {
+                node: NodeUuid::from_bytes([0xab; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+            id_source: Some(Box::new(SeededRowIdSource::new(0xab))),
+        })
+    })
+    .unwrap();
+    let (backend_transport, server_transport) = duplex();
+    let _upstream = block_on(backend.connect_upstream(backend_transport));
+    let _subscriber = server.accept_subscriber_with_trust(
+        server_transport,
+        AuthorSubject::SYSTEM,
+        CommitUnitTrust::TrustedBackend,
+    );
+
+    let direct = block_on(backend.insert(
+        "todos",
+        cells("alice cannot admit", false, alice),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xab)),
+            identity: crate::db::WriteIdentity::Session(alice),
+            ..Default::default()
+        },
+    ))
+    .expect("the client may stage a write before the serving backend evaluates it");
+    for _ in 0..4 {
+        backend.tick().unwrap();
+        server.tick().unwrap();
+    }
+    let direct_err = block_on(direct.wait(DurabilityTier::Global))
+        .expect_err("planted negative: Alice must not inherit SYSTEM's editor claim");
+    assert_eq!(direct_err.code, ErrorCode::WriteRejected);
+
+    let cells = BTreeMap::from([
+        ("done".to_owned(), Value::Bool(false)),
+        ("owner".to_owned(), Value::Uuid(alice.test_uuid())),
+    ]);
+    let mut upload = backend
+        .begin_streaming_value_upload(
+            "todos",
+            &cells,
+            "title",
+            groove::large_values::LargeValueKind::String,
+        )
+        .unwrap();
+    block_on(backend.push_streaming_value_upload(&mut upload, b"SYSTEM-admitted")).unwrap();
+    let write = block_on(backend.finish_streaming_value_upload(
+        upload,
+        crate::db::StreamingMutationKind::Insert,
+        "todos",
+        row(0xac),
+        cells,
+        "title",
+        None,
+        None,
+        None,
+        None,
+        Some(alice),
+    ))
+    .expect("SYSTEM must authorize the attributed streaming write");
+    for _ in 0..8 {
+        backend.tick().unwrap();
+        server.tick().unwrap();
+    }
+    assert_eq!(
+        block_on(write.wait(DurabilityTier::Global)).unwrap(),
+        write.mergeable_tx_id()
+    );
+    let SyncMessage::CommitUnit { tx, .. } = backend
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(write.mergeable_tx_id())
+        .unwrap()
+    else {
+        panic!("streamed attributed write must publish a commit unit");
+    };
+    assert_eq!(tx.made_by, alice);
 }
 
 #[test]
