@@ -1451,10 +1451,7 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   assert.match(typescript, /name: Run Node and browser test suites in parallel/);
   assert.match(typescript, /run: dev\/gates\/run-ts-tests\.sh/);
   assert.match(runner, /pnpm --filter jazz-tools build/);
-  assert.match(
-    runner,
-    /Every example resolves the public `jazz-tools\/\*` exports from `dist`/,
-  );
+  assert.match(runner, /Every example resolves the public `jazz-tools\/\*` exports from `dist`/);
   assert.match(runner, /--concurrency=2/);
   assert.match(runner, /setsid bash -c "\$\{node_tests_command\}" >"\$\{node_tests_log\}" 2>&1 &/);
   assert.match(
@@ -1527,7 +1524,11 @@ test("a failed jazz-tools prebuild prevents both TypeScript suites from starting
     });
     assert.equal(result.status, 23, result.stderr);
     assert.equal(fs.existsSync(nodeMarker), false, "node suite started after failed prebuild");
-    assert.equal(fs.existsSync(browserMarker), false, "browser suite started after failed prebuild");
+    assert.equal(
+      fs.existsSync(browserMarker),
+      false,
+      "browser suite started after failed prebuild",
+    );
     assert.match(result.stderr, /refusing to launch suites against stale exports/);
   } finally {
     fs.rmSync(fixture, { recursive: true, force: true });
