@@ -1142,6 +1142,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
         },
       },
     });
+    expect(mutationErrorSpy).toHaveBeenCalledTimes(1);
 
     const todosAfterRevert = await db.all(allTodos, { tier: "local" });
     expect(todosAfterRevert.length).toBe(0);
@@ -1168,7 +1169,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     expect(mutationErrorSpy).not.toHaveBeenCalled();
   });
 
-  it("does not replay delivered rejected worker batches after restart", async () => {
+  it("does not send a live rejection to a runtime attached after its originating peer closes", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions(
       "sync-on-mutation-error-restart",
       readOnlyPermissions,
@@ -1222,6 +1223,9 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const replayAfterAckSpy = vi.fn();
     dbAfterAcknowledgement.onMutationError(replayAfterAckSpy);
     await dbAfterAcknowledgement.all(allTodos, { tier: "local" });
+    // The durable worker can outlive its tabs. Reconciliation remains durable,
+    // but the original tab's application notification is not a worker backlog
+    // for a later tab (or a reconnecting replacement runtime).
     await sleep(500);
     expect(replayAfterAckSpy).not.toHaveBeenCalled();
   });
