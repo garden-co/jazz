@@ -3641,7 +3641,7 @@ mod dynamic_schema_view_tests {
                 MemoryStorage::new(&refs),
                 DbIdentity {
                     node: jazz::ids::NodeUuid::from_bytes([0x63; 16]),
-                    author: AuthorId::from_bytes([0xc3; 16]),
+                    author: AuthorSubject::for_test_bytes([0xc3; 16]),
                 },
             ))
             .await
@@ -3659,7 +3659,7 @@ mod dynamic_schema_view_tests {
             & !(jazz::wire::FEATURE_PAYLOAD_LZ4 | jazz::wire::FEATURE_PAYLOAD_ZSTD);
         let request = |request_id| jazz::protocol::ChunkRequestEntry {
             request_id,
-            locator: vec![request_id as u8; 16],
+            locator: jazz::groove::large_values::Locator::random(),
             expected_hash: [request_id as u8; 32],
             // A hop-exhausted request has a deterministic immediate result,
             // so the receipt exercises the binding drain without another
