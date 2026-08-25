@@ -1382,19 +1382,14 @@ describe("SharedWorker bridge with IndexedDB", () => {
         untrack(dbBeforeRestart);
 
         const dbAfterRestart = track(await createPersistentDb(syncServer.serverUrl));
-        // Run a query to set up the runtime
-        await dbAfterRestart.all(allTodos, { tier: "edge" });
+        expect(await dbAfterRestart.all(allTodos, { tier: "edge" })).toEqual([]);
+        await dbAfterRestart.shutdown();
+        untrack(dbAfterRestart);
 
-        await waitForCondition(
-          async () => {
-            const todosAfterRevert = await dbAfterRestart.all(allTodos, {
-              tier: "local",
-            });
-            return todosAfterRevert.length === 0;
-          },
-          5000,
-          "restarted rejected insert should remove the previous local row",
-        );
+        // Reopen offline to prove the accepted server state crossed the public
+        // runtime lifecycle boundary and was durably settled in the worker.
+        const dbAfterSettlement = track(await createPersistentDb(undefined));
+        expect(await dbAfterSettlement.all(allTodos, { tier: "local" })).toEqual([]);
       });
 
       it("update", async () => {
@@ -1441,18 +1436,12 @@ describe("SharedWorker bridge with IndexedDB", () => {
         untrack(dbBeforeRestart);
 
         const dbAfterRestart = track(await createPersistentDb(syncServer.serverUrl));
-        await dbAfterRestart.all(allTodos, { tier: "edge" });
+        expect(await dbAfterRestart.all(allTodos, { tier: "edge" })).toEqual([todo]);
+        await dbAfterRestart.shutdown();
+        untrack(dbAfterRestart);
 
-        await waitForCondition(
-          async () => {
-            const todosAfterRevert = await dbAfterRestart.all(allTodos, {
-              tier: "local",
-            });
-            return todosAfterRevert.length === 1 && todosAfterRevert[0]?.title === todo.title;
-          },
-          5000,
-          "restarted rejected update should restore the previous local row",
-        );
+        const dbAfterSettlement = track(await createPersistentDb(undefined));
+        expect(await dbAfterSettlement.all(allTodos, { tier: "local" })).toEqual([todo]);
       });
 
       it("delete", async () => {
@@ -1497,19 +1486,12 @@ describe("SharedWorker bridge with IndexedDB", () => {
         untrack(dbBeforeRestart);
 
         const dbAfterRestart = track(await createPersistentDb(syncServer.serverUrl));
-        await dbAfterRestart.all(allTodos, { tier: "edge" });
+        expect(await dbAfterRestart.all(allTodos, { tier: "edge" })).toEqual([todo]);
+        await dbAfterRestart.shutdown();
+        untrack(dbAfterRestart);
 
-        await waitForCondition(
-          async () => {
-            const todosAfterRevert = await dbAfterRestart.all(allTodos, {
-              tier: "local",
-            });
-            return todosAfterRevert.length === 1 && todosAfterRevert[0]?.title === todo.title;
-          },
-          5000,
-          "restarted rejected delete should restore the previous local row",
-        );
-        expect(await dbAfterRestart.all(allTodos, { tier: "local" })).toEqual([todo]);
+        const dbAfterSettlement = track(await createPersistentDb(undefined));
+        expect(await dbAfterSettlement.all(allTodos, { tier: "local" })).toEqual([todo]);
       });
     });
   });
