@@ -1494,6 +1494,24 @@ test("a sealed test surface rejects a child clean before it can delete prepared 
   }
 });
 
+test("Turbo preserves the sealed surface for the real Jazz Tools build task", () => {
+  const result = spawnSync(
+    "pnpm",
+    ["exec", "turbo", "run", "build", "--filter=jazz-tools", "--only", "--force"],
+    {
+      cwd: root,
+      encoding: "utf8",
+      env: { ...process.env, JAZZ_TEST_SEALED_TOOLS_DIST: "1" },
+    },
+  );
+  assert.notEqual(result.status, 0, "a sealed Jazz Tools build must not clean dist");
+  assert.match(
+    `${result.stdout}\n${result.stderr}`,
+    /jazz-tools dist is sealed for concurrent tests/,
+    "Turbo strict-env child dropped JAZZ_TEST_SEALED_TOOLS_DIST before clean-dist",
+  );
+});
+
 test("parallel TypeScript runner waits for both suites and combines their failures", () => {
   const runner = path.join(root, "dev/gates/run-ts-tests.sh");
   const cases = [

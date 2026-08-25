@@ -534,6 +534,12 @@ test("CI uses the correctness artifact path while package builds keep release WA
       expectedLease,
       `${task} must preserve the aggregate parent's selected artifact lock`,
     );
+  for (const task of ["build", "jazz-tools#build", "test"])
+    assert.deepEqual(
+      turbo.tasks[task].passThroughEnv,
+      ["JAZZ_TEST_SEALED_TOOLS_DIST"],
+      `${task} must preserve the sealed shared test surface for child package scripts`,
+    );
 });
 
 test("Turbo invalidates each native artifact only for its Cargo closure", () => {
