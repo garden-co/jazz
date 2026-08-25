@@ -422,7 +422,42 @@ impl OrderedChunkStorage {
         value
     }
 
+    // Ordered storage's conditional merge only returns the materialized
+    // winner, not whether this caller installed it.  An equal restage must be
+    // classified as an existing mapping for incoming-byte accounting, so each
+    // newly written chunk carries the installing call's opaque receipt. This
+    // lives only in Groove's private chunk-value format; legacy values retain
+    // their original hash-plus-bytes layout and decode without a receipt.
+    const INSTALL_RECEIPT_MAGIC: [u8; 32] = *b"\0groove-chunk-install-receipt-v1";
+
+    fn encode_with_install_receipt(hash: ContentHash, bytes: &[u8], receipt: [u8; 16]) -> Vec<u8> {
+        let encoded = Self::encode(hash, bytes);
+        let mut value =
+            Vec::with_capacity(Self::INSTALL_RECEIPT_MAGIC.len() + receipt.len() + encoded.len());
+        value.extend_from_slice(&Self::INSTALL_RECEIPT_MAGIC);
+        value.extend_from_slice(&receipt);
+        value.extend_from_slice(&encoded);
+        value
+    }
+
+    fn split_install_receipt(value: &[u8]) -> (Option<[u8; 16]>, &[u8]) {
+        let Some((magic, remainder)) = value.split_at_checked(Self::INSTALL_RECEIPT_MAGIC.len())
+        else {
+            return (None, value);
+        };
+        if magic != Self::INSTALL_RECEIPT_MAGIC {
+            return (None, value);
+        }
+        let Some((receipt, encoded)) = remainder.split_at_checked(16) else {
+            return (None, value);
+        };
+        let mut receipt_bytes = [0; 16];
+        receipt_bytes.copy_from_slice(receipt);
+        (Some(receipt_bytes), encoded)
+    }
+
     fn decode(value: Vec<u8>) -> Result<(ContentHash, Bytes), ChunkStorageError> {
+        let (_, value) = Self::split_install_receipt(&value);
         let (hash, bytes) = value
             .split_at_checked(32)
             .ok_or(ChunkStorageError::Integrity)?;
@@ -468,7 +503,8 @@ impl ChunkKvStorage for OrderedChunkStorage {
         Box::pin(async move {
             let storage = self.storage()?;
             let key = Self::key(locator.as_bytes());
-            let candidate = Self::encode(hash, &bytes);
+            let receipt = *uuid::Uuid::new_v4().as_bytes();
+            let candidate = Self::encode_with_install_receipt(hash, &bytes, receipt);
             // This must be a conditional storage transition rather than a
             // get-then-set sequence.  A durable backend can be shared by
             // independent database instances, so an executor-local lock would
@@ -490,7 +526,8 @@ impl ChunkKvStorage for OrderedChunkStorage {
                         "conditional chunk insert did not leave a winner".to_owned(),
                     )
                 })?;
-            if existing == candidate {
+            let (installed_receipt, _) = Self::split_install_receipt(&existing);
+            if installed_receipt == Some(receipt) {
                 Ok(None)
             } else {
                 Self::decode(existing).map(Some)
@@ -1811,6 +1848,67 @@ mod tests {
         assert_eq!(
             block_on(managed.get(locator, ContentHash([7; 32]))),
             Err(ChunkStorageError::Integrity)
+        );
+    }
+
+    #[test]
+    fn ordered_managed_storage_equal_restaging_is_not_new_storage() {
+        // This is intentionally an internal receipt: staging/accounting is
+        // below public row APIs, and it needs the durable ordered chunk plane.
+        let storage = crate::storage::MemoryStorage::new(&[crate::db::LARGE_VALUE_METADATA_CF]);
+        let layout = Rc::new(
+            block_on(LayoutStorage::new(
+                storage,
+                crate::storage::StorageLayout::Identity,
+            ))
+            .unwrap(),
+        );
+        let backend = Rc::new(OrderedChunkStorage::new(Rc::downgrade(&layout)));
+        let managed = ManagedChunkStorage::new(backend);
+        let bytes = Bytes::from_static(b"ordered managed immutable bytes");
+        let hash = object_hash(&bytes);
+        let locator = Locator::from_seed(b"ordered-managed-opaque-locator");
+        let chunk = StagedChunk {
+            node_ref: crate::large_values::NodeRef {
+                object_hash: hash,
+                locator,
+            },
+            encoded: bytes.to_vec(),
+        };
+
+        let installed = block_on(managed.stage(vec![chunk.clone()])).unwrap();
+        let restaged = block_on(managed.stage(vec![chunk])).unwrap();
+
+        assert!(installed.encoded_bytes > 0);
+        assert_eq!(restaged, Default::default());
+    }
+
+    #[test]
+    fn ordered_chunk_storage_classifies_legacy_equal_mapping_as_existing() {
+        // This is intentionally an internal compatibility receipt: the
+        // legacy on-disk chunk representation predates the install receipt.
+        let storage = crate::storage::MemoryStorage::new(&[crate::db::LARGE_VALUE_METADATA_CF]);
+        let layout = Rc::new(
+            block_on(LayoutStorage::new(
+                storage,
+                crate::storage::StorageLayout::Identity,
+            ))
+            .unwrap(),
+        );
+        let backend = OrderedChunkStorage::new(Rc::downgrade(&layout));
+        let bytes = Bytes::from_static(b"legacy immutable chunk bytes");
+        let hash = object_hash(&bytes);
+        let locator = Locator::from_seed(b"legacy-ordered-chunk-locator");
+        block_on(layout.set(
+            crate::db::LARGE_VALUE_METADATA_CF.to_owned(),
+            OrderedChunkStorage::key(locator.as_bytes()),
+            OrderedChunkStorage::encode(hash, &bytes),
+        ))
+        .unwrap();
+
+        assert_eq!(
+            block_on(backend.put_if_absent(locator, hash, bytes.clone())).unwrap(),
+            Some((hash, bytes))
         );
     }
 

@@ -1755,21 +1755,30 @@ where
         }
 
         // A base limit of only the logical result size is unsound: every
-        // staged key whose final operation is a Delete may consume one of
-        // those physical entries without producing a logical result.  The
-        // final operation is sufficient here: Set and Delta always retain a
-        // key (or surface their own error only if traversal reaches it), while
-        // Delete removes it regardless of its base value.  Thus `limit +
-        // deletes` is both a hard physical ceiling and enough base entries to
-        // fill the requested logical result when they exist.
+        // staged key whose final operation can remove it may consume one of
+        // those physical entries without producing a logical result. A
+        // compare-and-delete has the same effect when its expected bytes
+        // match, so count it conservatively too. Thus `limit + removals` is
+        // both a hard physical ceiling and enough base entries to fill the
+        // requested logical result when they exist.
         let physical_max_items = request.max_items.map(|limit| {
-            let final_deletes = staged
+            let final_removals = staged
                 .values()
                 .filter(|operations| {
-                    matches!(operations.last(), Some(OwnedWriteOperation::Delete { .. }))
+                    matches!(
+                        operations.last(),
+                        Some(OwnedWriteOperation::Delete { .. })
+                            | Some(OwnedWriteOperation::Delta {
+                                delta: StorageDelta {
+                                    kind: StorageDeltaKind::DeleteIfValueMatchesV1,
+                                    ..
+                                },
+                                ..
+                            })
+                    )
                 })
                 .count();
-            limit.saturating_add(final_deletes)
+            limit.saturating_add(final_removals)
         });
         let base = base
             .scan(ScanRequest {
@@ -3941,6 +3950,45 @@ mod tests {
     async fn memory_storage_conditional_delete_delta_matches_the_durable_value() {
         let storage = MemoryStorage::new(&["records"]);
         conformance::conditional_delete_delta_matches_the_durable_value(storage).await;
+    }
+
+    #[futures_test::test]
+    async fn staged_overlay_limited_scan_counts_conditional_deletes() {
+        // This is intentionally a storage-layer receipt: the overlay's
+        // read-your-own-writes scan limit is below Jazz's public query API.
+        let storage = MemoryStorage::new(&["records"]);
+        for (key, value) in [
+            (b"a".as_slice(), b"one".as_slice()),
+            (b"b".as_slice(), b"two".as_slice()),
+            (b"c".as_slice(), b"three".as_slice()),
+        ] {
+            storage
+                .set("records".into(), key.to_vec(), value.to_vec())
+                .await
+                .unwrap();
+        }
+        let staged = RefCell::new(StagedWriteState::from(vec![OwnedWriteOperation::delta(
+            "records",
+            b"a",
+            StorageDelta::delete_if_value_matches(b"one".to_vec()),
+        )]));
+        let overlay = StagedWriteOverlay::new(&storage, &staged);
+
+        let rows = collect_scan(
+            overlay
+                .scan(ScanRequest::prefix("records".into(), Vec::new()).with_max_items(2))
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (b"b".to_vec(), b"two".to_vec()),
+                (b"c".to_vec(), b"three".to_vec()),
+            ]
+        );
     }
 
     #[futures_test::test]
