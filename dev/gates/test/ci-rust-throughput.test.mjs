@@ -1623,17 +1623,50 @@ test("the Jazz Tools preflight derives public exports and keeps test-only entryp
 });
 
 test("missing public root or framework exports prevent both TypeScript suites from starting", () => {
-  const runner = path.join(root, "dev/gates/run-ts-tests.sh");
-  for (const relative of ["dist/index.js", "dist/react/index.js"]) {
-    const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-ts-ci-public-export-"));
-    const target = path.join(root, "packages/jazz-tools", relative);
-    const backup = `${target}.preflight-backup-${process.pid}`;
-    const nodeMarker = path.join(fixture, "node-suite-ran");
-    const browserMarker = path.join(fixture, "browser-suite-ran");
-    try {
-      fs.renameSync(target, backup);
-      const result = spawnSync("bash", [runner], {
-        cwd: root,
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-ts-ci-public-export-"));
+  const write = (relative, contents = "export {};") => {
+    const target = path.join(fixture, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, contents);
+  };
+  const packageFiles = [
+    "dist/index.d.ts",
+    "dist/index.js",
+    "dist/react/index.d.ts",
+    "dist/react/index.js",
+    "dist/testing/index.js",
+    "dist/cli.js",
+    "dist/runtime/client-session.js",
+    "dist/backend/request-auth.js",
+  ];
+  try {
+    // The real runner and verifier resolve from cwd, so this is a controlled
+    // checkout rather than a mutation of the developer's generated dist. Lint
+    // CI deliberately has no Jazz Tools build before it runs this contract.
+    for (const source of ["run-ts-tests.sh", "verify-jazz-tools-exports.mjs"])
+      write(`dev/gates/${source}`, fs.readFileSync(path.join(root, "dev/gates", source), "utf8"));
+    write("crates/jazz-napi/package.json", JSON.stringify({ type: "commonjs" }));
+    write("crates/jazz-napi/index.js", "module.exports = {};\n");
+    write(
+      "packages/jazz-tools/package.json",
+      JSON.stringify({
+        exports: {
+          ".": { types: "./dist/index.d.ts", default: "./dist/index.js" },
+          "./react": { types: "./dist/react/index.d.ts", default: "./dist/react/index.js" },
+          "./testing": { default: "./dist/testing/index.js" },
+        },
+      }),
+    );
+    for (const file of packageFiles) write(`packages/jazz-tools/${file}`);
+
+    for (const relative of ["dist/index.js", "dist/react/index.js"]) {
+      const nodeMarker = path.join(fixture, "node-suite-ran");
+      const browserMarker = path.join(fixture, "browser-suite-ran");
+      fs.rmSync(nodeMarker, { force: true });
+      fs.rmSync(browserMarker, { force: true });
+      fs.rmSync(path.join(fixture, "packages/jazz-tools", relative));
+      const result = spawnSync("bash", ["dev/gates/run-ts-tests.sh"], {
+        cwd: fixture,
         encoding: "utf8",
         env: {
           ...process.env,
@@ -1648,10 +1681,10 @@ test("missing public root or framework exports prevent both TypeScript suites fr
         `${result.stdout}\n${result.stderr}`,
         new RegExp(`public export is missing: ${relative}`),
       );
-    } finally {
-      if (fs.existsSync(backup)) fs.renameSync(backup, target);
-      fs.rmSync(fixture, { recursive: true, force: true });
+      write(`packages/jazz-tools/${relative}`);
     }
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
   }
 });
 
