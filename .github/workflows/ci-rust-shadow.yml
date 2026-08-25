@@ -19,6 +19,11 @@ permissions:
 
 jobs:
   shard:
+    # A full duplicate Rust suite is useful only while explicitly studying
+    # throughput. Keep ordinary PRs (and unlabelled fork PRs) from consuming
+    # the same runner capacity as required CI. Main pushes and manual runs
+    # retain the longitudinal signal.
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')
     name: Rust shadow shard ${{ matrix.index }} of 2
     strategy:
       fail-fast: false
@@ -52,7 +57,7 @@ jobs:
 
   aggregate:
     name: Rust throughput shadow
-    if: always()
+    if: always() && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark'))
     needs: [shard]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 3

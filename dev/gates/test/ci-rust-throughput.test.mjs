@@ -594,11 +594,21 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
   const shard = document.jobs.shard;
   const aggregate = document.jobs.aggregate;
   assert.deepEqual(document.permissions, { contents: "read", packages: "read" });
+  assert.match(
+    shard.if,
+    /github\.event_name != 'pull_request' \|\| contains\(github\.event\.pull_request\.labels\.\*\.name, 'benchmark'\)/,
+    "the expensive non-required shadow must run on PRs only when deliberately labelled",
+  );
   assert.deepEqual(shard.strategy.matrix.index, [1, 2]);
   assert.equal(shard.strategy["max-parallel"], 2);
   assert.equal(shard["runs-on"], "blacksmith-8vcpu-ubuntu-2404");
   assert.equal(aggregate.needs[0], "shard");
   assert.match(aggregate.if, /always/);
+  assert.match(
+    aggregate.if,
+    /github\.event_name != 'pull_request' \|\| contains\(github\.event\.pull_request\.labels\.\*\.name, 'benchmark'\)/,
+    "the aggregate must not fail when intentionally unlabelled PR shards are skipped",
+  );
   assert.equal(
     aggregate.steps[0].uses,
     "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
