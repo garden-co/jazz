@@ -216,20 +216,6 @@ pub enum StorageDeltaKind {
     DeleteIfValueMatchesV1,
 }
 
-// RocksDB merge operators cannot physically remove a key. They materialize
-// this reserved value instead, and the Rocks adapter exposes it as absence.
-// Non-merge backends delete the key outright. Chunk values always contain a
-// 32-byte content hash, so they cannot equal this short internal marker.
-const STORAGE_DELTA_TOMBSTONE_V1: &[u8] = b"\0groove-storage-delta-tombstone-v1";
-
-pub fn storage_delta_tombstone_value() -> Vec<u8> {
-    STORAGE_DELTA_TOMBSTONE_V1.to_vec()
-}
-
-pub fn is_storage_delta_tombstone(value: &[u8]) -> bool {
-    value == STORAGE_DELTA_TOMBSTONE_V1
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CurrentWinnerDelta {
     pub tx_time: u64,
@@ -337,7 +323,6 @@ pub fn apply_storage_delta(
     encoded_delta: &[u8],
 ) -> Result<Option<Vec<u8>>, Error> {
     let delta = StorageDelta::decode(encoded_delta)?;
-    let existing = existing.filter(|value| !is_storage_delta_tombstone(value));
     match delta.kind {
         StorageDeltaKind::CurrentWinnerV1 => {
             let candidate: CurrentWinnerDelta = postcard::from_bytes(&delta.payload)
@@ -2233,6 +2218,52 @@ pub(crate) mod conformance {
             .unwrap();
         assert_eq!(storage.get("records".into(), key).await.unwrap(), Some(new));
     }
+
+    pub(crate) async fn former_rocksdb_tombstone_bytes_remain_an_ordinary_value<S>(storage: S)
+    where
+        S: OrderedKvStorage,
+    {
+        let key = b"former-tombstone".to_vec();
+        let value = b"\0groove-storage-delta-tombstone-v1".to_vec();
+        let replacement = b"must-not-replace-an-ordinary-value".to_vec();
+        storage
+            .set("records".into(), key.clone(), value.clone())
+            .await
+            .unwrap();
+        storage
+            .write_many(vec![OwnedWriteOperation::delta(
+                "records",
+                key.clone(),
+                StorageDelta::set_if_absent(replacement),
+            )])
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.get("records".into(), key.clone()).await.unwrap(),
+            Some(value.clone())
+        );
+        assert_eq!(
+            collect_scan(
+                storage
+                    .scan(ScanRequest::prefix("records".into(), b"former-".to_vec()))
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+            vec![(key.clone(), value.clone())]
+        );
+
+        storage
+            .write_many(vec![OwnedWriteOperation::delta(
+                "records",
+                key.clone(),
+                StorageDelta::delete_if_value_matches(value),
+            )])
+            .await
+            .unwrap();
+        assert_eq!(storage.get("records".into(), key).await.unwrap(), None);
+    }
 }
 
 #[cfg(test)]
@@ -3950,6 +3981,12 @@ mod tests {
     async fn memory_storage_conditional_delete_delta_matches_the_durable_value() {
         let storage = MemoryStorage::new(&["records"]);
         conformance::conditional_delete_delta_matches_the_durable_value(storage).await;
+    }
+
+    #[futures_test::test]
+    async fn memory_storage_preserves_former_rocksdb_tombstone_bytes() {
+        let storage = MemoryStorage::new(&["records"]);
+        conformance::former_rocksdb_tombstone_bytes_remain_an_ordinary_value(storage).await;
     }
 
     #[futures_test::test]

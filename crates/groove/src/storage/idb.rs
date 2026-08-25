@@ -713,6 +713,10 @@ mod tests {
                 storage.clone(),
             )
             .await;
+            super::super::conformance::former_rocksdb_tombstone_bytes_remain_an_ordinary_value(
+                storage.clone(),
+            )
+            .await;
             super::super::conformance::reopen_preserves_data_and_adds_families(storage).await;
         });
     }
