@@ -3369,10 +3369,18 @@ fn inline_current_graph_with_source_metadata_and_branch_witness(
     Error,
 > {
     let mut metadata = BTreeMap::new();
-    if requirements
+    // Provenance is carried by the same content-version witness as ordinary
+    // table sources.  Inline candidates must expose that full capability too:
+    // a provenance-only requirement still needs the hidden version fields the
+    // query program uses to prove and evaluate the source.
+    let needs_version_witnesses = requirements
         .metadata
         .contains(&SourceMetadataRequirement::VersionWitnesses)
-    {
+        || requirements
+            .metadata
+            .iter()
+            .any(|requirement| matches!(requirement, SourceMetadataRequirement::Provenance(_)));
+    if needs_version_witnesses {
         metadata.insert(
             SourceMetadataRequirement::VersionWitnesses,
             SourceMetadataFields::VersionWitnesses {
