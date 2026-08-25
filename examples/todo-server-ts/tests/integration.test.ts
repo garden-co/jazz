@@ -262,12 +262,22 @@ describe("Todo Server Integration", () => {
         0,
       );
 
-      const listRes = await authenticatedFetch(`${server2.baseUrl}/todos`);
-      expect(listRes.status).toBe(200);
-      const todos: Todo[] = await listRes.json();
-
-      // Both todos should be present
-      expect(todos.length).toBe(2);
+      let todos: Todo[] = [];
+      await expect
+        .poll(
+          async () => {
+            const listRes = await authenticatedFetch(`${server2.baseUrl}/todos`);
+            expect(listRes.status).toBe(200);
+            todos = await listRes.json();
+            return todos.length;
+          },
+          {
+            interval: 50,
+            timeout: 10_000,
+            message: "persisted todos should become visible after local replay",
+          },
+        )
+        .toBe(2);
 
       const found1 = todos.find((t) => t.id === todo1.id);
       expect(found1).toBeDefined();
