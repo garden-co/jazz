@@ -930,40 +930,48 @@ impl OwnedChunkProvider {
         let leases = Rc::clone(&self.leases);
         let activity = Rc::clone(&self.activity);
         let in_flight = Rc::clone(&self.in_flight);
-        let cached = {
-            let mut cache = cache.borrow_mut();
-            cache.clock = cache.clock.wrapping_add(1);
-            let clock = cache.clock;
-            if let Some((bytes, last_use)) = cache.entries.get_mut(&request) {
-                *last_use = clock;
-                Some(bytes.clone())
-            } else {
-                None
+        Box::pin(async move {
+            // Admission must precede even a verified-cache hit. A reclamation
+            // pass may start after the last lease is dropped, and every new
+            // reader must remain pending until that pass releases its guard.
+            let _request_guard = ActiveChunkRequest::acquire(activity).await;
+            let cached = {
+                let mut cache = cache.borrow_mut();
+                cache.clock = cache.clock.wrapping_add(1);
+                let clock = cache.clock;
+                if let Some((bytes, last_use)) = cache.entries.get_mut(&request) {
+                    *last_use = clock;
+                    Some(bytes.clone())
+                } else {
+                    None
+                }
+            };
+            if let Some(bytes) = cached {
+                return Ok(ChunkLease::new(bytes, leases));
             }
-        };
-        if let Some(bytes) = cached {
-            return Box::pin(async move { Ok(ChunkLease::new(bytes, leases)) });
-        }
-        let mut entries = in_flight.borrow_mut();
-        if let Some(entry) = entries.entries.get_mut(&request) {
-            entry.consumers = entry.consumers.saturating_add(1);
-        } else {
-            entries.entries.insert(
-                request.clone(),
-                InFlightChunk {
-                    future: load_and_verify_chunk(provider, cache, activity, request.clone()),
-                    result: None,
-                    waiters: Vec::new(),
-                    consumers: 1,
-                },
-            );
-        }
-        drop(entries);
-        Box::pin(CoalescedChunkGet {
-            request,
-            in_flight,
-            leases,
-            done: false,
+            {
+                let mut entries = in_flight.borrow_mut();
+                if let Some(entry) = entries.entries.get_mut(&request) {
+                    entry.consumers = entry.consumers.saturating_add(1);
+                } else {
+                    entries.entries.insert(
+                        request.clone(),
+                        InFlightChunk {
+                            future: load_and_verify_chunk(provider, cache, request.clone()),
+                            result: None,
+                            waiters: Vec::new(),
+                            consumers: 1,
+                        },
+                    );
+                }
+            }
+            CoalescedChunkGet {
+                request,
+                in_flight,
+                leases,
+                done: false,
+            }
+            .await
         })
     }
 }
@@ -971,11 +979,9 @@ impl OwnedChunkProvider {
 fn load_and_verify_chunk(
     provider: Rc<dyn ChunkProvider>,
     cache: Rc<RefCell<VerifiedChunkCache>>,
-    activity: Rc<RefCell<ChunkActivityState>>,
     request: ChunkRequest,
 ) -> ChunkFuture<'static, Result<Bytes, ChunkError>> {
     Box::pin(async move {
-        let _request_guard = ActiveChunkRequest::acquire(activity).await;
         let bytes = provider.get(request.clone()).await?;
         if bytes.len() > crate::large_values::MAX_ENCODED_NODE_BYTES
             || crate::large_values::object_hash(&bytes).0 != request.object_hash
@@ -1210,7 +1216,7 @@ mod tests {
             Poll::Pending
         ));
         assert_eq!(control.observed(), vec![request.clone()]);
-        assert_eq!(chunks.cache_stats().active_requests, 1);
+        assert_eq!(chunks.cache_stats().active_requests, 2);
 
         // No blocked consumer remains, so the shared request is dropped rather
         // than becoming a permanently unpolled registry entry.
@@ -1222,6 +1228,81 @@ mod tests {
             Pin::new(&mut retry).poll(&mut context),
             Poll::Pending
         ));
+        assert_eq!(control.observed(), vec![request.clone(), request]);
+    }
+
+    #[test]
+    fn cached_get_waits_for_reclamation_admission_before_returning_a_lease() {
+        let bytes = Bytes::from_static(b"warm verified chunk");
+        let provider = Rc::new(CountingProvider {
+            calls: Cell::new(0),
+            bytes: bytes.clone(),
+        });
+        let chunks = OwnedChunkProvider::new(provider);
+        let request = ChunkRequest {
+            object_hash: crate::large_values::object_hash(&bytes).0,
+            locator: Locator::from_seed(b"warm-cache-reclamation"),
+        };
+
+        // Warm the verified cache, then leave no lease that would prevent a
+        // reclamation pass from beginning.
+        drop(block_on(chunks.get(request.clone())).unwrap());
+        let reclamation = chunks
+            .try_begin_reclamation()
+            .expect("a lease-free warm cache may begin reclamation");
+        let mut cached_get = chunks.get(request);
+        let waker = noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+
+        // This is the cache-before-admission regression: returning here would
+        // let a new read overlap a pass that has exclusive reclamation access.
+        assert!(matches!(
+            Pin::new(&mut cached_get).poll(&mut context),
+            Poll::Pending
+        ));
+        assert_eq!(chunks.cache_stats().active_requests, 0);
+        drop(reclamation);
+        assert!(matches!(
+            Pin::new(&mut cached_get).poll(&mut context),
+            Poll::Ready(Ok(_))
+        ));
+    }
+
+    #[test]
+    fn same_key_fanout_receives_one_error_and_a_later_retry_starts_fresh() {
+        let bytes = Bytes::from_static(b"retry after shared failure");
+        let request = ChunkRequest {
+            object_hash: crate::large_values::object_hash(&bytes).0,
+            locator: Locator::from_seed(b"shared-failure"),
+        };
+        let (provider, control) = TestChunkProvider::controlled([(request.clone(), bytes.clone())]);
+        let chunks = OwnedChunkProvider::new(Rc::new(provider));
+        control.pause();
+        control.fail_next(ChunkError::Unavailable);
+        let mut first = chunks.get(request.clone());
+        let mut second = chunks.get(request.clone());
+        let waker = noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+
+        assert!(matches!(
+            Pin::new(&mut first).poll(&mut context),
+            Poll::Pending
+        ));
+        assert!(matches!(
+            Pin::new(&mut second).poll(&mut context),
+            Poll::Pending
+        ));
+        control.release_one();
+        assert!(matches!(
+            Pin::new(&mut first).poll(&mut context),
+            Poll::Ready(Err(ChunkError::Unavailable))
+        ));
+        assert!(matches!(
+            Pin::new(&mut second).poll(&mut context),
+            Poll::Ready(Err(ChunkError::Unavailable))
+        ));
+        control.resume();
+        assert_eq!(block_on(chunks.get(request.clone())).unwrap(), bytes);
         assert_eq!(control.observed(), vec![request.clone(), request]);
     }
 
