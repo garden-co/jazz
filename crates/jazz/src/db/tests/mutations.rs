@@ -2,6 +2,24 @@
 
 use super::*;
 
+#[derive(Clone)]
+struct RetryableChunkResolver {
+    retry_after_ms: u32,
+}
+
+impl groove::chunks::MissingChunkResolver for RetryableChunkResolver {
+    fn resolve(
+        &self,
+        _request: groove::chunks::ChunkRequest,
+    ) -> groove::chunks::ChunkFuture<'_, Result<bytes::Bytes, groove::chunks::ChunkError>> {
+        Box::pin(async move {
+            Err(groove::chunks::ChunkError::Retryable {
+                retry_after_ms: self.retry_after_ms,
+            })
+        })
+    }
+}
+
 fn branch_column_reference_policy_schema() -> JazzSchema {
     let policy = PublicPolicyExpr::Exists {
         table: "branches".to_owned(),
@@ -171,6 +189,10 @@ fn db_facade_mutation_lifecycle_writes_reads_deletes_and_restores() {
 #[test]
 fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let chunks = std::rc::Rc::new(groove::chunks::MemoryChunkStorage::new());
+    block_on(async {
+        db.node.node.lock().await.set_chunk_storage(chunks.clone());
+    });
     let mut title = "a".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 257);
     title.push_str("🙂tail");
     let write = db
@@ -259,7 +281,374 @@ fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
         .unwrap();
     assert_eq!(
         rows[0].cell(&doctest_support::schema().tables[0], "title"),
-        Some(Value::String(title))
+        Some(Value::String(title.clone()))
+    );
+
+    // This deliberately plants the internal descriptor immediately before
+    // the binding-only hydrator. The corresponding public WASM receipt covers the
+    // full encode/decode path; this focused lower-level assertion proves the
+    // boundary still rejects a regression even if a maintained terminal
+    // happens to materialize the same row earlier in the pipeline.
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let mut event = block_on(subscription.next_raw()).unwrap();
+    let (descriptor, title_index, terminal_value) = {
+        let SubscriptionEvent::Delta { added, .. } = &mut event else {
+            panic!("expected opening subscription delta");
+        };
+        let (descriptor, record) = added[0].row.encoded_record();
+        let descriptor = descriptor.clone();
+        let mut values = descriptor.bind(record).to_values().unwrap();
+        let title_index = values
+            .iter()
+            .position(|value| {
+                matches!(value, Value::String(value) if value == &title)
+                    || matches!(value, Value::Nullable(Some(value)) if matches!(value.as_ref(), Value::String(value) if value == &title))
+            })
+            .expect("opening row contains the logical title");
+        values[title_index] = match &values[title_index] {
+            Value::Nullable(_) => Value::Nullable(Some(Box::new(Value::Large(edited_ref.clone())))),
+            _ => Value::Large(edited_ref.clone()),
+        };
+        added[0].row = CurrentRow::new(
+            "todos",
+            OwnedRecord::new(descriptor.create(&values).unwrap(), descriptor.clone()),
+        );
+        assert!(
+            matches!(
+                added[0]
+                    .row
+                    .cell(&doctest_support::schema().tables[0], "title"),
+                Some(Value::Large(_))
+            ),
+            "planted positive: the maintained event reaches the binding with a physical descriptor"
+        );
+        (
+            descriptor,
+            title_index,
+            added[0].row.encoded_record().1.to_vec(),
+        )
+    };
+    let mut ordinary_event = event.clone();
+    let SubscriptionEvent::Delta {
+        terminal_operations,
+        ..
+    } = &mut event
+    else {
+        unreachable!("opening subscription event is a delta");
+    };
+    terminal_operations.push(groove::ivm::TerminalOperation {
+        root_descriptor: descriptor.clone(),
+        root_key: Vec::new(),
+        path: Vec::new(),
+        edit: groove::ivm::TerminalEdit::Update {
+            key: Vec::new(),
+            value: terminal_value.clone(),
+        },
+    });
+    // A locally absent chunk with no peer retry instruction is terminal. The
+    // event remains physically intact so a caller can safely abandon it; it is
+    // never silently retried forever.
+    block_on(async {
+        db.node
+            .node
+            .lock()
+            .await
+            .set_chunk_storage(std::rc::Rc::new(groove::chunks::MemoryChunkStorage::new()));
+        db.node
+            .node
+            .lock()
+            .await
+            .set_missing_chunk_resolver(std::rc::Rc::new(groove::chunks::UnavailableChunkResolver));
+    });
+    assert!(matches!(
+        block_on(db.hydrate_subscription_event_for_binding_outcome(&mut ordinary_event)),
+        Err(BindingHydrationError::Error(_))
+    ));
+    block_on(async {
+        db.node.node.lock().await.set_chunk_storage(chunks.clone());
+    });
+    block_on(db.hydrate_subscription_event_for_binding(&mut ordinary_event)).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = ordinary_event else {
+        panic!("expected opening subscription delta");
+    };
+    assert_eq!(
+        added[0]
+            .row
+            .cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String(title.clone())),
+        "the subscription binding boundary must materialize the indirect text scalar"
+    );
+    block_on(db.hydrate_subscription_event_for_binding(&mut event)).unwrap();
+    let mut nested_event = event.clone();
+    let SubscriptionEvent::Delta {
+        added: terminal_added,
+        terminal_operations,
+        ..
+    } = event
+    else {
+        panic!("expected terminal subscription delta");
+    };
+    assert!(matches!(
+        terminal_added[0]
+            .row
+            .cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::Large(_))
+    ));
+    let groove::ivm::TerminalEdit::Update { value, .. } = &terminal_operations[0].edit else {
+        unreachable!("planted terminal operation is an update");
+    };
+    let terminal_values = descriptor.bind(value).to_values().unwrap();
+    assert!(
+        matches!(&terminal_values[title_index], Value::String(value) if value == &title)
+            || matches!(
+                &terminal_values[title_index],
+                Value::Nullable(Some(value))
+                    if matches!(value.as_ref(), Value::String(value) if value == &title)
+            ),
+        "structured terminal operations must not encode physical indirect scalars for bindings"
+    );
+
+    // A root terminal insertion can contain a whole collected tree. Hydration
+    // must descend through arrays and nested records before that record reaches
+    // the binding, rather than only looking for a top-level descriptor.
+    let nested_root_descriptor = RecordDescriptor::new([(
+        "children",
+        groove::records::ValueType::Array(Box::new(groove::records::ValueType::Record(Box::new(
+            descriptor,
+        )))),
+    )]);
+    let root_insert_value = nested_root_descriptor
+        .create(&[Value::Array(vec![Value::Record(OwnedRecord::new(
+            terminal_value.clone(),
+            descriptor,
+        ))])])
+        .unwrap();
+    let mut root_insert_event = nested_event.clone();
+    let SubscriptionEvent::Delta {
+        terminal_operations,
+        ..
+    } = &mut root_insert_event
+    else {
+        unreachable!("expected terminal subscription delta");
+    };
+    terminal_operations.clear();
+    terminal_operations.push(groove::ivm::TerminalOperation {
+        root_descriptor: nested_root_descriptor,
+        root_key: Vec::new(),
+        path: Vec::new(),
+        edit: groove::ivm::TerminalEdit::Insert {
+            index: 0,
+            key: Vec::new(),
+            value: root_insert_value,
+        },
+    });
+    block_on(db.hydrate_subscription_event_for_binding(&mut root_insert_event)).unwrap();
+    let SubscriptionEvent::Delta {
+        terminal_operations,
+        ..
+    } = root_insert_event
+    else {
+        unreachable!("expected terminal subscription delta");
+    };
+    let groove::ivm::TerminalEdit::Insert { value, .. } = &terminal_operations[0].edit else {
+        unreachable!("expected root terminal insertion");
+    };
+    let root_values = nested_root_descriptor.bind(value).to_values().unwrap();
+    let [Value::Array(children)] = root_values.as_slice() else {
+        unreachable!("expected root terminal collection");
+    };
+    let [Value::Record(child)] = children.as_slice() else {
+        unreachable!("expected one root terminal child");
+    };
+    let root_child_values = descriptor.bind(child.raw()).to_values().unwrap();
+    assert!(
+        matches!(&root_child_values[title_index], Value::String(value) if value == &title)
+            || matches!(
+                &root_child_values[title_index],
+                Value::Nullable(Some(value))
+                    if matches!(value.as_ref(), Value::String(value) if value == &title)
+            ),
+        "root terminal insertions must recursively materialize nested large values"
+    );
+
+    // A nested terminal operation keeps the root descriptor for layout
+    // discovery, but its payload is a child record. Hydrating it as the root
+    // record corrupts the raw bytes and only becomes visible when the binding
+    // later decodes the operation.
+    let SubscriptionEvent::Delta {
+        terminal_operations,
+        ..
+    } = &mut nested_event
+    else {
+        unreachable!("expected terminal subscription delta");
+    };
+    terminal_operations.clear();
+    terminal_operations.push(groove::ivm::TerminalOperation {
+        root_descriptor: nested_root_descriptor,
+        root_key: Vec::new(),
+        path: vec![groove::ivm::TerminalPathSegment::Collection(
+            "children".to_owned(),
+        )],
+        edit: groove::ivm::TerminalEdit::Insert {
+            index: 0,
+            key: Vec::new(),
+            value: terminal_value.clone(),
+        },
+    });
+    block_on(db.hydrate_subscription_event_for_binding(&mut nested_event)).unwrap();
+    let SubscriptionEvent::Delta {
+        terminal_operations,
+        ..
+    } = &nested_event
+    else {
+        unreachable!("expected terminal subscription delta");
+    };
+    let groove::ivm::TerminalEdit::Insert { value, .. } = &terminal_operations[0].edit else {
+        unreachable!("expected nested terminal insertion");
+    };
+    let nested_values = descriptor.bind(value).to_values().unwrap();
+    assert!(
+        matches!(&nested_values[title_index], Value::String(value) if value == &title)
+            || matches!(
+                &nested_values[title_index],
+                Value::Nullable(Some(value))
+                    if matches!(value.as_ref(), Value::String(value) if value == &title)
+            ),
+        "nested terminal payloads must use their child descriptor when hydrating large values"
+    );
+
+    // Follow an actual Collection/Key/Collection terminal path and preserve
+    // the retained payload exactly when its chunk is only retryably absent.
+    let nested_child_descriptor = RecordDescriptor::new([(
+        "notes",
+        groove::records::ValueType::Array(Box::new(groove::records::ValueType::Record(Box::new(
+            descriptor,
+        )))),
+    )]);
+    let deep_root_descriptor = RecordDescriptor::new([(
+        "children",
+        groove::records::ValueType::Array(Box::new(groove::records::ValueType::Record(Box::new(
+            nested_child_descriptor,
+        )))),
+    )]);
+    let mut deep_event = nested_event.clone();
+    let SubscriptionEvent::Delta {
+        terminal_operations,
+        ..
+    } = &mut deep_event
+    else {
+        unreachable!("expected terminal subscription delta");
+    };
+    terminal_operations.clear();
+    terminal_operations.push(groove::ivm::TerminalOperation {
+        root_descriptor: deep_root_descriptor,
+        root_key: Vec::new(),
+        path: vec![
+            groove::ivm::TerminalPathSegment::Collection("children".to_owned()),
+            groove::ivm::TerminalPathSegment::Key(vec![1]),
+            groove::ivm::TerminalPathSegment::Collection("notes".to_owned()),
+        ],
+        edit: groove::ivm::TerminalEdit::Insert {
+            index: 0,
+            key: Vec::new(),
+            value: terminal_value,
+        },
+    });
+    let retained_deep_value = match &deep_event {
+        SubscriptionEvent::Delta {
+            terminal_operations,
+            ..
+        } => match &terminal_operations[0].edit {
+            groove::ivm::TerminalEdit::Insert { value, .. } => value.clone(),
+            _ => unreachable!("expected deep terminal insertion"),
+        },
+        _ => unreachable!("expected terminal subscription delta"),
+    };
+    block_on(async {
+        db.node
+            .node
+            .lock()
+            .await
+            .set_chunk_storage(std::rc::Rc::new(groove::chunks::MemoryChunkStorage::new()));
+        db.node
+            .node
+            .lock()
+            .await
+            .set_missing_chunk_resolver(std::rc::Rc::new(RetryableChunkResolver {
+                retry_after_ms: 37,
+            }));
+    });
+    assert!(matches!(
+        block_on(db.hydrate_subscription_event_for_binding_outcome(&mut deep_event)),
+        Err(BindingHydrationError::RetryableChunkUnavailable { retry_after_ms: 37 })
+    ));
+    let retained_after_retry = match &deep_event {
+        SubscriptionEvent::Delta {
+            terminal_operations,
+            ..
+        } => match &terminal_operations[0].edit {
+            groove::ivm::TerminalEdit::Insert { value, .. } => value,
+            _ => unreachable!("expected deep terminal insertion"),
+        },
+        _ => unreachable!("expected terminal subscription delta"),
+    };
+    assert_eq!(
+        retained_after_retry, &retained_deep_value,
+        "retryable hydration must leave the retained terminal payload unchanged"
+    );
+    block_on(async {
+        let mut node = db.node.node.lock().await;
+        node.set_chunk_storage(chunks.clone());
+        node.set_missing_chunk_resolver(std::rc::Rc::new(groove::chunks::UnavailableChunkResolver));
+    });
+    block_on(db.hydrate_subscription_event_for_binding(&mut deep_event)).unwrap();
+    let SubscriptionEvent::Delta {
+        terminal_operations,
+        ..
+    } = deep_event
+    else {
+        unreachable!("expected terminal subscription delta");
+    };
+    let groove::ivm::TerminalEdit::Insert { value, .. } = &terminal_operations[0].edit else {
+        unreachable!("expected deep terminal insertion");
+    };
+    let deep_values = descriptor.bind(value).to_values().unwrap();
+    assert!(
+        matches!(&deep_values[title_index], Value::String(value) if value == &title)
+            || matches!(
+                &deep_values[title_index],
+                Value::Nullable(Some(value))
+                    if matches!(value.as_ref(), Value::String(value) if value == &title)
+            ),
+        "deep terminal paths must hydrate their child descriptor after retry"
+    );
+
+    let mut snapshot = RelationSnapshot {
+        root_count: 1,
+        rows: vec![added[0].row.clone()],
+        edges: Vec::new(),
+    };
+    let (descriptor, record) = snapshot.rows[0].encoded_record();
+    let descriptor = descriptor.clone();
+    let mut values = descriptor.bind(record).to_values().unwrap();
+    values[title_index] = match &values[title_index] {
+        Value::Nullable(_) => Value::Nullable(Some(Box::new(Value::Large(edited_ref.clone())))),
+        _ => Value::Large(edited_ref.clone()),
+    };
+    snapshot.rows[0] = CurrentRow::new(
+        "todos",
+        OwnedRecord::new(descriptor.create(&values).unwrap(), descriptor),
+    );
+    assert!(matches!(
+        snapshot.rows[0].cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::Large(_))
+    ));
+    block_on(db.hydrate_relation_snapshot_for_binding(&mut snapshot)).unwrap();
+    assert_eq!(
+        snapshot.rows[0].cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String(title.clone())),
+        "relation snapshots must not encode physical indirect scalars for bindings"
     );
 
     let json = format!(

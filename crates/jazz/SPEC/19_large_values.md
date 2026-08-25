@@ -65,7 +65,7 @@ Every retrievable node has two independent identities:
 ```text
 NodeRef {
   object_hash,     // commits to exact encoded bytes and child locators
-  locator,         // random opaque Groove storage key
+  locator,         // exact random 256-bit retrieval capability
 }
 ```
 
@@ -85,7 +85,8 @@ The private blob backend may deduplicate exact objects by object/content hash, b
 public/proxied namespace is opaque locator to internal object. Multiple locators
 may map to one physical blob without revealing that equality.
 
-Locators are random with sufficient entropy as defense in depth, excluded from Groove logical
+Locators are exactly 256 random bits drawn by Groove from the operating-system
+CSPRNG as defense in depth, excluded from Groove logical
 identity, and omitted or irreversibly redacted from logs, traces, analytics,
 error messages and metrics labels. Unknown, expired and unauthorized locator
 lookups expose indistinguishable public failure details.

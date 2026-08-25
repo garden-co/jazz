@@ -2536,6 +2536,63 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(calls).toEqual([]);
   });
 
+  it("rejects canonical permission predicates hidden inside Not(In(...))", async () => {
+    const calls: string[] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => {
+              calls.push("all");
+              return new Uint8Array([0]);
+            },
+            prepareQuery: () => {
+              calls.push("prepareQuery");
+              return {};
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    const plantedSensitivePredicate = {
+      Not: {
+        In: {
+          left: { column: "$canRead" },
+          values: [{ Literal: { type: "Boolean", value: true } }],
+        },
+      },
+    };
+    for (const query of [
+      { table: "todos", conditions: [plantedSensitivePredicate] },
+      {
+        table: "todos",
+        array_subqueries: [
+          {
+            column_name: "children",
+            table: "todos",
+            inner_column: "id",
+            outer_column: "todos.id",
+            filters: [plantedSensitivePredicate],
+          },
+        ],
+      },
+    ]) {
+      await expect(runtime.query(JSON.stringify(query))).rejects.toThrow(
+        "permission-introspection query",
+      );
+    }
+    expect(calls).toEqual([]);
+  });
+
   it("rejects permission introspection in array subqueries before native snapshot prep", async () => {
     const calls: string[] = [];
     const runtime = new NativeRuntimeAdapter(

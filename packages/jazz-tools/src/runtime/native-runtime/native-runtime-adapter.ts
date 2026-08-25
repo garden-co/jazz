@@ -320,7 +320,7 @@ export type Transport = {
   setOutboundScheduler?(callback: () => void): void;
   clearOutboundScheduler?(): void;
   routeAuxiliaryWireFrame?(frame: Uint8Array): unknown | Promise<unknown>;
-  recvAuxiliaryWireFrames?(): unknown[];
+  recvAuxiliaryWireFrames?(maxFrames?: number, maxBytes?: number): unknown[];
   auxiliaryOutboundReady?(): boolean | Promise<void>;
   tick(): number | Promise<number>;
   updateAuthenticatedClaims?(claims: Record<string, unknown>): void | Promise<void>;
@@ -3063,17 +3063,7 @@ function queryContainsPermissionIntrospection(queryJson: string): boolean {
 }
 
 function relationIrContainsPermissionPredicate(value: unknown): boolean {
-  if (!value || typeof value !== "object") return false;
-  if (Array.isArray(value)) return value.some(relationIrContainsPermissionPredicate);
-  const record = value as Record<string, unknown>;
-  const column =
-    readMagicPredicateColumn(record.Cmp) ??
-    readMagicPredicateColumn(record.In) ??
-    readMagicPredicateColumn(record.IsNull) ??
-    readMagicPredicateColumn(record.IsNotNull) ??
-    readMagicPredicateColumn(record.Contains);
-  if (column && isPermissionIntrospectionColumn(column)) return true;
-  return Object.values(record).some(relationIrContainsPermissionPredicate);
+  return predicateIrContainsPermissionIntrospection(value);
 }
 
 function relationIrContainsPermissionProjection(value: unknown): boolean {
@@ -3119,11 +3109,7 @@ function selectedColumnsContainPermissionIntrospection(value: unknown): boolean 
 
 function flatConditionsContainPermissionIntrospection(value: unknown): boolean {
   if (!Array.isArray(value)) return false;
-  return value.some((entry) => {
-    if (!entry || typeof entry !== "object") return false;
-    const column = (entry as { column?: unknown }).column;
-    return typeof column === "string" && isPermissionIntrospectionColumn(unqualifiedColumn(column));
-  });
+  return value.some(predicateIrContainsPermissionIntrospection);
 }
 
 function arraySubqueriesContainPermissionIntrospection(value: unknown): boolean {
@@ -3146,22 +3132,48 @@ function arraySubqueriesContainPermissionIntrospection(value: unknown): boolean 
 
 function arrayFiltersContainPermissionIntrospection(value: unknown): boolean {
   if (!Array.isArray(value)) return false;
-  return value.some((entry) => {
-    if (!entry || typeof entry !== "object") return false;
-    const record = entry as Record<string, unknown>;
-    for (const key of ["Eq", "Ne", "Gt", "Ge", "Lt", "Le", "IsNull", "IsNotNull", "Contains"]) {
-      const predicate = record[key];
-      if (!predicate || typeof predicate !== "object") continue;
-      const column = (predicate as { column?: unknown }).column;
-      if (
-        typeof column === "string" &&
-        isPermissionIntrospectionColumn(unqualifiedColumn(column))
-      ) {
-        return true;
-      }
+  return value.some(predicateIrContainsPermissionIntrospection);
+}
+
+function predicateIrContainsPermissionIntrospection(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some(predicateIrContainsPermissionIntrospection);
+  const record = value as Record<string, unknown>;
+
+  // Preserve support for the legacy flat/array predicate envelopes while the
+  // query adapter emits canonical predicate IR for all new queries.
+  if (
+    typeof record.op === "string" &&
+    typeof record.column === "string" &&
+    isPermissionIntrospectionColumn(unqualifiedColumn(record.column))
+  ) {
+    return true;
+  }
+
+  for (const key of ["Eq", "Ne", "Gt", "Ge", "Lt", "Le", "IsNull", "IsNotNull", "Contains"]) {
+    const legacyPredicate = record[key];
+    if (!legacyPredicate || typeof legacyPredicate !== "object") continue;
+    const column = (legacyPredicate as { column?: unknown }).column;
+    if (typeof column === "string" && isPermissionIntrospectionColumn(unqualifiedColumn(column))) {
+      return true;
     }
-    return false;
-  });
+  }
+
+  const canonicalColumn =
+    readMagicPredicateColumn(record.Cmp) ??
+    readMagicPredicateColumn(record.In) ??
+    readMagicPredicateColumn(record.IsNull) ??
+    readMagicPredicateColumn(record.IsNotNull) ??
+    readMagicPredicateColumn(record.Contains);
+  if (canonicalColumn && isPermissionIntrospectionColumn(unqualifiedColumn(canonicalColumn))) {
+    return true;
+  }
+
+  // This recursive walk deliberately includes And/Or/Not and nested array
+  // filters. A forbidden column must be rejected regardless of predicate shape.
+  return Object.entries(record).some(
+    ([key, child]) => key !== "Literal" && predicateIrContainsPermissionIntrospection(child),
+  );
 }
 
 function unqualifiedColumn(column: string): string {
@@ -3574,6 +3586,9 @@ function coerceQueryPredicate(
       ),
     };
   }
+  if (filter.op === "Not") {
+    return { op: "Not", predicate: coerceQueryPredicate(table, filter.predicate, schema) };
+  }
   if (filter.op === "In") {
     const columnType =
       filter.column === "id"
@@ -3650,6 +3665,9 @@ function coerceEnumPayloadPredicate(
       ...predicate,
       predicates: predicate.predicates.map((child) => coerceEnumPayloadPredicate(child, fields)),
     };
+  }
+  if (predicate.op === "Not") {
+    return { ...predicate, predicate: coerceEnumPayloadPredicate(predicate.predicate, fields) };
   }
   if (predicate.op === "EnumMatch") {
     throw new Error("payload enum matches cannot be nested");
@@ -3801,6 +3819,8 @@ function readArraySubqueryFilters(
 }
 
 function arraySubqueryFilterToPredicates(value: unknown): QueryPredicate[] | null {
+  const canonical = predicateToFilterTree(value);
+  if (canonical) return [canonical];
   if (!value || typeof value !== "object") return null;
   const record = value as Record<string, unknown>;
   for (const [key, op] of [
@@ -3966,6 +3986,11 @@ function readFlatConditions(conditions: unknown): QueryPredicate[] | null {
   const predicates: QueryPredicate[] = [];
   for (const condition of conditions) {
     if (!condition || typeof condition !== "object") return null;
+    const canonical = predicateToFilterTree(condition);
+    if (canonical) {
+      predicates.push(canonical);
+      continue;
+    }
     const record = condition as { column?: unknown; op?: unknown; value?: unknown };
     if (typeof record.column !== "string" || typeof record.op !== "string") return null;
     const column = record.column.split(".").at(-1) ?? record.column;
@@ -4033,7 +4058,10 @@ function predicateToFilters(predicate: unknown): QueryPredicate[] | null {
     return filters;
   }
   if (Array.isArray(record.Or)) return null;
-  if (record.Not) return null;
+  if (record.Not) {
+    const predicate = predicateToFilterTree(record.Not);
+    return predicate ? [{ op: "Not", predicate }] : null;
+  }
   const enumMatch = record.EnumMatch;
   if (enumMatch && typeof enumMatch === "object") {
     const match = enumMatch as { column?: unknown; case?: unknown; payload?: unknown };
@@ -4093,7 +4121,10 @@ function predicateToFilterTree(predicate: unknown): QueryPredicate | null {
       ? { op, predicates }
       : null;
   }
-  if (record.Not) return null;
+  if (record.Not) {
+    const predicate = predicateToFilterTree(record.Not);
+    return predicate ? { op: "Not", predicate } : null;
+  }
   const filters = predicateToFilters(predicate);
   return filters?.length === 1 ? filters[0]! : null;
 }
