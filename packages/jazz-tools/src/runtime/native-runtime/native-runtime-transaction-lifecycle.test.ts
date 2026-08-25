@@ -531,6 +531,67 @@ it("commits empty exclusive transactions, rejects empty mergeable transactions, 
   );
 });
 
+it("binds the trusted-serving identity when an exclusive transaction begins", () => {
+  const alice = "00000000-0000-0000-0000-0000000000a1";
+  const observed: Array<{ phase: "begin" | "commit"; author?: string }> = [];
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          beginTransaction: (
+            _openBatchId: string,
+            _kind: "mergeable" | "exclusive",
+            author?: Uint8Array,
+          ) =>
+            observed.push({
+              phase: "begin",
+              author: author && new TextDecoder().decode(author),
+            }),
+          attachExclusiveTx: () => fakeTx(),
+          commitTransaction: (
+            _openBatchId: string,
+            _kind?: "mergeable" | "exclusive",
+            author?: Uint8Array,
+          ) => {
+            observed.push({ phase: "commit", author: author && new TextDecoder().decode(author) });
+            return fakeWrite();
+          },
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    TEST_RUNTIME_AUTHOR,
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+    { readAuthorizationHost: "trusted-serving" },
+  );
+
+  const openBatchId = createOpenBatchId();
+  runtime.beginTransaction(
+    "exclusive",
+    openBatchId,
+    JSON.stringify({ issuer: "https://issuer.example", user_id: alice }),
+  );
+  runtime.insert(
+    "todos",
+    { title: { type: "Text", value: "exclusive" } },
+    JSON.stringify({
+      batch_id: openBatchId,
+      session: { issuer: "https://issuer.example", user_id: alice },
+    }),
+  );
+  runtime.commitTransaction(openBatchId);
+
+  expect(observed).toEqual([
+    { phase: "begin", author: `["https://issuer.example","${alice}"]` },
+    // The native core persists the bound subject; commit must not accept a replacement.
+    { phase: "commit", author: undefined },
+  ]);
+});
+
 it("emits an onMutationError event for an unawaited rejected write", async () => {
   const batchId = "00000000000070008000000000000042" as BatchId;
   let mutationErrorCallback: ((event: MutationErrorEvent) => void) | undefined;

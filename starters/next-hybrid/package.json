@@ -11,7 +11,7 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
-    "better-auth": "1.6.24",
+    "better-auth": "1.7.1",
     "jazz-napi": "workspace:*",
     "jazz-tools": "workspace:*",
     "next": "catalog:default",
