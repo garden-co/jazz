@@ -26,6 +26,27 @@ impl crate::chunks::MissingChunkResolver for FixtureChunkResolver {
 }
 
 #[derive(Clone)]
+struct CountingFixtureChunkResolver {
+    chunks: Rc<std::collections::BTreeMap<crate::chunks::ChunkRequest, Bytes>>,
+    calls: Rc<Cell<usize>>,
+}
+
+impl crate::chunks::MissingChunkResolver for CountingFixtureChunkResolver {
+    fn resolve(
+        &self,
+        request: crate::chunks::ChunkRequest,
+    ) -> crate::chunks::ChunkFuture<'_, Result<Bytes, crate::chunks::ChunkError>> {
+        self.calls.set(self.calls.get().saturating_add(1));
+        Box::pin(async move {
+            self.chunks
+                .get(&request)
+                .cloned()
+                .ok_or(crate::chunks::ChunkError::Unavailable)
+        })
+    }
+}
+
+#[derive(Clone)]
 struct CrashAfterChunkPut {
     storage: Rc<crate::chunks::MemoryChunkStorage>,
     fail_after_successes: Cell<Option<usize>>,
@@ -1663,6 +1684,79 @@ async fn queued_resolver_before_last_root_delete_does_not_leak_child_reference()
         .unwrap();
     let metadata: LargeValueNodeReferences = postcard::from_bytes(&encoded).unwrap();
     assert_eq!(metadata.references, 0);
+}
+
+/// Verifies Alice's resident tick may resolve and install a genuinely missing
+/// chunk before lifecycle serialization is acquired. The counted resolver and
+/// immediately published subscription delta prove the observer completed
+/// inside the tick rather than taking an already-resident fast path.
+///
+/// alice ──insert large──► tick ──missing root──► resolver/observer ──► delta
+///                                      └──────── lifecycle lock afterwards
+#[futures_test::test]
+async fn missing_chunk_observer_completes_during_tick_before_lifecycle_lock() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(chunks.clone());
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![3; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
+    )
+    .unwrap();
+    let staged = database
+        .stage_large_value_preparation(prepared.clone())
+        .await
+        .unwrap();
+    let root = prepared
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref == prepared.value_ref.root)
+        .unwrap()
+        .clone();
+    crate::chunks::ChunkStorage::delete(&*chunks, root.node_ref.locator, root.node_ref.object_hash)
+        .await
+        .unwrap();
+    let resolver_calls = Rc::new(Cell::new(0));
+    database.set_missing_chunk_resolver(Rc::new(CountingFixtureChunkResolver {
+        chunks: Rc::new(std::collections::BTreeMap::from([(
+            crate::chunks::ChunkRequest {
+                object_hash: root.node_ref.object_hash.0,
+                locator: root.node_ref.locator,
+            },
+            Bytes::from(root.encoded),
+        )])),
+        calls: Rc::clone(&resolver_calls),
+    }));
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("objects"))
+        .await
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut insert = database.open_batch();
+    insert.insert(
+        "objects",
+        vec![Value::U64(1), Value::Large(staged.value_ref)],
+    );
+    insert.accept_large_value(staged.id);
+    let applied = database.apply_batch(insert).await.unwrap();
+
+    assert!(resolver_calls.get() > 0, "the tick invoked the resolver");
+    let update = subscription.try_recv_with_publication().unwrap();
+    assert_eq!(update.publication, Some(applied.publication()));
+    assert_eq!(update.deltas.to_values().unwrap().len(), 1);
+
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted).unwrap();
 }
 
 #[futures_test::test]

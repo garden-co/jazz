@@ -227,25 +227,49 @@ impl Database {
             .chain(accepted_roots.keys())
             .cloned()
             .collect::<BTreeSet<_>>();
-        // Acquire before reading lifecycle metadata. A prior pipelined
-        // publication keeps its owned guard on the database, so later batches
-        // join the same serialized resident sequence without relocking.
+        let resident_overlay = Rc::new(StagedWriteOverlay::new_owned(
+            Rc::clone(&self.storage),
+            Rc::clone(&self.resident_writes),
+        ));
+        let staged_state = Rc::new(RefCell::new(StagedWriteState::from(staged_operations)));
+        let storage = Rc::new(StagedWriteOverlay::new_owned(
+            resident_overlay,
+            Rc::clone(&staged_state),
+        ));
+        let tick_start = Instant::now();
+        let resident_tick = match self
+            .ivm_runtime
+            .tick_resident_staged(
+                table_deltas,
+                OwnedStorage::new(Rc::clone(&storage)),
+                defer_notifications_until_durable,
+            )
+            .await
+        {
+            Ok(tick) => tick,
+            Err(error) => {
+                self.poisoned = true;
+                return Err(Error::IvmRuntime(error));
+            }
+        };
+        let ivm_tick_time = tick_start.elapsed();
+        // The IVM runs without the lifecycle lock so a missing chunk can invoke
+        // the metadata observer. Only after the resident tick settles do we
+        // serialize against that observer and compute from the complete staged
+        // overlay. No publication id exists yet, so cancellation while waiting
+        // for this lock cannot leave an ordered-persistence hole.
         let lifecycle_guard =
             if roots.is_empty() || self.large_value_publication_lifecycle_guard.is_some() {
                 None
             } else {
                 Some(self.large_value_lifecycle.clone().lock_owned().await)
             };
-        // While serialized, validate and encode the complete transition before
-        // the runtime receives a publication id or makes a resident mutation.
-        // After the tick returns, registration below contains no cancellable
-        // await, and this guard remains owned through the durable frontier.
         if !roots.is_empty() {
             let mut node_transitions = Vec::<(crate::large_values::NodeRef, i8)>::new();
             let mut lifecycle_operations = Vec::new();
             for root in &roots {
                 let key = large_value_root_key(root)?;
-                let mut references = match overlay
+                let mut references = match storage
                     .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
                     .await?
                 {
@@ -276,7 +300,7 @@ impl Database {
                     })?;
                 let next_total = references.durable.saturating_add(references.staged);
                 if previous_total == 0 && next_total > 0 && !references.node_active {
-                    if overlay
+                    if storage
                         .get(
                             LARGE_VALUE_METADATA_CF.to_owned(),
                             large_value_node_key(root)?,
@@ -303,44 +327,23 @@ impl Database {
             }
             lifecycle_operations.extend(
                 large_value_node_transition_operations(
-                    &overlay,
+                    storage.as_ref(),
                     BTreeMap::new(),
                     node_transitions,
                     false,
                 )
                 .await?,
             );
-            staged_operations.extend(lifecycle_operations);
+            staged_state.borrow_mut().extend(lifecycle_operations);
         }
-        let resident_overlay = Rc::new(StagedWriteOverlay::new_owned(
-            Rc::clone(&self.storage),
-            Rc::clone(&self.resident_writes),
-        ));
-        let staged_state = Rc::new(RefCell::new(StagedWriteState::from(staged_operations)));
-        let storage = Rc::new(StagedWriteOverlay::new_owned(
-            resident_overlay,
-            Rc::clone(&staged_state),
-        ));
+        // Every fallible/cancellable operation is complete. Allocate the id,
+        // bind buffered notifications, and register the publication without an
+        // intervening await.
         let publication = PublicationId(self.next_publication_id);
         self.next_publication_id = self.next_publication_id.saturating_add(1);
-        let tick_start = Instant::now();
-        let tick = match self
+        let tick = self
             .ivm_runtime
-            .tick_resident_staged(
-                table_deltas,
-                OwnedStorage::new(storage),
-                publication,
-                defer_notifications_until_durable,
-            )
-            .await
-        {
-            Ok(tick) => tick,
-            Err(error) => {
-                self.poisoned = true;
-                return Err(Error::IvmRuntime(error));
-            }
-        };
-        let ivm_tick_time = tick_start.elapsed();
+            .assign_resident_publication(resident_tick, publication);
         let staged_operations = std::mem::take(&mut *staged_state.borrow_mut()).into_operations();
         let operations = staged_operations
             .iter()
