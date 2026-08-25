@@ -1598,6 +1598,21 @@ mod tests {
     }
 
     #[test]
+    fn attached_client_identity_preserves_the_admitted_canonical_author() {
+        let admitted = AuthorSubject::authenticated("https://issuer.example", "opaque-subject")
+            .expect("fixture issuer and subject are valid");
+
+        let client = client_identity(42, admitted);
+
+        assert_eq!(client.author, admitted);
+        assert_eq!(
+            client.author.canonical(),
+            r#"["https://issuer.example","opaque-subject"]"#
+        );
+        assert_ne!(client.author, AuthorSubject::SYSTEM);
+    }
+
+    #[test]
     fn relay_shares_one_scope_and_forwards_two_ui_client_writes_upstream() {
         let directory = tempfile::tempdir().unwrap();
         let registry = NativeRelayRegistry::default();
