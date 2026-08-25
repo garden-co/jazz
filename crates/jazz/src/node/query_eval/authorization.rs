@@ -403,9 +403,9 @@ where
             insert_candidate,
             RowProvenance {
                 created_by: identity,
-                created_at: TxTime(0),
+                created_at: 0,
                 updated_by: identity,
-                updated_at: TxTime(0),
+                updated_at: 0,
             },
         )
         .await

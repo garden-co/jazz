@@ -16,18 +16,18 @@ pub(super) struct ViewEvaluationContext {
 fn version_provenance(version: &VersionRecord) -> RowProvenance {
     RowProvenance {
         created_by: version.created_by(),
-        created_at: version.created_at(),
+        created_at: version.created_at_ms(),
         updated_by: version.updated_by(),
-        updated_at: version.updated_at(),
+        updated_at: version.updated_at_ms(),
     }
 }
 
 fn stored_version_provenance(version: &VersionRow) -> RowProvenance {
     RowProvenance {
         created_by: version.created_by(),
-        created_at: version.created_at(),
+        created_at: version.created_at().physical_ms(),
         updated_by: version.updated_by(),
-        updated_at: version.updated_at(),
+        updated_at: version.updated_at().physical_ms(),
     }
 }
 
@@ -52,9 +52,9 @@ fn reconstructed_policy_subject_row(
 fn unresolved_provenance() -> RowProvenance {
     RowProvenance {
         created_by: AuthorSubject::SYSTEM,
-        created_at: TxTime(0),
+        created_at: 0,
         updated_by: AuthorSubject::SYSTEM,
-        updated_at: TxTime(0),
+        updated_at: 0,
     }
 }
 
@@ -270,7 +270,7 @@ where
                 created_by: previous_provenance.created_by,
                 created_at: previous_provenance.created_at,
                 updated_by: version.updated_by(),
-                updated_at: version.updated_at(),
+                updated_at: version.updated_at_ms(),
             };
             return self
                 .write_policy_query_allows_candidate_with_provenance_for_schema(
