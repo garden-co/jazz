@@ -387,6 +387,17 @@ where
     /// from an authored value and reintroduce partial-row sync semantics.
     fn malformed_authored_version_reason(&self, versions: &[VersionRecord]) -> Option<String> {
         for version in versions {
+            for (field, physical_ms) in [
+                ("created_at_ms", version.created_at_ms()),
+                ("updated_at_ms", version.updated_at_ms()),
+            ] {
+                if crate::time::TxTime::from_physical_ms(physical_ms).is_err() {
+                    return Some(format!(
+                        "row version for table '{}' has {field} outside the packed HLC physical-millisecond range",
+                        version.table()
+                    ));
+                }
+            }
             let Some(schema) = self
                 .catalogue
                 .catalogue_schemas
@@ -468,6 +479,13 @@ where
         versions: &[VersionRecord],
     ) -> Result<(), Error> {
         for version in versions {
+            if crate::time::TxTime::from_physical_ms(version.created_at_ms()).is_err()
+                || crate::time::TxTime::from_physical_ms(version.updated_at_ms()).is_err()
+            {
+                return Err(Error::MalformedViewUpdate(
+                    "row version provenance exceeds packed HLC physical-millisecond range",
+                ));
+            }
             let schema = self
                 .catalogue
                 .catalogue_schemas

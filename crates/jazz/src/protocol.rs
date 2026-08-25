@@ -730,9 +730,9 @@ impl VersionRecord {
         row_uuid: RowUuid,
         parents: Vec<TxId>,
         created_by: AuthorSubject,
-        created_at: TxTime,
+        created_at_ms: u64,
         updated_by: AuthorSubject,
-        updated_at: TxTime,
+        updated_at_ms: u64,
         cells_by_position: &[Option<Value>],
         deletion: Option<DeletionEvent>,
     ) -> Result<Self, groove::records::Error> {
@@ -742,9 +742,9 @@ impl VersionRecord {
             Value::Uuid(row_uuid.0),
             Value::Array(parents.into_iter().map(tx_id_value).collect()),
             Value::String(created_by.canonical().to_owned()),
-            Value::U64(created_at.0),
+            Value::U64(created_at_ms),
             Value::String(updated_by.canonical().to_owned()),
-            Value::U64(updated_at.0),
+            Value::U64(updated_at_ms),
             Value::Nullable(deletion.map(|deletion| {
                 Box::new(Value::EnumTag(match deletion {
                     DeletionEvent::Deleted => 0,
@@ -777,9 +777,9 @@ impl VersionRecord {
         row_uuid: RowUuid,
         parents: Vec<TxId>,
         created_by: AuthorSubject,
-        created_at: TxTime,
+        created_at_ms: u64,
         updated_by: AuthorSubject,
-        updated_at: TxTime,
+        updated_at_ms: u64,
         cells: &BTreeMap<String, V>,
         deletion: Option<DeletionEvent>,
     ) -> Result<Self, groove::records::Error> {
@@ -794,9 +794,9 @@ impl VersionRecord {
             row_uuid,
             parents,
             created_by,
-            created_at,
+            created_at_ms,
             updated_by,
-            updated_at,
+            updated_at_ms,
             &positional,
             deletion,
         )
@@ -860,14 +860,12 @@ impl VersionRecord {
         .expect("canonical wire created_by")
     }
 
-    /// Original creation timestamp for this logical row.
-    pub fn created_at(&self) -> TxTime {
-        TxTime(
-            self.record
-                .borrowed()
-                .get_u64(WireRowRecord::FIELD_CREATED_AT_IDX)
-                .expect("valid wire created_at"),
-        )
+    /// Original creation timestamp for this logical row in Unix milliseconds.
+    pub fn created_at_ms(&self) -> u64 {
+        self.record
+            .borrowed()
+            .get_u64(WireRowRecord::FIELD_CREATED_AT_IDX)
+            .expect("valid wire created_at_ms")
     }
 
     /// Author of this row version.
@@ -881,14 +879,12 @@ impl VersionRecord {
         .expect("canonical wire updated_by")
     }
 
-    /// Update timestamp for this row version.
-    pub fn updated_at(&self) -> TxTime {
-        TxTime(
-            self.record
-                .borrowed()
-                .get_u64(WireRowRecord::FIELD_UPDATED_AT_IDX)
-                .expect("valid wire updated_at"),
-        )
+    /// Update timestamp for this row version in Unix milliseconds.
+    pub fn updated_at_ms(&self) -> u64 {
+        self.record
+            .borrowed()
+            .get_u64(WireRowRecord::FIELD_UPDATED_AT_IDX)
+            .expect("valid wire updated_at_ms")
     }
 
     /// Cell value by application-schema column position.
@@ -962,9 +958,9 @@ groove::define_record! {
         0 => row_uuid: RowUuid,
         1 => parents: ParentRefs,
         2 => created_by: AuthorSubject,
-        3 => created_at: TxTime,
+        3 => created_at: u64,
         4 => updated_by: AuthorSubject,
-        5 => updated_at: TxTime,
+        5 => updated_at: u64,
         6 => _deletion: Option<Value>,
         .. user_cells,
     }
@@ -3027,7 +3023,8 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
         Value::Large(value) => {
             bytes.push(15);
             let encoded = groove::large_values::encode_stored_scalar(
-                &groove::large_values::StoredScalar::Large(value.clone()),
+                value.kind,
+                &groove::large_values::StoredScalar::Chunked(value.clone()),
             )
             .expect("admitted large descriptor has canonical encoding");
             put_bytes(bytes, &encoded);
@@ -3368,9 +3365,9 @@ mod tests {
             RowUuid::from_bytes([1; 16]),
             Vec::new(),
             AuthorSubject::SYSTEM,
-            TxTime(1),
+            1,
             AuthorSubject::SYSTEM,
-            TxTime(1),
+            1,
             &BTreeMap::from([("title".to_owned(), Value::String("x".to_owned()))]),
             None,
         )

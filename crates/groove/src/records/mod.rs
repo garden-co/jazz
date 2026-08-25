@@ -113,6 +113,15 @@ pub(crate) fn encode_single_field_value(
     encode_value(value, value_type)
 }
 
+/// Decode one value using the ordinary Groove value algebra. Engine-owned
+/// physical envelopes use this only behind declared logical schema types.
+pub(crate) fn decode_single_field_value(
+    bytes: &[u8],
+    value_type: &ValueType,
+) -> Result<Value, Error> {
+    decode_value(bytes, value_type)
+}
+
 /// Interned schema-side description needed to interpret compact record bytes.
 ///
 /// Equality and hashing are intern-handle based; deterministic code must not
@@ -1260,7 +1269,10 @@ impl<'a> BorrowedRecord<'a> {
 
     pub fn get_bytes(&self, field_idx: usize) -> Result<&'a [u8], Error> {
         let bytes = self.field_bytes(field_idx, &ValueType::Bytes)?;
-        Ok(crate::large_values::inline_scalar_bytes(bytes)?)
+        Ok(crate::large_values::inline_scalar_bytes(
+            crate::large_values::LargeValueKind::Bytes,
+            bytes,
+        )?)
     }
 
     pub fn get_uuid(&self, field_idx: usize) -> Result<uuid::Uuid, Error> {
@@ -1270,8 +1282,11 @@ impl<'a> BorrowedRecord<'a> {
 
     pub fn get_str(&self, field_idx: usize) -> Result<&'a str, Error> {
         let bytes = self.field_bytes(field_idx, &ValueType::String)?;
-        str::from_utf8(crate::large_values::inline_scalar_bytes(bytes)?)
-            .map_err(|_| Error::InvalidUtf8)
+        str::from_utf8(crate::large_values::inline_scalar_bytes(
+            crate::large_values::LargeValueKind::String,
+            bytes,
+        )?)
+        .map_err(|_| Error::InvalidUtf8)
     }
 
     pub fn get_nullable_u64(&self, field_idx: usize) -> Result<Option<u64>, Error> {
@@ -1338,14 +1353,20 @@ impl<'a> BorrowedRecord<'a> {
 
     pub fn get_nullable_string(&self, field_idx: usize) -> Result<Option<&'a str>, Error> {
         self.nullable_field(field_idx, &ValueType::String, |payload| {
-            str::from_utf8(crate::large_values::inline_scalar_bytes(payload)?)
-                .map_err(|_| Error::InvalidUtf8)
+            str::from_utf8(crate::large_values::inline_scalar_bytes(
+                crate::large_values::LargeValueKind::String,
+                payload,
+            )?)
+            .map_err(|_| Error::InvalidUtf8)
         })
     }
 
     pub fn get_nullable_bytes(&self, field_idx: usize) -> Result<Option<&'a [u8]>, Error> {
         self.nullable_field(field_idx, &ValueType::Bytes, |payload| {
-            Ok(crate::large_values::inline_scalar_bytes(payload)?)
+            Ok(crate::large_values::inline_scalar_bytes(
+                crate::large_values::LargeValueKind::Bytes,
+                payload,
+            )?)
         })
     }
 
