@@ -299,6 +299,7 @@ where
         );
         let mut stored_versions = Vec::new();
         let mut pending_parents = BTreeSet::new();
+        let mut authored_content_rows = BTreeSet::new();
         for (write_schema_version, commit) in commits {
             let schema_version_alias = self
                 .ensure_schema_version_alias(write_schema_version)
@@ -332,21 +333,36 @@ where
                 }
             }
             let layer = VersionLayer::for_commit(&commit);
-            let previous_current =
-                match self.query_local_layer_winner_in_branch(
+            let first_content_occurrence_in_batch = layer != VersionLayer::Content
+                || authored_content_rows.insert((
+                    table_id,
+                    branch_key.clone(),
+                    commit.row_uuid,
+                ));
+            let previous_local_current = self
+                .query_local_layer_winner_in_branch(
                     &table_schema.name,
                     &branch_key,
                     commit.row_uuid,
                     layer,
-                ).await? {
-                    Some(previous) => Some(previous),
-                    None => self.query_global_layer_winner_in_branch(
+                )
+                .await?;
+            let known_first_local_content_version =
+                layer == VersionLayer::Content
+                    && first_content_occurrence_in_batch
+                    && previous_local_current.is_none();
+            let previous_current = match previous_local_current {
+                Some(previous) => Some(previous),
+                None => {
+                    self.query_global_layer_winner_in_branch(
                         &table_schema.name,
                         &branch_key,
                         commit.row_uuid,
                         layer,
-                    ).await?,
-                };
+                    )
+                    .await?
+                }
+            };
             let creator_source = if let Some(previous) = previous_current.as_ref() {
                 Some(previous.clone())
             } else if layer == VersionLayer::Deletion {
@@ -446,8 +462,12 @@ where
                 self.version_storage_primary_key(&stored)?,
                 groove_record,
             );
-            self.update_merge_heads_for_content_version(&mut batch, &stored)
-                .await?;
+            self.update_merge_heads_for_content_version(
+                &mut batch,
+                &stored,
+                known_first_local_content_version,
+            )
+            .await?;
             self.write_ahead_current_insert(&mut batch, &stored)?;
             pending_parents.extend(stored.parents());
             stored_versions.push(stored);

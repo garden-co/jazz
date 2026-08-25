@@ -414,28 +414,39 @@ where
         &mut self,
         batch: &mut DatabaseBatch,
         version: &VersionRow,
+        known_first_local_version: bool,
     ) -> Result<(), Error> {
         if version.layer() != VersionLayer::Content {
             return Ok(());
         }
         let table_id = self.physical_table_id_for_version(version)?;
         let new_tx = self.version_tx_id(version)?;
-        let mut heads = match self.read_merge_heads(
-            table_id,
-            version.branch_key(),
-            version.row_uuid(),
-        ).await? {
-            Some(existing) => existing,
-            // A redacted exclusive view fragment intentionally persists
-            // history without current indexes. If a later visible mergeable
-            // version reaches this replica, bootstrap the derived head index
-            // from every locally known eligible version before advancing it.
-            None => self.recompute_merge_heads_from_persisted_history(
-                table_id,
-                version.table(),
-                version.branch_key(),
-                version.row_uuid(),
-            ).await?,
+        // Authored commits may skip the derived-index bootstrap only when the
+        // caller's physical-history lookup proved that this branch-local row
+        // has no persisted content version and this is its first occurrence
+        // in the still-uncommitted database batch.
+        let mut heads = if known_first_local_version {
+            BTreeSet::new()
+        } else {
+            match self
+                .read_merge_heads(table_id, version.branch_key(), version.row_uuid())
+                .await?
+            {
+                Some(existing) => existing,
+                // A redacted exclusive view fragment intentionally persists
+                // history without current indexes. If a later visible mergeable
+                // version reaches this replica, bootstrap the derived head index
+                // from every locally known eligible version before advancing it.
+                None => {
+                    self.recompute_merge_heads_from_persisted_history(
+                        table_id,
+                        version.table(),
+                        version.branch_key(),
+                        version.row_uuid(),
+                    )
+                    .await?
+                }
+            }
         };
         for parent in version.parents() {
             heads.remove(&parent);

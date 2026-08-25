@@ -37,43 +37,29 @@ jq -c '.data.repository.runs[]
   /tmp/codspeed-runs.json
 ```
 
-The selected `result.id` values are `headResultId` and `baseResultId`; the
-selected `benchmark.id` is `benchmarkId`.
+The selected `result.id` values become `HEAD_RESULT_ID` and `BASE_RESULT_ID`.
 
 ## Request and download the complete graph
 
-The web app uses the persisted `FindBenchmarkCallGraph` operation. Its response
-contains short-lived `callGraphPresignedUrl` values, so download both artifacts
-immediately after this request.
+Do not depend on the web app's persisted `FindBenchmarkCallGraph` hash: it can
+rotate. Once the result IDs are known, this ordinary query resolves each
+short-lived `callGraphPresignedUrl` directly. Download the artifact immediately.
 
 ```sh
-jq -nc \
-  --arg benchmarkId "$BENCHMARK_ID" \
-  --arg baseResultId "$BASE_RESULT_ID" \
-  --arg headResultId "$HEAD_RESULT_ID" \
-  '[{
-    operationName: "FindBenchmarkCallGraph",
-    variables: {
-      owner: "garden-co", repository: "jazz", provider: "GITHUB",
-      benchmarkId: $benchmarkId,
-      baseResultId: $baseResultId,
-      headResultId: $headResultId
-    },
-    extensions: {persistedQuery: {
-      version: 1,
-      sha256Hash: "5b886421b74801a5a0bb50f4603fe6bfc9bf8dc1c38af83af960874f24825642"
-    }}
-  }]' > /tmp/codspeed-callgraph-query.json
-
-curl -sS https://gql.codspeed.io/ \
-  -H 'Content-Type: application/json' \
-  -H "Authorization: $CODSPEED_AUTH_TOKEN" \
-  --data-binary @/tmp/codspeed-callgraph-query.json \
-  > /tmp/codspeed-callgraph-response.json
-
 for side in base head; do
-  jq -r ".[0].data.repository.${side}Result.callGraphPresignedUrl" \
-    /tmp/codspeed-callgraph-response.json \
+  case "$side" in
+    base) result_id="$BASE_RESULT_ID" ;;
+    head) result_id="$HEAD_RESULT_ID" ;;
+  esac
+  jq -nc --arg id "$result_id" '{
+    query: ("query { repository(owner: \"garden-co\", name: \"jazz\") { benchmarkResultById(id: \"" + $id + "\") { id callGraphPresignedUrl } } }")
+  }' > "/tmp/codspeed-${side}-callgraph-query.json"
+
+  curl -sS https://gql.codspeed.io/ \
+    -H 'Content-Type: application/json' \
+    -H "Authorization: $CODSPEED_AUTH_TOKEN" \
+    --data-binary @"/tmp/codspeed-${side}-callgraph-query.json" \
+    | jq -r '.data.repository.benchmarkResultById.callGraphPresignedUrl' \
     | xargs curl -sS -o "/tmp/codspeed-${side}.json.gz"
   gzip -dc "/tmp/codspeed-${side}.json.gz" \
     > "/tmp/codspeed-${side}.json"
