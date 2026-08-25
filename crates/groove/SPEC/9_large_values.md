@@ -178,6 +178,12 @@ are bounded and checked. Unknown format versions, cycles, dishonest metrics,
 invalid UTF-8, invalid JSON, arithmetic overflow, trailing bytes, and malformed
 child references fail the affected evaluation closure.
 
+Postcard decoding alone is insufficient because it accepts a valid value with
+trailing bytes. Every path that interprets node structure MUST require an exact
+byte-for-byte canonical re-encoding, including metadata-only traversal before
+the caller has an expected logical kind. Evaluation additionally verifies the
+expected object hash, format, kind, logical hash, and metrics.
+
 The encoded-node size ceiling is checked before hashing or deserialization, so
 an authenticated transport envelope cannot turn one malicious node into an
 unbounded hashing or allocation operation.
@@ -197,12 +203,16 @@ Replace { offset, delete_length, insert_bytes, utf16_effects? }
 
 Each offset addresses the value produced by all preceding edits in the tail.
 Append is a replacement at the current length with zero deletion. Insert,
-delete, overwrite, text splice, file mutation, and JSON replacement lower to
-the same primitive.
+delete, overwrite, text splice, and file mutation lower to the same primitive.
+JSON currently admits only a complete replacement of the current logical value;
+the inserted source must itself be valid JSON.
 
 Admission bounds patch count, total encoded tail bytes, inserted bytes, and all
-range arithmetic. The final result must satisfy the logical kind; intermediate
-states within one atomic tail need not independently be valid text or JSON.
+range arithmetic. For text, the byte boundaries and the exact UTF-16 offset and
+length effects are recomputed against the source value produced by preceding
+edits. An untrusted staged descriptor is replayed from its immutable base before
+publication so forged text coordinates, partial JSON edits, and noncanonical
+tails fail closed.
 
 When adding an edit would exceed a bound, Groove streams the current logical
 value through the edit, rechunks until content boundaries resynchronize, stages

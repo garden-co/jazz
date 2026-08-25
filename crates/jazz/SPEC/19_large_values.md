@@ -157,7 +157,9 @@ staging before it is intentionally not atomic: unreachable immutable chunks are
 harmless and expire. The row MUST NOT publish unless its exact root is available
 and Groove can validate the bounded tree/descriptor. Finalization itself is
 that admission boundary: regardless of prior staging call order, it validates
-the complete authenticated reachable tree and final logical scalar, and binds
+the complete authenticated reachable tree, canonically replays the edit tail
+against that immutable base (including source-derived text coordinates and
+whole-value-only JSON replacement), validates the final logical scalar, and binds
 the pending upload to the exact canonical descriptor before issuing a receipt.
 A pending upload's chunk journal or accounting cannot be reused to finalize a
 different descriptor. A failed/rejected mutation publishes neither the row
