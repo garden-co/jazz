@@ -1044,13 +1044,14 @@ where
         {
             return Ok(Vec::new());
         }
+        let has_one_shot_access_path = settled_binding_view.is_none()
+            && !self.one_shot_access_paths(shape, binding, tier)?.is_empty();
         // A concrete one-shot access path is binding-specific. Inline that
         // binding so execution keeps the selected graph instead of replacing it
-        // with the generic cached parameterized plan.
-        let inline_query = if prepared_plan.is_none()
-            && settled_binding_view.is_none()
-            && !self.one_shot_access_paths(shape, binding, tier)?.is_empty()
-        {
+        // with the generic cached parameterized plan. Prepared Local reads also
+        // take this path: their reusable graph cannot embed the current binding's
+        // physical index prefix and would otherwise hydrate the complete table.
+        let inline_query = if has_one_shot_access_path {
             let schema = self
                 .catalogue
                 .catalogue_schemas
@@ -1067,8 +1068,10 @@ where
             .as_ref()
             .map(|(shape, binding)| (shape, binding))
             .unwrap_or((shape, binding));
-        let prepared_plan = prepared_plan
-            .filter(|plan| !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker));
+        let prepared_plan = prepared_plan.filter(|plan| {
+            !has_one_shot_access_path
+                && !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker)
+        });
         let program = if prepared_plan.is_some() {
             None
         } else {

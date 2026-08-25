@@ -845,7 +845,7 @@ pub(super) fn physical_version_storage_tables(
                     .filter_map(|column| mapping.columns.get(&column).copied())
             })
             .collect::<BTreeSet<_>>();
-        for column_id in indexed_columns {
+        for &column_id in &indexed_columns {
             physical_global = physical_global.with_index(GrooveIndexSchema::new(
                 physical_current_index_name(column_id),
                 [physical_user_column_field(column_id)],
@@ -861,6 +861,12 @@ pub(super) fn physical_version_storage_tables(
         );
         physical_ahead.primary_key = logical_ahead_tables[0].primary_key.clone();
         physical_ahead.indices = logical_ahead_tables[0].indices.clone();
+        for column_id in indexed_columns {
+            physical_ahead = physical_ahead.with_index(GrooveIndexSchema::new(
+                physical_current_index_name(column_id),
+                [physical_user_column_field(column_id)],
+            ));
+        }
         let mut register_ahead = logical_ahead_tables[1].clone();
         register_ahead.name = physical_register_ahead_current_table_name(table_id);
 
