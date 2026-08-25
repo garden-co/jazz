@@ -5241,9 +5241,9 @@ function decodeBytes(
     case "Timestamp":
       return {
         type: "Timestamp",
-        value:
-          Number(view.getBigUint64(0, true)) *
-          (fieldName && isProvenanceMagicColumn(fieldName) ? 1_000 : 1),
+        // Current-row provenance and ordinary timestamp columns both cross the
+        // public binding boundary as Unix milliseconds.
+        value: Number(view.getBigUint64(0, true)),
       };
     case "Text":
     case "Json":
