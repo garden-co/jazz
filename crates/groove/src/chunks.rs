@@ -456,6 +456,14 @@ impl OrderedChunkStorage {
         (Some(receipt_bytes), encoded)
     }
 
+    /// The receipt identifies an attempted installation, but it is not an
+    /// integrity witness for the candidate bytes. Require the complete
+    /// private envelope too, so a matching receipt in corrupted storage
+    /// cannot be treated as this call's successful write.
+    fn is_installed_candidate(existing: &[u8], candidate: &[u8], receipt: [u8; 16]) -> bool {
+        Self::split_install_receipt(existing).0 == Some(receipt) && existing == candidate
+    }
+
     fn decode(value: Vec<u8>) -> Result<(ContentHash, Bytes), ChunkStorageError> {
         let (_, value) = Self::split_install_receipt(&value);
         let (hash, bytes) = value
@@ -526,8 +534,7 @@ impl ChunkKvStorage for OrderedChunkStorage {
                         "conditional chunk insert did not leave a winner".to_owned(),
                     )
                 })?;
-            let (installed_receipt, _) = Self::split_install_receipt(&existing);
-            if installed_receipt == Some(receipt) {
+            if Self::is_installed_candidate(&existing, &candidate, receipt) {
                 Ok(None)
             } else {
                 Self::decode(existing).map(Some)
@@ -1881,6 +1888,31 @@ mod tests {
 
         assert!(installed.encoded_bytes > 0);
         assert_eq!(restaged, Default::default());
+    }
+
+    #[test]
+    fn ordered_chunk_install_receipt_requires_the_exact_candidate_envelope() {
+        let receipt = [0x5a; 16];
+        let candidate_bytes = b"candidate authenticated bytes";
+        let candidate = OrderedChunkStorage::encode_with_install_receipt(
+            object_hash(candidate_bytes),
+            candidate_bytes,
+            receipt,
+        );
+        let mismatched_bytes = b"different authenticated bytes";
+        let mismatched = OrderedChunkStorage::encode_with_install_receipt(
+            object_hash(mismatched_bytes),
+            mismatched_bytes,
+            receipt,
+        );
+
+        assert!(OrderedChunkStorage::is_installed_candidate(
+            &candidate, &candidate, receipt
+        ));
+        assert!(
+            !OrderedChunkStorage::is_installed_candidate(&mismatched, &candidate, receipt),
+            "a receipt collision or corrupted payload must not claim this call installed it"
+        );
     }
 
     #[test]
