@@ -235,6 +235,14 @@ fn permission_advice_uses_authenticated_link_identity_without_mutating() {
         .insert("todos", cells("secret", false, alice))
         .unwrap()
         .row_uuid();
+    server
+        .node()
+        .borrow_mut()
+        .set_session_claims(alice, test_provider_claims(alice));
+    server
+        .node()
+        .borrow_mut()
+        .set_session_claims(mallory, test_provider_claims(mallory));
 
     let alice_client = open_db(0xa1, alice, &schema);
     let (alice_transport, alice_server_transport) = duplex_with_admitted_session_context(
@@ -246,6 +254,10 @@ fn permission_advice_uses_authenticated_link_identity_without_mutating() {
     );
     let _alice_upstream = crate::db::block_on(alice_client.connect_upstream(alice_transport));
     let _alice_subscriber = server.accept_subscriber(alice_server_transport, alice);
+    server
+        .node()
+        .borrow_mut()
+        .set_session_claims(alice, test_provider_claims(alice));
     let alice_advice = alice_client.request_permission_advice(PermissionAdviceAction::Read {
         table: "todos".to_owned(),
         row: owned,
@@ -261,6 +273,10 @@ fn permission_advice_uses_authenticated_link_identity_without_mutating() {
     );
     let _mallory_upstream = crate::db::block_on(mallory_client.connect_upstream(mallory_transport));
     let _mallory_subscriber = server.accept_subscriber(mallory_server_transport, mallory);
+    server
+        .node()
+        .borrow_mut()
+        .set_session_claims(mallory, test_provider_claims(mallory));
     let mallory_advice = mallory_client.request_permission_advice(PermissionAdviceAction::Read {
         table: "todos".to_owned(),
         row: owned,
@@ -293,6 +309,10 @@ fn distinct_advice_actions_with_one_compiled_scope_hydrate_once() {
         )
         .unwrap()
         .row_uuid();
+    server
+        .node()
+        .borrow_mut()
+        .set_session_claims(alice, test_provider_claims(alice));
     let client = open_db(0xa1, alice, &schema);
     let (client_transport, server_transport) = duplex_with_admitted_session_context(
         alice,
@@ -303,6 +323,10 @@ fn distinct_advice_actions_with_one_compiled_scope_hydrate_once() {
     );
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, alice);
+    server
+        .node()
+        .borrow_mut()
+        .set_session_claims(alice, test_provider_claims(alice));
 
     let first = client.request_permission_advice(PermissionAdviceAction::Read {
         table: "todos".to_owned(),
@@ -344,6 +368,10 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
         .insert("todos", cells("owned", false, alice))
         .unwrap()
         .row_uuid();
+    server
+        .node()
+        .borrow_mut()
+        .set_session_claims(alice, test_provider_claims(alice));
     let client = open_db(0xa1, alice, &schema);
     let (client_transport, server_transport) = duplex_with_admitted_session_context(
         alice,
@@ -354,6 +382,10 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
     );
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, alice);
+    server
+        .node()
+        .borrow_mut()
+        .set_session_claims(alice, test_provider_claims(alice));
 
     let first = client.request_permission_advice(PermissionAdviceAction::Read {
         table: "todos".to_owned(),
@@ -366,7 +398,10 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
 
     server.node().borrow_mut().set_session_claims(
         alice,
-        BTreeMap::from([("fresh".to_owned(), Value::Bool(true))]),
+        BTreeMap::from([
+            ("user_id".to_owned(), Value::Uuid(alice.test_uuid())),
+            ("fresh".to_owned(), Value::Bool(true)),
+        ]),
     );
     server.tick().unwrap();
     client.tick().unwrap();
@@ -382,7 +417,10 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
 
     server.node().borrow_mut().set_session_claims(
         alice,
-        BTreeMap::from([("fresh".to_owned(), Value::Bool(false))]),
+        BTreeMap::from([
+            ("user_id".to_owned(), Value::Uuid(alice.test_uuid())),
+            ("fresh".to_owned(), Value::Bool(false)),
+        ]),
     );
     server.tick().unwrap();
     client.tick().unwrap();

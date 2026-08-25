@@ -1096,6 +1096,12 @@ fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
     let other = AuthorSubject::for_test_bytes([0xb1; 16]);
     let spy = AuthorSubject::for_test_bytes([0xc1; 16]);
     let db = open_db(0xc4, AuthorSubject::SYSTEM, &schema);
+    for identity in [member, other, spy] {
+        db.set_identity_claims(
+            identity,
+            BTreeMap::from([("user_id".to_owned(), Value::Uuid(identity.test_uuid()))]),
+        );
+    }
     db.insert(
         "todos",
         BTreeMap::from([("title".to_owned(), Value::String("parent".to_owned()))]),

@@ -82,7 +82,7 @@ fn open_db() -> Db<TestStorage> {
     let schema = schema();
     let families = schema.column_families();
     let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-    block_on(Db::open(
+    let db = block_on(Db::open(
         DbConfig::new(
             schema,
             TestStorage::new(&family_refs),
@@ -93,7 +93,14 @@ fn open_db() -> Db<TestStorage> {
         )
         .with_id_source(SeededRowIdSource::new(0x8100)),
     ))
-    .expect("open authorization scope re-entry db")
+    .expect("open authorization scope re-entry db");
+    for identity in [writer(), reader(), maintainer()] {
+        db.set_identity_claims(
+            identity,
+            BTreeMap::from([("sub".to_owned(), Value::Uuid(identity.test_uuid()))]),
+        );
+    }
+    db
 }
 
 fn opts() -> ReadOpts {

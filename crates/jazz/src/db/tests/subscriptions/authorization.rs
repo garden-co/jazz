@@ -325,7 +325,7 @@ fn uuid_string_grant_role_schema(role: uuid::Uuid) -> JazzSchema {
         &[],
         "teams",
         "identity_key",
-        &["claims", "sub"],
+        &["user_id"],
         "id",
     );
     let access_policy = public_recursive_access_policy(
@@ -341,7 +341,7 @@ fn uuid_string_grant_role_schema(role: uuid::Uuid) -> JazzSchema {
         &[],
         "teams",
         "identity_key",
-        &["claims", "sub"],
+        &["user_id"],
         "id",
     );
     build_public_db_test_schema(
@@ -488,6 +488,10 @@ fn string_grant_role_access_filter_matches_uuid_literal_in_list() {
         db.seed_settled_mergeable_for_bootstrap(table, row_id, AuthorSubject::SYSTEM, cells)
             .unwrap();
     }
+    db.node
+        .node
+        .borrow_mut()
+        .set_session_claims(member, test_provider_claims(member));
     let prepared = db.prepare_query(&Query::from("docs")).unwrap();
     let one_shot = block_on(db.all_for_identity(
         &prepared,
@@ -589,6 +593,12 @@ fn direct_multi_identity_subscribe_reuses_shared_seeded_fragments_without_leakin
     let member = AuthorSubject::for_test_bytes([0x12; 16]);
     let other = AuthorSubject::for_test_bytes([0x13; 16]);
     let spy = AuthorSubject::for_test_bytes([0x99; 16]);
+    for identity in [member, other, spy] {
+        db.node
+            .node
+            .borrow_mut()
+            .set_session_claims(identity, test_provider_claims(identity));
+    }
     db.insert(
         "org",
         BTreeMap::from([("label".to_owned(), Value::String("org".to_owned()))]),
@@ -729,6 +739,10 @@ fn direct_same_identity_subscribe_reuses_shared_seeded_fragments_across_shapes()
     let schema = customer_two_resource_policy_minimal_schema();
     let db = open_db(0x6a, AuthorSubject::SYSTEM, &schema);
     let member = AuthorSubject::for_test_bytes([0x12; 16]);
+    db.node
+        .node
+        .borrow_mut()
+        .set_session_claims(member, test_provider_claims(member));
     db.insert(
         "org",
         BTreeMap::from([("label".to_owned(), Value::String("org".to_owned()))]),
@@ -1737,10 +1751,39 @@ fn served_subscription_rows_for_author(
     author: AuthorSubject,
     table: &str,
 ) -> Vec<RowUuid> {
+    served_subscription_rows_for_author_with_claims(
+        schema,
+        server,
+        author,
+        table,
+        test_provider_claims(author),
+    )
+}
+
+fn served_subscription_rows_for_author_with_claims(
+    schema: &JazzSchema,
+    server: &CoreDb,
+    author: AuthorSubject,
+    table: &str,
+    claims: BTreeMap<String, Value>,
+) -> Vec<RowUuid> {
     let client = open_db(author.test_uuid().as_bytes()[0], author, schema);
+    client
+        .node
+        .node
+        .borrow_mut()
+        .set_session_claims(author, claims.clone());
+    server
+        .node()
+        .borrow_mut()
+        .set_session_claims(author, claims.clone());
     let (client_transport, server_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);
+    server
+        .node()
+        .borrow_mut()
+        .set_session_claims(author, claims);
     let query = Query::from(table);
     let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
@@ -1785,6 +1828,15 @@ fn served_many_subscription_rows_for_author(
         author,
         schema,
     );
+    client
+        .node
+        .node
+        .borrow_mut()
+        .set_session_claims(author, test_provider_claims(author));
+    server
+        .node()
+        .borrow_mut()
+        .set_session_claims(author, test_provider_claims(author));
     let (client_transport, server_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);

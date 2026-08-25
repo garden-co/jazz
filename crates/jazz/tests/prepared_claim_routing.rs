@@ -47,6 +47,13 @@ fn user_b() -> AuthorSubject {
     AuthorSubject::for_test_uuid(uuid::uuid!("82000000-0000-0000-0000-000000000003"))
 }
 
+fn test_user_claims(identity: AuthorSubject, region: &str) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("user_id".to_owned(), Value::Uuid(identity.test_uuid())),
+        ("region".to_owned(), Value::String(region.to_owned())),
+    ])
+}
+
 type BenchDb = Db<TestStorage>;
 
 fn row(tag: u8) -> RowUuid {
@@ -571,14 +578,8 @@ fn assert_call_order(
     let team_a = row(0x11);
     let team_b = row(0x12);
     seed(&db, team_a, team_b, region_a, region_b);
-    db.set_identity_claims(
-        user_a(),
-        BTreeMap::from([("region".to_owned(), Value::String(region_a.to_owned()))]),
-    );
-    db.set_identity_claims(
-        user_b(),
-        BTreeMap::from([("region".to_owned(), Value::String(region_b.to_owned()))]),
-    );
+    db.set_identity_claims(user_a(), test_user_claims(user_a(), region_a));
+    db.set_identity_claims(user_b(), test_user_claims(user_b(), region_b));
     let query = Query::from(DOCUMENTS)
         .filter(eq(col("team"), param("team")))
         .order_by("updated_at", OrderDirection::Desc)
@@ -656,14 +657,8 @@ fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
     let public = row(0x51);
     let private = row(0x52);
     let regional = row(0x53);
-    db.set_identity_claims(
-        user_a(),
-        BTreeMap::from([("region".to_owned(), Value::String("region-a".to_owned()))]),
-    );
-    db.set_identity_claims(
-        user_b(),
-        BTreeMap::from([("region".to_owned(), Value::String("region-b".to_owned()))]),
-    );
+    db.set_identity_claims(user_a(), test_user_claims(user_a(), "region-a"));
+    db.set_identity_claims(user_b(), test_user_claims(user_b(), "region-b"));
     block_on(db.insert(
         DOCUMENTS,
         BTreeMap::from([
@@ -746,14 +741,8 @@ fn assert_retained_subscription_regions(region_a: &str, region_b: &str) {
     let team_a = row(0x11);
     let team_b = row(0x12);
     seed(&db, team_a, team_b, region_a, region_b);
-    db.set_identity_claims(
-        user_a(),
-        BTreeMap::from([("region".to_owned(), Value::String(region_a.to_owned()))]),
-    );
-    db.set_identity_claims(
-        user_b(),
-        BTreeMap::from([("region".to_owned(), Value::String(region_b.to_owned()))]),
-    );
+    db.set_identity_claims(user_a(), test_user_claims(user_a(), region_a));
+    db.set_identity_claims(user_b(), test_user_claims(user_b(), region_b));
     let query = Query::from(DOCUMENTS)
         .filter(eq(col("team"), param("team")))
         .order_by("updated_at", OrderDirection::Desc)
@@ -982,6 +971,7 @@ fn policy_dependency_reads_do_not_expose_dependency_rows() {
     db.set_identity_claims(
         user_a(),
         BTreeMap::from([
+            ("user_id".to_owned(), Value::Uuid(user_a().test_uuid())),
             ("region".to_owned(), Value::String("region-a".to_owned())),
             (
                 "membership_region".to_owned(),
@@ -992,6 +982,7 @@ fn policy_dependency_reads_do_not_expose_dependency_rows() {
     db.set_identity_claims(
         user_b(),
         BTreeMap::from([
+            ("user_id".to_owned(), Value::Uuid(user_b().test_uuid())),
             ("region".to_owned(), Value::String("region-b".to_owned())),
             (
                 "membership_region".to_owned(),
@@ -1088,6 +1079,10 @@ fn dependency_policies_are_not_recursively_composed_into_outer_policy() {
 fn policy_proof_implicit_and_outer_include_sources_do_not_reenter_policy_compilation() {
     let db = open_db_with_schema(two_hop_seeded_policy_schema());
     let (project_a, _, document_a, _) = seed_two_hop_reachability_policy(&db);
+    db.set_identity_claims(
+        user_a(),
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(user_a().test_uuid()))]),
+    );
     let query = Query::from(DOCUMENTS)
         .filter(eq(col("project"), param("project")))
         .include("project");
@@ -1147,14 +1142,8 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
     let document_a = row(0x41);
     let document_b = row(0x42);
     seed(&db, team_a, team_b, "region-a", "region-b");
-    db.set_identity_claims(
-        user_a(),
-        BTreeMap::from([("region".to_owned(), Value::String("region-a".to_owned()))]),
-    );
-    db.set_identity_claims(
-        user_b(),
-        BTreeMap::from([("region".to_owned(), Value::String("region-b".to_owned()))]),
-    );
+    db.set_identity_claims(user_a(), test_user_claims(user_a(), "region-a"));
+    db.set_identity_claims(user_b(), test_user_claims(user_b(), "region-b"));
     let query = Query::from(DOCUMENTS).filter(eq(col("team"), param("team")));
     let prepared_v1 = db
         .prepare_query_bound(
@@ -1286,14 +1275,8 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
     let team_a = row(0x11);
     let team_b = row(0x12);
     seed(&db, team_a, team_b, "region-a", "region-b");
-    db.set_identity_claims(
-        user_a(),
-        BTreeMap::from([("region".to_owned(), Value::String("region-a".to_owned()))]),
-    );
-    db.set_identity_claims(
-        user_b(),
-        BTreeMap::from([("region".to_owned(), Value::String("region-b".to_owned()))]),
-    );
+    db.set_identity_claims(user_a(), test_user_claims(user_a(), "region-a"));
+    db.set_identity_claims(user_b(), test_user_claims(user_b(), "region-b"));
     let query = Query::from(DOCUMENTS).filter(eq(col("team"), param("team")));
     let prepared = |team: RowUuid| {
         db.prepare_query_bound(
