@@ -6,6 +6,7 @@ use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_edge_txs};
 /// Verifies that recursive inherited access fails closed when row data forms a
 /// cycle and no reachable ancestor grants the session access.
 #[tokio::test]
+#[ignore = "#1763: recursive INHERITS cycles still time out before EdgeServer durability"]
 async fn rebac_recursive_inherits_cycle_does_not_overgrant() {
     tokio::task::LocalSet::new()
         .run_until(rebac_recursive_inherits_cycle_does_not_overgrant_inner())

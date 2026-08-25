@@ -1561,6 +1561,32 @@ async fn deep_retained_only_graph_ticks_through_the_dependency_queue() {
     assert!(runtime.retained_node_ids().contains(&output));
 }
 
+#[test]
+fn deeply_nested_graph_compiles_on_a_server_sized_stack() {
+    // Recursive INHERITS policy lowering legitimately produces a deeply
+    // nested, but finite, operator graph. The dedicated server-shell owner
+    // runs with an ordinary spawned-thread stack, so compilation must walk
+    // this graph iteratively rather than relying on a larger stack.
+    let compiled = std::thread::Builder::new()
+        .name("ivm-deep-graph-receipt".to_owned())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            let schema = albums_schema();
+            let mut runtime = IvmRuntime::new(schema).expect("build runtime");
+            let mut graph = GraphBuilder::table("albums");
+            for _ in 0..256 {
+                graph = graph.filter(PredicateExpr::gt("id", Value::U64(0)));
+            }
+            runtime
+                .add_dedup_graph(&graph)
+                .expect("compile deeply nested graph");
+        })
+        .expect("spawn server-sized stack receipt")
+        .join();
+
+    assert!(compiled.is_ok(), "deep graph compilation must not overflow");
+}
+
 #[futures_test::test]
 async fn unsubscribe_eagerly_collects_unretained_ephemeral_nodes_and_state() {
     let schema = albums_schema();
