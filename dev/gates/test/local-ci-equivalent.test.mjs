@@ -45,6 +45,11 @@ const turboExportStep = Object.freeze({
   env: { CACHE_SIGNATURE_KEY: "${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}" },
   run: 'echo "TURBO_REMOTE_CACHE_SIGNATURE_KEY=${CACHE_SIGNATURE_KEY}" >> "${GITHUB_ENV}"',
 });
+const sccacheStatsStep = Object.freeze({
+  name: "Report sccache statistics",
+  if: "always()",
+  run: "sccache --show-stats",
+});
 
 function isExactStep(actual, expected) {
   return (
@@ -55,8 +60,10 @@ function isExactStep(actual, expected) {
   );
 }
 
-const isKnownAdminExport = (step) =>
-  isExactStep(step, sccacheExportStep) || isExactStep(step, turboExportStep);
+const isKnownAdminStep = (step) =>
+  isExactStep(step, sccacheExportStep) ||
+  isExactStep(step, turboExportStep) ||
+  isExactStep(step, sccacheStatsStep);
 
 function assertCiSuiteUsesOnlySharedCorrectnessPartitions(model) {
   const expectedJobs = new Set(Object.values(ciPartitionJobs));
@@ -71,8 +78,7 @@ function assertCiSuiteUsesOnlySharedCorrectnessPartitions(model) {
       `${jobName} must invoke its shared ${partition} partition exactly once`,
     );
     for (const step of runSteps) {
-      if (step.run === expected || step.run === "sccache --show-stats" || isKnownAdminExport(step))
-        continue;
+      if (step.run === expected || isKnownAdminStep(step)) continue;
       assert.fail(`${jobName} has an unshared direct run step: ${step.name ?? step.run}`);
     }
   }
@@ -118,6 +124,22 @@ test("CI invokes only shared partitions and rejects a direct correctness bypass"
   assert.throws(
     () => assertCiSuiteUsesOnlySharedCorrectnessPartitions(turboExploit),
     /unshared direct run step: Export trusted Turbo cache signing key/,
+  );
+
+  const statsShellExploit = structuredClone(workflowModel);
+  statsShellExploit.jobs.lint.steps.find(({ name }) => name === sccacheStatsStep.name).shell =
+    "bash -c 'cargo test -p jazz; bash {0}'";
+  assert.throws(
+    () => assertCiSuiteUsesOnlySharedCorrectnessPartitions(statsShellExploit),
+    /unshared direct run step: Report sccache statistics/,
+  );
+
+  const statsRunExploit = structuredClone(workflowModel);
+  statsRunExploit.jobs.lint.steps.find(({ name }) => name === sccacheStatsStep.name).run =
+    "sccache --show-stats; cargo test -p jazz";
+  assert.throws(
+    () => assertCiSuiteUsesOnlySharedCorrectnessPartitions(statsRunExploit),
+    /unshared direct run step: Report sccache statistics/,
   );
 
   assert.deepEqual(
