@@ -14,6 +14,17 @@ log_dir=${RUNNER_TEMP:-/tmp}
 node_tests_log="${log_dir}/jazz-node-tests-$$.log"
 browser_tests_log="${log_dir}/jazz-browser-tests-$$.log"
 
+# Every example resolves the public `jazz-tools/*` exports from `dist`. Build
+# them once before either suite starts: otherwise an example's fallback build
+# can clean that shared directory while a sibling browser suite imports it.
+if [[ "${JAZZ_SKIP_JAZZ_TOOLS_BUILD:-0}" != "1" ]]; then
+  pnpm --filter jazz-tools build || {
+    status=$?
+    echo "jazz-tools prebuild failed; refusing to launch suites against stale exports" >&2
+    exit "${status}"
+  }
+fi
+
 terminate_children() {
   trap - INT TERM
   for child_pid in "${node_tests_pid}" "${browser_tests_pid}"; do
