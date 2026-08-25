@@ -731,6 +731,34 @@ interface MigrationPublicationJournal {
 const MIGRATION_STAGE_DIR = ".jazz-create-migration-stage";
 const MIGRATION_JOURNAL = ".jazz-create-migration.journal.json";
 
+interface MigrationLockOwner {
+  version: 1;
+  pid: number;
+  hostname: string;
+  token: string;
+}
+
+function parseMigrationLockOwner(text: string): MigrationLockOwner {
+  const value = JSON.parse(text) as unknown;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("owner is not an object");
+  }
+  const owner = value as Record<string, unknown>;
+  if (
+    Object.keys(owner).sort().join(",") !== "hostname,pid,token,version" ||
+    owner.version !== 1 ||
+    !Number.isSafeInteger(owner.pid) ||
+    (owner.pid as number) <= 0 ||
+    typeof owner.hostname !== "string" ||
+    owner.hostname.length === 0 ||
+    typeof owner.token !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(owner.token)
+  ) {
+    throw new Error("owner has an invalid shape");
+  }
+  return owner as unknown as MigrationLockOwner;
+}
+
 function contentIdentity(contents: string | Buffer): { size: number; sha256: string } {
   const bytes = Buffer.isBuffer(contents) ? contents : Buffer.from(contents);
   return { size: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex") };
@@ -1105,7 +1133,12 @@ async function withMigrationDirectoryLock<T>(
   await assertNoSymlinkComponents(migrationsDir);
   const lockDir = join(migrationsDir, ".jazz-create-migration.lock");
   const ownerPath = join(lockDir, "owner.json");
-  const owner = { version: 1, pid: process.pid, hostname: hostname(), token: randomUUID() };
+  const owner: MigrationLockOwner = {
+    version: 1,
+    pid: process.pid,
+    hostname: hostname(),
+    token: randomUUID(),
+  };
   const deadline = Date.now() + 10_000;
   let unknownOwnerSince: number | null = null;
   for (;;) {
@@ -1128,12 +1161,12 @@ async function withMigrationDirectoryLock<T>(
         if ((validationError as NodeJS.ErrnoException).code === "ENOENT") continue;
         throw validationError;
       }
-      let existing: typeof owner | null = null;
+      let existing: MigrationLockOwner | null = null;
       let existingText = "";
       try {
         await assertNoSymlinkComponents(ownerPath);
         existingText = await readFile(ownerPath, "utf8");
-        existing = JSON.parse(existingText) as typeof owner;
+        existing = parseMigrationLockOwner(existingText);
       } catch {
         if (!(await pathExists(lockDir))) continue;
         unknownOwnerSince ??= Date.now();
@@ -1156,26 +1189,20 @@ async function withMigrationDirectoryLock<T>(
         existing.pid > 0 &&
         !processIsAlive(existing.pid)
       ) {
-        const recoveryDir = join(lockDir, ".recovery");
-        try {
-          await mkdir(recoveryDir);
-        } catch (claimError) {
-          if ((claimError as NodeJS.ErrnoException).code !== "EEXIST") throw claimError;
-          await new Promise((resolve) => setTimeout(resolve, 10));
-          continue;
-        }
-        const unchanged = await readFile(ownerPath, "utf8").catch(() => "");
-        if (unchanged !== existingText) {
-          throw new Error(`Migration lock owner changed during stale recovery: ${lockDir}`);
-        }
         const quarantine = `${lockDir}.recovery-${owner.token}`;
-        await rename(lockDir, quarantine);
+        try {
+          await rename(lockDir, quarantine);
+        } catch (quarantineError) {
+          if ((quarantineError as NodeJS.ErrnoException).code === "ENOENT") continue;
+          throw quarantineError;
+        }
         await assertNoSymlinkComponents(quarantine);
         await assertNoSymlinkComponents(join(quarantine, "owner.json"));
         const quarantinedOwner = await readFile(join(quarantine, "owner.json"), "utf8");
         if (quarantinedOwner !== existingText) {
           throw new Error(`Quarantined migration lock owner did not match: ${quarantine}`);
         }
+        await pauseMigrationPublicationForTest("lock-quarantined");
         await rm(quarantine, { recursive: true });
         await syncDirectory(migrationsDir);
         continue;
