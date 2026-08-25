@@ -845,6 +845,7 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
             table,
             parts_for(table, seed, None),
             None,
+            None,
         )
         .unwrap();
         assert_eq!(content.record.descriptor().fields(), table.history_storage_table().record_schema().fields());
@@ -868,6 +869,7 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
         let deletion = VersionRow::from_parts_with_schema_version(
             table,
             parts_for(table, seed.wrapping_add(100), Some(DeletionEvent::Deleted)),
+            None,
             None,
         )
         .unwrap();

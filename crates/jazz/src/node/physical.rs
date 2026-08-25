@@ -20,6 +20,7 @@ pub(super) struct PreparedPhysicalWritePlan {
     pub(super) source_table: Arc<TableSchema>,
     pub(super) source_mapping: Arc<TablePhysicalMapping>,
     pub(super) physical_table: Arc<GrooveTableSchema>,
+    pub(super) logical_descriptor: records::RecordDescriptor,
     pub(super) physical_descriptor: records::RecordDescriptor,
 }
 

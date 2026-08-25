@@ -76,6 +76,7 @@ where
             source_table,
             source_mapping,
             physical_table,
+            logical_descriptor,
             physical_descriptor,
         });
         self.catalogue

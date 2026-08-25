@@ -394,6 +394,18 @@ where
                     .clone()
                     .unwrap_or_else(|| cells.keys().cloned().collect()),
             );
+            let history_descriptor = if commit.deletion.is_none() {
+                Some(
+                    self.prepared_physical_write_plan(
+                        write_schema_version,
+                        &table_schema.name,
+                        PhysicalWriteTarget::History,
+                    )?
+                    .logical_descriptor,
+                )
+            } else {
+                None
+            };
             let stored = VersionRow::from_parts_with_schema_version(
                 &table_schema,
                 VersionRowParts {
@@ -414,6 +426,7 @@ where
                 },
                 (write_schema_version != self.catalogue.current_schema_version_id)
                     .then_some(write_schema_version),
+                history_descriptor,
             )?;
             let previous_winner = if let Some(previous) = previous_current.as_ref() {
                 Some((
