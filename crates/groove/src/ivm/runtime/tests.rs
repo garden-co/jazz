@@ -1587,9 +1587,17 @@ fn deeply_nested_recursive_graph_compiles_on_a_server_sized_stack() {
                 "frontier",
                 1,
             );
-            runtime
+            let compiled = runtime
                 .add_dedup_graph(&graph)
                 .expect("compile deeply nested recursive graph");
+            let recursive_node = runtime
+                .graph
+                .node(compiled.node)
+                .expect("compiled recursive node");
+            let OpType::Recursive(recursive) = &recursive_node.descriptor.operator else {
+                panic!("compiled root must remain recursive");
+            };
+            assert_eq!(recursive.read_tables, ["albums"]);
             // The receipt targets compilation and recursive source discovery;
             // dropping a deliberately 8k-deep builder would independently
             // recurse through Boxes after that work has completed.
@@ -1598,7 +1606,10 @@ fn deeply_nested_recursive_graph_compiles_on_a_server_sized_stack() {
         .expect("spawn server-sized stack receipt")
         .join();
 
-    assert!(compiled.is_ok(), "deep graph compilation must not overflow");
+    assert!(
+        compiled.is_ok(),
+        "deep recursive graph compilation and source discovery must complete"
+    );
 }
 
 #[futures_test::test]
