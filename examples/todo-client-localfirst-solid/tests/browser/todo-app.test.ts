@@ -20,24 +20,25 @@ async function waitFor(check: () => boolean, timeoutMs: number, message: string)
 }
 
 describe("Solid Todo App E2E", () => {
-  const mounts: Array<{ dispose: () => void; container: HTMLDivElement }> = [];
+  const mounts: Array<{
+    dispose: () => void;
+    container: HTMLDivElement;
+    storageNamespace: string | undefined;
+  }> = [];
 
   async function mountApp(config: Partial<DbConfig> = {}): Promise<HTMLDivElement> {
     const el = document.createElement("div");
     document.body.appendChild(el);
+    const resolvedConfig: Partial<DbConfig> = {
+      appId: config.appId ?? "test-app",
+      driver: { type: "persistent", dbName: crypto.randomUUID() },
+      ...config,
+    };
+    const storageNamespace =
+      resolvedConfig.driver?.type === "persistent" ? resolvedConfig.driver.dbName : undefined;
 
-    const dispose = render(
-      () =>
-        App({
-          config: {
-            appId: config.appId ?? "test-app",
-            driver: { type: "persistent", dbName: crypto.randomUUID() },
-            ...config,
-          },
-        }),
-      el,
-    );
-    mounts.push({ dispose, container: el });
+    const dispose = render(() => App({ config: resolvedConfig }), el);
+    mounts.push({ dispose, container: el, storageNamespace });
 
     await waitFor(
       () => el.querySelector("#todo-list") !== null,
@@ -52,22 +53,27 @@ describe("Solid Todo App E2E", () => {
     const idx = mounts.findIndex((m) => m.container === el);
     if (idx === -1) return;
 
-    mounts[idx].dispose();
+    const { dispose, storageNamespace } = mounts[idx];
+    dispose();
     el.remove();
     mounts.splice(idx, 1);
-    await new Promise((r) => setTimeout(r, 200));
+
+    if (storageNamespace) {
+      const storage = window.__jazz;
+      if (!storage) throw new Error("Jazz browser storage controls are unavailable");
+      await storage.shutdown(storageNamespace);
+      await waitFor(
+        () => !storage.listLiveStorageNamespaces().includes(storageNamespace),
+        5000,
+        "Unmounted Jazz storage should finish releasing",
+      );
+    }
   }
 
   afterEach(async () => {
-    for (const { dispose, container } of mounts) {
-      try {
-        dispose();
-      } catch {
-        // best effort
-      }
-      container.remove();
+    while (mounts.length > 0) {
+      await unmountApp(mounts[0].container);
     }
-    mounts.length = 0;
   });
 
   it("renders the app with an empty todo list", async () => {
