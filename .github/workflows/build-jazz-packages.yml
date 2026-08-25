@@ -278,7 +278,12 @@ jobs:
           node -e 'const fs=require("fs");const rootPath="package.json";const pkg=JSON.parse(fs.readFileSync(rootPath,"utf8"));const deps=[];for(const entry of fs.readdirSync("npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const child=JSON.parse(fs.readFileSync(`npm/${entry.name}/package.json`,"utf8"));deps.push([child.name,pkg.version]);}deps.sort((a,b)=>a[0].localeCompare(b[0]));pkg.optionalDependencies=Object.fromEntries(deps);fs.writeFileSync(rootPath,`${JSON.stringify(pkg,null,2)}\n`);'
 
       - name: Stage and verify jazz-napi provenance manifests
-        run: node dev/artifacts/stage-napi-manifests.mjs
+        run: |
+          if [[ '${{ inputs.napi_matrix }}' == *'win32-x64-msvc'* ]]; then
+            node dev/artifacts/stage-napi-manifests.mjs
+          else
+            node dev/artifacts/stage-napi-manifests.mjs linux-x64-gnu darwin-x64 darwin-arm64
+          fi
 
       - name: Derive Jazz artifact expectations from sealed manifests
         run: node dev/artifacts/stage-native-fingerprints.mjs

@@ -1345,6 +1345,7 @@ test("pkg.pr.new previews omit Windows while release package builds retain it", 
   assert.match(packageBuild, /default: .*win32-x64-msvc/);
   assert.match(packageBuild, /include: \$\{\{ fromJSON\(inputs\.napi_matrix\) \}\}/);
   assert.match(packageBuild, /Remove Windows package omitted by this build/);
+  assert.match(packageBuild, /stage-napi-manifests\.mjs linux-x64-gnu darwin-x64 darwin-arm64/);
   assert.doesNotMatch(previewBuild, /win32-x64-msvc/);
   assert.match(previewBuild, /napi_matrix: .*linux-x64-gnu.*darwin-x64.*darwin-arm64/);
 });
