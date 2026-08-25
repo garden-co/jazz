@@ -715,6 +715,16 @@ impl<'de> serde::Deserialize<'de> for ColumnSchema {
 }
 
 impl ColumnSchema {
+    /// Logical column name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Public logical Groove type. Physical large-scalar backing types remain sealed.
+    pub fn column_type(&self) -> &GrooveColumnType {
+        &self.column_type
+    }
+
     /// Construct an ordinary column from a groove storage type.
     pub fn new(name: impl Into<String>, column_type: GrooveColumnType) -> Self {
         assert!(

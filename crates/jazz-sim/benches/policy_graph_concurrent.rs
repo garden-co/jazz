@@ -663,7 +663,7 @@ fn write_seed_rows(core: &Node<RocksDbStorage>, schema: &JazzSchema, rows: &[See
                     .unwrap_or_else(|| panic!("seed row missing column {}/{}", row.table, column));
                 (
                     column.clone(),
-                    json_to_cell_value(value, &column_schema.column_type),
+                    json_to_cell_value(value, column_schema.column_type()),
                 )
             })
             .collect::<BTreeMap<_, _>>();
