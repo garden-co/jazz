@@ -98,7 +98,9 @@ export class DirectConnectionManager extends ConnectionManager {
       this.isDisconnected = false;
     });
     if (!this.isDisconnected) {
-      for (const resolve of [...this.reconnectWaiters]) resolve();
+      const waiters = Array.from(this.reconnectWaiters);
+      this.reconnectWaiters.clear();
+      for (const resolve of waiters) resolve();
     }
   }
 
