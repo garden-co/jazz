@@ -1141,7 +1141,7 @@ async fn malformed_later_upload_child_has_no_durable_partial_write_after_reopen(
     let (root, mutated_children, valid_child_ref) = {
         let root = &mut prepared.staged_chunks[root_index];
         let crate::large_values::ChunkNode::Branch { children, .. } =
-            postcard::from_bytes(&root.encoded).unwrap()
+            crate::large_values::decode_canonical_node(&root.encoded).unwrap()
         else {
             panic!("large fixture must have a branch root");
         };
