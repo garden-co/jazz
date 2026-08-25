@@ -93,8 +93,14 @@ async function fileExists(path: string): Promise<boolean> {
 function spawnMigrationCreate(
   root: string,
   migrationsDir: string,
-  pauseAt: "lock-held" | "lock-quarantined" | "between-publications",
+  pauseAt:
+    | "lock-held"
+    | "lock-quarantined"
+    | "between-publications"
+    | "journaled"
+    | "snapshot-read",
   marker: string,
+  releaseMarker?: string,
 ) {
   return spawn(
     process.execPath,
@@ -105,6 +111,7 @@ function spawnMigrationCreate(
         NODE_ENV: "test",
         JAZZ_TEST_MIGRATION_PAUSE_AT: pauseAt,
         JAZZ_TEST_MIGRATION_PAUSE_MARKER: marker,
+        ...(releaseMarker ? { JAZZ_TEST_MIGRATION_PAUSE_RELEASE_MARKER: releaseMarker } : {}),
       },
       stdio: "ignore",
     },
@@ -1210,6 +1217,51 @@ describe("cli migrations", () => {
       expect(await readdir(outside)).toEqual([]);
     },
   );
+
+  it("rejects a snapshot-directory symlink swapped after publication is journaled", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const snapshotsDir = join(migrationsDir, "snapshots");
+    const outside = join(root, "outside");
+    const marker = join(root, "journaled.marker");
+    const releaseMarker = join(root, "journaled.release");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await mkdir(outside);
+
+    const child = spawnMigrationCreate(root, migrationsDir, "journaled", marker, releaseMarker);
+    await waitForCrashMarker(marker, child);
+    await rm(snapshotsDir, { recursive: true });
+    await symlink(outside, snapshotsDir, "dir");
+    await writeFile(releaseMarker, "release\n");
+    const code = await new Promise<number | null>((resolve) => child.once("close", resolve));
+
+    expect(code).not.toBe(0);
+    expect(await readdir(outside)).toEqual([]);
+  });
+
+  it("rejects a snapshot leaf swapped after the baseline directory is opened", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const snapshotsDir = join(migrationsDir, "snapshots");
+    const marker = join(root, "snapshot-read.marker");
+    const releaseMarker = join(root, "snapshot-read.release");
+    const outside = join(root, "outside-snapshot.json");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await createCatalogueMigration({ schemaDir: root, migrationsDir });
+    const snapshot = (await readdir(snapshotsDir)).find((name) => name.endsWith(".json"));
+    expect(snapshot).toBeDefined();
+    const snapshotPath = join(snapshotsDir, snapshot!);
+    await copyFile(snapshotPath, outside);
+
+    const child = spawnMigrationCreate(root, migrationsDir, "snapshot-read", marker, releaseMarker);
+    await waitForCrashMarker(marker, child);
+    await rm(snapshotPath);
+    await symlink(outside, snapshotPath, "file");
+    await writeFile(releaseMarker, "release\n");
+    const code = await new Promise<number | null>((resolve) => child.once("close", resolve));
+
+    expect(code).not.toBe(0);
+  });
 
   it.each(["outside", "in-tree"])(
     "rejects a %s symlinked committed snapshot baseline in the CLI process",
