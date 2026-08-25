@@ -31,13 +31,24 @@ Invariant digest:
 ## 9.1 Logical and physical values
 
 The public Groove type remains `bytes`, `string`, or `json`. Inline and indirect
-storage are physical arms of those types, conceptually:
+storage are physical arms of those types, encoded as one engine-owned ordinary
+Groove enum that is not visible in a schema, query, policy, index, or result:
 
 ```text
-StoredScalar = Inline(logical bytes) | Large(LargeValueRef)
+StoredScalar = enum {
+  Primitive { value: declared primitive },
+  Chunked {
+    format_version,
+    logical_hash,
+    root: { object_hash, locator },
+    byte_length,
+    utf16_length?,
+    edit_tail: [ { offset, delete_length, insert_bytes,
+                   utf16_offset, delete_utf16_length, insert_utf16_length } ],
+  },
+}
 
 LargeValueRef {
-  kind,
   format_version,
   logical_hash,
   root: NodeRef { object_hash, locator },
@@ -46,6 +57,20 @@ LargeValueRef {
   edit_tail,
 }
 ```
+
+The enum case tags are stable: `Primitive = 2`, `Chunked = 3`. Tags 0 and 1
+are permanently reserved so persisted values from the superseded private
+`[tag] + payload` codec fail closed instead of colliding with a canonical
+length-prefixed record. Its payloads use only Groove's canonical primitive,
+record, array, nullable, and enum codecs;
+there is no private tag byte or postcard envelope for a scalar descriptor.
+`bytes` uses the bytes primitive and `string` uses the string primitive. JSON
+retains Groove's existing canonical JSON-as-string logical representation, so
+its primitive backing is string as well; its JSON validation and chunk behavior
+are selected by declared schema/lowering metadata, never by a stored or
+client-supplied `kind` field. Internal raw string/bytes backing primitives only
+terminate this self-hosting enum encoding and are impossible at the public
+schema or logical-operator boundary.
 
 `logical_hash` is deterministic content identity. `object_hash` authenticates
 the exact encoded node, including the child locators that it reveals, and
@@ -66,7 +91,7 @@ Small logical values remain inline. Above a versioned threshold, Groove emits a
 large descriptor and immutable chunks. Once indirect, a value may remain
 indirect below the threshold; demotion is representation-only compaction.
 
-The physical tag is part of Groove's storage encoding, not a magic prefix in a
+The physical enum is part of Groove's storage encoding, not a magic prefix in a
 user string or JSON value. Every admitted cell has exactly one unambiguous arm.
 
 `INV-LARGE-1`: filters, policies lowered into Groove, joins, grouping, ordering,

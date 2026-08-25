@@ -1708,7 +1708,7 @@ fn naive_refetch_ceiling_bytes(schema: &JazzSchema, fixture: &Fixture) -> u64 {
             let positional = table
                 .columns
                 .iter()
-                .map(|column| commit.cells.get(&column.name).cloned())
+                .map(|column| commit.cells.get(column.name()).cloned())
                 .collect::<Vec<_>>();
             jazz::protocol::VersionRecord::encode(
                 table,

@@ -16,6 +16,16 @@ view-specific grant check. Jazz never parses content trees, applies edit
 tails, computes UTF-16 metrics, interprets JSON, or decides which chunks an IVM
 operator needs.
 
+Each runtime column also freezes an internal large-value semantic kind at
+schema lowering: bytes, text, or JSON. JSON remains the existing logical
+string-shaped Groove value, but the physical-row descriptor carries its
+schema-derived JSON context so a JSON root cannot be staged or encoded as text
+(or vice versa). Primitive bytes remain context-only; every persisted
+`Chunked` descriptor additionally carries a Groove-owned kind witness, checked
+against that immutable schema context before a root or edit tail is consumed.
+It is not client-chosen and is never visible to logical queries, policies,
+indices, or application results.
+
 Invariant digest:
 
 - `INV-CONTENT-1`: Jazz does not duplicate Groove's large-value semantics.
@@ -399,8 +409,9 @@ UTF-16 text coordinates and byte coordinates for bytes. Invalid UTF-8 boundaries
 and UTF-16 positions splitting surrogate pairs fail rather than round.
 
 Native Rust additionally exposes `Db::insert_streaming_value`. The caller
-supplies the ordinary non-streamed row cells, the target column and scalar kind,
-and a `std::io::Read`. A bounded producer bridge feeds the same resumable push
+supplies the ordinary non-streamed row cells, the target column, and a
+`std::io::Read`; Jazz derives the scalar kind exclusively from that column's
+schema. A bounded producer bridge feeds the same resumable push
 constructor and persisted pending-upload lifecycle used by NAPI and WASM; there
 is no second reader-specific staging path. Jazz charges each finalized batch
 before Groove persists it. Jazz does not publish the row until EOF, complete

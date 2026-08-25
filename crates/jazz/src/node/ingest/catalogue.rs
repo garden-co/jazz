@@ -1102,9 +1102,9 @@ where
                         if !physical_value_epoch_is_compatible(
                             &source_column.column_type,
                             &target_column.column_type,
-                        ) {
+                        ) || source_column.large_value_kind != target_column.large_value_kind {
                             return Err(Error::InvalidCatalogueUpdate(
-                                "column transform changes variant registry non-additively",
+                                "column transform changes physical value or large-value semantic kind",
                             ));
                         }
                         columns.insert(column.clone(), target_column.clone());

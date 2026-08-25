@@ -576,4 +576,82 @@ mod variant_case_tests {
             assert_eq!(detail.cases.len(), 1);
         }
     }
+
+    #[test]
+    fn physical_large_scalar_kind_is_schema_derived_and_json_is_not_text() {
+        let text = ColumnSchema::new("body", records::ValueType::String);
+        let mut json = ColumnSchema::new("body", records::ValueType::String);
+        json.large_value_kind = crate::schema::LargeValueSemanticKind::Json;
+
+        assert_eq!(
+            physical_storage_value_type(&text),
+            records::ValueType::String
+        );
+        assert_eq!(
+            physical_storage_value_type(&json),
+            groove::large_values::physical_storage_value_type(
+                groove::large_values::LargeValueKind::Json,
+            )
+        );
+        assert_ne!(physical_storage_value_type(&text), physical_storage_value_type(&json));
+        assert!(physical_storage_value_type(&json).is_internal_storage_type());
+        assert!(
+            std::panic::catch_unwind(|| {
+                ColumnSchema::new("not_public", physical_storage_value_type(&json))
+            })
+            .is_err(),
+            "the physical descriptor constructor cannot be smuggled back into a public Jazz schema"
+        );
+
+        let text_cell = records::RecordDescriptor::new([(
+            "cell",
+            physical_storage_value_type(&text),
+        )]);
+        let json_cell = records::RecordDescriptor::new([(
+            "cell",
+            physical_storage_value_type(&json),
+        )]);
+        let same_json_shaped_bytes = Value::String(r#"{"title":"same bytes"}"#.to_owned());
+        assert_eq!(
+            text_cell.create(std::slice::from_ref(&same_json_shaped_bytes)).unwrap(),
+            json_cell.create(std::slice::from_ref(&same_json_shaped_bytes)).unwrap(),
+            "the kind is contextual schema metadata, not a redundant cell witness"
+        );
+
+        let json_root = groove::large_values::prepare(
+            groove::large_values::LargeValueKind::Json,
+            br#"{"title":"same bytes"}"#,
+        )
+        .unwrap()
+        .value_ref;
+        assert!(
+            json_cell.create(&[Value::Large(json_root.clone())]).is_ok(),
+            "the JSON physical descriptor accepts its schema-derived large value"
+        );
+        assert!(
+            text_cell.create(&[Value::Large(json_root.clone())]).is_err(),
+            "a JSON descriptor must not enter text physical storage"
+        );
+
+        let json_record = json_cell
+            .create(&[Value::Large(json_root)])
+            .expect("encode JSON physical cell");
+        assert!(
+            text_cell.bind(&json_record).to_values().is_err(),
+            "a received JSON physical record cannot replay as text"
+        );
+        let text_root = groove::large_values::prepare(
+            groove::large_values::LargeValueKind::String,
+            br#"{"title":"same bytes"}"#,
+        )
+        .unwrap()
+        .value_ref;
+        let text_record = text_cell
+            .create(&[Value::Large(text_root)])
+            .expect("encode text physical cell");
+        assert!(
+            json_cell.bind(&text_record).to_values().is_err(),
+            "a received text physical record cannot replay as JSON"
+        );
+    }
 }

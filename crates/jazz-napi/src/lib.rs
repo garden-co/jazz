@@ -57,7 +57,6 @@ use jazz::db::{
     SubscriptionStream, TickScheduler as CoreTickScheduler, TickUrgency as CoreTickUrgency,
     WireTransportAdapter as CoreWireTransportAdapter, WriteHandle, block_on as core_block_on,
 };
-use jazz::groove::large_values::LargeValueKind as CoreLargeValueKind;
 use jazz::groove::records::{
     BorrowedRecord as CoreBorrowedRecord, RecordDescriptor, Value as CoreValue,
 };
@@ -1384,7 +1383,6 @@ impl NapiDb {
         row_id: Uint8Array,
         cells: Uint8Array,
         column: String,
-        kind: String,
         mutation: Option<String>,
         author: Option<Uint8Array>,
         updated_at_ms: Option<f64>,
@@ -1394,16 +1392,6 @@ impl NapiDb {
         if self.inner.borrow().is_none() {
             return Err(napi::Error::from_reason("database is closed"));
         }
-        let kind = match kind.as_str() {
-            "Text" => CoreLargeValueKind::String,
-            "Json" => CoreLargeValueKind::Json,
-            "Bytea" => CoreLargeValueKind::Bytes,
-            _ => {
-                return Err(napi::Error::from_reason(
-                    "streaming insert requires a Text, Json, or Bytea column",
-                ));
-            }
-        };
         let mutation = match mutation.as_deref().unwrap_or("insert") {
             "insert" => CoreStreamingMutationKind::Insert,
             "update" => CoreStreamingMutationKind::Update,
@@ -1434,10 +1422,10 @@ impl NapiDb {
                 .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
             match db {
                 NapiDbInnerStorage::Memory(db) => {
-                    db.begin_streaming_value_upload(&table, &cells, &column, kind)
+                    db.begin_streaming_value_upload(&table, &cells, &column)
                 }
                 NapiDbInnerStorage::Persistent(db) => {
-                    db.begin_streaming_value_upload(&table, &cells, &column, kind)
+                    db.begin_streaming_value_upload(&table, &cells, &column)
                 }
             }
             .map_err(|error| napi::Error::from_reason(error.to_string()))?
@@ -1472,7 +1460,6 @@ impl NapiDb {
         row_id: Uint8Array,
         cells: Uint8Array,
         column: String,
-        kind: String,
         mutation: Option<String>,
         author: Option<Uint8Array>,
         attribution: Uint8Array,
@@ -1497,7 +1484,6 @@ impl NapiDb {
             row_id,
             cells,
             column,
-            kind,
             mutation,
             None,
             updated_at_ms,
@@ -4608,7 +4594,6 @@ mod tests {
             Uint8Array::from(vec![0xb5; 16]),
             Uint8Array::from(Vec::new()),
             "label".to_owned(),
-            "Text".to_owned(),
             None,
             Some(Uint8Array::from(alice_bytes)),
             Uint8Array::from(alice.canonical().as_bytes().to_vec()),
@@ -4629,7 +4614,6 @@ mod tests {
             Uint8Array::from(vec![0xb6; 16]),
             Uint8Array::from(Vec::new()),
             "label".to_owned(),
-            "Text".to_owned(),
             None,
             None,
             Uint8Array::from(alice.canonical().as_bytes().to_vec()),

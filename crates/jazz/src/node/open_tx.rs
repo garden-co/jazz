@@ -802,8 +802,15 @@ where
                     ));
                 }
             }
-            for value in cells.values_mut() {
-                self.prepare_and_stage_large_scalar(value).await?;
+            for (column, value) in &mut cells {
+                let semantic_kind = table_schema
+                    .columns
+                    .iter()
+                    .find(|candidate| candidate.name == *column)
+                    .map(|column| column.large_value_kind)
+                    .unwrap_or(crate::schema::LargeValueSemanticKind::NotLarge);
+                self.prepare_and_stage_large_scalar(value, semantic_kind)
+                    .await?;
             }
             let cells = positional_cells_from_map(&table_schema, &cells)?;
             let provenance_at = TxTime(write.now_ms.unwrap_or(now_ms));
