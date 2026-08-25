@@ -231,7 +231,13 @@ struct MetadataChunkInstallObserver {
 struct ResidentLifecycleInstall {
     storage: OwnedStorage<'static>,
     staged: Rc<RefCell<StagedWriteState>>,
-    sealed: Rc<Cell<bool>>,
+    /// Whether the database currently owns `lifecycle` on behalf of resident
+    /// publications. A late installer takes the regular lock only after that
+    /// guard is released.
+    lifecycle_held: Rc<Cell<bool>>,
+    /// Before durability, installation metadata belongs in the publication
+    /// snapshot; afterwards it is a serialized follow-on write.
+    durable: Rc<Cell<bool>>,
 }
 
 impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
@@ -247,7 +253,10 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
                 )
             })?;
             let resident_install = self.resident_install.clone();
-            let _lifecycle = if resident_install.is_none() {
+            let _lifecycle = if resident_install
+                .as_ref()
+                .is_none_or(|install| !install.lifecycle_held.get())
+            {
                 Some(
                     self.lifecycle
                         .upgrade()
@@ -262,9 +271,10 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
             } else {
                 None
             };
-            let read_storage: &dyn OrderedKvStorage = resident_install
-                .as_ref()
-                .map_or(storage.as_ref(), |install| install.storage.as_ref());
+            let read_storage: &dyn OrderedKvStorage = match resident_install.as_ref() {
+                Some(install) if !install.durable.get() => install.storage.as_ref(),
+                _ => storage.as_ref(),
+            };
             let node = crate::large_values::decode_node_untyped_authenticated(
                 node_ref.object_hash,
                 &encoded,
@@ -337,14 +347,15 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
                 });
             }
             if let Some(install) = resident_install {
-                if install.sealed.get() {
-                    return Err(crate::chunks::ChunkError::Backend(
-                        "resident publication persisted before chunk installation completed"
-                            .to_owned(),
-                    ));
+                if install.durable.get() {
+                    storage
+                        .write_many(operations)
+                        .await
+                        .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))
+                } else {
+                    install.staged.borrow_mut().extend(operations);
+                    Ok(())
                 }
-                install.staged.borrow_mut().extend(operations);
-                Ok(())
             } else {
                 storage
                     .write_many(operations)
@@ -388,6 +399,9 @@ pub struct Database {
     /// waiting for themselves to persist; independent chunk installation is
     /// held outside it until every such transition is durable.
     large_value_publication_lifecycle_guard: Option<futures::lock::OwnedMutexGuard<()>>,
+    /// Shared with resident install observers so follow-on writes retain
+    /// lifecycle serialization after their publication becomes durable.
+    large_value_lifecycle_held: Rc<Cell<bool>>,
     large_value_lifecycle_publications: BTreeSet<PublicationId>,
     abandoned_application: Rc<Cell<bool>>,
     poisoned: bool,
@@ -409,7 +423,7 @@ pub struct AppliedBatch {
     publication: PublicationId,
     storage: Rc<LayoutStorage>,
     operations: Rc<RefCell<StagedWriteState>>,
-    resident_install_sealed: Option<Rc<Cell<bool>>>,
+    resident_install_durable: Option<Rc<Cell<bool>>>,
     order: Rc<RefCell<PersistenceOrder>>,
     ivm_tick_time: Duration,
     tick: TickMetrics,
@@ -431,7 +445,6 @@ impl AppliedBatch {
         );
         let mut attempt = PersistenceAttempt {
             lifecycle: Rc::clone(&self.lifecycle),
-            resident_install_sealed: self.resident_install_sealed.clone(),
             completed: false,
         };
         let turn = std::future::poll_fn(|cx| {
@@ -449,9 +462,6 @@ impl AppliedBatch {
             Poll::Pending
         })
         .await;
-        if let Some(sealed) = &self.resident_install_sealed {
-            sealed.set(true);
-        }
         let operations = self.operations.borrow().clone().into_operations();
         let storage_writes = StorageWriteMetrics::from_operations(
             &operations
@@ -465,6 +475,11 @@ impl AppliedBatch {
             Err(error) => Err(error),
         };
         let storage_write_time = storage_start.elapsed();
+        if result.is_ok()
+            && let Some(durable) = &self.resident_install_durable
+        {
+            durable.set(true);
+        }
         self.lifecycle
             .set(AppliedBatchLifecycle::PersistenceComplete);
         attempt.completed = true;
@@ -514,7 +529,6 @@ impl AppliedBatch {
 
 struct PersistenceAttempt {
     lifecycle: Rc<Cell<AppliedBatchLifecycle>>,
-    resident_install_sealed: Option<Rc<Cell<bool>>>,
     completed: bool,
 }
 
@@ -522,9 +536,6 @@ impl Drop for PersistenceAttempt {
     fn drop(&mut self) {
         if !self.completed && self.lifecycle.get() == AppliedBatchLifecycle::Persisting {
             self.lifecycle.set(AppliedBatchLifecycle::Applied);
-            if let Some(sealed) = &self.resident_install_sealed {
-                sealed.set(false);
-            }
         }
     }
 }

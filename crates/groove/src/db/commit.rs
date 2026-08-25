@@ -237,28 +237,17 @@ impl Database {
             resident_overlay,
             Rc::clone(&staged_state),
         ));
-        let resident_install_sealed = self
-            .large_value_publication_lifecycle_guard
-            .as_ref()
-            .map(|_| Rc::new(Cell::new(false)));
-        let resident_install_observer =
-            self.large_value_publication_lifecycle_guard
-                .as_ref()
-                .map(|_| {
-                    Rc::new(MetadataChunkInstallObserver {
-                        storage: Rc::downgrade(&self.storage),
-                        lifecycle: std::sync::Arc::downgrade(&self.large_value_lifecycle),
-                        resident_install: Some(ResidentLifecycleInstall {
-                            storage: OwnedStorage::new(Rc::clone(&storage)),
-                            staged: Rc::clone(&staged_state),
-                            sealed: Rc::clone(
-                                resident_install_sealed
-                                    .as_ref()
-                                    .expect("resident observer has a publication seal"),
-                            ),
-                        }),
-                    }) as Rc<dyn crate::chunks::ChunkInstallObserver>
-                });
+        let resident_install_durable = Rc::new(Cell::new(false));
+        let resident_install_observer = Rc::new(MetadataChunkInstallObserver {
+            storage: Rc::downgrade(&self.storage),
+            lifecycle: std::sync::Arc::downgrade(&self.large_value_lifecycle),
+            resident_install: Some(ResidentLifecycleInstall {
+                storage: OwnedStorage::new(Rc::clone(&storage)),
+                staged: Rc::clone(&staged_state),
+                lifecycle_held: Rc::clone(&self.large_value_lifecycle_held),
+                durable: Rc::clone(&resident_install_durable),
+            }),
+        }) as Rc<dyn crate::chunks::ChunkInstallObserver>;
         let tick_start = Instant::now();
         let resident_tick = match self
             .ivm_runtime
@@ -266,7 +255,7 @@ impl Database {
                 table_deltas,
                 OwnedStorage::new(Rc::clone(&storage)),
                 defer_notifications_until_durable,
-                resident_install_observer,
+                Some(resident_install_observer),
             )
             .await
         {
@@ -277,11 +266,11 @@ impl Database {
             }
         };
         let ivm_tick_time = tick_start.elapsed();
-        // The IVM runs without the lifecycle lock so a missing chunk can invoke
-        // the metadata observer. Only after the resident tick settles do we
-        // serialize against that observer and compute from the complete staged
-        // overlay. No publication id exists yet, so cancellation while waiting
-        // for this lock cannot leave an ordered-persistence hole.
+        // The IVM's resident observer uses the staged overlay. It takes the
+        // lifecycle lock itself only when another resident publication does
+        // not already hold it. After the tick settles, compute from the
+        // complete overlay. No publication id exists yet, so cancellation
+        // while waiting for this lock cannot leave an ordered-persistence hole.
         let lifecycle_guard =
             if roots.is_empty() || self.large_value_publication_lifecycle_guard.is_some() {
                 None
@@ -378,6 +367,7 @@ impl Database {
         if !roots.is_empty() {
             if let Some(guard) = lifecycle_guard {
                 self.large_value_publication_lifecycle_guard = Some(guard);
+                self.large_value_lifecycle_held.set(true);
             }
             self.large_value_lifecycle_publications.insert(publication);
         }
@@ -385,7 +375,7 @@ impl Database {
             publication,
             storage: Rc::clone(&self.storage),
             operations: staged_state,
-            resident_install_sealed,
+            resident_install_durable: Some(resident_install_durable),
             order: Rc::clone(&self.publication_persistence),
             ivm_tick_time,
             tick,
@@ -433,7 +423,9 @@ impl Database {
             frontier = frontier.saturating_add(1);
         }
         if self.large_value_lifecycle_publications.is_empty() {
-            self.large_value_publication_lifecycle_guard.take();
+            let guard = self.large_value_publication_lifecycle_guard.take();
+            self.large_value_lifecycle_held.set(false);
+            drop(guard);
         }
         self.refresh_resident_writes();
         if persistence.notifications_deferred {

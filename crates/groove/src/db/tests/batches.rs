@@ -47,6 +47,30 @@ impl crate::chunks::MissingChunkResolver for CountingFixtureChunkResolver {
 }
 
 #[derive(Clone)]
+struct DeferredFixtureChunkResolver {
+    chunks: Rc<std::collections::BTreeMap<crate::chunks::ChunkRequest, Bytes>>,
+    ready: Rc<Cell<bool>>,
+}
+
+impl crate::chunks::MissingChunkResolver for DeferredFixtureChunkResolver {
+    fn resolve(
+        &self,
+        request: crate::chunks::ChunkRequest,
+    ) -> crate::chunks::ChunkFuture<'_, Result<Bytes, crate::chunks::ChunkError>> {
+        let chunks = Rc::clone(&self.chunks);
+        let ready = Rc::clone(&self.ready);
+        Box::pin(async move {
+            std::future::poll_fn(|_| ready.get().then_some(()).map_or(Poll::Pending, Poll::Ready))
+                .await;
+            chunks
+                .get(&request)
+                .cloned()
+                .ok_or(crate::chunks::ChunkError::Unavailable)
+        })
+    }
+}
+
+#[derive(Clone)]
 struct CrashAfterChunkPut {
     storage: Rc<crate::chunks::MemoryChunkStorage>,
     fail_after_successes: Cell<Option<usize>>,
@@ -1865,37 +1889,104 @@ async fn sequential_cold_large_value_publications_do_not_deadlock_observer() {
     database.finish_persistence(second).unwrap();
 }
 
+/// The first publication has no predecessor lifecycle guard, but its cold
+/// resolver can still resume after the table write is durable. That late
+/// installation must not re-enter a self-held lifecycle mutex or disappear.
+#[futures_test::test]
+async fn first_cold_publication_persists_before_resolver_without_deadlock() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(chunks.clone());
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![3; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
+    )
+    .unwrap();
+    let staged = database
+        .stage_large_value_preparation(prepared.clone())
+        .await
+        .unwrap();
+    let root = prepared
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref == prepared.value_ref.root)
+        .unwrap()
+        .clone();
+    crate::chunks::ChunkStorage::delete(&*chunks, root.node_ref.locator, root.node_ref.object_hash)
+        .await
+        .unwrap();
+    database
+        .storage
+        .delete(
+            LARGE_VALUE_METADATA_CF.to_owned(),
+            large_value_node_key(&root.node_ref).unwrap(),
+        )
+        .await
+        .unwrap();
+    let resolver_ready = Rc::new(Cell::new(false));
+    database.set_missing_chunk_resolver(Rc::new(DeferredFixtureChunkResolver {
+        chunks: Rc::new(std::collections::BTreeMap::from([(
+            crate::chunks::ChunkRequest {
+                object_hash: root.node_ref.object_hash.0,
+                locator: root.node_ref.locator,
+            },
+            Bytes::from(root.encoded),
+        )])),
+        ready: Rc::clone(&resolver_ready),
+    }));
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("objects"))
+        .await
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut insert = database.open_batch();
+    insert.insert(
+        "objects",
+        vec![Value::U64(1), Value::Large(staged.value_ref)],
+    );
+    insert.accept_large_value(staged.id);
+    let applied = database.apply_batch(insert).await.unwrap();
+    assert!(subscription.try_recv().is_err());
+    let persisted = applied.persist().await;
+
+    resolver_ready.set(true);
+    database.flush().await.unwrap();
+    assert_eq!(
+        subscription
+            .try_recv_with_publication()
+            .unwrap()
+            .publication,
+        Some(applied.publication())
+    );
+    database.finish_persistence(persisted).unwrap();
+    assert!(
+        database
+            .storage
+            .get(
+                LARGE_VALUE_METADATA_CF.to_owned(),
+                large_value_node_key(&root.node_ref).unwrap(),
+            )
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
 /// A cold B evaluation may detach after its publication is assigned while its
-/// install observer remains pending. Once resumed, the observer's lifecycle
-/// writes must remain in B's resident overlay and B's durable operation set.
+/// install observer remains pending. Once B's snapshot is durable, a resumed
+/// observer must commit its lifecycle writes as a durable follow-on operation.
 #[futures_test::test]
 async fn suspended_resident_chunk_install_joins_assigned_publication() {
-    #[derive(Clone)]
-    struct PausedResolver {
-        chunks: Rc<std::collections::BTreeMap<crate::chunks::ChunkRequest, Bytes>>,
-        ready: Rc<Cell<bool>>,
-    }
-
-    impl crate::chunks::MissingChunkResolver for PausedResolver {
-        fn resolve(
-            &self,
-            request: crate::chunks::ChunkRequest,
-        ) -> crate::chunks::ChunkFuture<'_, Result<Bytes, crate::chunks::ChunkError>> {
-            let chunks = Rc::clone(&self.chunks);
-            let ready = Rc::clone(&self.ready);
-            Box::pin(async move {
-                std::future::poll_fn(|_| {
-                    ready.get().then_some(()).map_or(Poll::Pending, Poll::Ready)
-                })
-                .await;
-                chunks
-                    .get(&request)
-                    .cloned()
-                    .ok_or(crate::chunks::ChunkError::Unavailable)
-            })
-        }
-    }
-
     let schema = DatabaseSchema::new([TableSchema::new(
         "objects",
         [
@@ -1942,7 +2033,7 @@ async fn suspended_resident_chunk_install_joins_assigned_publication() {
         .await
         .unwrap();
     let resolver_ready = Rc::new(Cell::new(false));
-    database.set_missing_chunk_resolver(Rc::new(PausedResolver {
+    database.set_missing_chunk_resolver(Rc::new(DeferredFixtureChunkResolver {
         chunks: Rc::new(std::collections::BTreeMap::from([(
             crate::chunks::ChunkRequest {
                 object_hash: root.node_ref.object_hash.0,
@@ -1983,6 +2074,15 @@ async fn suspended_resident_chunk_install_joins_assigned_publication() {
     let second = database.apply_batch(second_batch).await.unwrap();
     assert!(subscription.try_recv().is_err());
 
+    // A cancelled queued persistence attempt must leave B retryable. Its
+    // eventual successful attempt still snapshots before the resolver wakes.
+    let mut cancelled = Box::pin(second.persist());
+    assert!(futures::poll!(cancelled.as_mut()).is_pending());
+    drop(cancelled);
+
+    database.finish_persistence(first.persist().await).unwrap();
+    database.finish_persistence(second.persist().await).unwrap();
+
     resolver_ready.set(true);
     database.flush().await.unwrap();
     assert_eq!(
@@ -1993,8 +2093,6 @@ async fn suspended_resident_chunk_install_joins_assigned_publication() {
         Some(second.publication())
     );
 
-    database.finish_persistence(first.persist().await).unwrap();
-    database.finish_persistence(second.persist().await).unwrap();
     assert!(
         database
             .storage
