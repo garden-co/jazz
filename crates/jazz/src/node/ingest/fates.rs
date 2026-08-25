@@ -391,6 +391,11 @@ where
             }
             None => tx.permission_subject.unwrap_or(tx.made_by),
         };
+        // Gate the effective permission subject so relayed anonymous sessions
+        // stay read-only without changing trusted-backend attribution.
+        if permission_subject.is_anonymous() {
+            return Ok(false);
+        }
         for version in versions {
             if !self
                 .version_satisfies_write_policy(version, permission_subject, tx.tx_id)

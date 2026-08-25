@@ -327,6 +327,15 @@ impl AuthorSubject {
             Self::Authenticated(value) => value.as_str(),
         }
     }
+
+    /// Whether this subject belongs to the read-only anonymous issuer.
+    pub(crate) fn is_anonymous(&self) -> bool {
+        matches!(
+            self,
+            Self::Authenticated(value)
+                if value.as_str().starts_with(r#"["urn:jazz:anonymous","#)
+        )
+    }
 }
 
 fn principal_is_nonempty(value: &str) -> bool {
