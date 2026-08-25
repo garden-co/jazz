@@ -1917,8 +1917,8 @@ pub fn encode_stored_scalar(kind: LargeValueKind, value: &StoredScalar) -> Resul
         StoredScalar::Primitive(bytes) => {
             validate_logical(kind, bytes)?;
             EnumValue::create(
-                0,
-                schema.case(0).map_err(|_| Error::MalformedScalar)?.payload,
+                2,
+                schema.case(2).map_err(|_| Error::MalformedScalar)?.payload,
                 &[primitive_value(kind, bytes.clone())],
             )
             .map_err(|_| Error::MalformedScalar)?
@@ -1929,8 +1929,8 @@ pub fn encode_stored_scalar(kind: LargeValueKind, value: &StoredScalar) -> Resul
             }
             validate_descriptor(value)?;
             EnumValue::create(
-                1,
-                schema.case(1).map_err(|_| Error::MalformedScalar)?.payload,
+                3,
+                schema.case(3).map_err(|_| Error::MalformedScalar)?.payload,
                 &chunked_values(value),
             )
             .map_err(|_| Error::MalformedScalar)?
@@ -1973,13 +1973,13 @@ pub fn decode_stored_scalar(kind: LargeValueKind, encoded: &[u8]) -> Result<Stor
         .to_values()
         .map_err(|_| Error::MalformedScalar)?;
     match value.tag() {
-        0 => {
+        2 => {
             if values.len() != 1 {
                 return Err(Error::MalformedScalar);
             }
             primitive_bytes(kind, &values[0]).map(StoredScalar::Primitive)
         }
-        1 => decode_chunked_values(kind, &values).map(StoredScalar::Chunked),
+        3 => decode_chunked_values(kind, &values).map(StoredScalar::Chunked),
         _ => Err(Error::MalformedScalar),
     }
 }
@@ -1989,8 +1989,8 @@ pub fn inline_scalar_bytes(kind: LargeValueKind, encoded: &[u8]) -> Result<&[u8]
     let (tag, payload) =
         crate::records::split_variant_record(encoded).map_err(|_| Error::MalformedScalar)?;
     match tag {
-        0 => {
-            let descriptor = schema.case(0).map_err(|_| Error::MalformedScalar)?.payload;
+        2 => {
+            let descriptor = schema.case(2).map_err(|_| Error::MalformedScalar)?.payload;
             let values = descriptor
                 .bind(payload)
                 .to_values()
@@ -2009,7 +2009,7 @@ pub fn inline_scalar_bytes(kind: LargeValueKind, encoded: &[u8]) -> Result<&[u8]
                 .map_err(|_| Error::MalformedScalar)?;
             Ok(&payload[span])
         }
-        1 => {
+        3 => {
             // Validate the complete descriptor before reporting that materialization is needed.
             let _ = decode_stored_scalar(kind, encoded)?;
             Err(Error::RequiresEvaluation)
@@ -2064,6 +2064,19 @@ fn stored_scalar_schema(kind: LargeValueKind) -> EnumSchema {
             LargeValueKind::Json => "groove.internal.stored_scalar.json",
         },
         [
+            // Tags 0 and 1 belonged to the pre-v13 private scalar codec. Keep
+            // them reserved and reject them at the scalar boundary so no
+            // legacy byte sequence can be accepted with a different meaning. In particular, legacy
+            // inline bytes were `[0] + payload`, which can otherwise collide
+            // exactly with a length-prefixed canonical record.
+            EnumCase::new(
+                "ReservedLegacyPrimitive",
+                RecordDescriptor::new(Vec::<(String, ValueType)>::new()),
+            ),
+            EnumCase::new(
+                "ReservedLegacyChunked",
+                RecordDescriptor::new(Vec::<(String, ValueType)>::new()),
+            ),
             EnumCase::new("Primitive", primitive),
             EnumCase::new("Chunked", chunked),
         ],
@@ -4617,7 +4630,7 @@ mod tests {
                 &ValueType::Enum(Box::new(stored_scalar_schema(LargeValueKind::Bytes))),
             )
             .unwrap();
-            assert!(matches!(generic, Value::Enum(ref value) if value.tag() == 0));
+            assert!(matches!(generic, Value::Enum(ref value) if value.tag() == 2));
         }
         for (kind, primitive) in [
             (
@@ -4637,7 +4650,18 @@ mod tests {
             Err(Error::MalformedScalar)
         );
         assert_eq!(
-            decode_stored_scalar(LargeValueKind::Bytes, &[2, 0]),
+            decode_stored_scalar(LargeValueKind::Bytes, &[4, 0]),
+            Err(Error::MalformedScalar)
+        );
+        // The pre-v13 codec encoded inline bytes as `[0] + payload`. Without
+        // reserved tags, this exact legacy value would be accepted as the new
+        // primitive `abc`, silently dropping its leading length-like byte.
+        assert_eq!(
+            decode_stored_scalar(LargeValueKind::Bytes, &[0, 3, b'a', b'b', b'c']),
+            Err(Error::MalformedScalar)
+        );
+        assert_eq!(
+            inline_scalar_bytes(LargeValueKind::Bytes, &[0, 3, b'a', b'b', b'c']),
             Err(Error::MalformedScalar)
         );
     }
@@ -4684,7 +4708,7 @@ mod tests {
                 &ValueType::Enum(Box::new(stored_scalar_schema(kind))),
             )
             .unwrap();
-            assert!(matches!(generic, Value::Enum(ref value) if value.tag() == 1));
+            assert!(matches!(generic, Value::Enum(ref value) if value.tag() == 3));
         }
     }
 
