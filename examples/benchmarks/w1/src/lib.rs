@@ -21,6 +21,7 @@ pub struct Fixture<S: OrderedKvStorage> {
     board: PreparedQuery,
     comments: PreparedQuery,
     activity: PreparedQuery,
+    bounded_activity_page: PreparedQuery,
 }
 
 impl Fixture<MemoryStorage> {
@@ -160,7 +161,7 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
                         (
                             "kind".to_owned(),
                             Value::String(
-                                if index % 2 == 0 {
+                                if (index / PROJECTS).is_multiple_of(2) {
                                     "updated"
                                 } else {
                                     "commented"
@@ -181,17 +182,30 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
         let board = prepare_page(&db, "tasks", "project", projects[0], "updated_at");
         let comments_query = prepare_page(&db, "comments", "task", task_ids[0], "created_at");
         let activity_query = prepare_page(&db, "activity", "task", task_ids[0], "created_at");
+        let bounded_activity_page = db
+            .prepare_query(
+                &Query::from("activity")
+                    .filter(eq(col("project"), lit(projects[0].0)))
+                    .filter(eq(col("kind"), lit("updated")))
+                    .limit(50),
+            )
+            .expect("prepare W1 two-equality activity page");
         let fixture = Self {
             db,
             board,
             comments: comments_query,
             activity: activity_query,
+            bounded_activity_page,
         };
         assert_eq!(fixture.board_count(), tasks.div_ceil(PROJECTS).min(200));
         assert_eq!(fixture.comments_count(), comments.div_ceil(tasks).min(200));
         assert_eq!(
             fixture.activity_count(),
             activity_events.div_ceil(tasks).min(200)
+        );
+        assert_eq!(
+            fixture.bounded_activity_page_count(),
+            expected_bounded_activity_count(activity_events)
         );
         fixture
     }
@@ -210,6 +224,10 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
 
     pub fn task_detail_count(&self) -> usize {
         self.comments_count() + self.activity_count()
+    }
+
+    pub fn bounded_activity_page_count(&self) -> usize {
+        self.read_count(&self.bounded_activity_page)
     }
 
     fn read_count(&self, query: &PreparedQuery) -> usize {
@@ -287,4 +305,11 @@ fn row_id(kind: u8, index: usize) -> RowUuid {
     bytes[0] = kind;
     bytes[8..].copy_from_slice(&(index as u64).to_be_bytes());
     RowUuid::from_bytes(bytes)
+}
+
+fn expected_bounded_activity_count(activity_events: usize) -> usize {
+    (0..activity_events)
+        .filter(|index| index % PROJECTS == 0 && (index / PROJECTS).is_multiple_of(2))
+        .count()
+        .min(50)
 }
