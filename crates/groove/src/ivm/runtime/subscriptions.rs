@@ -2729,9 +2729,22 @@ impl IvmRuntime {
         if let Some(output) = output_memo.get(&memo_key) {
             return Ok(*output);
         }
-        let output = self.infer_builder_output_uncached(graph, output_memo)?;
-        output_memo.insert(memo_key, output);
-        Ok(output)
+        // A legal policy graph can be deeply nested (for example a recursive
+        // inheritance policy after its public result and routing projections
+        // have been attached). Infer every child before its parent explicitly
+        // so descriptor inference does not consume the server owner's stack.
+        for builder in graph.postorder() {
+            let key = builder as *const GraphBuilder as usize;
+            if output_memo.contains_key(&key) {
+                continue;
+            }
+            let output = self.infer_builder_output_uncached(builder, output_memo)?;
+            output_memo.insert(key, output);
+        }
+        output_memo
+            .get(&memo_key)
+            .copied()
+            .ok_or(IvmRuntimeError::UnsupportedOperator)
     }
 
     fn infer_builder_output_uncached(

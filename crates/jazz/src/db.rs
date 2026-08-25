@@ -998,7 +998,12 @@ where
     identity: DbIdentity,
     node: Rc<Node<S>>,
     row_id_source: Rc<RefCell<Box<dyn RowIdSource>>>,
+    row_id_source_guarantees_fresh: bool,
     next_now_ms: Rc<Cell<u64>>,
+    // Minted only by the explicitly unsafe trusted-backend open path. SYSTEM
+    // itself is an admission identity, not proof that a Db may forge external
+    // row provenance.
+    backend_attribution: bool,
 }
 
 /// Process-local, content-addressed identity for an exact typed schema view.
@@ -2174,7 +2179,8 @@ pub enum WriteIdentity {
     /// Author and authorize the write as this trusted session identity.
     Session(AuthorSubject),
     /// Attribute provenance while retaining the database identity as policy subject.
-    /// Client databases reject attribution to a different author.
+    /// Only a Db opened through the trusted-backend capability may attribute
+    /// to a different author; its database identity remains the policy subject.
     Attribution(AuthorSubject),
 }
 
@@ -2360,13 +2366,21 @@ where
         options: InsertOptions,
     ) -> Result<RowUuid, Error> {
         ensure_transaction_identity(options.identity)?;
+        let known_fresh_row = options.row_id.is_none() && self.db().row_id_source_guarantees_fresh;
         let row = options
             .row_id
             .unwrap_or_else(|| self.db().row_id_source.borrow_mut().next_row_id());
         match options.target {
             ExactWriteTarget::Root => {
                 self.db()
-                    .stage_mergeable_insert(self.tx_id(), table, row, cells, options.updated_at_ms)
+                    .stage_mergeable_insert(
+                        self.tx_id(),
+                        table,
+                        row,
+                        cells,
+                        options.updated_at_ms,
+                        known_fresh_row,
+                    )
                     .await?;
             }
             ExactWriteTarget::Branch(branch) => {
@@ -2378,6 +2392,7 @@ where
                         row,
                         cells,
                         options.updated_at_ms,
+                        known_fresh_row,
                     )
                     .await?;
             }
@@ -2445,6 +2460,7 @@ where
                             row,
                             cells,
                             options.updated_at_ms,
+                            false,
                         )
                         .await
                 }

@@ -125,31 +125,10 @@ pub(super) fn record_deltas_digest(deltas: &RecordDeltas) -> u64 {
 }
 
 pub(super) fn builder_contains_recursive(graph: &GraphBuilder) -> bool {
-    match graph {
-        GraphBuilder::Recursive { .. } => true,
-        GraphBuilder::Filter { input, .. }
-        | GraphBuilder::Project { input, .. }
-        | GraphBuilder::StreamingChecksum { input, .. }
-        | GraphBuilder::UnwrapNullable { input, .. }
-        | GraphBuilder::Unnest { input, .. }
-        | GraphBuilder::VariantProject { input, .. }
-        | GraphBuilder::ArgMaxBy { input, .. }
-        | GraphBuilder::ArgMinBy { input, .. }
-        | GraphBuilder::TopBy { input, .. }
-        | GraphBuilder::CollectBy { input, .. }
-        | GraphBuilder::Aggregate { input, .. } => builder_contains_recursive(input),
-        GraphBuilder::Union { inputs } => inputs.iter().any(builder_contains_recursive),
-        GraphBuilder::Join { left, right, .. }
-        | GraphBuilder::SemiJoin { left, right, .. }
-        | GraphBuilder::AntiJoin { left, right, .. } => {
-            builder_contains_recursive(left) || builder_contains_recursive(right)
-        }
-        GraphBuilder::Table { .. }
-        | GraphBuilder::InlineRecords { .. }
-        | GraphBuilder::Index { .. }
-        | GraphBuilder::FrontierSource { .. }
-        | GraphBuilder::BindingSource { .. } => false,
-    }
+    graph
+        .postorder()
+        .iter()
+        .any(|node| matches!(node, GraphBuilder::Recursive { .. }))
 }
 
 pub(super) fn validate_arg_by_primary_key_indices(
@@ -478,10 +457,10 @@ impl TickEvaluator<'_> {
         Ok(())
     }
 
-    pub(super) fn take_terminal_deltas_for_output(
-        &mut self,
+    pub(super) fn terminal_delta_node_for_output(
+        &self,
         node: NodeId,
-    ) -> Result<Option<TerminalDeltas>, IvmRuntimeError> {
+    ) -> Result<Option<NodeId>, IvmRuntimeError> {
         let mut pending = vec![node];
         let mut seen = HashSet::new();
         let mut fallback = None;
@@ -501,16 +480,25 @@ impl TickEvaluator<'_> {
             has_public_root |= is_public_root;
             if self.terminal_deltas.contains_key(&node) {
                 if is_public_root {
-                    return Ok(self.terminal_deltas.remove(&node));
+                    return Ok(Some(node));
                 }
                 fallback.get_or_insert(node);
             }
             pending.extend(graph_node.descriptor.inputs.iter().copied());
         }
-        Ok((!has_public_root)
-            .then_some(fallback)
-            .flatten()
-            .and_then(|node| self.terminal_deltas.remove(&node)))
+        Ok((!has_public_root).then_some(fallback).flatten())
+    }
+
+    pub(super) fn terminal_deltas_for_consumer(
+        &mut self,
+        node: NodeId,
+        last_consumer: bool,
+    ) -> Option<TerminalDeltas> {
+        if last_consumer {
+            self.terminal_deltas.remove(&node)
+        } else {
+            self.terminal_deltas.get(&node).cloned()
+        }
     }
 
     pub(super) fn output_is_structured_collect_by(

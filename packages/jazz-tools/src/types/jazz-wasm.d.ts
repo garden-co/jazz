@@ -1,6 +1,7 @@
 declare module "jazz-wasm" {
   export default function init(input?: unknown): Promise<void>;
   export function initSync(input?: unknown): void;
+  export function nativeArtifactFingerprint(): string;
   export function generateId(): string;
   export function currentTimestamp(): bigint;
   export function deriveUserId(seedB64: string): string;
@@ -126,7 +127,6 @@ declare module "jazz-wasm" {
       rowId: Uint8Array,
       cells: Uint8Array,
       column: string,
-      kind: "Text" | "Json" | "Bytea",
       mutation?: "insert" | "update" | "upsert",
       author?: Uint8Array,
       updatedAtMs?: number,

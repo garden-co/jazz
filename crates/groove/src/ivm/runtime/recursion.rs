@@ -7,7 +7,7 @@
 //! public ticks, subscriptions, and graph retention live in [`super`].
 
 use bytes::Bytes;
-use rustc_hash::FxHashMap as HashMap;
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::rc::Rc;
 
 use crate::ivm::{IvmGraph, NodeId, OpType, RecursiveOp, StaticScanSpec, TableSourceOp};
@@ -586,19 +586,15 @@ fn collect_table_sources(
     node: NodeId,
     tables: &mut std::collections::HashSet<TableSnapshotSource>,
 ) -> Result<(), IvmRuntimeError> {
-    let graph_node = graph
-        .node(node)
-        .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
-    if let OpType::TableSource(table) = &graph_node.descriptor.operator {
-        tables.insert(TableSnapshotSource {
-            table: table.table.clone(),
-            scan: table.scan.clone(),
-        });
-    }
-    for input in &graph_node.descriptor.inputs {
-        collect_table_sources(graph, *input, tables)?;
-    }
-    Ok(())
+    walk_input_graph(graph, node, |_, graph_node| {
+        if let OpType::TableSource(table) = &graph_node.descriptor.operator {
+            tables.insert(TableSnapshotSource {
+                table: table.table.clone(),
+                scan: table.scan.clone(),
+            });
+        }
+        Ok(())
+    })
 }
 
 pub(super) fn recursive_read_tables(
@@ -619,22 +615,18 @@ fn collect_table_source_names(
     node: NodeId,
     tables: &mut HashMap<String, RecordDescriptor>,
 ) -> Result<(), IvmRuntimeError> {
-    let graph_node = graph
-        .node(node)
-        .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
-    if let OpType::TableSource(table) = &graph_node.descriptor.operator {
-        tables
-            .entry(table.table.clone())
-            .or_insert_with(|| graph_node.descriptor.output.records());
-    } else if let OpType::IndexSource(index) = &graph_node.descriptor.operator {
-        tables
-            .entry(index.table.clone())
-            .or_insert_with(|| graph_node.descriptor.output.records());
-    }
-    for input in &graph_node.descriptor.inputs {
-        collect_table_source_names(graph, *input, tables)?;
-    }
-    Ok(())
+    walk_input_graph(graph, node, |_, graph_node| {
+        if let OpType::TableSource(table) = &graph_node.descriptor.operator {
+            tables
+                .entry(table.table.clone())
+                .or_insert_with(|| graph_node.descriptor.output.records());
+        } else if let OpType::IndexSource(index) = &graph_node.descriptor.operator {
+            tables
+                .entry(index.table.clone())
+                .or_insert_with(|| graph_node.descriptor.output.records());
+        }
+        Ok(())
+    })
 }
 
 fn collect_binding_sources(
@@ -642,18 +634,14 @@ fn collect_binding_sources(
     node: NodeId,
     shapes: &mut HashMap<String, RecordDescriptor>,
 ) -> Result<(), IvmRuntimeError> {
-    let graph_node = graph
-        .node(node)
-        .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
-    if let OpType::BindingSource(binding) = &graph_node.descriptor.operator {
-        shapes
-            .entry(binding.shape.clone())
-            .or_insert_with(|| graph_node.descriptor.output.records());
-    }
-    for input in &graph_node.descriptor.inputs {
-        collect_binding_sources(graph, *input, shapes)?;
-    }
-    Ok(())
+    walk_input_graph(graph, node, |_, graph_node| {
+        if let OpType::BindingSource(binding) = &graph_node.descriptor.operator {
+            shapes
+                .entry(binding.shape.clone())
+                .or_insert_with(|| graph_node.descriptor.output.records());
+        }
+        Ok(())
+    })
 }
 
 fn collect_anti_join_right_table_sources(
@@ -661,19 +649,42 @@ fn collect_anti_join_right_table_sources(
     node: NodeId,
     tables: &mut HashMap<String, RecordDescriptor>,
 ) -> Result<(), IvmRuntimeError> {
-    let graph_node = graph
-        .node(node)
-        .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
-    if matches!(&graph_node.descriptor.operator, OpType::AntiJoin(_)) {
-        let right = graph_node
-            .descriptor
-            .inputs
-            .get(1)
-            .ok_or(IvmRuntimeError::GraphInputMissing(node))?;
-        collect_table_source_names(graph, *right, tables)?;
-    }
-    for input in &graph_node.descriptor.inputs {
-        collect_anti_join_right_table_sources(graph, *input, tables)?;
+    walk_input_graph(graph, node, |node, graph_node| {
+        if matches!(&graph_node.descriptor.operator, OpType::AntiJoin(_)) {
+            let right = graph_node
+                .descriptor
+                .inputs
+                .get(1)
+                .ok_or(IvmRuntimeError::GraphInputMissing(node))?;
+            collect_table_source_names(graph, *right, tables)?;
+        }
+        Ok(())
+    })
+}
+
+/// Walk an IVM graph's inputs without consuming the thread stack.
+///
+/// Compilation can produce a finite but very deep chain from recursive policy
+/// lowering. These collectors run while installing recursive nodes, on the
+/// server shell's normal stack. Visiting each node at most once also preserves
+/// the collectors' set/map semantics for hash-consed shared subgraphs.
+fn walk_input_graph(
+    graph: &IvmGraph,
+    root: NodeId,
+    mut visit: impl FnMut(NodeId, &crate::ivm::GraphNode) -> Result<(), IvmRuntimeError>,
+) -> Result<(), IvmRuntimeError> {
+    let mut pending = vec![root];
+    let mut seen = HashSet::default();
+    while let Some(node) = pending.pop() {
+        if !seen.insert(node) {
+            continue;
+        }
+        let graph_node = graph
+            .node(node)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+        visit(node, graph_node)?;
+        // Reverse push retains the recursive walk's left-to-right input order.
+        pending.extend(graph_node.descriptor.inputs.iter().rev().copied());
     }
     Ok(())
 }

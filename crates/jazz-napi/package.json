@@ -8,11 +8,26 @@
     "url": "https://github.com/garden-co/jazz2"
   },
   "files": [
+    "index.cjs",
+    "index.mjs",
     "index.js",
-    "index.d.ts"
+    "index.d.ts",
+    "native-binding.cjs",
+    "native-binding.pointer.cjs",
+    "native-loader.cjs",
+    "native-artifact-fingerprint.cjs",
+    ".native-artifacts/**"
   ],
-  "main": "index.js",
+  "main": "index.cjs",
   "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.mjs",
+      "require": "./index.cjs",
+      "default": "./index.cjs"
+    }
+  },
   "publishConfig": {
     "access": "public",
     "tag": "alpha"
