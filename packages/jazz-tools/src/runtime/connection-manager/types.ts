@@ -127,8 +127,18 @@ export abstract class ConnectionManager {
 
   abstract reconnect(): Promise<void>;
 
-  updateAuth(auth: { jwtToken?: string; cookieSession?: Session }): void {
-    if ("jwtToken" in auth) this.client?.updateAuthToken(auth.jwtToken);
+  updateAuth(auth: {
+    jwtToken?: string;
+    cookieSession?: Session;
+    trustedReservedSession?: Session;
+  }): void {
+    if ("jwtToken" in auth) {
+      if (auth.jwtToken && auth.trustedReservedSession) {
+        this.client?.updateTrustedAuthToken(auth.jwtToken, auth.trustedReservedSession);
+      } else {
+        this.client?.updateAuthToken(auth.jwtToken);
+      }
+    }
     if ("cookieSession" in auth) this.client?.updateCookieSession(auth.cookieSession);
   }
 

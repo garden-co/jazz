@@ -31,6 +31,16 @@ import {
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
 import { encodeNativeNullValue, storageColumnValueType } from "./native-row-codec.js";
 import { type BatchId, type WriteReceipt } from "../client.js";
+import {
+  ANONYMOUS_JWT_ISSUER,
+  LOCAL_FIRST_JWT_ISSUER,
+  STATIC_BEARER_SESSION_ISSUER,
+  SYSTEM_SESSION_ISSUER,
+  TRUSTED_RESERVED_SESSION_TOKEN_FIELD,
+  sessionFromVerifiedReservedJwtPayload,
+  trustedReservedSessionToken,
+} from "../client-session.js";
+import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
 
 type NativeDbForTest = ReturnType<
   NonNullable<ConstructorParameters<typeof NativeRuntimeAdapter>[0]>["openMemory"]
@@ -42,6 +52,13 @@ async function committedBatchId(receipt: WriteReceipt): Promise<BatchId> {
 }
 
 const previousWebSocket = globalThis.WebSocket;
+const TEST_RUNTIME_AUTHOR = new TextEncoder().encode('["urn:jazz:test","runtime"]');
+const RESERVED_TEST_ISSUERS = [
+  SYSTEM_SESSION_ISSUER,
+  LOCAL_FIRST_JWT_ISSUER,
+  STATIC_BEARER_SESSION_ISSUER,
+  ANONYMOUS_JWT_ISSUER,
+];
 
 function decodeSchemaSource(bytes: Uint8Array) {
   return JSON.parse(new TextDecoder().decode(bytes)) as {
@@ -114,7 +131,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       { openMemory: () => fakeDb({ close }) },
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -146,7 +163,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -182,7 +199,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -213,7 +230,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           } as never,
           testSchema,
           new Uint8Array(16),
-          new Uint8Array(16),
+          TEST_RUNTIME_AUTHOR,
           1,
           true,
         ),
@@ -242,7 +259,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -291,7 +308,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -345,7 +362,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -396,7 +413,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -455,7 +472,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -512,7 +529,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -560,7 +577,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         },
       },
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -612,7 +629,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -664,7 +681,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -748,7 +765,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -819,7 +836,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -830,7 +847,8 @@ describe("NativeRuntimeAdapter server transport", () => {
         JSON.stringify({
           user_id: "00000000-0000-0000-0000-0000000000a1",
           claims: {},
-          authMode: "anonymous",
+          issuer: "https://issuer.example",
+          authMode: "external",
         }),
         "local",
       ),
@@ -866,11 +884,12 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
     const session = {
+      issuer: "https://issuer.example",
       user_id: "00000000-0000-0000-0000-0000000000a1",
       claims: {},
       authMode: "external" as const,
@@ -895,7 +914,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -905,6 +924,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       runtime.canDeleteLocally("todos", "00000000-0000-0000-0000-000000000001", {
         user_id: "00000000-0000-0000-0000-0000000000a1",
         claims: {},
+        issuer: "https://issuer.example",
         authMode: "external",
       }),
     ).toBe("unknown");
@@ -934,7 +954,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -966,12 +986,13 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
       { readAuthorizationHost: "trusted-serving" },
     );
     const session = {
+      issuer: "https://issuer.example",
       user_id: "00000000-0000-0000-0000-0000000000a1",
       claims: {},
       authMode: "external" as const,
@@ -987,6 +1008,9 @@ describe("NativeRuntimeAdapter server transport", () => {
 
   it("uses trusted serving only when the host explicitly selects it", async () => {
     const authors: string[] = [];
+    const claimUpdates: Array<{ author: string; claims: Record<string, unknown> }> = [];
+    const externalIssuer = "https://issuer.example";
+    const externalUserId = "00000000-0000-0000-0000-0000000000a1";
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
@@ -995,12 +1019,159 @@ describe("NativeRuntimeAdapter server transport", () => {
               throw new Error("trusted serving query must not use client-local all");
             },
             allForIdentity: (_query: unknown, author: Uint8Array) => {
-              authors.push(formatUuidForTest(author));
+              authors.push(new TextDecoder().decode(author));
               return encodeRows([
                 {
                   table: "todos",
                   rowId: new Uint8Array(16),
                   title: "trusted serving",
+                },
+              ]);
+            },
+            setIdentityClaims: (author: Uint8Array, claims: Record<string, unknown>) => {
+              claimUpdates.push({ author: new TextDecoder().decode(author), claims });
+            },
+            prepareQuery: () => ({}),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+      { readAuthorizationHost: "trusted-serving" },
+    );
+
+    await expect(
+      runtime.query(
+        JSON.stringify({ table: "todos" }),
+        JSON.stringify({
+          user_id: externalUserId,
+          claims: { role: "reader", subject: "application-owned-subject" },
+          issuer: externalIssuer,
+          authMode: "external",
+        }),
+        "local",
+      ),
+    ).resolves.toEqual([
+      {
+        table: "todos",
+        id: "00000000-0000-0000-0000-000000000000",
+        values: [{ type: "Text", value: "trusted serving" }],
+      },
+    ]);
+    expect(authors).toEqual([`["${externalIssuer}","${externalUserId}"]`]);
+    expect(claimUpdates).toEqual([
+      {
+        author: `["${externalIssuer}","${externalUserId}"]`,
+        claims: {
+          role: "reader",
+          subject: "application-owned-subject",
+          iss: externalIssuer,
+          issuer: externalIssuer,
+          sub: externalUserId,
+          user_id: externalUserId,
+          userId: externalUserId,
+          author: `["${externalIssuer}","${externalUserId}"]`,
+          authMode: "external",
+          auth_mode: "external",
+        },
+      },
+    ]);
+  });
+
+  it("rejects reserved issuers in public read sessions but preserves private trusted identity", async () => {
+    const authors: string[] = [];
+    const privateSystemAuthor = JSON.stringify([SYSTEM_SESSION_ISSUER, SYSTEM_AUTHOR_ID]);
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            allForIdentity: (_query: unknown, author: Uint8Array) => {
+              authors.push(new TextDecoder().decode(author));
+              return encodeRows([
+                {
+                  table: "todos",
+                  rowId: new Uint8Array(16),
+                  title: "private trusted identity",
+                },
+              ]);
+            },
+            prepareQuery: () => ({}),
+            subscribeForIdentity: () => {
+              throw new Error("reserved public session must be rejected before subscribing");
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new TextEncoder().encode(privateSystemAuthor),
+      1,
+      true,
+      { readAuthorizationHost: "trusted-serving" },
+    );
+
+    await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "local")).resolves.toEqual(
+      [
+        {
+          table: "todos",
+          id: "00000000-0000-0000-0000-000000000000",
+          values: [{ type: "Text", value: "private trusted identity" }],
+        },
+      ],
+    );
+    expect(authors).toEqual([privateSystemAuthor]);
+
+    for (const issuer of RESERVED_TEST_ISSUERS) {
+      const sessionJson = JSON.stringify({
+        issuer,
+        user_id: "public-caller",
+        claims: {},
+        authMode:
+          issuer === LOCAL_FIRST_JWT_ISSUER
+            ? "local-first"
+            : issuer === ANONYMOUS_JWT_ISSUER
+              ? "anonymous"
+              : "external",
+      });
+      await expect(
+        runtime.query(JSON.stringify({ table: "todos" }), sessionJson, "local"),
+      ).rejects.toThrow("reserved issuer");
+      expect(() =>
+        runtime.createSubscription(JSON.stringify({ table: "todos" }), sessionJson, "local"),
+      ).toThrow("reserved issuer");
+    }
+  });
+
+  it("admits verified reserved sessions carrying the in-process runtime capability", async () => {
+    const authors: string[] = [];
+    const trustedSession = sessionFromVerifiedReservedJwtPayload(
+      { iss: LOCAL_FIRST_JWT_ISSUER, sub: "verified-user" },
+      "local-first",
+    )!;
+    const runtimeSessionJson = JSON.stringify({
+      ...trustedSession,
+      [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: trustedReservedSessionToken(trustedSession),
+    });
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            allForIdentity: (_query: unknown, author: Uint8Array) => {
+              authors.push(new TextDecoder().decode(author));
+              return encodeRows([
+                {
+                  table: "todos",
+                  rowId: new Uint8Array(16),
+                  title: "verified reserved identity",
                 },
               ]);
             },
@@ -1013,30 +1184,96 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
       { readAuthorizationHost: "trusted-serving" },
     );
 
     await expect(
-      runtime.query(
-        JSON.stringify({ table: "todos" }),
-        JSON.stringify({
-          user_id: "00000000-0000-0000-0000-0000000000a1",
-          claims: {},
-          authMode: "anonymous",
-        }),
-        "local",
-      ),
+      runtime.query(JSON.stringify({ table: "todos" }), runtimeSessionJson, "local"),
     ).resolves.toEqual([
       {
         table: "todos",
         id: "00000000-0000-0000-0000-000000000000",
-        values: [{ type: "Text", value: "trusted serving" }],
+        values: [{ type: "Text", value: "verified reserved identity" }],
       },
     ]);
-    expect(authors).toEqual(["00000000-0000-0000-0000-0000000000a1"]);
+    expect(authors).toEqual(['["urn:jazz:local-first","verified-user"]']);
+  });
+
+  it("keeps first-party reserved browser sessions out of public native identity ingress", async () => {
+    const setIdentityClaims = vi.fn(() => {
+      // This represents the raw NAPI/WASM identity ABI. It deliberately
+      // rejects reserved canonical subjects, just as the real binding does.
+      throw new Error("author issuer is reserved");
+    });
+    const all = vi.fn(() =>
+      encodeRows([
+        {
+          table: "todos",
+          rowId: new Uint8Array(16),
+          title: "local replica",
+        },
+      ]),
+    );
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all,
+            prepareQuery: () => ({}),
+            setIdentityClaims,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    for (const [issuer, authMode] of [
+      [LOCAL_FIRST_JWT_ISSUER, "local-first"],
+      [ANONYMOUS_JWT_ISSUER, "anonymous"],
+    ] as const) {
+      const trustedSession = sessionFromVerifiedReservedJwtPayload(
+        { iss: issuer, sub: `${authMode}-browser-user` },
+        authMode,
+      )!;
+      await expect(
+        runtime.query(
+          JSON.stringify({ table: "todos" }),
+          JSON.stringify({
+            ...trustedSession,
+            [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: trustedReservedSessionToken(trustedSession),
+          }),
+          "local",
+        ),
+      ).resolves.toHaveLength(1);
+    }
+
+    // A serialized lookalike has no in-process capability and must still be
+    // rejected before it can reach either the local replica or the native ABI.
+    await expect(
+      runtime.query(
+        JSON.stringify({ table: "todos" }),
+        JSON.stringify({
+          issuer: LOCAL_FIRST_JWT_ISSUER,
+          user_id: "forged-browser-user",
+          claims: {},
+          authMode: "local-first",
+        }),
+        "local",
+      ),
+    ).rejects.toThrow("reserved issuer");
+
+    expect(all).toHaveBeenCalledTimes(2);
+    expect(setIdentityClaims).not.toHaveBeenCalled();
   });
 
   it("decodes fixed-width array columns from native row batches", async () => {
@@ -1054,7 +1291,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       arraySchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -1102,7 +1339,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -1167,7 +1404,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -1249,7 +1486,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         },
       },
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -1325,7 +1562,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -1428,7 +1665,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -1463,7 +1700,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -1507,7 +1744,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         },
       },
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -1577,7 +1814,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -1628,7 +1865,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         },
       },
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -1783,7 +2020,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       relationSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -1894,7 +2131,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       relationSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -1984,7 +2221,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2044,7 +2281,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2104,7 +2341,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2145,7 +2382,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2192,7 +2429,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2202,12 +2439,18 @@ describe("NativeRuntimeAdapter server transport", () => {
     await Promise.all([
       runtime.query(
         JSON.stringify({ table: "todos" }),
-        JSON.stringify({ user_id: "00000000-0000-0000-0000-0000000000a1" }),
+        JSON.stringify({
+          issuer: "https://issuer.example",
+          user_id: "00000000-0000-0000-0000-0000000000a1",
+        }),
         "edge",
       ),
       runtime.query(
         JSON.stringify({ table: "todos" }),
-        JSON.stringify({ user_id: "00000000-0000-0000-0000-0000000000b2" }),
+        JSON.stringify({
+          issuer: "https://issuer.example",
+          user_id: "00000000-0000-0000-0000-0000000000b2",
+        }),
         "edge",
       ),
     ]);
@@ -2272,7 +2515,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2317,7 +2560,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         } as never,
         testSchema,
         new Uint8Array(16),
-        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
         1,
         true,
       );
@@ -2380,7 +2623,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2427,7 +2670,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2482,7 +2725,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2520,7 +2763,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2615,7 +2858,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2661,7 +2904,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2696,7 +2939,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2751,7 +2994,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2781,7 +3024,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2825,15 +3068,43 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(() =>
       runtime.createSubscription(
         JSON.stringify({ table: "todos" }),
-        JSON.stringify({ user_id: "00000000-0000-0000-0000-000000000000" }),
+        JSON.stringify({
+          issuer: "https://issuer.example",
+          user_id: "00000000-0000-0000-0000-000000000000",
+        }),
       ),
     ).not.toThrow();
     expect(() =>
       runtime.createSubscription(
         JSON.stringify({ table: "todos" }),
-        JSON.stringify({ user_id: null }),
+        JSON.stringify({ issuer: "https://issuer.example", user_id: null }),
       ),
     ).toThrow("session is missing user_id");
+    expect(() =>
+      runtime.createSubscription(
+        JSON.stringify({ table: "todos" }),
+        JSON.stringify({ issuer: "https://issuer.example", user_id: "\ud800" }),
+      ),
+    ).toThrow("session is missing user_id");
+    expect(() =>
+      runtime.createSubscription(
+        JSON.stringify({ table: "todos" }),
+        JSON.stringify({ issuer: "\udc00", user_id: "00000000-0000-0000-0000-000000000000" }),
+      ),
+    ).toThrow("session is missing issuer");
+    expect(() =>
+      runtime.createSubscription(
+        JSON.stringify({ table: "todos" }),
+        JSON.stringify({ user_id: "00000000-0000-0000-0000-000000000000" }),
+      ),
+    ).toThrow("session is missing issuer");
+    expect(() =>
+      runtime.insert(
+        "todos",
+        { title: { type: "Text", value: "missing issuer" } },
+        JSON.stringify({ user_id: "00000000-0000-0000-0000-000000000000" }),
+      ),
+    ).toThrow("session is missing issuer");
   });
 
   it("applies subscription deltas to the full keyed snapshot", async () => {
@@ -2857,7 +3128,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -3011,7 +3282,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -3085,7 +3356,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -3150,7 +3421,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       schema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -3183,7 +3454,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -3227,7 +3498,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -3282,7 +3553,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         },
       } satisfies WasmSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -3380,7 +3651,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         },
       } satisfies WasmSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -3461,7 +3732,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -4026,7 +4297,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.close();
   });
 
-  it("coerces UUID provenance authors into public text subscription frames", () => {
+  it("passes canonical text provenance authors through public text subscription frames", () => {
     const schema = {
       notes: {
         columns: [
@@ -4062,9 +4333,97 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(change.row.values).toEqual([
       { type: "Text", value: "public title" },
       { type: "Text", value: "public note" },
-      { type: "Text", value: "00000000-0000-0000-0000-0000000000aa" },
+      { type: "Text", value: JSON.stringify(["https://issuer.example", "user-1"]) },
       { type: "Timestamp", value: 123_000 },
     ]);
+  });
+
+  it.each([
+    {
+      name: "arbitrary text",
+      provenanceBytes: new TextEncoder().encode("not-json"),
+    },
+    {
+      name: "double stored-scalar wrapper",
+      provenanceBytes: Uint8Array.from([
+        0,
+        ...inlineScalar(JSON.stringify(["https://issuer.example", "user-1"])),
+      ]),
+    },
+    {
+      name: "noncanonical JSON whitespace",
+      provenanceBytes: new TextEncoder().encode(`[ "https://issuer.example", "user-1" ]`),
+    },
+    {
+      name: "ASCII-blank component",
+      provenanceBytes: inlineScalar(JSON.stringify(["https://issuer.example", " "])),
+    },
+  ])("rejects malformed public provenance author bytes: $name", ({ provenanceBytes }) => {
+    const schema = {
+      notes: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "note", column_type: { type: "Text" }, nullable: true },
+        ],
+      },
+    } satisfies WasmSchema;
+    const publicColumns = [
+      ...schema.notes.columns,
+      { name: "$createdBy", column_type: { type: "Text" }, nullable: false },
+      { name: "$createdAt", column_type: { type: "Timestamp" }, nullable: false },
+    ] as const;
+    const nativeDelta = readNativeSubscriptionDelta(
+      new PostcardReader(
+        encodeUserWrappedSubscriptionDelta({
+          table: "notes",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000321"),
+          title: "public title",
+          note: "public note",
+          provenanceBytes,
+        }),
+      ),
+    );
+
+    expect(() =>
+      applySubscriptionDeltaWithWireDelta([], new Map(), nativeDelta, schema, true, {
+        rootTable: "notes",
+        rootColumns: publicColumns,
+      }),
+    ).toThrow(/canonical author subject/);
+  });
+
+  it("keeps ordinary text decoding strict while validating provenance specially", () => {
+    const schema = {
+      notes: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "note", column_type: { type: "Text" }, nullable: true },
+        ],
+      },
+    } satisfies WasmSchema;
+    const publicColumns = [
+      ...schema.notes.columns,
+      { name: "$createdBy", column_type: { type: "Text" }, nullable: false },
+      { name: "$createdAt", column_type: { type: "Timestamp" }, nullable: false },
+    ] as const;
+    const nativeDelta = readNativeSubscriptionDelta(
+      new PostcardReader(
+        encodeUserWrappedSubscriptionDelta({
+          table: "notes",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000321"),
+          title: "public title",
+          titleBytes: new TextEncoder().encode("unwrapped ordinary text"),
+          note: "public note",
+        }),
+      ),
+    );
+
+    expect(() =>
+      applySubscriptionDeltaWithWireDelta([], new Map(), nativeDelta, schema, true, {
+        rootTable: "notes",
+        rootColumns: publicColumns,
+      }),
+    ).toThrow("indirect scalar crossed a logical binding boundary");
   });
 
   it("encodes range id comparisons into prepared native queries", async () => {
@@ -4098,7 +4457,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -4163,7 +4522,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -4222,7 +4581,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         },
       },
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -4320,7 +4679,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       } as never,
       schema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -4361,7 +4720,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
       { readAuthorizationHost: "trusted-serving" },
@@ -4378,7 +4737,11 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
         yield "updated";
       })(),
       JSON.stringify({
-        session: { user_id: "user-1", claims: { role: "editor" } },
+        session: {
+          issuer: "https://issuer.example",
+          user_id: "user-1",
+          claims: { role: "editor" },
+        },
         updated_at: 1_234_000,
         branch_view: { head, base },
       }),
@@ -4391,6 +4754,208 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     expect(call[7]).toBe(1234);
     expect(call[8]).toEqual(head);
     expect(call[9]).toEqual(base);
+  });
+
+  it.each([
+    {
+      name: "valid canonical attribution",
+      attribution: JSON.stringify(["https://issuer.example", "user-1"]),
+      expectedAuthor: JSON.stringify(["https://issuer.example", "user-1"]),
+    },
+    {
+      name: "noncanonical JSON whitespace",
+      attribution: `[ "https://issuer.example", "user-1" ]`,
+      expectedAuthor: undefined,
+    },
+    {
+      name: "blank subject",
+      attribution: JSON.stringify(["https://issuer.example", " "]),
+      expectedAuthor: undefined,
+    },
+  ])("strictly parses write-context canonical author attribution: $name", async (testCase) => {
+    const ownerAuthor = JSON.stringify(["urn:jazz:test", "owner"]);
+    const beginStreamingMutationEncoded = vi.fn(
+      (
+        _table: string,
+        _rowId: Uint8Array,
+        _cells: Uint8Array,
+        _column: string,
+        _kind: "Text" | "Json" | "Bytea",
+        _mutation?: "insert" | "update" | "upsert",
+        _author?: Uint8Array,
+        _updatedAtMs?: number,
+        _head?: unknown,
+        _base?: unknown,
+      ) => ({
+        push: () => undefined,
+        finish: () => fakeWrite(),
+        abort: vi.fn(),
+      }),
+    );
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => fakeDb({ beginStreamingMutationEncoded }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new TextEncoder().encode(ownerAuthor),
+      1,
+      true,
+      { readAuthorizationHost: "trusted-serving" },
+    );
+
+    await runtime.streamingMutation(
+      "update",
+      "todos",
+      {},
+      "title",
+      (async function* () {
+        yield "updated";
+      })(),
+      JSON.stringify({ attribution: testCase.attribution }),
+      "00000000-0000-0000-0000-000000000123",
+    );
+
+    const author = beginStreamingMutationEncoded.mock.calls[0]?.[6];
+    expect(author instanceof Uint8Array ? new TextDecoder().decode(author) : undefined).toBe(
+      testCase.expectedAuthor ?? ownerAuthor,
+    );
+  });
+
+  it("rejects reserved public write-context sessions and attributions", async () => {
+    const beginStreamingMutationEncoded = vi.fn(() => ({
+      push: () => undefined,
+      finish: () => fakeWrite(),
+      abort: vi.fn(),
+    }));
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => fakeDb({ beginStreamingMutationEncoded }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new TextEncoder().encode(JSON.stringify(["urn:jazz:test", "owner"])),
+      1,
+      true,
+      { readAuthorizationHost: "trusted-serving" },
+    );
+
+    async function* source() {
+      yield "updated";
+    }
+
+    for (const issuer of RESERVED_TEST_ISSUERS) {
+      await expect(
+        runtime.streamingMutation(
+          "update",
+          "todos",
+          {},
+          "title",
+          source(),
+          JSON.stringify({
+            session: {
+              issuer,
+              user_id: "public-caller",
+              claims: {},
+            },
+          }),
+          "00000000-0000-0000-0000-000000000123",
+        ),
+      ).rejects.toThrow("reserved issuer");
+
+      await expect(
+        runtime.streamingMutation(
+          "update",
+          "todos",
+          {},
+          "title",
+          source(),
+          JSON.stringify({ attribution: JSON.stringify([issuer, "public-caller"]) }),
+          "00000000-0000-0000-0000-000000000123",
+        ),
+      ).rejects.toThrow("reserved issuer");
+    }
+
+    await expect(
+      runtime.streamingMutation(
+        "update",
+        "todos",
+        {},
+        "title",
+        source(),
+        JSON.stringify({ attribution: SYSTEM_AUTHOR_ID }),
+        "00000000-0000-0000-0000-000000000123",
+      ),
+    ).rejects.toThrow("reserved issuer");
+
+    expect(beginStreamingMutationEncoded).not.toHaveBeenCalled();
+  });
+
+  it("admits verified reserved write-context sessions carrying the runtime capability", async () => {
+    const beginStreamingMutationEncoded = vi.fn(
+      (
+        _table: string,
+        _rowId: Uint8Array,
+        _cells: Uint8Array,
+        _column: string,
+        _kind: "Text" | "Json" | "Bytea",
+        _mutation?: "insert" | "update" | "upsert",
+        _author?: Uint8Array,
+        _updatedAtMs?: number,
+        _head?: unknown,
+        _base?: unknown,
+      ) => ({
+        push: () => undefined,
+        finish: () => fakeWrite(),
+        abort: vi.fn(),
+      }),
+    );
+    const trustedSession = sessionFromVerifiedReservedJwtPayload(
+      { iss: LOCAL_FIRST_JWT_ISSUER, sub: "verified-writer" },
+      "local-first",
+    )!;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => fakeDb({ beginStreamingMutationEncoded }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new TextEncoder().encode(JSON.stringify(["urn:jazz:test", "owner"])),
+      1,
+      true,
+      { readAuthorizationHost: "trusted-serving" },
+    );
+
+    await runtime.streamingMutation(
+      "update",
+      "todos",
+      {},
+      "title",
+      (async function* () {
+        yield "updated";
+      })(),
+      JSON.stringify({
+        session: {
+          ...trustedSession,
+          [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: trustedReservedSessionToken(trustedSession),
+        },
+      }),
+      "00000000-0000-0000-0000-000000000123",
+    );
+
+    const author = beginStreamingMutationEncoded.mock.calls[0]?.[6];
+    expect(author instanceof Uint8Array ? new TextDecoder().decode(author) : undefined).toBe(
+      '["urn:jazz:local-first","verified-writer"]',
+    );
   });
 
   it("aborts the native upload when the producer fails", async () => {
@@ -4411,7 +4976,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -4528,7 +5093,7 @@ function emptyNativeRuntime(): NativeRuntimeAdapter {
     } as never,
     testSchema,
     new Uint8Array(16),
-    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
     1,
     true,
   );
@@ -4556,7 +5121,7 @@ function runtimeWithNativeSubscriptionChunk(
     } as never,
     schema,
     new Uint8Array(16),
-    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
     1,
     true,
   );
@@ -4582,7 +5147,7 @@ function runtimeWithNativeRelationSubscriptionChunks(
     } as never,
     schema,
     new Uint8Array(16),
-    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
     1,
     true,
   );
@@ -5485,13 +6050,15 @@ function encodeUserWrappedSubscriptionDelta(row: {
   table: string;
   rowId: Uint8Array;
   title: string;
+  titleBytes?: Uint8Array;
   note: string;
+  provenanceBytes?: Uint8Array;
 }): Uint8Array {
   const descriptor = [
     { name: "row_uuid", valueType: { tag: 10 } },
     { name: "user_title", valueType: { tag: 14, inner: { tag: 8 } } },
     { name: "user_note", valueType: { tag: 14, inner: { tag: 14, inner: { tag: 8 } } } },
-    { name: "$createdBy", valueType: { tag: 10 } },
+    { name: "$createdBy", valueType: { tag: 8 } },
     { name: "$createdAt", valueType: { tag: 3 } },
   ];
   const delta = new PostcardWriter();
@@ -5504,9 +6071,9 @@ function encodeUserWrappedSubscriptionDelta(row: {
       encodedRow.bytes(
         createRecord(descriptor, [
           row.rowId,
-          presentBytes(inlineScalar(row.title)),
+          presentBytes(row.titleBytes ?? inlineScalar(row.title)),
           presentBytes(presentBytes(inlineScalar(row.note))),
-          uuidBytes("00000000-0000-0000-0000-0000000000aa"),
+          row.provenanceBytes ?? inlineScalar(JSON.stringify(["https://issuer.example", "user-1"])),
           u64Bytes(123),
         ]),
       );
@@ -5531,9 +6098,9 @@ function encodeTeamGatherSubscriptionDelta(delta: {
     { name: "user_name", valueType: { tag: 14, inner: { tag: 8 } } },
     { name: "user_org_id", valueType: { tag: 14, inner: { tag: 10 } } },
     { name: "user_parent_id", valueType: { tag: 14, inner: { tag: 10 } } },
-    { name: "$createdBy", valueType: { tag: 10 } },
+    { name: "$createdBy", valueType: { tag: 8 } },
     { name: "$createdAt", valueType: { tag: 3 } },
-    { name: "$updatedBy", valueType: { tag: 10 } },
+    { name: "$updatedBy", valueType: { tag: 8 } },
     { name: "$updatedAt", valueType: { tag: 3 } },
   ];
   const added = delta.added ?? [];
@@ -5573,9 +6140,9 @@ function writeTeamGatherBatches(
               : presentBytes(inlineScalar(source.name)),
             encodeNativeNullValue(descriptor[2]!.valueType),
             encodeNativeNullValue(descriptor[3]!.valueType),
-            uuidBytes("00000000-0000-0000-0000-0000000000aa"),
+            inlineScalar(JSON.stringify(["https://issuer.example", "user-1"])),
             u64Bytes(123),
-            uuidBytes("00000000-0000-0000-0000-0000000000aa"),
+            inlineScalar(JSON.stringify(["https://issuer.example", "user-1"])),
             u64Bytes(123),
           ]),
         );

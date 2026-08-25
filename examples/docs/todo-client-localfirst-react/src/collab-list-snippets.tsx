@@ -27,7 +27,7 @@ s.definePermissions(app, ({ policy, anyOf, allowedTo, session }) => {
   // Projects: creator and members
   policy.projects.allowRead.where((project) =>
     anyOf([
-      { $createdBy: session.user_id },
+      { $createdBy: session.author },
       policy.projectMembers.exists.where({
         projectId: project.id,
         user_id: session.user_id,
@@ -35,7 +35,7 @@ s.definePermissions(app, ({ policy, anyOf, allowedTo, session }) => {
     ]),
   );
   policy.projects.allowInsert.always();
-  policy.projects.allowUpdate.where({ $createdBy: session.user_id });
+  policy.projects.allowUpdate.where({ $createdBy: session.author });
 
   // Tasks: inherit from project
   policy.tasks.allowRead.where(allowedTo.read("projectId"));
@@ -46,14 +46,14 @@ s.definePermissions(app, ({ policy, anyOf, allowedTo, session }) => {
   policy.projectMembers.allowInsert.where((member) =>
     policy.projects.exists.where({
       id: member.projectId,
-      $createdBy: session.user_id,
+      $createdBy: session.author,
     }),
   );
   policy.projectMembers.allowRead.where((member) =>
     anyOf([
       policy.projects.exists.where({
         id: member.projectId,
-        $createdBy: session.user_id,
+        $createdBy: session.author,
       }),
       { user_id: session.user_id },
     ]),

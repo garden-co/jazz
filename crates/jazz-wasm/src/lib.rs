@@ -24,7 +24,7 @@ use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
 #[cfg(target_arch = "wasm32")]
 use jazz::groove::storage::IdbStorage;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::{BranchSelector, BranchViewBase, PermissionAdviceAction, ReadViewSpec};
 use jazz::query::{Query, RelationExpr, RelationQuery};
 use jazz::schema::JazzSchema;
@@ -179,7 +179,7 @@ struct WasmOpenDbConfig {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 struct WasmDbIdentity {
     node: NodeUuid,
-    author: AuthorId,
+    author: AuthorSubject,
 }
 
 impl From<WasmDbIdentity> for DbIdentity {
@@ -223,7 +223,7 @@ struct WasmStreamingMutationState {
     row_id: RowUuid,
     cells: RowCells,
     column: String,
-    identity: Option<AuthorId>,
+    identity: Option<AuthorSubject>,
     updated_at_ms: Option<u64>,
     head: Option<BranchSelector>,
     base: Option<BranchViewBase>,
@@ -464,7 +464,7 @@ pub struct WasmTransport {
     auxiliary_pump: jazz::db::PeerIoPump,
     protocol_version: u16,
     features: u64,
-    subscriber_identity: Option<AuthorId>,
+    subscriber_identity: Option<AuthorSubject>,
 }
 
 enum WasmTransportInner {
@@ -701,7 +701,7 @@ impl WasmDbInner {
         &self,
         query: &PreparedQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<Vec<jazz::node::CurrentRow>, jazz::db::Error> {
         with_wasm_db!(self, |db| block_on(
             db.all_for_identity(query, opts, author)
@@ -711,7 +711,7 @@ impl WasmDbInner {
     fn begin_exclusive(
         &self,
         id: OpenTransactionId,
-        author: Option<AuthorId>,
+        author: Option<AuthorSubject>,
     ) -> Result<(), jazz::db::Error> {
         with_wasm_db!(self, |db| match author {
             Some(author) => block_on(db.begin_exclusive_for_identity(id, author)),
@@ -722,7 +722,7 @@ impl WasmDbInner {
     fn begin_mergeable(
         &self,
         id: OpenTransactionId,
-        author: Option<AuthorId>,
+        author: Option<AuthorSubject>,
     ) -> Result<(), jazz::db::Error> {
         with_wasm_db!(self, |db| match author {
             Some(author) => block_on(db.begin_mergeable_for_identity(id, author)),
@@ -734,7 +734,7 @@ impl WasmDbInner {
         &self,
         tx_id: OpenTransactionId,
         query: &PreparedQuery,
-        author: AuthorId,
+        author: AuthorSubject,
         opts: ReadOpts,
     ) -> Result<Vec<jazz::node::CurrentRow>, jazz::db::Error> {
         with_wasm_db!(self, |db| block_on(
@@ -759,7 +759,7 @@ impl WasmDbInner {
         &self,
         tx_id: OpenTransactionId,
         query: &PreparedQuery,
-        author: AuthorId,
+        author: AuthorSubject,
         opts: ReadOpts,
     ) -> Result<Vec<jazz::node::CurrentRow>, jazz::db::Error> {
         with_wasm_db!(self, |db| block_on(
@@ -804,7 +804,7 @@ impl WasmDbInner {
         &self,
         query: &PreparedQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<jazz::node::RelationSnapshot, jazz::db::Error> {
         with_wasm_db!(self, |db| db
             .all_relation_snapshot_for_identity(query, opts, author)
@@ -823,14 +823,14 @@ impl WasmDbInner {
         &self,
         query: &RelationQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<jazz::node::RelationSnapshot, jazz::db::Error> {
         with_wasm_db!(self, |db| db
             .all_relation_query_for_identity(query, opts, author)
             .await)
     }
 
-    fn set_identity_claims(&self, author: AuthorId, claims: BTreeMap<String, Value>) {
+    fn set_identity_claims(&self, author: AuthorSubject, claims: BTreeMap<String, Value>) {
         with_wasm_db!(self, |db| db.set_identity_claims(author, claims))
     }
 
@@ -848,7 +848,7 @@ impl WasmDbInner {
         &self,
         query: &PreparedQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<Pin<Box<dyn Stream<Item = SubscriptionEvent> + 'static>>, jazz::db::Error> {
         with_wasm_db!(self, |db| block_on(
             db.subscribe_for_identity(query, opts, author)
@@ -875,7 +875,7 @@ impl WasmDbInner {
         &self,
         query: &RelationQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<Pin<Box<dyn Stream<Item = SubscriptionEvent> + 'static>>, jazz::db::Error> {
         with_wasm_db!(self, |db| block_on(
             db.subscribe_relation_query_for_identity(query, opts, author),
@@ -897,7 +897,7 @@ impl WasmDbInner {
         &self,
         query: &PreparedQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<QueryAttachment, jazz::db::Error> {
         with_wasm_db!(self, |db| db
             .attach_query_with_opts_for_identity(query, opts, author))
@@ -1074,6 +1074,33 @@ impl WasmDb {
     pub fn open_memory(schema: Vec<u8>, config: Vec<u8>) -> Result<WasmDb, JsValue> {
         console_error_panic_hook::set_once();
         let (schema, config) = decode_open_args(&schema, &config)?;
+        validate_untrusted_open_author(&config)?;
+        let refs = schema.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let db =
+            block_on(open_db(schema, MemoryStorage::new(&refs), config)).map_err(to_js_error)?;
+        db.set_deferred_local_persistence(true);
+        Ok(Self {
+            inner: WasmDbInner::Memory(Rc::new(db)),
+            owns_runtime: true,
+        })
+    }
+
+    /// Open with a verified Jazz self-signed client identity. This deliberately
+    /// stays separate from `openMemory`: untrusted open config bytes can never
+    /// select a Jazz-reserved identity.
+    #[wasm_bindgen(js_name = openMemoryWithSelfSignedProof)]
+    pub fn open_memory_with_self_signed_proof(
+        schema: Vec<u8>,
+        config: Vec<u8>,
+        token: String,
+        app_id: String,
+        claimed_author: String,
+    ) -> Result<WasmDb, JsValue> {
+        console_error_panic_hook::set_once();
+        let (schema, mut config) = decode_open_args(&schema, &config)?;
+        config.identity.author =
+            verify_self_signed_runtime_author(&token, &app_id, &claimed_author)?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
         let db =
@@ -1094,6 +1121,36 @@ impl WasmDb {
     ) -> Result<WasmDb, JsValue> {
         console_error_panic_hook::set_once();
         let (schema, config) = decode_open_args(&schema, &config)?;
+        validate_untrusted_open_author(&config)?;
+        let refs = schema.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = BrowserStorage::open(IndexedDbPageStore::from_js(page_store), &refs)
+            .await
+            .map_err(to_js_error)?;
+        let db = open_db(schema, storage, config)
+            .await
+            .map_err(to_js_error)?;
+        db.set_deferred_local_persistence(true);
+        Ok(Self {
+            inner: WasmDbInner::Browser(Rc::new(db)),
+            owns_runtime: true,
+        })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = openBrowserWithSelfSignedProof)]
+    pub async fn open_browser_with_self_signed_proof(
+        page_store: JsValue,
+        schema: Vec<u8>,
+        config: Vec<u8>,
+        token: String,
+        app_id: String,
+        claimed_author: String,
+    ) -> Result<WasmDb, JsValue> {
+        console_error_panic_hook::set_once();
+        let (schema, mut config) = decode_open_args(&schema, &config)?;
+        config.identity.author =
+            verify_self_signed_runtime_author(&token, &app_id, &claimed_author)?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = BrowserStorage::open(IndexedDbPageStore::from_js(page_store), &refs)
@@ -1998,7 +2055,7 @@ impl WasmDb {
                 node: NodeUuid::from_bytes(remote_node),
                 epoch: remote_epoch,
             },
-            link_identity: AuthorId::from_bytes(local_node),
+            link_identity: AuthorSubject::for_test_bytes(local_node),
             negotiated_features: features as u64,
         };
         let transport = Box::new(WireTransportAdapter::new_with_session_context(
@@ -2477,7 +2534,7 @@ fn read_rows_for_transaction(
     db: &WasmDbInner,
     query: &WasmPreparedQuery,
     tx: &WasmTx,
-    author: Option<AuthorId>,
+    author: Option<AuthorSubject>,
     opts: JsValue,
 ) -> Result<Vec<jazz::node::CurrentRow>, JsValue> {
     ensure_transaction_runtime(db, tx)?;
@@ -2680,6 +2737,34 @@ where
     }
 }
 
+fn validate_untrusted_open_author(config: &WasmOpenDbConfig) -> Result<(), JsValue> {
+    validate_untrusted_open_author_core(config)
+        .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+fn validate_untrusted_open_author_core(
+    config: &WasmOpenDbConfig,
+) -> Result<(), jazz::ids::AuthorSubjectError> {
+    AuthorSubject::from_untrusted_canonical(config.identity.author.canonical()).map(|_| ())
+}
+
+fn verify_self_signed_runtime_author(
+    token: &str,
+    app_id: &str,
+    claimed_author: &str,
+) -> Result<AuthorSubject, JsValue> {
+    verify_self_signed_runtime_author_core(token, app_id, claimed_author)
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+fn verify_self_signed_runtime_author_core(
+    token: &str,
+    app_id: &str,
+    claimed_author: &str,
+) -> Result<AuthorSubject, String> {
+    jazz::tools::identity::verify_client_runtime_author(token, app_id, claimed_author)
+}
+
 fn configure_initial_sync_flush_cadence<S>(
     db: &Db<S>,
     every: Option<u32>,
@@ -2754,16 +2839,19 @@ fn checked_js_u64_range(start: f64, end: f64) -> Result<std::ops::Range<u64>, Js
     Ok(start..end)
 }
 
-fn author_id_from_bytes(bytes: &[u8]) -> Result<AuthorId, JsValue> {
-    let bytes: [u8; 16] = bytes
-        .try_into()
-        .map_err(|_| JsValue::from_str("author id must be 16 bytes"))?;
-    Ok(AuthorId::from_bytes(bytes))
+fn author_id_from_bytes(bytes: &[u8]) -> Result<AuthorSubject, JsValue> {
+    let canonical = std::str::from_utf8(bytes)
+        .map_err(|_| JsValue::from_str("author subject must be canonical UTF-8 JSON"))?;
+    AuthorSubject::from_untrusted_canonical(canonical)
+        .map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
-fn claims_from_js(author: AuthorId, claims: JsValue) -> Result<BTreeMap<String, Value>, JsValue> {
+fn claims_from_js(
+    _author: AuthorSubject,
+    claims: JsValue,
+) -> Result<BTreeMap<String, Value>, JsValue> {
     let raw: serde_json::Value = serde_wasm_bindgen::from_value(claims).map_err(to_js_error)?;
-    let mut claims = match raw {
+    let claims = match raw {
         serde_json::Value::Null => BTreeMap::new(),
         serde_json::Value::Object(map) => map
             .into_iter()
@@ -2771,16 +2859,6 @@ fn claims_from_js(author: AuthorId, claims: JsValue) -> Result<BTreeMap<String, 
             .collect::<Result<BTreeMap<_, _>, JsValue>>()?,
         _ => return Err(JsValue::from_str("identity claims must be an object")),
     };
-    let subject = author.0.to_string();
-    claims
-        .entry("subject".to_owned())
-        .or_insert_with(|| Value::String(subject.clone()));
-    claims
-        .entry("sub".to_owned())
-        .or_insert_with(|| Value::String(subject.clone()));
-    claims
-        .entry("user_id".to_owned())
-        .or_insert_with(|| Value::String(subject));
     Ok(claims)
 }
 
@@ -3683,6 +3761,78 @@ mod dynamic_schema_view_tests {
     }
 
     #[test]
+    fn public_wasm_open_config_rejects_every_reserved_author() {
+        for issuer in [
+            AuthorSubject::SYSTEM_ISSUER,
+            AuthorSubject::LOCAL_FIRST_ISSUER,
+            AuthorSubject::ANONYMOUS_ISSUER,
+            AuthorSubject::STATIC_BEARER_ISSUER,
+        ] {
+            let author = if issuer == AuthorSubject::SYSTEM_ISSUER {
+                AuthorSubject::SYSTEM
+            } else {
+                AuthorSubject::from_canonical(&serde_json::to_string(&(issuer, "caller")).unwrap())
+                    .unwrap()
+            };
+            let config = WasmOpenDbConfig {
+                identity: WasmDbIdentity {
+                    node: NodeUuid::from_bytes([0x7a; 16]),
+                    author,
+                },
+                row_id_seed: None,
+                history_complete: false,
+                initial_sync_flush_every: None,
+            };
+            assert!(
+                validate_untrusted_open_author_core(&config).is_err(),
+                "ordinary WasmDb.openMemory must reject reserved issuer {issuer}"
+            );
+        }
+    }
+
+    #[test]
+    fn wasm_self_signed_open_verifier_binds_exact_proof_author() {
+        let seed = [0x51; 32];
+        let app_id = "wasm-proof-test";
+        let token = jazz::tools::identity::mint_jazz_self_signed_token(
+            &seed,
+            AuthorSubject::LOCAL_FIRST_ISSUER,
+            app_id,
+            60,
+        )
+        .unwrap();
+        let verified =
+            jazz::tools::identity::verify_jazz_self_signed_proof(&token, app_id).unwrap();
+        let claimed = AuthorSubject::from_canonical(
+            &serde_json::to_string(&(verified.issuer, verified.user_id)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            verify_self_signed_runtime_author_core(&token, app_id, claimed.canonical()).unwrap(),
+            claimed
+        );
+        assert!(
+            verify_self_signed_runtime_author_core(&token, "wrong-app", claimed.canonical())
+                .is_err()
+        );
+        assert!(verify_self_signed_runtime_author_core(
+            &token,
+            app_id,
+            AuthorSubject::SYSTEM_CANONICAL
+        )
+        .is_err());
+        let mut bad_signature = token.into_bytes();
+        let last = bad_signature.len() - 1;
+        bad_signature[last] ^= 1;
+        assert!(verify_self_signed_runtime_author_core(
+            std::str::from_utf8(&bad_signature).unwrap(),
+            app_id,
+            claimed.canonical(),
+        )
+        .is_err());
+    }
+
+    #[test]
     fn javascript_numeric_claims_preserve_safe_integers_and_fail_closed_when_lossy() {
         assert_eq!(
             claim_value_from_json(serde_json::json!(7)).unwrap(),
@@ -3785,7 +3935,7 @@ mod dynamic_schema_view_tests {
                 MemoryStorage::new(&refs),
                 DbIdentity {
                     node: jazz::ids::NodeUuid::from_bytes([0x45; 16]),
-                    author: AuthorId::from_bytes([0xa5; 16]),
+                    author: AuthorSubject::for_test_bytes([0xa5; 16]),
                 },
             )))
             .unwrap(),
@@ -3846,14 +3996,14 @@ mod dynamic_schema_view_tests {
                 inner: WasmDbInner::Memory(Rc::clone(&owner)),
                 owns_runtime: false,
             };
-            let alice = AuthorId::from_bytes([0xa7; 16]);
-            let bob = AuthorId::from_bytes([0xb7; 16]);
+            let alice = AuthorSubject::for_test_bytes([0xa7; 16]);
+            let bob = AuthorSubject::for_test_bytes([0xb7; 16]);
             let bound = OpenTransactionId::new();
             binding
                 .begin_transaction(
                     bound.to_string(),
                     "exclusive".to_owned(),
-                    Some(alice.0.as_bytes().to_vec()),
+                    Some(alice.canonical().as_bytes().to_vec()),
                 )
                 .unwrap();
             let tx = binding.attach_exclusive_tx(bound.to_string()).unwrap();
@@ -3865,7 +4015,7 @@ mod dynamic_schema_view_tests {
                     .all_in_transaction_for_identity(
                         &query,
                         &tx,
-                        alice.0.as_bytes().to_vec(),
+                        alice.canonical().as_bytes().to_vec(),
                         JsValue::NULL
                     )
                     .is_ok(),
@@ -3885,7 +4035,7 @@ mod dynamic_schema_view_tests {
                 .all_in_transaction_for_identity(
                     &view_query,
                     &tx,
-                    alice.0.as_bytes().to_vec(),
+                    alice.canonical().as_bytes().to_vec(),
                     JsValue::NULL,
                 )
                 .is_ok());
@@ -3897,7 +4047,7 @@ mod dynamic_schema_view_tests {
                     .one_in_transaction_for_identity(
                         &view_query,
                         &tx,
-                        alice.0.as_bytes().to_vec(),
+                        alice.canonical().as_bytes().to_vec(),
                         JsValue::NULL,
                     )
                     .is_ok(),
@@ -3923,7 +4073,7 @@ mod dynamic_schema_view_tests {
                 .begin_transaction(
                     bound.to_string(),
                     "exclusive".to_owned(),
-                    Some(alice.0.as_bytes().to_vec()),
+                    Some(alice.canonical().as_bytes().to_vec()),
                 )
                 .unwrap();
             block_on(other_owner.exclusive_tx_ref(bound).insert(
@@ -3953,21 +4103,21 @@ mod dynamic_schema_view_tests {
             assert_foreign(other_binding.all_in_transaction_for_identity(
                 &other_query,
                 &tx,
-                alice.0.as_bytes().to_vec(),
+                alice.canonical().as_bytes().to_vec(),
                 JsValue::NULL,
             ));
             assert_foreign(other_binding.one_in_transaction(&other_query, &tx, JsValue::NULL));
             assert_foreign(other_binding.one_in_transaction_for_identity(
                 &other_query,
                 &tx,
-                alice.0.as_bytes().to_vec(),
+                alice.canonical().as_bytes().to_vec(),
                 JsValue::NULL,
             ));
             let error = binding
                 .all_in_transaction_for_identity(
                     &query,
                     &tx,
-                    bob.0.as_bytes().to_vec(),
+                    bob.canonical().as_bytes().to_vec(),
                     JsValue::NULL,
                 )
                 .unwrap_err();

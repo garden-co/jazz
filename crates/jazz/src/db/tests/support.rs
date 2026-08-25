@@ -168,7 +168,7 @@ pub(super) fn rocks_storage(schema: &JazzSchema) -> RocksDbStorage {
     RocksDbStorage::open(&path, &refs).unwrap()
 }
 
-pub(super) fn open_db(node: u8, author: AuthorId, schema: &JazzSchema) -> Db<RocksDbStorage> {
+pub(super) fn open_db(node: u8, author: AuthorSubject, schema: &JazzSchema) -> Db<RocksDbStorage> {
     let storage = rocks_storage(schema);
     block_on(Db::open(DbConfig {
         schema: schema.clone(),
@@ -180,6 +180,21 @@ pub(super) fn open_db(node: u8, author: AuthorId, schema: &JazzSchema) -> Db<Roc
         id_source: Some(Box::new(SeededRowIdSource::new(node as u64))),
     }))
     .unwrap()
+}
+
+/// Construct the explicit provider-side identity fixture used by DB tests.
+///
+/// Test `AuthorSubject`s identify Jazz provenance; application UUID columns
+/// intentionally compare against the separately admitted provider `user_id`.
+/// This helper keeps that distinction visible without inventing a provider
+/// `sub` from the logical author.
+pub(super) fn test_provider_claims(author: AuthorSubject) -> BTreeMap<String, Value> {
+    match author {
+        AuthorSubject::System => BTreeMap::new(),
+        AuthorSubject::Authenticated(_) => {
+            BTreeMap::from([("user_id".to_owned(), Value::Uuid(author.test_uuid()))])
+        }
+    }
 }
 
 pub(super) fn row_ids(rows: &[CurrentRow]) -> Vec<RowUuid> {
@@ -306,7 +321,7 @@ pub(super) fn duplex_with_client_outbound_tap() -> (
 /// In-memory handshake pairing needs an internal test because it verifies the
 /// transport/admission boundary before any user-visible sync payload exists.
 pub(super) fn duplex_with_admitted_session_context(
-    identity: AuthorId,
+    identity: AuthorSubject,
     client_node: NodeUuid,
     client_epoch: u64,
     server_node: NodeUuid,
@@ -352,7 +367,7 @@ pub(super) fn duplex_with_admitted_session_context(
 /// tap. This keeps reconnect tests at the real session-context boundary while
 /// exposing only the wire frames they need to assert.
 pub(super) fn duplex_with_admitted_session_context_and_client_outbound_tap(
-    identity: AuthorId,
+    identity: AuthorSubject,
     client_node: NodeUuid,
     client_epoch: u64,
     server_node: NodeUuid,
@@ -1034,17 +1049,22 @@ pub(super) fn owner_read_schema() -> JazzSchema {
                 .column("owner", PublicColumnType::Uuid)
                 .policies(
                     PublicTablePolicies::new()
-                        .with_select(public_session_eq("owner", &["claims", "sub"])),
+                        .with_select(public_session_eq("owner", &["user_id"])),
                 ),
         ),
     )
 }
 
 pub(super) fn created_by_read_schema() -> JazzSchema {
-    created_by_read_schema_for_claim("sub")
+    created_by_read_schema_for_claim("author")
 }
 
 pub(super) fn created_by_read_schema_for_claim(claim_name: &str) -> JazzSchema {
+    let session_path = if claim_name == "author" {
+        vec!["author"]
+    } else {
+        vec!["claims", claim_name]
+    };
     build_public_db_test_schema(
         PublicSchemaBuilder::new().table(
             PublicTableSchemaBuilder::new("todos")
@@ -1052,7 +1072,7 @@ pub(super) fn created_by_read_schema_for_claim(claim_name: &str) -> JazzSchema {
                 .column("done", PublicColumnType::Boolean)
                 .policies(
                     PublicTablePolicies::new()
-                        .with_select(public_session_eq("$createdBy", &["claims", claim_name])),
+                        .with_select(public_session_eq("$createdBy", &session_path)),
                 ),
         ),
     )
@@ -1067,7 +1087,7 @@ pub(super) fn owner_write_schema() -> JazzSchema {
                 .column("owner", PublicColumnType::Uuid)
                 .policies(public_legacy_write_policy(public_session_eq(
                     "owner",
-                    &["claims", "sub"],
+                    &["user_id"],
                 ))),
         ),
     )
@@ -1157,7 +1177,7 @@ pub(super) fn benchmark_shaped_recursive_reachable_read_schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         "group_access_edges",
         "user_id",
-        &["claims", "sub"],
+        &["user_id"],
         "group_id",
     );
     build_public_db_test_schema(
@@ -1242,7 +1262,7 @@ pub(super) fn customer_resource_policy_minimal_schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         "group_access_edges",
         "user_id",
-        &["claims", "sub"],
+        &["user_id"],
         "group_id",
     );
     build_public_db_test_schema(
@@ -1282,7 +1302,7 @@ pub(super) fn customer_two_resource_policy_minimal_schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         "group_access_edges",
         "user_id",
-        &["claims", "sub"],
+        &["user_id"],
         "group_id",
     );
     let res_j_policy = public_recursive_access_policy(
@@ -1298,7 +1318,7 @@ pub(super) fn customer_two_resource_policy_minimal_schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         "group_access_edges",
         "user_id",
-        &["claims", "sub"],
+        &["user_id"],
         "group_id",
     );
     build_public_db_test_schema(
@@ -1339,7 +1359,7 @@ pub(super) fn same_table_seeded_resource_policy_schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         "teams",
         "identity_key",
-        &["claims", "sub"],
+        &["user_id"],
         "id",
     );
     same_table_seeded_public_schema(PublicColumnType::Uuid, resource_policy)
@@ -1410,7 +1430,7 @@ pub(super) fn customer_inherited_child_policy_schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         "group_access_edges",
         "user_id",
-        &["claims", "sub"],
+        &["user_id"],
         "group_id",
     );
     let child_read = PublicPolicyExpr::and(vec![
@@ -1474,7 +1494,7 @@ pub(super) fn inherited_insert_policy_schema() -> JazzSchema {
                         PublicTablePolicies::new()
                             .with_select(PublicPolicyExpr::True)
                             .with_update(
-                                Some(public_session_eq("owner", &["claims", "sub"])),
+                                Some(public_session_eq("owner", &["user_id"])),
                                 public_literal_eq("locked", PublicValue::Boolean(false)),
                             ),
                     ),
@@ -1628,7 +1648,7 @@ pub(super) fn policy_relation_schema() -> JazzSchema {
                     .column("owner", PublicColumnType::Uuid)
                     .policies(
                         PublicTablePolicies::new()
-                            .with_select(public_session_eq("owner", &["claims", "sub"])),
+                            .with_select(public_session_eq("owner", &["user_id"])),
                     ),
             ),
     )
@@ -1644,7 +1664,7 @@ pub(super) fn evolved_owner_write_schema() -> JazzSchema {
                 .column("body", PublicColumnType::Text)
                 .policies(public_legacy_write_policy(public_session_eq(
                     "owner",
-                    &["claims", "sub"],
+                    &["user_id"],
                 ))),
         ),
     )
@@ -1665,11 +1685,11 @@ pub(super) fn relation_snapshot_row(table: &str, row_uuid: RowUuid) -> CurrentRo
 /// A reset may carry canonical relation provenance while the materialized
 /// related row is named by a newer read schema. Ordinary removal must use the
 /// same projected edge identity, retaining an unrelated same-UUID row.
-pub(super) fn cells(title: &str, done: bool, owner: AuthorId) -> RowCells {
+pub(super) fn cells(title: &str, done: bool, owner: AuthorSubject) -> RowCells {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.to_owned())),
         ("done".to_owned(), Value::Bool(done)),
-        ("owner".to_owned(), Value::Uuid(owner.0)),
+        ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
     ])
 }
 
@@ -1703,7 +1723,7 @@ pub(super) fn issue_schema() -> JazzSchema {
 pub(super) fn issue_cells(
     title: &str,
     state: &str,
-    assignee: AuthorId,
+    assignee: AuthorSubject,
     project: RowUuid,
     priority: u64,
     labels: &[&str],
@@ -1712,7 +1732,7 @@ pub(super) fn issue_cells(
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.to_owned())),
         ("state".to_owned(), Value::String(state.to_owned())),
-        ("assignee".to_owned(), Value::Uuid(assignee.0)),
+        ("assignee".to_owned(), Value::Uuid(assignee.test_uuid())),
         ("project".to_owned(), Value::Uuid(project.0)),
         ("priority".to_owned(), Value::U64(priority)),
         (
@@ -1734,19 +1754,20 @@ pub(super) fn issue_cells(
 pub(super) struct CoreDb {
     pub(super) server: Node<RocksDbStorage>,
     schema: JazzSchema,
-    author: AuthorId,
+    author: AuthorSubject,
     pub(super) next_now_ms: Cell<u64>,
     id_source: RefCell<SeededRowIdSource>,
 }
 
-pub(super) fn open_core(node_byte: u8, author: AuthorId, schema: &JazzSchema) -> CoreDb {
+pub(super) fn open_core(node_byte: u8, author: AuthorSubject, schema: &JazzSchema) -> CoreDb {
     let storage = rocks_storage(schema);
-    let node = NodeState::new_history_complete(
+    let mut node = NodeState::new_history_complete(
         NodeUuid::from_bytes([node_byte; 16]),
         schema.clone(),
         storage,
     )
     .unwrap();
+    node.set_session_claims(author, test_provider_claims(author));
     CoreDb {
         server: Node::new(node),
         schema: schema.clone(),
@@ -1889,7 +1910,7 @@ impl CoreDb {
 
     pub(super) fn insert_attributed(
         &self,
-        made_by: AuthorId,
+        made_by: AuthorSubject,
         table: &str,
         cells: RowCells,
     ) -> Result<WriteHandle<RocksDbStorage>, Error> {
@@ -1926,7 +1947,7 @@ impl CoreDb {
 
     pub(super) fn update_attributed(
         &self,
-        made_by: AuthorId,
+        made_by: AuthorSubject,
         table: &str,
         row: RowUuid,
         patch: RowCells,
@@ -1977,25 +1998,33 @@ impl CoreDb {
     pub(super) fn accept_subscriber(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Rc<LocalMutex<PeerConnection<RocksDbStorage>>> {
-        self.server.accept_subscriber(transport, identity)
+        self.server.accept_subscriber_with_claims(
+            transport,
+            identity,
+            test_provider_claims(identity),
+        )
     }
 
     pub(super) fn accept_subscriber_with_trust(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         trust: CommitUnitTrust,
     ) -> Rc<LocalMutex<PeerConnection<RocksDbStorage>>> {
-        self.server
-            .accept_subscriber_with_trust(transport, identity, trust)
+        self.server.accept_subscriber_with_claims_and_trust(
+            transport,
+            identity,
+            test_provider_claims(identity),
+            trust,
+        )
     }
 
     pub(super) fn accept_subscriber_with_claims(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> Rc<LocalMutex<PeerConnection<RocksDbStorage>>> {
         self.server
@@ -2005,7 +2034,7 @@ impl CoreDb {
     pub(super) fn accept_subscriber_with_resume(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         cursor: ResumeCursor,
     ) -> Rc<LocalMutex<PeerConnection<RocksDbStorage>>> {
         self.server

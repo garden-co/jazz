@@ -12,7 +12,7 @@ fn db_facade_local_subscription_reports_initial_and_changed_results() {
         storage: doctest_support::MemoryStorage::new(&refs),
         identity: DbIdentity {
             node: NodeUuid::from_bytes([0x11; 16]),
-            author: AuthorId::from_bytes([0xa1; 16]),
+            author: AuthorSubject::for_test_bytes([0xa1; 16]),
         },
         id_source: Some(Box::new(SeededRowIdSource::new(0x1111))),
     }))
@@ -303,7 +303,7 @@ fn db_facade_schedules_immediate_tick_for_upstream_connection() {
 #[test]
 fn upstream_inbound_application_completes_synchronously_or_schedules_continuation() {
     let schema = schema();
-    let author = AuthorId::from_bytes([0xa1; 16]);
+    let author = AuthorSubject::for_test_bytes([0xa1; 16]);
     let server = open_core(0x51, author, &schema);
     let client = open_db(0x52, author, &schema);
     let scheduler = Rc::new(RecordingScheduler::default());

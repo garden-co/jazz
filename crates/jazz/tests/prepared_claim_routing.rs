@@ -7,7 +7,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::{
     CurrentWriteSchema, LensOp, MigrationLens, SchemaLineagePublication, SchemaVersion, TableLens,
 };
@@ -35,9 +35,24 @@ const GROUP_MEMBERS: &str = "group_members";
 const GROUP_EDGES: &str = "group_edges";
 const CYCLE_A: &str = "cycle_a";
 const CYCLE_B: &str = "cycle_b";
-const WRITER: AuthorId = AuthorId(uuid::uuid!("82000000-0000-0000-0000-000000000001"));
-const USER_A: AuthorId = AuthorId(uuid::uuid!("82000000-0000-0000-0000-000000000002"));
-const USER_B: AuthorId = AuthorId(uuid::uuid!("82000000-0000-0000-0000-000000000003"));
+fn writer() -> AuthorSubject {
+    AuthorSubject::for_test_uuid(uuid::uuid!("82000000-0000-0000-0000-000000000001"))
+}
+
+fn user_a() -> AuthorSubject {
+    AuthorSubject::for_test_uuid(uuid::uuid!("82000000-0000-0000-0000-000000000002"))
+}
+
+fn user_b() -> AuthorSubject {
+    AuthorSubject::for_test_uuid(uuid::uuid!("82000000-0000-0000-0000-000000000003"))
+}
+
+fn test_user_claims(identity: AuthorSubject, region: &str) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("user_id".to_owned(), Value::Uuid(identity.test_uuid())),
+        ("region".to_owned(), Value::String(region.to_owned())),
+    ])
+}
 
 type BenchDb = Db<TestStorage>;
 
@@ -364,10 +379,10 @@ fn open_db() -> BenchDb {
 }
 
 fn open_db_with_schema(schema: JazzSchema) -> BenchDb {
-    open_db_with_schema_as(schema, WRITER)
+    open_db_with_schema_as(schema, writer())
 }
 
-fn open_db_with_schema_as(schema: JazzSchema, author: AuthorId) -> BenchDb {
+fn open_db_with_schema_as(schema: JazzSchema, author: AuthorSubject) -> BenchDb {
     let families = schema.column_families();
     let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(
@@ -387,7 +402,7 @@ fn open_db_with_schema_as(schema: JazzSchema, author: AuthorId) -> BenchDb {
 fn row_ids_for_identity(
     db: &BenchDb,
     prepared: &jazz::db::PreparedQuery,
-    identity: AuthorId,
+    identity: AuthorSubject,
 ) -> Vec<RowUuid> {
     block_on(db.all_for_identity(prepared, opts(), identity))
         .expect("read prepared query for identity")
@@ -419,14 +434,14 @@ fn seed(db: &BenchDb, team_a: RowUuid, team_b: RowUuid, region_a: &str, region_b
         .expect("seed team");
     }
     for (membership, team, user, region) in [
-        (row(0x31), team_a, USER_A, region_a),
-        (row(0x32), team_b, USER_B, region_b),
+        (row(0x31), team_a, user_a(), region_a),
+        (row(0x32), team_b, user_b(), region_b),
     ] {
         block_on(db.insert(
             MEMBERSHIPS,
             BTreeMap::from([
                 ("team".to_owned(), Value::Uuid(team.0)),
-                ("user".to_owned(), Value::Uuid(user.0)),
+                ("user".to_owned(), Value::Uuid(user.test_uuid())),
                 ("region".to_owned(), Value::String(region.to_owned())),
             ]),
             jazz::db::InsertOptions {
@@ -532,12 +547,15 @@ fn seed_two_hop_reachability_policy(db: &BenchDb) -> (RowUuid, RowUuid, RowUuid,
         ))
         .expect("seed project access");
     }
-    for (membership, group, user) in [(row(0xa1), group_a, USER_A), (row(0xa2), group_b, USER_B)] {
+    for (membership, group, user) in [
+        (row(0xa1), group_a, user_a()),
+        (row(0xa2), group_b, user_b()),
+    ] {
         block_on(db.insert(
             GROUP_MEMBERS,
             BTreeMap::from([
                 ("group".to_owned(), Value::Uuid(group.0)),
-                ("user".to_owned(), Value::Uuid(user.0)),
+                ("user".to_owned(), Value::Uuid(user.test_uuid())),
             ]),
             jazz::db::InsertOptions {
                 row_id: Some(membership),
@@ -551,8 +569,8 @@ fn seed_two_hop_reachability_policy(db: &BenchDb) -> (RowUuid, RowUuid, RowUuid,
 }
 
 fn assert_call_order(
-    first: (AuthorId, RowUuid, RowUuid),
-    second: (AuthorId, RowUuid, RowUuid),
+    first: (AuthorSubject, RowUuid, RowUuid),
+    second: (AuthorSubject, RowUuid, RowUuid),
     region_a: &str,
     region_b: &str,
 ) {
@@ -560,14 +578,8 @@ fn assert_call_order(
     let team_a = row(0x11);
     let team_b = row(0x12);
     seed(&db, team_a, team_b, region_a, region_b);
-    db.set_identity_claims(
-        USER_A,
-        BTreeMap::from([("region".to_owned(), Value::String(region_a.to_owned()))]),
-    );
-    db.set_identity_claims(
-        USER_B,
-        BTreeMap::from([("region".to_owned(), Value::String(region_b.to_owned()))]),
-    );
+    db.set_identity_claims(user_a(), test_user_claims(user_a(), region_a));
+    db.set_identity_claims(user_b(), test_user_claims(user_b(), region_b));
     let query = Query::from(DOCUMENTS)
         .filter(eq(col("team"), param("team")))
         .order_by("updated_at", OrderDirection::Desc)
@@ -607,14 +619,14 @@ fn prepared_policy_claims_route_per_identity_and_application_binding() {
     let document_b = row(0x42);
 
     assert_call_order(
-        (USER_A, team_a, document_a),
-        (USER_B, team_b, document_b),
+        (user_a(), team_a, document_a),
+        (user_b(), team_b, document_b),
         "region-a",
         "region-b",
     );
     assert_call_order(
-        (USER_B, team_b, document_b),
-        (USER_A, team_a, document_a),
+        (user_b(), team_b, document_b),
+        (user_a(), team_a, document_a),
         "region-a",
         "region-b",
     );
@@ -645,19 +657,13 @@ fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
     let public = row(0x51);
     let private = row(0x52);
     let regional = row(0x53);
-    db.set_identity_claims(
-        USER_A,
-        BTreeMap::from([("region".to_owned(), Value::String("region-a".to_owned()))]),
-    );
-    db.set_identity_claims(
-        USER_B,
-        BTreeMap::from([("region".to_owned(), Value::String("region-b".to_owned()))]),
-    );
+    db.set_identity_claims(user_a(), test_user_claims(user_a(), "region-a"));
+    db.set_identity_claims(user_b(), test_user_claims(user_b(), "region-b"));
     block_on(db.insert(
         DOCUMENTS,
         BTreeMap::from([
             ("visibility".to_owned(), Value::String("public".to_owned())),
-            ("owner".to_owned(), Value::Uuid(WRITER.0)),
+            ("owner".to_owned(), Value::Uuid(writer().test_uuid())),
             ("region".to_owned(), Value::String("other".to_owned())),
         ]),
         jazz::db::InsertOptions {
@@ -670,7 +676,7 @@ fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
         DOCUMENTS,
         BTreeMap::from([
             ("visibility".to_owned(), Value::String("private".to_owned())),
-            ("owner".to_owned(), Value::Uuid(USER_A.0)),
+            ("owner".to_owned(), Value::Uuid(user_a().test_uuid())),
             ("region".to_owned(), Value::String("other".to_owned())),
         ]),
         jazz::db::InsertOptions {
@@ -683,7 +689,7 @@ fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
         DOCUMENTS,
         BTreeMap::from([
             ("visibility".to_owned(), Value::String("private".to_owned())),
-            ("owner".to_owned(), Value::Uuid(WRITER.0)),
+            ("owner".to_owned(), Value::Uuid(writer().test_uuid())),
             ("region".to_owned(), Value::String("region-a".to_owned())),
         ]),
         jazz::db::InsertOptions {
@@ -696,7 +702,7 @@ fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
     let prepared = db
         .prepare_query(&Query::from(DOCUMENTS).order_by("visibility", OrderDirection::Asc))
         .expect("prepare mixed claim and claimless policy");
-    let mut rows = block_on(db.all_for_identity(&prepared, opts(), USER_A))
+    let mut rows = block_on(db.all_for_identity(&prepared, opts(), user_a()))
         .expect("read mixed claim and claimless policy")
         .into_iter()
         .map(|row| row.row_uuid())
@@ -706,7 +712,7 @@ fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
     expected.sort_unstable();
     assert_eq!(rows, expected);
 
-    let rows = block_on(db.all_for_identity(&prepared, opts(), USER_B))
+    let rows = block_on(db.all_for_identity(&prepared, opts(), user_b()))
         .expect("read claimless policy branch")
         .into_iter()
         .map(|row| row.row_uuid())
@@ -720,7 +726,7 @@ fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
                 .limit(1),
         )
         .expect("prepare finite mixed-policy window");
-    for identity in [USER_A, USER_B] {
+    for identity in [user_a(), user_b()] {
         let rows = block_on(db.all_for_identity(&windowed, opts(), identity))
             .expect("read finite claimless policy branch")
             .into_iter()
@@ -735,14 +741,8 @@ fn assert_retained_subscription_regions(region_a: &str, region_b: &str) {
     let team_a = row(0x11);
     let team_b = row(0x12);
     seed(&db, team_a, team_b, region_a, region_b);
-    db.set_identity_claims(
-        USER_A,
-        BTreeMap::from([("region".to_owned(), Value::String(region_a.to_owned()))]),
-    );
-    db.set_identity_claims(
-        USER_B,
-        BTreeMap::from([("region".to_owned(), Value::String(region_b.to_owned()))]),
-    );
+    db.set_identity_claims(user_a(), test_user_claims(user_a(), region_a));
+    db.set_identity_claims(user_b(), test_user_claims(user_b(), region_b));
     let query = Query::from(DOCUMENTS)
         .filter(eq(col("team"), param("team")))
         .order_by("updated_at", OrderDirection::Desc)
@@ -754,9 +754,9 @@ fn assert_retained_subscription_regions(region_a: &str, region_b: &str) {
         )
         .expect("prepare team binding")
     };
-    let mut stream_a = block_on(db.subscribe_for_identity(&prepared(team_a), opts(), USER_A))
+    let mut stream_a = block_on(db.subscribe_for_identity(&prepared(team_a), opts(), user_a()))
         .expect("subscribe team A");
-    let mut stream_b = block_on(db.subscribe_for_identity(&prepared(team_b), opts(), USER_B))
+    let mut stream_b = block_on(db.subscribe_for_identity(&prepared(team_b), opts(), user_b()))
         .expect("subscribe team B");
 
     let initial = |event| match event {
@@ -853,8 +853,8 @@ fn prepared_nested_claim_routes_keep_two_bindings_isolated_through_live_membersh
         .expect("seed invite chat");
     }
     for (identity, join_code, user_id) in [
-        (USER_A, join_code_a, user_id_a),
-        (USER_B, join_code_b, user_id_b),
+        (user_a(), join_code_a, user_id_a),
+        (user_b(), join_code_b, user_id_b),
     ] {
         db.set_identity_claims(
             identity,
@@ -875,9 +875,9 @@ fn prepared_nested_claim_routes_keep_two_bindings_isolated_through_live_membersh
         )
         .expect("prepare chat binding")
     };
-    let mut stream_a = block_on(db.subscribe_for_identity(&prepared(chat_a), opts(), USER_A))
+    let mut stream_a = block_on(db.subscribe_for_identity(&prepared(chat_a), opts(), user_a()))
         .expect("subscribe invite binding A");
-    let mut stream_b = block_on(db.subscribe_for_identity(&prepared(chat_b), opts(), USER_B))
+    let mut stream_b = block_on(db.subscribe_for_identity(&prepared(chat_b), opts(), user_b()))
         .expect("subscribe invite binding B");
     let initial_rows = |event| match event {
         SubscriptionEvent::Delta {
@@ -969,8 +969,9 @@ fn policy_dependency_reads_do_not_expose_dependency_rows() {
     let team_b = row(0x12);
     seed(&db, team_a, team_b, "region-a", "region-b");
     db.set_identity_claims(
-        USER_A,
+        user_a(),
         BTreeMap::from([
+            ("user_id".to_owned(), Value::Uuid(user_a().test_uuid())),
             ("region".to_owned(), Value::String("region-a".to_owned())),
             (
                 "membership_region".to_owned(),
@@ -979,8 +980,9 @@ fn policy_dependency_reads_do_not_expose_dependency_rows() {
         ]),
     );
     db.set_identity_claims(
-        USER_B,
+        user_b(),
         BTreeMap::from([
+            ("user_id".to_owned(), Value::Uuid(user_b().test_uuid())),
             ("region".to_owned(), Value::String("region-b".to_owned())),
             (
                 "membership_region".to_owned(),
@@ -990,7 +992,8 @@ fn policy_dependency_reads_do_not_expose_dependency_rows() {
     );
     let query = Query::from(DOCUMENTS).filter(eq(col("team"), param("team")));
 
-    for (identity, team, expected) in [(USER_A, team_a, row(0x41)), (USER_B, team_b, row(0x42))] {
+    for (identity, team, expected) in [(user_a(), team_a, row(0x41)), (user_b(), team_b, row(0x42))]
+    {
         let prepared = db
             .prepare_query_bound(
                 &query,
@@ -1004,7 +1007,7 @@ fn policy_dependency_reads_do_not_expose_dependency_rows() {
             .collect::<Vec<_>>();
         assert_eq!(rows, vec![expected]);
     }
-    for (identity, other_team) in [(USER_A, team_b), (USER_B, team_a)] {
+    for (identity, other_team) in [(user_a(), team_b), (user_b(), team_a)] {
         let prepared = db
             .prepare_query_bound(
                 &query,
@@ -1021,11 +1024,11 @@ fn policy_dependency_reads_do_not_expose_dependency_rows() {
         .prepare_query(&Query::from(MEMBERSHIPS))
         .expect("prepare direct membership read");
     assert!(
-        row_ids_for_identity(&db, &memberships, USER_A).is_empty(),
+        row_ids_for_identity(&db, &memberships, user_a()).is_empty(),
         "raw dependency evidence must not make the dependency row directly visible"
     );
     assert_eq!(
-        row_ids_for_identity(&db, &memberships, USER_B),
+        row_ids_for_identity(&db, &memberships, user_b()),
         vec![row(0x32)],
         "ordinary dependency-table reads must still enforce its own policy"
     );
@@ -1051,22 +1054,22 @@ fn dependency_policies_are_not_recursively_composed_into_outer_policy() {
 
     assert_eq!(prepared_a.shape().shape_id(), prepared_b.shape().shape_id());
     assert_eq!(
-        row_ids_for_identity(&db, &prepared_a, USER_A),
+        row_ids_for_identity(&db, &prepared_a, user_a()),
         vec![document_a],
         "the outer document policy requires a matching membership row; the membership table's own policy is not recursively composed"
     );
     assert_eq!(
-        row_ids_for_identity(&db, &prepared_a, USER_B),
+        row_ids_for_identity(&db, &prepared_a, user_b()),
         vec![document_a],
         "the dependency table's nested project policy must not narrow the outer policy"
     );
     assert_eq!(
-        row_ids_for_identity(&db, &prepared_b, USER_A),
+        row_ids_for_identity(&db, &prepared_b, user_a()),
         vec![document_b],
         "raw policy evidence remains available regardless of the dependency table's own read policy"
     );
     assert_eq!(
-        row_ids_for_identity(&db, &prepared_b, USER_B),
+        row_ids_for_identity(&db, &prepared_b, user_b()),
         vec![document_b],
         "principal B must receive only project B through the seeded policy chain"
     );
@@ -1076,6 +1079,10 @@ fn dependency_policies_are_not_recursively_composed_into_outer_policy() {
 fn policy_proof_implicit_and_outer_include_sources_do_not_reenter_policy_compilation() {
     let db = open_db_with_schema(two_hop_seeded_policy_schema());
     let (project_a, _, document_a, _) = seed_two_hop_reachability_policy(&db);
+    db.set_identity_claims(
+        user_a(),
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(user_a().test_uuid()))]),
+    );
     let query = Query::from(DOCUMENTS)
         .filter(eq(col("project"), param("project")))
         .include("project");
@@ -1087,7 +1094,7 @@ fn policy_proof_implicit_and_outer_include_sources_do_not_reenter_policy_compila
         .expect("prepare included project binding");
 
     assert_eq!(
-        row_ids_for_identity(&db, &prepared, USER_A),
+        row_ids_for_identity(&db, &prepared, user_a()),
         vec![document_a],
         "policy and outer include sources must not re-enter the protected policy"
     );
@@ -1121,7 +1128,7 @@ fn mutually_referential_dependency_policies_do_not_recurse() {
         .prepare_query(&Query::from(CYCLE_A))
         .expect("prepare cyclic policy query");
     assert_eq!(
-        row_ids_for_identity(&db, &prepared, USER_A),
+        row_ids_for_identity(&db, &prepared, user_a()),
         vec![a],
         "each policy reads the other table as raw evidence instead of recursively applying its policy"
     );
@@ -1129,20 +1136,14 @@ fn mutually_referential_dependency_policies_do_not_recurse() {
 
 #[test]
 fn prepared_binding_reprepares_claim_routing_after_schema_change() {
-    let db = open_db_with_schema_as(schema(), AuthorId::SYSTEM);
+    let db = open_db_with_schema_as(schema(), AuthorSubject::SYSTEM);
     let team_a = row(0x11);
     let team_b = row(0x12);
     let document_a = row(0x41);
     let document_b = row(0x42);
     seed(&db, team_a, team_b, "region-a", "region-b");
-    db.set_identity_claims(
-        USER_A,
-        BTreeMap::from([("region".to_owned(), Value::String("region-a".to_owned()))]),
-    );
-    db.set_identity_claims(
-        USER_B,
-        BTreeMap::from([("region".to_owned(), Value::String("region-b".to_owned()))]),
-    );
+    db.set_identity_claims(user_a(), test_user_claims(user_a(), "region-a"));
+    db.set_identity_claims(user_b(), test_user_claims(user_b(), "region-b"));
     let query = Query::from(DOCUMENTS).filter(eq(col("team"), param("team")));
     let prepared_v1 = db
         .prepare_query_bound(
@@ -1151,10 +1152,10 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
         )
         .expect("prepare v1 team A binding");
     assert_eq!(
-        row_ids_for_identity(&db, &prepared_v1, USER_A),
+        row_ids_for_identity(&db, &prepared_v1, user_a()),
         vec![document_a]
     );
-    assert!(row_ids_for_identity(&db, &prepared_v1, USER_B).is_empty());
+    assert!(row_ids_for_identity(&db, &prepared_v1, user_b()).is_empty());
     let prepared_team_v1 = db
         .prepare_query_bound(
             &Query::from(TEAMS).filter(eq(col("name"), param("name"))),
@@ -1228,10 +1229,10 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
         prepared_v2_b.shape().shape_id()
     );
     assert_eq!(
-        row_ids_for_identity(&db, &prepared_v2_a, USER_A),
+        row_ids_for_identity(&db, &prepared_v2_a, user_a()),
         vec![document_a]
     );
-    let projected = block_on(db.all_for_identity(&prepared_v2_a, opts(), USER_A))
+    let projected = block_on(db.all_for_identity(&prepared_v2_a, opts(), user_a()))
         .expect("read v2 defaulted document");
     assert_eq!(projected.len(), 1);
     assert_eq!(projected[0].cell_at(2), Some(Value::U64(0)));
@@ -1244,15 +1245,15 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
         vec![team_a]
     );
     assert!(
-        row_ids_for_identity(&db, &prepared_v2_a, USER_B).is_empty(),
+        row_ids_for_identity(&db, &prepared_v2_a, user_b()).is_empty(),
         "principal B's claim must not select principal A's row after re-preparation"
     );
     assert!(
-        row_ids_for_identity(&db, &prepared_v2_b, USER_A).is_empty(),
+        row_ids_for_identity(&db, &prepared_v2_b, user_a()).is_empty(),
         "principal A's claim must not select principal B's row after re-preparation"
     );
     assert_eq!(
-        row_ids_for_identity(&db, &prepared_v2_b, USER_B),
+        row_ids_for_identity(&db, &prepared_v2_b, user_b()),
         vec![document_b]
     );
 }
@@ -1270,18 +1271,12 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
 /// alice ──drop───────► release Alice only ──write──► Bob receives row
 /// ```
 fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() {
-    let db = open_db_with_schema_as(schema(), AuthorId::SYSTEM);
+    let db = open_db_with_schema_as(schema(), AuthorSubject::SYSTEM);
     let team_a = row(0x11);
     let team_b = row(0x12);
     seed(&db, team_a, team_b, "region-a", "region-b");
-    db.set_identity_claims(
-        USER_A,
-        BTreeMap::from([("region".to_owned(), Value::String("region-a".to_owned()))]),
-    );
-    db.set_identity_claims(
-        USER_B,
-        BTreeMap::from([("region".to_owned(), Value::String("region-b".to_owned()))]),
-    );
+    db.set_identity_claims(user_a(), test_user_claims(user_a(), "region-a"));
+    db.set_identity_claims(user_b(), test_user_claims(user_b(), "region-b"));
     let query = Query::from(DOCUMENTS).filter(eq(col("team"), param("team")));
     let prepared = |team: RowUuid| {
         db.prepare_query_bound(
@@ -1290,9 +1285,9 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
         )
         .expect("prepare subscription binding")
     };
-    let mut stream_a = block_on(db.subscribe_for_identity(&prepared(team_a), opts(), USER_A))
+    let mut stream_a = block_on(db.subscribe_for_identity(&prepared(team_a), opts(), user_a()))
         .expect("subscribe A");
-    let mut stream_b = block_on(db.subscribe_for_identity(&prepared(team_b), opts(), USER_B))
+    let mut stream_b = block_on(db.subscribe_for_identity(&prepared(team_b), opts(), user_b()))
         .expect("subscribe B");
     stream_a.try_next_event().expect("A reset");
     stream_b.try_next_event().expect("B reset");
@@ -1400,7 +1395,7 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
 /// ```
 fn prepared_join_handle_recompiles_after_catalogue_runtime_rebuild() {
     let v1 = public_join_schema();
-    let db = open_db_with_schema_as(v1.clone(), AuthorId::SYSTEM);
+    let db = open_db_with_schema_as(v1.clone(), AuthorSubject::SYSTEM);
     let team = row(0xa1);
     let document = row(0xa2);
     block_on(db.insert(
@@ -1535,7 +1530,7 @@ fn prepared_binding_rejects_conflicting_claim_types_across_policies() {
     );
     let db = open_db_with_schema(schema);
     db.set_identity_claims(
-        USER_A,
+        user_a(),
         BTreeMap::from([("shared_scope".to_owned(), Value::Uuid(row(0x11).0))]),
     );
     let error = db

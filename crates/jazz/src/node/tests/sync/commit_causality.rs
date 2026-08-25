@@ -211,7 +211,7 @@ fn client_side_rejection_cascades_to_local_mergeable_descendant() {
         .tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
         .unwrap();
     let (exclusive, exclusive_unit) = client
-        .commit_exclusive_settled(tx_id, AuthorId::SYSTEM, SKEW_TOLERANCE_MS + 1)
+        .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, SKEW_TOLERANCE_MS + 1)
         .unwrap();
     let (dependent, dependent_unit) = client
         .commit_mergeable_unit_settled(
@@ -283,7 +283,7 @@ fn authority_unparks_child_after_unknown_parent_accepts() {
     client
         .tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
         .unwrap();
-    let (exclusive, exclusive_unit) = client.commit_exclusive_settled(tx_id, AuthorId::SYSTEM, 1).unwrap();
+    let (exclusive, exclusive_unit) = client.commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 1).unwrap();
     let (child, child_unit) = client
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row, 2)

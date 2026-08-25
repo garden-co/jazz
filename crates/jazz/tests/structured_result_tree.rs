@@ -6,7 +6,7 @@ use jazz::block_on;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent};
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
-use jazz::ids::{AuthorId, NodeUuid};
+use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::query::{ArraySubquery, OrderDirection, Query, col, eq, param};
 use jazz::result_tree::ResultRelation;
 use jazz::schema::JazzSchema;
@@ -54,7 +54,7 @@ fn open_db() -> Db<TestStorage> {
             TestStorage::new(&references),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x71; 16]),
-                author: AuthorId::from_bytes([0x72; 16]),
+                author: AuthorSubject::for_test_bytes([0x72; 16]),
             },
         )
         .with_id_source(SeededRowIdSource::new(73)),

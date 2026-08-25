@@ -137,7 +137,7 @@ fn upload_start_is_rate_admitted_before_pending_metadata_is_written() {
                 value_ref: prepared.value_ref,
             }),
             Some(CommitUnitIngestContext {
-                identity: AuthorId::SYSTEM,
+                identity: AuthorSubject::SYSTEM,
                 trust: CommitUnitTrust::Session,
                 edge_authority: false,
             }),
@@ -244,7 +244,7 @@ fn pushed_chunks_must_be_staged_before_the_referencing_authority_commit() {
     .unwrap();
     let (_, unit) = writer.commit_mergeable_unit_settled(commit).unwrap();
     let context = Some(CommitUnitIngestContext {
-        identity: AuthorId::SYSTEM,
+        identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
         edge_authority: false,
     });
@@ -322,7 +322,7 @@ fn corrupt_root_first_upload_is_rejected_without_poisoning_the_receiver() {
     )
     .unwrap();
     let context = Some(CommitUnitIngestContext {
-        identity: AuthorId::SYSTEM,
+        identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
         edge_authority: false,
     });
@@ -382,7 +382,7 @@ fn rate_limited_upload_preserves_pending_claim_for_retry() {
     )
     .unwrap();
     let context = Some(CommitUnitIngestContext {
-        identity: AuthorId::SYSTEM,
+        identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
         edge_authority: false,
     });
@@ -505,7 +505,7 @@ fn maintenance_evicts_pending_upload_after_the_configured_age() {
     )
     .unwrap();
     let context = Some(CommitUnitIngestContext {
-        identity: AuthorId::SYSTEM,
+        identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
         edge_authority: false,
     });
@@ -552,7 +552,7 @@ fn delayed_chunk_upload_succeeds_while_pending_journal_remains_present() {
     )
     .unwrap();
     let context = Some(CommitUnitIngestContext {
-        identity: AuthorId::SYSTEM,
+        identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
         edge_authority: false,
     });
@@ -812,9 +812,9 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
                 TxTime::from(u64::from(seed) + 1),
                 node(seed.wrapping_add(1)),
             )],
-            created_by: AuthorId(uuid::Uuid::from_bytes([seed.wrapping_add(2); 16])),
+            created_by: AuthorSubject::for_test_uuid(uuid::Uuid::from_bytes([seed.wrapping_add(2); 16])),
             created_at: TxTime::from(u64::from(seed) + 40),
-            updated_by: AuthorId(uuid::Uuid::from_bytes([seed.wrapping_add(3); 16])),
+            updated_by: AuthorSubject::for_test_uuid(uuid::Uuid::from_bytes([seed.wrapping_add(3); 16])),
             updated_at: TxTime::from(u64::from(seed) + 50),
             cells: table
                 .columns
@@ -1142,7 +1142,7 @@ fn late_lower_hlc_child_is_rejected_at_admission() {
                 tx_id: parent,
                 kind: TxKind::Mergeable,
                 n_total_writes: 1,
-                made_by: AuthorId::SYSTEM,
+                made_by: AuthorSubject::SYSTEM,
                 permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,
@@ -1171,7 +1171,7 @@ fn late_lower_hlc_child_is_rejected_at_admission() {
                 tx_id: child,
                 kind: TxKind::Mergeable,
                 n_total_writes: 1,
-                made_by: AuthorId::SYSTEM,
+                made_by: AuthorSubject::SYSTEM,
                 permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,
@@ -1224,7 +1224,7 @@ fn unlawful_child_with_known_parent_rejects_before_global_state() {
                 tx_id: parent,
                 kind: TxKind::Mergeable,
                 n_total_writes: 1,
-                made_by: AuthorId::SYSTEM,
+                made_by: AuthorSubject::SYSTEM,
                 permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,
@@ -1252,7 +1252,7 @@ fn unlawful_child_with_known_parent_rejects_before_global_state() {
                 tx_id: child,
                 kind: TxKind::Mergeable,
                 n_total_writes: 1,
-                made_by: AuthorId::SYSTEM,
+                made_by: AuthorSubject::SYSTEM,
                 permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,

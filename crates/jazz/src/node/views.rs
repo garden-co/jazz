@@ -185,7 +185,7 @@ pub(crate) struct MaintainedViewBundleInputs<'a> {
     pub(crate) result_member_removes: Vec<ResultMemberEntry>,
     pub(crate) program_fact_adds: Vec<ProgramFactEntry>,
     pub(crate) program_fact_removes: Vec<ProgramFactEntry>,
-    pub(crate) identity: AuthorId,
+    pub(crate) identity: AuthorSubject,
     pub(crate) tier: DurabilityTier,
     /// Maintained fact and collector state. The current carrier consumes its
     /// membership/witness facts; the retained recursive app rows are available
@@ -222,7 +222,7 @@ where
             [],
             [],
             [],
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
         )
         .await
     }
@@ -236,7 +236,7 @@ where
         peer_complete_tx_payloads: impl IntoIterator<Item = TxId>,
         previous_result_set: impl IntoIterator<Item = TxId>,
         previous_member_result_set: impl IntoIterator<Item = ResultMemberEntry>,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<SyncMessage, Error> {
         let (shape, binding) = self.whole_table_shape_binding(table)?;
         self.view_update_for_query_binding_with_peer_payload_inventory(
@@ -262,7 +262,7 @@ where
         peer_complete_tx_payloads: impl IntoIterator<Item = TxId>,
         previous_result_set: impl IntoIterator<Item = TxId>,
         previous_member_result_set: impl IntoIterator<Item = ResultMemberEntry>,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<SyncMessage, Error> {
         self.seeded_maintained_view_update_for_query_binding_with_peer_payload_inventory(
             shape,
@@ -288,7 +288,7 @@ where
         peer_complete_tx_payloads: impl IntoIterator<Item = TxId>,
         previous_result_set: impl IntoIterator<Item = TxId>,
         previous_member_result_set: impl IntoIterator<Item = ResultMemberEntry>,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<SyncMessage, Error> {
         self.seeded_maintained_view_update_for_query_binding_with_peer_payload_inventory_at_tier(
             shape,
@@ -312,7 +312,7 @@ where
         peer_complete_tx_payloads: impl IntoIterator<Item = TxId>,
         previous_result_set: impl IntoIterator<Item = TxId>,
         previous_member_result_set: impl IntoIterator<Item = ResultMemberEntry>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         tier: DurabilityTier,
     ) -> Result<SyncMessage, Error> {
         let peer_complete_tx_payloads = peer_complete_tx_payloads

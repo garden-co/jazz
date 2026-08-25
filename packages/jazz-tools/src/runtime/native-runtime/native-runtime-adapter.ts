@@ -25,7 +25,18 @@ import type {
 } from "../client.js";
 import type { Session } from "../context.js";
 import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
-import { authorBytesForSubject } from "../author-id.js";
+import {
+  TRUSTED_RESERVED_SESSION_TOKEN_FIELD,
+  isReservedJazzIssuer,
+  isTrustedReservedSession,
+} from "../client-session.js";
+import {
+  authorBytesForSession,
+  canonicalAuthorSubject,
+  decodeCanonicalAuthorSubjectBytes,
+  isUsableSubject,
+  parseCanonicalAuthorSubject,
+} from "../author-id.js";
 import {
   PostcardReader,
   PostcardWriter,
@@ -37,6 +48,7 @@ import {
   type NativeRelationSubscriptionSnapshot,
   type NativeRowBatch,
   type NativeSubscriptionDelta,
+  type NativeSelfSignedClientProof,
   type QueryArraySubquery,
   type DescriptorField,
   type QueryLiteral,
@@ -47,7 +59,12 @@ import {
 } from "./native-codec.js";
 import { encodeSchema } from "./schema-codec.js";
 import { nativeRowFieldPlanCacheKey, valueTypeCacheKey } from "./native-row-descriptor-key.js";
-import { WebSocketCarrier, type WebSocketNegotiation, wireAuthFailureReason } from "./websocket.js";
+import {
+  WebSocketCarrier,
+  peerIdentityForWebSocketAuth,
+  type WebSocketNegotiation,
+  wireAuthFailureReason,
+} from "./websocket.js";
 import {
   createNativeRowValueEncoder,
   createRecord,
@@ -81,7 +98,24 @@ type CoreTickWake = "immediate" | "deferred" | `after:${number}`;
 
 type NativeDbConstructor = {
   openMemory(schema: Uint8Array, config: Uint8Array): NativeDb;
+  openMemoryAsBackend?(schema: Uint8Array, config: Uint8Array): NativeDb;
   openPersistent?(dataPath: string, schema: Uint8Array, config: Uint8Array): NativeDb;
+  openPersistentAsBackend?(dataPath: string, schema: Uint8Array, config: Uint8Array): NativeDb;
+  openMemoryWithSelfSignedProof?(
+    schema: Uint8Array,
+    config: Uint8Array,
+    token: string,
+    appId: string,
+    claimedAuthor: string,
+  ): NativeDb;
+  openPersistentWithSelfSignedProof?(
+    dataPath: string,
+    schema: Uint8Array,
+    config: Uint8Array,
+    token: string,
+    appId: string,
+    claimedAuthor: string,
+  ): NativeDb;
 };
 
 type NativeWriteOptions = {
@@ -363,7 +397,9 @@ type ServerTransportWorkWaiter = {
 };
 
 type RuntimeSession = {
+  issuer: string;
   user_id: string;
+  authMode?: string;
   claims: Record<string, unknown>;
   identity: Uint8Array;
 };
@@ -434,11 +470,72 @@ function openPersistentDb(
   dataPath: string,
   schema: Uint8Array,
   config: Uint8Array,
+  selfSignedClientProof?: NativeSelfSignedClientProof,
+  backendMode = false,
 ): NativeDb {
+  if (selfSignedClientProof && backendMode) {
+    throw new Error("A native runtime cannot be both self-signed and backend-scoped");
+  }
+  if (backendMode) {
+    if (!Runtime.openPersistentAsBackend) {
+      throw new Error(
+        "Native runtime does not support explicit backend opens; rebuild the matching Jazz native artifact",
+      );
+    }
+    return Runtime.openPersistentAsBackend(dataPath, schema, config);
+  }
+  if (selfSignedClientProof) {
+    if (!Runtime.openPersistentWithSelfSignedProof) {
+      throw new Error(
+        "Native runtime does not support self-signed client opens; rebuild the matching Jazz native artifact",
+      );
+    }
+    return Runtime.openPersistentWithSelfSignedProof(
+      dataPath,
+      schema,
+      config,
+      selfSignedClientProof.token,
+      selfSignedClientProof.appId,
+      selfSignedClientProof.claimedAuthor,
+    );
+  }
   if (!Runtime.openPersistent) {
     throw new Error("Native runtime does not expose persistent storage");
   }
   return Runtime.openPersistent(dataPath, schema, config);
+}
+
+function openMemoryDb(
+  Runtime: NativeDbConstructor,
+  schema: Uint8Array,
+  config: Uint8Array,
+  selfSignedClientProof?: NativeSelfSignedClientProof,
+  backendMode = false,
+): NativeDb {
+  if (selfSignedClientProof && backendMode) {
+    throw new Error("A native runtime cannot be both self-signed and backend-scoped");
+  }
+  if (backendMode) {
+    if (!Runtime.openMemoryAsBackend) {
+      throw new Error(
+        "Native runtime does not support explicit backend opens; rebuild the matching Jazz native artifact",
+      );
+    }
+    return Runtime.openMemoryAsBackend(schema, config);
+  }
+  if (!selfSignedClientProof) return Runtime.openMemory(schema, config);
+  if (!Runtime.openMemoryWithSelfSignedProof) {
+    throw new Error(
+      "Native runtime does not support self-signed client opens; rebuild the matching Jazz native artifact",
+    );
+  }
+  return Runtime.openMemoryWithSelfSignedProof(
+    schema,
+    config,
+    selfSignedClientProof.token,
+    selfSignedClientProof.appId,
+    selfSignedClientProof.claimedAuthor,
+  );
 }
 
 export class NativeRuntimeAdapter implements Runtime {
@@ -447,6 +544,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly configBytes: Uint8Array;
   private readonly peerIdentity: Uint8Array;
   private readonly schemaHash: string;
+  private readonly trustedBackend: boolean;
   private readonly preparedQueries = new Map<string, PreparedQuery>();
   private readonly transactionOwner: TransactionOwnerState;
   private readonly pendingTxs: Map<string, PendingTx>;
@@ -521,7 +619,9 @@ export class NativeRuntimeAdapter implements Runtime {
       persistentPath?: string;
       db?: NativeDb;
       initialSyncFlushEvery?: number;
+      selfSignedClientProof?: NativeSelfSignedClientProof;
       readAuthorizationHost?: ReadAuthorizationHost;
+      backendMode?: boolean;
       owner?: NativeRuntimeAdapter;
     },
   ) {
@@ -537,6 +637,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.completedTxs = this.transactionOwner.completedTxs;
     this.writes = this.transactionOwner.writes;
     this.schemaBytes = encodeSchema(schema);
+    this.trustedBackend = opts?.backendMode === true;
     this.configBytes = openConfig(
       node,
       author,
@@ -552,12 +653,25 @@ export class NativeRuntimeAdapter implements Runtime {
       if (!Runtime) {
         throw new Error("Native runtime constructor required for persistent storage");
       }
-      this.db = openPersistentDb(Runtime, opts.persistentPath, this.schemaBytes, this.configBytes);
+      this.db = openPersistentDb(
+        Runtime,
+        opts.persistentPath,
+        this.schemaBytes,
+        this.configBytes,
+        opts?.selfSignedClientProof,
+        opts?.backendMode,
+      );
     } else {
       if (!Runtime) {
         throw new Error("Native runtime constructor required for memory storage");
       }
-      this.db = Runtime.openMemory(this.schemaBytes, this.configBytes);
+      this.db = openMemoryDb(
+        Runtime,
+        this.schemaBytes,
+        this.configBytes,
+        opts?.selfSignedClientProof,
+        opts?.backendMode,
+      );
     }
     if (opts?.owner) return;
     if (typeof this.db.setTickScheduler !== "function") {
@@ -1371,13 +1485,14 @@ export class NativeRuntimeAdapter implements Runtime {
         );
       }
       const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
+      const projectedColumns = subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns;
       let rows = this.readPlainRows(query, opts, session ?? undefined, pendingTx);
-      let rowStates = rowsFromBatches(readRowBatches(rows), this.schema);
+      let rowStates = rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
       if (!pendingTx && (tier === "edge" || tier === "global") && rowStates.length > 0) {
         await this.refreshRowsFromEdge(session, rowStates);
         if (this.closed) return [];
         rows = this.readPlainRows(query, opts, session ?? undefined, pendingTx);
-        rowStates = rowsFromBatches(readRowBatches(rows), this.schema);
+        rowStates = rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
       }
       return rowStates;
     } finally {
@@ -1511,11 +1626,12 @@ export class NativeRuntimeAdapter implements Runtime {
     // shutdown is allowed to reject them.
     void this.disconnect({ rejectWaiters: false });
     const generation = ++this.serverConnectionGeneration;
+    const transportIdentity = peerIdentityForWebSocketAuth(authJson, this.peerIdentity);
     this.serverTransportError = null;
     this.serverEndpointUrl = url;
     const carrier = new WebSocketCarrier({
       endpointUrl: url,
-      peerIdentity: this.peerIdentity,
+      peerIdentity: transportIdentity,
       authJson,
       onFrame: (frame) => {
         if (generation !== this.serverConnectionGeneration) return;
@@ -1575,7 +1691,7 @@ export class NativeRuntimeAdapter implements Runtime {
       negotiation.features,
       authority.node,
       authority.epoch,
-      this.peerIdentity,
+      this.node,
       localEpoch,
     );
   }
@@ -1777,6 +1893,7 @@ export class NativeRuntimeAdapter implements Runtime {
    * point, with a request session supplying its subject when present.
    */
   private readRowsForHost(query: PreparedQuery, opts: unknown, identity?: Uint8Array): Uint8Array {
+    if (this.trustedBackend && identity === undefined) return this.db.all(query, opts);
     return this.readAuthorizationHost === "trusted-serving"
       ? this.db.allForIdentity(query, identity ?? this.peerIdentity, opts)
       : this.db.all(query, opts);
@@ -1787,6 +1904,7 @@ export class NativeRuntimeAdapter implements Runtime {
    * an ordinary client mutation into a policy-enforcing local admission.
    */
   private trustedWriteIdentity(session: RuntimeSession | null | undefined): Uint8Array | undefined {
+    if (this.trustedBackend && !session) return undefined;
     return this.readAuthorizationHost === "trusted-serving"
       ? (session?.identity ?? this.peerIdentity)
       : undefined;
@@ -1928,7 +2046,21 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private applySessionClaims(session: RuntimeSession | null | undefined): void {
-    if (!session || !this.db.setIdentityClaims) return;
+    // Client runtimes only evaluate their already-settled local replica. They
+    // never select the policy-enforcing native entry points, so there is no
+    // reason to serialize a session subject into the public native ABI here.
+    // In particular, local-first and anonymous subjects are admitted by the
+    // first-party TypeScript flow, while raw native identity ingress must keep
+    // rejecting their reserved issuers. Claims are required only by the
+    // explicitly selected trusted-serving host, where every identity call is
+    // part of that serving boundary.
+    if (
+      !session ||
+      this.readAuthorizationHost !== "trusted-serving" ||
+      !this.db.setIdentityClaims
+    ) {
+      return;
+    }
     this.db.setIdentityClaims(session.identity, session.claims);
   }
 
@@ -2828,23 +2960,92 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
   if (!writeContext) return null;
   try {
     const parsed = JSON.parse(writeContext) as {
+      issuer?: unknown;
       user_id?: unknown;
+      claims?: unknown;
+      authMode?: unknown;
       attribution?: unknown;
-      session?: { user_id?: unknown; claims?: unknown };
+      [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]?: unknown;
+      session?: {
+        issuer?: unknown;
+        user_id?: unknown;
+        claims?: unknown;
+        authMode?: unknown;
+        [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]?: unknown;
+      };
     };
+    if (parsed.attribution === SYSTEM_AUTHOR_ID) {
+      throw new Error("Native runtime public session uses reserved issuer");
+    }
+    const attributedAuthor =
+      typeof parsed.attribution === "string"
+        ? parsePublicCanonicalAuthor(parsed.attribution)
+        : null;
     const userId =
-      typeof parsed.user_id === "string"
+      attributedAuthor?.user_id ??
+      (typeof parsed.user_id === "string"
         ? parsed.user_id
         : typeof parsed.session?.user_id === "string"
           ? parsed.session.user_id
-          : parsed.attribution === SYSTEM_AUTHOR_ID
-            ? SYSTEM_AUTHOR_ID
-            : undefined;
-    if (!userId) return null;
-    const claims = sessionClaims(userId, parsed.session?.claims);
-    return { user_id: userId, claims, identity: authorBytesForSubject(userId) };
-  } catch {
+          : undefined);
+    if (!userId || !isUsableSubject(userId)) return null;
+    const issuer = attributedAuthor?.issuer ?? parsed.session?.issuer ?? parsed.issuer;
+    if (typeof issuer !== "string" || !isUsableSubject(issuer)) {
+      throw new Error("session is missing issuer");
+    }
+    const session = {
+      issuer,
+      user_id: userId,
+      authMode:
+        typeof parsed.session?.authMode === "string"
+          ? parsed.session.authMode
+          : typeof parsed.authMode === "string"
+            ? parsed.authMode
+            : undefined,
+    };
+    assertPublicSessionIssuer(
+      session.issuer,
+      session.user_id,
+      session.authMode,
+      parsed.session?.[TRUSTED_RESERVED_SESSION_TOKEN_FIELD] ??
+        parsed[TRUSTED_RESERVED_SESSION_TOKEN_FIELD],
+    );
+    const claims = sessionClaims(parsed.session?.claims ?? parsed.claims, session);
+    return { ...session, claims, identity: authorBytesForSession(session) };
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message === "session is missing issuer" ||
+        error.message === "Native runtime public session uses reserved issuer")
+    ) {
+      throw error;
+    }
     return null;
+  }
+}
+
+function parsePublicCanonicalAuthor(value: string): { issuer: string; user_id: string } | null {
+  const parsed = parseCanonicalAuthorSubject(value);
+  if (parsed && isReservedJazzIssuer(parsed.issuer)) {
+    throw new Error("Native runtime public session uses reserved issuer");
+  }
+  return parsed ? { issuer: parsed.issuer, user_id: parsed.user_id } : null;
+}
+
+function assertPublicSessionIssuer(
+  issuer: string,
+  userId: string,
+  authMode: string | undefined,
+  trustedToken?: unknown,
+): void {
+  if (
+    isReservedJazzIssuer(issuer) &&
+    !(
+      (authMode === "local-first" || authMode === "anonymous" || authMode === "external") &&
+      isTrustedReservedSession({ issuer, user_id: userId, authMode }, trustedToken)
+    )
+  ) {
+    throw new Error("Native runtime public session uses reserved issuer");
   }
 }
 
@@ -2959,14 +3160,34 @@ function assertSupportedReadOptions(tier?: string | null, optionsJson?: string |
 
 function readSession(sessionJson?: string | null): RuntimeSession | null {
   if (sessionJson == null) return null;
-  const parsed = JSON.parse(sessionJson) as { user_id?: unknown; claims?: unknown };
-  if (typeof parsed.user_id !== "string") {
+  const parsed = JSON.parse(sessionJson) as {
+    issuer?: unknown;
+    user_id?: unknown;
+    claims?: unknown;
+    authMode?: unknown;
+    [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]?: unknown;
+  };
+  if (typeof parsed.user_id !== "string" || !isUsableSubject(parsed.user_id)) {
     throw new Error("Native runtime session is missing user_id");
   }
-  return {
+  if (typeof parsed.issuer !== "string" || !isUsableSubject(parsed.issuer)) {
+    throw new Error("Native runtime session is missing issuer");
+  }
+  const session = {
+    issuer: parsed.issuer,
     user_id: parsed.user_id,
-    claims: sessionClaims(parsed.user_id, parsed.claims),
-    identity: authorBytesForSubject(parsed.user_id),
+    authMode: typeof parsed.authMode === "string" ? parsed.authMode : undefined,
+  };
+  assertPublicSessionIssuer(
+    session.issuer,
+    session.user_id,
+    session.authMode,
+    parsed[TRUSTED_RESERVED_SESSION_TOKEN_FIELD],
+  );
+  return {
+    ...session,
+    claims: sessionClaims(parsed.claims, session),
+    identity: authorBytesForSession(session),
   };
 }
 
@@ -2974,11 +3195,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function sessionClaims(userId: string, rawClaims: unknown): Record<string, unknown> {
+function sessionClaims(
+  rawClaims: unknown,
+  session: { issuer: string; user_id: string; authMode?: string },
+): Record<string, unknown> {
+  const canonical = canonicalAuthorSubject(session.issuer, session.user_id);
   return {
     ...(isRecord(rawClaims) ? rawClaims : {}),
-    user_id: userId,
-    userId,
+    iss: session.issuer,
+    issuer: session.issuer,
+    sub: session.user_id,
+    user_id: session.user_id,
+    userId: session.user_id,
+    author: canonical,
+    ...(session.authMode ? { authMode: session.authMode, auth_mode: session.authMode } : {}),
   };
 }
 
@@ -4445,6 +4675,9 @@ function nativeRowFieldPlans(
 
   const columns = projectedColumns ?? schema[batch.table]?.columns ?? [];
   const columnsByName = new Map(columns.map((column) => [column.name, column]));
+  const projectedNames = projectedColumns
+    ? new Set(projectedColumns.map((column) => column.name))
+    : null;
   const plans: NativeRowFieldPlan[] = [];
 
   for (let index = 0; index < batch.descriptor.length; index += 1) {
@@ -4452,16 +4685,15 @@ function nativeRowFieldPlans(
     if (!fieldName || isInternalField(fieldName) || isCurrentRowPhysicalField(fieldName)) continue;
 
     const name = publicFieldName(fieldName);
-    const type =
-      name === "$createdBy" || name === "$updatedBy"
-        ? ({ type: "Uuid" } as const)
-        : (magicColumnType(name) ?? columnsByName.get(name)?.column_type);
+    const type = magicColumnType(name) ?? columnsByName.get(name)?.column_type;
     plans.push({
       name,
       index,
       type,
       storageType: batch.descriptor[index]!.valueType,
-      includeInValues: !isHiddenIncludeColumn(name) && !isProvenanceMagicColumn(name),
+      includeInValues:
+        !isHiddenIncludeColumn(name) &&
+        (!isProvenanceMagicColumn(name) || projectedNames?.has(name) === true),
     });
   }
 
@@ -4820,6 +5052,14 @@ function decodeBytes(
     case "Text":
     case "Json":
     case "Enum":
+      if (
+        fieldName !== undefined &&
+        isProvenanceMagicColumn(fieldName) &&
+        type.type === "Text" &&
+        storageType?.tag === 8
+      ) {
+        return { type: "Text", value: decodeProvenanceText(bytes) };
+      }
       if (bytes[0] !== 0) throw new Error("indirect scalar crossed a logical binding boundary");
       return { type: "Text", value: textDecoder.decode(bytes.subarray(1)) };
     case "EnumPayload":
@@ -4850,6 +5090,10 @@ function decodeBytes(
         ),
       };
   }
+}
+
+function decodeProvenanceText(bytes: Uint8Array): string {
+  return decodeCanonicalAuthorSubjectBytes(bytes);
 }
 
 function decodePayloadEnumBytes(
@@ -5506,12 +5750,7 @@ function valuesForNativeFrame(row: RowState, columns: readonly ColumnDescriptor[
     const value =
       row.valuesByColumn.get(column.name) ??
       (column.column_type.type === "Array" ? { type: "Array", value: [] } : { type: "Null" });
-    values[index] =
-      (column.name === "$createdBy" || column.name === "$updatedBy") &&
-      column.column_type.type === "Text" &&
-      value.type === "Uuid"
-        ? { type: "Text", value: value.value }
-        : value;
+    values[index] = value;
   }
   return values;
 }

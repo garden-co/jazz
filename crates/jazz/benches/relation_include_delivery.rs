@@ -10,7 +10,7 @@ use jazz::block_on;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent};
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{ArraySubquery, Query};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -292,7 +292,7 @@ fn open_db(scale: usize, sample: usize) -> Db<MemoryStorage> {
             MemoryStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([(scale as u8).wrapping_add(sample as u8); 16]),
-                author: AuthorId::from_bytes([0xa1; 16]),
+                author: AuthorSubject::for_test_bytes([0xa1; 16]),
             },
         )
         .with_id_source(SeededRowIdSource::new((scale + sample) as u64 + 1)),

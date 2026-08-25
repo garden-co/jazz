@@ -62,11 +62,11 @@ fn branch_column_reference_policy_schema() -> JazzSchema {
 #[test]
 fn admitted_server_authorizes_branch_write_through_referenced_application_row() {
     let schema = branch_column_reference_policy_schema();
-    let owner = AuthorId::from_bytes([0x76; 16]);
-    let outsider = AuthorId::from_bytes([0x77; 16]);
+    let owner = AuthorSubject::for_test_bytes([0x76; 16]);
+    let outsider = AuthorSubject::for_test_bytes([0x77; 16]);
     let branch = row(0x78);
     let selector = BranchSelector::new([("branch_id", Value::Uuid(branch.0))]);
-    let server = open_core(0x75, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x75, AuthorSubject::SYSTEM, &schema);
     server
         .insert_with_id(
             "branches",
@@ -74,7 +74,7 @@ fn admitted_server_authorizes_branch_write_through_referenced_application_row() 
             BTreeMap::from([
                 ("branch_key".to_owned(), Value::Uuid(branch.0)),
                 ("name".to_owned(), Value::String("draft".to_owned())),
-                ("owner".to_owned(), Value::Uuid(owner.0)),
+                ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
             ]),
         )
         .unwrap();
@@ -688,7 +688,7 @@ fn high_level_large_value_reads_authorize_before_descriptor_lookup() {
                 ),
         ),
     );
-    let reader = AuthorId::from_bytes([0x4e; 16]);
+    let reader = AuthorSubject::for_test_bytes([0x4e; 16]);
     let db = open_db(0x4e, reader, &schema);
     let visible = row(0x4e);
     let hidden = row(0x4f);
@@ -727,7 +727,7 @@ fn nullable_large_text_uses_the_same_high_level_read_and_edit_surface() {
     let schema = build_public_db_test_schema(PublicSchemaBuilder::new().table(
         PublicTableSchemaBuilder::new("notes").nullable_column("body", PublicColumnType::Text),
     ));
-    let db = open_db(0x4d, AuthorId::SYSTEM, &schema);
+    let db = open_db(0x4d, AuthorSubject::SYSTEM, &schema);
     let row = row(0x4d);
     let body = "n".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 73);
     db.insert(
@@ -766,7 +766,7 @@ fn db_facade_runs_saas_shaped_local_lane_end_to_end() {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
     let db = block_on(Db::open(DbConfig {
         schema: schema.clone(),
         storage,
@@ -811,8 +811,8 @@ fn db_facade_runs_saas_shaped_local_lane_end_to_end() {
 #[test]
 fn core_db_self_finalizes_own_writes_to_global() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let core = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let core = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
 
     let write = core
         .insert("todos", cells("authority write", false, owner))
@@ -829,8 +829,8 @@ fn core_db_self_finalizes_own_writes_to_global() {
 #[test]
 fn db_sync_surface_uploads_client_writes_for_authority_fate() {
     let schema = schema();
-    let author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, author, &schema);
 
     let (client_transport, server_transport) = duplex();
@@ -867,8 +867,8 @@ fn db_sync_surface_uploads_client_writes_for_authority_fate() {
 #[test]
 fn byte_wire_uploads_client_writes_for_authority_fate() {
     let schema = schema();
-    let author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, author, &schema);
 
     let (client_transport, server_transport) = byte_duplex();
@@ -900,8 +900,8 @@ fn byte_wire_uploads_client_writes_for_authority_fate() {
 #[test]
 fn db_sync_surface_uploads_client_exclusive_commit_for_global_fate() {
     let schema = schema();
-    let author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, author, &schema);
 
     let (client_transport, server_transport) = duplex();
@@ -949,8 +949,8 @@ fn db_sync_surface_uploads_client_exclusive_commit_for_global_fate() {
 #[test]
 fn db_sync_surface_returns_exclusive_conflict_fate_to_client() {
     let schema = schema();
-    let author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, author, &schema);
 
     let (client_transport, server_transport) = duplex();
@@ -1012,7 +1012,7 @@ fn db_sync_surface_returns_exclusive_conflict_fate_to_client() {
 #[test]
 fn unhandled_rejection_is_delivered_as_mutation_error() {
     let schema = schema();
-    let author = AuthorId::from_bytes([0xc1; 16]);
+    let author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, author, &schema);
     let (client_transport, mut authority_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
@@ -1065,7 +1065,7 @@ fn unhandled_rejection_is_delivered_as_mutation_error() {
 #[test]
 fn waited_rejection_is_not_delivered_as_mutation_error() {
     let schema = schema();
-    let author = AuthorId::from_bytes([0xc2; 16]);
+    let author = AuthorSubject::for_test_bytes([0xc2; 16]);
     let client = open_db(0xc2, author, &schema);
     let (client_transport, mut authority_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
@@ -1121,7 +1121,7 @@ fn waited_rejection_is_not_delivered_as_mutation_error() {
 #[test]
 fn wait_after_rejection_suppresses_queued_mutation_error() {
     let schema = schema();
-    let author = AuthorId::from_bytes([0xc4; 16]);
+    let author = AuthorSubject::for_test_bytes([0xc4; 16]);
     let client = open_db(0xc4, author, &schema);
     let (client_transport, mut authority_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
@@ -1177,7 +1177,7 @@ fn wait_after_rejection_suppresses_queued_mutation_error() {
 #[test]
 fn undelivered_mutation_error_is_recovered_after_reopen() {
     let schema = schema();
-    let author = AuthorId::from_bytes([0xc3; 16]);
+    let author = AuthorSubject::for_test_bytes([0xc3; 16]);
     let identity = DbIdentity {
         node: NodeUuid::from_bytes([0xc3; 16]),
         author,
@@ -1262,8 +1262,8 @@ fn undelivered_mutation_error_is_recovered_after_reopen() {
 #[test]
 fn write_fate_and_durability_are_queryable_through_facade() {
     let schema = schema();
-    let author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, author, &schema);
 
     let (client_transport, server_transport) = duplex();
@@ -1309,9 +1309,9 @@ fn write_fate_and_durability_are_queryable_through_facade() {
 #[test]
 fn session_upload_rejects_forged_made_by_without_ingesting_rows() {
     let schema = owner_write_schema();
-    let session_author = AuthorId::from_bytes([0xc1; 16]);
-    let forged_author = AuthorId::from_bytes([0xa1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let session_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let forged_author = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, session_author, &schema);
 
     let (client_transport, server_transport) = duplex();
@@ -1352,8 +1352,8 @@ fn session_upload_rejects_forged_made_by_without_ingesting_rows() {
 #[test]
 fn session_upload_uses_connection_identity_for_write_policy() {
     let schema = owner_write_schema();
-    let session_author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let session_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, session_author, &schema);
 
     let (client_transport, server_transport) = duplex();
@@ -1388,9 +1388,9 @@ fn session_upload_uses_connection_identity_for_write_policy() {
 #[test]
 fn admitted_server_prepared_write_policy_binds_text_user_id_claim() {
     let schema = owner_id_session_write_schema();
-    let alice = AuthorId::from_bytes([0xa1; 16]);
-    let bob = AuthorId::from_bytes([0xb2; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let alice_client = open_db(0xa1, alice, &schema);
     let bob_client = open_db(0xb2, bob, &schema);
     let alice_claims = BTreeMap::from([(
@@ -1467,13 +1467,19 @@ fn admitted_server_prepared_write_policy_binds_text_user_id_claim() {
 #[test]
 fn admitted_server_prepared_write_policy_coerces_string_user_id_to_uuid_column() {
     let schema = owner_uuid_session_write_schema();
-    let alice = AuthorId::from_bytes([0xa3; 16]);
-    let bob = AuthorId::from_bytes([0xb3; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa3; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb3; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let alice_client = open_db(0xa3, alice, &schema);
     let bob_client = open_db(0xb3, bob, &schema);
-    let alice_claims = BTreeMap::from([("user_id".to_owned(), Value::String(alice.0.to_string()))]);
-    let bob_claims = BTreeMap::from([("user_id".to_owned(), Value::String(bob.0.to_string()))]);
+    let alice_claims = BTreeMap::from([(
+        "user_id".to_owned(),
+        Value::String(alice.test_uuid().to_string()),
+    )]);
+    let bob_claims = BTreeMap::from([(
+        "user_id".to_owned(),
+        Value::String(bob.test_uuid().to_string()),
+    )]);
     alice_client.set_identity_claims(alice, alice_claims.clone());
     bob_client.set_identity_claims(bob, bob_claims.clone());
 
@@ -1494,7 +1500,7 @@ fn admitted_server_prepared_write_policy_coerces_string_user_id_to_uuid_column()
                     "body".to_owned(),
                     Value::String("owned by alice".to_owned()),
                 ),
-                ("owner_id".to_owned(), Value::Uuid(alice.0)),
+                ("owner_id".to_owned(), Value::Uuid(alice.test_uuid())),
             ]),
             Default::default(),
         )
@@ -1516,7 +1522,7 @@ fn admitted_server_prepared_write_policy_coerces_string_user_id_to_uuid_column()
                     "body".to_owned(),
                     Value::String("spoofed by bob".to_owned()),
                 ),
-                ("owner_id".to_owned(), Value::Uuid(alice.0)),
+                ("owner_id".to_owned(), Value::Uuid(alice.test_uuid())),
             ]),
             crate::db::InsertOptions {
                 row_id: Some(row(0xb3)),
@@ -1534,8 +1540,8 @@ fn admitted_server_prepared_write_policy_coerces_string_user_id_to_uuid_column()
 #[test]
 fn admitted_server_prepared_write_policy_fails_closed_for_wrong_user_id_type() {
     let schema = owner_id_session_write_schema();
-    let author = AuthorId::from_bytes([0xa4; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let author = AuthorSubject::for_test_bytes([0xa4; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xa4, author, &schema);
     let claims = BTreeMap::from([("user_id".to_owned(), Value::Bool(true))]);
     client.set_identity_claims(author, claims.clone());
@@ -1573,9 +1579,9 @@ fn admitted_server_prepared_write_policy_fails_closed_for_wrong_user_id_type() {
 #[test]
 fn session_delete_uses_current_row_for_owner_write_policy() {
     let schema = owner_write_schema();
-    let session_author = AuthorId::from_bytes([0xc1; 16]);
-    let other_author = AuthorId::from_bytes([0xd1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let session_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let other_author = AuthorSubject::for_test_bytes([0xd1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, session_author, &schema);
 
     let (client_transport, server_transport) = duplex();
@@ -1637,9 +1643,9 @@ fn session_delete_uses_current_row_for_owner_write_policy() {
 #[test]
 fn trusted_backend_upload_uses_backend_policy_and_stores_user_made_by() {
     let schema = owner_write_schema();
-    let backend_author = AuthorId::from_bytes([0xb0; 16]);
-    let attributed_user = AuthorId::from_bytes([0xa1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let backend_author = AuthorSubject::for_test_bytes([0xb0; 16]);
+    let attributed_user = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let backend = open_db(0xb0, backend_author, &schema);
 
     let (backend_transport, server_transport) = duplex();
@@ -1649,6 +1655,9 @@ fn trusted_backend_upload_uses_backend_policy_and_stores_user_made_by() {
         backend_author,
         CommitUnitTrust::TrustedBackend,
     );
+    backend.set_identity_claims(attributed_user, test_provider_claims(attributed_user));
+    backend.tick().unwrap();
+    server.tick().unwrap();
 
     let tx_id = backend
         .node
@@ -1685,9 +1694,9 @@ fn trusted_backend_upload_uses_backend_policy_and_stores_user_made_by() {
 #[test]
 fn trusted_backend_upload_applies_session_claim_assertions_for_write_policy() {
     let schema = editor_claim_write_schema();
-    let backend_author = AuthorId::from_bytes([0xb0; 16]);
-    let editor_author = AuthorId::from_bytes([0xe1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let backend_author = AuthorSubject::for_test_bytes([0xb0; 16]);
+    let editor_author = AuthorSubject::for_test_bytes([0xe1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let backend = open_db(0xb0, backend_author, &schema);
 
     let (backend_transport, server_transport) = duplex();
@@ -1730,8 +1739,8 @@ fn trusted_backend_upload_applies_session_claim_assertions_for_write_policy() {
 #[test]
 fn session_claim_assertions_require_trusted_backend_upload() {
     let schema = editor_claim_write_schema();
-    let session_author = AuthorId::from_bytes([0xe1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let session_author = AuthorSubject::for_test_bytes([0xe1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xe1, session_author, &schema);
 
     let (client_transport, server_transport) = duplex();
@@ -1766,9 +1775,9 @@ fn session_claim_assertions_require_trusted_backend_upload() {
 #[test]
 fn trusted_backend_delete_uses_permission_subject_parent_for_write_policy() {
     let schema = owner_write_schema();
-    let backend_author = AuthorId::from_bytes([0xb0; 16]);
-    let attributed_user = AuthorId::from_bytes([0xa1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let backend_author = AuthorSubject::for_test_bytes([0xb0; 16]);
+    let attributed_user = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let backend = open_db(0xb0, backend_author, &schema);
 
     let (backend_transport, server_transport) = duplex();
@@ -1778,6 +1787,11 @@ fn trusted_backend_delete_uses_permission_subject_parent_for_write_policy() {
         backend_author,
         CommitUnitTrust::TrustedBackend,
     );
+    // The trusted backend may attribute a mutation to this admitted provider
+    // session, but its UUID owner policy still reads the raw provider claim.
+    backend.set_identity_claims(attributed_user, test_provider_claims(attributed_user));
+    backend.tick().unwrap();
+    server.tick().unwrap();
 
     let insert = backend
         .insert(
@@ -1819,10 +1833,12 @@ fn trusted_backend_delete_uses_permission_subject_parent_for_write_policy() {
 #[test]
 fn client_insert_advice_is_unknown_without_writing() {
     let schema = owner_write_schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let other = AuthorId::from_bytes([0xb2; 16]);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let other = AuthorSubject::for_test_bytes([0xb2; 16]);
     let owner_db = open_db(0xa1, owner, &schema);
     let other_db = open_db(0xb2, other, &schema);
+    owner_db.set_identity_claims(owner, test_provider_claims(owner));
+    other_db.set_identity_claims(other, test_provider_claims(other));
 
     assert_eq!(
         owner_db
@@ -1855,10 +1871,12 @@ fn client_insert_advice_is_unknown_without_writing() {
 #[test]
 fn client_delete_advice_is_unknown_without_mutating() {
     let schema = owner_write_schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let other = AuthorId::from_bytes([0xb2; 16]);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let other = AuthorSubject::for_test_bytes([0xb2; 16]);
     let owner_db = open_db(0xa1, owner, &schema);
     let other_db = open_db(0xb2, other, &schema);
+    owner_db.set_identity_claims(owner, test_provider_claims(owner));
+    other_db.set_identity_claims(other, test_provider_claims(other));
     let row = row(1);
     let write = owner_db
         .insert(
@@ -1906,14 +1924,14 @@ fn client_delete_advice_is_unknown_without_mutating() {
         PermissionAdvice::Denied,
     );
     assert_eq!(prepared_read(&owner_db, &owner_db.table("todos")).len(), 1);
-    assert_eq!(prepared_read(&other_db, &other_db.table("todos")).len(), 1);
+    assert_eq!(prepared_read(&other_db, &other_db.table("todos")).len(), 0);
 }
 
 #[test]
 fn core_attributed_insert_uses_core_identity_for_policy_and_user_for_made_by() {
     let schema = owner_write_schema();
-    let backend = AuthorId::from_bytes([0xbe; 16]);
-    let attributed_user = AuthorId::from_bytes([0xa1; 16]);
+    let backend = AuthorSubject::for_test_bytes([0xbe; 16]);
+    let attributed_user = AuthorSubject::for_test_bytes([0xa1; 16]);
     let core = open_core(0x5e, backend, &schema);
     let write = core
         .insert_attributed(
@@ -1939,8 +1957,8 @@ fn core_attributed_insert_uses_core_identity_for_policy_and_user_for_made_by() {
 #[test]
 fn client_attributed_insert_to_different_user_is_rejected() {
     let schema = owner_write_schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let attributed_user = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let attributed_user = AuthorSubject::for_test_bytes([0xa1; 16]);
     let client = open_db(0xc1, client_author, &schema);
 
     let err = match client
@@ -1965,7 +1983,7 @@ fn client_attributed_insert_to_different_user_is_rejected() {
 #[test]
 fn default_insert_keeps_subject_and_made_by_equal() {
     let schema = owner_write_schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
     let db = open_db(0xa1, owner, &schema);
     let write = db
         .insert("todos", cells("default", false, owner), Default::default())

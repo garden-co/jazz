@@ -15,16 +15,28 @@ where
     pub async fn open_exclusive(&mut self, id: OpenTransactionId) -> Result<(), Error> {
         self.open_transaction(
             id,
-            OpenTransactionKind::Exclusive { bound_author: None },
-            AuthorId::SYSTEM,
+            OpenTransactionKind::Exclusive {
+                bound_author: Some(AuthorSubject::SYSTEM),
+            },
+            AuthorSubject::SYSTEM,
         )
         .await
+    }
+
+    #[cfg(feature = "testing")]
+    /// Open an exclusive transaction for a synthetic test identity.
+    pub async fn open_exclusive_for_test(
+        &mut self,
+        id: OpenTransactionId,
+        made_by: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.open_exclusive_for_identity(id, made_by).await
     }
 
     pub(crate) async fn open_exclusive_for_identity(
         &mut self,
         id: OpenTransactionId,
-        made_by: AuthorId,
+        made_by: AuthorSubject,
     ) -> Result<(), Error> {
         self.open_transaction(
             id,
@@ -40,8 +52,8 @@ where
     pub(crate) async fn open_mergeable(
         &mut self,
         id: OpenTransactionId,
-        made_by: AuthorId,
-        permission_subject: Option<AuthorId>,
+        made_by: AuthorSubject,
+        permission_subject: Option<AuthorSubject>,
     ) -> Result<(), Error> {
         self.open_transaction(
             id,
@@ -58,7 +70,7 @@ where
         &mut self,
         id: OpenTransactionId,
         kind: OpenTransactionKind,
-        provisional_author: AuthorId,
+        provisional_author: AuthorSubject,
     ) -> Result<(), Error> {
         self.require_catalogue_ready()?;
         if self.open_tx.open_transactions.contains_key(&id)
@@ -681,28 +693,41 @@ where
     }
 
     /// Commit an exclusive transaction and return its sync commit unit.
+    pub(crate) async fn commit_exclusive_bound(
+        &mut self,
+        open_batch_id: OpenTransactionId,
+        now_ms: u64,
+    ) -> Result<(PublishedTransaction, SyncMessage), Error> {
+        let OpenTransactionKind::Exclusive {
+            bound_author: Some(author),
+        } = self.open_tx(open_batch_id)?.kind
+        else {
+            return Err(Error::OpenTransactionIdentityMismatch);
+        };
+        self.commit_exclusive(open_batch_id, author, now_ms).await
+    }
+
+    /// Commit an exclusive transaction and return its sync commit unit.
     pub async fn commit_exclusive(
         &mut self,
         open_batch_id: OpenTransactionId,
-        made_by: AuthorId,
+        made_by: AuthorSubject,
         now_ms: u64,
     ) -> Result<(PublishedTransaction, SyncMessage), Error> {
-        if !matches!(
-            self.open_tx(open_batch_id)?.kind,
-            OpenTransactionKind::Exclusive { .. }
-        ) {
-            return Err(Error::InvalidMergeableCommit(
-                "open transaction is not exclusive",
-            ));
-        }
-        if matches!(
-            self.open_tx(open_batch_id)?.kind,
+        let made_by = match self.open_tx(open_batch_id)?.kind {
             OpenTransactionKind::Exclusive {
-                bound_author: Some(bound)
-            } if bound != made_by
-        ) {
-            return Err(Error::OpenTransactionIdentityMismatch);
-        }
+                bound_author: Some(bound_author),
+            } if bound_author != made_by => return Err(Error::OpenTransactionIdentityMismatch),
+            OpenTransactionKind::Exclusive {
+                bound_author: Some(bound_author),
+            } => bound_author,
+            OpenTransactionKind::Exclusive { bound_author: None } => made_by,
+            OpenTransactionKind::Mergeable { .. } => {
+                return Err(Error::InvalidMergeableCommit(
+                    "open transaction is not exclusive",
+                ));
+            }
+        };
         if !self
             .open_exclusive_is_locally_serializable(open_batch_id)
             .await?
@@ -788,7 +813,11 @@ where
                 Error::InvalidMergeableCommit("transaction write count exceeds u32")
             })?,
             made_by,
-            permission_subject: None,
+            // Exclusive writes carry their trusted open-session identity
+            // explicitly, just like immediate mergeable session writes. This
+            // keeps authority policy evaluation independent from the transport
+            // link's SYSTEM credential.
+            permission_subject: Some(made_by),
             base_snapshot: Some(open_tx.base_snapshot),
             row_read_set: Some(open_tx.row_reads),
             absent_read_set: Some(open_tx.absent_reads),
@@ -806,16 +835,6 @@ where
         self.open_tx.open_transactions.remove(&open_batch_id);
         self.open_tx.closed_batches.insert(open_batch_id);
         Ok((publication, SyncMessage::CommitUnit { tx, versions }))
-    }
-
-    /// Commit an exclusive transaction using the identity bound when it opened.
-    pub async fn commit_exclusive_bound(
-        &mut self,
-        open_batch_id: OpenTransactionId,
-        now_ms: u64,
-    ) -> Result<(PublishedTransaction, SyncMessage), Error> {
-        let author = self.open_tx(open_batch_id)?.provisional_author;
-        self.commit_exclusive(open_batch_id, author, now_ms).await
     }
 
     async fn open_exclusive_is_locally_serializable(
@@ -1272,13 +1291,11 @@ where
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OpenTransactionKind {
     Exclusive {
-        /// Present only for identity-capability transactions opened by `Db`.
-        /// Low-level node transactions retain their historical commit-time author.
-        bound_author: Option<AuthorId>,
+        bound_author: Option<AuthorSubject>,
     },
     Mergeable {
-        made_by: AuthorId,
-        permission_subject: Option<AuthorId>,
+        made_by: AuthorSubject,
+        permission_subject: Option<AuthorSubject>,
     },
 }
 
@@ -1287,7 +1304,7 @@ pub(super) struct OpenTransaction {
     /// Commit semantics and attribution carried by this open transaction.
     pub(super) kind: OpenTransactionKind,
     /// Author reflected by transaction-local provenance before commit.
-    pub(super) provisional_author: AuthorId,
+    pub(super) provisional_author: AuthorSubject,
     /// Snapshot captured when the transaction opened.
     pub(super) base_snapshot: Snapshot,
     /// Base snapshot row derivations observed by point reads in this transaction.

@@ -67,6 +67,13 @@ export type SubscriptionStreamChunk =
   | SubscriptionDeltaChunk
   | SubscriptionRejectedChunk;
 
+/** A self-signed proof may derive a Jazz-owned client author only at DB open. */
+export type NativeSelfSignedClientProof = {
+  token: string;
+  appId: string;
+  claimedAuthor: string;
+};
+
 export async function readSubscriptionSnapshot(
   reader: ReadableStreamDefaultReader<SubscriptionStreamChunk>,
 ): Promise<SubscriptionSnapshotChunk> {
@@ -121,7 +128,7 @@ export function openConfig(
 ): Uint8Array {
   const writer = new PostcardWriter();
   writer.bytes(node);
-  writer.bytes(author);
+  writer.string(canonicalOpenAuthor(author));
   if (sourceId == null) {
     writer.none();
   } else {
@@ -133,7 +140,33 @@ export function openConfig(
   } else {
     writer.some((value) => value.u64(initialSyncFlushEvery));
   }
+  // The native binding keeps a trailing `backend_credential` slot solely to
+  // reject legacy raw ingress. New configs must never serialize one.
+  writer.none();
   return writer.finish();
+}
+
+/**
+ * Core open configuration carries a portable canonical `[issuer, subject]`
+ * JSON author. There is deliberately no UUID fallback.
+ */
+function canonicalOpenAuthor(author: Uint8Array): string {
+  try {
+    const canonical = new TextDecoder("utf-8", { fatal: true }).decode(author);
+    const parsed = JSON.parse(canonical);
+    if (
+      Array.isArray(parsed) &&
+      parsed.length === 2 &&
+      typeof parsed[0] === "string" &&
+      typeof parsed[1] === "string" &&
+      JSON.stringify(parsed) === canonical
+    ) {
+      return canonical;
+    }
+  } catch {
+    // Fall through to the consistent public-boundary diagnostic.
+  }
+  throw new Error("native open config author must be canonical UTF-8 JSON [issuer, subject]");
 }
 
 export function queryFromTable(table: string): Uint8Array {

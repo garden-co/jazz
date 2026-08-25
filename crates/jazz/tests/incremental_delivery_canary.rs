@@ -14,7 +14,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{ArraySubquery, Query};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -135,7 +135,7 @@ fn open_db_with_schema(scale: usize, schema: JazzSchema) -> Db<TestStorage> {
             TestStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([scale as u8; 16]),
-                author: AuthorId::from_bytes([0xa1; 16]),
+                author: AuthorSubject::for_test_bytes([0xa1; 16]),
             },
         )
         .with_id_source(SeededRowIdSource::new(scale as u64 + 1)),
@@ -152,7 +152,7 @@ fn open_history_complete_db_with_schema(scale: usize, schema: JazzSchema) -> Db<
             TestStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([(scale as u8).wrapping_add(0x40); 16]),
-                author: AuthorId::SYSTEM,
+                author: AuthorSubject::SYSTEM,
             },
         )
         .with_id_source(SeededRowIdSource::new(scale as u64 + 10_000)),
@@ -174,7 +174,7 @@ fn open_rocks_db_with_schema(
             storage,
             DbIdentity {
                 node: NodeUuid::from_bytes([scale as u8; 16]),
-                author: AuthorId::from_bytes([0xa1; 16]),
+                author: AuthorSubject::for_test_bytes([0xa1; 16]),
             },
         )
         .with_id_source(SeededRowIdSource::new(scale as u64 + 1)),
@@ -238,7 +238,7 @@ fn seed_reset_batch_fixture(db: &Db<TestStorage>, rows: usize) {
         db.seed_settled_mergeable_for_bootstrap(
             "items",
             row(30_000_000 + index as u64),
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             BTreeMap::from([
                 ("label".to_owned(), Value::String(format!("item-{index}"))),
                 ("ordinal".to_owned(), Value::I32(index as i32)),
@@ -375,7 +375,7 @@ fn measure_post_reset_single_insert(existing_rows: usize) -> AllocSnapshot {
 
     let (client_transport, server_transport) = duplex();
     let _upstream = jazz::db::block_on(client.connect_upstream(client_transport));
-    let _subscriber = server.accept_subscriber(server_transport, AuthorId::SYSTEM);
+    let _subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
 
     let prepared = client
         .prepare_query(&Query::from("items"))
@@ -393,7 +393,7 @@ fn measure_post_reset_single_insert(existing_rows: usize) -> AllocSnapshot {
         .seed_settled_mergeable_for_bootstrap(
             "items",
             row(90_000_000 + existing_rows as u64),
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             BTreeMap::from([
                 (
                     "label".to_owned(),

@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use jazz::db::DbIdentity;
-use jazz::ids::{AuthorId, NodeUuid};
+use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::protocol_limits::{MAX_WIRE_FRAME_BYTES, validate_wire_frame_len};
 use jazz::schema::JazzSchema;
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
@@ -361,7 +361,7 @@ fn default_config() -> InMemoryServerShellConfig {
         JazzSchema::empty(),
         DbIdentity {
             node: NodeUuid::from_bytes([0x5e; 16]),
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
         },
     )
 }
@@ -734,7 +734,8 @@ mod tests {
         assert_eq!(admitted.subject, sub);
         assert_eq!(
             admitted.author,
-            jazz::tools::identity::author_id_from_principal(sub)
+            AuthorSubject::from_canonical(&format!(r#"["urn:jazz:static-bearer","{sub}"]"#))
+                .unwrap()
         );
     }
 }

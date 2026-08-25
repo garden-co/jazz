@@ -206,10 +206,10 @@ const createdByApp = schema.defineApp({
 });
 
 const createdByPermissions = schema.definePermissions(createdByApp, ({ policy, session }) => {
-  policy.todos.allowRead.where({ $createdBy: session.user_id });
+  policy.todos.allowRead.where({ $createdBy: session.author });
   policy.todos.allowInsert.always();
-  policy.todos.allowUpdate.where({ $createdBy: session.user_id });
-  policy.todos.allowDelete.where({ $createdBy: session.user_id });
+  policy.todos.allowUpdate.where({ $createdBy: session.author });
+  policy.todos.allowDelete.where({ $createdBy: session.author });
 });
 
 type Chat = RowOf<typeof app.chats>;
@@ -586,6 +586,7 @@ describe("raw websocket private read gate", () => {
     );
 
     const inviteSession = {
+      issuer: "https://issuer.jazz.test",
       user_id: bobUserId,
       claims: { join_code: joinCode },
       authMode: "external" as const,
@@ -1052,7 +1053,12 @@ async function waitForSubscription<T extends { id: string }>(
   label: string,
   timeoutMs = 15_000,
   options?: { tier?: "local" | "edge" },
-  session?: { user_id: string; claims: Record<string, unknown>; authMode: "external" },
+  session?: {
+    issuer: string;
+    user_id: string;
+    claims: Record<string, unknown>;
+    authMode: "external";
+  },
 ): Promise<() => void> {
   return await new Promise<() => void>((resolve, reject) => {
     let settled = false;

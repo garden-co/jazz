@@ -20,7 +20,7 @@ fn catalogue_schema_publish_replicates_and_is_idempotent() {
         }],
     );
     let publish = SyncMessage::PublishSchemaWithLens {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         catalogue_seq: 1,
         publication: Box::new(SchemaLineagePublication::new(
             payload.clone(),
@@ -104,7 +104,7 @@ fn catalogue_lens_publish_validates_admin_id_and_known_endpoints() {
         Vec::new(),
     );
     let unknown_result = core.apply_trusted_catalogue_message_settled(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         lens: unknown,
     });
     assert!(matches!(
@@ -114,7 +114,7 @@ fn catalogue_lens_publish_validates_admin_id_and_known_endpoints() {
 
     let ack = core
         .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(publication),
         })

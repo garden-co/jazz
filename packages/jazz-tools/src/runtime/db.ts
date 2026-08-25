@@ -49,7 +49,13 @@ import { transformRow, transformRows } from "./row-transformer.js";
 import { toValue, toWriteRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
-import { resolveClientSessionSync } from "./client-session.js";
+import {
+  parseJwtPayload,
+  resolveClientSessionSync,
+  sessionFromVerifiedReservedJwtPayload,
+  type ClientSessionInput,
+} from "./client-session.js";
+import { canonicalAuthorSubject } from "./author-id.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { isPermissionIntrospectionColumn, magicColumnType } from "../magic-columns.js";
 import {
@@ -102,6 +108,8 @@ export type DbConfig = {
   telemetryCollectorUrl?: string;
   /** Enable runtime tracing for DevTools-only diagnostics. */
   devMode?: boolean;
+  /** @internal Session produced by a first-party reserved-issuer auth flow. */
+  trustedReservedSession?: ClientSessionInput["trustedReservedSession"];
 } & (
   | {
       /** Local-first auth via a local seed. */
@@ -150,13 +158,14 @@ export function resolveDefaultPersistentDbName(config: DbConfig): string {
     appId: config.appId,
     jwtToken: config.jwtToken,
     cookieSession: config.cookieSession,
+    trustedReservedSession: config.trustedReservedSession,
   });
 
   if (!session?.user_id || session.authMode === "anonymous") {
     return config.appId;
   }
 
-  return `${config.appId}::${encodeURIComponent(session.user_id)}`;
+  return `${config.appId}::${encodeURIComponent(canonicalAuthorSubject(session.issuer, session.user_id))}`;
 }
 
 /**
@@ -1250,7 +1259,14 @@ export class Db {
         this.config.appId,
         ttlSeconds,
       );
-      this.updateAuthToken(newToken);
+      const trustedReservedSession = sessionFromVerifiedReservedJwtPayload(
+        parseJwtPayload(newToken) ?? {},
+        "local-first",
+      );
+      if (!trustedReservedSession) {
+        throw new Error("Minted local-first token is missing its reserved session identity");
+      }
+      this.applyAuthUpdate(newToken, trustedReservedSession);
       this.scheduleLocalFirstRefresh(ttlSeconds);
     } catch (e) {
       console.error("Failed to refresh local-first token:", e);
@@ -1270,11 +1286,11 @@ export class Db {
     this.authStateStore.markUnauthenticated(reason);
   }
 
-  protected applyAuthUpdate(token: string | null): boolean {
+  protected applyAuthUpdate(token: string | null, trustedReservedSession?: Session): boolean {
     const jwtToken = token ?? undefined;
     const previousToken = this.config.jwtToken;
     const previousState = this.authStateStore.getState();
-    const nextState = this.authStateStore.applyJwtToken(jwtToken);
+    const nextState = this.authStateStore.applyJwtToken(jwtToken, trustedReservedSession);
     const tokenChanged = previousToken !== jwtToken;
 
     if (!tokenChanged && nextState === previousState) {
@@ -1282,8 +1298,9 @@ export class Db {
     }
 
     this.config.jwtToken = jwtToken;
+    this.config.trustedReservedSession = trustedReservedSession;
 
-    this.connection.updateAuth({ jwtToken });
+    this.connection.updateAuth({ jwtToken, trustedReservedSession });
 
     return true;
   }
@@ -2270,7 +2287,11 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
       const jwtToken = runtimeSource.mintLocalFirstToken(
         createRuntimeTokenOptions(secret, config.appId, 3600),
       );
-      resolvedConfig = { ...configWithoutAuth, jwtToken };
+      const trustedReservedSession = sessionFromVerifiedReservedJwtPayload(
+        parseJwtPayload(jwtToken) ?? {},
+        "local-first",
+      );
+      resolvedConfig = { ...configWithoutAuth, jwtToken, trustedReservedSession };
     }
   } else if (!config.jwtToken && !config.cookieSession && !config.adminSecret) {
     // Anonymous: mint an ephemeral keypair + anonymous JWT.
@@ -2280,7 +2301,11 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
     const jwtToken = runtimeSource.mintAnonymousToken(
       createRuntimeTokenOptions(ephemeralSeed, config.appId, 3600),
     );
-    resolvedConfig = { ...configWithoutAuth, jwtToken };
+    const trustedReservedSession = sessionFromVerifiedReservedJwtPayload(
+      parseJwtPayload(jwtToken) ?? {},
+      "anonymous",
+    );
+    resolvedConfig = { ...configWithoutAuth, jwtToken, trustedReservedSession };
   }
 
   const driver = resolveStorageDriver(resolvedConfig.driver);

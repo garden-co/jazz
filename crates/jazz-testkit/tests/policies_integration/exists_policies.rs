@@ -284,7 +284,7 @@ async fn local_update_using_exists_policy_allows_admin_and_denies_non_admin_inne
         .0;
 
     let bob_err = client
-        .for_session(Session::new(super::BOB_ID))
+        .for_session(Session::new("urn:jazz:test", super::BOB_ID))
         .update(
             protected,
             vec![("data".into(), Value::Text("bob update".into()))],
@@ -293,7 +293,7 @@ async fn local_update_using_exists_policy_allows_admin_and_denies_non_admin_inne
     assert_client_policy_denied(bob_err, "protected", Operation::Update);
 
     client
-        .for_session(Session::new(super::ALICE_ID))
+        .for_session(Session::new("urn:jazz:test", super::ALICE_ID))
         .update(
             protected,
             vec![("data".into(), Value::Text("alice update".into()))],

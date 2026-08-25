@@ -18,7 +18,12 @@ describe("public integer values", () => {
     const testApp = await createPolicyTestApp(app, permissions, expect);
 
     try {
-      const db = testApp.as({ user_id: "integer-boundary", claims: {}, authMode: "local-first" });
+      const db = testApp.as({
+        issuer: "https://issuer.example",
+        user_id: "integer-boundary",
+        claims: {},
+        authMode: "external",
+      });
       const boundaries = [-2_147_483_648, 2_147_483_647];
 
       for (const value of boundaries) {

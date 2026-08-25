@@ -18,7 +18,9 @@ use crate::db::{
 };
 use crate::groove::records::{BorrowedRecord, OwnedRecord, Value as CoreValue};
 use crate::groove::storage::{BoxedStorage as CoreStorage, MemoryStorage as CoreMemoryStorage};
-use crate::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
+use crate::ids::{
+    AuthorSubject as CoreAuthorSubject, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid,
+};
 use crate::protocol::ReadViewSpec as CoreReadViewSpec;
 use crate::query::{Aggregate as CoreAggregate, AggregateFunction as CoreAggregateFunction, Query};
 use crate::tools::OpenTransactionId;
@@ -81,6 +83,7 @@ struct AppliedTerminalOperations {
 
 #[derive(Debug, Deserialize)]
 struct UnverifiedJwtClaims {
+    iss: String,
     sub: String,
     #[serde(default)]
     claims: JwtClaimsPayload,
@@ -270,7 +273,7 @@ impl Backend {
         self.0.detach_connection(connection)
     }
 
-    fn set_identity_claims(&self, identity: CoreAuthorId, claims: HashMap<String, CoreValue>) {
+    fn set_identity_claims(&self, identity: CoreAuthorSubject, claims: HashMap<String, CoreValue>) {
         self.0
             .set_identity_claims(identity, claims.into_iter().collect());
     }
@@ -290,7 +293,7 @@ impl Backend {
 
     fn insert_for_identity(
         &self,
-        identity: CoreAuthorId,
+        identity: CoreAuthorSubject,
         table: &str,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
@@ -324,7 +327,7 @@ impl Backend {
 
     fn insert_with_id_for_identity(
         &self,
-        identity: CoreAuthorId,
+        identity: CoreAuthorSubject,
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
@@ -355,7 +358,7 @@ impl Backend {
 
     fn upsert_for_identity(
         &self,
-        identity: CoreAuthorId,
+        identity: CoreAuthorSubject,
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
@@ -386,7 +389,7 @@ impl Backend {
 
     fn delete_for_identity(
         &self,
-        identity: CoreAuthorId,
+        identity: CoreAuthorSubject,
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
@@ -454,7 +457,7 @@ impl Backend {
         &self,
         tx_id: OpenTransactionId,
         prepared: &crate::db::PreparedQuery,
-        author: CoreAuthorId,
+        author: CoreAuthorSubject,
         opts: CoreReadOpts,
     ) -> std::result::Result<Vec<crate::node::CurrentRow>, CoreDbError> {
         crate::db::block_on(
@@ -484,6 +487,14 @@ impl Backend {
 
     fn begin_exclusive(&self, id: OpenTransactionId) -> std::result::Result<(), CoreDbError> {
         crate::db::block_on(self.0.begin_exclusive(id))
+    }
+
+    fn begin_exclusive_for_identity(
+        &self,
+        id: OpenTransactionId,
+        author: CoreAuthorSubject,
+    ) -> std::result::Result<(), CoreDbError> {
+        crate::db::block_on(self.0.begin_exclusive_for_identity(id, author))
     }
 
     fn exclusive_write(
@@ -538,9 +549,18 @@ impl Backend {
     ) -> std::result::Result<CoreTxId, CoreDbError> {
         crate::db::block_on(self.0.commit_exclusive_handle(tx_id))
     }
+
+    fn commit_exclusive_handle_for_identity(
+        &self,
+        tx_id: OpenTransactionId,
+        author: CoreAuthorSubject,
+    ) -> std::result::Result<CoreTxId, CoreDbError> {
+        crate::db::block_on(self.0.commit_exclusive_handle_for_identity(tx_id, author))
+    }
 }
 
 struct ExclusiveTransactionState {
+    author: Option<CoreAuthorSubject>,
     writes: Vec<ExclusiveTransactionWrite>,
 }
 
@@ -666,7 +686,7 @@ impl ClientDb {
         opts: CoreReadOpts,
         transaction_id: OpenTransactionId,
         table: String,
-        author: CoreAuthorId,
+        author: CoreAuthorSubject,
     ) -> Result<Vec<crate::node::CurrentRow>> {
         let prepared = {
             let inner = self.inner.borrow();
@@ -713,7 +733,7 @@ impl ClientDb {
         table: String,
         row_id: Option<Uuid>,
         cells: crate::db::RowCells,
-        identity: Option<CoreAuthorId>,
+        identity: Option<CoreAuthorSubject>,
     ) -> Result<(ObjectId, CoreTxId)> {
         let mut inner = self.inner.borrow_mut();
         let (row_uuid, tx_id) = match row_id {
@@ -780,7 +800,7 @@ impl ClientDb {
         table: String,
         row_id: Uuid,
         cells: crate::db::RowCells,
-        identity: Option<CoreAuthorId>,
+        identity: Option<CoreAuthorSubject>,
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
         let write = match identity {
@@ -830,7 +850,7 @@ impl ClientDb {
         &self,
         row_id: ObjectId,
         cells: crate::db::RowCells,
-        identity: Option<CoreAuthorId>,
+        identity: Option<CoreAuthorSubject>,
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
@@ -875,7 +895,7 @@ impl ClientDb {
         Ok(())
     }
 
-    fn delete(&self, row_id: ObjectId, identity: Option<CoreAuthorId>) -> Result<CoreTxId> {
+    fn delete(&self, row_id: ObjectId, identity: Option<CoreAuthorSubject>) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
             JazzError::Write("delete requires a row created or observed by this client".to_string())
@@ -914,7 +934,7 @@ impl ClientDb {
         Ok(())
     }
 
-    fn begin_transaction(&self) -> Result<OpenTransactionId> {
+    fn begin_transaction(&self, author: Option<CoreAuthorSubject>) -> Result<OpenTransactionId> {
         let mut inner = self.inner.borrow_mut();
         let mut transaction_id = OpenTransactionId::new();
         while inner.transactions.contains_key(&transaction_id)
@@ -922,13 +942,19 @@ impl ClientDb {
         {
             transaction_id = OpenTransactionId::new();
         }
-        inner
-            .db
-            .begin_exclusive(transaction_id)
-            .map_err(|error| JazzError::Write(error.to_string()))?;
+        match author {
+            Some(author) => inner
+                .db
+                .begin_exclusive_for_identity(transaction_id, author),
+            None => inner.db.begin_exclusive(transaction_id),
+        }
+        .map_err(|error| JazzError::Write(error.to_string()))?;
         inner.transactions.insert(
             transaction_id,
-            ExclusiveTransactionState { writes: Vec::new() },
+            ExclusiveTransactionState {
+                author,
+                writes: Vec::new(),
+            },
         );
         Ok(transaction_id)
     }
@@ -951,10 +977,13 @@ impl ClientDb {
             .transactions
             .remove(&transaction_id)
             .expect("transaction open checked above");
-        let tx_id = inner
-            .db
-            .commit_exclusive_handle(transaction_id)
-            .map_err(|error| JazzError::Write(error.to_string()))?;
+        let tx_id = match state.author {
+            Some(author) => inner
+                .db
+                .commit_exclusive_handle_for_identity(transaction_id, author),
+            None => inner.db.commit_exclusive_handle(transaction_id),
+        }
+        .map_err(|error| JazzError::Write(error.to_string()))?;
         let committed_id = core_batch_id(tx_id);
         inner.write_map.insert(committed_id, tx_id);
         for write in state.writes {
@@ -1627,13 +1656,23 @@ fn session_from_unverified_jwt(token: &str) -> Option<Session> {
         return None;
     }
 
+    let auth_mode = match claims.iss.as_str() {
+        CoreAuthorSubject::LOCAL_FIRST_ISSUER => {
+            crate::tools::public_api::session::AuthMode::LocalFirst
+        }
+        CoreAuthorSubject::ANONYMOUS_ISSUER => {
+            crate::tools::public_api::session::AuthMode::Anonymous
+        }
+        _ => crate::tools::public_api::session::AuthMode::External,
+    };
     Some(Session {
+        issuer: claims.iss.clone(),
         user_id: user_id.to_string(),
         claims: match claims.claims {
             JwtClaimsPayload::Absent => serde_json::Value::Object(serde_json::Map::new()),
             JwtClaimsPayload::Present(claims) => claims,
         },
-        ..Session::new(user_id)
+        auth_mode,
     })
 }
 
@@ -1648,22 +1687,37 @@ fn default_session_from_context(context: &AppContext) -> Option<Session> {
         .and_then(session_from_unverified_jwt)
 }
 
-fn core_identity(context: &AppContext, default_session: Option<&Session>) -> CoreDbIdentity {
+fn core_identity(
+    context: &AppContext,
+    default_session: Option<&Session>,
+) -> Result<CoreDbIdentity> {
     let node_uuid = context
         .client_id
         .map(|id| id.0)
         .unwrap_or_else(Uuid::now_v7);
-    let author_uuid = default_session
-        .map(|session| crate::tools::identity::author_id_from_principal(&session.user_id).0)
-        .unwrap_or(node_uuid);
-    CoreDbIdentity {
+    let author = match default_session {
+        Some(session) => core_author_from_session(session)?,
+        // A backend/admin credential is an internal authority context, not an
+        // unauthenticated end-user session.  Its connection identity must use
+        // the canonical system subject so trusted writes can receive their
+        // fate even when a per-write session supplies a distinct permission
+        // subject.
+        None if context.backend_secret.is_some() || context.admin_secret.is_some() => {
+            CoreAuthorSubject::SYSTEM
+        }
+        None => CoreAuthorSubject::reserved(
+            CoreAuthorSubject::ANONYMOUS_ISSUER,
+            &node_uuid.to_string(),
+        )?,
+    };
+    Ok(CoreDbIdentity {
         node: CoreNodeUuid(node_uuid),
-        author: CoreAuthorId(author_uuid),
-    }
+        author,
+    })
 }
 
-fn core_author_from_principal(principal: &str) -> CoreAuthorId {
-    crate::tools::identity::author_id_from_principal(principal)
+fn core_author_from_session(session: &Session) -> Result<CoreAuthorSubject> {
+    Ok(session.author_subject()?)
 }
 
 fn core_storage(schema: &crate::schema::JazzSchema, context: &AppContext) -> Result<StorageBundle> {
@@ -1744,6 +1798,11 @@ fn session_claims_to_core_claims(session: &Session) -> Result<HashMap<String, Co
         core_claims.insert(name, json_claim_to_core_value(value)?);
     }
     core_claims.insert("sub".to_owned(), CoreValue::String(session.user_id.clone()));
+    core_claims.insert("iss".to_owned(), CoreValue::String(session.issuer.clone()));
+    core_claims.insert(
+        "issuer".to_owned(),
+        CoreValue::String(session.issuer.clone()),
+    );
     core_claims.insert(
         "user_id".to_owned(),
         CoreValue::String(session.user_id.clone()),
@@ -1751,6 +1810,10 @@ fn session_claims_to_core_claims(session: &Session) -> Result<HashMap<String, Co
     core_claims.insert(
         "authMode".to_owned(),
         CoreValue::String(auth_mode_claim_value(session.auth_mode).to_owned()),
+    );
+    core_claims.insert(
+        "author".to_owned(),
+        CoreValue::String(session.author_subject()?.canonical().to_owned()),
     );
     Ok(core_claims)
 }
@@ -1878,9 +1941,9 @@ fn core_row_provenance_to_public(
     provenance: crate::node::RowProvenance,
 ) -> crate::tools::metadata::RowProvenance {
     crate::tools::metadata::RowProvenance {
-        created_by: provenance.created_by.0.to_string(),
+        created_by: provenance.created_by.canonical().to_owned(),
         created_at: provenance.created_at.0,
-        updated_by: provenance.updated_by.0.to_string(),
+        updated_by: provenance.updated_by.canonical().to_owned(),
         updated_at: provenance.updated_at.0,
     }
 }
@@ -2141,12 +2204,29 @@ fn transaction_rejected_before_tier_message(
 }
 
 impl JazzClient {
-    fn write_identity(&self) -> Option<CoreAuthorId> {
-        self.write_context
+    fn write_identity(&self) -> Result<Option<CoreAuthorSubject>> {
+        let session = self
+            .write_context
             .as_ref()
             .and_then(|context| context.session())
-            .or(self.default_session.as_ref())
-            .map(|session| core_author_from_principal(session.get_user_id()))
+            .or(self.default_session.as_ref());
+        let Some(session) = session else {
+            return Ok(None);
+        };
+        let identity = core_author_from_session(session)?;
+        // Explicit backend session scopes supply the policy subject at write
+        // time, after the shared client has already opened. Register their
+        // raw session claims under that canonical subject before evaluating
+        // local policy. In particular, `user_id` remains the JWT subject so a
+        // UUID policy columns can coerce it; the separate reserved `author`
+        // claim carries canonical provenance identity.
+        let claims = session_claims_to_core_claims(session)?;
+        self.db
+            .inner
+            .borrow()
+            .db
+            .set_identity_claims(identity, claims);
+        Ok(Some(identity))
     }
 
     fn check_core_write_not_rejected(db: &Backend, tx_id: CoreTxId) -> Result<()> {
@@ -2734,8 +2814,8 @@ impl PublicQueryDecoder {
                 match column {
                     "$createdAt" => Value::Timestamp(provenance.created_at.0),
                     "$updatedAt" => Value::Timestamp(provenance.updated_at.0),
-                    "$createdBy" => Value::Text(provenance.created_by.0.to_string()),
-                    "$updatedBy" => Value::Text(provenance.updated_by.0.to_string()),
+                    "$createdBy" => Value::Text(provenance.created_by.canonical().to_owned()),
+                    "$updatedBy" => Value::Text(provenance.updated_by.canonical().to_owned()),
                     _ => unreachable!("matched provenance magic column"),
                 }
             }
@@ -2818,7 +2898,7 @@ impl JazzClient {
         {
             let public_schema_convert = crate::schema::JazzSchema::new(&context.schema)
                 .map_err(|error| JazzError::Schema(error.to_string()))?;
-            let identity = core_identity(&context, default_session.as_ref());
+            let identity = core_identity(&context, default_session.as_ref())?;
             let storage = core_storage(&public_schema_convert, &context)?;
             let auth = has_server.then(|| WsAuthConfig {
                 jwt_token: if context.backend_secret.is_some() {
@@ -2946,7 +3026,7 @@ impl JazzClient {
             .and_then(|ctx| ctx.transaction_id)
         {
             let author = self
-                .write_identity()
+                .write_identity()?
                 .unwrap_or_else(|| self.db.inner.borrow().identity.author);
             self.db
                 .query_transaction_rows(query.clone(), opts, transaction_id, table, author)?
@@ -2998,7 +3078,7 @@ impl JazzClient {
                     table.to_string(),
                     object_id.into(),
                     cells,
-                    self.write_identity(),
+                    self.write_identity()?,
                 )?;
                 let transaction_id = core_batch_id(tx_id);
                 Ok((row_id, row_values, Some(transaction_id)))
@@ -3026,7 +3106,7 @@ impl JazzClient {
             } else {
                 let tx_id =
                     self.db
-                        .upsert(table.to_string(), object_id, cells, self.write_identity())?;
+                        .upsert(table.to_string(), object_id, cells, self.write_identity()?)?;
                 Ok(Some(core_batch_id(tx_id)))
             }
         }
@@ -3060,7 +3140,7 @@ impl JazzClient {
                 self.db.stage_update(transaction_id, object_id, cells)?;
                 Ok(None)
             } else {
-                let tx_id = self.db.update(object_id, cells, self.write_identity())?;
+                let tx_id = self.db.update(object_id, cells, self.write_identity()?)?;
                 Ok(Some(core_batch_id(tx_id)))
             }
         }
@@ -3077,7 +3157,7 @@ impl JazzClient {
                 self.db.stage_delete(transaction_id, object_id)?;
                 Ok(None)
             } else {
-                let tx_id = self.db.delete(object_id, self.write_identity())?;
+                let tx_id = self.db.delete(object_id, self.write_identity()?)?;
                 Ok(Some(core_batch_id(tx_id)))
             }
         }
@@ -3089,15 +3169,22 @@ impl JazzClient {
     /// not visible to ordinary reads until the transaction is committed and
     /// accepted by the authority.
     pub fn begin_transaction(&self) -> Result<JazzTransaction> {
-        {
-            let transaction_id = self.db.begin_transaction()?;
-            let client = self
-                .with_write_context(WriteContext::default().with_transaction_id(transaction_id));
-            Ok(JazzTransaction {
-                transaction_id,
-                client,
-            })
-        }
+        let author = self.write_identity()?;
+        let transaction_id = self.db.begin_transaction(author)?;
+        // Keep an explicit session/attribution context when adding the
+        // transaction id. In particular, a backend connection is SYSTEM by
+        // default, but `for_session(..).begin_transaction()` must continue to
+        // evaluate and author as that session throughout staging and commit.
+        let write_context = self
+            .write_context
+            .clone()
+            .unwrap_or_default()
+            .with_transaction_id(transaction_id);
+        let client = self.with_write_context(write_context);
+        Ok(JazzTransaction {
+            transaction_id,
+            client,
+        })
     }
 
     /// Commit an open transaction by transaction id.
@@ -3265,6 +3352,7 @@ mod tests {
             .encode(r#"{"alg":"none","typ":"JWT"}"#);
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
             serde_json::to_vec(&json!({
+                "iss": "https://issuer.example",
                 "sub": sub,
                 "claims": claims,
             }))
@@ -3276,8 +3364,13 @@ mod tests {
     fn make_test_jwt_without_claims(sub: &str) -> String {
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(r#"{"alg":"none","typ":"JWT"}"#);
-        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_vec(&json!({ "sub": sub })).expect("serialize jwt payload"));
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&json!({
+                "iss": "https://issuer.example",
+                "sub": sub,
+            }))
+            .expect("serialize jwt payload"),
+        );
         format!("{header}.{payload}.sig")
     }
     #[test]
@@ -3315,8 +3408,8 @@ mod tests {
     }
 
     #[test]
-    fn client_session_reserved_claims_override_application_claims() {
-        let session = Session::new("trusted-user")
+    fn client_session_preserves_provider_subject_and_adds_logical_author() {
+        let session = Session::new(CoreAuthorSubject::LOCAL_FIRST_ISSUER, "trusted-user")
             .with_auth_mode(crate::tools::public_api::session::AuthMode::LocalFirst)
             .with_claims(json!({
                 "sub": "spoofed-subject",
@@ -3336,6 +3429,15 @@ mod tests {
         assert_eq!(
             claims.get("authMode"),
             Some(&CoreValue::String("local-first".to_owned()))
+        );
+        assert_eq!(
+            claims.get("author"),
+            Some(&CoreValue::String(
+                CoreAuthorSubject::reserved(CoreAuthorSubject::LOCAL_FIRST_ISSUER, "trusted-user")
+                    .unwrap()
+                    .canonical()
+                    .to_owned()
+            ))
         );
     }
 
@@ -3420,6 +3522,21 @@ mod tests {
             default_session_from_context(&context).is_none(),
             "backend/admin clients should keep using explicit session scopes"
         );
+    }
+
+    #[test]
+    fn backend_context_uses_system_connection_author_for_explicit_session_writes() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut context = make_offline_context(
+            AppId::from_name("backend-system-connection-author"),
+            temp_dir.path().to_path_buf(),
+            declared_todo_schema(),
+        );
+        context.backend_secret = Some("backend-secret".to_owned());
+
+        let identity = core_identity(&context, default_session_from_context(&context).as_ref())
+            .expect("derive backend identity");
+        assert_eq!(identity.author, CoreAuthorSubject::SYSTEM);
     }
 
     #[tokio::test(flavor = "current_thread")]
