@@ -623,6 +623,7 @@ mod tests {
     use super::*;
     use crate::server::catalogue::CatalogueStore;
     use jazz::tools::AppId;
+    use jazz::groove::storage::OrderedKvStorage;
 
     fn dynamic_bootstrap_schema() -> jazz::tools::public_schema::Schema {
         jazz::tools::public_schema::SchemaBuilder::new()
@@ -945,6 +946,37 @@ mod tests {
         assert_eq!(
             tiers,
             std::collections::HashSet::from([DurabilityTier::GlobalServer])
+        );
+    }
+
+    #[tokio::test]
+    async fn persistent_builder_fails_when_catalogue_scan_is_corrupt() {
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let catalogue_path = data_dir.path().join(CATALOGUE_ROCKSDB_DIR);
+        {
+            let storage =
+                jazz_storage_rocksdb::RocksDbStorage::open(&catalogue_path, &["default"])
+                    .expect("open raw catalogue storage");
+            jazz::db::block_on(storage.set(
+                "default".to_owned(),
+                b"cat:not-a-uuid".to_vec(),
+                vec![0],
+            ))
+            .expect("write malformed catalogue entry");
+        }
+
+        let result = ServerBuilder::new(AppId::from_name("corrupt-durable-catalogue"))
+            .with_schema(dynamic_bootstrap_schema())
+            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage(StorageBackend::Persistent {
+                path: data_dir.path().to_path_buf(),
+            })
+            .build()
+            .await;
+
+        assert!(
+            result.is_err(),
+            "server startup must fail rather than treating a corrupt durable catalogue as empty"
         );
     }
 
