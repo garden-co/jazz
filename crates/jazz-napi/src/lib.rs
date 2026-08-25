@@ -3306,7 +3306,7 @@ fn core_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<CoreReadOp
         return Ok(opts);
     }
     if let Some(tier) = optional_json_string_prop(&value, "tier")? {
-        opts.tier = core_durability_tier_from_str(&tier)?;
+        opts.tier = core_read_tier_from_str(&tier)?;
     }
     if let Some(local_updates) = optional_json_string_prop(&value, "local_updates")? {
         opts.local_updates = match local_updates.as_str() {
@@ -3480,6 +3480,21 @@ fn core_durability_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier>
         other => Err(napi::Error::from_reason(format!(
             "unknown durability tier {other}"
         ))),
+    }
+}
+
+/// Read-only binding lowering. Write waits keep the durability-tier parser so
+/// `remote` names cannot accidentally become a write settlement tier.
+fn core_read_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier> {
+    match tier {
+        "local-first" | "LocalFirst" => Ok(CoreDurabilityTier::Local),
+        // NAPI has no explicit-offline state of its own. The TypeScript
+        // connection manager resolves RemoteIfPossible before the ABI call;
+        // direct NAPI callers therefore retain strict remote behavior.
+        "remote" | "Remote" | "remote-if-possible" | "RemoteIfPossible" => {
+            Ok(CoreDurabilityTier::Edge)
+        }
+        _ => core_durability_tier_from_str(tier),
     }
 }
 
@@ -4131,11 +4146,28 @@ mod tests {
         NapiTxKind, PreparedQuery, RestoreOptions, Tx, UpdateOptions, UpsertOptions,
         authority_epoch_from_bigint, core_author_id_from_bytes, core_block_on,
         core_claim_value_from_json, core_insert_options, core_open_backend_identity,
-        core_open_identity, core_read_opts_from_json, core_restore_options,
-        core_subscription_event_to_napi, core_update_options, core_upsert_options,
-        encode_core_subscription_delta, terminal_bytes_to_numbers,
+        core_open_identity, core_read_opts_from_json, core_read_tier_from_str,
+        core_restore_options, core_subscription_event_to_napi, core_update_options,
+        core_upsert_options, encode_core_subscription_delta, terminal_bytes_to_numbers,
         unknown_transaction_kind_message,
     };
+
+    /// Binding read choices lower without widening the write durability parser.
+    #[test]
+    fn read_tier_names_lower_to_existing_core_tiers() {
+        assert_eq!(
+            core_read_tier_from_str("local-first").expect("local-first read tier"),
+            jazz::tx::DurabilityTier::Local
+        );
+        assert_eq!(
+            core_read_tier_from_str("remote-if-possible").expect("strict remote read tier"),
+            jazz::tx::DurabilityTier::Edge
+        );
+        assert!(
+            super::core_durability_tier_from_str("remote").is_err(),
+            "write waits must not accept read-only tier names"
+        );
+    }
 
     #[test]
     fn transaction_binding_diagnostics_use_transaction_vocabulary() {

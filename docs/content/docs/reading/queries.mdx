@@ -69,11 +69,19 @@ For background on how data flows between tiers, see [How Sync Works](/docs/conce
 
 ### Choosing a tier
 
-Pass a tier when you need the first result to be authoritative at a specific level&hairsp;—&hairsp;for example, when a user has just navigated to a page and a stale local snapshot would mislead them.
+Pass a read choice when you need to control whether the first result may use local
+knowledge&hairsp;—&hairsp;for example, when a user has just navigated to a page and a
+stale local snapshot would mislead them.
 
 - `"local"`&hairsp;—&hairsp;Local storage only. The default on browsers and clients. Fastest, but reflects only what this device has already synced.
 - `"edge"`&hairsp;—&hairsp;Wait for the nearest sync server to respond. The default on backends and servers. A good middle ground when you want confirmation that the query has fetched data from the network.
 - `"global"`&hairsp;—&hairsp;Wait for the central server. Use when you need a globally-consistent snapshot, accepting the extra round-trip latency.
+
+New APIs also expose `"local-first"`, `"remote"`, and
+`"remote-if-possible"`. The last option falls back to local only after an
+explicit app disconnect; it never treats a timeout, error, or slow remote request
+as offline. The legacy values above remain supported for reads and continue to be
+the write-durability values used by `wait({ tier })`.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
