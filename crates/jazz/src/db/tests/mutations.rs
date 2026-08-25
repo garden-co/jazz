@@ -2407,12 +2407,7 @@ fn backend_attribution_survives_mergeable_and_streaming_publication() {
         ("owner".to_owned(), Value::Uuid(backend_author.test_uuid())),
     ]);
     let mut upload = backend
-        .begin_streaming_value_upload(
-            "todos",
-            &streaming_cells,
-            "title",
-            groove::large_values::LargeValueKind::String,
-        )
+        .begin_streaming_value_upload("todos", &streaming_cells, "title")
         .unwrap();
     block_on(backend.push_streaming_value_upload(&mut upload, b"streamed provenance")).unwrap();
     let streamed = block_on(backend.finish_streaming_value_upload(
@@ -2535,12 +2530,7 @@ fn backend_attribution_survives_mergeable_and_streaming_publication() {
         ("owner".to_owned(), Value::Uuid(backend_author.test_uuid())),
     ]);
     let upload = backend
-        .begin_streaming_value_upload(
-            "todos",
-            &upload_cells,
-            "title",
-            groove::large_values::LargeValueKind::String,
-        )
+        .begin_streaming_value_upload("todos", &upload_cells, "title")
         .unwrap();
     let err = match block_on(backend.finish_streaming_value_upload(
         upload,
@@ -2565,12 +2555,7 @@ fn backend_attribution_survives_mergeable_and_streaming_publication() {
         ("owner".to_owned(), Value::Uuid(backend_author.test_uuid())),
     ]);
     let mixed_upload = backend
-        .begin_streaming_value_upload(
-            "todos",
-            &mixed_cells,
-            "title",
-            groove::large_values::LargeValueKind::String,
-        )
+        .begin_streaming_value_upload("todos", &mixed_cells, "title")
         .unwrap();
     let err = match block_on(backend.finish_streaming_value_upload(
         mixed_upload,
@@ -2657,12 +2642,7 @@ fn attributed_streaming_uses_system_admission_without_losing_provenance() {
         ("owner".to_owned(), Value::Uuid(alice.test_uuid())),
     ]);
     let mut upload = backend
-        .begin_streaming_value_upload(
-            "todos",
-            &cells,
-            "title",
-            groove::large_values::LargeValueKind::String,
-        )
+        .begin_streaming_value_upload("todos", &cells, "title")
         .unwrap();
     block_on(backend.push_streaming_value_upload(&mut upload, b"SYSTEM-admitted")).unwrap();
     let write = block_on(backend.finish_streaming_value_upload(

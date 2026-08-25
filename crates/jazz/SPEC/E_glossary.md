@@ -31,10 +31,11 @@ Invariant digest: no `INV-*` ids are defined or cited by this chapter.
 
 ### Time & order (ch. 2–4)
 
-- **`TxTime`** — packed HLC time: 48-bit ms + 16-bit counter.
+- **`TxTime`** — opaque packed HLC time: 46-bit Unix ms + 18-bit counter.
+  It is used only for version ordering; public provenance is physical Unix ms.
 - **`TxId`** — `TxTime` + creating `NodeUuid`; the transaction's identity.
-- **`GlobalTime`** — the core-assigned packed HLC settlement position: 48-bit
-  physical milliseconds plus a 16-bit logical counter. It is strictly monotone
+- **`GlobalTime`** — the core-assigned packed HLC settlement position: 46-bit
+  physical milliseconds plus an 18-bit logical counter. It is strictly monotone
   per core authority but not dense. A
   persisted `settled_through: GlobalTime` is known-state possession for
   payload dedup/repair, not proof of a live authority connection or a settled
