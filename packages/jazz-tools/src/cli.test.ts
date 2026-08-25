@@ -1211,6 +1211,46 @@ describe("cli migrations", () => {
     },
   );
 
+  it.each(["outside", "in-tree"])(
+    "rejects a %s symlinked committed snapshot baseline in the CLI process",
+    async (targetKind) => {
+      const { root } = await createWorkspace();
+      const migrationsDir = join(root, "migrations");
+      const snapshotsDir = join(migrationsDir, "snapshots");
+      await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+      await createCatalogueMigration({ schemaDir: root, migrationsDir });
+      const snapshot = (await readdir(snapshotsDir)).find((name) => name.endsWith(".json"));
+      expect(snapshot).toBeDefined();
+      const snapshotPath = join(snapshotsDir, snapshot!);
+      const target =
+        targetKind === "outside"
+          ? join(root, "outside-snapshot.json")
+          : join(migrationsDir, "in-tree-snapshot.json");
+      await copyFile(snapshotPath, target);
+      await rm(snapshotPath);
+      await symlink(target, snapshotPath, "file");
+
+      const result = spawnSync(
+        process.execPath,
+        [
+          distCliPath,
+          "migrations",
+          "create",
+          "--schema-dir",
+          root,
+          "--migrations-dir",
+          migrationsDir,
+        ],
+        { encoding: "utf8" },
+      );
+
+      expect(result.status).not.toBe(0);
+      expect(`${result.stdout}\n${result.stderr}`).toContain(
+        "Migration path must not contain a symlink or junction",
+      );
+    },
+  );
+
   it("writes an initial committed snapshot on first run", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");

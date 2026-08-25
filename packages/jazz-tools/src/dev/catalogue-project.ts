@@ -423,6 +423,7 @@ async function readSnapshotEntry(dir: string, fileName: string): Promise<Snapsho
   }
 
   const filePath = join(dir, fileName);
+  await assertNoSymlinkComponents(filePath);
   const schema = JSON.parse(await readFile(filePath, "utf8")) as WasmSchema;
   return {
     hash: await computeSchemaHash(schema),
@@ -437,6 +438,9 @@ async function listSnapshotEntries(dir: string): Promise<SnapshotEntry[]> {
     return [];
   }
 
+  // Snapshots determine both the logical timestamp and the implicit baseline.
+  // Do not let either decision follow a redirected committed snapshot path.
+  await assertNoSymlinkComponents(dir);
   const files = await readdir(dir);
   return (await Promise.all(files.map((fileName) => readSnapshotEntry(dir, fileName)))).filter(
     (entry): entry is SnapshotEntry => entry !== null,
