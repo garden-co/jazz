@@ -27,6 +27,22 @@ export interface Relation {
   nullable: boolean;
 }
 
+export class AmbiguousRelationNameError extends Error {}
+
+function addRelation(relations: Map<string, Relation[]>, relation: Relation): void {
+  const tableRelations = relations.get(relation.fromTable);
+  if (!tableRelations) {
+    throw new Error(`Unknown relation source table "${relation.fromTable}"`);
+  }
+  const existing = tableRelations.find((candidate) => candidate.name === relation.name);
+  if (existing) {
+    throw new AmbiguousRelationNameError(
+      `Generated relation name "${relation.name}" is ambiguous on table "${relation.fromTable}" between columns "${existing.fromColumn}/${existing.toColumn}" and "${relation.fromColumn}/${relation.toColumn}". Rename one of the reference columns.`,
+    );
+  }
+  tableRelations.push(relation);
+}
+
 /**
  * Capitalize the first letter of a string.
  */
@@ -85,7 +101,7 @@ export function analyzeRelations(schema: WasmSchema): Map<string, Relation[]> {
           isArray: isForwardArray,
           nullable: col.nullable,
         };
-        relations.get(tableName)!.push(forwardRelation);
+        addRelation(relations, forwardRelation);
 
         // Verify the referenced table exists
         if (!relations.has(col.references)) {
@@ -106,7 +122,7 @@ export function analyzeRelations(schema: WasmSchema): Map<string, Relation[]> {
           isArray: true,
           nullable: false, // Arrays are not nullable, just empty
         };
-        relations.get(col.references)!.push(reverseRelation);
+        addRelation(relations, reverseRelation);
       }
     }
   }

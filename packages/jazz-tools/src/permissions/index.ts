@@ -7,7 +7,11 @@ import type {
   TablePolicies,
 } from "../schema.js";
 import type { WasmSchema } from "../drivers/types.js";
-import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
+import {
+  AmbiguousRelationNameError,
+  analyzeRelations,
+  type Relation,
+} from "../codegen/relation-analyzer.js";
 import type {
   RelColumnRef,
   RelExpr,
@@ -904,7 +908,10 @@ function collectRelationsByTable(app: AppLike): Map<string, Relation[]> {
   const typedSchema = schema as WasmSchema;
   try {
     return analyzeRelations(typedSchema);
-  } catch {
+  } catch (error) {
+    if (error instanceof AmbiguousRelationNameError) {
+      throw error;
+    }
     // Keep permissive behavior for partially-specified schemas used in tests/tooling.
     // hopTo/gather callers still receive explicit unknown-relation errors.
     return new Map();
@@ -1315,12 +1322,18 @@ function resolveNamedRelation(
   table: string,
   relationName: string,
 ): Relation {
-  const relations = relationsByTable.get(table) ?? [];
-  const relation = relations.find((candidate) => candidate.name === relationName);
-  if (!relation) {
+  const matches = (relationsByTable.get(table) ?? []).filter(
+    (candidate) => candidate.name === relationName,
+  );
+  if (matches.length === 0) {
     throw new Error(`Unknown relation "${relationName}" on table "${table}".`);
   }
-  return relation;
+  if (matches.length > 1) {
+    throw new AmbiguousRelationNameError(
+      `Relation "${relationName}" is ambiguous on table "${table}". Rename one of the reference columns.`,
+    );
+  }
+  return matches[0]!;
 }
 
 function isRecursiveCurrentFilter(raw: unknown, token: RecursiveCurrentValue): boolean {

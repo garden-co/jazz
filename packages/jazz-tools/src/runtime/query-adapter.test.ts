@@ -23,7 +23,23 @@ const app = s.defineApp({
   }),
 });
 
+const ambiguousRelationsApp = s.defineApp({
+  users: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    ownerId: s.ref("users"),
+    owner_id: s.ref("users"),
+  }),
+});
+
 describe("translateQuery", () => {
+  it("rejects reference columns that generate the same relation name", () => {
+    expect(() =>
+      translateQuery(ambiguousRelationsApp.todos._build(), ambiguousRelationsApp.wasmSchema),
+    ).toThrow(/Generated relation name "owner" is ambiguous on table "todos"/);
+  });
+
   it("emits ordinary table queries on the flat Query path", () => {
     const query = app.todos
       .includeDeleted()
