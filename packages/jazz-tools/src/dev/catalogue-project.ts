@@ -7,8 +7,10 @@
  * Prefer using {@link catalogue.ts} utils whenever possible.
  */
 
-import { access, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { access, mkdir, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { hostname } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import type { WasmSchema } from "../drivers/types.js";
@@ -701,11 +703,164 @@ async function loadLatestCommittedSnapshot(
   };
 }
 
-async function ensureCommittedSnapshot(
+interface MigrationPublicationFile {
+  finalPath: string;
+  contents: string;
+}
+
+interface MigrationPublicationJournal {
+  version: 1;
+  files: Array<{ stagedName: string; finalRelativePath: string }>;
+}
+
+const MIGRATION_STAGE_DIR = ".jazz-create-migration-stage";
+const MIGRATION_JOURNAL = ".jazz-create-migration.journal.json";
+
+function relativePublicationPath(migrationsDir: string, finalPath: string): string {
+  const relativePath = relative(resolve(migrationsDir), resolve(finalPath));
+  if (
+    !relativePath ||
+    relativePath === ".." ||
+    relativePath.startsWith(`..${sep}`) ||
+    isAbsolute(relativePath)
+  ) {
+    throw new Error(`Migration publication escaped its directory: ${finalPath}`);
+  }
+  return relativePath;
+}
+
+async function syncFile(path: string, contents: string): Promise<void> {
+  const handle = await open(path, "wx");
+  try {
+    await handle.writeFile(contents);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function syncDirectory(path: string): Promise<void> {
+  if (process.platform === "win32") return;
+  const handle = await open(path, "r");
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function recoverMigrationPublication(migrationsDir: string): Promise<void> {
+  const journalPath = join(migrationsDir, MIGRATION_JOURNAL);
+  if (!(await pathExists(journalPath))) {
+    await rm(join(migrationsDir, MIGRATION_STAGE_DIR), { recursive: true, force: true });
+    for (const entry of await readdir(migrationsDir)) {
+      if (entry.startsWith(`${MIGRATION_JOURNAL}.`) && entry.endsWith(".tmp")) {
+        await rm(join(migrationsDir, entry), { force: true });
+      }
+    }
+    return;
+  }
+  const journal = JSON.parse(await readFile(journalPath, "utf8")) as MigrationPublicationJournal;
+  if (journal.version !== 1 || !Array.isArray(journal.files) || journal.files.length === 0) {
+    throw new Error(`Invalid interrupted migration publication journal: ${journalPath}`);
+  }
+  for (const file of journal.files) {
+    if (basename(file.stagedName) !== file.stagedName) {
+      throw new Error(`Invalid staged migration filename in ${journalPath}`);
+    }
+    const stagedPath = join(migrationsDir, MIGRATION_STAGE_DIR, file.stagedName);
+    const finalPath = resolve(migrationsDir, file.finalRelativePath);
+    if (relativePublicationPath(migrationsDir, finalPath) !== file.finalRelativePath) {
+      throw new Error(`Invalid migration publication path in ${journalPath}`);
+    }
+    if (await pathExists(finalPath)) {
+      if (await pathExists(stagedPath)) {
+        const [published, staged] = await Promise.all([readFile(finalPath), readFile(stagedPath)]);
+        if (!published.equals(staged)) {
+          throw new Error(
+            `Cannot recover interrupted migration publication: ${finalPath} does not match its staged output`,
+          );
+        }
+      }
+      continue;
+    }
+    if (!(await pathExists(stagedPath))) {
+      throw new Error(
+        `Cannot recover interrupted migration publication: missing ${stagedPath} and ${finalPath}`,
+      );
+    }
+    await mkdir(dirname(finalPath), { recursive: true });
+    await rename(stagedPath, finalPath);
+    await syncDirectory(dirname(finalPath));
+  }
+  await rm(journalPath, { force: true });
+  await syncDirectory(migrationsDir);
+  await rm(join(migrationsDir, MIGRATION_STAGE_DIR), { recursive: true, force: true });
+  await syncDirectory(migrationsDir);
+}
+
+async function pauseMigrationPublicationForTest(phase: string): Promise<void> {
+  if (process.env.NODE_ENV !== "test" || process.env.JAZZ_TEST_MIGRATION_PAUSE_AT !== phase) {
+    return;
+  }
+  const marker = process.env.JAZZ_TEST_MIGRATION_PAUSE_MARKER;
+  if (marker) await writeFile(marker, phase);
+  await new Promise<never>(() => {
+    setInterval(() => undefined, 1_000);
+  });
+}
+
+/**
+ * Publish one logical migration generation. Multiple renames cannot be atomic,
+ * so a crash may briefly expose a prefix of the files. The fsynced journal is
+ * written first; every later invocation recovers that exact generation under
+ * the directory lock before inspecting baselines or allocating a timestamp.
+ */
+async function publishMigrationFilesRecoverably(
+  migrationsDir: string,
+  files: MigrationPublicationFile[],
+): Promise<void> {
+  if (files.length === 0) return;
+  const stageDir = join(migrationsDir, MIGRATION_STAGE_DIR);
+  await mkdir(stageDir, { recursive: true });
+  const journal: MigrationPublicationJournal = { version: 1, files: [] };
+  for (const [index, file] of files.entries()) {
+    if (await pathExists(file.finalPath)) {
+      throw new Error(`Migration output already exists: ${file.finalPath}`);
+    }
+    const stagedName = `${randomUUID()}-${index}`;
+    await syncFile(join(stageDir, stagedName), file.contents);
+    journal.files.push({
+      stagedName,
+      finalRelativePath: relativePublicationPath(migrationsDir, file.finalPath),
+    });
+  }
+  await syncDirectory(stageDir);
+  const journalPath = join(migrationsDir, MIGRATION_JOURNAL);
+  const journalTemp = `${journalPath}.${randomUUID()}.tmp`;
+  await syncFile(journalTemp, `${JSON.stringify(journal)}\n`);
+  await rename(journalTemp, journalPath);
+  await syncDirectory(migrationsDir);
+  await pauseMigrationPublicationForTest("journaled");
+  for (const [index, file] of journal.files.entries()) {
+    const finalPath = resolve(migrationsDir, file.finalRelativePath);
+    await mkdir(dirname(finalPath), { recursive: true });
+    await rename(join(stageDir, file.stagedName), finalPath);
+    await syncDirectory(dirname(finalPath));
+    if (index === 0 && journal.files.length > 1) {
+      await pauseMigrationPublicationForTest("between-publications");
+    }
+  }
+  await rm(journalPath, { force: true });
+  await syncDirectory(migrationsDir);
+  await rm(stageDir, { recursive: true, force: true });
+}
+
+async function committedSnapshotPublication(
   migrationsDir: string,
   schema: ResolvedSchemaInput,
   timestamp: string,
-): Promise<string | null> {
+): Promise<MigrationPublicationFile | null> {
   const entries = await listSnapshotEntriesForMigrations(migrationsDir);
   if (
     entries.some(
@@ -714,12 +869,13 @@ async function ensureCommittedSnapshot(
   ) {
     return null;
   }
-
-  return writeSnapshotSchemaForMigrations(
-    migrationsDir,
-    snapshotFilename(schema.hash, timestamp),
-    schema.schema,
-  );
+  return {
+    finalPath: join(
+      snapshotsDirForMigrations(migrationsDir),
+      snapshotFilename(schema.hash, timestamp),
+    ),
+    contents: `${JSON.stringify(schema.schema, null, 2)}\n`,
+  };
 }
 
 async function loadCurrentSchema(schemaDir: string): Promise<ResolvedSchemaInput> {
@@ -804,13 +960,16 @@ async function createMigrationUnlocked(
   } else {
     const latest = await loadLatestCommittedSnapshot(options.migrationsDir);
     if (!latest) {
+      const snapshot = await committedSnapshotPublication(
+        options.migrationsDir,
+        currentSchema!,
+        timestamp,
+      );
+      if (!snapshot) throw new Error("Initial committed snapshot already exists");
+      await publishMigrationFilesRecoverably(options.migrationsDir, [snapshot]);
       return {
         status: "initial-snapshot",
-        snapshotPath: (await ensureCommittedSnapshot(
-          options.migrationsDir,
-          currentSchema!,
-          timestamp,
-        ))!,
+        snapshotPath: snapshot.finalPath,
       };
     }
 
@@ -828,13 +987,15 @@ async function createMigrationUnlocked(
   }
 
   if (!schemaTransitionRequiresRowTransform(fromSchema.schema, toSchema.schema)) {
+    const snapshot = shouldWriteCommittedSnapshot
+      ? await committedSnapshotPublication(options.migrationsDir, toSchema, timestamp)
+      : null;
+    if (snapshot) await publishMigrationFilesRecoverably(options.migrationsDir, [snapshot]);
     return {
       status: "migration-not-required",
       fromHash: fromSchema.hash,
       toHash: toSchema.hash,
-      snapshotPath: shouldWriteCommittedSnapshot
-        ? await ensureCommittedSnapshot(options.migrationsDir, toSchema, timestamp)
-        : null,
+      snapshotPath: snapshot?.finalPath ?? null,
     };
   }
 
@@ -845,17 +1006,19 @@ async function createMigrationUnlocked(
     options.name ? normalizeMigrationName(options.name) : undefined,
     timestamp,
   );
-  if (await pathExists(filePath)) {
-    throw new Error(`Migration stub already exists: ${filePath}`);
-  }
-
   const stub = renderMigrationStub({
     fromHash: fromSchema.hash,
     toHash: toSchema.hash,
     fromSchema: fromSchema.schema,
     toSchema: toSchema.schema,
   });
-  await writeFile(filePath, stub);
+  const snapshot = shouldWriteCommittedSnapshot
+    ? await committedSnapshotPublication(options.migrationsDir, toSchema, timestamp)
+    : null;
+  await publishMigrationFilesRecoverably(options.migrationsDir, [
+    { finalPath: filePath, contents: stub },
+    ...(snapshot ? [snapshot] : []),
+  ]);
 
   return {
     status: "generated",
@@ -863,9 +1026,7 @@ async function createMigrationUnlocked(
     fromHash: fromSchema.hash,
     toHash: toSchema.hash,
     needsRename: !options.name,
-    snapshotPath: shouldWriteCommittedSnapshot
-      ? await ensureCommittedSnapshot(options.migrationsDir, toSchema, timestamp)
-      : null,
+    snapshotPath: snapshot?.finalPath ?? null,
   };
 }
 
@@ -874,27 +1035,88 @@ async function withMigrationDirectoryLock<T>(
   operation: () => Promise<T>,
 ): Promise<T> {
   const lockDir = join(migrationsDir, ".jazz-create-migration.lock");
+  const ownerPath = join(lockDir, "owner.json");
+  const owner = { version: 1, pid: process.pid, hostname: hostname(), token: randomUUID() };
+  const candidateDir = `${lockDir}.${owner.token}.candidate`;
+  await mkdir(candidateDir);
+  await syncFile(join(candidateDir, "owner.json"), `${JSON.stringify(owner)}\n`);
+  await syncDirectory(candidateDir);
+  await syncDirectory(migrationsDir);
   const deadline = Date.now() + 10_000;
   for (;;) {
     try {
-      // mkdir is the cross-process compare-and-set. Holding the lock across
-      // baseline discovery and both output writes makes timestamp allocation
-      // and committing the new baseline one operation.
-      await mkdir(lockDir);
+      // Renaming a fully prepared owner directory is the cross-process
+      // compare-and-set. There is no acquired-lock window with missing owner
+      // metadata, even if the process dies at any instruction boundary.
+      await rename(candidateDir, lockDir);
+      await syncDirectory(migrationsDir);
+      await pauseMigrationPublicationForTest("lock-held");
       break;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const code = (error as NodeJS.ErrnoException).code;
+      const contention =
+        code === "EEXIST" ||
+        code === "ENOTEMPTY" ||
+        // Windows commonly reports EPERM when renaming over an existing,
+        // non-empty directory. Only interpret it as contention after proving
+        // the destination exists; otherwise preserve the real filesystem error.
+        (code === "EPERM" && (await pathExists(lockDir)));
+      if (!contention) {
+        await rm(candidateDir, { recursive: true, force: true });
+        throw error;
+      }
+      let existing: typeof owner | null = null;
+      try {
+        existing = JSON.parse(await readFile(ownerPath, "utf8")) as typeof owner;
+      } catch {
+        // A missing or malformed owner cannot safely be stolen: its creator
+        // may still be between mkdir and publishing metadata.
+      }
+      if (
+        existing?.version === 1 &&
+        existing.hostname === hostname() &&
+        Number.isSafeInteger(existing.pid) &&
+        existing.pid > 0 &&
+        !processIsAlive(existing.pid)
+      ) {
+        const unchanged = await readFile(ownerPath, "utf8").catch(() => "");
+        if (unchanged === `${JSON.stringify(existing)}\n`) {
+          await rm(lockDir, { recursive: true, force: true });
+          await syncDirectory(migrationsDir);
+          continue;
+        }
+      }
       if (Date.now() >= deadline) {
-        throw new Error(`Timed out waiting for another migration generator to release ${lockDir}`);
+        const detail = existing
+          ? `owner pid=${existing.pid} host=${existing.hostname}`
+          : "owner metadata is missing or invalid";
+        await rm(candidateDir, { recursive: true, force: true });
+        throw new Error(
+          `Timed out waiting for another migration generator to release ${lockDir}; ${detail}`,
+        );
       }
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
   }
 
   try {
+    await recoverMigrationPublication(migrationsDir);
     return await operation();
   } finally {
-    await rm(lockDir, { recursive: true, force: true });
+    const current = await readFile(ownerPath, "utf8").catch(() => "");
+    if (current === `${JSON.stringify(owner)}\n`) {
+      await rm(lockDir, { recursive: true, force: true });
+      await syncDirectory(migrationsDir);
+    }
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
   }
 }
 

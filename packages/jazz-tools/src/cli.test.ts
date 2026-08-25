@@ -13,9 +13,11 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import { afterEach, assert, describe, expect, it, vi } from "vitest";
 import { structuralSchemaHash } from "./dev/schema-utils.js";
+import { createMigration as createCatalogueMigration } from "./dev/catalogue-project.js";
 import {
   APP_ID_ENV_VARS,
   SERVER_URL_ENV_VARS,
@@ -86,6 +88,45 @@ async function fileExists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function spawnMigrationCreate(
+  root: string,
+  migrationsDir: string,
+  pauseAt: "lock-held" | "between-publications",
+  marker: string,
+) {
+  return spawn(
+    process.execPath,
+    [distCliPath, "migrations", "create", "--schema-dir", root, "--migrations-dir", migrationsDir],
+    {
+      env: {
+        ...process.env,
+        NODE_ENV: "test",
+        JAZZ_TEST_MIGRATION_PAUSE_AT: pauseAt,
+        JAZZ_TEST_MIGRATION_PAUSE_MARKER: marker,
+      },
+      stdio: "ignore",
+    },
+  );
+}
+
+async function waitForCrashMarker(marker: string, child: ReturnType<typeof spawn>): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (!(await fileExists(marker))) {
+    if (child.exitCode !== null) {
+      throw new Error(`migration child exited before reaching ${marker}`);
+    }
+    if (Date.now() >= deadline) throw new Error(`migration child did not reach ${marker}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+async function killChild(child: ReturnType<typeof spawn>): Promise<void> {
+  if (child.exitCode !== null) return;
+  const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+  child.kill("SIGKILL");
+  await closed;
 }
 
 async function captureConsoleLogs<T>(
@@ -943,6 +984,10 @@ describe("cli migrations", () => {
     await mkdir(migrationsDir, { recursive: true });
     const externalLock = join(migrationsDir, ".jazz-create-migration.lock");
     await mkdir(externalLock);
+    await writeFile(
+      join(externalLock, "owner.json"),
+      `${JSON.stringify({ version: 1, pid: process.pid, hostname: hostname(), token: "test" })}\n`,
+    );
 
     const resultsPromise = Promise.all(
       Array.from(
@@ -985,6 +1030,52 @@ describe("cli migrations", () => {
       (await readdir(join(migrationsDir, "snapshots"))).filter((name) => name.endsWith(".json")),
     ).toHaveLength(1);
     await expect(access(join(migrationsDir, ".jazz-create-migration.lock"))).rejects.toThrow();
+  });
+
+  it("recovers a lock whose same-host owner was killed", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const marker = join(root, "lock-held.marker");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+
+    const child = spawnMigrationCreate(root, migrationsDir, "lock-held", marker);
+    await waitForCrashMarker(marker, child);
+    await killChild(child);
+
+    const result = await createCatalogueMigration({ schemaDir: root, migrationsDir });
+    expect(result.status).toBe("initial-snapshot");
+    expect(
+      (await readdir(join(migrationsDir, "snapshots"))).filter((name) => name.endsWith(".json")),
+    ).toHaveLength(1);
+    await expect(access(join(migrationsDir, ".jazz-create-migration.lock"))).rejects.toThrow();
+  });
+
+  it("recovers a killed migration between publishing its paired outputs", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const marker = join(root, "between-publications.marker");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await createCatalogueMigration({ schemaDir: root, migrationsDir });
+    await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
+
+    const child = spawnMigrationCreate(root, migrationsDir, "between-publications", marker);
+    await waitForCrashMarker(marker, child);
+    await killChild(child);
+
+    expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toHaveLength(1);
+    expect(await fileExists(join(migrationsDir, ".jazz-create-migration.journal.json"))).toBe(true);
+
+    const retry = await createCatalogueMigration({ schemaDir: root, migrationsDir });
+    expect(retry.status).toBe("unchanged");
+    expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toHaveLength(1);
+    expect(
+      (await readdir(join(migrationsDir, "snapshots"))).filter((name) => name.endsWith(".json")),
+    ).toHaveLength(2);
+    expect(await fileExists(join(migrationsDir, ".jazz-create-migration.journal.json"))).toBe(
+      false,
+    );
+    expect(await fileExists(join(migrationsDir, ".jazz-create-migration-stage"))).toBe(false);
+    expect(await fileExists(join(migrationsDir, ".jazz-create-migration.lock"))).toBe(false);
   });
 
   it("writes an initial committed snapshot on first run", async () => {
