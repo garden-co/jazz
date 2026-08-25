@@ -604,6 +604,8 @@ pub enum ChunkError {
     Backend(String),
     #[error("chunk bytes do not match the requested object hash")]
     Integrity,
+    #[error("chunk request re-entered while its backing request was being polled")]
+    Reentrant,
 }
 
 impl From<ChunkStorageError> for ChunkError {
@@ -719,8 +721,8 @@ struct InFlightChunks {
 
 struct InFlightChunk {
     /// Temporarily `None` only while a consumer is polling it outside the
-    /// registry borrow. A reentrant request for this exact key waits for that
-    /// consumer to return it to the entry.
+    /// registry borrow. A synchronous reentrant request for this exact key is
+    /// a request cycle and fails deterministically.
     future: Option<ChunkFuture<'static, Result<Bytes, ChunkError>>>,
     result: Option<Result<Bytes, ChunkError>>,
     waiters: Vec<Waker>,
@@ -756,7 +758,7 @@ impl CoalescedChunkGet {
             // one being cancelled. Wake remaining consumers so one of them
             // installs its waker on the single shared future.
             let wake = if entry.consumers != 0 && entry.result.is_none() {
-                entry.waiters.clone()
+                std::mem::take(&mut entry.waiters)
             } else {
                 Vec::new()
             };
@@ -778,7 +780,7 @@ impl Future for CoalescedChunkGet {
         enum Next {
             Complete(Result<Bytes, ChunkError>),
             Poll(ChunkFuture<'static, Result<Bytes, ChunkError>>),
-            Waiting,
+            Reentrant,
         }
 
         let next = {
@@ -790,14 +792,14 @@ impl Future for CoalescedChunkGet {
             if let Some(result) = &entry.result {
                 Next::Complete(result.clone())
             } else {
-                entry.future.take().map_or(Next::Waiting, Next::Poll)
+                entry.future.take().map_or(Next::Reentrant, Next::Poll)
             }
         };
 
         let mut wake = Vec::new();
         let result = match next {
             Next::Complete(result) => Some(result),
-            Next::Waiting => None,
+            Next::Reentrant => Some(Err(ChunkError::Reentrant)),
             Next::Poll(mut future) => match future.as_mut().poll(cx) {
                 Poll::Pending => {
                     let mut in_flight = self.in_flight.borrow_mut();
@@ -1298,7 +1300,7 @@ mod tests {
         let chunks = OwnedChunkProvider::new(Rc::new(provider));
         control.pause();
         let mut first = chunks.get(request.clone());
-        let mut second = chunks.get(request);
+        let mut second = chunks.get(request.clone());
         let first_wakes = Arc::new(WakeCounter(AtomicUsize::new(0)));
         let second_wakes = Arc::new(WakeCounter(AtomicUsize::new(0)));
         let first_waker = waker(Arc::clone(&first_wakes));
@@ -1320,6 +1322,31 @@ mod tests {
         // explicitly wake `second` so the shared future keeps making progress.
         drop(first);
         assert_eq!(second_wakes.0.load(Ordering::SeqCst), 1);
+        assert!(
+            chunks
+                .in_flight
+                .borrow()
+                .entries
+                .get(&request)
+                .expect("remaining consumer keeps the shared request")
+                .waiters
+                .is_empty()
+        );
+        assert!(matches!(
+            Pin::new(&mut second).poll(&mut second_context),
+            Poll::Pending
+        ));
+        assert_eq!(
+            chunks
+                .in_flight
+                .borrow()
+                .entries
+                .get(&request)
+                .expect("remaining consumer re-registers its waker")
+                .waiters
+                .len(),
+            1
+        );
         control.release_one();
         assert!(matches!(
             Pin::new(&mut second).poll(&mut second_context),
@@ -1397,6 +1424,7 @@ mod tests {
             Pin::new(&mut second).poll(&mut context),
             Poll::Ready(Err(ChunkError::Unavailable))
         ));
+        assert!(chunks.in_flight.borrow().entries.is_empty());
         control.resume();
         assert_eq!(block_on(chunks.get(request.clone())).unwrap(), bytes);
         assert_eq!(control.observed(), vec![request.clone(), request]);
@@ -1437,6 +1465,7 @@ mod tests {
         assert_eq!(control.observed(), vec![request]);
         assert_eq!(chunks.cache_stats().active_requests, 0);
         assert_eq!(chunks.cache_stats().active_leases, 2);
+        assert!(chunks.in_flight.borrow().entries.is_empty());
     }
 
     #[test]
@@ -1493,6 +1522,43 @@ mod tests {
         *slot.borrow_mut() = Some(chunks.clone());
 
         assert_eq!(block_on(chunks.get(first)).unwrap(), first_bytes);
+    }
+
+    #[test]
+    fn synchronously_reentrant_same_key_fails_and_cleans_up() {
+        struct CycleProvider {
+            chunks: Rc<RefCell<Option<OwnedChunkProvider>>>,
+        }
+
+        impl ChunkProvider for CycleProvider {
+            fn get(&self, request: ChunkRequest) -> ChunkFuture<'_, Result<Bytes, ChunkError>> {
+                let chunks = Rc::clone(&self.chunks);
+                Box::pin(async move {
+                    let nested = chunks
+                        .borrow()
+                        .as_ref()
+                        .expect("provider is installed")
+                        .get(request);
+                    let _nested_lease = nested.await?;
+                    Ok(Bytes::new())
+                })
+            }
+        }
+
+        let bytes = Bytes::from_static(b"same-key request cycle");
+        let request = ChunkRequest {
+            object_hash: crate::large_values::object_hash(&bytes).0,
+            locator: Locator::from_seed(b"same-key-cycle"),
+        };
+        let slot = Rc::new(RefCell::new(None));
+        let chunks = OwnedChunkProvider::new(Rc::new(CycleProvider {
+            chunks: Rc::clone(&slot),
+        }));
+        *slot.borrow_mut() = Some(chunks.clone());
+
+        assert_eq!(block_on(chunks.get(request)), Err(ChunkError::Reentrant));
+        assert!(chunks.in_flight.borrow().entries.is_empty());
+        assert_eq!(chunks.cache_stats().active_requests, 0);
     }
 
     #[test]
