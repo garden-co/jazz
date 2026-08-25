@@ -629,6 +629,7 @@ mod tests {
     use jazz::tools::AppId;
     use jazz::tools::metadata::{MetadataKey, ObjectType};
     use jazz::tools::public_schema::SchemaHash;
+    use jazz::tools::schema_lens::LensTransform;
 
     fn dynamic_bootstrap_schema() -> jazz::tools::public_schema::Schema {
         jazz::tools::public_schema::SchemaBuilder::new()
@@ -1066,6 +1067,109 @@ mod tests {
             assert!(
                 error.contains(object_type.as_str()) && error.contains(decode_context),
                 "startup error identifies the corrupt known entry type and decoder: {error}"
+            );
+            assert!(
+                error.contains(&object_id.to_string()),
+                "startup error identifies the corrupt durable object: {error}"
+            );
+
+            let storage = jazz_storage_rocksdb::RocksDbStorage::open(&catalogue_path, &["default"])
+                .expect("failed startup releases the catalogue RocksDB lock");
+            jazz::db::block_on(storage.delete(
+                "default".to_owned(),
+                format!("cat:{}", object_id.uuid().simple()).into_bytes(),
+            ))
+            .expect("remove corrupt catalogue entry");
+            drop(storage);
+            ServerBuilder::new(app_id)
+                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+                .with_storage(StorageBackend::Persistent {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .build()
+                .await
+                .expect("builder retries after repaired catalogue");
+        }
+    }
+
+    #[tokio::test]
+    async fn persistent_builder_fails_when_known_catalogue_payload_has_trailing_garbage() {
+        let schema = dynamic_bootstrap_schema();
+        let schema_hash = SchemaHash::compute(&schema);
+        let permissions = std::collections::HashMap::new();
+        for (object_type, decode_context, mut content) in [
+            (
+                ObjectType::CatalogueSchema,
+                "decode schema payload",
+                crate::server::catalogue_payload_codec::encode_schema(&schema),
+            ),
+            (
+                ObjectType::CatalogueLens,
+                "decode lens payload",
+                crate::server::catalogue_payload_codec::encode_lens_transform(&LensTransform::new()),
+            ),
+            (
+                ObjectType::CataloguePermissionsBundle,
+                "decode permissions bundle payload",
+                crate::server::catalogue_payload_codec::encode_permissions_bundle(
+                    schema_hash,
+                    1,
+                    None,
+                    &permissions,
+                ),
+            ),
+            (
+                ObjectType::CataloguePermissionsHead,
+                "decode permissions head payload",
+                crate::server::catalogue_payload_codec::encode_permissions_head(
+                    schema_hash,
+                    1,
+                    None,
+                    jazz::tools::ObjectId::new(),
+                ),
+            ),
+        ] {
+            let data_dir = tempfile::TempDir::new().expect("temp data dir");
+            let catalogue_path = data_dir.path().join(CATALOGUE_ROCKSDB_DIR);
+            let app_id = AppId::from_name(&format!("trailing-{}", object_type.as_str()));
+            let object_id = jazz::tools::ObjectId::new();
+            let mut metadata = std::collections::HashMap::from([
+                (MetadataKey::Type.to_string(), object_type.to_string()),
+                (MetadataKey::AppId.to_string(), app_id.uuid().to_string()),
+            ]);
+            if object_type == ObjectType::CatalogueLens {
+                metadata.insert(MetadataKey::SourceHash.to_string(), schema_hash.to_string());
+                metadata.insert(MetadataKey::TargetHash.to_string(), schema_hash.to_string());
+            }
+            content.push(0xff);
+            write_raw_catalogue_entry(
+                &catalogue_path,
+                &CatalogueEntry {
+                    object_id,
+                    metadata,
+                    content,
+                },
+            );
+
+            let result = ServerBuilder::new(app_id)
+                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+                .with_storage(StorageBackend::Persistent {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .build()
+                .await;
+            let error = result
+                .err()
+                .expect("known catalogue payload with trailing garbage must fail startup");
+            assert!(
+                error.contains("failed to read durable catalogue: Decode error"),
+                "startup error retains durable-catalogue context: {error}"
+            );
+            assert!(
+                error.contains(object_type.as_str())
+                    && error.contains(decode_context)
+                    && error.contains("trailing data after decoded payload"),
+                "startup error identifies the known decoder and trailing payload data: {error}"
             );
             assert!(
                 error.contains(&object_id.to_string()),
