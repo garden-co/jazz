@@ -3915,8 +3915,25 @@ fn occurrence_root_bytes(occurrence: &OutputOccurrenceId) -> [u8; 16] {
         .expect("an output occurrence always begins with its root UUID")
 }
 
+/// Read only the public root UUID from a flat terminal key. Groove may append
+/// hidden binding-route fields (for example an explicit identity claim), while
+/// membership owns the exact public occurrence identity for this path.
 fn terminal_occurrence_root_bytes(encoded: &[u8]) -> Result<[u8; 16], Error> {
-    terminal_root_occurrence_id(encoded).map(|occurrence| occurrence_root_bytes(&occurrence))
+    if encoded.first().copied() != Some(10) {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "terminal root key must begin with a UUID",
+        ));
+    }
+    encoded
+        .get(1..17)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| {
+            Error::new(
+                ErrorCode::Protocol,
+                "terminal root key contains a truncated UUID",
+            )
+        })
 }
 
 fn apply_maintained_membership_update_to_snapshot(
