@@ -99,6 +99,29 @@ test("release fingerprint staging verifies downloaded WASM bytes before deriving
   writeReleaseNapiManifest(root);
 
   stageNativeFingerprints(root);
+  const generatedNapi = readFileSync(
+    join(root, "packages/jazz-tools/src/runtime/native-artifact-fingerprint-napi.ts"),
+    "utf8",
+  );
+  const generatedWasm = readFileSync(
+    join(root, "packages/jazz-tools/src/runtime/native-artifact-fingerprint-wasm.ts"),
+    "utf8",
+  );
+  stageNativeFingerprints(root);
+  assert.equal(
+    readFileSync(
+      join(root, "packages/jazz-tools/src/runtime/native-artifact-fingerprint-napi.ts"),
+      "utf8",
+    ),
+    generatedNapi,
+  );
+  assert.equal(
+    readFileSync(
+      join(root, "packages/jazz-tools/src/runtime/native-artifact-fingerprint-wasm.ts"),
+      "utf8",
+    ),
+    generatedWasm,
+  );
   assert.match(
     readFileSync(
       join(root, "packages/jazz-tools/src/runtime/native-artifact-fingerprint-wasm.ts"),

@@ -268,7 +268,7 @@ fn mix_current_row(hash: &mut u64, row: &CurrentRow, table: &TableSchema) {
     mix_str(hash, row.table());
     mix_bytes(hash, row.row_uuid().as_bytes());
     for (idx, column) in table.columns.iter().enumerate() {
-        mix_str(hash, &column.name);
+        mix_str(hash, column.name());
         if let Some(value) = row.cell_at(idx) {
             mix_str(hash, &format!("{value:?}"));
         }

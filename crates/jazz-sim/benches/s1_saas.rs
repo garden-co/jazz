@@ -16,7 +16,6 @@ use jazz::peer::{MaintainedSubscriptionViewMetrics, PeerState};
 use jazz::protocol::{RegisterShapeOptions, ShapeAst, Subscribe, SubscriptionKey, SyncMessage};
 use jazz::query::{Binding, Query, ValidatedQuery, col, eq, lit, ne, param};
 use jazz::schema::JazzSchema;
-use jazz::time::TxTime;
 use jazz::tools::public_schema::{
     ColumnType as PublicColumnType, SchemaBuilder, TableSchema as PublicTableSchema,
 };
@@ -1708,7 +1707,7 @@ fn naive_refetch_ceiling_bytes(schema: &JazzSchema, fixture: &Fixture) -> u64 {
             let positional = table
                 .columns
                 .iter()
-                .map(|column| commit.cells.get(&column.name).cloned())
+                .map(|column| commit.cells.get(column.name()).cloned())
                 .collect::<Vec<_>>();
             jazz::protocol::VersionRecord::encode(
                 table,
@@ -1716,9 +1715,9 @@ fn naive_refetch_ceiling_bytes(schema: &JazzSchema, fixture: &Fixture) -> u64 {
                 commit.row_uuid,
                 Vec::new(),
                 AuthorSubject::SYSTEM,
-                TxTime(0),
+                0,
                 AuthorSubject::SYSTEM,
-                TxTime(0),
+                0,
                 &positional,
                 None,
             )

@@ -293,9 +293,9 @@ where
                     (
                         RowProvenance {
                             created_by: created.created_by(),
-                            created_at: created.created_at(),
+                            created_at: created.created_at().physical_ms(),
                             updated_by: updated.updated_by(),
-                            updated_at: updated.updated_at(),
+                            updated_at: updated.updated_at().physical_ms(),
                         },
                         (updated.tx_time(), updated.tx_node_alias()),
                     )
@@ -305,7 +305,7 @@ where
                     let Some(now_ms) = write.now_ms else {
                         continue;
                     };
-                    let updated_at = TxTime(now_ms);
+                    let updated_at = now_ms;
                     provenance = Some(match provenance {
                         Some(existing) => RowProvenance {
                             updated_by: provisional_author,
@@ -758,10 +758,19 @@ where
             .get(&open_batch_id)
             .cloned()
             .ok_or(Error::MissingOpenBatch(open_batch_id))?;
+        for write in &open_tx.writes {
+            if let Some(provenance_ms) = write.now_ms {
+                TxTime::from_physical_ms(provenance_ms).map_err(|_| {
+                    Error::InvalidMergeableCommit(
+                        "exclusive write now_ms exceeds packed HLC physical-millisecond range",
+                    )
+                })?;
+            }
+        }
         for parent in open_tx.writes.iter().flat_map(|write| write.parents.iter()) {
             self.merge_tx_time(parent.time);
         }
-        let made_at = self.mint_tx_time(now_ms);
+        let made_at = self.mint_tx_time(now_ms)?;
         let tx_id = TxId::new(made_at, self.node_uuid);
         let provenance_snapshot = open_tx.base_snapshot.clone();
         let mut versions = Vec::with_capacity(open_tx.writes.len());
@@ -802,11 +811,23 @@ where
                     ));
                 }
             }
-            for value in cells.values_mut() {
-                self.prepare_and_stage_large_scalar(value).await?;
+            for (column, value) in &mut cells {
+                let semantic_kind = table_schema
+                    .columns
+                    .iter()
+                    .find(|candidate| candidate.name == *column)
+                    .map(|column| column.large_value_kind)
+                    .unwrap_or(crate::schema::LargeValueSemanticKind::NotLarge);
+                self.prepare_and_stage_large_scalar(value, semantic_kind)
+                    .await?;
             }
             let cells = positional_cells_from_map(&table_schema, &cells)?;
-            let provenance_at = TxTime(write.now_ms.unwrap_or(now_ms));
+            let provenance_at =
+                TxTime::from_physical_ms(write.now_ms.unwrap_or(now_ms)).map_err(|_| {
+                    Error::InvalidMergeableCommit(
+                        "exclusive write now_ms exceeds packed HLC physical-millisecond range",
+                    )
+                })?;
             let (created_by, created_at) = snapshot_content
                 .as_ref()
                 .map(|version| (version.created_by(), version.created_at()))
@@ -817,9 +838,9 @@ where
                 write.row_uuid,
                 write.parents,
                 created_by,
-                created_at,
+                created_at.physical_ms(),
                 made_by,
-                provenance_at,
+                provenance_at.physical_ms(),
                 &cells,
                 write.deletion,
             )?);
@@ -948,9 +969,6 @@ where
         };
         let mut commits = Vec::with_capacity(open_tx.writes.len());
         for (index, write) in open_tx.writes.into_iter().enumerate() {
-            for parent in &write.parents {
-                self.merge_tx_time(parent.time);
-            }
             let parents = if write.refresh_parents_at_commit {
                 if write.deletion.is_none() {
                     self.local_content_winner_tx_id_in_branch(
@@ -1016,10 +1034,22 @@ where
             }
             commits.push((write.schema_version, commit));
         }
+        // Constructing an open batch may require snapshot reads, but it must
+        // not advance HLC/parent state until *every* lowered write is valid.
+        // In particular, a later invalid public provenance value must not make
+        // an otherwise valid first write observably consume a clock position.
+        for (_, commit) in &commits {
+            commit.validate()?;
+        }
         let first = commits.first().ok_or(Error::InvalidMergeableCommit(
             "mergeable transaction requires at least one write",
         ))?;
-        let made_at = self.mint_tx_time(first.1.now_ms);
+        for (_, commit) in &commits {
+            for parent in &commit.parents {
+                self.merge_tx_time(parent.time);
+            }
+        }
+        let made_at = self.mint_tx_time(first.1.now_ms)?;
         let committed = self
             .commit_mergeable_many_at_with_schema_versions(commits, made_at)
             .await?;

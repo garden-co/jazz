@@ -504,9 +504,9 @@ fn mixed_version_carriers(
                         RowUuid::from_bytes([0x90 + index as u8; 16]),
                         Vec::new(),
                         author,
-                        TxTime(100 + index),
+                        100 + index,
                         author,
-                        TxTime(100 + index),
+                        100 + index,
                         &BTreeMap::from([("title".to_owned(), format!("run-{index}"))]),
                         None,
                     )
@@ -555,7 +555,7 @@ fn fixture_manifest() -> Manifest {
         .collect();
 
     Manifest {
-        fixture_set: "jazz-wire-message-frames-v12",
+        fixture_set: "jazz-wire-message-frames-v14",
         codec: "postcard WireFrame::Message(WireEnvelope { payload: encode_sync_message(..) })",
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: FEATURE_SYNC_MESSAGE_PAYLOAD,

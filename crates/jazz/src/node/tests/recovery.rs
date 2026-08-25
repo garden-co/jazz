@@ -584,7 +584,9 @@ fn global_time_allocates_max_once_then_stays_exhausted() {
         .unwrap();
     assert!(matches!(
         node.finalize_local_mergeable_commit_settled(after_exhaustion),
-        Err(Error::InvalidStoredValue("global HLC exhausted"))
+        Err(Error::ClockOverflow(crate::time::HlcOverflow {
+            physical_ms: crate::time::HLC_MAX_PHYSICAL_MS,
+        }))
     ));
     assert_eq!(
         node.transaction_state_settled(after_exhaustion).unwrap(),
@@ -622,7 +624,9 @@ fn recovery_rejects_global_time_allocation_after_max() {
         .unwrap();
     assert!(matches!(
         reopened.finalize_local_mergeable_commit_settled(next_tx),
-        Err(Error::InvalidStoredValue("global HLC exhausted"))
+        Err(Error::ClockOverflow(crate::time::HlcOverflow {
+            physical_ms: crate::time::HLC_MAX_PHYSICAL_MS,
+        }))
     ));
 }
 

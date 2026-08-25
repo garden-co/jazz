@@ -127,7 +127,6 @@ declare module "jazz-wasm" {
       rowId: Uint8Array,
       cells: Uint8Array,
       column: string,
-      kind: "Text" | "Json" | "Bytea",
       mutation?: "insert" | "update" | "upsert",
       author?: Uint8Array,
       updatedAtMs?: number,
