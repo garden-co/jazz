@@ -969,9 +969,6 @@ where
         };
         let mut commits = Vec::with_capacity(open_tx.writes.len());
         for (index, write) in open_tx.writes.into_iter().enumerate() {
-            for parent in &write.parents {
-                self.merge_tx_time(parent.time);
-            }
             let parents = if write.refresh_parents_at_commit {
                 if write.deletion.is_none() {
                     self.local_content_winner_tx_id_in_branch(
@@ -1037,9 +1034,21 @@ where
             }
             commits.push((write.schema_version, commit));
         }
+        // Constructing an open batch may require snapshot reads, but it must
+        // not advance HLC/parent state until *every* lowered write is valid.
+        // In particular, a later invalid public provenance value must not make
+        // an otherwise valid first write observably consume a clock position.
+        for (_, commit) in &commits {
+            commit.validate()?;
+        }
         let first = commits.first().ok_or(Error::InvalidMergeableCommit(
             "mergeable transaction requires at least one write",
         ))?;
+        for (_, commit) in &commits {
+            for parent in &commit.parents {
+                self.merge_tx_time(parent.time);
+            }
+        }
         let made_at = self.mint_tx_time(first.1.now_ms)?;
         let committed = self
             .commit_mergeable_many_at_with_schema_versions(commits, made_at)
