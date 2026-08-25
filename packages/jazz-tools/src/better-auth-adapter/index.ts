@@ -8,6 +8,7 @@ import type { Db, QueryBuilder, TransactionScope } from "../runtime/db.js";
 import type { BackendSchemaInput } from "../backend/index.js";
 import { resolveSchemaSource } from "../schema-source.js";
 import { createJazzSchemaSourceFile } from "./schema.js";
+import { readTableIndexes } from "./indexes.js";
 import type { JazzBuiltCondition, JazzRowRecord, JazzSortBy } from "./types.js";
 import {
   filterListByWhere,
@@ -64,15 +65,6 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         storedFieldNames: readonly string[];
       };
 
-      // Better Auth exposes composite indexes in its runtime table schema, but
-      // its public `BetterAuthDBSchema` type currently only describes fields.
-      // Keep this compatibility boundary narrow: adapter inputs still use the
-      // upstream type, while this is the exact extra runtime metadata we read.
-      type RuntimeCompositeIndex = {
-        fields: readonly string[];
-        unique?: boolean;
-      };
-
       const getUniqueConstraints = (model: string): UniqueConstraint[] => {
         const defaultModelName = getDefaultModelName(model);
         const modelSchema = schema[defaultModelName];
@@ -87,12 +79,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
           }
         }
 
-        const indexes = (
-          modelSchema as typeof modelSchema & {
-            indexes?: readonly RuntimeCompositeIndex[];
-          }
-        ).indexes;
-        for (const index of indexes ?? []) {
+        for (const index of readTableIndexes(defaultModelName, modelSchema.indexes)) {
           if (!index.unique) continue;
           result.push({
             storedFieldNames: index.fields.map((field) =>
