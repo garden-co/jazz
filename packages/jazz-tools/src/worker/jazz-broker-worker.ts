@@ -69,6 +69,7 @@ type RuntimeContext = {
 const workerGlobal = globalThis as SharedWorkerGlobal;
 const contexts = new Map<string, RuntimeContext>();
 let wasmModulePromise: Promise<WasmModule> | null = null;
+let wasmModuleSource: string | null = null;
 let contextInitializationTail: Promise<void> = Promise.resolve();
 let nextResetId = 1;
 
@@ -224,14 +225,44 @@ async function initialize(context: RuntimeContext): Promise<void> {
 async function loadWorkerWasmModule(
   runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
 ): Promise<WasmModule> {
+  const source = workerWasmSource(runtimeSources);
+  if (wasmModulePromise && (!source || wasmModuleSource !== source)) {
+    throw new Error(
+      "incompatible WASM asset source for this SharedWorker; start a worker scoped to the new asset URL",
+    );
+  }
   const load = wasmModulePromise ?? loadWasmModule(runtimeSources);
   wasmModulePromise = load;
+  wasmModuleSource = source;
   try {
     return await load;
   } catch (error) {
-    if (wasmModulePromise === load) wasmModulePromise = null;
+    if (wasmModulePromise === load) {
+      wasmModulePromise = null;
+      wasmModuleSource = null;
+    }
     throw error;
   }
+}
+
+function workerWasmSource(
+  runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
+): string | null {
+  // The page assigns an opaque identity before structured-cloning an in-memory
+  // source into this worker. A raw worker caller without that identity is
+  // deliberately unshareable: treating every supplied byte array/module as
+  // the same source would silently reuse the first wasm-bindgen realm.
+  if (runtimeSources?.wasmModule) {
+    return runtimeSources.workerWasmAssetIdentity
+      ? `module:${runtimeSources.workerWasmAssetIdentity}`
+      : null;
+  }
+  if (runtimeSources?.wasmSource) {
+    return runtimeSources.workerWasmAssetIdentity
+      ? `source:${runtimeSources.workerWasmAssetIdentity}`
+      : null;
+  }
+  return runtimeSources?.wasmUrl ?? "worker-local";
 }
 
 function cleanupFailedContext(context: RuntimeContext): void {
