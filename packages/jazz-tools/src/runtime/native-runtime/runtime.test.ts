@@ -381,6 +381,52 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(transport.received).toEqual([]);
   });
 
+  it("retires an upstream admitted after its connection was disconnected", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transport = new FakeTransport([]);
+    let resolveAdmission!: (transport: Transport) => void;
+    const admission = new Promise<Transport>((resolve) => {
+      resolveAdmission = resolve;
+    });
+    const connectUpstreamWithSession = vi.fn(() => admission);
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => new FakeTransport([]),
+            connectUpstreamWithSession,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await waitForFakeWebSocketNegotiation();
+    expect(connectUpstreamWithSession).toHaveBeenCalledOnce();
+
+    await runtime.disconnect();
+    resolveAdmission(transport);
+    await waitForFakeWebSocketNegotiation();
+
+    expect(sockets[0]?.closed).toBe(true);
+    expect(transport.closed).toBe(true);
+    expect(transport.tickCount).toBe(0);
+  });
+
   it("fails active subscriptions when the websocket reports a fatal wire error", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {

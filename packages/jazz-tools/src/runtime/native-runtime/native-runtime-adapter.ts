@@ -1806,6 +1806,15 @@ export class NativeRuntimeAdapter implements Runtime {
       } catch (error) {
         throw contextualError("connecting the negotiated upstream transport", error);
       }
+      if (
+        this.closed ||
+        generation !== this.serverConnectionGeneration ||
+        carrier !== this.serverCarrier
+      ) {
+        carrier.close();
+        await this.retirePeerTransport(transport);
+        return carrier;
+      }
       this.serverTransport = transport;
       void this.watchAuxiliaryOutbound(transport, carrier, generation);
       this.flushQueuedServerFrames(carrier);
