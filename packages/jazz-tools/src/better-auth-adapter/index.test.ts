@@ -618,6 +618,13 @@ describe("jazzAdapter", () => {
         data: account("issuer-a", "same-account", firstUser.id),
       });
       await expect(
+        adapter.update({
+          model: "account",
+          where: [{ field: "id", operator: "eq", value: primary.id, connector: "AND" }],
+          update: { accountId: primary.accountId },
+        }),
+      ).resolves.toMatchObject({ id: primary.id, accountId: primary.accountId });
+      await expect(
         adapter.create({
           model: "account",
           data: account("issuer-a", "same-account", secondUser.id),
