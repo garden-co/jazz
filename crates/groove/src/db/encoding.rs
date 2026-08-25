@@ -1,55 +1,105 @@
 use super::*;
+use crate::records::ValidatedVariantRecord;
 
 pub(super) fn resolve_record_input(
     table: &TableSchema,
     input: &RecordInput,
+    descriptor: RecordDescriptor,
 ) -> Result<(u32, RecordDescriptor, Vec<u8>), Error> {
     match input {
         RecordInput::Values(values) => {
             let variant_tag = 0;
-            let descriptor = table
-                .record_schema_for_variant(variant_tag)
-                .ok_or_else(|| Error::UnknownTableVariant {
-                    table: table.name.clone(),
-                    version: u64::from(variant_tag),
-                })?;
             let record = encode_record(table, descriptor, values)?;
             Ok((variant_tag, descriptor, record))
         }
-        RecordInput::Record(record) => resolve_variant_record(table, record),
+        RecordInput::Record(record) => resolve_variant_record(table, record, descriptor),
     }
 }
 
 pub(super) fn resolve_raw_record_input(
     table: &TableSchema,
     input: &RawRecordInput,
+    descriptor: RecordDescriptor,
 ) -> Result<(u32, RecordDescriptor, Vec<u8>), Error> {
     match input {
         RawRecordInput::Payload(payload) => {
             let variant_tag = 0;
-            let descriptor = table
-                .record_schema_for_variant(variant_tag)
-                .ok_or_else(|| Error::UnknownTableVariant {
-                    table: table.name.clone(),
-                    version: u64::from(variant_tag),
-                })?;
             Ok((variant_tag, descriptor, payload.clone()))
         }
-        RawRecordInput::Record(record) => resolve_variant_record(table, record),
+        RawRecordInput::Record(record) => resolve_variant_record(table, record, descriptor),
+        RawRecordInput::ValidatedRecord(record) => {
+            resolve_validated_variant_record(table, record, descriptor)
+        }
     }
 }
 
-pub(super) fn resolve_variant_record(
+pub(super) fn resolve_owned_record_input(
     table: &TableSchema,
-    record: &VariantRecord,
+    input: RecordInput,
+    descriptor: RecordDescriptor,
+) -> Result<(u32, RecordDescriptor, Vec<u8>), Error> {
+    match input {
+        RecordInput::Values(values) => {
+            let variant_tag = 0;
+            let record = encode_record(table, descriptor, &values)?;
+            Ok((variant_tag, descriptor, record))
+        }
+        RecordInput::Record(record) => resolve_owned_variant_record(table, record, descriptor),
+    }
+}
+
+pub(super) fn resolve_owned_raw_record_input(
+    table: &TableSchema,
+    input: RawRecordInput,
+    descriptor: RecordDescriptor,
+) -> Result<(u32, RecordDescriptor, Vec<u8>), Error> {
+    match input {
+        RawRecordInput::Payload(payload) => Ok((0, descriptor, payload)),
+        RawRecordInput::Record(record) => resolve_owned_variant_record(table, record, descriptor),
+        RawRecordInput::ValidatedRecord(record) => {
+            resolve_owned_validated_variant_record(table, record, descriptor)
+        }
+    }
+}
+
+fn resolve_validated_variant_record(
+    table: &TableSchema,
+    record: &ValidatedVariantRecord,
+    descriptor: RecordDescriptor,
 ) -> Result<(u32, RecordDescriptor, Vec<u8>), Error> {
     let variant_tag = record.variant_tag();
-    let descriptor = table
-        .record_schema_for_variant(variant_tag)
-        .ok_or_else(|| Error::UnknownTableVariant {
+    if !record.descriptor().registry_compatible_with(&descriptor) {
+        return Err(Error::SchemaVersionDescriptorMismatch {
             table: table.name.clone(),
             version: u64::from(variant_tag),
-        })?;
+        });
+    }
+    let (_, record) = record.clone().into_parts();
+    Ok((variant_tag, descriptor, record.into_raw()))
+}
+
+fn resolve_owned_validated_variant_record(
+    table: &TableSchema,
+    record: ValidatedVariantRecord,
+    descriptor: RecordDescriptor,
+) -> Result<(u32, RecordDescriptor, Vec<u8>), Error> {
+    let variant_tag = record.variant_tag();
+    if !record.descriptor().registry_compatible_with(&descriptor) {
+        return Err(Error::SchemaVersionDescriptorMismatch {
+            table: table.name.clone(),
+            version: u64::from(variant_tag),
+        });
+    }
+    let (_, record) = record.into_parts();
+    Ok((variant_tag, descriptor, record.into_raw()))
+}
+
+fn resolve_owned_variant_record(
+    table: &TableSchema,
+    record: VariantRecord,
+    descriptor: RecordDescriptor,
+) -> Result<(u32, RecordDescriptor, Vec<u8>), Error> {
+    let variant_tag = record.variant_tag();
     if !record
         .record()
         .descriptor()
@@ -60,7 +110,28 @@ pub(super) fn resolve_variant_record(
             version: u64::from(variant_tag),
         });
     }
-    record.record().to_values()?;
+    record.record().validate()?;
+    let (_, record) = record.into_parts();
+    Ok((variant_tag, descriptor, record.into_raw()))
+}
+
+pub(super) fn resolve_variant_record(
+    table: &TableSchema,
+    record: &VariantRecord,
+    descriptor: RecordDescriptor,
+) -> Result<(u32, RecordDescriptor, Vec<u8>), Error> {
+    let variant_tag = record.variant_tag();
+    if !record
+        .record()
+        .descriptor()
+        .registry_compatible_with(&descriptor)
+    {
+        return Err(Error::SchemaVersionDescriptorMismatch {
+            table: table.name.clone(),
+            version: u64::from(variant_tag),
+        });
+    }
+    record.record().validate()?;
     Ok((variant_tag, descriptor, record.record().raw().to_vec()))
 }
 
