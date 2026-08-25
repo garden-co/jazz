@@ -3,6 +3,7 @@ import type { StandardJSONSchemaV1 } from "@standard-schema/spec";
 import {
   col,
   getCollectedMigration,
+  getCollectedMigrations,
   getCollectedSchema,
   migrate,
   resetCollectedState,
@@ -400,6 +401,34 @@ describe("ref DSL", () => {
     expect(() => table("todos", { images: col.array(col.ref("images")) })).toThrow(
       "Invalid array reference key 'images'. Rename it to 'images_ids' or 'imagesIds'.",
     );
+  });
+});
+
+describe("legacy migration collection", () => {
+  it("serializes renameFrom source-to-destination through getCollectedMigration", () => {
+    resetCollectedState();
+    migrate("users", {
+      emailAddress: col.renameFrom("email"),
+    });
+
+    expect(getCollectedMigration()).toEqual({
+      table: "users",
+      operations: [{ type: "rename", column: "email", value: "emailAddress" }],
+    });
+  });
+
+  it("serializes renameFrom source-to-destination through getCollectedMigrations", () => {
+    resetCollectedState();
+    migrate("users", {
+      emailAddress: col.renameFrom("email"),
+    });
+
+    expect(getCollectedMigrations()).toEqual([
+      {
+        table: "users",
+        operations: [{ type: "rename", column: "email", value: "emailAddress" }],
+      },
+    ]);
   });
 });
 
