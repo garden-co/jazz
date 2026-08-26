@@ -1415,6 +1415,16 @@ impl ClientDbInner {
                             normalize_subscription_updates(surviving_rows, added, updated, |row| {
                                 &row.occurrence_id
                             });
+                        let change_delta = (!reset_replaces_initial_view).then(|| {
+                            query_decoder.core_subscription_change_delta(
+                                &db,
+                                &query,
+                                &current_rows,
+                                &effective_added,
+                                &effective_updated,
+                                &removed,
+                            )
+                        });
                         PublicQueryDecoder::apply_core_subscription_rows(
                             &mut current_rows,
                             &effective_added,
@@ -1434,13 +1444,7 @@ impl ClientDbInner {
                                 &current_rows,
                             )
                         } else {
-                            query_decoder.core_subscription_change_delta(
-                                &db,
-                                &query,
-                                &effective_added,
-                                &effective_updated,
-                                &removed,
-                            )
+                            change_delta.expect("non-reset subscription frame has a change delta")
                         };
                         if !reset_replaces_initial_view {
                             initial_hydration = false;
@@ -2553,6 +2557,7 @@ impl PublicQueryDecoder {
         &self,
         db: &Backend,
         query: &Query,
+        previous_rows: &[CoreSubscriptionOutputRow],
         added_rows: &[CoreSubscriptionOutputRow],
         updated_rows: &[CoreSubscriptionOutputRow],
         removed_rows: &[crate::db::RemovedRow],
@@ -2572,11 +2577,15 @@ impl PublicQueryDecoder {
             .iter()
             .map(|row| {
                 let public = self.core_subscription_row_to_public(db, query, row)?;
+                let content_changed = previous_rows
+                    .iter()
+                    .find(|previous| previous.occurrence_id == row.occurrence_id)
+                    .is_none_or(|previous| !previous.row.subscription_equivalent(&row.row));
                 Ok(OrderedUpdated {
                     id: public.id.clone(),
                     old_index: row.previous_index.unwrap_or(row.index),
                     new_index: row.index,
-                    row: Some(public),
+                    row: content_changed.then_some(public),
                 })
             })
             .collect::<Result<Vec<_>>>()?;

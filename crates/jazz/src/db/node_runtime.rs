@@ -2400,17 +2400,63 @@ where
                         (None, false)
                     };
                 if let Some(update) = maintained_update {
-                    if terminal_rows {
-                        let LocalMaintainedViewSubscriptionUpdate::Structured {
+                    match update {
+                        LocalMaintainedViewSubscriptionUpdate::Structured {
                             terminal_operations,
-                        } = update
-                        else {
-                            return Err(Error::new(
-                                ErrorCode::Protocol,
-                                "structured subscription produced a flat maintained update",
-                            ));
-                        };
-                        if !terminal_operations.is_empty() {
+                        } => {
+                            if !terminal_operations.is_empty() {
+                                let settled = subscription_is_settled(
+                                    &node.borrow(),
+                                    active_authority_view_receipts,
+                                    &shape,
+                                    &binding,
+                                    settled_tier,
+                                    read_view,
+                                    remote_propagate_upstream,
+                                    requires_authority_receipt,
+                                );
+                                let terminal_layout = refresh
+                                    .maintained
+                                    .as_ref()
+                                    .and_then(LocalMaintainedViewSubscription::terminal_root_layout)
+                                    .ok_or_else(|| {
+                                        Error::new(
+                                            ErrorCode::Protocol,
+                                            "terminal operation arrived without a prepared root layout",
+                                        )
+                                    })?;
+                                let event = apply_terminal_operations_to_subscription_snapshot(
+                                    &mut refresh.snapshot,
+                                    &mut refresh.snapshot_index,
+                                    terminal_operations,
+                                    None,
+                                    terminal_layout,
+                                    shape.query().table.as_str(),
+                                    snapshot_tier,
+                                    settled,
+                                )?;
+                                refresh.settled = settled;
+                                retained.push(Rc::downgrade(&state));
+                                if refresh.sender.unbounded_send(event).is_ok() {
+                                    changed += 1;
+                                }
+                                continue;
+                            }
+                            let Some(maintained) = refresh.maintained.as_ref() else {
+                                return Err(Error::new(
+                                    ErrorCode::Protocol,
+                                    "structured subscription lost its Groove terminal",
+                                ));
+                            };
+                            let materialized = node
+                                .lock()
+                                .await
+                                .materialize_local_maintained_relation_snapshot_with_occurrences(
+                                    maintained,
+                                )
+                                .await?;
+                            let snapshot = materialized.snapshot;
+                            let current_root_occurrences = materialized.root_occurrence_ids;
                             let settled = subscription_is_settled(
                                 &node.borrow(),
                                 active_authority_view_receipts,
@@ -2421,168 +2467,112 @@ where
                                 remote_propagate_upstream,
                                 requires_authority_receipt,
                             );
-                            let terminal_layout = refresh
-                                .maintained
-                                .as_ref()
-                                .and_then(LocalMaintainedViewSubscription::terminal_root_layout)
-                                .ok_or_else(|| {
-                                    Error::new(
-                                        ErrorCode::Protocol,
-                                        "terminal operation arrived without a prepared root layout",
-                                    )
-                                })?;
-                            let event = apply_terminal_operations_to_subscription_snapshot(
-                                &mut refresh.snapshot,
-                                &mut refresh.snapshot_index,
-                                terminal_operations,
-                                None,
-                                terminal_layout,
-                                shape.query().table.as_str(),
+                            let state_ref = &mut refresh;
+                            let previous_root_occurrences = snapshot_root_occurrences(
+                                &state_ref.snapshot,
+                                &state_ref.snapshot_index,
+                            )?;
+                            let event = subscription_terminal_delta_event(
                                 snapshot_tier,
                                 settled,
+                                &state_ref.snapshot,
+                                &previous_root_occurrences,
+                                &snapshot,
+                                &current_root_occurrences,
                             )?;
-                            refresh.settled = settled;
+                            state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
+                            state_ref.snapshot_index =
+                                relation_snapshot_index_with_root_occurrences(
+                                    &state_ref.snapshot,
+                                    &current_root_occurrences,
+                                )?;
+                            state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
+                            state_ref.settled = settled;
                             retained.push(Rc::downgrade(&state));
-                            if refresh.sender.unbounded_send(event).is_ok() {
+                            if state_ref.sender.unbounded_send(event).is_ok() {
                                 changed += 1;
                             }
                             continue;
                         }
-                        let Some(maintained) = refresh.maintained.as_ref() else {
-                            return Err(Error::new(
-                                ErrorCode::Protocol,
-                                "structured subscription lost its Groove terminal",
-                            ));
-                        };
-                        let materialized = node
-                            .lock()
-                            .await
-                            .materialize_local_maintained_relation_snapshot_with_occurrences(
-                                maintained,
-                            )
-                            .await?;
-                        let snapshot = materialized.snapshot;
-                        let current_root_occurrences = materialized.root_occurrence_ids;
-                        let settled = subscription_is_settled(
-                            &node.borrow(),
-                            active_authority_view_receipts,
-                            &shape,
-                            &binding,
-                            settled_tier,
-                            read_view,
-                            remote_propagate_upstream,
-                            requires_authority_receipt,
-                        );
-                        let state_ref = &mut refresh;
-                        let previous_root_occurrences = snapshot_root_occurrences(
-                            &state_ref.snapshot,
-                            &state_ref.snapshot_index,
-                        )?;
-                        let event = subscription_terminal_delta_event(
-                            snapshot_tier,
-                            settled,
-                            &state_ref.snapshot,
-                            &previous_root_occurrences,
-                            &snapshot,
-                            &current_root_occurrences,
-                        )?;
-                        state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
-                        state_ref.snapshot_index = relation_snapshot_index_with_root_occurrences(
-                            &state_ref.snapshot,
-                            &current_root_occurrences,
-                        )?;
-                        state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
-                        state_ref.settled = settled;
-                        retained.push(Rc::downgrade(&state));
-                        if state_ref.sender.unbounded_send(event).is_ok() {
-                            changed += 1;
-                        }
-                        continue;
-                    } else {
-                        let LocalMaintainedViewSubscriptionUpdate::Flat {
+                        LocalMaintainedViewSubscriptionUpdate::Flat {
                             authoritative_membership_changed,
                             added,
                             removed,
                             terminal_operations,
-                        } = update
-                        else {
-                            return Err(Error::new(
-                                ErrorCode::Protocol,
-                                "flat subscription produced a structured maintained update",
-                            ));
-                        };
-                        let state_ref = &mut refresh;
-                        let previous_snapshot = state_ref.snapshot.clone();
-                        let previous_snapshot_index = state_ref.snapshot_index.clone();
-                        let mut event = apply_maintained_update_to_snapshot(
-                            &mut state_ref.snapshot,
-                            &mut state_ref.snapshot_index,
-                            LocalMaintainedViewSubscriptionUpdate::Flat {
-                                authoritative_membership_changed,
-                                added,
-                                removed,
-                                terminal_operations,
-                            },
-                            shape.query().table.as_str(),
-                            snapshot_tier,
-                            previous_settled,
-                            None,
-                        )?;
-                        if authoritative_membership_changed {
-                            order_maintained_snapshot_roots(
-                                &node.borrow(),
-                                &shape.query(),
+                        } => {
+                            let state_ref = &mut refresh;
+                            let previous_snapshot = state_ref.snapshot.clone();
+                            let previous_snapshot_index = state_ref.snapshot_index.clone();
+                            let mut event = apply_maintained_update_to_snapshot(
                                 &mut state_ref.snapshot,
                                 &mut state_ref.snapshot_index,
-                            )?;
-                            // Authority reconciliation carries row
-                            // additions/removals without positions.
-                            // Re-publish the first changed ordered
-                            // suffix so consumers apply TopBy order.
-                            event = subscription_terminal_delta_event(
+                                LocalMaintainedViewSubscriptionUpdate::Flat {
+                                    authoritative_membership_changed,
+                                    added,
+                                    removed,
+                                    terminal_operations,
+                                },
+                                shape.query().table.as_str(),
                                 snapshot_tier,
                                 previous_settled,
-                                &previous_snapshot,
-                                &snapshot_root_occurrences(
+                                None,
+                            )?;
+                            if authoritative_membership_changed {
+                                order_maintained_snapshot_roots(
+                                    &node.borrow(),
+                                    &shape.query(),
+                                    &mut state_ref.snapshot,
+                                    &mut state_ref.snapshot_index,
+                                )?;
+                                // Authority reconciliation carries row
+                                // additions/removals without positions.
+                                // Re-publish the first changed ordered
+                                // suffix so consumers apply TopBy order.
+                                event = subscription_terminal_delta_event(
+                                    snapshot_tier,
+                                    previous_settled,
                                     &previous_snapshot,
-                                    &previous_snapshot_index,
-                                )?,
-                                &state_ref.snapshot,
-                                &snapshot_root_occurrences(
+                                    &snapshot_root_occurrences(
+                                        &previous_snapshot,
+                                        &previous_snapshot_index,
+                                    )?,
                                     &state_ref.snapshot,
-                                    &state_ref.snapshot_index,
-                                )?,
-                            )?;
+                                    &snapshot_root_occurrences(
+                                        &state_ref.snapshot,
+                                        &state_ref.snapshot_index,
+                                    )?,
+                                )?;
+                            }
+                            state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
+                            let settled = subscription_is_settled(
+                                &node.borrow(),
+                                active_authority_view_receipts,
+                                &shape,
+                                &binding,
+                                settled_tier,
+                                read_view,
+                                remote_propagate_upstream,
+                                requires_authority_receipt,
+                            ) && node
+                                .borrow()
+                                .relation_snapshot_has_materialized_required_cells(
+                                    shape.query(),
+                                    &state_ref.snapshot,
+                                )?;
+                            state_ref.settled = settled;
+                            retained.push(Rc::downgrade(&state));
+                            if let SubscriptionEvent::Delta {
+                                settled: event_settled,
+                                ..
+                            } = &mut event
+                            {
+                                *event_settled = settled;
+                            }
+                            if state_ref.sender.unbounded_send(event).is_ok() {
+                                changed += 1;
+                            }
+                            continue;
                         }
-                        state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
-                        let settled = subscription_is_settled(
-                            &node.borrow(),
-                            active_authority_view_receipts,
-                            &shape,
-                            &binding,
-                            settled_tier,
-                            read_view,
-                            remote_propagate_upstream,
-                            requires_authority_receipt,
-                        ) && node
-                            .borrow()
-                            .relation_snapshot_has_materialized_required_cells(
-                                shape.query(),
-                                &state_ref.snapshot,
-                            )?;
-                        state_ref.settled = settled;
-                        retained.push(Rc::downgrade(&state));
-                        if let SubscriptionEvent::Delta {
-                            settled: event_settled,
-                            ..
-                        } = &mut event
-                        {
-                            *event_settled = settled;
-                        }
-                        if state_ref.sender.unbounded_send(event).is_ok() {
-                            changed += 1;
-                        }
-                        continue;
                     }
                 }
                 let preserve_local_overlay = suppressed_authoritative_change;
