@@ -2207,6 +2207,7 @@ export class NativeRuntimeAdapter implements Runtime {
       session?.identity,
       minimumPeerActivityEpoch,
       pendingPeerActivityEpoch,
+      confirmedPeerActivityEpoch != null,
     );
     if (this.nonDurableClient && this.db.queryAttachmentIsCovered(attachment)) {
       const confirmations = this.peerCoveredQueries.get(query) ?? new Map<string, number>();
@@ -2278,6 +2279,7 @@ export class NativeRuntimeAdapter implements Runtime {
     identity?: Uint8Array,
     minimumPeerActivityEpoch?: number,
     pendingPeerActivityEpoch?: number,
+    exactContextWasConfirmed = false,
   ): Promise<void> {
     const deadline = Date.now() + 15_000;
     const tier = (opts as { tier?: string }).tier ?? "";
@@ -2296,7 +2298,8 @@ export class NativeRuntimeAdapter implements Runtime {
         const peerHasResponded =
           minimumPeerActivityEpoch == null ||
           this.peerTransportActivityEpoch > minimumPeerActivityEpoch ||
-          (minimumPeerActivityEpoch > 0 &&
+          (exactContextWasConfirmed &&
+            minimumPeerActivityEpoch > 0 &&
             this.peerTransportProcessedActivityEpoch >= minimumPeerActivityEpoch) ||
           (pendingPeerActivityEpoch != null &&
             this.peerTransportProcessedActivityEpoch >= pendingPeerActivityEpoch);
