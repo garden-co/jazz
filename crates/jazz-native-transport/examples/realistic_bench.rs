@@ -893,6 +893,8 @@ async fn run_w4_cold_start(
     let hot_project = seed.projects[0];
 
     let mut latencies = Vec::with_capacity(cycles);
+    let mut open_latencies = Vec::with_capacity(cycles);
+    let mut first_query_latencies = Vec::with_capacity(cycles);
     progress(format!("W4 start cycles={}", cycles));
 
     for i in 0..cycles {
@@ -902,12 +904,17 @@ async fn run_w4_cold_start(
         copy_dir_recursive(&data_dir, &cycle_data_dir)?;
         let t0 = Instant::now();
         let client = connect_client(app_id, cycle_data_dir, None).await?;
+        let open_elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
         let query = jazz::query::Query::from("tasks")
             .filter(eq(col("project_id"), lit(*hot_project.uuid())))
             .order_by("updated_at", OrderDirection::Desc)
             .limit(200);
+        let query_started = Instant::now();
         let _ = client.query(query, None).await?;
+        let first_query_elapsed_ms = query_started.elapsed().as_secs_f64() * 1000.0;
         let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        open_latencies.push(open_elapsed_ms);
+        first_query_latencies.push(first_query_elapsed_ms);
         latencies.push(elapsed_ms);
         client.shutdown().await?;
         drop(cycle_temp);
@@ -916,6 +923,14 @@ async fn run_w4_cold_start(
     let wall_time_ms = latencies.iter().sum::<f64>();
     let mut operation_summaries = BTreeMap::new();
     operation_summaries.insert("cold_reopen".to_string(), summarize_op(&latencies));
+    operation_summaries.insert(
+        "cold_reopen_open".to_string(),
+        summarize_op(&open_latencies),
+    );
+    operation_summaries.insert(
+        "cold_reopen_first_query".to_string(),
+        summarize_op(&first_query_latencies),
+    );
 
     Ok(BenchResult {
         scenario_id: scenario.id.clone(),
