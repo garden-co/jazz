@@ -976,8 +976,12 @@ async function withTopologyCompensationTimeout<T>(
       new Promise<T>((_, reject) => {
         timer = setTimeout(() => {
           timedOut = true;
-          controller.abort(timeoutError);
+          // Reject before aborting. An abort-aware cleanup may resolve
+          // synchronously from its abort listener; if that resolution reaches
+          // Promise.race first, the diagnostic timeout is incorrectly
+          // recorded as a successful cleanup.
           reject(timeoutError);
+          controller.abort(timeoutError);
         }, timeoutMs);
       }),
     ]);

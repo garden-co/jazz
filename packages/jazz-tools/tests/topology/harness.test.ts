@@ -691,6 +691,7 @@ describe("shared example topology harness", () => {
 
   it("aborts timed-out cleanup before it can mutate", async () => {
     let postTimeoutEffect = false;
+    let cleanupAborted = false;
     await expect(
       runTopologyScenario({
         id: "harness.fixture.cleanup-timeout",
@@ -711,6 +712,7 @@ describe("shared example topology harness", () => {
             signal.addEventListener(
               "abort",
               () => {
+                cleanupAborted = true;
                 clearTimeout(timer);
                 resolve();
               },
@@ -722,10 +724,11 @@ describe("shared example topology harness", () => {
       (error: unknown) =>
         error instanceof TopologyScenarioError &&
         error.receipt.cleanup?.status === "failed" &&
-        error.receipt.cleanup.elapsedMs >= 5 &&
         (error.receipt.cleanup.error?.includes("cleanup timed out") ?? false),
     );
-    await new Promise((resolve) => setTimeout(resolve, 40));
+    // This planted cleanup resolves synchronously when it observes abort. The
+    // timeout must still win the race, and no delayed mutation may remain.
+    expect(cleanupAborted).toBe(true);
     expect(postTimeoutEffect).toBe(false);
   });
 
