@@ -44,10 +44,10 @@ describe("useAuthState", () => {
       ),
     });
     // @ts-expect-error — no status field
-    result.current.status;
+    void result.current.status;
     // @ts-expect-error — no transport field
-    result.current.transport;
+    void result.current.transport;
     // @ts-expect-error — canonical identity is exposed only as user
-    result.current.userId;
+    void result.current.userId;
   });
 });

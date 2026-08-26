@@ -11,6 +11,8 @@ import { userIdentity } from "../index.js";
 
 // @ts-expect-error Internal transport sessions are not a public package type.
 import type { Session } from "../index.js";
+declare const unavailableSession: Session;
+void unavailableSession;
 
 // @ts-expect-error sessionAuthor was replaced by userIdentity without a compatibility alias.
 import { sessionAuthor } from "../index.js";
@@ -32,16 +34,16 @@ const cookieSession = {
 declare const publicSession: PublicSession;
 publicSession.user satisfies string;
 // @ts-expect-error Raw transport issuer is not exposed by PublicSession.
-publicSession.issuer;
+void publicSession.issuer;
 // @ts-expect-error Raw transport subject is not exposed by PublicSession.
-publicSession.user_id;
+void publicSession.user_id;
 userIdentity("https://issuer.example", "user") satisfies string;
 
 declare const publicDb: import("../index.js").Db;
 // @ts-expect-error Framework transport session access is package-private.
 publicDb.getInternalSession();
 // @ts-expect-error Trusted reserved sessions are not public configuration.
-publicDb.getConfig().trustedReservedSession;
+void publicDb.getConfig().trustedReservedSession;
 
 const unauthenticated: PackageDbConfig = { appId: "app" };
 const localFirst: PackageDbConfig = { appId: "app", secret: "secret" };
