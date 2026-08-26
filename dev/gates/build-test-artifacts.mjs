@@ -468,10 +468,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   } else
     withArtifactBuildLock((scope, lease) =>
       buildTestArtifacts(command, scope, lease, snapshotCorrectnessArtifacts),
-    ).catch(
-      (error) => {
-        console.error(`test-artifacts: ${error.message}`);
-        process.exitCode = 1;
-      },
-    );
+    ).catch((error) => {
+      console.error(`test-artifacts: ${error.message}`);
+      process.exitCode = 1;
+    });
 }

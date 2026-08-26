@@ -96,7 +96,10 @@ export function verifyCorrectnessTestArtifacts(rootDir = root) {
       readFileSync(resolve(wasmPackage, "jazz_wasm.d.ts"), "utf8"),
       "WasmDb",
     );
-    const generatedGlue = classBody(readFileSync(resolve(wasmPackage, "jazz_wasm.js"), "utf8"), "WasmDb");
+    const generatedGlue = classBody(
+      readFileSync(resolve(wasmPackage, "jazz_wasm.js"), "utf8"),
+      "WasmDb",
+    );
     // These are the worker-boundary entry points whose arity is observable at
     // runtime and has previously drifted when bindgen glue was stale.
     for (const method of ["connectUpstream", "acceptSubscriber"]) {

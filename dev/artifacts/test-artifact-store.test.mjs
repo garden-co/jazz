@@ -75,15 +75,19 @@ test("two worktrees retain independently runnable fingerprint-addressed correctn
       'export const label = "replaced";',
     );
     assert.equal(
-      (await import(`${pathToFileURL(join(firstSnapshot.wasmPackage, "jazz_wasm.js")).href}?after=other-publish`)).label,
+      (
+        await import(
+          `${pathToFileURL(join(firstSnapshot.wasmPackage, "jazz_wasm.js")).href}?after=other-publish`
+        )
+      ).label,
       "first",
     );
     assert.equal(readCorrectnessArtifactSnapshot(first).fingerprint, firstSnapshot.fingerprint);
     assert.equal(readCorrectnessArtifactSnapshot(second).fingerprint, secondSnapshot.fingerprint);
     assert.equal(existsSync(correctnessArtifactPointer(first)), true);
     assert.equal(
-      require(join(first, "crates", "jazz-napi", "correctness-native-binding.pointer.cjs")).nativeBinding
-        .label,
+      require(join(first, "crates", "jazz-napi", "correctness-native-binding.pointer.cjs"))
+        .nativeBinding.label,
       "first",
     );
   } finally {

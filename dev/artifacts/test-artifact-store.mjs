@@ -5,7 +5,17 @@
  * subsequently replaced mutable package generation.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync, cpSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+  cpSync,
+} from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 
 const pointerName = ".jazz-correctness-test-artifacts.json";
@@ -50,8 +60,11 @@ function readManifest(path, label) {
 function activeNapiGeneration(root) {
   const packageDir = join(root, "crates", "jazz-napi");
   const pointer = readFileSync(join(packageDir, "native-binding.pointer.cjs"), "utf8");
-  const generation = /\.native-artifacts\/(generation-[A-Za-z0-9.-]+)\/index\.js/.exec(pointer)?.[1];
-  if (!generation) throw new Error("correctness artifacts: active NAPI generation pointer is invalid");
+  const generation = /\.native-artifacts\/(generation-[A-Za-z0-9.-]+)\/index\.js/.exec(
+    pointer,
+  )?.[1];
+  if (!generation)
+    throw new Error("correctness artifacts: active NAPI generation pointer is invalid");
   return join(packageDir, ".native-artifacts", generation);
 }
 
@@ -60,7 +73,9 @@ function copyTree(source, destination) {
     recursive: true,
     dereference: false,
     filter(path) {
-      return !basename(path).startsWith(".pkg-stage-") && !basename(path).startsWith(".pkg-backup-");
+      return (
+        !basename(path).startsWith(".pkg-stage-") && !basename(path).startsWith(".pkg-backup-")
+      );
     },
   });
 }
