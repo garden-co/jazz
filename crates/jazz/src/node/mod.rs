@@ -1183,16 +1183,33 @@ impl CurrentRow {
     pub(crate) fn provenance(&self) -> Result<Option<RowProvenance>, Error> {
         let descriptor = self.record.descriptor();
         let borrowed = self.record.borrowed();
-        let Some(created_by_idx) = descriptor.field_index("$createdBy") else {
-            return Ok(None);
+        let indices = match (
+            descriptor.field_index("$createdBy"),
+            descriptor.field_index("$createdAt"),
+            descriptor.field_index("$updatedBy"),
+            descriptor.field_index("$updatedAt"),
+        ) {
+            (Some(created_by), Some(created_at), Some(updated_by), Some(updated_at)) => {
+                Some((created_by, created_at, updated_by, updated_at))
+            }
+            _ if descriptor.field_index("schema_version").is_some()
+                && descriptor.field_index("branch_key").is_some() =>
+            {
+                match (
+                    descriptor.field_index("created_by"),
+                    descriptor.field_index("created_at"),
+                    descriptor.field_index("updated_by"),
+                    descriptor.field_index("updated_at"),
+                ) {
+                    (Some(created_by), Some(created_at), Some(updated_by), Some(updated_at)) => {
+                        Some((created_by, created_at, updated_by, updated_at))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
         };
-        let Some(created_at_idx) = descriptor.field_index("$createdAt") else {
-            return Ok(None);
-        };
-        let Some(updated_by_idx) = descriptor.field_index("$updatedBy") else {
-            return Ok(None);
-        };
-        let Some(updated_at_idx) = descriptor.field_index("$updatedAt") else {
+        let Some((created_by_idx, created_at_idx, updated_by_idx, updated_at_idx)) = indices else {
             return Ok(None);
         };
         Ok(Some(RowProvenance {
@@ -1288,6 +1305,103 @@ impl CurrentRow {
             return None;
         }
         Some((TxTime(time), NodeAlias(alias)))
+    }
+
+    /// Compare the row data visible to a subscription, independent of the
+    /// physical descriptor that happened to materialize it.
+    ///
+    /// A maintained view may carry an unchanged row first from its physical
+    /// current relation and then from a public policy/query projection. The
+    /// storage-only fields differ between those descriptors, but emitting an
+    /// update for that representation change would turn a policy no-op (such
+    /// as reordering an array used only as a reverse-inheritance grant) into a
+    /// spurious application-visible row update.
+    pub(crate) fn subscription_equivalent(&self, other: &Self) -> bool {
+        let provenance_matches = match (self.provenance(), other.provenance()) {
+            (Ok(left), Ok(right)) => left == right,
+            _ => false,
+        };
+        self.table == other.table
+            && self.row_uuid() == other.row_uuid()
+            && self.deleted == other.deleted
+            && self.subscription_cells_equivalent(other)
+            && provenance_matches
+    }
+
+    fn subscription_cells_equivalent(&self, other: &Self) -> bool {
+        // Decode each cell exactly once. Descriptor order differs between a
+        // physical current row and its public projection, so canonicalize the
+        // borrowed logical names instead of repeatedly rescanning either row.
+        match (
+            self.canonical_subscription_cells(),
+            other.canonical_subscription_cells(),
+        ) {
+            (Some(left), Some(right)) => left == right,
+            _ => false,
+        }
+    }
+
+    fn canonical_subscription_cells(&self) -> Option<Vec<(&str, Vec<u8>)>> {
+        let mut cells = self
+            .subscription_cells()
+            .map(|(name, value)| Some((name, postcard::to_allocvec(&value).ok()?)))
+            .collect::<Option<Vec<_>>>()?;
+        // Logical names may legally collide (for example a group column and
+        // an aggregate alias). The canonical Value bytes preserve multiset
+        // semantics without making equality depend on descriptor order.
+        cells.sort_unstable();
+        Some(cells)
+    }
+
+    fn subscription_cells(&self) -> impl Iterator<Item = (&str, Option<Value>)> + '_ {
+        let descriptor = self.record.descriptor();
+        let borrowed = self.record.borrowed();
+        let physical_current = descriptor.field_index("schema_version").is_some()
+            && descriptor.field_index("created_by").is_some()
+            && descriptor.field_index("updated_by").is_some();
+        descriptor
+            .fields()
+            .iter()
+            .enumerate()
+            .filter_map(move |(idx, field)| {
+                let name = field.name.as_ref()?.as_str();
+                let name = if name.starts_with("user_") {
+                    let name = self::query_engine::logical_user_column(name);
+                    self::query_engine::aggregate_output_logical_name(name).unwrap_or(name)
+                } else if let Some(name) = self::query_engine::aggregate_output_logical_name(name) {
+                    name
+                } else if matches!(
+                    name,
+                    "$createdBy"
+                        | "$createdAt"
+                        | "$updatedBy"
+                        | "$updatedAt"
+                        | "branch_key"
+                        | "row_uuid"
+                        | "tx_time"
+                        | "tx_node_id"
+                        | "schema_version"
+                        | "parents"
+                        | "authored_columns"
+                        | "global_time"
+                        | "settle_position"
+                ) || name.starts_with("__jazz_")
+                    || (physical_current
+                        && matches!(
+                            name,
+                            "created_by" | "created_at" | "updated_by" | "updated_at"
+                        ))
+                {
+                    return None;
+                } else {
+                    name
+                };
+                let value = match borrowed.get_idx(idx).ok()? {
+                    Value::Nullable(value) => value.map(|value| *value),
+                    value => Some(value),
+                };
+                Some((name, value))
+            })
     }
 
     #[cfg(test)]
@@ -1983,6 +2097,17 @@ pub enum Error {
     /// Error returned by Groove-owned chunk storage.
     #[error(transparent)]
     ChunkStorage(#[from] groove::chunks::ChunkStorageError),
+    /// An upstream upload referenced a locally owned immutable chunk that is
+    /// no longer readable. Retrieval locators are fingerprinted rather than
+    /// printed because they authorize exact reads.
+    #[error("large-value upstream upload cannot read local chunk ({context}): {source}")]
+    LargeValueUploadChunkUnavailable {
+        /// Redacted source role, transaction, and immutable-object identities.
+        context: String,
+        /// The local chunk-store failure.
+        #[source]
+        source: groove::chunks::ChunkStorageError,
+    },
     /// Groove rejected a malformed logical value or indirect descriptor.
     #[error(transparent)]
     LargeValue(#[from] groove::large_values::Error),

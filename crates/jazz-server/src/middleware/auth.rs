@@ -1010,10 +1010,10 @@ pub async fn extract_session(
     if let Some(token) = token {
         // Self-signed JWT path (local-first or anonymous).
         //
-        // Anonymous is always accepted at the transport layer — apps gate
-        // anonymous reads/writes via the permissions DSL
-        // (`session.where({ authMode: "anonymous" })`) and Task 6's write-deny
-        // middleware. Local-first still requires the explicit config opt-in.
+        // Anonymous is accepted at the transport layer so public reads can
+        // flow. The core fate authority structurally rejects its writes before
+        // table-policy evaluation; apps still gate anonymous reads through the
+        // permissions DSL. Local-first requires the explicit config opt-in.
         if let Some(issuer) = is_jazz_self_signed_identity_proof(token) {
             if issuer == identity::LOCAL_FIRST_ISSUER && !config.allow_local_first_auth {
                 return Err(UnauthenticatedResponse::disabled(

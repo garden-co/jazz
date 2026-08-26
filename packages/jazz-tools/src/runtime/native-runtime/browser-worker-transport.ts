@@ -6,6 +6,19 @@ import type { Transport } from "./native-runtime-adapter.js";
 export const MAX_AUXILIARY_FRAMES_PER_PORT_MESSAGE = 8;
 export const MAX_AUXILIARY_BYTES_PER_PORT_MESSAGE = 1024 * 1024;
 
+/** Redacted, bounded relay diagnostics from one WASM transport hop. */
+export type AuxiliaryRelayTrace = Readonly<{
+  event: string;
+  role: "upstream" | "subscriber";
+  connection: string;
+  requestId: string;
+  remainingHops: number;
+  objectHash: string;
+  locatorFingerprint: string;
+  response?: "found" | "unavailable" | "retryable";
+  storageError?: "unavailable" | "locator-conflict" | "integrity" | "backend";
+}>;
+
 export interface PeerTransportRuntime {
   onPeerTransportWork(listener: () => void): () => void;
   notifyPeerTransportActivity?(): void;
@@ -32,11 +45,13 @@ export class BrowserWorkerTransportPump {
     private readonly transport: Transport,
     private readonly sendFrames: (frames: Uint8Array[]) => void,
     private readonly onError: (error: unknown) => void,
+    private readonly onAuxiliaryTrace?: (entries: AuxiliaryRelayTrace[]) => void,
   ) {
     // The evaluator notifies every peer after a pass. This pump drains its
     // transport immediately after the pass it requested, so that notification
     // must not recursively request another identical pass.
     this.removeWorkListener = runtime.onPeerTransportWork(() => this.schedule(false));
+    this.transport.setAuxiliaryTraceEnabled?.(onAuxiliaryTrace !== undefined);
     this.transport.setOutboundScheduler?.(() => this.scheduleOutboundDrain());
     void this.watchAuxiliaryOutbound().catch((error) => {
       if (!this.closed) this.onError(error);
@@ -74,6 +89,7 @@ export class BrowserWorkerTransportPump {
     this.closed = true;
     this.removeWorkListener();
     this.transport.clearOutboundScheduler?.();
+    this.transport.setAuxiliaryTraceEnabled?.(false);
     void this.runtime.retirePeerTransport(this.transport).catch(this.onError);
     for (const waiter of this.flushWaiters) waiter.resolve();
     this.flushWaiters.clear();
@@ -101,6 +117,7 @@ export class BrowserWorkerTransportPump {
       ),
     );
     if (auxiliaryFrames.length > 0) this.sendFrames(auxiliaryFrames);
+    this.publishAuxiliaryTrace();
     return auxiliaryFrames.length > 0;
   }
 
@@ -159,7 +176,15 @@ export class BrowserWorkerTransportPump {
     // that our own pump ran after sending a request. Auxiliary frames count:
     // they can be the response that resumes a blocked query evaluation.
     this.runtime.notifyPeerTransportActivity?.();
+    this.publishAuxiliaryTrace();
     this.schedule();
+  }
+
+  private publishAuxiliaryTrace(): void {
+    if (!this.onAuxiliaryTrace) return;
+    const entries = this.transport.takeAuxiliaryTrace?.();
+    if (!entries || entries.length === 0) return;
+    this.onAuxiliaryTrace(entries as AuxiliaryRelayTrace[]);
   }
 
   private async watchAuxiliaryOutbound(): Promise<void> {

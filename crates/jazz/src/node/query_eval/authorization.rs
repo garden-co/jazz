@@ -6,6 +6,7 @@
 //! in the bindings module.
 
 use super::*;
+use crate::query::{col, eq, lit};
 
 /// Exact, action-specific policy support compiled for a hypothetical operation.
 ///
@@ -165,6 +166,95 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    pub(crate) async fn read_policy_query_allows_open_tx_row(
+        &mut self,
+        tx_id: OpenTransactionId,
+        policy: &crate::query::Query,
+        policy_schema_version: SchemaVersionId,
+        row_uuid: RowUuid,
+        identity: AuthorSubject,
+    ) -> Result<bool, Error> {
+        let policy_schema = if policy_schema_version == self.catalogue.current_schema_version_id {
+            &self.catalogue.schema
+        } else {
+            &self
+                .catalogue
+                .catalogue_schemas
+                .get(&policy_schema_version)
+                .ok_or(Error::InvalidStoredValue("policy schema payload missing"))?
+                .schema
+        }
+        .clone();
+        // Access-path pushdown is an optimization, not part of the decision
+        // boundary. Keep the target coordinate in the policy AST as well so
+        // inline transaction overlays cannot authorize one row from another
+        // visible row returned by the same source graph.
+        let policy = policy
+            .clone()
+            .filter(eq(col("id"), lit(Value::Uuid(row_uuid.0))));
+        let policy_shape =
+            policy.validate_with_schema_version(&policy_schema, policy_schema_version)?;
+        let policy_binding = policy_shape.bind(BTreeMap::new())?;
+        let policy_shape = bind_query_params_with_mode(
+            &policy_shape,
+            &policy_binding,
+            &policy_schema,
+            ParamBindingMode::InlineAllReachableSeeds,
+        )?;
+        let binding = policy_shape.bind(BTreeMap::new())?;
+        let input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
+        let input = RowSetProgramInput {
+            binding: self.program_binding_for_shape(
+                &policy_shape,
+                &binding,
+                query_binding_source_shape_for_parts_if_needed(
+                    policy_shape.params(),
+                    &binding_claim_params_for_shape(&input_shape, policy_shape.params()),
+                ),
+                BTreeMap::new(),
+                binding_claim_params_for_shape(&input_shape, policy_shape.params()),
+            ),
+            shape: input_shape,
+        };
+        let policy_context = match self.query_program_policy_context(identity) {
+            PolicyContext::Identity {
+                mode,
+                permission_subject,
+                claims,
+                attribution,
+            } => PolicyContext::AuthorizationSubplan {
+                protected_source: root_source_id(policy_shape.query().table.as_str()),
+                role: PolicyDecisionRole::Read,
+                mode,
+                permission_subject,
+                claims,
+                attribution,
+            },
+            other => other,
+        };
+        let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
+        let request = QueryProgramRequest {
+            authorization_mode: QueryAuthorizationMode::TrustedServing,
+            reads: tx_query_read_set(&input.shape, policy_shape.schema_version(), tx_id, snapshot),
+            policy: policy_context,
+            input,
+            output: current_query_output_request(
+                CurrentQueryProgramOutput::PolicyPredicate,
+                policy_shape.query(),
+                &policy_schema,
+            ),
+        };
+        let access_paths = BTreeMap::from([(
+            root_source_id(policy_shape.query().table.as_str()),
+            CurrentAccessPath::PrimaryKey(vec![Value::Uuid(row_uuid.0)]),
+        )]);
+        let program = self
+            .compile_query_program_request_with_access_paths(request, access_paths)
+            .await?;
+        self.write_policy_query_program_allows(&program, &policy_shape, &binding)
+            .await
+    }
+
     pub(super) async fn policy_authorization_row_id_graph(
         &mut self,
         request: QueryProgramRequest,
