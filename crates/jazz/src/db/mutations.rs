@@ -2395,6 +2395,31 @@ where
         if self.authorize_read_for_identity(table, row, identity)? != PermissionAdvice::Allowed {
             return Err(read_for_write_denied("UPDATE", table));
         }
+        let authored_columns = patch.keys().cloned().collect();
+        // A complete replacement still requires read permission, proved by
+        // the point dry-run above, but it does not consume any preimage cells.
+        // Avoid materializing a second policy query here: besides doing
+        // unnecessary work, that read can install transient coverage whose
+        // lifetime races a subsequent authorship-based visibility handoff.
+        if self
+            .table_schema(table)?
+            .columns
+            .iter()
+            .all(|column| patch.contains_key(&column.name))
+        {
+            let parent = match self.local_current_row(table, row).await? {
+                Some(existing) => {
+                    self.node
+                        .node
+                        .lock()
+                        .await
+                        .current_row_tx_id(&existing)
+                        .await
+                }
+                None => None,
+            };
+            return Ok((patch, parent, authored_columns));
+        }
         let existing = self
             .local_row_for_trusted_identity(table, row, identity)
             .await?
@@ -2408,7 +2433,6 @@ where
             let parent = node.current_row_tx_id(&existing).await;
             (cells, parent)
         };
-        let authored_columns = patch.keys().cloned().collect();
         cells.extend(patch);
         Ok((cells, parent, authored_columns))
     }

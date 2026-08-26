@@ -628,7 +628,8 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor_inner() {
     assert_eq!(bob_rows[0].1[2], canonical_user_principal(super::ALICE_ID));
     assert_eq!(bob_rows[0].1[3], canonical_user_principal(super::ALICE_ID));
 
-    bob.for_session(Session::new("urn:jazz:test", super::BOB_ID))
+    let bob_update = bob
+        .for_session(Session::new("urn:jazz:test", super::BOB_ID))
         .update(
             note_id,
             vec![
@@ -636,15 +637,21 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor_inner() {
                 ("shared".to_string(), false.into()),
             ],
         )
-        .expect("bob becomes latest updater");
+        .expect("bob becomes latest updater")
+        .expect("ordinary Bob update commits immediately");
+    wait_for_edge_txs(&bob, &[bob_update]).await;
 
-    let alice_rows = wait_for_rows(
-        &alice,
-        query.clone(),
-        "alice no longer sees bob-updated row",
-        |rows| rows.is_empty().then_some(rows),
+    let alice_rows = tokio::time::timeout(
+        READY_TIMEOUT,
+        wait_for_rows(
+            &alice,
+            query.clone(),
+            "alice no longer sees bob-updated row",
+            |rows| rows.is_empty().then_some(rows),
+        ),
     )
-    .await;
+    .await
+    .expect("Alice's removal query must not stall after Bob's update reaches edge");
     assert!(alice_rows.is_empty());
 
     let bob_rows = wait_for_rows(
