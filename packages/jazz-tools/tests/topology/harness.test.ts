@@ -235,6 +235,7 @@ describe("shared example topology harness", () => {
       "parent",
       async (_, context) => {
         staleIntercept = context.intercept;
+        await Promise.resolve();
         await context.intercept(
           { from: "a", to: "b", label: "child" },
           "child",
@@ -253,6 +254,31 @@ describe("shared example topology harness", () => {
     await expect(staleIntercept({ from: "a", to: "b" }, "stale", () => undefined)).rejects.toThrow(
       "topology delivery intercept is no longer active",
     );
+  });
+
+  it("invalidates a synchronous callback intercept before its queued microtasks run", async () => {
+    const scheduler = new TopologyEnvelopeScheduler(39);
+    let escaped!: Promise<void>;
+    await scheduler.intercept(
+      { from: "a", to: "b", label: "sync-parent" },
+      "sync-parent",
+      (_, context) => {
+        queueMicrotask(() => {
+          escaped = context.intercept(
+            { from: "a", to: "b", label: "escaped-child" },
+            "escaped-child",
+            () => undefined,
+          );
+        });
+      },
+    );
+    await expect(escaped).rejects.toThrow("topology delivery intercept is no longer active");
+    expect(
+      scheduler
+        .receipt()
+        .activities.filter(({ action }) => action === "delivered")
+        .map(({ label }) => label),
+    ).toEqual(["sync-parent"]);
   });
 
   it("snapshots bounded descriptors and rejects receipt-field or payload injection", async () => {

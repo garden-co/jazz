@@ -38,7 +38,9 @@ before returning so it cannot quietly mutate a later scenario.
 Callbacks that need to enqueue a follow-up use their scoped
 `deliveryContext.intercept(...)`; ordinary concurrent callers continue to use
 the scheduler directly and their promise does not settle before their ready
-delivery has run.
+delivery has run. A synchronous callback loses that capability immediately on
+return, before any microtask it queued can run; an async callback retains it
+until its returned promise settles.
 
 Envelope descriptors are deliberately narrow, immutable snapshots of
 `{ from, to, label? }`: endpoint names and labels are bounded, unknown metadata

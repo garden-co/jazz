@@ -654,29 +654,39 @@ export class TopologyEnvelopeScheduler {
 
   private async deliver(pending: PendingEnvelope<unknown>): Promise<void> {
     const controller = new AbortController();
-    const promise = Promise.resolve().then(async () => {
+    const promise = Promise.resolve().then(() => {
       let callbackActive = true;
+      const context: TopologyEnvelopeDeliveryContext = {
+        envelopeId: pending.envelopeId,
+        attempt: pending.attempt,
+        tick: this.#tick,
+        sequence: pending.sequence,
+        signal: controller.signal,
+        intercept: async <T>(
+          envelope: TopologyTransportEnvelope,
+          value: T,
+          deliver: TopologyEnvelopeDelivery<T>,
+        ) => {
+          if (!callbackActive) {
+            throw new Error("topology delivery intercept is no longer active");
+          }
+          await this.interceptInternal(envelope, value, deliver, true);
+        },
+      };
+      let result: Promise<void> | void;
       try {
-        await pending.deliver(pending.value, {
-          envelopeId: pending.envelopeId,
-          attempt: pending.attempt,
-          tick: this.#tick,
-          sequence: pending.sequence,
-          signal: controller.signal,
-          intercept: async <T>(
-            envelope: TopologyTransportEnvelope,
-            value: T,
-            deliver: TopologyEnvelopeDelivery<T>,
-          ) => {
-            if (!callbackActive) {
-              throw new Error("topology delivery intercept is no longer active");
-            }
-            await this.interceptInternal(envelope, value, deliver, true);
-          },
-        });
-      } finally {
+        result = pending.deliver(pending.value, context);
+      } catch (error) {
         callbackActive = false;
+        throw error;
       }
+      if (result === undefined) {
+        callbackActive = false;
+        return;
+      }
+      return Promise.resolve(result).finally(() => {
+        callbackActive = false;
+      });
     });
     this.#inFlight.set(pending.sequence, { pending, controller, promise });
     try {
