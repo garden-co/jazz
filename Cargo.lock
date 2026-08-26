@@ -2119,6 +2119,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-example-record-player-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+]
+
+[[package]]
 name = "jazz-napi"
 version = "0.1.0"
 dependencies = [
@@ -2140,21 +2148,6 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "jazz-native-relay"
-version = "0.1.0"
-dependencies = [
- "futures",
- "getrandom 0.3.4",
- "jazz",
- "jazz-storage-sqlite",
- "postcard",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
 ]
 
 [[package]]
@@ -2271,16 +2264,6 @@ dependencies = [
  "rust-rocksdb",
  "serde",
  "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "jazz-storage-sqlite"
-version = "0.1.0"
-dependencies = [
- "futures",
- "groove",
- "rusqlite",
  "tempfile",
 ]
 
