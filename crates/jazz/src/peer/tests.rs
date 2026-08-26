@@ -2719,6 +2719,8 @@ fn maintained_subscription_view_hit_metrics_and_footprint_update() {
     let metrics = peer.maintained_subscription_view_metrics();
     assert_eq!(metrics.hits_out, 1);
     assert_eq!(metrics.footprint.result_rows, 1);
+    assert_eq!(metrics.footprint.structured_app_rows, 0);
+    assert_eq!(metrics.footprint.structured_app_rows_bytes, 0);
     assert!(metrics.footprint.version_identities >= 1);
     assert!(metrics.footprint.version_tx_entries >= 1);
 }

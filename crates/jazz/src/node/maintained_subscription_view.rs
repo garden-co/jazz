@@ -553,6 +553,15 @@ impl MaintainedSubscriptionView {
             .collect()
     }
 
+    /// Release the app-row collector after a flat subscription's reset has
+    /// been materialized. Only structured array output reads this state after
+    /// opening; flat subscriptions publish subsequent rows from membership
+    /// and version witnesses.
+    pub(crate) fn discard_structured_app_rows(&mut self) {
+        self.structured_app_rows.clear();
+        self.structured_app_row_descriptor = None;
+    }
+
     fn apply_structured_app_row_delta(&mut self, root: RowUuid, record: OwnedRecord, weight: i64) {
         self.structured_app_row_descriptor = Some(*record.descriptor());
         let records = self.structured_app_rows.entry(root).or_default();
