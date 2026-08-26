@@ -2097,6 +2097,17 @@ pub enum Error {
     /// Error returned by Groove-owned chunk storage.
     #[error(transparent)]
     ChunkStorage(#[from] groove::chunks::ChunkStorageError),
+    /// An upstream upload referenced a locally owned immutable chunk that is
+    /// no longer readable. Retrieval locators are fingerprinted rather than
+    /// printed because they authorize exact reads.
+    #[error("large-value upstream upload cannot read local chunk ({context}): {source}")]
+    LargeValueUploadChunkUnavailable {
+        /// Redacted source role, transaction, and immutable-object identities.
+        context: String,
+        /// The local chunk-store failure.
+        #[source]
+        source: groove::chunks::ChunkStorageError,
+    },
     /// Groove rejected a malformed logical value or indirect descriptor.
     #[error(transparent)]
     LargeValue(#[from] groove::large_values::Error),

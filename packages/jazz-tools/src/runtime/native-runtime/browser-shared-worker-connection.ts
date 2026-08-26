@@ -131,6 +131,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
             onStorageReset: this.callbacks.onStorageReset,
             onStorageInvalidated: this.callbacks.onStorageInvalidated,
           },
+          options.logLevel === "trace",
         );
         void this.connection.ready().then(() => resolve(true), reject);
       };

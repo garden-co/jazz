@@ -92,6 +92,58 @@ pub(crate) type SharedNodeState<S> = Rc<LocalMutex<NodeState<S>>>;
 
 const DEFAULT_CHUNK_FORWARD_HOPS: u8 = 8;
 const MAX_PENDING_CHUNK_DEMANDS: usize = 4096;
+// Auxiliary chunk routing crosses several independent transports in browser
+// persistent-worker mode. Retain only a small, redacted flight recorder so a
+// binding can explain a miss without ever exposing a capability locator.
+const MAX_CHUNK_RELAY_TRACE_EVENTS_PER_CONNECTION: usize = 64;
+
+/// A bounded, redacted auxiliary-routing event for binding diagnostics.
+///
+/// Request ids and connection ids are hop-local. `object_hash` and
+/// `locator_fingerprint` are short BLAKE3-derived fingerprints rather than
+/// the actual immutable-content hash or retrieval capability.
+#[derive(Clone, Debug)]
+pub struct PeerIoTraceEntry {
+    /// Routing transition observed at this transport hop.
+    pub event: &'static str,
+    /// Whether this link points upstream or to a downstream subscriber.
+    pub role: &'static str,
+    /// Opaque, process-local connection epoch.
+    pub connection: u64,
+    /// Hop-local request identifier.
+    pub request_id: u64,
+    /// Forwarding budget associated with the request at this hop.
+    pub remaining_hops: u8,
+    /// Short fingerprint of the immutable object hash.
+    pub object_hash: String,
+    /// Short fingerprint of the opaque retrieval capability.
+    pub locator_fingerprint: String,
+    /// Result kind, for response transitions only.
+    pub response: Option<&'static str>,
+    /// Redacted local-storage failure class, when a relay cannot serve a chunk.
+    pub storage_error: Option<&'static str>,
+}
+
+fn short_fingerprint(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex()[..12].to_owned()
+}
+
+fn response_kind(response: &ChunkResponse) -> &'static str {
+    match response {
+        ChunkResponse::Found(_) => "found",
+        ChunkResponse::Unavailable => "unavailable",
+        ChunkResponse::Retryable { .. } => "retryable",
+    }
+}
+
+fn storage_error_kind(error: &groove::chunks::ChunkStorageError) -> &'static str {
+    match error {
+        groove::chunks::ChunkStorageError::Unavailable => "unavailable",
+        groove::chunks::ChunkStorageError::LocatorConflict => "locator-conflict",
+        groove::chunks::ChunkStorageError::Integrity => "integrity",
+        groove::chunks::ChunkStorageError::Backend(_) => "backend",
+    }
+}
 
 enum ChunkDemandWaiter {
     Local {
@@ -123,6 +175,8 @@ struct ChunkDemandState {
     upstream_connection: Option<u64>,
     upstream_connections: BTreeSet<u64>,
     completion_generation: u64,
+    trace_by_connection: BTreeMap<u64, VecDeque<PeerIoTraceEntry>>,
+    traced_connections: BTreeSet<u64>,
 }
 
 #[derive(Clone, Default)]
@@ -131,6 +185,56 @@ struct PeerChunkResolver {
 }
 
 impl PeerChunkResolver {
+    fn record_request(
+        &self,
+        connection: u64,
+        role: PeerIoPumpRole,
+        event: &'static str,
+        request: &ChunkRequestEntry,
+        response: Option<&ChunkResponse>,
+        storage_error: Option<&groove::chunks::ChunkStorageError>,
+    ) {
+        let mut state = self.state.borrow_mut();
+        if !state.traced_connections.contains(&connection) {
+            return;
+        }
+        let trace = state.trace_by_connection.entry(connection).or_default();
+        if trace.len() >= MAX_CHUNK_RELAY_TRACE_EVENTS_PER_CONNECTION {
+            trace.pop_front();
+        }
+        trace.push_back(PeerIoTraceEntry {
+            event,
+            role: role.as_str(),
+            connection,
+            request_id: request.request_id,
+            remaining_hops: request.remaining_hops,
+            object_hash: short_fingerprint(&request.expected_hash),
+            locator_fingerprint: short_fingerprint(request.locator.as_bytes()),
+            response: response.map(response_kind),
+            storage_error: storage_error.map(storage_error_kind),
+        });
+    }
+
+    fn take_trace(&self, connection: u64) -> Vec<PeerIoTraceEntry> {
+        self.state
+            .borrow_mut()
+            .trace_by_connection
+            .remove(&connection)
+            .map(VecDeque::into_iter)
+            .map(Iterator::collect)
+            .unwrap_or_default()
+    }
+
+    fn set_trace_enabled(&self, connection: u64, enabled: bool) {
+        let mut state = self.state.borrow_mut();
+        if enabled {
+            state.traced_connections.insert(connection);
+        } else {
+            state.traced_connections.remove(&connection);
+            state.trace_by_connection.remove(&connection);
+        }
+    }
+
     fn has_pending_local_demand(&self) -> bool {
         self.state
             .borrow()
@@ -367,6 +471,8 @@ impl PeerChunkResolver {
     fn disconnect(&self, connection: u64, upstream: bool) {
         let mut state = self.state.borrow_mut();
         state.disconnected_connections.insert(connection);
+        state.trace_by_connection.remove(&connection);
+        state.traced_connections.remove(&connection);
         let disconnected_waker = state.outbound_wakers.remove(&connection);
         state.relay_responses.remove(&connection);
         if upstream {
@@ -444,6 +550,15 @@ enum PeerIoPumpRole {
     Subscriber,
 }
 
+impl PeerIoPumpRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Upstream => "upstream",
+            Self::Subscriber => "subscriber",
+        }
+    }
+}
+
 /// Executor-neutral auxiliary peer-I/O endpoint.
 ///
 /// Bindings retain this clone beside their socket. It never acquires Jazz's
@@ -486,6 +601,32 @@ impl PeerIoPump {
                     return Ok(());
                 }
                 for response in batch.responses {
+                    if let Some((request, remaining_hops)) = {
+                        let state = self.resolver.state.borrow();
+                        state
+                            .chunk_by_upstream_id
+                            .get(&response.request_id)
+                            .and_then(|request| {
+                                state
+                                    .pending_by_chunk
+                                    .get(request)
+                                    .map(|pending| (request.clone(), pending.remaining_hops))
+                            })
+                    } {
+                        self.resolver.record_request(
+                            self.connection,
+                            self.role,
+                            "inbound-response",
+                            &ChunkRequestEntry {
+                                request_id: response.request_id,
+                                locator: request.locator,
+                                expected_hash: request.object_hash,
+                                remaining_hops,
+                            },
+                            Some(&response.result),
+                            None,
+                        );
+                    }
                     self.resolver.complete(response);
                 }
                 Ok(())
@@ -493,6 +634,14 @@ impl PeerIoPump {
             (PeerIoPumpRole::Subscriber, SyncMessage::ChunkRequestBatch(batch)) => {
                 let mut responses = Vec::new();
                 for request in batch.requests {
+                    self.resolver.record_request(
+                        self.connection,
+                        self.role,
+                        "inbound-request",
+                        &request,
+                        None,
+                        None,
+                    );
                     match self
                         .local_chunks
                         .get(
@@ -501,17 +650,45 @@ impl PeerIoPump {
                         )
                         .await
                     {
-                        Ok(bytes) => responses.push(ChunkResponseEntry {
-                            request_id: request.request_id,
-                            result: ChunkResponse::Found(bytes.to_vec()),
-                        }),
+                        Ok(bytes) => {
+                            self.resolver.record_request(
+                                self.connection,
+                                self.role,
+                                "local-response",
+                                &request,
+                                Some(&ChunkResponse::Found(Vec::new())),
+                                None,
+                            );
+                            responses.push(ChunkResponseEntry {
+                                request_id: request.request_id,
+                                result: ChunkResponse::Found(bytes.to_vec()),
+                            });
+                        }
                         Err(groove::chunks::ChunkStorageError::Unavailable) => {
+                            self.resolver.record_request(
+                                self.connection,
+                                self.role,
+                                "relay-request",
+                                &request,
+                                None,
+                                None,
+                            );
                             self.resolver.enqueue_relay(self.connection, request)
                         }
-                        Err(_) => responses.push(ChunkResponseEntry {
-                            request_id: request.request_id,
-                            result: ChunkResponse::Unavailable,
-                        }),
+                        Err(error) => {
+                            self.resolver.record_request(
+                                self.connection,
+                                self.role,
+                                "local-response",
+                                &request,
+                                Some(&ChunkResponse::Unavailable),
+                                Some(&error),
+                            );
+                            responses.push(ChunkResponseEntry {
+                                request_id: request.request_id,
+                                result: ChunkResponse::Unavailable,
+                            });
+                        }
                     }
                 }
                 if !responses.is_empty() {
@@ -658,6 +835,16 @@ impl PeerIoPump {
         match self.role {
             PeerIoPumpRole::Upstream => {
                 let requests = self.resolver.take_outbound(limit);
+                for request in &requests {
+                    self.resolver.record_request(
+                        self.connection,
+                        self.role,
+                        "outbound-request",
+                        request,
+                        None,
+                        None,
+                    );
+                }
                 (!requests.is_empty()).then_some(SyncMessage::ChunkRequestBatch(
                     ChunkRequestBatch { requests },
                 ))
@@ -736,6 +923,16 @@ impl PeerIoPump {
             .borrow()
             .disconnected_connections
             .contains(&self.connection)
+    }
+
+    /// Drain this link's bounded redacted auxiliary-routing trace.
+    pub fn take_trace(&self) -> Vec<PeerIoTraceEntry> {
+        self.resolver.take_trace(self.connection)
+    }
+
+    /// Enable or disable this link's bounded diagnostic flight recorder.
+    pub fn set_trace_enabled(&self, enabled: bool) {
+        self.resolver.set_trace_enabled(self.connection, enabled);
     }
 }
 

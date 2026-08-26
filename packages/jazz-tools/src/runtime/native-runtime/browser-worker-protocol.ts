@@ -60,6 +60,23 @@ export interface BrowserInspectorContext {
   schema: WasmSchema;
 }
 
+/**
+ * Redacted flight-recorder entry for a browser chunk relay. Hashes and
+ * locators are short fingerprints; no retrieval capability is exposed.
+ */
+export type BrowserRelayTrace = {
+  hop: "tab-worker" | "worker-tab" | "worker-server";
+  event: string;
+  role: "upstream" | "subscriber";
+  connection: string;
+  requestId: string;
+  remainingHops: number;
+  objectHash: string;
+  locatorFingerprint: string;
+  response?: "found" | "unavailable" | "retryable";
+  storageError?: "unavailable" | "locator-conflict" | "integrity" | "backend";
+};
+
 export type BrowserInspectorControlRequest =
   | { type: "list-contexts"; id: number }
   | {
@@ -83,4 +100,5 @@ export type BrowserFollowerPortEvent =
   | { type: "mutation-error"; event: MutationErrorEvent }
   | { type: "storage-reset"; resetId: number }
   | { type: "storage-invalidated" }
+  | { type: "relay-trace"; entries: BrowserRelayTrace[] }
   | { type: "error"; message: string };

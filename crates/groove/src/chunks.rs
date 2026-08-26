@@ -168,12 +168,32 @@ pub trait ChunkStorage {
 /// It exposes exact reads but never the backend object or staging/deletion.
 #[derive(Clone)]
 pub struct LocalChunkReader {
-    storage: Rc<dyn ChunkStorage>,
+    // Peer I/O pumps outlive a single in-memory `Database` facade: a
+    // catalogue update can rebuild that facade over the same durable store
+    // while existing browser/socket links remain attached. Keep the lookup
+    // service stable and retarget its backend at that boundary instead of
+    // leaving those links with OrderedChunkStorage's deliberately weak old
+    // storage handle.
+    storage: Rc<RefCell<Rc<dyn ChunkStorage>>>,
 }
 
 impl LocalChunkReader {
     pub(crate) fn new(storage: Rc<dyn ChunkStorage>) -> Self {
-        Self { storage }
+        Self {
+            storage: Rc::new(RefCell::new(storage)),
+        }
+    }
+
+    /// Retarget all clones of this local-only reader to the storage selected
+    /// by a rebuilt database facade.
+    ///
+    /// This does not expose staging or deletion. It is intentionally separate
+    /// from [`ChunkStorage`] so a peer transport can keep serving exact reads
+    /// across a host-side runtime rebuild without extending the old storage
+    /// lifetime.
+    pub fn refresh_from(&self, replacement: &Self) {
+        let storage = replacement.storage.borrow().clone();
+        self.storage.replace(storage);
     }
 
     pub async fn get(
@@ -181,7 +201,11 @@ impl LocalChunkReader {
         locator: Locator,
         expected_hash: ContentHash,
     ) -> Result<Bytes, ChunkStorageError> {
-        self.storage.get(locator, expected_hash).await
+        // Do not retain the RefCell borrow across the asynchronous backend
+        // operation: a catalogue rebuild may retarget this reader while an
+        // unrelated peer request is in flight.
+        let storage = self.storage.borrow().clone();
+        storage.get(locator, expected_hash).await
     }
 }
 
@@ -1914,6 +1938,52 @@ mod tests {
         }]));
         assert_eq!(result, Err(ChunkStorageError::Integrity));
         assert!(storage.is_empty());
+    }
+
+    #[test]
+    fn local_chunk_reader_refreshes_existing_clones() {
+        let locator = Locator::from_seed(b"retargeted-reader");
+        let first_bytes = Bytes::from_static(b"first backing store");
+        let first_hash = object_hash(&first_bytes);
+        let first = Rc::new(MemoryChunkStorage::new());
+        block_on(first.stage(vec![StagedChunk {
+            node_ref: crate::large_values::NodeRef {
+                object_hash: first_hash,
+                locator,
+            },
+            encoded: first_bytes.to_vec(),
+        }]))
+        .unwrap();
+
+        let reader = LocalChunkReader::new(first);
+        let retained_by_peer = reader.clone();
+        assert_eq!(
+            block_on(retained_by_peer.get(locator, first_hash)).unwrap(),
+            first_bytes
+        );
+
+        let second_bytes = Bytes::from_static(b"replacement backing store");
+        let second_hash = object_hash(&second_bytes);
+        let second = Rc::new(MemoryChunkStorage::new());
+        block_on(second.stage(vec![StagedChunk {
+            node_ref: crate::large_values::NodeRef {
+                object_hash: second_hash,
+                locator,
+            },
+            encoded: second_bytes.to_vec(),
+        }]))
+        .unwrap();
+        let replacement = LocalChunkReader::new(second);
+
+        reader.refresh_from(&replacement);
+        assert_eq!(
+            block_on(retained_by_peer.get(locator, second_hash)).unwrap(),
+            second_bytes
+        );
+        assert_eq!(
+            block_on(retained_by_peer.get(locator, first_hash)),
+            Err(ChunkStorageError::Unavailable)
+        );
     }
 
     #[test]

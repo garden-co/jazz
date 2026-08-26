@@ -779,7 +779,8 @@ where
         self.database
             .set_missing_chunk_resolver(self.chunk_resolver.clone());
         let runtime_provider = self.database.owned_chunk_provider();
-        self.local_chunk_reader = self.database.local_chunk_reader();
+        self.local_chunk_reader
+            .refresh_from(&self.database.local_chunk_reader());
         self.content_runtime_provider = runtime_provider;
     }
 
@@ -1352,11 +1353,12 @@ where
         .await?;
         database.set_missing_chunk_resolver(self.chunk_resolver.clone());
         self.content_runtime_provider = database.owned_chunk_provider();
-        // Peer upload retries read through this handle outside the Groove
-        // runtime.  The old reader's ordered chunk backend deliberately holds
-        // only a weak storage reference, so retaining it across a database
-        // rebuild makes a later fragmented upload observe a closed store.
-        self.local_chunk_reader = database.local_chunk_reader();
+        // Existing peer I/O pumps retain clones of this local-only lookup
+        // service. Retarget all of them before dropping the rebuilt facade's
+        // temporary reader, rather than leaving a live browser/socket link on
+        // OrderedChunkStorage's deliberately weak old storage handle.
+        self.local_chunk_reader
+            .refresh_from(&database.local_chunk_reader());
         self.database.replace(database);
         self.register_physical_history_variant_projections().await?;
         self.register_physical_current_variant_projections().await?;
