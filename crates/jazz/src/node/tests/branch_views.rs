@@ -180,7 +180,13 @@ fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
 }
 
 #[test]
-fn frozen_base_row_reappears_after_head_deletion_is_restored() {
+/// Frozen-base lowering keeps the base content and deletion registers separate.
+/// This internal test is needed because it verifies the maintained graph's
+/// frozen input and its live head fate transition in one evaluation boundary.
+///
+/// alice writes and deletes base content at the snapshot, then the head's
+/// `Restored` winner reveals that frozen content without a head content write.
+fn frozen_base_deleted_row_reappears_after_head_deletion_is_restored() {
     let schema = branch_view_schema();
     let node_id = NodeUuid::from_bytes([0x4a; 16]);
     let (_dir, mut node) = open_history_complete_node_with_schema(node_id, schema.clone());
@@ -198,6 +204,14 @@ fn frozen_base_row_reappears_after_head_deletion_is_restored() {
                 ])),
         )
         .unwrap();
+    let base_delete = node
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 15)
+                .branch(base.clone())
+                .parents(vec![base_tx])
+                .deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
     node.commit_mergeable_settled(
         MergeableCommit::new("todos", row_uuid, 20)
             .branch(head.clone())
@@ -212,7 +226,7 @@ fn frozen_base_row_reappears_after_head_deletion_is_restored() {
             crate::protocol::SnapshotRef {
                 owner: node_id,
                 global_base: GlobalTime(0),
-                local_base: base_tx.time,
+                local_base: base_delete.time,
                 dots: Vec::new(),
             },
         )),

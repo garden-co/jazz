@@ -311,7 +311,7 @@ where
         output_branch: &BranchKey,
         base_branch: &BranchKey,
         snapshot: &SnapshotRef,
-    ) -> Result<Vec<CurrentRow>, Error> {
+    ) -> Result<(Vec<CurrentRow>, Vec<CurrentRow>), Error> {
         let (base_content, base_deletions) = self
             .branch_winners_for_schema(
                 table,
@@ -321,15 +321,30 @@ where
                 Some(snapshot),
             )
             .await?;
-        self.materialize_branch_view_winners(
+        // Keep the frozen content and deletion layers distinct. A live head
+        // `Restored` winner can reveal base content even when the frozen base
+        // itself had a `Deleted` winner.
+        let deleted_row_ids = base_deletions
+            .iter()
+            .filter_map(|(row_uuid, version)| {
+                (version.deletion() == Some(DeletionEvent::Deleted)).then_some(*row_uuid)
+            })
+            .collect::<BTreeSet<_>>();
+        let base_rows = self.materialize_branch_view_winners(
             table,
             read_schema_version,
             output_branch,
             BTreeMap::new(),
             BTreeMap::new(),
             base_content,
-            base_deletions,
-        )
+            BTreeMap::new(),
+        )?;
+        let deleted_base_rows = base_rows
+            .iter()
+            .filter(|row| deleted_row_ids.contains(&row.row_uuid()))
+            .cloned()
+            .collect();
+        Ok((base_rows, deleted_base_rows))
     }
 
     fn materialize_branch_view_winners(
