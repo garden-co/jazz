@@ -1047,6 +1047,49 @@ fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
 }
 
 #[test]
+fn partial_value_update_publishes_text_splice_and_ordinary_patch_atomically() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let mut title = "a".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 32);
+    title.push_str("tail");
+    let write = db
+        .insert(
+            "todos",
+            doctest_support::todo_cells(&title, false),
+            Default::default(),
+        )
+        .unwrap();
+    let row = write.row_uuid();
+    block_on(write.wait(DurabilityTier::Local)).unwrap();
+
+    let start = title.len() as u64 - 4;
+    let write = block_on(db.update_with_large_value_mutations(
+        "todos",
+        row,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        vec![LargeValueUpdate::Splice {
+            column: "title".to_owned(),
+            within: LargeValueUpdatePage::TextUtf8 {
+                from: start,
+                to: start + 4,
+            },
+            splices: vec![LargeValueUpdateSplice {
+                at: 0,
+                delete: 4,
+                insert: b"done".to_vec(),
+            }],
+        }],
+    ))
+    .unwrap();
+    block_on(write.wait(DurabilityTier::Local)).unwrap();
+
+    title.replace_range(title.len() - 4.., "done");
+    let rows = prepared_read(&db, &db.table("todos"));
+    let table = &doctest_support::schema().tables[0];
+    assert_eq!(rows[0].cell(table, "title"), Some(Value::String(title)));
+    assert_eq!(rows[0].cell(table, "done"), Some(Value::Bool(true)));
+}
+
+#[test]
 fn high_level_large_value_reads_authorize_before_descriptor_lookup() {
     let allowed = "readable-large-value/".repeat(5_000);
     let schema = build_public_db_test_schema(

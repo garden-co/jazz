@@ -438,7 +438,7 @@ defaults to UTF-16; UTF-8 splice fields opt in explicitly. Bounds, integer
 overflow, UTF-8 boundaries, and UTF-16 surrogate splits fail rather than round.
 JSON edits use RFC 6901 pointer escaping, fail for a missing path or incompatible
 schema/kind/nullability, and lower to Groove's ordinary binary edit-tail model;
-they do not create a JSON-specific storage model. All fields in one `update`
+they do not create a JSON-specific storage model. All fields in one `applyDiffs`
 commit atomically. There is deliberately no page staleness/CAS promise in this
 API revision.
 
