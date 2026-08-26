@@ -1604,6 +1604,57 @@ fn mergeable_session_mutations_observe_visible_rows_in_their_overlay() {
         committed.cell(table, "title"),
         Some(Value::String("ready".to_owned()))
     );
+
+    // A different visible row must not satisfy the targeted policy proof for
+    // a staged row that Alice cannot read.
+    let hidden = row(0xc9);
+    let hidden_open = OpenTransactionId::new();
+    db.begin_mergeable_for_identity(hidden_open, alice).unwrap();
+    let hidden_tx = db.mergeable_tx_ref(hidden_open);
+    hidden_tx
+        .insert(
+            "todos",
+            cells("hidden", false, AuthorSubject::for_test_bytes([0xb7; 16])),
+            InsertOptions {
+                row_id: Some(hidden),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    for (label, error) in [
+        (
+            "update",
+            hidden_tx
+                .update(
+                    "todos",
+                    hidden,
+                    BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+                    Default::default(),
+                )
+                .expect_err("hidden overlay UPDATE must require visibility"),
+        ),
+        (
+            "upsert",
+            hidden_tx
+                .upsert(
+                    "todos",
+                    hidden,
+                    BTreeMap::from([("title".to_owned(), Value::String("nope".to_owned()))]),
+                    Default::default(),
+                )
+                .expect_err("hidden overlay UPSERT must require visibility"),
+        ),
+    ] {
+        assert_eq!(error.code, ErrorCode::WriteRejected, "{label}");
+        assert_eq!(
+            error.message,
+            format!(
+                "read policy denied {} on table todos: the operation requires read permission on the target row",
+                label.to_ascii_uppercase()
+            )
+        );
+    }
+    db.commit_mergeable_handle(hidden_open).unwrap();
 }
 
 /// Mergeable serving reads retain their existing per-call identity semantics.

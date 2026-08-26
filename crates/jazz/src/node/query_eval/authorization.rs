@@ -6,6 +6,7 @@
 //! in the bindings module.
 
 use super::*;
+use crate::query::{col, eq, lit};
 
 /// Exact, action-specific policy support compiled for a hypothetical operation.
 ///
@@ -184,9 +185,15 @@ where
                 .schema
         }
         .clone();
-        let policy_shape = policy
+        // Access-path pushdown is an optimization, not part of the decision
+        // boundary. Keep the target coordinate in the policy AST as well so
+        // inline transaction overlays cannot authorize one row from another
+        // visible row returned by the same source graph.
+        let policy = policy
             .clone()
-            .validate_with_schema_version(&policy_schema, policy_schema_version)?;
+            .filter(eq(col("id"), lit(Value::Uuid(row_uuid.0))));
+        let policy_shape =
+            policy.validate_with_schema_version(&policy_schema, policy_schema_version)?;
         let policy_binding = policy_shape.bind(BTreeMap::new())?;
         let policy_shape = bind_query_params_with_mode(
             &policy_shape,
