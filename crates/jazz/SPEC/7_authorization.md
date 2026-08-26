@@ -47,8 +47,9 @@ Invariant digest:
   authority across tables.
 - `INV-RLS-23`: Jazz derives the reserved logical `session.user` and user
   authorship from the exact trusted JWT subject pair `(iss, sub)`, represented
-  portably as canonical JSON `[iss,sub]`. Admitted provider claims including
-  `session.iss`, `session.sub`, and `session.user_id` retain their raw values.
+  portably as canonical JSON `[iss,sub]`. Raw provider claims remain exclusively
+  under `session.claims[<name>]`, including `session.claims["iss"]`,
+  `session.claims["sub"]`, and a provider claim named `user`.
   Jazz MUST NOT normalize either component, hash the pair into a UUID, or admit
   the reserved system issuer. Local intern handles MUST never become wire,
   storage, query, equality, or ordering values.
@@ -97,7 +98,8 @@ normalization. The same `sub` from two issuers therefore denotes two authors.
 
 That canonical string is the logical `session.user` value in transactions,
 provenance, policy claims, storage, and sync. It does not replace the admitted
-provider `sub` or `user_id` claims. Implementations may intern it in memory, but the
+provider claims. A provider's `user` claim is `session.claims["user"]` and can
+never shadow or spoof `session.user`. Implementations may intern it in memory, but the
 intern handle is process-local and has no observable meaning. Provenance
 supports equality, inequality, grouping, and equality-index lookup. It is not
 orderable: applications sort authors by joining the subject through their own
@@ -122,7 +124,7 @@ compiler currently lowers equality and inequality, membership/containment,
 boolean composition, columns, literals, and authenticated,
 admission-controlled claims: `Eq`/`Ne`/`In`/`Contains`/`All`/`Any`/`Not` over
 column / literal / `claim(...)`. `claim("user")` resolves to the authenticated
-`AuthorSubject`; `claim("sub")` remains the admitted provider subject. Additional claim names are session claims supplied by the trusted
+`AuthorSubject`; raw claim names are supplied by the trusted
 admission/session layer and must not be client-supplied query bindings. Predicate
 forms the compiler cannot authorize, such as range and null checks, deny until
 explicitly supported.
@@ -132,9 +134,9 @@ same claim predicate subset. `session.where({ "claims.role": "admin" })` lowers
 to claim/literal equality, and `SessionInList { path: ["claims", "role"],
 values: [...] }` lowers to a scalar claim membership check equivalent to an
 `OR` of claim/literal equality predicates. The core server shell accepts
-`session.user_id` / `session.userId` and one-level `session.claims.<name>` paths
-for these predicates; deeper claim paths and non-scalar session predicates remain
-unsupported at this boundary.
+`session.user`, `session.authMode`, and one-level `session.claims["name"]` paths
+for these predicates. Flat `session.someClaim` paths and deeper claim paths are
+rejected; non-scalar session predicates remain unsupported at this boundary.
 
 ### 7.2 Write authorization
 

@@ -666,7 +666,7 @@ fn normalize_enum_payload_operand(
         }
         Operand::Param(param) => Ok(NormalizedValueRef::Param(param.clone())),
         Operand::Claim(claim) => Ok(NormalizedValueRef::Claim(ClaimPath(
-            claim.split('.').map(str::to_owned).collect(),
+            crate::query::operand_claim_path(claim),
         ))),
         Operand::Literal(value) => {
             let value = target_type
@@ -840,7 +840,7 @@ fn normalize_operand_with_target_type_and_declared_id_and_flat_join_alias(
         },
         Operand::Param(param) => NormalizedValueRef::Param(param.clone()),
         Operand::Claim(claim) => {
-            NormalizedValueRef::Claim(ClaimPath(claim.split('.').map(str::to_owned).collect()))
+            NormalizedValueRef::Claim(ClaimPath(crate::query::operand_claim_path(claim)))
         }
         Operand::Literal(value) => {
             let value = target_type
@@ -1896,7 +1896,7 @@ fn reachable_seed_value_ref(seed: &Operand) -> Result<NormalizedValueRef, Error>
         Operand::Param(param) => Ok(NormalizedValueRef::Param(param.clone())),
         Operand::Literal(Value::Uuid(uuid)) => literal_value_ref(&Value::Uuid(*uuid)),
         Operand::Claim(claim) => Ok(NormalizedValueRef::Claim(ClaimPath(
-            claim.split('.').map(str::to_owned).collect(),
+            crate::query::operand_claim_path(claim),
         ))),
         Operand::Column(_) | Operand::Literal(_) => Err(normalization_gap(
             "reachable_via currently supports uuid parameter/claim/literal seeds only",

@@ -376,18 +376,25 @@ pub fn admitted_session_claims(
     issuer: &str,
     subject: &str,
     author: AuthorSubject,
-    mut claims: BTreeMap<String, Value>,
+    claims: BTreeMap<String, Value>,
 ) -> BTreeMap<String, Value> {
-    claims.insert("iss".to_owned(), Value::String(issuer.to_owned()));
-    claims.insert("issuer".to_owned(), Value::String(issuer.to_owned()));
-    claims.insert("subject".to_owned(), Value::String(subject.to_owned()));
-    claims.insert("sub".to_owned(), Value::String(subject.to_owned()));
-    claims.insert("user_id".to_owned(), Value::String(subject.to_owned()));
-    claims.insert(
+    let mut admitted = claims
+        .into_iter()
+        .map(|(name, value)| (crate::query::provider_claim_key(&name), value))
+        .collect::<BTreeMap<_, _>>();
+    admitted.insert(
+        crate::query::provider_claim_key("iss"),
+        Value::String(issuer.to_owned()),
+    );
+    admitted.insert(
+        crate::query::provider_claim_key("sub"),
+        Value::String(subject.to_owned()),
+    );
+    admitted.insert(
         "user".to_owned(),
         Value::String(author.canonical().to_owned()),
     );
-    claims
+    admitted
 }
 
 fn jwt_decoding_key(verifier: &JwtVerifierConfig) -> Result<DecodingKey, AuthAdmissionError> {

@@ -661,12 +661,11 @@ export type WhereInputOrCallback<WhereInput, Row> =
   | WhereInput
   | ((row: RowContext<Row>) => WhereInput | Condition);
 
-export type SessionContext = Record<string, SessionRefValue> & {
+export type SessionContext = {
   /** Opaque canonical JSON `[iss,sub]` identity used by provenance columns. */
   readonly user: SessionRefValue;
-  /** Raw admitted provider subject/user id; use for application owner columns. */
-  readonly user_id: SessionRefValue;
-  readonly userId: SessionRefValue;
+  /** Raw provider claims, kept separate from Jazz-owned session identity. */
+  readonly claims: Readonly<Record<string, SessionRefValue>>;
   readonly authMode: SessionRefValue;
   where: SessionWhereBuilder;
 };
@@ -1804,9 +1803,9 @@ function stripQualifier(column: string): string {
 
 /** @internal */
 export function createSessionContext(): SessionContext {
-  const claimRef = (path: string): SessionRefValue => ({
+  const claimRef = (...path: string[]): SessionRefValue => ({
     __jazzPermissionKind: "session-ref",
-    path: normalizeSessionPath(path),
+    path,
   });
   const whereBuilder = ((input: Record<string, unknown>): SessionWhereCondition => ({
     __jazzPermissionKind: "session-where",
@@ -1818,7 +1817,20 @@ export function createSessionContext(): SessionContext {
         if (prop === "where") {
           return whereBuilder;
         }
-        return claimRef(prop);
+        if (prop === "claims") {
+          return new Proxy(
+            {},
+            {
+              get(_claims, claim) {
+                return typeof claim === "string" ? claimRef("claims", claim) : undefined;
+              },
+            },
+          );
+        }
+        if (prop === "user" || prop === "authMode") return claimRef(prop);
+        throw new Error(
+          `Unknown session property ${prop}; raw provider claims must use session.claims["${prop}"]`,
+        );
       }
       return undefined;
     },

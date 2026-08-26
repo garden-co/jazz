@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   definePermissions,
+  createSessionContext,
   relationExistsToPolicy,
   relationToIr,
   type PermissionRelation,
@@ -19,6 +20,15 @@ interface Todo {
   done: boolean;
   projectId?: string;
 }
+
+it("keeps provider user claims nested and rejects flat claim access", () => {
+  const session = createSessionContext();
+  expect(session.user.path).toEqual(["user"]);
+  expect(session.claims["user"].path).toEqual(["claims", "user"]);
+  expect(() => (session as unknown as Record<string, unknown>).role).toThrow(
+    /raw provider claims must use session\.claims\["role"\]/,
+  );
+});
 
 interface TodoWhere {
   id?: string;
@@ -370,12 +380,12 @@ const creatorCondition = {
 describe("permissions DSL", () => {
   it("compiles read/insert/update/delete policies", () => {
     const compiled = definePermissions(app, ({ policy, allOf, allowedTo, session }) => [
-      policy.todos.allowRead.where({ ownerId: session.userId }),
-      policy.todos.allowInsert.where({ ownerId: session.userId }),
+      policy.todos.allowRead.where({ ownerId: session.claims["sub"] }),
+      policy.todos.allowInsert.where({ ownerId: session.claims["sub"] }),
       policy.todos.allowUpdate
         .whereOld(allOf([allowedTo.update("projectId"), { archived: false }]))
         .whereNew(allowedTo.update("projectId")),
-      policy.todos.allowDelete.where({ ownerId: session.userId }),
+      policy.todos.allowDelete.where({ ownerId: session.claims["sub"] }),
     ]);
 
     expect(compiled.todos!.select?.using).toEqual({
@@ -384,7 +394,7 @@ describe("permissions DSL", () => {
       op: "Eq",
       value: {
         type: "SessionRef",
-        path: ["userId"],
+        path: ["claims", "sub"],
       },
     });
     expect(compiled.todos!.insert?.with_check).toEqual({
@@ -393,7 +403,7 @@ describe("permissions DSL", () => {
       op: "Eq",
       value: {
         type: "SessionRef",
-        path: ["userId"],
+        path: ["claims", "sub"],
       },
     });
     expect(compiled.todos!.update?.using).toEqual({
@@ -426,7 +436,7 @@ describe("permissions DSL", () => {
       op: "Eq",
       value: {
         type: "SessionRef",
-        path: ["userId"],
+        path: ["claims", "sub"],
       },
     });
   });
@@ -546,9 +556,9 @@ describe("permissions DSL", () => {
 
   it("supports plural action aliases and OR-merges repeated rules", () => {
     const compiled = definePermissions(app, ({ policy, anyOf, allowedTo, session }) => [
-      policy.todos.allowReads.where({ ownerId: session.userId }),
+      policy.todos.allowReads.where({ ownerId: session.claims["sub"] }),
       policy.todos.allowReads.where(anyOf([{ done: true }, allowedTo.read("projectId")])),
-      policy.todos.allowInserts.where({ ownerId: session.userId }),
+      policy.todos.allowInserts.where({ ownerId: session.claims["sub"] }),
     ]);
 
     expect(compiled.todos!.select?.using).toEqual({
@@ -560,7 +570,7 @@ describe("permissions DSL", () => {
           op: "Eq",
           value: {
             type: "SessionRef",
-            path: ["userId"],
+            path: ["claims", "sub"],
           },
         },
         {
@@ -585,7 +595,7 @@ describe("permissions DSL", () => {
       op: "Eq",
       value: {
         type: "SessionRef",
-        path: ["userId"],
+        path: ["claims", "sub"],
       },
     });
   });
@@ -594,7 +604,7 @@ describe("permissions DSL", () => {
     const compiled = definePermissions(app, ({ policy, session }) => [
       policy.todos.allowRead.where(
         policy.todoShares.exists.where({
-          userId: session.userId,
+          userId: session.claims["sub"],
           canRead: true,
         }),
       ),
@@ -612,7 +622,7 @@ describe("permissions DSL", () => {
             op: "Eq",
             value: {
               type: "SessionRef",
-              path: ["userId"],
+              path: ["claims", "sub"],
             },
           },
           {
@@ -719,11 +729,11 @@ describe("permissions DSL", () => {
       policy.people.allowRead.where((person) =>
         anyOf([
           policy.friendships.exists.where({
-            personAId: session.personId,
+            personAId: session.claims["personId"],
             personBId: person.id,
           }),
           policy.friendships.exists.where({
-            personBId: session.personId,
+            personBId: session.claims["personId"],
             personAId: person.id,
           }),
         ]),
@@ -761,13 +771,13 @@ describe("permissions DSL", () => {
             policy.people
               .where({ profileId: profile.id })
               .join(policy.friendships, { left: "id", right: "personAId" })
-              .where({ personBId: session.personId }),
+              .where({ personBId: session.claims["personId"] }),
           ),
           policy.exists(
             policy.people
               .where({ profileId: profile.id })
               .join(policy.friendships, { left: "id", right: "personBId" })
-              .where({ personAId: session.personId }),
+              .where({ personAId: session.claims["personId"] }),
           ),
         ]),
       ),
@@ -806,7 +816,7 @@ describe("permissions DSL", () => {
         policy.exists(
           policy.people
             .where({ profileId: profile.id })
-            .join(policy.friendships.where({ personBId: session.personId }), {
+            .join(policy.friendships.where({ personBId: session.claims["personId"] }), {
               left: "id",
               right: "personAId",
             }),
@@ -842,11 +852,11 @@ describe("permissions DSL", () => {
         policy.exists(
           policy.people
             .where({ profileId: profile.id })
-            .join(policy.friendships.where({ personAId: session.personId }), {
+            .join(policy.friendships.where({ personAId: session.claims["personId"] }), {
               left: "id",
               right: "personAId",
             })
-            .join(policy.profiles.where({ id: session.personId }), {
+            .join(policy.profiles.where({ id: session.claims["personId"] }), {
               left: "personBId",
               right: "id",
             }),
@@ -875,11 +885,11 @@ describe("permissions DSL", () => {
         policy.exists(
           policy.people
             .where({ profileId: profile.id })
-            .join(policy.friendships.where({ personAId: session.personId }), {
+            .join(policy.friendships.where({ personAId: session.claims["personId"] }), {
               left: "id",
               right: "personAId",
             })
-            .where({ "friendships.personBId": session.personId }),
+            .where({ "friendships.personBId": session.claims["personId"] }),
         ),
       ),
     ]);
@@ -911,10 +921,12 @@ describe("permissions DSL", () => {
       definePermissions(socialApp, ({ policy, session }) => [
         policy.profiles.allowRead.where(
           policy.exists(
-            policy.people.where({}).join(policy.people.where({ profileId: session.personId }), {
-              left: "id",
-              right: "id",
-            }),
+            policy.people
+              .where({})
+              .join(policy.people.where({ profileId: session.claims["personId"] }), {
+                left: "id",
+                right: "id",
+              }),
           ),
         ),
       ]),
@@ -926,11 +938,11 @@ describe("permissions DSL", () => {
           policy.exists(
             policy.people
               .where({})
-              .join(policy.friendships.where({ personBId: session.personId }), {
+              .join(policy.friendships.where({ personBId: session.claims["personId"] }), {
                 left: "id",
                 right: "personAId",
               })
-              .join(policy.friendships.where({ personAId: session.personId }), {
+              .join(policy.friendships.where({ personAId: session.claims["personId"] }), {
                 left: "personBId",
                 right: "personAId",
               }),
@@ -947,7 +959,7 @@ describe("permissions DSL", () => {
               .where({})
               .join(
                 policy.friendships
-                  .where({ personBId: session.personId })
+                  .where({ personBId: session.claims["personId"] })
                   .join(policy.people, { left: "personAId", right: "id" }),
                 { left: "id", right: "personAId" },
               ),
@@ -964,7 +976,7 @@ describe("permissions DSL", () => {
               .where({})
               .join(
                 policy.friendships
-                  .where({ personBId: session.personId })
+                  .where({ personBId: session.claims["personId"] })
                   .select({ friend: "personAId" }),
                 { left: "id", right: "personAId" },
               ),
@@ -981,8 +993,8 @@ describe("permissions DSL", () => {
               .where({})
               .join(
                 policy.union([
-                  policy.friendships.where({ personAId: session.personId }),
-                  policy.friendships.where({ personBId: session.personId }),
+                  policy.friendships.where({ personAId: session.claims["personId"] }),
+                  policy.friendships.where({ personBId: session.claims["personId"] }),
                 ]),
                 { left: "id", right: "personAId" },
               ),
@@ -1017,13 +1029,13 @@ describe("permissions DSL", () => {
             policy.people
               .where({ profileId: profile.id })
               .hopTo("friendshipsViaPersonA")
-              .where({ personBId: session.personId }),
+              .where({ personBId: session.claims["personId"] }),
           ),
           policy.exists(
             policy.people
               .where({ profileId: profile.id })
               .hopTo("friendshipsViaPersonB")
-              .where({ personAId: session.personId }),
+              .where({ personAId: session.claims["personId"] }),
           ),
         ]),
       ),
@@ -1086,7 +1098,7 @@ describe("permissions DSL", () => {
       const reachableTeams = policy.teams.gather({
         start: {
           kind: "individual",
-          identity_key: session.userId,
+          identity_key: session.claims["sub"],
         },
         step: ({ current }) =>
           policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
@@ -1170,7 +1182,7 @@ describe("permissions DSL", () => {
       const reachableTeams = policy.teams.gather({
         start: {
           kind: "individual",
-          identity_key: session.userId,
+          identity_key: session.claims["sub"],
         },
         step: ({ current }) =>
           policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
@@ -1250,7 +1262,7 @@ describe("permissions DSL", () => {
     let relation: PermissionRelation | undefined;
     definePermissions(app, ({ policy, session }) => {
       const directParents = policy.team_team_edges
-        .where({ child_team: session.user_id })
+        .where({ child_team: session.claims["sub"] })
         .hopTo("parent_team");
       relation = policy.teams.gather({
         start: directParents,
@@ -1397,7 +1409,7 @@ describe("permissions DSL", () => {
   it("anchors sibling qualified policy joins to the protected row", () => {
     const compiled = definePermissions(app, ({ policy, session }) => [
       policy.teams.allowRead.where({
-        "user_team_edges.user_id": session.userId,
+        "user_team_edges.user_id": session.claims["sub"],
         "resource_access_edges.grant_role": "viewer",
       } as Record<string, unknown>),
     ]);
@@ -1436,7 +1448,7 @@ describe("permissions DSL", () => {
     const compiled = definePermissions(app, ({ policy, session }) => [
       policy.teams.allowRead.where({
         kind: "manual",
-        "user_team_edges.user_id": session.userId,
+        "user_team_edges.user_id": session.claims["sub"],
         "user_team_edges.administrator": true,
       } as Record<string, unknown>),
     ]);
@@ -1478,7 +1490,7 @@ describe("permissions DSL", () => {
     const compiled = definePermissions(app, ({ policy, session }) => [
       policy.teams.allowRead.where((team) =>
         policy.user_team_edges.exists.where({
-          user_id: session.userId,
+          user_id: session.claims["sub"],
           team: team.id,
           "teams.kind": "manual",
         } as Record<string, unknown>),
@@ -1514,7 +1526,7 @@ describe("permissions DSL", () => {
       const reachableTeams = policy.teams.gather({
         start: {
           kind: "individual",
-          identity_key: session.userId,
+          identity_key: session.claims["sub"],
         },
         step: ({ current }) =>
           policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
@@ -1548,7 +1560,7 @@ describe("permissions DSL", () => {
       const reachableTeams = policy.teams.gather({
         start: {
           kind: "individual",
-          identity_key: session.userId,
+          identity_key: session.claims["sub"],
         },
         step: ({ current }) =>
           policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
@@ -1615,7 +1627,7 @@ describe("permissions DSL", () => {
     expect(() =>
       definePermissions(app, ({ policy, session }) => {
         const reachableTeams = policy.teams.gather({
-          start: { "team_team_edges.id": session.userId },
+          start: { "team_team_edges.id": session.claims["sub"] },
           step: ({ current }) =>
             policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
         });
@@ -1713,7 +1725,7 @@ describe("permissions DSL", () => {
 
   it("supports update rules with only whereOld or whereNew", () => {
     const oldOnly = definePermissions(app, ({ policy, session }) => [
-      policy.todos.allowUpdate.whereOld({ ownerId: session.userId }),
+      policy.todos.allowUpdate.whereOld({ ownerId: session.claims["sub"] }),
     ]);
     expect(oldOnly.todos!.update?.using).toEqual({
       type: "Cmp",
@@ -1721,13 +1733,13 @@ describe("permissions DSL", () => {
       op: "Eq",
       value: {
         type: "SessionRef",
-        path: ["userId"],
+        path: ["claims", "sub"],
       },
     });
     expect(oldOnly.todos!.update?.with_check).toEqual(oldOnly.todos!.update?.using);
 
     const newOnly = definePermissions(app, ({ policy, session }) => [
-      policy.todos.allowUpdate.whereNew({ ownerId: session.userId }),
+      policy.todos.allowUpdate.whereNew({ ownerId: session.claims["sub"] }),
     ]);
     expect(newOnly.todos!.update?.with_check).toEqual({
       type: "Cmp",
@@ -1735,7 +1747,7 @@ describe("permissions DSL", () => {
       op: "Eq",
       value: {
         type: "SessionRef",
-        path: ["userId"],
+        path: ["claims", "sub"],
       },
     });
     expect(newOnly.todos!.update?.using).toEqual(newOnly.todos!.update?.with_check);
@@ -1774,7 +1786,7 @@ describe("permissions DSL", () => {
 
     const inSessionCompiled = definePermissions(app, ({ policy, session }) => [
       policy.todos.allowRead.where({
-        ownerId: { in: session["claims.teamIds"] },
+        ownerId: { in: session.claims["teamIds"] },
       } as unknown as TodoWhere),
     ]);
     expect(inSessionCompiled.todos!.select?.using).toEqual({
@@ -1793,10 +1805,10 @@ describe("permissions DSL", () => {
     const compiled = definePermissions(app, ({ policy, allOf, anyOf, session }) => [
       policy.todos.allowRead.where(
         allOf([
-          { ownerId: session.userId },
+          { ownerId: session.claims["sub"] },
           session.where({
             "claims.role": "manager",
-            user_id: { ne: null },
+            "claims.sub": { ne: null },
           }),
         ]),
       ),
@@ -1820,7 +1832,7 @@ describe("permissions DSL", () => {
               op: "Eq",
               value: {
                 type: "SessionRef",
-                path: ["userId"],
+                path: ["claims", "sub"],
               },
             },
             {
@@ -1837,7 +1849,7 @@ describe("permissions DSL", () => {
                 },
                 {
                   type: "SessionIsNotNull",
-                  path: ["user_id"],
+                  path: ["claims", "sub"],
                 },
               ],
             },
@@ -1872,7 +1884,7 @@ describe("permissions DSL", () => {
   it("rejects invalid session.where(...) value shapes", () => {
     expect(() =>
       definePermissions(app, ({ policy, session }) => [
-        policy.todos.allowRead.where(session.where({ "claims.role": session.userId })),
+        policy.todos.allowRead.where(session.where({ "claims.role": session.claims["sub"] })),
       ]),
     ).toThrow(/session references are not supported/i);
 
@@ -1940,7 +1952,7 @@ describe("permissions DSL", () => {
           allowedTo.read("projectId"),
           policy.todoShares.exists.where({
             todoId: todo.id,
-            userId: session.userId,
+            userId: session.claims["sub"],
             canRead: true,
           }),
         ]),
@@ -1976,7 +1988,7 @@ describe("permissions DSL", () => {
                 op: "Eq",
                 value: {
                   type: "SessionRef",
-                  path: ["userId"],
+                  path: ["claims", "sub"],
                 },
               },
               {
