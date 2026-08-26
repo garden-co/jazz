@@ -14,10 +14,25 @@ use crate::protocol_limits::{
 };
 use crate::schema::{ColumnSchema, MERGE_HEADS_TABLE};
 use groove::records::ValueType;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub(super) const MAX_SCHEMA_LINEAGE_DECLARATIONS: usize = 4096;
 pub(super) const MAX_SCHEMA_LINEAGE_NAME_BYTES: usize = 1024;
 pub(super) const MAX_SCHEMA_LINEAGE_OPS: usize = 16_384;
+
+#[cfg(test)]
+static MERGE_HEAD_REACHABILITY_WALKS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(super) fn reset_merge_head_reachability_walks_for_test() {
+    MERGE_HEAD_REACHABILITY_WALKS.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(super) fn merge_head_reachability_walks_for_test() -> usize {
+    MERGE_HEAD_REACHABILITY_WALKS.load(Ordering::Relaxed)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct CommitUnitParkMode {

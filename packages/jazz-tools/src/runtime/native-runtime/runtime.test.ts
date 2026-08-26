@@ -5071,6 +5071,138 @@ describe("NativeRuntimeAdapter server transport", () => {
 });
 
 describe("NativeRuntimeAdapter streaming inserts", () => {
+  it("serializes finalization across schema views while source ingestion stays concurrent", async () => {
+    type Deferred<T> = {
+      promise: Promise<T>;
+      resolve(value: T): void;
+      reject(error: Error): void;
+    };
+    const deferred = <T>(): Deferred<T> => {
+      let resolve!: (value: T) => void;
+      let reject!: (error: Error) => void;
+      const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+        resolve = resolvePromise;
+        reject = rejectPromise;
+      });
+      return { promise, resolve, reject };
+    };
+    const completions = [
+      deferred<ReturnType<typeof fakeWrite>>(),
+      deferred<ReturnType<typeof fakeWrite>>(),
+    ];
+    const pushed: string[] = [];
+    const started: number[] = [];
+    let nextCompletion = 0;
+    let nativeDb!: NativeDbForTest;
+    const beginStreamingMutationEncoded = vi.fn(() => ({
+      push(chunk: Uint8Array) {
+        pushed.push(new TextDecoder().decode(chunk));
+      },
+      finish() {
+        const completion = nextCompletion++;
+        started.push(completion);
+        return completions[completion]!.promise;
+      },
+      abort: vi.fn(),
+    }));
+    nativeDb = fakeDb({
+      beginStreamingMutationEncoded,
+      registerSchema: () => nativeDb,
+    });
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => nativeDb,
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const view = runtime.registerSchemaView(testSchema);
+    const source = async function* (value: string) {
+      yield value;
+    };
+
+    const first = runtime.streamingMutation("insert", "todos", {}, "title", source("first"));
+    const second = view.streamingMutation("insert", "todos", {}, "title", source("second"));
+
+    await vi.waitFor(() => expect(pushed).toEqual(expect.arrayContaining(["first", "second"])));
+    await vi.waitFor(() => expect(started).toEqual([0]));
+    completions[0]!.resolve(fakeWrite());
+    await vi.waitFor(() => expect(started).toEqual([0, 1]));
+    completions[1]!.resolve(fakeWrite());
+
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+  });
+
+  it("releases the next streaming finalization after a failed finish", async () => {
+    type Deferred<T> = {
+      promise: Promise<T>;
+      resolve(value: T): void;
+      reject(error: Error): void;
+    };
+    const deferred = <T>(): Deferred<T> => {
+      let resolve!: (value: T) => void;
+      let reject!: (error: Error) => void;
+      const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+        resolve = resolvePromise;
+        reject = rejectPromise;
+      });
+      return { promise, resolve, reject };
+    };
+    const completions = [
+      deferred<ReturnType<typeof fakeWrite>>(),
+      deferred<ReturnType<typeof fakeWrite>>(),
+    ];
+    const started: number[] = [];
+    const aborts = [vi.fn(), vi.fn()];
+    let nextCompletion = 0;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            beginStreamingMutationEncoded: () => {
+              const upload = nextCompletion++;
+              return {
+                push: () => undefined,
+                finish() {
+                  started.push(upload);
+                  return completions[upload]!.promise;
+                },
+                abort: aborts[upload]!,
+              };
+            },
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const source = async function* () {
+      yield "value";
+    };
+
+    const first = runtime.streamingMutation("insert", "todos", {}, "title", source());
+    const second = runtime.streamingMutation("insert", "todos", {}, "title", source());
+
+    await vi.waitFor(() => expect(started).toEqual([0]));
+    completions[0]!.reject(new Error("native finish failed"));
+    await expect(first).rejects.toThrow("native finish failed");
+    expect(aborts[0]).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(started).toEqual([0, 1]));
+    completions[1]!.resolve(fakeWrite());
+    await expect(second).resolves.toEqual(expect.objectContaining({ id: expect.any(String) }));
+  });
+
   it("infers the physical kind and applies backpressure to async chunks", async () => {
     const pushed: Uint8Array[] = [];
     let finished = false;
@@ -5749,6 +5881,9 @@ function runtimeWithNativeSubscriptionChunk(
   chunk: unknown,
   schema: WasmSchema = testSchema,
 ): NativeRuntimeAdapter {
+  // Native readAll drains its queue; returning the same non-empty batch forever
+  // would make the adapter's bounded drain loop spin rather than model NAPI.
+  const chunks = [chunk];
   return new NativeRuntimeAdapter(
     {
       openMemory: () =>
@@ -5756,7 +5891,7 @@ function runtimeWithNativeSubscriptionChunk(
           all: () => new Uint8Array([0]),
           prepareQuery: () => ({}),
           subscribe: () => ({
-            readAll: () => [chunk],
+            readAll: () => chunks.splice(0),
             close: () => true,
           }),
           tick: () => undefined,
@@ -5782,7 +5917,7 @@ function runtimeWithNativeRelationSubscriptionChunks(
       openMemory: () =>
         fakeDb({
           subscribeRelationQuery: () => ({
-            readAll: () => chunks,
+            readAll: () => chunks.splice(0),
             close: () => true,
           }),
           tick: () => undefined,
@@ -6797,6 +6932,150 @@ function writeTeamGatherBatches(
     rows.length === 0 ? 0 : 1,
   );
 }
+
+it("awaits pending native large-value hydration while checking edge coverage", async () => {
+  let polls = 0;
+  let peerPumps = 0;
+  let asyncReads = 0;
+  let syncReads = 0;
+  let runtime!: NativeRuntimeAdapter;
+  const pending = {
+    poll: () => {
+      if (polls++ === 0) {
+        (runtime as unknown as { peerTransportActivityEpoch: number }).peerTransportActivityEpoch =
+          2;
+        return null;
+      }
+      return new Uint8Array();
+    },
+  };
+  runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          all: () => {
+            syncReads += 1;
+            throw new Error("coverage bypassed the async native read boundary");
+          },
+          allAsync: async () => {
+            asyncReads += 1;
+            return pending;
+          },
+          prepareQuery: () => ({}),
+          queryAttachmentIsCovered: () => true,
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+  (
+    runtime as unknown as {
+      pumpServerTransport(): Promise<void>;
+    }
+  ).pumpServerTransport = async () => {
+    peerPumps += 1;
+  };
+
+  const waitForCoverage = (
+    runtime as unknown as {
+      waitForQueryCoverage(
+        attachment: unknown,
+        query: object,
+        opts: object,
+        identity?: Uint8Array,
+        minimumPeerActivityEpoch?: number,
+      ): Promise<void>;
+    }
+  ).waitForQueryCoverage.bind(runtime);
+
+  await expect(waitForCoverage({}, {}, { tier: "edge" }, undefined, 1)).resolves.toBeUndefined();
+  expect(polls).toBe(2);
+  expect(asyncReads).toBe(1);
+  expect(syncReads).toBe(0);
+  expect(peerPumps).toBeGreaterThanOrEqual(2);
+});
+
+it("cancels a suspended native read before polling it again after close", async () => {
+  let polls = 0;
+  let runtime!: NativeRuntimeAdapter;
+  runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          readValueRange: () => ({
+            poll: () => {
+              polls += 1;
+              if (polls > 1) throw new Error("native read was polled after close");
+              queueMicrotask(() => void runtime.close());
+              return null;
+            },
+          }),
+          close: () => undefined,
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+
+  await expect(
+    runtime.readValueRange("todos", "00000000-0000-0000-0000-000000000001", "title", 0, 1),
+  ).rejects.toThrow("large-value hydration was cancelled by runtime shutdown");
+  expect(polls).toBe(1);
+});
+
+it("cancels a suspended native write before polling it again after close", async () => {
+  let polls = 0;
+  let runtime!: NativeRuntimeAdapter;
+  runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          appendValue: async () => ({
+            poll: () => {
+              polls += 1;
+              if (polls > 1) throw new Error("native write was polled after close");
+              queueMicrotask(() => void runtime.close());
+              return null;
+            },
+          }),
+          close: () => undefined,
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+
+  await expect(
+    runtime.appendValue(
+      "todos",
+      "00000000-0000-0000-0000-000000000001",
+      "title",
+      new Uint8Array([1]),
+    ),
+  ).rejects.toThrow("large-value mutation was cancelled by runtime shutdown");
+  expect(polls).toBe(1);
+});
 
 function typedOccurrenceKey(label: string): Uint8Array {
   const labelBytes = inlineScalar(label);
