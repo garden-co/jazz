@@ -16,9 +16,7 @@ test("release workflow uploads the sealed WASM provenance manifest", () => {
     join(repositoryRoot, ".github/workflows/build-jazz-packages.yml"),
     "utf8",
   );
-  const wasmUpload = workflow.match(
-    /name: jazz-wasm-pkg[\s\S]*?if-no-files-found: error/,
-  )?.[0];
+  const wasmUpload = workflow.match(/name: jazz-wasm-pkg[\s\S]*?if-no-files-found: error/)?.[0];
   assert.ok(wasmUpload, "missing jazz-wasm package artifact upload");
   assert.match(wasmUpload, /path: crates\/jazz-wasm\/pkg/);
   assert.match(wasmUpload, /include-hidden-files: true/);
