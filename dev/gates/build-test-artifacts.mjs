@@ -13,6 +13,7 @@ import { linkSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
+import { snapshotCorrectnessArtifacts } from "../artifacts/test-artifact-store.mjs";
 
 const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 
@@ -356,6 +357,7 @@ export async function buildTestArtifacts(
   run = command,
   scope = createBuildScope(),
   lease = undefined,
+  snapshot = () => {},
 ) {
   let firstBuildError;
   const guardedRun = (command, args, label, env) =>
@@ -401,6 +403,10 @@ export async function buildTestArtifacts(
     ["dev/artifacts/stage-native-fingerprints.mjs", "--local"],
     "derive local artifact expectations",
   );
+  // Seal the exact pair before jazz-tools bundles its broker worker. The
+  // mutable package publication paths are still useful to package builds, but
+  // correctness bundles must never follow a later replacement generation.
+  snapshot(root);
   // The atomic WASM producer seals its matching manifest before publication.
   await guardedRun(
     "pnpm",
@@ -460,7 +466,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.error("test-artifacts: expected no argument or `unlock`");
     process.exitCode = 1;
   } else
-    withArtifactBuildLock((scope, lease) => buildTestArtifacts(command, scope, lease)).catch(
+    withArtifactBuildLock((scope, lease) =>
+      buildTestArtifacts(command, scope, lease, snapshotCorrectnessArtifacts),
+    ).catch(
       (error) => {
         console.error(`test-artifacts: ${error.message}`);
         process.exitCode = 1;
