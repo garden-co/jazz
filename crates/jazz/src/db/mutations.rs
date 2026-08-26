@@ -2230,6 +2230,12 @@ where
         row: RowUuid,
         identity: AuthorSubject,
     ) -> Result<Option<CurrentRow>, Error> {
+        // A policy-free table cannot hide the preimage from this client. Use
+        // the point lookup directly instead of building and hydrating an
+        // unbounded policy query only to select one row afterward.
+        if self.table_schema(table)?.read_policy.is_none() {
+            return self.local_current_row(table, row).await;
+        }
         let query = self.prepare_query(&Query::from(table))?;
         Ok(self
             .node
