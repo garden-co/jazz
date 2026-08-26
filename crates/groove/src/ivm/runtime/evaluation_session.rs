@@ -398,6 +398,7 @@ impl<'a> EvaluationRequests<'a> {
                     load_indexed_rows(storage, table_schema, primary_index_schema, index, entries)
                         .await
                         .map(EvaluationRequestOutput::Storage)
+                        .map_err(Into::into)
                 })
             }
             EvaluationRequestKey::Storage(StorageRequestKey::IndexedRowsRange {
