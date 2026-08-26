@@ -51,27 +51,57 @@ fn run_rung(table_rows: usize, owned_rows: usize, result_rows: usize, batch_rows
     let temp = tempfile::tempdir().expect("create owner-filter RocksDB directory");
     let schema = schema();
     let db = open_db(temp.path(), schema.clone());
+    db.set_identity_claims(
+        author(),
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(AUTHOR_UUID))]),
+    );
 
     let seed_started = Instant::now();
     seed_rows(&db, table_rows, owned_rows, batch_rows);
     let seed_us = seed_started.elapsed().as_micros();
-    db.close().expect("close seeded owner-filter db");
-    drop(db);
+    db.reset_storage_read_metrics_for_test();
 
     let cases = [
-        ("policy_only", policy_only_query(), owned_rows),
-        ("owner_predicate_all", owner_predicate_query(), owned_rows),
+        (
+            "system_point_local",
+            point_query(row(0)),
+            1,
+            DurabilityTier::Local,
+            AuthorSubject::SYSTEM,
+        ),
+        (
+            "policy_point_local",
+            point_query(row(0)),
+            1,
+            DurabilityTier::Local,
+            author(),
+        ),
+        (
+            "policy_only",
+            policy_only_query(),
+            owned_rows,
+            DurabilityTier::Local,
+            author(),
+        ),
+        (
+            "owner_predicate_all",
+            owner_predicate_query(),
+            owned_rows,
+            DurabilityTier::Local,
+            author(),
+        ),
         (
             "owner_predicate_ordered_limit",
             owner_predicate_query()
                 .order_by("updated_at", OrderDirection::Desc)
                 .limit(result_rows),
             result_rows,
+            DurabilityTier::Local,
+            author(),
         ),
     ];
 
-    for (case, query, expected_rows) in cases {
-        let db = open_db(temp.path(), schema.clone());
+    for (case, query, expected_rows, tier, identity) in cases {
         let open_metrics = db.take_storage_read_metrics_for_test();
         db.reset_storage_read_metrics_for_test();
         let prepare_started = Instant::now();
@@ -83,7 +113,7 @@ fn run_rung(table_rows: usize, owned_rows: usize, result_rows: usize, batch_rows
 
         db.reset_storage_read_metrics_for_test();
         let query_started = Instant::now();
-        let rows = block_on(db.all_for_identity(&prepared, global_read_opts(), author()))
+        let rows = block_on(db.all_for_identity(&prepared, read_opts(tier), identity))
             .expect("run owner-filter query");
         let query_us = query_started.elapsed().as_micros();
         let query_metrics = db.take_storage_read_metrics_for_test();
@@ -101,8 +131,8 @@ fn run_rung(table_rows: usize, owned_rows: usize, result_rows: usize, batch_rows
             &prepare_metrics,
             &query_metrics,
         );
-        db.close().expect("close owner-filter db");
     }
+    db.close().expect("close owner-filter db");
 }
 
 fn schema() -> JazzSchema {
@@ -117,7 +147,7 @@ fn schema() -> JazzSchema {
                     TablePolicies::new()
                         .with_select(schema_fixture::session_user_id_column("owner")),
                 )
-                .index_only(["owner", "updated_at"]),
+                .index_only(["owner", "updated_at", "title"]),
         ),
     )
 }
@@ -146,36 +176,34 @@ fn open_db(path: &Path, schema: JazzSchema) -> Db<RocksDbStorage> {
 fn seed_rows(db: &Db<RocksDbStorage>, table_rows: usize, owned_rows: usize, batch_rows: usize) {
     for batch_start in (0..table_rows).step_by(batch_rows) {
         let batch_end = table_rows.min(batch_start + batch_rows);
-        let tx = block_on(db.mergeable_tx()).expect("open owner-filter seed tx");
-
-        for index in batch_start..batch_end {
-            let owner = if index < owned_rows {
-                author()
-            } else {
-                other_author()
-            };
-            block_on(tx.insert(
-                TABLE,
-                BTreeMap::from([
-                    ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
-                    ("active".to_owned(), Value::Bool(true)),
-                    ("updated_at".to_owned(), Value::U64(index as u64)),
-                    (
-                        "title".to_owned(),
-                        Value::String(format!("document-{index}")),
-                    ),
-                ]),
-                InsertOptions {
-                    row_id: Some(row(index)),
-                    ..Default::default()
-                },
-            ))
-            .expect("stage owner-filter row");
-        }
-
-        let tx_id = block_on(tx.commit()).expect("commit owner-filter seed tx");
-        db.finalize_local_mergeable_commit_for_test(tx_id)
-            .expect("settle owner-filter seed tx");
+        block_on(db.transaction(async |tx| {
+            for index in batch_start..batch_end {
+                let owner = if index < owned_rows {
+                    author()
+                } else {
+                    other_author()
+                };
+                tx.insert(
+                    TABLE,
+                    BTreeMap::from([
+                        ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
+                        ("active".to_owned(), Value::Bool(true)),
+                        ("updated_at".to_owned(), Value::U64(index as u64)),
+                        (
+                            "title".to_owned(),
+                            Value::String(format!("document-{index}")),
+                        ),
+                    ]),
+                    InsertOptions {
+                        row_id: Some(row(index)),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            }
+            Ok(())
+        }))
+        .expect("seed owner-filter transaction");
     }
 }
 
@@ -196,9 +224,13 @@ fn owner_predicate_query() -> Query {
         .filter(eq(col("active"), lit(true)))
 }
 
-fn global_read_opts() -> ReadOpts {
+fn point_query(_row: RowUuid) -> Query {
+    Query::from(TABLE).filter(eq(col("title"), lit("document-0")))
+}
+
+fn read_opts(tier: DurabilityTier) -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Global,
+        tier,
         local_updates: LocalUpdates::Deferred,
         propagation: Propagation::LocalOnly,
         include_deleted: false,
