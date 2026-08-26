@@ -1,5 +1,5 @@
 use jazz::groove::storage::MemoryStorage;
-use jazz_example_w1_benchmark::Fixture;
+use jazz_example_w1_benchmark::{Fixture, ResumeFixture};
 
 fn main() {
     divan::main();
@@ -109,6 +109,20 @@ fn restore_task_point_scaling_memory(bencher: divan::Bencher<'_, '_>, activity_e
         .bench_local_values(|fixture| {
             fixture.restore_target_task();
             fixture
+        });
+}
+
+/// One-row byte-wire resume after the full W1 topology is prepared off-clock.
+#[divan::bench(args = [(300, 1_200, 900), (500, 2_000, 1_500)], sample_count = 1)]
+fn resume_one_task_update_scaling_memory(
+    bencher: divan::Bencher<'_, '_>,
+    (tasks, comments, activity): (usize, usize, usize),
+) {
+    bencher
+        .with_inputs(|| ResumeFixture::memory(tasks, comments, activity))
+        .bench_local_values(|mut fixture| {
+            let resume_bytes = fixture.resume_once();
+            (fixture, resume_bytes)
         });
 }
 
