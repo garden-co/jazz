@@ -54,6 +54,7 @@ export type BrowserFollowerPortRequest =
   | { type: "close"; id?: number; releaseContext?: boolean };
 
 export interface BrowserInspectorContext {
+  workerRealmId: string;
   key: string;
   appId: string;
   dbName: string;
@@ -79,6 +80,7 @@ export type BrowserRelayTrace = {
 
 export type BrowserInspectorControlRequest =
   | { type: "list-contexts"; id: number }
+  | { type: "terminate-worker"; id: number }
   | {
       type: "attach-context";
       id: number;
