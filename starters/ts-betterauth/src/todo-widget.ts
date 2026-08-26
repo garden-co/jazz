@@ -1,4 +1,4 @@
-import type { QueryBuilder, QueryOptions, SubscriptionDelta } from "jazz-tools/client";
+import type { QueryBuilder, QueryOptions } from "jazz-tools/client";
 import { app } from "../schema.js";
 
 type Todo = { id: string; title: string; done: boolean };
@@ -12,9 +12,9 @@ export interface TodoDb {
   insert<T, Init>(table: unknown, data: Init): MaybePromise<MutationResult<T>>;
   update(table: unknown, id: string, data: Partial<unknown>): MaybePromise<MutationResult<void>>;
   delete(table: unknown, id: string): MaybePromise<MutationResult<void>>;
-  subscribeAll<T extends { id: string }>(
+  subscribe<T extends { id: string }>(
     query: QueryBuilder<T>,
-    callback: (delta: SubscriptionDelta<T>) => void,
+    callback: (rows: T[]) => void,
     options?: QueryOptions,
   ): () => void;
 }
@@ -130,19 +130,11 @@ export function mountTodoWidget(parent: HTMLElement, db: TodoDb): () => void {
     );
   });
 
-  return db.subscribeAll(app.todos, (delta) => {
+  return db.subscribe(app.todos, (todos) => {
     // The simplest possible approach: rebuild the whole list on every tick.
     // It's fine here — the list is small and there's no DOM state to preserve
     // (no inline editing, no focused inputs inside rows).
     //
-    // If you need finer-grained updates, the delta gives you everything:
-    //   delta.all   — the full current result set (Todo[]) after this tick
-    //   delta.delta — ordered row-level changes:
-    //       { kind: Added,   id, index, item }   // new row at `index`
-    //       { kind: Updated, id, index, item }   // row content changed
-    //       { kind: Removed, id, index }         // row gone at `index`
-    // Iterate delta.delta to apply per-row DOM patches instead of a full
-    // swap, e.g. to keep focus, preserve animations, or avoid reflow cost.
-    renderTodos(delta.all ?? []);
+    renderTodos(todos);
   });
 }
