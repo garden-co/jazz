@@ -1150,7 +1150,7 @@ where
         let published = {
             let mut node = self.node.node.lock().await;
             let commit = node
-                .seal_inherited_large_values(commit, self.schema_version_id)
+                .seal_inherited_large_values(commit, self.schema_version_id, true)
                 .await?
                 .staged_large_cell(column, staged, nullable);
             node.commit_mergeable_in_schema(self.schema_version_id, commit)
@@ -1821,6 +1821,14 @@ where
         } else {
             cells
         };
+        let allow_inherited_descriptors = !authored_columns.as_ref().is_some_and(|authored| {
+            self.table_schema(table).is_ok_and(|schema| {
+                schema
+                    .columns
+                    .iter()
+                    .all(|column| authored.contains(&column.name))
+            })
+        });
         let mut commit = MergeableCommit::new(table, row, now_ms)
             .branch(branch)
             .made_by(made_by)
@@ -1840,7 +1848,11 @@ where
         let published = {
             let mut node = self.node.node.lock().await;
             let commit = node
-                .seal_inherited_large_values(commit, self.schema_version_id)
+                .seal_inherited_large_values(
+                    commit,
+                    self.schema_version_id,
+                    allow_inherited_descriptors,
+                )
                 .await?;
             node.commit_mergeable_in_schema(self.schema_version_id, commit)
                 .await?

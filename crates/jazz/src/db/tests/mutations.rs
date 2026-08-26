@@ -335,6 +335,54 @@ fn db_facade_mutation_lifecycle_writes_reads_deletes_and_restores() {
 }
 
 #[test]
+fn full_row_replacement_cannot_bless_an_inherited_large_value_descriptor() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let chunks = std::rc::Rc::new(groove::chunks::MemoryChunkStorage::new());
+    block_on(async {
+        db.node.node.lock().await.set_chunk_storage(chunks);
+    });
+    let title = "x".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 1);
+    let write = db
+        .insert(
+            "todos",
+            doctest_support::todo_cells(&title, false),
+            Default::default(),
+        )
+        .unwrap();
+    let row = write.row_uuid();
+    block_on(write.wait(DurabilityTier::Local)).unwrap();
+    let descriptor = block_on(async {
+        let mut node = db.node.node.lock().await;
+        match node
+            .current_physical_cell_in_schema(db.schema_version_id, "todos", row, "title")
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Value::Large(value_ref) => value_ref,
+            other => panic!("oversized title stayed inline: {other:?}"),
+        }
+    });
+
+    let error = match block_on(db.update(
+        "todos",
+        row,
+        BTreeMap::from([
+            ("title".to_owned(), Value::Large(descriptor)),
+            ("done".to_owned(), Value::Bool(true)),
+        ]),
+        Default::default(),
+    )) {
+        Ok(_) => panic!("raw full-row input must not bless an inherited descriptor"),
+        Err(error) => error,
+    };
+    assert!(
+        error.message.contains("unverified large-value descriptor"),
+        "unexpected descriptor rejection: {error:?}"
+    );
+}
+
+#[test]
 fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let chunks = std::rc::Rc::new(groove::chunks::MemoryChunkStorage::new());
