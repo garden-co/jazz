@@ -4,6 +4,7 @@ export const LOCAL_DEFAULTS = Object.freeze({
   serverUrl: "http://127.0.0.1:4200",
 });
 
+/** @param {Record<string, string | undefined>} env */
 export function readBuildConfig(env = process.env) {
   return {
     origin: env.NEXT_PUBLIC_APP_ORIGIN ?? LOCAL_DEFAULTS.origin,
@@ -14,6 +15,7 @@ export function readBuildConfig(env = process.env) {
   };
 }
 
+/** @param {ReturnType<typeof readBuildConfig>} config */
 export function usesLocalDefaults(config = readBuildConfig()) {
   return (
     config.origin === LOCAL_DEFAULTS.origin &&
@@ -23,6 +25,7 @@ export function usesLocalDefaults(config = readBuildConfig()) {
 }
 
 /** Reject partial/nonlocal configurations before Next evaluates any route. */
+/** @param {ReturnType<typeof readBuildConfig>} config */
 export function assertBuildConfiguration(config = readBuildConfig()) {
   if (usesLocalDefaults(config)) return config;
   const missing = [
