@@ -726,9 +726,8 @@ describe("shared example topology harness", () => {
         error.receipt.cleanup?.status === "failed" &&
         (error.receipt.cleanup.error?.includes("cleanup timed out") ?? false),
     );
-    // This planted cleanup resolves synchronously when it observes abort. The
-    // timeout must still win the race, and no delayed mutation may remain.
     expect(cleanupAborted).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 40));
     expect(postTimeoutEffect).toBe(false);
   });
 
