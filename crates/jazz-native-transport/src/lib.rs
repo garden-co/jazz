@@ -12,7 +12,7 @@ use jazz::wire::{
     decode_frame, encode_frame, negotiate_wire,
 };
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use tokio::sync::{Notify, Semaphore, mpsc};
+use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
@@ -20,7 +20,8 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use jazz::tools::AppId;
 use jazz::tools::native_transport_connector::{
     ConnectedNativeTransport, NativeCatalogueBootstrapFuture, NativeTransportConnector,
-    NativeTransportFuture, NativeTransportRequest,
+    NativeTransportError, NativeTransportFuture, NativeTransportRequest, NativeTransportTerminal,
+    NativeTransportTerminalFuture,
 };
 use jazz::tools::websocket_prelude_auth::AuthConfig;
 
@@ -88,6 +89,7 @@ pub struct WebSocketTransport {
     inbound_notify: Arc<Notify>,
     outbound: BoundedOutbound,
     task: tokio::task::JoinHandle<()>,
+    terminal: Option<oneshot::Receiver<NativeTransportTerminal>>,
     protocol_version: u16,
     features: u64,
     session_context: Option<ConnectionSessionContext>,
@@ -111,7 +113,7 @@ impl NativeTransportConnector for NativeWebSocketConnector {
 
     fn connect(&self, request: NativeTransportRequest) -> NativeTransportFuture {
         Box::pin(async move {
-            let transport = WebSocketTransport::connect_with_wake(
+            let mut transport = WebSocketTransport::connect_with_wake(
                 request.server_url,
                 request.app_id,
                 request.peer_identity,
@@ -124,11 +126,13 @@ impl NativeTransportConnector for NativeWebSocketConnector {
             })?;
             let (protocol_version, features, session_context) =
                 transport.negotiated_transport_metadata();
+            let terminal = transport.take_terminal_future();
             Ok(ConnectedNativeTransport {
                 transport: Box::new(transport),
                 protocol_version,
                 features,
                 session_context,
+                terminal,
             })
         })
     }
@@ -441,17 +445,24 @@ impl WebSocketTransport {
         let inbound_notify = Arc::new(Notify::new());
         let inbound_budget = Arc::new(Semaphore::new(WS_CLIENT_MAX_QUEUED_BYTES));
         let (outbound, outbound_rx, outbound_backpressured) = BoundedOutbound::channel();
-        let task = tokio::spawn(run_ws_pump(
-            ws,
-            inbound_tx,
-            inbound_budget,
-            Arc::clone(&inbound_error),
-            Arc::clone(&inbound_notify),
-            outbound_rx,
-            outbound_backpressured,
-            Arc::clone(&wake),
-            bootstrap_catalogue,
-        ));
+        let (terminal_tx, terminal) = oneshot::channel();
+        let pump_inbound_error = Arc::clone(&inbound_error);
+        let pump_inbound_notify = Arc::clone(&inbound_notify);
+        let task = tokio::spawn(async move {
+            let terminal = run_ws_pump(
+                ws,
+                inbound_tx,
+                inbound_budget,
+                pump_inbound_error,
+                pump_inbound_notify,
+                outbound_rx,
+                outbound_backpressured,
+                wake,
+                bootstrap_catalogue,
+            )
+            .await;
+            let _ = terminal_tx.send(terminal);
+        });
 
         Ok(Self {
             inbound,
@@ -459,6 +470,7 @@ impl WebSocketTransport {
             inbound_notify,
             outbound,
             task,
+            terminal: Some(terminal),
             protocol_version: negotiated.protocol_version,
             features: negotiated.features,
             session_context,
@@ -468,6 +480,20 @@ impl WebSocketTransport {
     /// Negotiated metadata authenticated during the websocket handshake.
     pub fn negotiated_transport_metadata(&self) -> (u16, u64, Option<ConnectionSessionContext>) {
         (self.protocol_version, self.features, self.session_context)
+    }
+
+    fn take_terminal_future(&mut self) -> NativeTransportTerminalFuture {
+        let terminal = self
+            .terminal
+            .take()
+            .expect("native transport terminal future is taken exactly once");
+        Box::pin(async move {
+            terminal.await.unwrap_or_else(|_| {
+                NativeTransportTerminal::Failed(NativeTransportError(
+                    "websocket pump stopped without a terminal reason".to_owned(),
+                ))
+            })
+        })
     }
 }
 
@@ -644,100 +670,144 @@ async fn run_ws_pump(
     outbound_backpressured: Arc<AtomicBool>,
     wake: Arc<dyn Fn() + Send + Sync>,
     bootstrap_catalogue: bool,
-) {
-    async {
-      loop {
-        tokio::select! {
-            maybe_frame = outbound.recv() => {
-                let Some(first_frame) = maybe_frame else {
-                    let _ = ws.close(None).await;
-                    return;
-                };
-                let mut batch = vec![first_frame];
-                let mut batch_bytes = POSTCARD_BATCH_LENGTH_RESERVE
-                    + batch[0].bytes.len()
-                    + POSTCARD_FRAME_LENGTH_RESERVE;
-                while let Ok(frame) = outbound.try_recv() {
-                    let frame_bytes = frame.bytes.len() + POSTCARD_FRAME_LENGTH_RESERVE;
-                    if batch.len() >= MAX_WIRE_BATCH_FRAMES
-                        || batch_bytes.saturating_add(frame_bytes) > WS_CLIENT_OUTBOUND_BATCH_BYTES
-                    {
-                        let Ok(bytes) = postcard::to_allocvec(&OutboundBatch(&batch)) else {
-                            return;
-                        };
-                        if ws.send(Message::Binary(bytes.into())).await.is_err() {
-                            return;
-                        }
-                        batch.clear();
-                        if outbound_backpressured.swap(false, Ordering::AcqRel) {
-                            wake();
-                        }
-                        batch_bytes = POSTCARD_BATCH_LENGTH_RESERVE;
-                    }
-                    batch_bytes = batch_bytes.saturating_add(frame_bytes);
-                    batch.push(frame);
-                }
-                let Ok(bytes) = postcard::to_allocvec(&OutboundBatch(&batch)) else {
-                    return;
-                };
-                if ws.send(Message::Binary(bytes.into())).await.is_err() {
-                    return;
-                }
-                drop(batch);
-                if outbound_backpressured.swap(false, Ordering::AcqRel) {
-                    wake();
-                }
-            }
-            message = ws.next() => {
-                let bytes = match message {
-                    Some(Ok(Message::Binary(bytes))) => bytes,
-                    Some(Ok(_)) => {
-                        fail_inbound(&inbound_error, &inbound_notify, "websocket peer sent a non-binary wire batch");
+) -> NativeTransportTerminal {
+    let terminal = async {
+        loop {
+            tokio::select! {
+                maybe_frame = outbound.recv() => {
+                    let Some(first_frame) = maybe_frame else {
                         let _ = ws.close(None).await;
-                        return;
-                    }
-                    Some(Err(error)) => {
-                        fail_inbound(&inbound_error, &inbound_notify, format!("websocket receive failed: {error}"));
-                        return;
-                    }
-                    None => {
-                        fail_inbound(&inbound_error, &inbound_notify, "websocket peer closed before completing wire exchange");
-                        return;
-                    }
-                };
-                let frames = match decode_inbound_batch(&bytes, bootstrap_catalogue) {
-                    Ok(frames) => frames,
-                    Err(error) => {
-                        fail_inbound(&inbound_error, &inbound_notify, error);
-                        let _ = ws.close(None).await;
-                        return;
-                    }
-                };
-                for frame in frames {
-                    if let Err(error) = validate_wire_frame_len(frame.len()) {
-                        fail_inbound(&inbound_error, &inbound_notify, error);
-                        let _ = ws.close(None).await;
-                        return;
-                    }
-                    let permits = u32::try_from(frame.len()).expect("wire frame limit fits u32");
-                    let Ok(budget) = Arc::clone(&inbound_budget).acquire_many_owned(permits).await else {
-                        return;
+                        return NativeTransportTerminal::Closed(
+                            "websocket transport owner closed".to_owned(),
+                        );
                     };
-                    if inbound.send(InboundFrame { bytes: frame, _budget: budget }).await.is_err() {
-                        return;
+                    let mut batch = vec![first_frame];
+                    let mut batch_bytes = POSTCARD_BATCH_LENGTH_RESERVE
+                        + batch[0].bytes.len()
+                        + POSTCARD_FRAME_LENGTH_RESERVE;
+                    while let Ok(frame) = outbound.try_recv() {
+                        let frame_bytes = frame.bytes.len() + POSTCARD_FRAME_LENGTH_RESERVE;
+                        if batch.len() >= MAX_WIRE_BATCH_FRAMES
+                            || batch_bytes.saturating_add(frame_bytes)
+                                > WS_CLIENT_OUTBOUND_BATCH_BYTES
+                        {
+                            let bytes = match postcard::to_allocvec(&OutboundBatch(&batch)) {
+                                Ok(bytes) => bytes,
+                                Err(error) => {
+                                    return NativeTransportTerminal::Failed(NativeTransportError(
+                                        format!(
+                                            "failed to encode websocket wire batch: {error}"
+                                        ),
+                                    ));
+                                }
+                            };
+                            if let Err(error) = ws.send(Message::Binary(bytes.into())).await {
+                                return NativeTransportTerminal::Failed(NativeTransportError(
+                                    format!("websocket send failed: {error}"),
+                                ));
+                            }
+                            batch.clear();
+                            if outbound_backpressured.swap(false, Ordering::AcqRel) {
+                                wake();
+                            }
+                            batch_bytes = POSTCARD_BATCH_LENGTH_RESERVE;
+                        }
+                        batch_bytes = batch_bytes.saturating_add(frame_bytes);
+                        batch.push(frame);
                     }
-                    // A maximum logical message can exceed the bounded
-                    // channel. Wake on every frame so its consumer drains
-                    // before the producer blocks on a later fragment.
-                    inbound_notify.notify_one();
-                    wake();
+                    let bytes = match postcard::to_allocvec(&OutboundBatch(&batch)) {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            return NativeTransportTerminal::Failed(NativeTransportError(format!(
+                                "failed to encode websocket wire batch: {error}"
+                            )));
+                        }
+                    };
+                    if let Err(error) = ws.send(Message::Binary(bytes.into())).await {
+                        return NativeTransportTerminal::Failed(NativeTransportError(format!(
+                            "websocket send failed: {error}"
+                        )));
+                    }
+                    drop(batch);
+                    if outbound_backpressured.swap(false, Ordering::AcqRel) {
+                        wake();
+                    }
+                }
+                message = ws.next() => {
+                    let bytes = match message {
+                        Some(Ok(Message::Binary(bytes))) => bytes,
+                        Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+                        Some(Ok(Message::Close(frame))) => {
+                            let reason = format!("websocket peer closed: {frame:?}");
+                            fail_inbound(&inbound_error, &inbound_notify, &reason);
+                            return NativeTransportTerminal::Closed(reason);
+                        }
+                        Some(Ok(_)) => {
+                            let reason = "websocket peer sent a non-binary wire batch".to_owned();
+                            fail_inbound(&inbound_error, &inbound_notify, &reason);
+                            let _ = ws.close(None).await;
+                            return NativeTransportTerminal::Failed(NativeTransportError(reason));
+                        }
+                        Some(Err(error)) => {
+                            let reason = format!("websocket receive failed: {error}");
+                            fail_inbound(&inbound_error, &inbound_notify, &reason);
+                            return NativeTransportTerminal::Failed(NativeTransportError(reason));
+                        }
+                        None => {
+                            let reason = "websocket peer closed before completing wire exchange"
+                                .to_owned();
+                            fail_inbound(&inbound_error, &inbound_notify, &reason);
+                            return NativeTransportTerminal::Closed(reason);
+                        }
+                    };
+                    let frames = match decode_inbound_batch(&bytes, bootstrap_catalogue) {
+                        Ok(frames) => frames,
+                        Err(error) => {
+                            fail_inbound(&inbound_error, &inbound_notify, &error);
+                            let _ = ws.close(None).await;
+                            return NativeTransportTerminal::Failed(NativeTransportError(error));
+                        }
+                    };
+                    for frame in frames {
+                        if let Err(error) = validate_wire_frame_len(frame.len()) {
+                            fail_inbound(&inbound_error, &inbound_notify, &error);
+                            let _ = ws.close(None).await;
+                            return NativeTransportTerminal::Failed(NativeTransportError(error));
+                        }
+                        let permits =
+                            u32::try_from(frame.len()).expect("wire frame limit fits u32");
+                        let Ok(budget) =
+                            Arc::clone(&inbound_budget).acquire_many_owned(permits).await
+                        else {
+                            return NativeTransportTerminal::Closed(
+                                "websocket transport owner closed".to_owned(),
+                            );
+                        };
+                        if inbound
+                            .send(InboundFrame {
+                                bytes: frame,
+                                _budget: budget,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return NativeTransportTerminal::Closed(
+                                "websocket transport owner closed".to_owned(),
+                            );
+                        }
+                        // A maximum logical message can exceed the bounded
+                        // channel. Wake on every frame so its consumer drains
+                        // before the producer blocks on a later fragment.
+                        inbound_notify.notify_one();
+                        wake();
+                    }
                 }
             }
         }
-      }
     }
     .await;
     finish_outbound_pump(outbound, &outbound_backpressured, wake.as_ref());
+    terminal
 }
 
 fn decode_inbound_batch(bytes: &[u8], bootstrap_catalogue: bool) -> Result<Vec<Vec<u8>>, String> {
@@ -920,6 +990,7 @@ mod tests {
             inbound_notify: Arc::new(Notify::new()),
             outbound,
             task,
+            terminal: None,
             protocol_version: WIRE_PROTOCOL_VERSION,
             features: FEATURE_SYNC_MESSAGE_PAYLOAD,
             session_context: None,

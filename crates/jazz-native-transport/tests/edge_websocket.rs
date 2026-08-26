@@ -7,6 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use jazz::tools::AppId;
+use jazz::tools::native_transport_connector::{
+    NativeTransportConnector as _, NativeTransportRequest, NativeTransportTerminal,
+};
 use jazz::tools::{AppContext, ClientStorage, JazzClient};
 use jazz::wire::WireTransport as _;
 use jazz_native_transport::{NativeWebSocketConnector, WebSocketClientError, WebSocketTransport};
@@ -96,6 +99,50 @@ async fn core_websocket_transport_helper_negotiates_route_hello() {
     .expect("native transport negotiates public route");
     let (_, _, session) = client.negotiated_transport_metadata();
     assert!(session.is_some(), "admitted hello carries session context");
+    task.abort();
+}
+
+/// The native adapter's terminal future observes an otherwise-idle socket; no
+/// semantic frame or outbound retry is needed to discover the peer close.
+#[tokio::test]
+async fn connected_native_transport_reports_idle_websocket_closure() {
+    let app_id = AppId::from_name("adapter-idle-close-terminal");
+    let built = ServerBuilder::new(app_id)
+        .with_schema(schema())
+        .with_auth_config(auth("secret"))
+        .with_storage(StorageBackend::InMemory)
+        .build()
+        .await
+        .expect("build core");
+    let (url, state, task) = serve_built(built).await;
+    let connected = NativeWebSocketConnector
+        .connect(NativeTransportRequest {
+            server_url: url,
+            app_id,
+            peer_identity: jazz::ids::AuthorSubject::SYSTEM,
+            auth: transport_auth("secret"),
+            wake: Arc::new(|| {}),
+        })
+        .await
+        .expect("connect idle native transport");
+    let _transport = connected.transport;
+    let terminal = connected.terminal;
+
+    state.shutdown.request_shutdown();
+    let shutdown_state = Arc::clone(&state);
+    let shutdown = tokio::spawn(async move { shutdown_state.run_shutdown_finalization().await });
+    let reason = tokio::time::timeout(Duration::from_secs(3), terminal)
+        .await
+        .expect("idle websocket closure resolves terminal future");
+    let diagnosis = match reason {
+        NativeTransportTerminal::Closed(message) => message,
+        NativeTransportTerminal::Failed(error) => error.0,
+    };
+    assert!(
+        !diagnosis.trim().is_empty(),
+        "idle websocket closure returns a terminal diagnosis"
+    );
+    shutdown.await.expect("shutdown task");
     task.abort();
 }
 
