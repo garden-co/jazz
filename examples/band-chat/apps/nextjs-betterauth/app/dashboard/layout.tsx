@@ -9,6 +9,10 @@ export default async function DashboardLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   const session = await auth.api.getSession({ headers: await headers() });
   if (!session) redirect("/");
-  await ensureProfile(session.user.id, session.user.name);
+  await ensureProfile(
+    process.env.NEXT_PUBLIC_APP_ORIGIN ?? "http://127.0.0.1:3000",
+    session.user.id,
+    session.user.name,
+  );
   return <JazzProvider>{children}</JazzProvider>;
 }

@@ -16,9 +16,11 @@ product slice, not another generic Todo tutorial.
 - A room creator may bootstrap their own membership and admit another profile.
   The room UI lists members and lets its issuer-scoped creator admit or remove
   them. A guest cannot add themself. A message must reference a profile owned by
-  the authenticated raw Better Auth user id, while Jazz records row provenance
-  from the issuer-scoped `session.author`. Revocation rejects subsequent writes
-  at the serving authority; it does not erase rows already retained locally.
+  the authenticated canonical `session.author`. Profiles and memberships store
+  that same `[issuer, subject]` identity, so equal raw Better Auth user ids from
+  different issuers cannot inherit one another's profile, rooms, membership, or
+  send authority. Revocation rejects subsequent writes at the serving authority;
+  it does not erase rows already retained locally.
 - The attachment picker accepts inline PNG, JPEG, WebP, text, and PDF files up
   to 256 KiB. This is client-side UX validation only, not a Jazz authorization,
   security, or storage limit: `s.bytes()` has no size constraint, so an actor

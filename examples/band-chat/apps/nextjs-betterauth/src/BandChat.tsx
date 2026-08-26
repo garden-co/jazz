@@ -4,6 +4,7 @@ import { useState, type FormEvent } from "react";
 import type { DbConfig } from "jazz-tools";
 import { JazzProvider, useAll, useDb, useSession } from "jazz-tools/react";
 import { app } from "../schema";
+import { authorForSession } from "./lib/identity";
 
 // This only bounds files selected through this component. `s.bytes()` has no
 // corresponding schema or policy size constraint, so it must not be treated as
@@ -21,10 +22,7 @@ const allowedAttachmentTypes = new Set([
 export function BandChat() {
   const session = useSession();
   return session?.user_id ? (
-    <RoomWorkspace
-      author={JSON.stringify([session.issuer, session.user_id])}
-      userId={session.user_id}
-    />
+    <RoomWorkspace author={authorForSession(session.issuer, session.user_id)} />
   ) : (
     <p>Loading identity…</p>
   );
@@ -39,10 +37,10 @@ export function BandChatPreview({ config }: { config: DbConfig }) {
   );
 }
 
-function RoomWorkspace({ author, userId }: { author: string; userId: string }) {
+function RoomWorkspace({ author }: { author: string }) {
   const db = useDb();
   const { data: rooms = [] } = useAll(app.rooms.select("*", "$createdBy").orderBy("name", "asc"));
-  const { data: profiles = [] } = useAll(app.profiles.where({ userId }));
+  const { data: profiles = [] } = useAll(app.profiles.where({ author }));
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
   const [newRoomName, setNewRoomName] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -60,12 +58,12 @@ function RoomWorkspace({ author, userId }: { author: string; userId: string }) {
         profiles[0] ??
         (
           await db.insert(app.profiles, {
-            userId,
+            author,
             displayName: "Band member",
           })
         ).value;
       const room = (await db.insert(app.rooms, { name })).value;
-      await db.insert(app.roomMembers, { roomId: room.id, userId });
+      await db.insert(app.roomMembers, { roomId: room.id, memberAuthor: author });
       // Keep the returned profile live so the write order is clear to readers.
       void profile;
       setSelectedRoomId(room.id);
@@ -110,7 +108,7 @@ function RoomWorkspace({ author, userId }: { author: string; userId: string }) {
           <Conversation
             canEditMembership={selectedRoom.$createdBy === author}
             roomId={selectedRoom.id}
-            userId={userId}
+            author={author}
           />
         ) : (
           <section className="empty">
@@ -129,17 +127,17 @@ function RoomWorkspace({ author, userId }: { author: string; userId: string }) {
 function Conversation({
   canEditMembership,
   roomId,
-  userId,
+  author,
 }: {
   canEditMembership: boolean;
   roomId: string;
-  userId: string;
+  author: string;
 }) {
   const { data: rooms = [] } = useAll(app.rooms.where({ id: roomId }));
   const { data: messages = [] } = useAll(
     app.messages.where({ roomId }).select("*", "$createdAt").orderBy("$createdAt", "asc"),
   );
-  const { data: profiles = [] } = useAll(app.profiles.where({ userId }));
+  const { data: profiles = [] } = useAll(app.profiles.where({ author }));
   const room = rooms[0];
   if (!room) return <p>Loading room…</p>;
 
@@ -168,18 +166,18 @@ function Conversation({
 function MembershipEditor({ roomId }: { roomId: string }) {
   const db = useDb();
   const { data: memberships = [] } = useAll(app.roomMembers.where({ roomId }));
-  const { data: profiles = [] } = useAll(app.profiles);
-  const [userId, setUserId] = useState("");
+  const [memberAuthor, setMemberAuthor] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   async function invite(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const invitedUserId = userId.trim();
-    if (!invitedUserId || memberships.some((member) => member.userId === invitedUserId)) return;
+    const invitedAuthor = memberAuthor.trim();
+    if (!invitedAuthor || memberships.some((member) => member.memberAuthor === invitedAuthor))
+      return;
     setError(null);
     try {
-      await db.insert(app.roomMembers, { roomId, userId: invitedUserId });
-      setUserId("");
+      await db.insert(app.roomMembers, { roomId, memberAuthor: invitedAuthor });
+      setMemberAuthor("");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -198,37 +196,26 @@ function MembershipEditor({ roomId }: { roomId: string }) {
     <section aria-label="Room membership">
       <h3>Members</h3>
       <ul>
-        {memberships.map((membership) => {
-          const profile = profiles.find((candidate) => candidate.userId === membership.userId);
-          return (
-            <li key={membership.id}>
-              <span>
-                {profile?.displayName ?? "Unknown profile"} <small>{membership.userId}</small>
-              </span>
-              <button onClick={() => void remove(membership.id)} type="button">
-                Remove
-              </button>
-            </li>
-          );
-        })}
+        {memberships.map((membership) => (
+          <li key={membership.id}>
+            <span>
+              <small>{membership.memberAuthor}</small>
+            </span>
+            <button onClick={() => void remove(membership.id)} type="button">
+              Remove
+            </button>
+          </li>
+        ))}
       </ul>
       <form onSubmit={(event) => void invite(event)}>
         <label>
-          Invite user ID
+          Invite canonical author
           <input
-            aria-label="Invite user ID"
-            list="band-chat-profiles"
-            onChange={(event) => setUserId(event.target.value)}
-            value={userId}
+            aria-label="Invite canonical author"
+            onChange={(event) => setMemberAuthor(event.target.value)}
+            value={memberAuthor}
           />
         </label>
-        <datalist id="band-chat-profiles">
-          {profiles.map((profile) => (
-            <option key={profile.id} value={profile.userId}>
-              {profile.displayName}
-            </option>
-          ))}
-        </datalist>
         <button type="submit">Invite member</button>
       </form>
       {error ? <p role="alert">{error}</p> : null}

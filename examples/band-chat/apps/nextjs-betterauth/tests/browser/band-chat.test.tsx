@@ -62,10 +62,14 @@ it("renders the serving-authority owner, guest-message, and removal flow", async
   });
   const ownerUserId = "browser-owner";
   const guestUserId = "browser-guest";
+  const ownerToken = await getJazzServerJwtForUser(ownerUserId, undefined, server.appId);
+  const guestToken = await getJazzServerJwtForUser(guestUserId, undefined, server.appId);
+  const guestTokenClaims = JSON.parse(atob(guestToken.split(".")[1]!)) as { iss: string };
+  const guestAuthor = JSON.stringify([guestTokenClaims.iss, guestUserId]);
   const owner = await mount({
     appId: server.appId,
     driver: { type: "persistent", dbName: `band-chat-owner-${crypto.randomUUID()}` },
-    jwtToken: await getJazzServerJwtForUser(ownerUserId, undefined, server.appId),
+    jwtToken: ownerToken,
     serverUrl: server.serverUrl,
   });
   await createRoom(owner, "Owner room");
@@ -73,20 +77,22 @@ it("renders the serving-authority owner, guest-message, and removal flow", async
   const guest = await mount({
     appId: server.appId,
     driver: { type: "persistent", dbName: `band-chat-guest-${crypto.randomUUID()}` },
-    jwtToken: await getJazzServerJwtForUser(guestUserId, undefined, server.appId),
+    jwtToken: guestToken,
     serverUrl: server.serverUrl,
   });
   await createRoom(guest, "Guest profile bootstrap");
 
-  const invitee = owner.querySelector<HTMLInputElement>("input[aria-label='Invite user ID']")!;
-  await setInputValue(invitee, guestUserId);
+  const invitee = owner.querySelector<HTMLInputElement>(
+    "input[aria-label='Invite canonical author']",
+  )!;
+  await setInputValue(invitee, guestAuthor);
   await act(async () =>
     invitee
       .closest("form")!
       .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
   );
   await waitFor(
-    () => owner.textContent?.includes(guestUserId) ?? false,
+    () => owner.textContent?.includes(guestAuthor) ?? false,
     "owner should render the invited guest",
     15_000,
   );
@@ -116,11 +122,11 @@ it("renders the serving-authority owner, guest-message, and removal flow", async
   );
 
   const guestMembership = [...owner.querySelectorAll("li")].find((row) =>
-    row.textContent?.includes(guestUserId),
+    row.textContent?.includes(guestAuthor),
   )!;
   await act(async () => guestMembership.querySelector<HTMLButtonElement>("button")!.click());
   await waitFor(
-    () => !owner.textContent?.includes(guestUserId),
+    () => !owner.textContent?.includes(guestAuthor),
     "owner should render the guest removal",
     15_000,
   );
@@ -168,10 +174,13 @@ it("creates a local room, sends a message, and applies client-side picker valida
     "room should be visible",
   );
 
-  const invitee = element.querySelector<HTMLInputElement>("input[aria-label='Invite user ID']")!;
+  const invitee = element.querySelector<HTMLInputElement>(
+    "input[aria-label='Invite canonical author']",
+  )!;
+  const guestAuthor = JSON.stringify(["https://guest.example", "guest-user"]);
   Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!.call(
     invitee,
-    "guest-user",
+    guestAuthor,
   );
   await act(async () => {
     invitee.dispatchEvent(new Event("input", { bubbles: true }));
@@ -180,15 +189,15 @@ it("creates a local room, sends a message, and applies client-side picker valida
       .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
   });
   await waitFor(
-    () => element.textContent?.includes("guest-user") ?? false,
+    () => element.textContent?.includes(guestAuthor) ?? false,
     "invited member should be visible",
   );
   const guestMembership = [...element.querySelectorAll("li")].find((row) =>
-    row.textContent?.includes("guest-user"),
+    row.textContent?.includes(guestAuthor),
   )!;
   await act(async () => guestMembership.querySelector<HTMLButtonElement>("button")!.click());
   await waitFor(
-    () => !element.textContent?.includes("guest-user"),
+    () => !element.textContent?.includes(guestAuthor),
     "removed member should disappear",
   );
 

@@ -1,4 +1,5 @@
 import { defineConfig } from "vitest/config";
+import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import { playwright } from "@vitest/browser-playwright";
 import topLevelAwait from "vite-plugin-top-level-await";
@@ -11,6 +12,11 @@ import {
 } from "../../../../packages/jazz-tools/tests/browser/testing-server-node.js";
 
 export default defineConfig({
+  resolve: { alias: { "@": fileURLToPath(new URL(".", import.meta.url)) } },
+  define: {
+    "process.env.NEXT_PUBLIC_JAZZ_APP_ID": JSON.stringify("band-chat-browser-tests"),
+    "process.env.NEXT_PUBLIC_JAZZ_SERVER_URL": JSON.stringify("ws://band-chat.test"),
+  },
   plugins: [wasm(), topLevelAwait(), react()],
   worker: { plugins: () => [wasm(), topLevelAwait()] },
   test: {

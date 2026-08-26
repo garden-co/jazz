@@ -1,8 +1,13 @@
+import { jwtClient } from "better-auth/client/plugins";
 import { createAuthClient } from "better-auth/react";
 
-export const authClient = createAuthClient();
+export const authClient = createAuthClient({ plugins: [jwtClient()] });
 
 export async function getJwtFromBetterAuth(): Promise<string | null> {
-  const { data, error } = await authClient.$fetch<{ token: string }>("/token", { method: "GET" });
-  return error ? null : (data?.token ?? null);
+  try {
+    const { data, error } = await authClient.token();
+    return error ? null : (data?.token ?? null);
+  } catch {
+    return null;
+  }
 }
