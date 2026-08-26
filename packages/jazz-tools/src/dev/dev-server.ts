@@ -1,4 +1,3 @@
-import { createServer as createNetServer } from "node:net";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -8,18 +7,6 @@ import { JazzServer } from "jazz-napi";
 export { deploy, type DeployOptions } from "./catalogue.js";
 
 const DEFAULT_APP_ID = "00000000-0000-0000-0000-000000000001";
-// The 20000-40000 space is partitioned by process id: vitest runs test files
-// in separate worker processes whose module-global allocation state cannot
-// coordinate, and a shared range let one worker steal a port another worker's
-// reopen test had briefly released (the napi.integration reopen flakes).
-const AUTO_PORT_SLOTS = 64;
-const AUTO_PORT_SLOT = process.pid % AUTO_PORT_SLOTS;
-const AUTO_PORT_RANGE = Math.floor(20_000 / AUTO_PORT_SLOTS);
-const AUTO_PORT_MIN = 20_000 + AUTO_PORT_SLOT * AUTO_PORT_RANGE;
-
-const autoAllocatedPorts = new Set<number>();
-
-let nextAutoPort = AUTO_PORT_MIN + Math.floor(Math.random() * AUTO_PORT_RANGE);
 
 export interface StartLocalJazzServerOptions {
   appId?: string;
@@ -46,38 +33,6 @@ export interface LocalJazzServerHandle {
   stop: () => Promise<void>;
 }
 
-async function canBindPort(port: number): Promise<boolean> {
-  return await new Promise<boolean>((resolve) => {
-    const server = createNetServer();
-    server.once("error", () => {
-      resolve(false);
-    });
-    server.listen(port, "127.0.0.1", () => {
-      server.close((error) => {
-        void error;
-        resolve(true);
-      });
-    });
-  });
-}
-
-async function allocateAutoPort(): Promise<number> {
-  for (let attempts = 0; attempts < AUTO_PORT_RANGE; attempts += 1) {
-    const candidate = nextAutoPort;
-    nextAutoPort = AUTO_PORT_MIN + ((nextAutoPort - AUTO_PORT_MIN + 1) % AUTO_PORT_RANGE);
-    if (autoAllocatedPorts.has(candidate)) {
-      continue;
-    }
-    if (!(await canBindPort(candidate))) {
-      continue;
-    }
-    autoAllocatedPorts.add(candidate);
-    return candidate;
-  }
-
-  throw new Error("Failed to allocate a local Jazz server port.");
-}
-
 async function createOwnedDataDir(): Promise<string> {
   return await mkdtemp(join(tmpdir(), "jazz-dev-server-"));
 }
@@ -99,8 +54,10 @@ export async function startLocalJazzServer(
   options: StartLocalJazzServerOptions = {},
 ): Promise<LocalJazzServerHandle> {
   const appId = options.appId ?? DEFAULT_APP_ID;
-  const port = options.port ?? (await allocateAutoPort());
-  const ownsPort = options.port === undefined;
+  // Ask the server to bind port 0 when callers do not require a particular
+  // address. Unlike probing a candidate port first, this is atomic and remains
+  // safe across Vitest worker processes (and separate concurrent CI jobs).
+  const port = options.port ?? 0;
   const ownsDataDir = options.inMemory !== true && options.dataDir === undefined;
   const dataDir = ownsDataDir ? await createOwnedDataDir() : options.dataDir;
   const adminSecret = options.adminSecret ?? `jazz-test-admin-${randomUUID().slice(0, 8)}`;
@@ -122,9 +79,6 @@ export async function startLocalJazzServer(
       schema: options.schema ? [...options.schema] : undefined,
     });
   } catch (error) {
-    if (ownsPort) {
-      autoAllocatedPorts.delete(port);
-    }
     if (ownsDataDir && dataDir) {
       await rm(dataDir, { recursive: true, force: true }).catch(() => undefined);
     }
@@ -145,9 +99,6 @@ export async function startLocalJazzServer(
       try {
         await server.stop();
       } finally {
-        if (ownsPort) {
-          autoAllocatedPorts.delete(port);
-        }
         if (ownsDataDir && dataDir) {
           await rm(dataDir, { recursive: true, force: true }).catch(() => undefined);
         }

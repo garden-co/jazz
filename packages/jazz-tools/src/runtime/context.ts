@@ -23,11 +23,24 @@ export interface RuntimeSourcesConfig {
   /** Explicit URL for the browser broker SharedWorker entry script. Overrides `baseUrl`. */
   brokerWorkerUrl?: string;
 
+  /**
+   * Immutable version for browser runtime URL overrides.
+   *
+   * When browser worker assets are configured with `baseUrl`, `wasmUrl`, or
+   * `brokerWorkerUrl`, this value is added to their URLs and must change with
+   * the deployed WASM/worker build. This prevents a long-lived SharedWorker
+   * from silently reusing bytes from an older deployment at the same URL.
+   */
+  wasmVersion?: string;
+
   /** Explicit in-memory WASM source bytes. Overrides URL-based resolution. */
   wasmSource?: BufferSource;
 
   /** Explicit compiled WASM module. Highest-precedence bootstrap input. */
   wasmModule?: WebAssembly.Module;
+
+  /** @internal Stable identity for an in-memory WASM input sent to a worker. */
+  workerWasmAssetIdentity?: string;
 
   /** @internal Pre-attached worker peer used by the same-origin inspector. */
   browserWorkerPort?: MessagePort;

@@ -718,6 +718,45 @@ impl WasmDbInner {
         ))
     }
 
+    async fn all_async(
+        &self,
+        query: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<Vec<jazz::node::CurrentRow>, jazz::db::Error> {
+        match self {
+            Self::Memory(db) => db.all(query, opts).await,
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => db.all(query, opts).await,
+            Self::Closed => panic!("WasmDb is closed"),
+        }
+    }
+
+    async fn all_for_identity_async(
+        &self,
+        query: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorSubject,
+    ) -> Result<Vec<jazz::node::CurrentRow>, jazz::db::Error> {
+        match self {
+            Self::Memory(db) => db.all_for_identity(query, opts, author).await,
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => db.all_for_identity(query, opts, author).await,
+            Self::Closed => panic!("WasmDb is closed"),
+        }
+    }
+
+    async fn hydrate_rows_for_binding(
+        &self,
+        rows: &mut [jazz::node::CurrentRow],
+    ) -> Result<(), jazz::db::Error> {
+        match self {
+            Self::Memory(db) => db.hydrate_rows_for_binding(rows).await,
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => db.hydrate_rows_for_binding(rows).await,
+            Self::Closed => panic!("WasmDb is closed"),
+        }
+    }
+
     fn begin_exclusive(
         &self,
         id: OpenTransactionId,
@@ -1309,6 +1348,28 @@ impl WasmDb {
         encode_synchronous_rows(&rows)
     }
 
+    /// Asynchronous ordinary read. Unlike the legacy synchronous entry point,
+    /// this can suspend to hydrate indirect large values without blocking the
+    /// browser event loop that drives the owning peer transport.
+    #[wasm_bindgen(js_name = allAsync)]
+    pub fn all_async(
+        &self,
+        query: &WasmPreparedQuery,
+        opts: JsValue,
+    ) -> Result<js_sys::Promise, JsValue> {
+        let inner = self.inner.clone();
+        let query = query.inner.clone();
+        let opts = read_opts_from_js(opts)?;
+        Ok(future_to_promise(async move {
+            let mut rows = inner.all_async(&query, opts).await.map_err(to_js_error)?;
+            inner
+                .hydrate_rows_for_binding(&mut rows)
+                .await
+                .map_err(to_js_error)?;
+            bytes_to_js(encode_rows(&rows).map_err(to_js_error)?)
+        }))
+    }
+
     #[wasm_bindgen(js_name = one)]
     pub fn one(&self, query: &WasmPreparedQuery, opts: JsValue) -> Result<Vec<u8>, JsValue> {
         let opts = read_opts_from_js(opts)?;
@@ -1409,6 +1470,31 @@ impl WasmDb {
             .all_for_identity(&query.inner, opts, author)
             .map_err(to_js_error)?;
         encode_synchronous_rows(&rows)
+    }
+
+    /// Identity-scoped asynchronous ordinary read; see [`Self::all_async`].
+    #[wasm_bindgen(js_name = allForIdentityAsync)]
+    pub fn all_for_identity_async(
+        &self,
+        query: &WasmPreparedQuery,
+        author: Vec<u8>,
+        opts: JsValue,
+    ) -> Result<js_sys::Promise, JsValue> {
+        let inner = self.inner.clone();
+        let query = query.inner.clone();
+        let author = author_id_from_bytes(&author)?;
+        let opts = read_opts_from_js(opts)?;
+        Ok(future_to_promise(async move {
+            let mut rows = inner
+                .all_for_identity_async(&query, opts, author)
+                .await
+                .map_err(to_js_error)?;
+            inner
+                .hydrate_rows_for_binding(&mut rows)
+                .await
+                .map_err(to_js_error)?;
+            bytes_to_js(encode_rows(&rows).map_err(to_js_error)?)
+        }))
     }
 
     #[wasm_bindgen(js_name = allRelationQuery)]
@@ -2292,6 +2378,55 @@ impl WasmTransport {
             pump.outbound_ready().await;
             Ok(JsValue::UNDEFINED)
         })
+    }
+
+    /// Drain this transport's bounded, redacted chunk-relay flight recorder.
+    /// This is intentionally diagnostics-only: capabilities and full content
+    /// hashes never cross the JS boundary.
+    #[wasm_bindgen(js_name = takeAuxiliaryTrace)]
+    pub fn take_auxiliary_trace(&self) -> js_sys::Array {
+        let entries = js_sys::Array::new();
+        for trace in self.auxiliary_pump.take_trace() {
+            let entry = js_sys::Object::new();
+            let set = |name: &str, value: JsValue| {
+                let _ = js_sys::Reflect::set(&entry, &JsValue::from_str(name), &value);
+            };
+            set("event", JsValue::from_str(trace.event));
+            set("role", JsValue::from_str(trace.role));
+            // IDs are opaque diagnostic correlation keys. Keep the full u64
+            // rather than lossy-converting it to a JavaScript number.
+            set(
+                "connection",
+                JsValue::from_str(&trace.connection.to_string()),
+            );
+            set(
+                "requestId",
+                JsValue::from_str(&trace.request_id.to_string()),
+            );
+            set(
+                "remainingHops",
+                JsValue::from_f64(trace.remaining_hops as f64),
+            );
+            set("objectHash", JsValue::from_str(&trace.object_hash));
+            set(
+                "locatorFingerprint",
+                JsValue::from_str(&trace.locator_fingerprint),
+            );
+            if let Some(response) = trace.response {
+                set("response", JsValue::from_str(response));
+            }
+            if let Some(storage_error) = trace.storage_error {
+                set("storageError", JsValue::from_str(storage_error));
+            }
+            entries.push(&entry);
+        }
+        entries
+    }
+
+    /// Enable this transport's bounded redacted auxiliary flight recorder.
+    #[wasm_bindgen(js_name = setAuxiliaryTraceEnabled)]
+    pub fn set_auxiliary_trace_enabled(&self, enabled: bool) {
+        self.auxiliary_pump.set_trace_enabled(enabled);
     }
 
     #[wasm_bindgen(js_name = sendWireFrame)]

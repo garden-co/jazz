@@ -801,6 +801,23 @@ where
     }
 
     #[cfg(feature = "testing")]
+    /// Test-only count of relay-owned upstream usage sites. This deliberately
+    /// counts wire owners rather than coverage evaluators, so reconnect tests
+    /// can prove a detached downstream session left no orphaned owner behind.
+    pub fn relay_upstream_subscription_owner_count_for_test(&self) -> usize {
+        self.node.relay_upstream_subscription_owners.borrow().len()
+    }
+
+    #[cfg(feature = "testing")]
+    /// Test-only count of relay-registered downstream wire usage sites.
+    pub fn relay_registered_query_binding_count_for_test(&self) -> usize {
+        self.node
+            .node
+            .borrow()
+            .registered_query_binding_count_for_test()
+    }
+
+    #[cfg(feature = "testing")]
     /// Test/bench-only maintained subscription sizing diagnostics used by
     /// warm-cache performance receipts.
     pub fn maintained_subscription_size_receipts_for_test(

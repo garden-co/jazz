@@ -271,19 +271,6 @@ export interface RenameTableFromOp<TOldName extends string = string> {
   oldName: TOldName;
 }
 
-export type MigrationOp = AddOp | DropOp | RenameOp;
-
-// Internal representation for a single-table migration
-export interface TableMigration {
-  table: string;
-  operations: MigrationOpEntry[];
-}
-
-export interface MigrationOpEntry {
-  column: string;
-  op: MigrationOp;
-}
-
 // Lens format for SQL generation
 export interface IntroduceLensOp {
   type: "introduce";

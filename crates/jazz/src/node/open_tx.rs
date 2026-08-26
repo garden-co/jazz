@@ -84,6 +84,39 @@ where
         }
     }
 
+    /// Return the policy identity bound to an open mergeable transaction.
+    pub(crate) fn mergeable_transaction_permission_subject(
+        &self,
+        id: OpenTransactionId,
+    ) -> Result<Option<AuthorSubject>, Error> {
+        match self.open_tx(id)?.kind {
+            OpenTransactionKind::Mergeable {
+                permission_subject, ..
+            } => Ok(permission_subject),
+            OpenTransactionKind::Exclusive { .. } => Err(Error::InvalidMergeableCommit(
+                "open transaction is not mergeable",
+            )),
+        }
+    }
+
+    /// Return the identity capability bound to an open exclusive transaction.
+    pub(crate) fn exclusive_transaction_bound_author(
+        &self,
+        id: OpenTransactionId,
+    ) -> Result<AuthorSubject, Error> {
+        match self.open_tx(id)?.kind {
+            OpenTransactionKind::Exclusive {
+                bound_author: Some(author),
+            } => Ok(author),
+            OpenTransactionKind::Exclusive { bound_author: None } => {
+                Ok(self.open_tx(id)?.provisional_author)
+            }
+            OpenTransactionKind::Mergeable { .. } => Err(Error::InvalidMergeableCommit(
+                "open transaction is not exclusive",
+            )),
+        }
+    }
+
     async fn open_transaction(
         &mut self,
         id: OpenTransactionId,
