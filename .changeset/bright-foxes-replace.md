@@ -2,4 +2,4 @@
 "jazz-tools": patch
 ---
 
-Replace React clients when their runtime factory identity changes.
+Preserve runtime factory and source identity when React providers choose a client, while keeping unchanged React Native provider rerenders on the current client.
