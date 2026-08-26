@@ -1,11 +1,14 @@
 //! W1 compatibility fixture derived from the realistic project-board workload.
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, VecDeque};
+use std::rc::Rc;
 
 use jazz::db::{
     Db, DbConfig, DbIdentity, DeleteOptions, InsertOptions, LocalUpdates, MergeableTxOps,
-    PreparedQuery, Propagation, ReadOpts, RestoreOptions, SubscriptionEvent, SubscriptionStream,
-    UpdateOptions, WriteIdentity, block_on,
+    PeerIoPump, PreparedQuery, Propagation, ReadOpts, RestoreOptions, ResumeCursor,
+    SubscriptionEvent, SubscriptionStream, UpdateOptions, WireTransportAdapter, WriteIdentity,
+    block_on,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
@@ -17,6 +20,11 @@ use jazz::tools::{
     Value as PublicValue,
 };
 use jazz::tx::DurabilityTier;
+use jazz::wire::{
+    FEATURE_MESSAGE_FRAGMENTATION, FEATURE_SESSION_FRAME, FEATURE_STRUCTURED_ERRORS,
+    FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError, WIRE_PROTOCOL_VERSION, WireSession,
+    WireTransport,
+};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use tempfile::TempDir;
 
@@ -46,6 +54,59 @@ pub struct Fixture<S: OrderedKvStorage> {
 pub struct MaintainedActivityFixture<S: OrderedKvStorage> {
     fixture: Fixture<S>,
     subscription: SubscriptionStream,
+}
+
+/// Prepared byte-wire reconnect with one disconnected task update pending.
+pub struct ResumeFixture {
+    server: Db<MemoryStorage>,
+    client: Db<MemoryStorage>,
+    subscription: SubscriptionStream,
+    cursor: Option<ResumeCursor>,
+    full_snapshot_bytes: usize,
+}
+
+struct ByteDuplexTransport {
+    outbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
+    inbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
+}
+
+struct ByteQueues {
+    left_to_right: Rc<RefCell<VecDeque<Vec<u8>>>>,
+    right_to_left: Rc<RefCell<VecDeque<Vec<u8>>>>,
+}
+
+impl ByteQueues {
+    fn is_empty(&self) -> bool {
+        self.left_to_right.borrow().is_empty() && self.right_to_left.borrow().is_empty()
+    }
+}
+
+fn pump_aux(left: &PeerIoPump, right: &PeerIoPump) {
+    loop {
+        let mut progressed = false;
+        while let Some(message) = left.take_outbound(64) {
+            block_on(right.route_incoming(message)).expect("route W1 left auxiliary message");
+            progressed = true;
+        }
+        while let Some(message) = right.take_outbound(64) {
+            block_on(left.route_incoming(message)).expect("route W1 right auxiliary message");
+            progressed = true;
+        }
+        if !progressed {
+            break;
+        }
+    }
+}
+
+impl WireTransport for ByteDuplexTransport {
+    fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+        self.outbound.borrow_mut().push_back(frame);
+        Ok(())
+    }
+
+    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+        self.inbound.borrow_mut().pop_front()
+    }
 }
 
 impl Fixture<MemoryStorage> {
@@ -83,6 +144,153 @@ impl Fixture<MemoryStorage> {
             MemoryStorage::new(&family_refs).expect("valid memory storage families"),
             WriteIdentity::Session(policy_bench_identity()),
         )
+    }
+}
+
+impl ResumeFixture {
+    pub fn memory(tasks: usize, comments: usize, activity_events: usize) -> Self {
+        let writer = Fixture::<MemoryStorage>::memory(tasks, comments, activity_events);
+        let server = open_memory_node(schema(false), 0x72, true);
+        let client = open_memory_node(schema(false), 0x73, false);
+
+        let (writer_transport, server_writer_transport, queues) = byte_duplex(1);
+        let writer_upstream = block_on(writer.db.connect_upstream(writer_transport));
+        let writer_subscriber =
+            server.accept_subscriber(server_writer_transport, AuthorSubject::SYSTEM);
+        let writer_pump = block_on(writer_upstream.lock()).io_pump();
+        let server_writer_pump = block_on(writer_subscriber.lock()).io_pump();
+        let mut quiet_ticks = 0;
+        for _ in 0..10_000 {
+            block_on(writer.db.tick()).expect("ship W1 resume seed rows");
+            block_on(server.tick()).expect("ingest W1 resume seed rows");
+            pump_aux(&writer_pump, &server_writer_pump);
+            quiet_ticks = if queues.is_empty() {
+                quiet_ticks + 1
+            } else {
+                0
+            };
+            if quiet_ticks == 2 {
+                break;
+            }
+        }
+        assert!(writer.db.detach_connection(&writer_upstream));
+        assert!(server.detach_connection(&writer_subscriber));
+        let (client_transport, server_transport, _queues) = byte_duplex(2);
+        let upstream = block_on(client.connect_upstream(client_transport));
+        let subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
+        let client_pump = block_on(upstream.lock()).io_pump();
+        let server_pump = block_on(subscriber.lock()).io_pump();
+        let prepared = client
+            .prepare_query(&Query::from("tasks"))
+            .expect("prepare W1 resumed tasks query");
+        let mut subscription = block_on(client.subscribe(
+            &prepared,
+            ReadOpts {
+                tier: DurabilityTier::Global,
+                local_updates: LocalUpdates::Deferred,
+                propagation: Propagation::Full,
+                ..ReadOpts::default()
+            },
+        ))
+        .expect("subscribe W1 resumed tasks");
+        let mut initial_rows = 0;
+        for _ in 0..512 {
+            block_on(client.tick()).expect("announce W1 resumed tasks subscription");
+            block_on(server.tick()).expect("serve W1 full task snapshot");
+            block_on(client.tick()).expect("apply W1 full task snapshot");
+            block_on(client.tick()).expect("materialize W1 full task snapshot");
+            pump_aux(&client_pump, &server_pump);
+            while let Some(event) = subscription.try_next_event() {
+                initial_rows += event_row_count(event);
+            }
+            if initial_rows == tasks {
+                break;
+            }
+        }
+        assert_eq!(initial_rows, tasks);
+        let full_snapshot_bytes = block_on(subscriber.lock())
+            .last_resume_bytes()
+            .expect("W1 full snapshot bytes");
+        block_on(server.tick()).expect("refresh W1 served cursor state");
+        block_on(client.tick()).expect("apply W1 served cursor state");
+        while subscription.try_next_event().is_some() {}
+        let cursor = block_on(subscriber.lock())
+            .take_resume_cursor()
+            .expect("take W1 subscriber resume cursor");
+        assert!(client.detach_connection(&upstream));
+        assert!(server.detach_connection(&subscriber));
+
+        let write = block_on(writer.db.update(
+            "tasks",
+            writer.task_transition_row,
+            BTreeMap::from([(
+                "status".to_owned(),
+                Value::String("resume-canary".to_owned()),
+            )]),
+            UpdateOptions::default(),
+        ))
+        .expect("write disconnected W1 task update");
+        block_on(write.wait(DurabilityTier::Local)).expect("settle disconnected W1 task update");
+        let (writer_transport, server_writer_transport, queues) = byte_duplex(3);
+        let writer_upstream = block_on(writer.db.connect_upstream(writer_transport));
+        let writer_subscriber =
+            server.accept_subscriber(server_writer_transport, AuthorSubject::SYSTEM);
+        let writer_pump = block_on(writer_upstream.lock()).io_pump();
+        let server_writer_pump = block_on(writer_subscriber.lock()).io_pump();
+        let mut quiet_ticks = 0;
+        for _ in 0..1_000 {
+            block_on(writer.db.tick()).expect("ship disconnected W1 task update");
+            block_on(server.tick()).expect("ingest disconnected W1 task update");
+            pump_aux(&writer_pump, &server_writer_pump);
+            quiet_ticks = if queues.is_empty() {
+                quiet_ticks + 1
+            } else {
+                0
+            };
+            if quiet_ticks == 2 {
+                break;
+            }
+        }
+        assert!(writer.db.detach_connection(&writer_upstream));
+        assert!(server.detach_connection(&writer_subscriber));
+
+        Self {
+            server,
+            client,
+            subscription,
+            cursor: Some(cursor),
+            full_snapshot_bytes,
+        }
+    }
+
+    pub fn resume_once(&mut self) -> usize {
+        let cursor = self.cursor.take().expect("W1 resume fixture is single-use");
+        let (client_transport, server_transport, _queues) = byte_duplex(4);
+        let _upstream = block_on(self.client.connect_upstream(client_transport));
+        let resumed = self.server.accept_subscriber_with_resume(
+            server_transport,
+            AuthorSubject::SYSTEM,
+            cursor,
+        );
+        let client_pump = block_on(_upstream.lock()).io_pump();
+        let server_pump = block_on(resumed.lock()).io_pump();
+        block_on(self.client.tick()).expect("announce resumed W1 subscription");
+        block_on(self.server.tick()).expect("serve W1 resume catch-up");
+        pump_aux(&client_pump, &server_pump);
+        block_on(self.client.tick()).expect("apply W1 resume catch-up");
+        block_on(self.client.tick()).expect("materialize W1 resume event");
+        let resume_bytes = block_on(resumed.lock())
+            .last_resume_bytes()
+            .expect("W1 resume catch-up bytes");
+        let mut changed = event_row_count(
+            block_on(self.subscription.next_event()).expect("W1 resume stream remains open"),
+        );
+        while let Some(event) = self.subscription.try_next_event() {
+            changed += event_row_count(event);
+        }
+        assert_eq!(changed, 1);
+        assert!(resume_bytes < self.full_snapshot_bytes);
+        resume_bytes
     }
 }
 
@@ -476,6 +684,72 @@ fn open_db<S: OrderedKvStorage + ReopenableStorage + 'static>(
         },
     )))
     .expect("open W1 benchmark database")
+}
+
+fn open_memory_node(schema: JazzSchema, node: u8, history_complete: bool) -> Db<MemoryStorage> {
+    let families = schema.column_families();
+    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let config = DbConfig::new(
+        schema,
+        MemoryStorage::new(&family_refs).expect("valid memory storage families"),
+        DbIdentity {
+            node: NodeUuid::from_bytes([node; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    );
+    if history_complete {
+        block_on(Db::open_history_complete(config))
+    } else {
+        block_on(Db::open(config))
+    }
+    .expect("open W1 resume database")
+}
+
+fn byte_duplex(
+    epoch: u64,
+) -> (
+    Box<dyn jazz::db::Transport>,
+    Box<dyn jazz::db::Transport>,
+    ByteQueues,
+) {
+    let left = Rc::new(RefCell::new(VecDeque::new()));
+    let right = Rc::new(RefCell::new(VecDeque::new()));
+    let left_transport = ByteDuplexTransport {
+        outbound: Rc::clone(&left),
+        inbound: Rc::clone(&right),
+    };
+    let right_transport = ByteDuplexTransport {
+        outbound: Rc::clone(&right),
+        inbound: Rc::clone(&left),
+    };
+    let session = WireSession {
+        session_id: "w1-resume-benchmark".to_owned(),
+        epoch,
+        identity: Some(AuthorSubject::SYSTEM),
+    };
+    let features = FEATURE_SYNC_MESSAGE_PAYLOAD
+        | FEATURE_SESSION_FRAME
+        | FEATURE_STRUCTURED_ERRORS
+        | FEATURE_MESSAGE_FRAGMENTATION;
+    let queues = ByteQueues {
+        left_to_right: left,
+        right_to_left: right,
+    };
+    (
+        Box::new(WireTransportAdapter::new(
+            left_transport,
+            WIRE_PROTOCOL_VERSION,
+            features,
+            Some(session.clone()),
+        )),
+        Box::new(WireTransportAdapter::new(
+            right_transport,
+            WIRE_PROTOCOL_VERSION,
+            features,
+            Some(session),
+        )),
+        queues,
+    )
 }
 
 fn prepare_page<S: OrderedKvStorage + ReopenableStorage + 'static>(
