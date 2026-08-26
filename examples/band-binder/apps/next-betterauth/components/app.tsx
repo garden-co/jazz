@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { JazzProvider, useAll, useDb, useLocalFirstAuth, useSession } from "jazz-tools/react";
 import { app } from "../schema";
+import { bootstrapWorkspace } from "../bootstrap";
 import { BinderWorkspace } from "./binder";
 
 const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID ?? "00000000-0000-0000-0000-000000000001";
@@ -43,44 +44,32 @@ function WorkspaceShell() {
       ) : !selected ? (
         <BootstrapWorkspace author={author} />
       ) : (
-        <Workspace workspaceId={selected.id} />
+        <Workspace workspaceId={selected.id} author={author} />
       )}
     </main>
   );
 }
 
-function BootstrapWorkspace({ author }: { author: string }) {
+function BootstrapWorkspace({ author, workspaceId }: { author: string; workspaceId?: string }) {
   const db = useDb();
   const [creating, setCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const bootstrap = async () => {
     setCreating(true);
+    setError(null);
     try {
-      const workspace = await db
-        .insert(app.workspaces, { name: "World tour" })
-        .wait({ tier: "local" });
-      await db
-        .insert(app.members, { workspaceId: workspace.id, author, role: "owner" })
-        .wait({ tier: "local" });
-      const page = await db
-        .insert(app.pages, { workspaceId: workspace.id, title: "Tour book" })
-        .wait({ tier: "local" });
-      await db
-        .insert(app.blocks, {
-          workspaceId: workspace.id,
-          pageId: page.id,
-          position: 10,
-          kind: "text",
-          payload: { text: "Add the first tour note" },
-        })
-        .wait({ tier: "local" });
+      await bootstrapWorkspace(db, author, { workspaceId });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setCreating(false);
     }
   };
   return (
     <section aria-label="Create workspace">
-      <h2>Start a binder</h2>
+      <h2>{workspaceId ? "Repair binder setup" : "Start a binder"}</h2>
       <p>Bootstrap is an explicit write action, separate from the initial workspace query.</p>
+      {error ? <p role="alert">Could not create the binder: {error}</p> : null}
       <button disabled={creating} onClick={() => void bootstrap()}>
         {creating ? "Creating…" : "Create demo workspace"}
       </button>
@@ -88,13 +77,32 @@ function BootstrapWorkspace({ author }: { author: string }) {
   );
 }
 
-function Workspace({ workspaceId }: { workspaceId: string }) {
+function Workspace({ workspaceId, author }: { workspaceId: string; author: string }) {
   const { data: roots = [] } = useAll(
     app.pages.where({ workspaceId, parentPageId: null }).orderBy("title", "asc").limit(1),
   );
   return roots[0] ? (
-    <BinderWorkspace workspaceId={workspaceId} rootPageId={roots[0].id} />
+    <ReadyWorkspace workspaceId={workspaceId} rootPageId={roots[0].id} author={author} />
   ) : (
-    <p>Waiting for the root page…</p>
+    <BootstrapWorkspace author={author} workspaceId={workspaceId} />
+  );
+}
+
+function ReadyWorkspace({
+  workspaceId,
+  rootPageId,
+  author,
+}: {
+  workspaceId: string;
+  rootPageId: string;
+  author: string;
+}) {
+  const { data: blocks = [] } = useAll(
+    app.blocks.where({ workspaceId, pageId: rootPageId }).limit(1),
+  );
+  return blocks[0] ? (
+    <BinderWorkspace workspaceId={workspaceId} rootPageId={rootPageId} />
+  ) : (
+    <BootstrapWorkspace author={author} workspaceId={workspaceId} />
   );
 }

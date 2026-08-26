@@ -2,8 +2,8 @@
 
 use std::collections::BTreeMap;
 
-use jazz::db::{Db, DbConfig, DbIdentity, PreparedQuery, block_on};
-use jazz::groove::records::Value;
+use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, PreparedQuery, WriteIdentity, block_on};
+use jazz::groove::records::{BorrowedRecord, Value};
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, all_of, col, eq, lit};
@@ -143,7 +143,7 @@ impl Fixture {
                     ("title".into(), Value::String(format!("Song {index:02}"))),
                 ]),
             );
-            insert(
+            insert_at(
                 &db,
                 "suggestions",
                 row_id(7, index),
@@ -158,6 +158,7 @@ impl Fixture {
                     ),
                     ("status".into(), Value::String("open".into())),
                 ]),
+                2_000_000 + (31 - index) as u64,
             );
             insert(
                 &db,
@@ -265,12 +266,40 @@ impl Fixture {
         ]
     }
 
-    pub fn suggestion_window_count(&self) -> usize {
+    pub fn suggestion_window_receipt(&self) -> Vec<SuggestionReceipt> {
         self.db
             .read(&self.suggestion_window)
             .expect("read live suggestion window")
-            .len()
+            .into_iter()
+            .map(|row| {
+                let (descriptor, raw) = row.encoded_record();
+                let record = BorrowedRecord::new(raw, descriptor);
+                let created_at = record
+                    .get_u64(
+                        descriptor
+                            .field_index("$createdAt")
+                            .expect("selected $createdAt"),
+                    )
+                    .expect("valid selected $createdAt");
+                SuggestionReceipt {
+                    id: row.row_uuid(),
+                    created_at,
+                    selected_fields: descriptor
+                        .fields()
+                        .iter()
+                        .filter_map(|field| field.name.clone())
+                        .collect(),
+                }
+            })
+            .collect()
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct SuggestionReceipt {
+    pub id: RowUuid,
+    pub created_at: u64,
+    pub selected_fields: Vec<String>,
 }
 
 fn bounded_workspace_query(
@@ -369,6 +398,27 @@ fn schema() -> JazzSchema {
 fn insert(db: &BenchDb, table: &str, id: RowUuid, cells: BTreeMap<String, Value>) {
     let write = block_on(db.insert_with_id_attributed(AuthorSubject::SYSTEM, table, id, cells))
         .expect("insert fixture row");
+    block_on(write.wait(DurabilityTier::Local)).expect("fixture row reaches local durability");
+}
+
+fn insert_at(
+    db: &BenchDb,
+    table: &str,
+    id: RowUuid,
+    cells: BTreeMap<String, Value>,
+    updated_at_ms: u64,
+) {
+    let write = block_on(db.insert(
+        table,
+        cells,
+        InsertOptions {
+            row_id: Some(id),
+            identity: WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            updated_at_ms: Some(updated_at_ms),
+            ..Default::default()
+        },
+    ))
+    .expect("insert timestamped fixture row");
     block_on(write.wait(DurabilityTier::Local)).expect("fixture row reaches local durability");
 }
 

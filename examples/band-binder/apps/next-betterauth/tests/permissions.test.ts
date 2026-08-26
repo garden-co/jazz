@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createPolicyTestApp, type PolicyTestApp } from "jazz-tools/testing";
 import permissions from "../permissions.js";
 import { app } from "../schema.js";
+import { bootstrapSteps, bootstrapWorkspace } from "../bootstrap.js";
 
 // These are integration receipts: each deliberately awaits serving-authority
 // admission or rejection at the edge. The cross-workspace receipt performs
@@ -24,6 +25,43 @@ const session = (user_id: string) => ({
 const author = (subject: string) => JSON.stringify(["https://band-binder.test", subject]);
 
 describe("BandBinder workspace roles", () => {
+  it.each(bootstrapSteps)(
+    "resumes bootstrap interrupted after %s without duplicates",
+    async (step) => {
+      const owner = testApp.as(session("interrupted-owner"));
+      await expect(
+        bootstrapWorkspace(owner, author("interrupted-owner"), {
+          tier: "edge",
+          afterStep: (completed) => {
+            if (completed === step) throw new Error(`interrupted after ${step}`);
+          },
+        }),
+      ).rejects.toThrow(`interrupted after ${step}`);
+      await bootstrapWorkspace(owner, author("interrupted-owner"), { tier: "edge" });
+      expect(await owner.all(app.workspaces.where({}), { tier: "edge" })).toHaveLength(1);
+      expect(await owner.all(app.members.where({}), { tier: "edge" })).toHaveLength(1);
+      expect(await owner.all(app.pages.where({}), { tier: "edge" })).toHaveLength(1);
+      expect(await owner.all(app.blocks.where({}), { tier: "edge" })).toHaveLength(1);
+    },
+  );
+
+  it("keeps identical provider subjects isolated by issuer", async () => {
+    const issuerA = testApp.as(session("shared"));
+    const issuerB = testApp.as({ ...session("shared"), issuer: "https://other.test" });
+    const workspace = await issuerA
+      .insert(app.workspaces, { name: "Issuer scoped" })
+      .wait({ tier: "edge" });
+    await issuerA
+      .insert(app.members, { workspaceId: workspace.id, author: author("shared"), role: "owner" })
+      .wait({ tier: "edge" });
+    expect(await issuerA.all(app.workspaces.where({ id: workspace.id }), { tier: "edge" })).toEqual(
+      [workspace],
+    );
+    expect(await issuerB.all(app.workspaces.where({ id: workspace.id }), { tier: "edge" })).toEqual(
+      [],
+    );
+  });
+
   it(
     "admits stage-manager writes, limits members to suggestions, and revokes both exactly",
     async () => {

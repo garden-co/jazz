@@ -24,6 +24,10 @@
   browser receipt proves the grant arrives before asking the correlated
   workspace policy to admit it; the remaining core closure defect is tracked by
   [#1871](https://github.com/garden-co/jazz/issues/1871).
+- Bootstrap stays behind an explicit user action and resumes each durable
+  workspace/member/page/block prefix idempotently. A single transaction cannot
+  currently admit this sequence because the membership write's permission
+  cannot use the workspace created in the same batch as its authority witness.
 - Large rich text and large attachment streaming remain tracked by #1833,
   #1839, and #1844. Small attachment bytes are represented directly today.
 - The Rust root-query builder accepts `$createdAt` in `select(...)`, but a
