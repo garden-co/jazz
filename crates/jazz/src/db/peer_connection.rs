@@ -1123,13 +1123,30 @@ where
                             pending.remove(pending_index);
                         }
                         // Upload locally-authored commits not yet shipped on this link.
-                        let to_upload: Vec<TxId> = outbox
-                            .borrow()
-                            .iter()
-                            .map(|pending| pending.tx_id)
-                            .filter(|tx_id| !uploaded.contains(tx_id))
-                            .collect();
-                        for tx_id in to_upload {
+                        let to_upload: Vec<(TxId, Option<SyncMessage>)> = {
+                            let outbox = outbox.borrow();
+                            let expected_missing = outbox.len().checked_sub(uploaded.len());
+                            let mut suffix = outbox
+                                .iter()
+                                .rev()
+                                .take_while(|pending| !uploaded.contains(&pending.tx_id))
+                                .map(|pending| (pending.tx_id, pending.unit.clone()))
+                                .collect::<Vec<_>>();
+                            if expected_missing == Some(suffix.len()) {
+                                suffix.reverse();
+                                suffix
+                            } else {
+                                // Fate cleanup and authority handoff can leave
+                                // holes in this link's uploaded set. Preserve
+                                // the general set-difference behavior there.
+                                outbox
+                                    .iter()
+                                    .filter(|pending| !uploaded.contains(&pending.tx_id))
+                                    .map(|pending| (pending.tx_id, pending.unit.clone()))
+                                    .collect()
+                            }
+                        };
+                        for (tx_id, staged) in to_upload {
                             if failed_large_value_uploads.contains(&tx_id)
                                 || awaiting_large_value_uploads.contains_key(&tx_id)
                                 || !awaiting_large_value_uploads.is_empty()
@@ -1149,11 +1166,6 @@ where
                             self.large_value_upload_retry_deadlines
                                 .borrow_mut()
                                 .remove(&tx_id);
-                            let staged = outbox
-                                .borrow()
-                                .iter()
-                                .find(|pending| pending.tx_id == tx_id)
-                                .and_then(|pending| pending.unit.clone());
                             let unit = if let Some(unit) = staged {
                                 unit
                             } else {

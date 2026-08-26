@@ -1970,8 +1970,12 @@ impl UploadOutbox {
         true
     }
 
-    fn iter(&self) -> impl Iterator<Item = &PendingUpload> {
+    fn iter(&self) -> impl DoubleEndedIterator<Item = &PendingUpload> + ExactSizeIterator {
         self.entries.iter()
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
     }
 
     fn is_empty(&self) -> bool {
