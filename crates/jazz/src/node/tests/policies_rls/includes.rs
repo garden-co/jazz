@@ -107,6 +107,19 @@ fn point_read_authorization_keeps_using_physical_row_uuid_with_declared_id() {
         .unwrap();
     core.accept_global_for_test(tx.0).unwrap();
 
+    let generic = Query::from("documents")
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let generic_binding = generic.bind(BTreeMap::new()).unwrap();
+    core.query_rows_for_link(&generic, &generic_binding, DurabilityTier::Global, alice)
+        .unwrap();
+    let cached_policy_graphs = core
+        .query
+        .policy_authorization_graph_cache
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
     core.reset_query_engine_read_metrics();
     assert!(
         core.dry_run_read_current_allows("documents", physical_row, alice)
@@ -116,6 +129,15 @@ fn point_read_authorization_keeps_using_physical_row_uuid_with_declared_id() {
         core.query_engine_read_metrics().source_primary_key_scans,
         1,
         "the authorization probe must point-scan the physical row"
+    );
+    assert_eq!(
+        core.query
+            .policy_authorization_graph_cache
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        cached_policy_graphs,
+        "point authorization must preserve the reusable generic policy graph"
     );
     assert!(
         core.dry_run_write_current_allows("documents", physical_row, alice)
