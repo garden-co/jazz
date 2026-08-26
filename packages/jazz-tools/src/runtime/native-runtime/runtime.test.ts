@@ -2584,6 +2584,104 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
+  it("reuses worker-confirmed query coverage without requiring an impossible second response", async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              all: () => new Uint8Array([0]),
+              connectUpstream: () => new FakeTransport([]),
+              prepareQuery: () => ({}),
+              attachQuery: () => ({}),
+              queryAttachmentIsCovered: () => true,
+              detachQuery: () => undefined,
+              setNonDurableClient: () => undefined,
+              tick: () => undefined,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      runtime.setNonDurableClient();
+      runtime.connectUpstreamPeer();
+
+      let firstSettled = false;
+      const first = runtime
+        .query(JSON.stringify({ table: "todos" }), null, "edge")
+        .then(() => (firstSettled = true));
+      await vi.advanceTimersByTimeAsync(10);
+      expect(firstSettled).toBe(false);
+
+      runtime.notifyPeerTransportActivity();
+      await vi.advanceTimersByTimeAsync(10);
+      await first;
+
+      let secondSettled = false;
+      const second = runtime
+        .query(JSON.stringify({ table: "todos" }), null, "edge")
+        .then(() => (secondSettled = true));
+      await vi.advanceTimersByTimeAsync(1);
+      expect(secondSettled).toBe(true);
+      await second;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("accepts query coverage after consuming worker activity that arrived before attachment", async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              all: () => new Uint8Array([0]),
+              connectUpstream: () => new FakeTransport([]),
+              prepareQuery: () => ({}),
+              attachQuery: () => ({}),
+              queryAttachmentIsCovered: () => true,
+              detachQuery: () => undefined,
+              setNonDurableClient: () => undefined,
+              tick: () => undefined,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      runtime.setNonDurableClient();
+      runtime.connectUpstreamPeer();
+
+      runtime.notifyPeerTransportActivity();
+      let settled = false;
+      const query = runtime
+        .query(JSON.stringify({ table: "todos" }), null, "edge")
+        .then(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(10);
+      expect(settled).toBe(false);
+
+      await runtime.progressPeerTransport();
+      await vi.advanceTimersByTimeAsync(10);
+      await query;
+      expect(settled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("waits for suspended evaluation before probing one-shot query coverage", async () => {
     let releaseTick!: () => void;
     let reportTickStarted!: () => void;

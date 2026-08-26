@@ -611,6 +611,11 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverInboundProcessed = false;
   private readonly peerTransportWorkListeners = new Set<() => void>();
   private peerTransportActivityEpoch = 0;
+  private peerTransportProcessedActivityEpoch = 0;
+  // A non-durable follower needs one worker response before trusting native
+  // coverage. Once that response covered a prepared query, reattaching the
+  // same query may already be covered and legitimately emit no new frame.
+  private readonly peerCoveredQueries = new Set<PreparedQuery>();
   private coreTickScheduled = false;
   private coreTickRunning = false;
   private coreTickAgain = false;
@@ -747,7 +752,12 @@ export class NativeRuntimeAdapter implements Runtime {
 
   async progressPeerTransport(): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.progressPeerTransport();
+    const activityReadyForProcessing = this.peerTransportActivityEpoch;
     await this.runCoreTick();
+    this.peerTransportProcessedActivityEpoch = Math.max(
+      this.peerTransportProcessedActivityEpoch,
+      activityReadyForProcessing,
+    );
   }
 
   retirePeerTransport(transport: Transport): Promise<void> {
@@ -2164,16 +2174,30 @@ export class NativeRuntimeAdapter implements Runtime {
       attachment = this.db.attachQuery(query, opts);
     }
     if (!this.db.queryAttachmentIsCovered) return attachment;
+    if (
+      this.nonDurableClient &&
+      this.peerCoveredQueries.has(query) &&
+      this.db.queryAttachmentIsCovered(attachment)
+    ) {
+      return attachment;
+    }
     const minimumPeerActivityEpoch = this.nonDurableClient
       ? this.peerTransportActivityEpoch
       : undefined;
+    const pendingPeerActivityEpoch =
+      this.nonDurableClient &&
+      this.peerTransportActivityEpoch > this.peerTransportProcessedActivityEpoch
+        ? this.peerTransportActivityEpoch
+        : undefined;
     await this.waitForQueryCoverage(
       attachment,
       query,
       readOptions(tier, false, optionsJson),
       session?.identity,
       minimumPeerActivityEpoch,
+      pendingPeerActivityEpoch,
     );
+    if (this.nonDurableClient) this.peerCoveredQueries.add(query);
     return attachment;
   }
 
@@ -2229,6 +2253,7 @@ export class NativeRuntimeAdapter implements Runtime {
     opts: unknown,
     identity?: Uint8Array,
     minimumPeerActivityEpoch?: number,
+    pendingPeerActivityEpoch?: number,
   ): Promise<void> {
     const deadline = Date.now() + 15_000;
     const tier = (opts as { tier?: string }).tier ?? "";
@@ -2246,7 +2271,9 @@ export class NativeRuntimeAdapter implements Runtime {
       if (this.db.queryAttachmentIsCovered) {
         const peerHasResponded =
           minimumPeerActivityEpoch == null ||
-          this.peerTransportActivityEpoch > minimumPeerActivityEpoch;
+          this.peerTransportActivityEpoch > minimumPeerActivityEpoch ||
+          (pendingPeerActivityEpoch != null &&
+            this.peerTransportProcessedActivityEpoch >= pendingPeerActivityEpoch);
         if (peerHasResponded && this.db.queryAttachmentIsCovered(attachment)) return;
       }
       try {

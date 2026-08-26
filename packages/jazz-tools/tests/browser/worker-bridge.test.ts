@@ -1983,13 +1983,13 @@ describe("SharedWorker bridge with IndexedDB", () => {
     });
     await waitForCondition(
       async () => {
-        const writerSnapshots = await Promise.all(
-          [0, 1].map((tabIndex) => queryRemoteBrowserDbRows(remoteDbId, tabIndex)),
+        const tabSnapshots = await Promise.all(
+          [0, 1, 2].map((tabIndex) => queryRemoteBrowserDbRows(remoteDbId, tabIndex)),
         );
-        return writerSnapshots.every((rows) => rows.some((row) => row.id === rowId));
+        return tabSnapshots.every((rows) => rows.some((row) => row.id === rowId));
       },
       8_000,
-      "Seed row should be locally observed by both writers before conflicting updates",
+      "Seed row should be locally observed by every tab before conflicting updates",
     );
 
     await Promise.all([
