@@ -2417,6 +2417,94 @@ async fn root_first_upload_requests_only_authenticated_missing_frontier() {
 }
 
 #[futures_test::test]
+async fn zero_byte_upload_child_is_rejected_before_frontier_or_metadata_admission() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let backend = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let managed = Rc::new(crate::chunks::ManagedChunkStorage::new(backend.clone()));
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(managed);
+    let prepared = crate::large_values::repeated_child_dag_fixture(
+        1,
+        crate::large_values::BRANCH_MIN_CHILDREN,
+    );
+    let root = prepared
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref == prepared.value_ref.root)
+        .unwrap()
+        .clone();
+
+    assert_eq!(
+        database
+            .begin_large_value_upload(prepared.value_ref.clone())
+            .await
+            .unwrap(),
+        crate::large_values::LargeValueUploadProgress::Missing(vec![
+            prepared.value_ref.root.clone()
+        ]),
+        "an absent root may be requested before its bytes can be authenticated"
+    );
+    assert!(matches!(
+        database
+            .continue_large_value_upload(prepared.value_ref.clone(), vec![root])
+            .await,
+        Err(Error::IvmRuntime(
+            crate::ivm::runtime::IvmRuntimeError::LargeValue(
+                crate::large_values::Error::MalformedNode
+            )
+        ))
+    ));
+
+    assert!(
+        database
+            .pending_large_value_uploads()
+            .await
+            .unwrap()
+            .is_empty(),
+        "rejection must remove the pending upload rather than expose child locators"
+    );
+    assert!(
+        database.staged_large_values().await.unwrap().is_empty(),
+        "a malformed root must not produce a staging receipt"
+    );
+    assert_eq!(
+        backend.len(),
+        0,
+        "batch admission must reject the authenticated root before staging bytes"
+    );
+    for chunk in &prepared.staged_chunks {
+        assert!(
+            database
+                .storage
+                .get(
+                    LARGE_VALUE_METADATA_CF.to_owned(),
+                    large_value_node_key(&chunk.node_ref).unwrap(),
+                )
+                .await
+                .unwrap()
+                .is_none(),
+            "a rejected root must not install node or child reference metadata"
+        );
+    }
+    assert_eq!(
+        database
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap(),
+        0,
+        "rejection before admission must not leave refcount reclamation work"
+    );
+}
+
+#[futures_test::test]
 async fn bounded_upload_start_caps_new_pending_metadata_and_allows_resume() {
     let schema = DatabaseSchema::new([TableSchema::new(
         "objects",

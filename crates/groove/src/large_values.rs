@@ -4437,6 +4437,96 @@ mod tests {
     }
 
     #[test]
+    fn zero_byte_branch_child_is_rejected_before_descendant_discovery_or_materialization() {
+        let prepared = repeated_child_dag_fixture(1, BRANCH_MIN_CHILDREN);
+        let root = prepared
+            .staged_chunks
+            .iter()
+            .find(|chunk| chunk.node_ref == prepared.value_ref.root)
+            .unwrap();
+
+        assert_eq!(
+            decode_node(
+                LargeValueKind::Bytes,
+                root.node_ref.object_hash,
+                &root.encoded,
+            ),
+            Err(Error::MalformedNode)
+        );
+        assert_eq!(
+            decode_authenticated_node(root.node_ref.object_hash, &root.encoded),
+            Err(Error::MalformedNode)
+        );
+
+        let provider = PreparedProvider::new(&prepared);
+        let mut visited = std::collections::BTreeSet::new();
+        assert_eq!(
+            futures::executor::block_on(visit_reachable_chunks(
+                &prepared.value_ref,
+                &provider,
+                |request| {
+                    visited.insert(request.clone());
+                },
+            )),
+            Err(ReachabilityError::LargeValue(Error::MalformedNode))
+        );
+        let root_request = ChunkRequest {
+            object_hash: root.node_ref.object_hash.0,
+            locator: root.node_ref.locator,
+        };
+        assert_eq!(
+            visited,
+            std::collections::BTreeSet::from([root_request.clone()]),
+            "an authenticated malformed root must not expose its child frontier"
+        );
+
+        let mut inputs = EvaluationInputs::default();
+        inputs.install_chunk(root_request, bytes::Bytes::copy_from_slice(&root.encoded));
+        assert!(matches!(
+            materialize_attempt(&prepared.value_ref, &mut inputs),
+            Err(IvmRuntimeError::LargeValue(Error::MalformedNode))
+        ));
+        assert!(
+            inputs.take_missing_chunks().is_empty(),
+            "materialization must reject the root before requesting descendants"
+        );
+    }
+
+    #[test]
+    fn canonical_empty_value_is_one_empty_root_leaf() {
+        let prepared =
+            prepare_with_locator(LargeValueKind::Bytes, b"", deterministic_locator).unwrap();
+        assert_eq!(prepared.staged_chunks.len(), 1);
+        let root = &prepared.staged_chunks[0];
+        assert_eq!(root.node_ref, prepared.value_ref.root);
+        assert_eq!(prepared.value_ref.byte_length, 0);
+        assert_eq!(
+            decode_node(
+                LargeValueKind::Bytes,
+                root.node_ref.object_hash,
+                &root.encoded,
+            ),
+            Ok(ChunkNode::Leaf {
+                format: FORMAT_VERSION,
+                kind: LargeValueKind::Bytes,
+                bytes: Vec::new(),
+            })
+        );
+
+        let mut inputs = EvaluationInputs::default();
+        inputs.install_chunk(
+            ChunkRequest {
+                object_hash: root.node_ref.object_hash.0,
+                locator: root.node_ref.locator,
+            },
+            bytes::Bytes::copy_from_slice(&root.encoded),
+        );
+        let materialized = materialize_attempt(&prepared.value_ref, &mut inputs).unwrap();
+        assert_eq!(materialized, Vec::<u8>::new());
+        assert!(inputs.take_missing_chunks().is_empty());
+    }
+
+    #[test]
     fn shared_dag_physical_walks_deduplicate_and_logical_materialization_is_bounded() {
         let prepared = repeated_child_dag_fixture(MAX_TREE_DEPTH, BRANCH_MAX_CHILDREN);
         assert_eq!(prepared.staged_chunks.len(), MAX_TREE_DEPTH + 1);
@@ -5221,6 +5311,119 @@ mod tests {
             "only {reused} of {} exact locator-bearing old nodes survived",
             old_refs.len()
         );
+    }
+
+    #[test]
+    fn full_deletion_consolidates_to_one_empty_root_leaf() {
+        let mut state = 0x5eed_cafe_f00d_beef_u64;
+        let base = (0..LEAF_TARGET_BYTES * 96)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect::<Vec<_>>();
+        let prepared =
+            prepare_with_locator(LargeValueKind::Bytes, &base, deterministic_locator).unwrap();
+        let encoded_by_hash = prepared
+            .staged_chunks
+            .iter()
+            .map(|chunk| (chunk.node_ref.object_hash, chunk.encoded.as_slice()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let ChunkNode::Branch { children, .. } = decode_node(
+            LargeValueKind::Bytes,
+            prepared.value_ref.root.object_hash,
+            encoded_by_hash[&prepared.value_ref.root.object_hash],
+        )
+        .unwrap() else {
+            panic!("fixture must have a branch root");
+        };
+        assert!(
+            children.iter().any(|child| matches!(
+                decode_node(
+                    LargeValueKind::Bytes,
+                    child.node_ref.object_hash,
+                    encoded_by_hash[&child.node_ref.object_hash],
+                ),
+                Ok(ChunkNode::Branch { .. })
+            )),
+            "fixture must have multiple branch levels"
+        );
+
+        let available = prepared
+            .staged_chunks
+            .iter()
+            .map(|chunk| {
+                (
+                    ChunkRequest {
+                        object_hash: chunk.node_ref.object_hash.0,
+                        locator: chunk.node_ref.locator,
+                    },
+                    bytes::Bytes::copy_from_slice(&chunk.encoded),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut edit_inputs = EvaluationInputs::default();
+        let TailEditOutcome::Updated(with_tail) = replace_tail_attempt(
+            &prepared.value_ref,
+            0,
+            base.len() as u64,
+            Vec::new(),
+            &mut edit_inputs,
+        )
+        .unwrap() else {
+            panic!("one deletion must fit the edit tail");
+        };
+        assert!(edit_inputs.take_missing_chunks().is_empty());
+
+        let mut inputs = EvaluationInputs::default();
+        let consolidated = loop {
+            match consolidate_single_edit_attempt(&with_tail, &mut inputs, deterministic_locator) {
+                Ok(value) => break value,
+                Err(IvmRuntimeError::EvaluationBlocked) => {
+                    for request in inputs.take_missing_chunks() {
+                        inputs.install_chunk(request.clone(), available[&request].clone());
+                    }
+                }
+                Err(error) => panic!("unexpected full-deletion consolidation failure: {error}"),
+            }
+        };
+
+        assert_eq!(consolidated.value_ref.byte_length, 0);
+        assert!(consolidated.value_ref.edit_tail.is_empty());
+        assert_eq!(
+            consolidated.staged_chunks.len(),
+            1,
+            "a fully deleted value must not retain zero-metric branch ancestors"
+        );
+        let root = &consolidated.staged_chunks[0];
+        assert_eq!(root.node_ref, consolidated.value_ref.root);
+        assert_eq!(
+            decode_node(
+                LargeValueKind::Bytes,
+                root.node_ref.object_hash,
+                &root.encoded,
+            ),
+            Ok(ChunkNode::Leaf {
+                format: FORMAT_VERSION,
+                kind: LargeValueKind::Bytes,
+                bytes: Vec::new(),
+            })
+        );
+
+        let mut materialize_inputs = EvaluationInputs::default();
+        materialize_inputs.install_chunk(
+            ChunkRequest {
+                object_hash: root.node_ref.object_hash.0,
+                locator: root.node_ref.locator,
+            },
+            bytes::Bytes::copy_from_slice(&root.encoded),
+        );
+        let materialized =
+            materialize_attempt(&consolidated.value_ref, &mut materialize_inputs).unwrap();
+        assert_eq!(materialized, Vec::<u8>::new());
+        assert!(materialize_inputs.take_missing_chunks().is_empty());
     }
 
     #[test]
