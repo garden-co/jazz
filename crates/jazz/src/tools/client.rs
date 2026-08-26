@@ -267,6 +267,13 @@ impl Backend {
         self.0.set_tick_scheduler(Some(scheduler));
     }
 
+    async fn close(&self) -> Result<()> {
+        self.0
+            .close()
+            .await
+            .map_err(|error| JazzError::Connection(error.to_string()))
+    }
+
     async fn connect_upstream(&self, transport: Box<dyn CoreTransport>) -> BackendConnection {
         self.0.connect_upstream(transport).await
     }
@@ -685,6 +692,15 @@ impl ClientDb {
                 schema: Rc::new(public_schema),
             },
         }))
+    }
+
+    async fn close(&self) -> Result<()> {
+        let backend = {
+            let mut inner = self.inner.borrow_mut();
+            inner.disconnect_upstream();
+            inner.db.clone()
+        };
+        backend.close().await
     }
 
     async fn query_rows(
@@ -3438,8 +3454,7 @@ impl JazzClient {
 
     /// Shutdown the client and release resources.
     pub async fn shutdown(self) -> Result<()> {
-        self.db.disconnect_upstream();
-        Ok(())
+        self.db.close().await
     }
 }
 
@@ -3859,7 +3874,7 @@ mod tests {
             )
             .await
             .expect("wait for local durability");
-        drop(client);
+        client.shutdown().await.expect("gracefully close client");
 
         let restarted = JazzClient::connect(context)
             .await
