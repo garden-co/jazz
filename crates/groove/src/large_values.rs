@@ -1,6 +1,7 @@
 //! Canonical indirect representation for large logical scalar values.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -2164,6 +2165,18 @@ pub fn inline_scalar_bytes(kind: LargeValueKind, encoded: &[u8]) -> Result<&[u8]
 }
 
 fn stored_scalar_schema(kind: LargeValueKind) -> EnumSchema {
+    static BYTES: OnceLock<EnumSchema> = OnceLock::new();
+    static STRING: OnceLock<EnumSchema> = OnceLock::new();
+    static JSON: OnceLock<EnumSchema> = OnceLock::new();
+    match kind {
+        LargeValueKind::Bytes => BYTES.get_or_init(|| build_stored_scalar_schema(kind)),
+        LargeValueKind::String => STRING.get_or_init(|| build_stored_scalar_schema(kind)),
+        LargeValueKind::Json => JSON.get_or_init(|| build_stored_scalar_schema(kind)),
+    }
+    .clone()
+}
+
+fn build_stored_scalar_schema(kind: LargeValueKind) -> EnumSchema {
     let primitive = RecordDescriptor::new([(
         "value",
         match kind {
