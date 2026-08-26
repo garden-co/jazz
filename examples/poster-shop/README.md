@@ -21,10 +21,13 @@ or admin of `shape.canvasId`, and `shape.layerId` resolves to a layer whose
 `canvasId` equals `shape.canvasId`. This explicitly denies attaching a shape to
 a layer from another canvas; it never falls back to membership alone.
 
-The follow-up topology receipt will run this ordinary application schema and
-policy set through browser → edge → core. Its deterministic timeout/fault
-plumbing comes from the shared example topology harness; it does not replace
-the application's queries or policy evaluator.
+The browser topology receipt runs this ordinary application schema and policy
+set through browser → serving core. It verifies concurrent ordered edits, an
+offline local shape across persistent reopen, replay to a peer after reconnect,
+the same bounded shape-window query used by a viewport, and a post-revocation
+write denial. Its deterministic timeout/fault plumbing comes from the shared
+example topology harness; it does not replace the application's queries or
+policy evaluator.
 
 `checkpoints.branch` is only a named marker at this stage. It does not expose a
 branch view, choose a winner, or claim canvas-specific concurrent ordering
