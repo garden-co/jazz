@@ -683,7 +683,17 @@ where
         now_ms: Option<u64>,
     ) -> Result<WriteHandle<S>, Error> {
         if mutations.is_empty() {
-            return self.update(table, row, patch).await;
+            return self
+                .update(
+                    table,
+                    row,
+                    patch,
+                    UpdateOptions {
+                        updated_at_ms: now_ms,
+                        ..Default::default()
+                    },
+                )
+                .await;
         }
         let (mut cells, parent, mut authored_columns) =
             self.merge_existing_cells(table, row, patch).await?;
@@ -742,7 +752,7 @@ where
             let published = {
                 let mut node = self.node.node.lock().await;
                 let commit = if staged.is_empty() {
-                    node.seal_inherited_large_values(commit, self.schema_version_id)
+                    node.seal_inherited_large_values(commit, self.schema_version_id, true)
                         .await?
                 } else {
                     node.seal_large_value_updates(commit, &staged, self.schema_version_id)
