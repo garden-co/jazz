@@ -45,7 +45,7 @@ export type BrowserWebSocket = {
   ): void;
 };
 
-export const WIRE_PROTOCOL_VERSION = 12;
+export const WIRE_PROTOCOL_VERSION = 14;
 export const MIN_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
 export const MAX_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
 export const FEATURE_SYNC_MESSAGE_PAYLOAD = 1 << 0;
@@ -347,7 +347,7 @@ function canonicalAuthorForWebSocketAuth(auth: Record<string, unknown>): string 
 
   if (typeof auth.jwt_token === "string") {
     const payload = parseJwtPayload(auth.jwt_token);
-    const issuer = typeof payload?.iss === "string" ? payload.iss.trim() : undefined;
+    const issuer = typeof payload?.iss === "string" ? payload.iss : undefined;
     const subject = payload?.sub;
     if (
       typeof issuer === "string" &&

@@ -24,9 +24,9 @@ struct CanonicalVersionRecord {
     row_uuid: RowUuid,
     parents: Vec<TxId>,
     created_by: AuthorSubject,
-    created_at: TxTime,
+    created_at: u64,
     updated_by: AuthorSubject,
-    updated_at: TxTime,
+    updated_at: u64,
     deletion: Option<DeletionEvent>,
     cells: Vec<String>,
 }
@@ -60,9 +60,9 @@ fn canonical_version_record(record: VersionRecord) -> CanonicalVersionRecord {
         row_uuid: record.row_uuid(),
         parents,
         created_by: record.created_by(),
-        created_at: record.created_at(),
+        created_at: record.created_at_ms(),
         updated_by: record.updated_by(),
-        updated_at: record.updated_at(),
+        updated_at: record.updated_at_ms(),
         deletion: record.deletion(),
         cells,
     }
@@ -70,7 +70,7 @@ fn canonical_version_record(record: VersionRecord) -> CanonicalVersionRecord {
 
 fn capture_view_update(update: SyncMessage) -> CanonicalViewUpdate {
     let normalized_version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         reset_result_set,
         peer_payload_inventory: crate::protocol::PeerPayloadInventory {
@@ -79,7 +79,7 @@ fn capture_view_update(update: SyncMessage) -> CanonicalViewUpdate {
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -232,12 +232,12 @@ fn apply_capture_result_delta(
     result_set: &mut BTreeSet<ResultRowEntry>,
     update: &SyncMessage,
 ) {
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -263,10 +263,10 @@ fn apply_capture_delivery_state(
     update: &SyncMessage,
 ) {
     apply_capture_result_delta(result_set, update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -281,7 +281,7 @@ fn apply_capture_delivery_state(
 }
 
 fn view_update_full_bundle_count(update: &SyncMessage) -> usize {
-    let SyncMessage::ViewUpdate { .. } = update else {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) = update else {
         panic!("expected view update");
     };
     version_bundles_for_update(update).len()
@@ -474,10 +474,10 @@ impl MaintainedSubscriptionViewSubscription {
             },
         )
         .resolve()?;
-        let SyncMessage::ViewUpdate {
+        let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             reset_result_set: update_reset,
             ..
-        } = &mut update
+        }) = &mut update
         else {
             panic!("expected view update");
         };
@@ -492,7 +492,7 @@ fn assert_shipped_content_rows(
     expected_rows: &[RowUuid],
     absent_rows: &[RowUuid],
 ) {
-    let SyncMessage::ViewUpdate { .. } = update else {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) = update else {
         panic!("expected view update");
     };
     let version_bundles = version_bundles_for_update(update);
@@ -526,13 +526,13 @@ fn assert_retraction_without_replacement_leak(
     old_tx_id: TxId,
     unreadable_tx_id: TxId,
 ) {
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         version_bundles,
         peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };

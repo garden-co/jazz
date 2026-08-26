@@ -8,7 +8,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, LocalUpdates, MergeableTxOps, Propagation, ReadOpts,
+    Db, DbConfig, DbIdentity, InsertOptions, LocalUpdates, MergeableTxOps, Propagation, ReadOpts,
     SeededRowIdSource, block_on,
 };
 use jazz::groove::db::StorageReadMetrics;
@@ -154,9 +154,8 @@ fn seed_rows(db: &Db<RocksDbStorage>, table_rows: usize, owned_rows: usize, batc
             } else {
                 other_author()
             };
-            block_on(tx.insert_with_id(
+            block_on(tx.insert(
                 TABLE,
-                row(index),
                 BTreeMap::from([
                     ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
                     ("active".to_owned(), Value::Bool(true)),
@@ -166,6 +165,10 @@ fn seed_rows(db: &Db<RocksDbStorage>, table_rows: usize, owned_rows: usize, batc
                         Value::String(format!("document-{index}")),
                     ),
                 ]),
+                InsertOptions {
+                    row_id: Some(row(index)),
+                    ..Default::default()
+                },
             ))
             .expect("stage owner-filter row");
         }

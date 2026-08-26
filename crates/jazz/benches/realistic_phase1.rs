@@ -523,8 +523,15 @@ where
         .map(|index| {
             let row = row_uuid(0x11, index);
             wait_local(
-                db.insert_with_id("users", row, user_cells(index))
-                    .expect("seed user"),
+                db.insert(
+                    "users",
+                    user_cells(index),
+                    jazz::db::InsertOptions {
+                        row_id: Some(row),
+                        ..Default::default()
+                    },
+                )
+                .expect("seed user"),
             );
             row
         })
@@ -534,8 +541,15 @@ where
         .map(|index| {
             let row = row_uuid(0x1f, index);
             wait_local(
-                db.insert_with_id("organizations", row, organization_cells(index))
-                    .expect("seed organization"),
+                db.insert(
+                    "organizations",
+                    organization_cells(index),
+                    jazz::db::InsertOptions {
+                        row_id: Some(row),
+                        ..Default::default()
+                    },
+                )
+                .expect("seed organization"),
             );
             row
         })
@@ -546,6 +560,7 @@ where
             db.insert(
                 "memberships",
                 membership_cells(index, &organizations, &users),
+                Default::default(),
             )
             .expect("seed membership"),
         );
@@ -555,10 +570,13 @@ where
         .map(|index| {
             let row = row_uuid(0x22, index);
             wait_local(
-                db.insert_with_id(
+                db.insert(
                     "projects",
-                    row,
                     project_cells(index, &organizations, &users),
+                    jazz::db::InsertOptions {
+                        row_id: Some(row),
+                        ..Default::default()
+                    },
                 )
                 .expect("seed project"),
             );
@@ -570,8 +588,15 @@ where
         .map(|index| {
             let row = row_uuid(0x33, index);
             wait_local(
-                db.insert_with_id("tasks", row, task_cells(index, &projects, &users))
-                    .expect("seed task"),
+                db.insert(
+                    "tasks",
+                    task_cells(index, &projects, &users),
+                    jazz::db::InsertOptions {
+                        row_id: Some(row),
+                        ..Default::default()
+                    },
+                )
+                .expect("seed task"),
             );
             row
         })
@@ -579,8 +604,12 @@ where
 
     for index in 0..profile.comments {
         wait_local(
-            db.insert("comments", comment_cells(index, &tasks, &users))
-                .expect("seed comment"),
+            db.insert(
+                "comments",
+                comment_cells(index, &tasks, &users),
+                Default::default(),
+            )
+            .expect("seed comment"),
         );
     }
 
@@ -588,7 +617,7 @@ where
         for watcher_offset in 0..profile.watchers_per_task {
             let user = users[(task_index + watcher_offset) % users.len()];
             wait_local(
-                db.insert("watchers", watcher_cells(*task, user))
+                db.insert("watchers", watcher_cells(*task, user), Default::default())
                     .expect("seed watcher"),
             );
         }
@@ -596,8 +625,12 @@ where
 
     for index in 0..profile.activity_events {
         wait_local(
-            db.insert("activity", activity_cells(index, &projects, &tasks, &users))
-                .expect("seed activity"),
+            db.insert(
+                "activity",
+                activity_cells(index, &projects, &tasks, &users),
+                Default::default(),
+            )
+            .expect("seed activity"),
         );
     }
 
@@ -616,8 +649,15 @@ where
         .map(|index| {
             let row = row_uuid(0x41, index);
             wait_local(
-                db.insert_with_id("users", row, user_cells(index))
-                    .expect("seed resume user"),
+                db.insert(
+                    "users",
+                    user_cells(index),
+                    jazz::db::InsertOptions {
+                        row_id: Some(row),
+                        ..Default::default()
+                    },
+                )
+                .expect("seed resume user"),
             );
             row
         })
@@ -627,8 +667,15 @@ where
         .map(|index| {
             let row = row_uuid(0x42, index);
             wait_local(
-                db.insert_with_id("organizations", row, organization_cells(index))
-                    .expect("seed resume organization"),
+                db.insert(
+                    "organizations",
+                    organization_cells(index),
+                    jazz::db::InsertOptions {
+                        row_id: Some(row),
+                        ..Default::default()
+                    },
+                )
+                .expect("seed resume organization"),
             );
             row
         })
@@ -638,10 +685,13 @@ where
         .map(|index| {
             let row = row_uuid(0x43, index);
             wait_local(
-                db.insert_with_id(
+                db.insert(
                     "projects",
-                    row,
                     project_cells(index, &organizations, &users),
+                    jazz::db::InsertOptions {
+                        row_id: Some(row),
+                        ..Default::default()
+                    },
                 )
                 .expect("seed resume project"),
             );
@@ -653,8 +703,15 @@ where
         .map(|index| {
             let row = row_uuid(0x44, index);
             wait_local(
-                db.insert_with_id("tasks", row, task_cells(index, &projects, &users))
-                    .expect("seed resume task"),
+                db.insert(
+                    "tasks",
+                    task_cells(index, &projects, &users),
+                    jazz::db::InsertOptions {
+                        row_id: Some(row),
+                        ..Default::default()
+                    },
+                )
+                .expect("seed resume task"),
             );
             row
         })
@@ -779,8 +836,15 @@ fn seed_recursive_permissions_fixture(db: &BenchDb) {
         (RECURSIVE_HIDDEN_TEAM, "hidden"),
     ] {
         wait_local(
-            db.insert_with_id("teams", team, recursive_team_cells(name))
-                .expect("seed recursive team"),
+            db.insert(
+                "teams",
+                recursive_team_cells(name),
+                jazz::db::InsertOptions {
+                    row_id: Some(team),
+                    ..Default::default()
+                },
+            )
+            .expect("seed recursive team"),
         );
     }
 
@@ -790,8 +854,15 @@ fn seed_recursive_permissions_fixture(db: &BenchDb) {
         (RECURSIVE_DOC_HIDDEN, "hidden", "hidden"),
     ] {
         wait_local(
-            db.insert_with_id("docs", doc, recursive_doc_cells(title, kind))
-                .expect("seed recursive doc"),
+            db.insert(
+                "docs",
+                recursive_doc_cells(title, kind),
+                jazz::db::InsertOptions {
+                    row_id: Some(doc),
+                    ..Default::default()
+                },
+            )
+            .expect("seed recursive doc"),
         );
     }
 
@@ -801,8 +872,12 @@ fn seed_recursive_permissions_fixture(db: &BenchDb) {
         (RECURSIVE_DOC_HIDDEN, RECURSIVE_HIDDEN_TEAM),
     ] {
         wait_local(
-            db.insert("doc_access", recursive_doc_access_cells(doc, team))
-                .expect("seed recursive doc access"),
+            db.insert(
+                "doc_access",
+                recursive_doc_access_cells(doc, team),
+                Default::default(),
+            )
+            .expect("seed recursive doc access"),
         );
     }
 
@@ -810,6 +885,7 @@ fn seed_recursive_permissions_fixture(db: &BenchDb) {
         db.insert(
             "team_edges",
             recursive_team_edge_cells(RECURSIVE_READER_TEAM, RECURSIVE_PARENT_TEAM),
+            Default::default(),
         )
         .expect("seed recursive team edge"),
     );
@@ -822,16 +898,26 @@ fn seed_permission_resume_fixture(db: &BenchDb) {
         (RECURSIVE_HIDDEN_TEAM, "hidden"),
     ] {
         wait_local(
-            db.insert_with_id("teams", team, recursive_team_cells(name))
-                .expect("seed resume permission team"),
+            db.insert(
+                "teams",
+                recursive_team_cells(name),
+                jazz::db::InsertOptions {
+                    row_id: Some(team),
+                    ..Default::default()
+                },
+            )
+            .expect("seed resume permission team"),
         );
     }
 
     wait_local(
-        db.insert_with_id(
+        db.insert(
             "team_edges",
-            RESUME_EDGE_READER_PARENT,
             recursive_team_edge_cells(RECURSIVE_READER_TEAM, RECURSIVE_PARENT_TEAM),
+            jazz::db::InsertOptions {
+                row_id: Some(RESUME_EDGE_READER_PARENT),
+                ..Default::default()
+            },
         )
         .expect("seed resume permission team edge"),
     );
@@ -843,8 +929,15 @@ fn seed_permission_resume_fixture(db: &BenchDb) {
         (RESUME_DOC_NEVER, "never", "never-visible"),
     ] {
         wait_local(
-            db.insert_with_id("docs", doc, recursive_doc_cells(title, kind))
-                .expect("seed resume permission doc"),
+            db.insert(
+                "docs",
+                recursive_doc_cells(title, kind),
+                jazz::db::InsertOptions {
+                    row_id: Some(doc),
+                    ..Default::default()
+                },
+            )
+            .expect("seed resume permission doc"),
         );
     }
 
@@ -862,8 +955,15 @@ fn seed_permission_resume_fixture(db: &BenchDb) {
         (RESUME_ACCESS_NEVER, RESUME_DOC_NEVER, RECURSIVE_HIDDEN_TEAM),
     ] {
         wait_local(
-            db.insert_with_id("doc_access", access, recursive_doc_access_cells(doc, team))
-                .expect("seed resume permission access"),
+            db.insert(
+                "doc_access",
+                recursive_doc_access_cells(doc, team),
+                jazz::db::InsertOptions {
+                    row_id: Some(access),
+                    ..Default::default()
+                },
+            )
+            .expect("seed resume permission access"),
         );
     }
 }
@@ -1046,6 +1146,7 @@ fn r1_crud(c: &mut Criterion) {
                         .insert(
                             "tasks",
                             task_cells(next_task, &fixture.projects, &fixture.users),
+                            Default::default(),
                         )
                         .expect("insert task");
                     let inserted_row = inserted.row_uuid();
@@ -1061,12 +1162,16 @@ fn r1_crud(c: &mut Criterion) {
                                 ("status".to_owned(), Value::String("review".to_owned())),
                                 ("updated_at".to_owned(), Value::U64(next_task as u64)),
                             ]),
+                            Default::default(),
                         )
                         .expect("update task"),
                     );
                     update_index += 1;
 
-                    wait_local(db.delete("tasks", inserted_row).expect("delete task"));
+                    wait_local(
+                        db.delete("tasks", inserted_row, Default::default())
+                            .expect("delete task"),
+                    );
                 });
             },
         );
@@ -1642,6 +1747,7 @@ fn r4_hot_task_history(c: &mut Criterion) {
                                 ),
                                 ("updated_at".to_owned(), Value::U64(event_index as u64)),
                             ]),
+                            Default::default(),
                         )
                         .expect("hot task update"),
                     );
@@ -1649,6 +1755,7 @@ fn r4_hot_task_history(c: &mut Criterion) {
                         db.insert(
                             "comments",
                             comment_cells(event_index, &[hot_task], &fixture.users),
+                            Default::default(),
                         )
                         .expect("hot task comment"),
                     );
@@ -1661,6 +1768,7 @@ fn r4_hot_task_history(c: &mut Criterion) {
                                 &[hot_task],
                                 &fixture.users,
                             ),
+                            Default::default(),
                         )
                         .expect("hot task activity"),
                     );
@@ -1717,6 +1825,7 @@ fn r9_subscribed_write(c: &mut Criterion) {
                                 ("status".to_owned(), Value::String("doing".to_owned())),
                                 ("updated_at".to_owned(), Value::U64(task_index as u64)),
                             ]),
+                            Default::default(),
                         )
                         .expect("subscribed task update"),
                     );
@@ -1797,6 +1906,7 @@ fn r10_sync_fanout(c: &mut Criterion) {
                                         Value::U64((profile.tasks + update_index) as u64),
                                     ),
                                 ]),
+                                Default::default(),
                             )
                             .expect("writer project-board update"),
                     );
@@ -1895,7 +2005,7 @@ fn r11_byte_wire_resume(c: &mut Criterion) {
                                         Value::String(changed_status.to_owned()),
                                     ),
                                     ("updated_at".to_owned(), Value::U64(9_001)),
-                                ]),
+                                ]), Default::default()
                             )
                             .expect("writer disconnected task update"),
                     );
@@ -2059,22 +2169,26 @@ fn run_permission_filtered_resume(
                     "doc_access",
                     RESUME_ACCESS_REVOKED,
                     recursive_doc_access_cells(RESUME_DOC_REVOKED, RECURSIVE_HIDDEN_TEAM),
+                    Default::default(),
                 )
                 .expect("hide disconnected doc access before revoke"),
         );
         wait_local(
             writer
-                .delete("doc_access", RESUME_ACCESS_REVOKED)
+                .delete("doc_access", RESUME_ACCESS_REVOKED, Default::default())
                 .expect("revoke disconnected doc access"),
         );
     }
     if churn.grants() {
         wait_local(
             writer
-                .insert_with_id(
+                .insert(
                     "doc_access",
-                    RESUME_ACCESS_GRANTED,
                     recursive_doc_access_cells(RESUME_DOC_GRANTED, RECURSIVE_PARENT_TEAM),
+                    jazz::db::InsertOptions {
+                        row_id: Some(RESUME_ACCESS_GRANTED),
+                        ..Default::default()
+                    },
                 )
                 .expect("grant disconnected doc access"),
         );
@@ -2183,10 +2297,13 @@ fn run_claim_filtered_resume(
     ] {
         wait_local(
             writer
-                .insert_with_id(
+                .insert(
                     "claim_docs",
-                    row,
                     BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+                    jazz::db::InsertOptions {
+                        row_id: Some(row),
+                        ..Default::default()
+                    },
                 )
                 .expect("seed claim-resume doc"),
         );

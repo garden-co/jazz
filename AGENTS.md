@@ -26,6 +26,15 @@ as soon as work begins or that first commit exists; the PR may be red/WIP and
 must not wait for completion or review. Lanes remain local-only: they must not
 push, create or modify PRs, comment on GitHub, or merge.
 
+### Pull-request descriptions
+
+Every behavior-changing PR description explains the before/after behavior,
+the governing invariants, and important non-goals or unchanged cases. Include
+worked examples for the normal path and meaningful edge, failure, retry, or
+handoff cases. For nuanced or large changes, make these concrete enough for an
+adversarial reviewer to verify the behavior and for a future reader to recover
+the decision without reconstructing it from the diff or conversation history.
+
 **Testing:** prefer black-boxed integration tests over unit tests or white-box tests.
 Do not use JSON-like schema/permissions/query definitions. Always use the public API to build them in the tests.
 Before writing any test in Rust crates, always read `crates/jazz/TESTING_GUIDELINES.md` in full and follow it.
@@ -42,6 +51,19 @@ core gate's `-p jazz --no-default-features --features testing,transport-compress
 
 **Canonical gates:** do not let born-red or rotted targets accumulate silently.
 For ordinary Rust/core work, the full gate set is:
+
+**Local CI-equivalent gate.** `node dev/gates/local-ci-equivalent.mjs
+--ci-equivalent` is the only local command that may be described as
+_CI-equivalent_. It executes the exact named correctness/build command
+partitions invoked by `.github/workflows/ci-suite.yml` (serialized locally;
+CI schedules them in parallel). It fails closed on a missing partition and
+includes the exhaustive workspace `--lib --bins --tests --examples --benches`
+compile with CI's required features before TypeScript artifacts or suites.
+The default `node dev/gates/local-ci-equivalent.mjs` is deliberately a faster
+**focused** iteration mode and prints that it is **not CI-equivalent**. Lanes
+must never call a focused, crate-only, or partial-artifact receipt
+CI-equivalent. Use `--ci-partition <name>` only when reproducing one named CI
+job during diagnosis; it is likewise not a full CI-equivalent result.
 
 - `cargo test -p jazz`
 - `cargo test -p groove`

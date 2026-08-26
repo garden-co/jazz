@@ -98,7 +98,9 @@ type CoreTickWake = "immediate" | "deferred" | `after:${number}`;
 
 type NativeDbConstructor = {
   openMemory(schema: Uint8Array, config: Uint8Array): NativeDb;
+  openMemoryAsBackend?(schema: Uint8Array, config: Uint8Array): NativeDb;
   openPersistent?(dataPath: string, schema: Uint8Array, config: Uint8Array): NativeDb;
+  openPersistentAsBackend?(dataPath: string, schema: Uint8Array, config: Uint8Array): NativeDb;
   openMemoryWithSelfSignedProof?(
     schema: Uint8Array,
     config: Uint8Array,
@@ -116,18 +118,36 @@ type NativeDbConstructor = {
   ): NativeDb;
 };
 
+type NativeWriteOptions = {
+  author?: Uint8Array;
+  updatedAtMs?: number;
+};
+
+type NativeInsertOptions = NativeWriteOptions & {
+  rowId?: Uint8Array;
+  branch?: unknown;
+};
+
+type NativeUpdateOptions = NativeWriteOptions & {
+  head?: unknown;
+  base?: unknown;
+};
+
+type NativeUpsertOptions = NativeWriteOptions & {
+  branch?: unknown;
+};
+
+type NativeDeleteOptions = NativeUpdateOptions;
+type NativeRestoreOptions = NativeUpsertOptions;
+
 type NativeDb = {
   // Native runtime adapters may close synchronously or asynchronously and may
   // report whether they transitioned state. The adapter awaits either form and
   // owns idempotence, so callers never observe that implementation detail.
   close?(): void | boolean | Promise<void | boolean>;
   registerSchema(schema: Uint8Array): NativeDb;
-  beginTransaction(
-    openBatchId: string,
-    kind: TransactionKind,
-    author?: Uint8Array,
-    attribution?: Uint8Array,
-  ): void;
+  beginTransaction(openBatchId: string, kind: TransactionKind, author?: Uint8Array): void;
+  beginTransactionAttributed?(openBatchId: string, attribution: Uint8Array): void;
   commitTransaction(openBatchId: string, kind?: TransactionKind): Write;
   rollbackTransaction(openBatchId: string): void;
   attachMergeableTx(openBatchId: string): Tx;
@@ -164,32 +184,56 @@ type NativeDb = {
     author: Uint8Array,
     opts: unknown,
   ): ReadableStream<unknown> | Subscription;
-  insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): Write;
-  insertWithIdEncodedForIdentity(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    author: Uint8Array,
-    updatedAtMs?: number | null,
-  ): Write;
+  insertEncoded(table: string, cells: Uint8Array, options?: NativeInsertOptions): Write;
   insertWithIdEncodedAttributed?(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
     author: Uint8Array,
   ): Write;
-  insertWithIdEncoded(
+  updateEncoded(
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    options?: NativeUpdateOptions,
+  ): Write;
+  updateEncodedAttributed?(
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    author: Uint8Array,
+  ): Write;
+  upsertEncoded(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
-    updatedAtMs?: number | null,
+    options?: NativeUpsertOptions,
+  ): Write;
+  upsertEncodedAttributed?(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    author: Uint8Array,
+  ): Write;
+  deleteEncoded(table: string, rowId: Uint8Array, options?: NativeDeleteOptions): Write;
+  deleteAttributed?(table: string, rowId: Uint8Array, author: Uint8Array): Write;
+  restoreEncoded(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    options?: NativeRestoreOptions,
+  ): Write;
+  restoreEncodedAttributed?(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    author: Uint8Array,
   ): Write;
   beginStreamingMutationEncoded?(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
     column: string,
-    kind: "Text" | "Json" | "Bytea",
     mutation?: StreamingMutationKind,
     author?: Uint8Array,
     updatedAtMs?: number,
@@ -201,139 +245,11 @@ type NativeDb = {
     rowId: Uint8Array,
     cells: Uint8Array,
     column: string,
-    kind: "Text" | "Json" | "Bytea",
     mutation: StreamingMutationKind | undefined,
     author: Uint8Array | undefined,
     attribution: Uint8Array,
     updatedAtMs?: number,
-    head?: unknown,
-    base?: unknown,
   ): NativeStreamingMutation;
-  insertWithIdEncodedInBranch?(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    branch: unknown,
-  ): Write;
-  insertWithIdEncodedInBranchForIdentity?(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    branch: unknown,
-    author: Uint8Array,
-  ): Write;
-  restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): Write;
-  restoreEncodedForIdentity(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    author: Uint8Array,
-    updatedAtMs?: number | null,
-  ): Write;
-  restoreEncodedAttributed?(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    author: Uint8Array,
-  ): Write;
-  restoreEncoded(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    updatedAtMs?: number | null,
-  ): Write;
-  restoreInBranch?(table: string, rowId: Uint8Array, branch: unknown): Write;
-  restoreEncodedInBranch?(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    branch: unknown,
-  ): Write;
-  restoreEncodedInBranchForIdentity?(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    branch: unknown,
-    author: Uint8Array,
-  ): Write;
-  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): Write;
-  updateEncodedForIdentity(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    author: Uint8Array,
-    updatedAtMs?: number | null,
-  ): Write;
-  updateEncodedAttributed?(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    author: Uint8Array,
-  ): Write;
-  updateEncoded(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    updatedAtMs?: number | null,
-  ): Write;
-  updateEncodedInBranch?(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    branch: unknown,
-  ): Write;
-  updateEncodedInBranchView?(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    head: unknown,
-    base?: unknown,
-  ): Write;
-  updateEncodedInBranchViewForIdentity?(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    head: unknown,
-    base: unknown,
-    author: Uint8Array,
-  ): Write;
-  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): Write;
-  upsertEncodedForIdentity(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    author: Uint8Array,
-    updatedAtMs?: number | null,
-  ): Write;
-  upsertEncodedAttributed?(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    author: Uint8Array,
-  ): Write;
-  upsertEncoded(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    updatedAtMs?: number | null,
-  ): Write;
-  delete(table: string, rowId: Uint8Array, updatedAtMs?: number | null): Write;
-  deleteForIdentity(
-    table: string,
-    rowId: Uint8Array,
-    author: Uint8Array,
-    updatedAtMs?: number | null,
-  ): Write;
-  deleteAttributed?(table: string, rowId: Uint8Array, author: Uint8Array): Write;
-  deleteInBranch?(table: string, rowId: Uint8Array, branch: unknown): Write;
-  deleteInBranchView?(table: string, rowId: Uint8Array, head: unknown, base?: unknown): Write;
-  deleteInBranchViewForIdentity?(
-    table: string,
-    rowId: Uint8Array,
-    head: unknown,
-    base: unknown,
-    author: Uint8Array,
-  ): Write;
   requestInsertPermissionAdviceEncoded?(
     table: string,
     cells: Uint8Array,
@@ -432,7 +348,8 @@ type Subscription = {
 
 type Write = {
   readonly batchId: string;
-  payload: Uint8Array;
+  readonly payload: Uint8Array;
+  readonly rowId: Uint8Array;
   wait(tier: string): Promise<void>;
   writeState(): unknown;
   close?(): boolean;
@@ -441,51 +358,26 @@ type Write = {
 type Tx = {
   commit(): Write;
   rollback(): void;
-  insertWithIdEncoded(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    updatedAtMs?: number | null,
-  ): void;
-  insertWithIdEncodedInBranch?(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    branch: unknown,
-  ): void;
-  restoreEncoded(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    updatedAtMs?: number | null,
-  ): void;
-  restoreEncodedInBranch?(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    branch: unknown,
-  ): void;
+  insertEncoded(table: string, cells: Uint8Array, options?: NativeInsertOptions): Uint8Array;
   updateEncoded(
     table: string,
     rowId: Uint8Array,
     patch: Uint8Array,
-    updatedAtMs?: number | null,
-  ): void;
-  updateEncodedInBranchView?(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    head: unknown,
-    base?: unknown,
+    options?: NativeUpdateOptions,
   ): void;
   upsertEncoded(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
-    updatedAtMs?: number | null,
+    options?: NativeUpsertOptions,
   ): void;
-  delete(table: string, rowId: Uint8Array, updatedAtMs?: number | null): void;
-  deleteInBranchView?(table: string, rowId: Uint8Array, head: unknown, base?: unknown): void;
+  deleteEncoded(table: string, rowId: Uint8Array, options?: NativeDeleteOptions): void;
+  restoreEncoded(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    options?: NativeRestoreOptions,
+  ): void;
 };
 
 export type Transport = {
@@ -496,7 +388,7 @@ export type Transport = {
   setOutboundScheduler?(callback: () => void): void;
   clearOutboundScheduler?(): void;
   routeAuxiliaryWireFrame?(frame: Uint8Array): unknown | Promise<unknown>;
-  recvAuxiliaryWireFrames?(): unknown[];
+  recvAuxiliaryWireFrames?(maxFrames?: number, maxBytes?: number): unknown[];
   auxiliaryOutboundReady?(): boolean | Promise<void>;
   tick(): number | Promise<number>;
   updateAuthenticatedClaims?(claims: Record<string, unknown>): void | Promise<void>;
@@ -508,6 +400,7 @@ type PendingTx = {
   kind: TransactionKind;
   txByView: Map<NativeRuntimeAdapter, Tx>;
   identity?: Uint8Array;
+  /** External provenance fixed at begin, never supplied per staged operation. */
   attribution?: Uint8Array;
   writes: PendingTxWrite[];
 };
@@ -615,7 +508,19 @@ function openPersistentDb(
   schema: Uint8Array,
   config: Uint8Array,
   selfSignedClientProof?: NativeSelfSignedClientProof,
+  backendMode = false,
 ): NativeDb {
+  if (selfSignedClientProof && backendMode) {
+    throw new Error("A native runtime cannot be both self-signed and backend-scoped");
+  }
+  if (backendMode) {
+    if (!Runtime.openPersistentAsBackend) {
+      throw new Error(
+        "Native runtime does not support explicit backend opens; rebuild the matching Jazz native artifact",
+      );
+    }
+    return Runtime.openPersistentAsBackend(dataPath, schema, config);
+  }
   if (selfSignedClientProof) {
     if (!Runtime.openPersistentWithSelfSignedProof) {
       throw new Error(
@@ -642,7 +547,19 @@ function openMemoryDb(
   schema: Uint8Array,
   config: Uint8Array,
   selfSignedClientProof?: NativeSelfSignedClientProof,
+  backendMode = false,
 ): NativeDb {
+  if (selfSignedClientProof && backendMode) {
+    throw new Error("A native runtime cannot be both self-signed and backend-scoped");
+  }
+  if (backendMode) {
+    if (!Runtime.openMemoryAsBackend) {
+      throw new Error(
+        "Native runtime does not support explicit backend opens; rebuild the matching Jazz native artifact",
+      );
+    }
+    return Runtime.openMemoryAsBackend(schema, config);
+  }
   if (!selfSignedClientProof) return Runtime.openMemory(schema, config);
   if (!Runtime.openMemoryWithSelfSignedProof) {
     throw new Error(
@@ -724,7 +641,6 @@ export class NativeRuntimeAdapter implements Runtime {
     return new NativeRuntimeAdapter(null, schema, this.node, this.peerIdentity, 1, true, {
       db: this.db.registerSchema(encodeSchema(schema)),
       owner: this,
-      backendCredential: this.trustedBackend ? "inherited-backend-capability" : undefined,
     });
   }
 
@@ -733,7 +649,8 @@ export class NativeRuntimeAdapter implements Runtime {
     private readonly schema: WasmSchema,
     private readonly node: Uint8Array,
     author: Uint8Array,
-    sourceId: number,
+    // Retained for constructor compatibility; production row IDs must use the core clock source.
+    _sourceId: number,
     historyComplete: boolean,
     opts?: {
       persistentPath?: string;
@@ -741,7 +658,7 @@ export class NativeRuntimeAdapter implements Runtime {
       initialSyncFlushEvery?: number;
       selfSignedClientProof?: NativeSelfSignedClientProof;
       readAuthorizationHost?: ReadAuthorizationHost;
-      backendCredential?: string;
+      backendMode?: boolean;
       owner?: NativeRuntimeAdapter;
     },
   ) {
@@ -757,14 +674,13 @@ export class NativeRuntimeAdapter implements Runtime {
     this.completedTxs = this.transactionOwner.completedTxs;
     this.writes = this.transactionOwner.writes;
     this.schemaBytes = encodeSchema(schema);
-    this.trustedBackend = opts?.owner?.trustedBackend ?? opts?.backendCredential !== undefined;
+    this.trustedBackend = opts?.backendMode === true;
     this.configBytes = openConfig(
       node,
       author,
-      sourceId,
+      undefined,
       historyComplete,
       opts?.initialSyncFlushEvery,
-      opts?.backendCredential,
     );
     this.peerIdentity = author;
     this.schemaHash = serializeRuntimeSchema(schema);
@@ -780,6 +696,7 @@ export class NativeRuntimeAdapter implements Runtime {
         this.schemaBytes,
         this.configBytes,
         opts?.selfSignedClientProof,
+        opts?.backendMode,
       );
     } else {
       if (!Runtime) {
@@ -790,6 +707,7 @@ export class NativeRuntimeAdapter implements Runtime {
         this.schemaBytes,
         this.configBytes,
         opts?.selfSignedClientProof,
+        opts?.backendMode,
       );
     }
     if (opts?.owner) return;
@@ -1078,33 +996,28 @@ export class NativeRuntimeAdapter implements Runtime {
     _writeContext?: string | null,
     objectId?: string | null,
   ): InsertResult {
-    const rowId = objectId ? parseUuid(objectId) : crypto.getRandomValues(new Uint8Array(16));
-    const cells = encodeCellsForRow(this.table(table), values);
+    const suppliedRowId = objectId ? parseUuid(objectId) : undefined;
     const writeSession = sessionFromWriteContext(_writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = this.trustedWriteIdentity(writeSession);
-    const attribution = this.backendAttribution(_writeContext, writeSession);
+    const attribution = this.backendAttribution(_writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(_writeContext);
     const branchView = branchViewFromWriteContext(_writeContext);
-    if (attribution && branchView) {
-      throw new Error("Backend-attributed branch mutations are not supported yet");
-    }
+    rejectAttributedBranchWrite(attribution, branchView);
     const tx = this.currentTx(_writeContext, "Insert");
+    if (tx) this.assertTransactionAttribution(tx, attribution);
+    const attributedInsert =
+      attribution && !tx
+        ? requireBackendAttributionAbi(this.db.insertWithIdEncodedAttributed, "insert")
+        : undefined;
+    const cells = encodeCellsForRow(this.table(table), values);
     if (tx) {
-      if (rowContainsOversizedScalar(this.table(table), values)) {
-        throw new Error(
-          "Oversized values cannot be inserted inside a synchronous transaction; use insertStreaming outside the transaction",
-        );
-      }
-      const nativeTx = this.txForWrite(tx, writeIdentity, attribution);
-      if (branchView) {
-        requireBranchMethod(
-          nativeTx.insertWithIdEncodedInBranch,
-          "transaction branch inserts",
-        ).call(nativeTx, table, rowId, cells, branchView.head);
-      } else {
-        nativeTx.insertWithIdEncoded(table, rowId, cells, updatedAtMs);
-      }
+      const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
+      const rowId = nativeTx.insertEncoded(table, cells, {
+        rowId: suppliedRowId,
+        branch: branchView?.head,
+        updatedAtMs: updatedAtMs ?? undefined,
+      });
       const row = this.rowStateFromValues(table, rowId, values);
       tx.writes.push({ table, rowId, row });
       return {
@@ -1114,36 +1027,24 @@ export class NativeRuntimeAdapter implements Runtime {
         openBatchId: txIdFromContext(_writeContext)!,
       };
     }
-    const write = writeOrNormalizeRejection("Insert", () =>
-      branchView
-        ? writeIdentity
-          ? requireBranchMethod(
-              this.db.insertWithIdEncodedInBranchForIdentity,
-              "identity-scoped branch inserts",
-            ).call(this.db, table, rowId, cells, branchView.head, writeIdentity)
-          : requireBranchMethod(this.db.insertWithIdEncodedInBranch, "branch inserts").call(
-              this.db,
-              table,
-              rowId,
-              cells,
-              branchView.head,
-            )
-        : attribution
-          ? requireAttributionMethod(
-              this.db.insertWithIdEncodedAttributed,
-              "backend-attributed inserts",
-            ).call(this.db, table, rowId, cells, attribution)
-          : writeIdentity
-            ? this.db.insertWithIdEncodedForIdentity(
-                table,
-                rowId,
-                cells,
-                writeIdentity,
-                updatedAtMs,
-              )
-            : this.db.insertWithIdEncoded(table, rowId, cells, updatedAtMs),
-    );
-    return this.finishInsert(table, rowId, values, write);
+    const write = writeOrNormalizeRejection("Insert", () => {
+      if (attribution) {
+        return attributedInsert!.call(
+          this.db,
+          table,
+          suppliedRowId ?? crypto.getRandomValues(new Uint8Array(16)),
+          cells,
+          attribution,
+        );
+      }
+      return this.db.insertEncoded(table, cells, {
+        rowId: suppliedRowId,
+        author: writeIdentity,
+        branch: branchView?.head,
+        updatedAtMs: updatedAtMs ?? undefined,
+      });
+    });
+    return this.finishInsert(table, suppliedRowId ?? write.rowId, values, write);
   }
 
   async streamingMutation(
@@ -1156,7 +1057,6 @@ export class NativeRuntimeAdapter implements Runtime {
     objectId?: string | null,
   ): Promise<StreamingInsertResult> {
     const begin = this.db.beginStreamingMutationEncoded;
-    if (!begin) throw new Error("Native runtime does not expose streaming mutations");
     const operation =
       mutation === "insert" ? "Insert" : mutation === "update" ? "Update" : "Upsert";
     if (this.currentTx(writeContext, operation)) {
@@ -1165,9 +1065,19 @@ export class NativeRuntimeAdapter implements Runtime {
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = this.trustedWriteIdentity(writeSession);
-    const attribution = this.backendAttribution(writeContext, writeSession);
+    const attribution = this.backendAttribution(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
+    rejectAttributedBranchWrite(attribution, branchView);
+    const attributedBegin = attribution
+      ? requireBackendAttributionAbi(
+          this.db.beginStreamingMutationAttributedEncoded,
+          "streaming mutations",
+        )
+      : undefined;
+    const ordinaryBegin = attribution
+      ? undefined
+      : requireBackendAttributionAbi(begin, "streaming mutations");
 
     const definition = this.table(table);
     const descriptor = definition.columns.find((candidate) => candidate.name === column);
@@ -1183,30 +1093,23 @@ export class NativeRuntimeAdapter implements Runtime {
         ? encodeCellsForStreamingRow(definition, values, column, table)
         : encodeCellsForStreamingPatch(definition, values, column);
     const upload = attribution
-      ? requireAttributionMethod(
-          this.db.beginStreamingMutationAttributedEncoded,
-          "backend-attributed streaming mutations",
-        ).call(
+      ? attributedBegin!.call(
           this.db,
           table,
           rowId,
           cells,
           column,
-          kind,
           mutation,
-          writeIdentity,
+          undefined,
           attribution,
           updatedAtMs ?? undefined,
-          branchView?.head,
-          branchView?.base,
         )
-      : begin.call(
+      : ordinaryBegin!.call(
           this.db,
           table,
           rowId,
           cells,
           column,
-          kind,
           mutation,
           writeIdentity,
           updatedAtMs ?? undefined,
@@ -1259,30 +1162,26 @@ export class NativeRuntimeAdapter implements Runtime {
     writeContext?: string | null,
   ): InsertResult {
     const rowId = parseUuid(objectId);
-    const cells = encodeCellsForRow(this.table(table), values);
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = this.trustedWriteIdentity(writeSession);
-    const attribution = this.backendAttribution(writeContext, writeSession);
+    const attribution = this.backendAttribution(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
-    if (attribution && branchView) {
-      throw new Error("Backend-attributed branch mutations are not supported yet");
-    }
+    rejectAttributedBranchWrite(attribution, branchView);
     const tx = this.currentTx(writeContext, "Restore");
+    if (tx) this.assertTransactionAttribution(tx, attribution);
+    const attributedRestore =
+      attribution && !tx
+        ? requireBackendAttributionAbi(this.db.restoreEncodedAttributed, "restore")
+        : undefined;
+    const cells = encodeCellsForRow(this.table(table), values);
     if (tx) {
-      const nativeTx = this.txForWrite(tx, writeIdentity, attribution);
-      if (branchView) {
-        requireBranchMethod(nativeTx.restoreEncodedInBranch, "transaction branch restores").call(
-          nativeTx,
-          table,
-          rowId,
-          cells,
-          branchView.head,
-        );
-      } else {
-        nativeTx.restoreEncoded(table, rowId, cells, updatedAtMs);
-      }
+      const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
+      nativeTx.restoreEncoded(table, rowId, cells, {
+        branch: branchView?.head,
+        updatedAtMs: updatedAtMs ?? undefined,
+      });
       const row = this.rowStateFromValues(table, rowId, values);
       tx.writes.push({ table, rowId, row });
       return {
@@ -1292,29 +1191,16 @@ export class NativeRuntimeAdapter implements Runtime {
         openBatchId: txIdFromContext(writeContext)!,
       };
     }
-    const write = writeOrNormalizeRejection("Restore", () =>
-      branchView
-        ? writeIdentity
-          ? requireBranchMethod(
-              this.db.restoreEncodedInBranchForIdentity,
-              "identity-scoped branch restores",
-            ).call(this.db, table, rowId, cells, branchView.head, writeIdentity)
-          : requireBranchMethod(this.db.restoreEncodedInBranch, "branch restores").call(
-              this.db,
-              table,
-              rowId,
-              cells,
-              branchView.head,
-            )
-        : attribution
-          ? requireAttributionMethod(
-              this.db.restoreEncodedAttributed,
-              "backend-attributed restores",
-            ).call(this.db, table, rowId, cells, attribution)
-          : writeIdentity
-            ? this.db.restoreEncodedForIdentity(table, rowId, cells, writeIdentity, updatedAtMs)
-            : this.db.restoreEncoded(table, rowId, cells, updatedAtMs),
-    );
+    const write = writeOrNormalizeRejection("Restore", () => {
+      if (attribution) {
+        return attributedRestore!.call(this.db, table, rowId, cells, attribution);
+      }
+      return this.db.restoreEncoded(table, rowId, cells, {
+        author: writeIdentity,
+        branch: branchView?.head,
+        updatedAtMs: updatedAtMs ?? undefined,
+      });
+    });
     return this.finishInsert(table, rowId, values, write);
   }
 
@@ -1325,31 +1211,27 @@ export class NativeRuntimeAdapter implements Runtime {
     writeContext?: string | null,
   ): MutationResult {
     const rowId = parseUuid(objectId);
-    const patch = encodeCellsForPatch(this.table(table), values);
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = this.trustedWriteIdentity(writeSession);
-    const attribution = this.backendAttribution(writeContext, writeSession);
+    const attribution = this.backendAttribution(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
-    if (attribution && branchView) {
-      throw new Error("Backend-attributed branch mutations are not supported yet");
-    }
+    rejectAttributedBranchWrite(attribution, branchView);
     const tx = this.currentTx(writeContext, "Update");
+    if (tx) this.assertTransactionAttribution(tx, attribution);
+    const attributedUpdate =
+      attribution && !tx
+        ? requireBackendAttributionAbi(this.db.updateEncodedAttributed, "update")
+        : undefined;
+    const patch = encodeCellsForPatch(this.table(table), values);
     if (tx) {
-      const nativeTx = this.txForWrite(tx, writeIdentity, attribution);
-      if (branchView) {
-        requireBranchMethod(nativeTx.updateEncodedInBranchView, "transaction branch updates").call(
-          nativeTx,
-          table,
-          rowId,
-          patch,
-          branchView.head,
-          branchView.base,
-        );
-      } else {
-        nativeTx.updateEncoded(table, rowId, patch, updatedAtMs);
-      }
+      const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
+      nativeTx.updateEncoded(table, rowId, patch, {
+        head: branchView?.head,
+        base: branchView?.base,
+        updatedAtMs: updatedAtMs ?? undefined,
+      });
       tx.writes.push({
         table,
         rowId,
@@ -1357,38 +1239,17 @@ export class NativeRuntimeAdapter implements Runtime {
       });
       return { kind: "staged", openBatchId: txIdFromContext(writeContext)! };
     }
-    const write = writeOrNormalizeRejection("Update", () =>
-      branchView
-        ? writeIdentity
-          ? requireBranchMethod(
-              this.db.updateEncodedInBranchViewForIdentity,
-              "identity-scoped branch updates",
-            ).call(this.db, table, rowId, patch, branchView.head, branchView.base, writeIdentity)
-          : branchView.base === undefined
-            ? requireBranchMethod(this.db.updateEncodedInBranch, "exact branch updates").call(
-                this.db,
-                table,
-                rowId,
-                patch,
-                branchView.head,
-              )
-            : requireBranchMethod(this.db.updateEncodedInBranchView, "branch-view updates").call(
-                this.db,
-                table,
-                rowId,
-                patch,
-                branchView.head,
-                branchView.base,
-              )
-        : attribution
-          ? requireAttributionMethod(
-              this.db.updateEncodedAttributed,
-              "backend-attributed updates",
-            ).call(this.db, table, rowId, patch, attribution)
-          : writeIdentity
-            ? this.db.updateEncodedForIdentity(table, rowId, patch, writeIdentity, updatedAtMs)
-            : this.db.updateEncoded(table, rowId, patch, updatedAtMs),
-    );
+    const write = writeOrNormalizeRejection("Update", () => {
+      if (attribution) {
+        return attributedUpdate!.call(this.db, table, rowId, patch, attribution);
+      }
+      return this.db.updateEncoded(table, rowId, patch, {
+        author: writeIdentity,
+        head: branchView?.head,
+        base: branchView?.base,
+        updatedAtMs: updatedAtMs ?? undefined,
+      });
+    });
     return this.finishMutation(write);
   }
 
@@ -1403,9 +1264,16 @@ export class NativeRuntimeAdapter implements Runtime {
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = this.trustedWriteIdentity(writeSession);
-    const attribution = this.backendAttribution(writeContext, writeSession);
+    const attribution = this.backendAttribution(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
+    const branchView = branchViewFromWriteContext(writeContext);
+    rejectAttributedBranchWrite(attribution, branchView);
     const tx = this.currentTx(writeContext, "Upsert");
+    if (tx) this.assertTransactionAttribution(tx, attribution);
+    const attributedUpsert =
+      attribution && !tx
+        ? requireBackendAttributionAbi(this.db.upsertEncodedAttributed, "upsert")
+        : undefined;
     const existing = tx
       ? (this.stagedRowForWriteMerge(tx, table, rowId) ?? this.readRowForWriteMerge(table, rowId))
       : this.readRow(table, rowId, writeIdentity);
@@ -1418,11 +1286,14 @@ export class NativeRuntimeAdapter implements Runtime {
       throw writeError("Upsert", normalizeWriteSetupMessage(errorMessage(error)));
     }
     if (tx) {
-      this.txForWrite(tx, writeIdentity, attribution).upsertEncoded(
+      this.txForWrite(tx, attribution ? undefined : writeIdentity).upsertEncoded(
         table,
         rowId,
         cells,
-        updatedAtMs,
+        {
+          branch: branchView?.head,
+          updatedAtMs: updatedAtMs ?? undefined,
+        },
       );
       tx.writes.push({
         table,
@@ -1433,16 +1304,16 @@ export class NativeRuntimeAdapter implements Runtime {
       });
       return { kind: "staged", openBatchId: txIdFromContext(writeContext)! };
     }
-    const write = writeOrNormalizeRejection("Upsert", () =>
-      attribution
-        ? requireAttributionMethod(
-            this.db.upsertEncodedAttributed,
-            "backend-attributed upserts",
-          ).call(this.db, table, rowId, cells, attribution)
-        : writeIdentity
-          ? this.db.upsertEncodedForIdentity(table, rowId, cells, writeIdentity, updatedAtMs)
-          : this.db.upsertEncoded(table, rowId, cells, updatedAtMs),
-    );
+    const write = writeOrNormalizeRejection("Upsert", () => {
+      if (attribution) {
+        return attributedUpsert!.call(this.db, table, rowId, cells, attribution);
+      }
+      return this.db.upsertEncoded(table, rowId, cells, {
+        author: writeIdentity,
+        branch: branchView?.head,
+        updatedAtMs: updatedAtMs ?? undefined,
+      });
+    });
     return this.finishMutation(write);
   }
 
@@ -1452,61 +1323,37 @@ export class NativeRuntimeAdapter implements Runtime {
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = this.trustedWriteIdentity(writeSession);
-    const attribution = this.backendAttribution(writeContext, writeSession);
+    const attribution = this.backendAttribution(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
-    if (attribution && branchView) {
-      throw new Error("Backend-attributed branch mutations are not supported yet");
-    }
+    rejectAttributedBranchWrite(attribution, branchView);
     const tx = this.currentTx(writeContext, "Delete");
+    if (tx) this.assertTransactionAttribution(tx, attribution);
+    const attributedDelete =
+      attribution && !tx
+        ? requireBackendAttributionAbi(this.db.deleteAttributed, "delete")
+        : undefined;
     if (tx) {
-      const nativeTx = this.txForWrite(tx, writeIdentity, attribution);
-      if (branchView) {
-        requireBranchMethod(nativeTx.deleteInBranchView, "transaction branch deletes").call(
-          nativeTx,
-          table,
-          rowId,
-          branchView.head,
-          branchView.base,
-        );
-      } else {
-        nativeTx.delete(table, rowId, updatedAtMs);
-      }
+      const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
+      nativeTx.deleteEncoded(table, rowId, {
+        head: branchView?.head,
+        base: branchView?.base,
+        updatedAtMs: updatedAtMs ?? undefined,
+      });
       tx.writes.push({ table, rowId, deleted: true });
       return { kind: "staged", openBatchId: txIdFromContext(writeContext)! };
     }
-    const write = writeOrNormalizeRejection("Delete", () =>
-      branchView
-        ? writeIdentity
-          ? requireBranchMethod(
-              this.db.deleteInBranchViewForIdentity,
-              "identity-scoped branch deletes",
-            ).call(this.db, table, rowId, branchView.head, branchView.base, writeIdentity)
-          : branchView.base === undefined
-            ? requireBranchMethod(this.db.deleteInBranch, "exact branch deletes").call(
-                this.db,
-                table,
-                rowId,
-                branchView.head,
-              )
-            : requireBranchMethod(this.db.deleteInBranchView, "branch-view deletes").call(
-                this.db,
-                table,
-                rowId,
-                branchView.head,
-                branchView.base,
-              )
-        : attribution
-          ? requireAttributionMethod(this.db.deleteAttributed, "backend-attributed deletes").call(
-              this.db,
-              table,
-              rowId,
-              attribution,
-            )
-          : writeIdentity
-            ? this.db.deleteForIdentity(table, rowId, writeIdentity, updatedAtMs)
-            : this.db.delete(table, rowId, updatedAtMs),
-    );
+    const write = writeOrNormalizeRejection("Delete", () => {
+      if (attribution) {
+        return attributedDelete!.call(this.db, table, rowId, attribution);
+      }
+      return this.db.deleteEncoded(table, rowId, {
+        author: writeIdentity,
+        head: branchView?.head,
+        base: branchView?.base,
+        updatedAtMs: updatedAtMs ?? undefined,
+      });
+    });
     return this.finishMutation(write);
   }
 
@@ -1610,12 +1457,27 @@ export class NativeRuntimeAdapter implements Runtime {
     // the trusted-serving subject here so every staged operation and its
     // commit are authorized as that one subject.
     const identity = this.trustedWriteIdentity(session);
-    const attribution = this.backendAttribution(sessionJson, session);
-    if (attribution && kind !== "mergeable") {
-      throw new Error("Backend-attributed transactions currently require mergeable kind");
+    const attribution = this.backendAttribution(sessionJson);
+    const admission = attribution ? undefined : identity;
+    if (attribution) {
+      if (kind !== "mergeable") {
+        throw new Error("Backend-attributed transactions require mergeable kind");
+      }
+      requireBackendAttributionAbi(
+        this.db.beginTransactionAttributed,
+        "mergeable transactions",
+      ).call(this.db, id, attribution);
+    } else {
+      this.db.beginTransaction(id, kind, admission);
     }
-    this.db.beginTransaction(id, kind, identity, attribution);
-    this.pendingTxs.set(id, { id, kind, identity, attribution, writes: [], txByView: new Map() });
+    this.pendingTxs.set(id, {
+      id,
+      kind,
+      identity: admission,
+      attribution,
+      writes: [],
+      txByView: new Map(),
+    });
     return id;
   }
 
@@ -1635,7 +1497,6 @@ export class NativeRuntimeAdapter implements Runtime {
     this.pendingTxs.delete(openBatchId);
     this.completedTxs.set(openBatchId, { kind: pending.kind, state: "committed" });
     this.pumpSubscriptions();
-    this.scheduleCoreTick();
     this.scheduleServerPump();
     this.notifyPeerTransportWork();
     const batchId = recordWrite(write, this.writes);
@@ -1652,11 +1513,6 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!write) {
       throw new Error(`Wait for transaction failed: unknown transaction ${batchId}`);
     }
-    // A host-side write can return at the resident local-lane boundary while
-    // its owned storage work is queued.  Waiting is an explicit observation
-    // point, so also drive that queued core work rather than depending on an
-    // unrelated transport wakeup to make local durability observable.
-    await this.runCoreTick();
     for (;;) {
       this.throwServerTransportErrorForTier(tier);
       const observedServerWorkEpoch = this.serverTransportWorkEpoch;
@@ -1718,12 +1574,6 @@ export class NativeRuntimeAdapter implements Runtime {
     const materializedTier = this.nonDurableClient ? "local" : tier;
     const opts = readOptions(materializedTier, queryIncludesDeleted(coreQueryJson), optionsJson);
     if (queryUsesNativeRelationApi(coreQueryJson)) {
-      if (this.isBackendSystemSession(session)) {
-        if (!this.db.allRelationQuery)
-          throw new Error("Native runtime does not support relation queries");
-        const payload = await this.db.allRelationQuery(coreQueryJson, opts);
-        return rowsFromBatches(readRowBatches(payload), this.schema);
-      }
       if (this.readAuthorizationHost === "trusted-serving") {
         if (!this.db.allRelationQueryForIdentity) {
           throw new Error("Native runtime does not support trusted-serving relation queries");
@@ -1747,16 +1597,6 @@ export class NativeRuntimeAdapter implements Runtime {
     this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
     try {
       if (queryHasArraySubqueries(coreQueryJson)) {
-        if (this.isBackendSystemSession(session)) {
-          if (!this.db.allRelationSnapshot)
-            throw new Error("Native runtime does not support relation snapshots");
-          const payload = await this.db.allRelationSnapshot(query, opts);
-          return rowsFromRelationSnapshot(
-            readRelationSnapshot(payload),
-            this.schema,
-            subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
-          );
-        }
         if (this.readAuthorizationHost === "trusted-serving") {
           if (!this.db.allRelationSnapshotForIdentity) {
             throw new Error("Native runtime does not support trusted-serving relation snapshots");
@@ -1818,7 +1658,6 @@ export class NativeRuntimeAdapter implements Runtime {
       }
       if (
         this.readAuthorizationHost === "trusted-serving" &&
-        !this.isBackendSystemSession(session) &&
         !this.db.subscribeRelationQueryForIdentity
       ) {
         throw new Error("Native runtime does not support trusted-serving relation subscriptions");
@@ -1828,7 +1667,6 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     if (
       this.readAuthorizationHost === "trusted-serving" &&
-      !this.isBackendSystemSession(session) &&
       !usesNativeRelationApi &&
       !this.db.subscribeForIdentity
     ) {
@@ -1842,7 +1680,7 @@ export class NativeRuntimeAdapter implements Runtime {
     try {
       if (usesNativeRelationApi) {
         nativeSubscription =
-          this.readAuthorizationHost === "trusted-serving" && !this.isBackendSystemSession(session)
+          this.readAuthorizationHost === "trusted-serving"
             ? this.db.subscribeRelationQueryForIdentity!(
                 queryJson,
                 identity ?? this.peerIdentity,
@@ -1853,7 +1691,7 @@ export class NativeRuntimeAdapter implements Runtime {
         const query = this.prepareQuery(queryJson);
         preparedQuery = query;
         nativeSubscription =
-          this.readAuthorizationHost === "trusted-serving" && !this.isBackendSystemSession(session)
+          this.readAuthorizationHost === "trusted-serving"
             ? this.db.subscribeForIdentity!(query, identity ?? this.peerIdentity, opts)
             : this.db.subscribe!(query, opts);
       }
@@ -2080,7 +1918,6 @@ export class NativeRuntimeAdapter implements Runtime {
     const batchId = recordWrite(write, this.writes);
     if (this.nonDurableClient) this.trackLocalSettlement(batchId);
     this.pumpSubscriptions();
-    this.scheduleCoreTick();
     this.scheduleServerPump();
     this.notifyPeerTransportWork();
     const row = this.rowStateFromValues(table, rowId, values);
@@ -2091,7 +1928,6 @@ export class NativeRuntimeAdapter implements Runtime {
     const batchId = recordWrite(write, this.writes);
     if (this.nonDurableClient) this.trackLocalSettlement(batchId);
     this.pumpSubscriptions();
-    this.scheduleCoreTick();
     this.scheduleServerPump();
     this.notifyPeerTransportWork();
     return { kind: "committed", batchId };
@@ -2195,8 +2031,7 @@ export class NativeRuntimeAdapter implements Runtime {
    * point, with a request session supplying its subject when present.
    */
   private readRowsForHost(query: PreparedQuery, opts: unknown, identity?: Uint8Array): Uint8Array {
-    if (this.trustedBackend && identity && isSystemIdentity(identity))
-      return this.db.all(query, opts);
+    if (this.trustedBackend && identity === undefined) return this.db.all(query, opts);
     return this.readAuthorizationHost === "trusted-serving"
       ? this.db.allForIdentity(query, identity ?? this.peerIdentity, opts)
       : this.db.all(query, opts);
@@ -2207,35 +2042,31 @@ export class NativeRuntimeAdapter implements Runtime {
    * an ordinary client mutation into a policy-enforcing local admission.
    */
   private trustedWriteIdentity(session: RuntimeSession | null | undefined): Uint8Array | undefined {
-    if (this.trustedBackend && session && isSystemIdentity(session.identity)) return undefined;
+    if (this.trustedBackend && !session) return undefined;
     return this.readAuthorizationHost === "trusted-serving"
       ? (session?.identity ?? this.peerIdentity)
       : undefined;
   }
 
-  /**
-   * A backend credential admits the write as SYSTEM; the public canonical
-   * attribution is provenance only.  Keep those two identities separate so
-   * an attributed backend write cannot accidentally become a user-authorized
-   * write (or vice versa).
-   */
-  private backendAttribution(
-    writeContext: string | null | undefined,
-    session: RuntimeSession | null | undefined,
-  ): Uint8Array | undefined {
-    if (!this.isBackendSystemSession(session) || !writeContext) return undefined;
+  /** External provenance is accepted only by the explicit backend runtime;
+   * ordinary/session callers continue through their normal identity path. */
+  private backendAttribution(writeContext?: string | null): Uint8Array | undefined {
+    if (!this.trustedBackend || !writeContext) return undefined;
+    let attribution: unknown;
     try {
-      const parsed = JSON.parse(writeContext) as { attribution?: unknown };
-      if (typeof parsed.attribution !== "string") return undefined;
-      const author = parsePublicCanonicalAuthor(parsed.attribution);
-      return author ? authorBytesForSession(author) : undefined;
+      attribution = (JSON.parse(writeContext) as { attribution?: unknown }).attribution;
     } catch {
       return undefined;
     }
-  }
-
-  private isBackendSystemSession(session: RuntimeSession | null | undefined): boolean {
-    return this.trustedBackend && !!session && isSystemIdentity(session.identity);
+    if (attribution === undefined) return undefined;
+    if (typeof attribution !== "string") {
+      throw new Error("backend attribution must be a canonical author subject string");
+    }
+    const author = parsePublicCanonicalAuthor(attribution);
+    if (!author) {
+      throw new Error("backend attribution must be a canonical author subject string");
+    }
+    return authorBytesForSession({ issuer: author.issuer, user_id: author.user_id });
   }
 
   private stagedRowForWriteMerge(
@@ -2320,9 +2151,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.closed) return;
     const opts = readOptions(tier, false, optionsJson);
     let attachment: unknown;
-    if (this.isBackendSystemSession(session)) {
-      attachment = this.db.attachQuery(query, opts);
-    } else if (this.readAuthorizationHost === "trusted-serving") {
+    if (this.readAuthorizationHost === "trusted-serving") {
       if (!this.db.attachQueryForIdentity) {
         throw new Error("Native runtime does not support trusted-serving query coverage");
       }
@@ -2391,7 +2220,6 @@ export class NativeRuntimeAdapter implements Runtime {
     ) {
       return;
     }
-    if (this.trustedBackend && isSystemIdentity(session.identity)) return;
     this.db.setIdentityClaims(session.identity, session.claims);
   }
 
@@ -2455,14 +2283,7 @@ export class NativeRuntimeAdapter implements Runtime {
     throw new Error(`${operation} failed: WriteError("${txStateMessage(id, this.completedTxs)}")`);
   }
 
-  private txForWrite(
-    pending: PendingTx,
-    identity: Uint8Array | undefined,
-    attribution?: Uint8Array,
-  ): Tx {
-    if (!sameOptionalBytes(pending.attribution, attribution)) {
-      throw new Error("Native runtime transaction cannot mix provenance attributions");
-    }
+  private txForWrite(pending: PendingTx, identity: Uint8Array | undefined): Tx {
     if (pending.kind === "exclusive") {
       if (pending.identity && (!identity || !sameBytes(pending.identity, identity))) {
         throw new Error("Native runtime exclusive transaction cannot mix write identities");
@@ -2476,6 +2297,21 @@ export class NativeRuntimeAdapter implements Runtime {
       throw new Error("Native runtime mergeable transaction cannot mix write identities");
     }
     return this.txForRead(pending);
+  }
+
+  private assertTransactionAttribution(
+    pending: PendingTx,
+    attribution: Uint8Array | undefined,
+  ): void {
+    if (!pending.attribution && !attribution) return;
+    if (!pending.attribution) {
+      throw new Error("Native runtime transaction was opened without backend attribution");
+    }
+    if (!attribution || !sameBytes(pending.attribution, attribution)) {
+      throw new Error(
+        "Native runtime backend-attributed transaction requires its original provenance subject",
+      );
+    }
   }
 
   private txForRead(pending: PendingTx): Tx {
@@ -3235,26 +3071,6 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 }
 
-const LARGE_VALUE_INLINE_BYTES = 64 * 1024;
-
-function rowContainsOversizedScalar(
-  definition: { columns: ColumnDescriptor[] },
-  values: InsertValues,
-): boolean {
-  return definition.columns.some((column) => {
-    const value = values[column.name];
-    if (!value || value.type === "Null") return false;
-    if (column.column_type.type === "Bytea") {
-      return value.type === "Bytea" && value.value.byteLength > LARGE_VALUE_INLINE_BYTES;
-    }
-    return (
-      (column.column_type.type === "Text" || column.column_type.type === "Json") &&
-      value.type === "Text" &&
-      new TextEncoder().encode(value.value).byteLength > LARGE_VALUE_INLINE_BYTES
-    );
-  });
-}
-
 function closeSubscriptionSourceState(subscription: SubscriptionState): void {
   for (const source of subscription.sources) {
     closeSubscriptionSource(source.source);
@@ -3314,14 +3130,20 @@ function branchViewFromWriteContext(writeContext?: string | null): EncodedBranch
   }
 }
 
-function requireBranchMethod<T>(method: T | undefined, name: string): T {
-  if (method === undefined) throw new Error(`native runtime does not support ${name}`);
-  return method;
+function rejectAttributedBranchWrite(
+  attribution: Uint8Array | undefined,
+  branchView: EncodedBranchView | undefined,
+): void {
+  if (attribution && branchView) {
+    throw new Error("Backend-attributed writes do not support branch views");
+  }
 }
 
-function requireAttributionMethod<T>(method: T | undefined, name: string): T {
-  if (method === undefined) {
-    throw new Error(`native runtime does not support ${name}; rebuild native artifacts`);
+function requireBackendAttributionAbi<T>(method: T | undefined, operation: string): T {
+  if (!method) {
+    throw new Error(
+      `Native runtime does not support backend-attributed ${operation}; rebuild the matching Jazz native artifact`,
+    );
   }
   return method;
 }
@@ -3351,29 +3173,15 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
       typeof parsed.attribution === "string"
         ? parsePublicCanonicalAuthor(parsed.attribution)
         : null;
-    const trustedSystemSession =
-      parsed.session?.issuer === "urn:jazz:system" &&
-      parsed.session?.user_id === SYSTEM_AUTHOR_ID &&
-      isTrustedReservedSession(
-        {
-          issuer: parsed.session.issuer,
-          user_id: parsed.session.user_id,
-          authMode: parsed.session.authMode as Session["authMode"],
-        },
-        parsed.session?.[TRUSTED_RESERVED_SESSION_TOKEN_FIELD],
-      );
-    const userId = trustedSystemSession
-      ? SYSTEM_AUTHOR_ID
-      : (attributedAuthor?.user_id ??
-        (typeof parsed.user_id === "string"
-          ? parsed.user_id
-          : typeof parsed.session?.user_id === "string"
-            ? parsed.session.user_id
-            : undefined));
+    const userId =
+      attributedAuthor?.user_id ??
+      (typeof parsed.user_id === "string"
+        ? parsed.user_id
+        : typeof parsed.session?.user_id === "string"
+          ? parsed.session.user_id
+          : undefined);
     if (!userId || !isUsableSubject(userId)) return null;
-    const issuer = trustedSystemSession
-      ? "urn:jazz:system"
-      : (attributedAuthor?.issuer ?? parsed.session?.issuer ?? parsed.issuer);
+    const issuer = attributedAuthor?.issuer ?? parsed.session?.issuer ?? parsed.issuer;
     if (typeof issuer !== "string" || !isUsableSubject(issuer)) {
       throw new Error("session is missing issuer");
     }
@@ -3416,17 +3224,6 @@ function parsePublicCanonicalAuthor(value: string): { issuer: string; user_id: s
   return parsed ? { issuer: parsed.issuer, user_id: parsed.user_id } : null;
 }
 
-function isSystemIdentity(identity: Uint8Array): boolean {
-  try {
-    return (
-      decodeCanonicalAuthorSubjectBytes(identity) ===
-      canonicalAuthorSubject("urn:jazz:system", SYSTEM_AUTHOR_ID)
-    );
-  } catch {
-    return false;
-  }
-}
-
 function assertPublicSessionIssuer(
   issuer: string,
   userId: string,
@@ -3456,7 +3253,7 @@ function updatedAtMsFromWriteContext(writeContext?: string | null): number | und
   if (!Number.isSafeInteger(parsed.updated_at) || parsed.updated_at < 0) {
     throw new Error("updatedAt must be a nonnegative safe integer");
   }
-  return Math.trunc(parsed.updated_at / 1_000);
+  return parsed.updated_at;
 }
 
 function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
@@ -3687,17 +3484,7 @@ function queryContainsPermissionIntrospection(queryJson: string): boolean {
 }
 
 function relationIrContainsPermissionPredicate(value: unknown): boolean {
-  if (!value || typeof value !== "object") return false;
-  if (Array.isArray(value)) return value.some(relationIrContainsPermissionPredicate);
-  const record = value as Record<string, unknown>;
-  const column =
-    readMagicPredicateColumn(record.Cmp) ??
-    readMagicPredicateColumn(record.In) ??
-    readMagicPredicateColumn(record.IsNull) ??
-    readMagicPredicateColumn(record.IsNotNull) ??
-    readMagicPredicateColumn(record.Contains);
-  if (column && isPermissionIntrospectionColumn(column)) return true;
-  return Object.values(record).some(relationIrContainsPermissionPredicate);
+  return predicateIrContainsPermissionIntrospection(value);
 }
 
 function relationIrContainsPermissionProjection(value: unknown): boolean {
@@ -3743,11 +3530,7 @@ function selectedColumnsContainPermissionIntrospection(value: unknown): boolean 
 
 function flatConditionsContainPermissionIntrospection(value: unknown): boolean {
   if (!Array.isArray(value)) return false;
-  return value.some((entry) => {
-    if (!entry || typeof entry !== "object") return false;
-    const column = (entry as { column?: unknown }).column;
-    return typeof column === "string" && isPermissionIntrospectionColumn(unqualifiedColumn(column));
-  });
+  return value.some(predicateIrContainsPermissionIntrospection);
 }
 
 function arraySubqueriesContainPermissionIntrospection(value: unknown): boolean {
@@ -3770,22 +3553,48 @@ function arraySubqueriesContainPermissionIntrospection(value: unknown): boolean 
 
 function arrayFiltersContainPermissionIntrospection(value: unknown): boolean {
   if (!Array.isArray(value)) return false;
-  return value.some((entry) => {
-    if (!entry || typeof entry !== "object") return false;
-    const record = entry as Record<string, unknown>;
-    for (const key of ["Eq", "Ne", "Gt", "Ge", "Lt", "Le", "IsNull", "IsNotNull", "Contains"]) {
-      const predicate = record[key];
-      if (!predicate || typeof predicate !== "object") continue;
-      const column = (predicate as { column?: unknown }).column;
-      if (
-        typeof column === "string" &&
-        isPermissionIntrospectionColumn(unqualifiedColumn(column))
-      ) {
-        return true;
-      }
+  return value.some(predicateIrContainsPermissionIntrospection);
+}
+
+function predicateIrContainsPermissionIntrospection(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some(predicateIrContainsPermissionIntrospection);
+  const record = value as Record<string, unknown>;
+
+  // Preserve support for the legacy flat/array predicate envelopes while the
+  // query adapter emits canonical predicate IR for all new queries.
+  if (
+    typeof record.op === "string" &&
+    typeof record.column === "string" &&
+    isPermissionIntrospectionColumn(unqualifiedColumn(record.column))
+  ) {
+    return true;
+  }
+
+  for (const key of ["Eq", "Ne", "Gt", "Ge", "Lt", "Le", "IsNull", "IsNotNull", "Contains"]) {
+    const legacyPredicate = record[key];
+    if (!legacyPredicate || typeof legacyPredicate !== "object") continue;
+    const column = (legacyPredicate as { column?: unknown }).column;
+    if (typeof column === "string" && isPermissionIntrospectionColumn(unqualifiedColumn(column))) {
+      return true;
     }
-    return false;
-  });
+  }
+
+  const canonicalColumn =
+    readMagicPredicateColumn(record.Cmp) ??
+    readMagicPredicateColumn(record.In) ??
+    readMagicPredicateColumn(record.IsNull) ??
+    readMagicPredicateColumn(record.IsNotNull) ??
+    readMagicPredicateColumn(record.Contains);
+  if (canonicalColumn && isPermissionIntrospectionColumn(unqualifiedColumn(canonicalColumn))) {
+    return true;
+  }
+
+  // This recursive walk deliberately includes And/Or/Not and nested array
+  // filters. A forbidden column must be rejected regardless of predicate shape.
+  return Object.entries(record).some(
+    ([key, child]) => key !== "Literal" && predicateIrContainsPermissionIntrospection(child),
+  );
 }
 
 function unqualifiedColumn(column: string): string {
@@ -4198,6 +4007,9 @@ function coerceQueryPredicate(
       ),
     };
   }
+  if (filter.op === "Not") {
+    return { op: "Not", predicate: coerceQueryPredicate(table, filter.predicate, schema) };
+  }
   if (filter.op === "In") {
     const columnType =
       filter.column === "id"
@@ -4274,6 +4086,9 @@ function coerceEnumPayloadPredicate(
       ...predicate,
       predicates: predicate.predicates.map((child) => coerceEnumPayloadPredicate(child, fields)),
     };
+  }
+  if (predicate.op === "Not") {
+    return { ...predicate, predicate: coerceEnumPayloadPredicate(predicate.predicate, fields) };
   }
   if (predicate.op === "EnumMatch") {
     throw new Error("payload enum matches cannot be nested");
@@ -4425,6 +4240,8 @@ function readArraySubqueryFilters(
 }
 
 function arraySubqueryFilterToPredicates(value: unknown): QueryPredicate[] | null {
+  const canonical = predicateToFilterTree(value);
+  if (canonical) return [canonical];
   if (!value || typeof value !== "object") return null;
   const record = value as Record<string, unknown>;
   for (const [key, op] of [
@@ -4590,6 +4407,11 @@ function readFlatConditions(conditions: unknown): QueryPredicate[] | null {
   const predicates: QueryPredicate[] = [];
   for (const condition of conditions) {
     if (!condition || typeof condition !== "object") return null;
+    const canonical = predicateToFilterTree(condition);
+    if (canonical) {
+      predicates.push(canonical);
+      continue;
+    }
     const record = condition as { column?: unknown; op?: unknown; value?: unknown };
     if (typeof record.column !== "string" || typeof record.op !== "string") return null;
     const column = record.column.split(".").at(-1) ?? record.column;
@@ -4657,7 +4479,10 @@ function predicateToFilters(predicate: unknown): QueryPredicate[] | null {
     return filters;
   }
   if (Array.isArray(record.Or)) return null;
-  if (record.Not) return null;
+  if (record.Not) {
+    const predicate = predicateToFilterTree(record.Not);
+    return predicate ? [{ op: "Not", predicate }] : null;
+  }
   const enumMatch = record.EnumMatch;
   if (enumMatch && typeof enumMatch === "object") {
     const match = enumMatch as { column?: unknown; case?: unknown; payload?: unknown };
@@ -4717,7 +4542,10 @@ function predicateToFilterTree(predicate: unknown): QueryPredicate | null {
       ? { op, predicates }
       : null;
   }
-  if (record.Not) return null;
+  if (record.Not) {
+    const predicate = predicateToFilterTree(record.Not);
+    return predicate ? { op: "Not", predicate } : null;
+  }
   const filters = predicateToFilters(predicate);
   return filters?.length === 1 ? filters[0]! : null;
 }
@@ -5409,9 +5237,9 @@ function decodeBytes(
     case "Timestamp":
       return {
         type: "Timestamp",
-        value:
-          Number(view.getBigUint64(0, true)) *
-          (fieldName && isProvenanceMagicColumn(fieldName) ? 1_000 : 1),
+        // Current-row provenance and ordinary timestamp columns both cross the
+        // public binding boundary as Unix milliseconds.
+        value: Number(view.getBigUint64(0, true)),
       };
     case "Text":
     case "Json":
@@ -5424,14 +5252,14 @@ function decodeBytes(
       ) {
         return { type: "Text", value: decodeProvenanceText(bytes) };
       }
-      if (bytes[0] !== 0) throw new Error("indirect scalar crossed a logical binding boundary");
+      if (bytes[0] !== 2) throw new Error("indirect scalar crossed a logical binding boundary");
       return { type: "Text", value: textDecoder.decode(bytes.subarray(1)) };
     case "EnumPayload":
       return decodePayloadEnumBytes(type, bytes, storageType, nestedRowCarrier);
     case "Uuid":
       return { type: "Uuid", value: formatUuid(bytes) };
     case "Bytea":
-      if (bytes[0] !== 0) throw new Error("indirect scalar crossed a logical binding boundary");
+      if (bytes[0] !== 2) throw new Error("indirect scalar crossed a logical binding boundary");
       return { type: "Bytea", value: bytes.subarray(1).slice() };
     case "Array":
       return {
@@ -5475,7 +5303,7 @@ function decodePayloadEnumBytes(
   if (!entry) throw new Error("unknown Enum payload case");
   const enumStorage = nonNullableStorageType(storageType);
   const payloadDescriptor =
-    enumStorage?.tag === 16
+    enumStorage?.tag === 17
       ? enumStorage.enumSchema?.cases?.find((candidate) => candidate.name === caseName)?.payload
       : undefined;
   if (!payloadDescriptor || payloadDescriptor.length !== entry.fields.length) {
@@ -5505,18 +5333,18 @@ function decodePayloadEnumBytes(
 
 function nonNullableStorageType(storageType?: ValueType): ValueType | undefined {
   let current = storageType;
-  while (current?.tag === 14) current = current.inner;
+  while (current?.tag === 15) current = current.inner;
   return current;
 }
 
 function arrayElementStorageType(storageType?: ValueType): ValueType | undefined {
   const array = nonNullableStorageType(storageType);
-  return array?.tag === 13 ? array.inner : undefined;
+  return array?.tag === 14 ? array.inner : undefined;
 }
 
 function recordStorageDescriptor(storageType?: ValueType): DescriptorField[] | undefined {
   const record = nonNullableStorageType(storageType);
-  return record?.tag === 15 ? record.record : undefined;
+  return record?.tag === 16 ? record.record : undefined;
 }
 
 export type NestedRowCarrier = "full-record" | "keyed-terminal";
@@ -6240,10 +6068,6 @@ function bytesKey(bytes: Uint8Array): string {
 
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
   return left.length === right.length && left.every((byte, index) => byte === right[index]);
-}
-
-function sameOptionalBytes(left: Uint8Array | undefined, right: Uint8Array | undefined): boolean {
-  return left === undefined || right === undefined ? left === right : sameBytes(left, right);
 }
 
 function concatBytes(chunks: Uint8Array[]): Uint8Array {

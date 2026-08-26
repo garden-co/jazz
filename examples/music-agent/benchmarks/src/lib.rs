@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 use std::io::Cursor;
 
-use jazz::db::{Db, DbConfig, DbIdentity, PreparedQuery, block_on};
-use jazz::groove::large_values::{INLINE_VALUE_MAX_BYTES, LargeValueKind};
+use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, PreparedQuery, block_on};
+use jazz::groove::large_values::INLINE_VALUE_MAX_BYTES;
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -66,7 +66,6 @@ impl Fixture {
                 ("role".into(), Value::String("assistant".into())),
             ]),
             "body",
-            LargeValueKind::String,
             Cursor::new(text),
         ))
         .expect("stream assistant turn");
@@ -76,7 +75,6 @@ impl Fixture {
             attachment,
             BTreeMap::from([("turn".into(), Value::Uuid(assistant.0))]),
             "payload",
-            LargeValueKind::Bytes,
             Cursor::new(vec![7_u8; INLINE_VALUE_MAX_BYTES * 2]),
         ))
         .expect("stream audio attachment");
@@ -193,8 +191,15 @@ fn table(schema: &JazzSchema, name: &str) -> TableSchema {
 }
 
 fn insert(db: &BenchDb, table: &str, row: RowUuid, cells: BTreeMap<String, Value>) {
-    let write =
-        block_on(db.insert_with_id(table, row, cells)).expect("insert MusicAgent fixture row");
+    let write = block_on(db.insert(
+        table,
+        cells,
+        InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        },
+    ))
+    .expect("insert MusicAgent fixture row");
     block_on(write.wait(DurabilityTier::Local)).expect("durable fixture row");
 }
 

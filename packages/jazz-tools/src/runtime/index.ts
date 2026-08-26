@@ -8,6 +8,7 @@ export {
   PersistedWriteRejectedError,
   loadWasmModule,
   type DurabilityTier,
+  ReadTier,
   type QueryPropagation,
   type QueryVisibility,
   type Row,

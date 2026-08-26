@@ -1,0 +1,91 @@
+name: React Native relay artifacts
+
+on:
+  pull_request:
+    # A label is the explicit opt-in for these expensive platform builds.
+    # Include removal so its no-op run joins the same concurrency group and
+    # cancels a previously queued or running artifact build for this PR.
+    types: [opened, reopened, synchronize, labeled, unlabeled]
+  push:
+    branches: [main]
+    paths:
+      - "crates/jazz-native-relay/**"
+      - "crates/jazz-storage-sqlite/**"
+      - "crates/jazz-rn/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  # An unlabeled run has no jobs, but still cancels stale work for this PR.
+  group: rn-native-artifacts-${{ github.event.pull_request.number || github.ref }}
+  # Keep each qualifying main push intact; PR label changes replace stale work.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  android:
+    name: Android relay static libraries
+    # A label is maintainer-controlled but does not make a fork's checked-out
+    # code trusted. Keep artifact builds on same-repository PRs only.
+    if: >-
+      ${{
+        github.event_name != 'pull_request'
+        || (
+          contains(github.event.pull_request.labels.*.name, 'react-native')
+          && github.event.pull_request.head.repo.full_name == github.repository
+        )
+      }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-cache: "true"
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - run: cargo install cargo-ndk --locked
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+      - run: sdkmanager --install "ndk;27.1.12297006"
+      - run: pnpm --filter jazz-rn build:relay:android
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/27.1.12297006
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-rn-relay-android
+          path: |
+            crates/jazz-rn/android/src/main/jniLibs
+            crates/jazz-rn/android/jazz-native-relay.manifest.json
+            crates/jazz-rn/native/include
+          if-no-files-found: error
+
+  ios:
+    name: iOS relay XCFramework
+    if: >-
+      ${{
+        github.event_name != 'pull_request'
+        || (
+          contains(github.event.pull_request.labels.*.name, 'react-native')
+          && github.event.pull_request.head.repo.full_name == github.repository
+        )
+      }}
+    runs-on: blacksmith-6vcpu-macos-15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-cache: "true"
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      - run: pnpm --filter jazz-rn build:relay:ios
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-rn-relay-ios
+          path: |
+            crates/jazz-rn/JazzNativeRelay.xcframework
+            crates/jazz-rn/ios/jazz-native-relay.manifest.json
+            crates/jazz-rn/native/include
+          if-no-files-found: error

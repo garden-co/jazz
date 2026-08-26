@@ -898,8 +898,7 @@ pub fn resolve_verified_jwt_session(
     let issuer = verified
         .issuer
         .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
+        .filter(|v| jazz::tools::identity::principal_is_nonempty(v))
         .ok_or_else(|| UnauthenticatedResponse::invalid("JWT iss claim is required"))?
         .to_owned();
 
@@ -1378,6 +1377,36 @@ mod tests {
         assert_eq!(session.auth_mode, jazz::tools::AuthMode::External);
         assert_eq!(session.claims["subject"], "user-42");
         assert_eq!(session.claims["issuer"], "https://issuer.example");
+    }
+
+    #[test]
+    fn resolve_verified_jwt_session_rejects_blank_issuer_and_preserves_exact_bytes() {
+        for issuer in [
+            None,
+            Some("".to_owned()),
+            Some(" \t\n\x0b\x0c\r ".to_owned()),
+        ] {
+            assert!(
+                resolve_verified_jwt_session(VerifiedJwt {
+                    subject: "user".to_owned(),
+                    issuer,
+                    claims: serde_json::json!({}),
+                    exp: None,
+                })
+                .is_err(),
+                "missing or ASCII-whitespace-only issuer must be rejected"
+            );
+        }
+
+        let session = resolve_verified_jwt_session(VerifiedJwt {
+            subject: "user".to_owned(),
+            issuer: Some(" https://issuer.example ".to_owned()),
+            claims: serde_json::json!({}),
+            exp: None,
+        })
+        .expect("non-empty issuer is retained exactly");
+        assert_eq!(session.issuer, " https://issuer.example ");
+        assert_eq!(session.claims["issuer"], " https://issuer.example ");
     }
 
     #[tokio::test]

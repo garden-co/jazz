@@ -21,6 +21,51 @@ fn permission_advice_scope_preserves_provider_sub_and_injects_canonical_author()
 }
 
 #[test]
+fn negated_null_membership_policy_does_not_authorize_null_rows() {
+    let mut schema = public_query_eval_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("documents")
+                .nullable_column("classification", PublicColumnType::Text)
+                .nullable_column("null_option", PublicColumnType::Text),
+        ),
+    );
+    schema.runtime_mut_for_testing().tables[0].read_policy = Some(Query::from("documents").filter(
+        crate::query::not(in_list(col("classification"), [col("null_option")])),
+    ));
+    let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0x98; 16]), schema.clone());
+    for (id, timestamp, classification) in [
+        (row(1), 1_001, Value::Nullable(None)),
+        (
+            row(2),
+            1_002,
+            Value::Nullable(Some(Box::new(Value::String("public".to_owned())))),
+        ),
+    ] {
+        node.commit_mergeable_unit_settled(
+            MergeableCommit::new("documents", id, timestamp)
+                .made_by(AuthorSubject::SYSTEM)
+                .cells(BTreeMap::from([
+                    ("classification".to_owned(), classification),
+                    ("null_option".to_owned(), Value::Nullable(None)),
+                ])),
+        )
+        .unwrap();
+    }
+
+    let reader = author(9);
+    let shape = Query::from("documents").validate_runtime(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let visible = node
+        .query_rows_for_link(&shape, &binding, DurabilityTier::Local, reader)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(visible, BTreeSet::from([row(2)]));
+}
+
+#[test]
 fn nested_read_policy_claim_slots_do_not_cross_validated_types() {
     let schema = RuntimeSchema::new([
         TableSchema::new(
@@ -315,7 +360,12 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         .query
         .registered_bindings
         .get(&shape.shape_id())
-        .and_then(|bindings| bindings.get(&binding.binding_id()))
+        .and_then(|bindings| {
+            bindings.get(&(
+                binding.binding_id(),
+                RegisterShapeOptions::default().read_view_key(),
+            ))
+        })
         .map(|registered| registered.values.clone())
         .expect("server reconstructed the subscribed invite binding");
     let server_binding = shape
@@ -537,9 +587,15 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     .expect("one-shot nested policy claim routes must bind against the root descriptor");
 
     let mut edge = PeerState::edge_client(identity);
+    let client_subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
     let update = edge
-        .rehydrate_query_with_opts(
+        .rehydrate_query_for_subscription_with_opts(
             &mut node,
+            client_subscription,
             &shape,
             &server_binding,
             RegisterShapeOptions {
@@ -547,7 +603,8 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
                 ..RegisterShapeOptions::default()
             },
         )
-        .expect("the serving maintained view must retain the invite claim route");
+        .expect("the serving maintained view must retain the invite claim route")
+        .expect("the invite subscription has an initial update");
     client
         .apply_sync_message_settled(update)
         .expect("the client must materialize the invited chat update");
@@ -671,11 +728,17 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         &simple_message_binding,
     );
     let mut normal_simple_peer = PeerState::edge_client(identity);
+    let normal_simple_subscription = SubscriptionKey {
+        shape_id: simple_message_shape.shape_id(),
+        binding_id: simple_message_binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
     normal_client
         .apply_sync_message_settled(
             normal_simple_peer
-                .rehydrate_query_with_opts(
+                .rehydrate_query_for_subscription_with_opts(
                     &mut node,
+                    normal_simple_subscription,
                     &simple_message_shape,
                     &simple_message_binding,
                     RegisterShapeOptions {
@@ -683,7 +746,8 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
                         ..RegisterShapeOptions::default()
                     },
                 )
-                .expect("serve normal-member message snapshot without include"),
+                .expect("serve normal-member message snapshot without include")
+                .expect("normal-member message snapshot without include is ready"),
         )
         .expect("client applies normal-member message snapshot without include");
     assert_eq!(
@@ -711,9 +775,15 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     );
     subscribe_query_binding(&mut normal_client, &message_shape, &message_binding);
     let mut normal_peer = PeerState::edge_client(identity);
+    let normal_subscription = SubscriptionKey {
+        shape_id: message_shape.shape_id(),
+        binding_id: message_binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
     let normal_update = normal_peer
-        .rehydrate_query_with_opts(
+        .rehydrate_query_for_subscription_with_opts(
             &mut node,
+            normal_subscription,
             &message_shape,
             &message_binding,
             RegisterShapeOptions {
@@ -721,13 +791,14 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
                 ..RegisterShapeOptions::default()
             },
         )
-        .expect("serve normal-member message include/order snapshot");
+        .expect("serve normal-member message include/order snapshot")
+        .expect("normal-member message include/order snapshot is ready");
     let normal_versions = normal_update
         .expand_version_carriers_for_receive()
         .expect("expand normal-member message include/order payloads");
-    if let SyncMessage::ViewUpdate {
+    if let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         version_bundles, ..
-    } = &normal_versions
+    }) = &normal_versions
     {
         let (profile_bundle, profile_version) = version_bundles
             .iter()
@@ -1126,11 +1197,11 @@ fn missing_policy_seed_claim_denies_authorization_support_rehydration() {
             options,
         )
         .expect("missing policy seed claim must hydrate as an empty authorization proof");
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("authorization support must return a settled view update");
     };

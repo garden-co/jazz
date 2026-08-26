@@ -223,8 +223,16 @@ fn write_rejected(reason: RejectionReason) -> RejectionReason {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = open_db()?;
     let mergeable = block_on(db.mergeable_tx())?;
-    let first = block_on(mergeable.insert("todos", todo_cells("write examples", false)))?;
-    let second = block_on(mergeable.insert("todos", todo_cells("run examples", true)))?;
+    let first = block_on(mergeable.insert(
+        "todos",
+        todo_cells("write examples", false),
+        Default::default(),
+    ))?;
+    let second = block_on(mergeable.insert(
+        "todos",
+        todo_cells("run examples", true),
+        Default::default(),
+    ))?;
     let mergeable_tx = block_on(mergeable.commit())?;
 
     let todos = db.prepare_query(&db.table("todos"))?;

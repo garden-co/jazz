@@ -1,4 +1,5 @@
 import { createMemo, createResource, createSignal, onCleanup, type Accessor } from "solid-js";
+import { serializeClientConfig } from "../runtime/client-config-key.js";
 import type { DbConfig } from "../runtime/db.js";
 import type { JazzClient } from "../web/create-jazz-client.js";
 import {
@@ -25,7 +26,7 @@ export function createSolidJazzClientInternal(
   const [connectedRunId, setConnectedRunId] = createSignal<number | undefined>(undefined);
 
   const stableConfig = createMemo(config, undefined, {
-    equals: (prev, next) => JSON.stringify(prev) === JSON.stringify(next),
+    equals: (prev, next) => serializeClientConfig(prev) === serializeClientConfig(next),
   });
 
   const [res, { mutate, refetch }] = createResource(

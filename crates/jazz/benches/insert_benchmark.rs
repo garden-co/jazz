@@ -25,15 +25,11 @@ use jazz::tx::DurabilityTier;
 
 type BenchDb = Db<MemoryStorage>;
 
-const AUTHOR_UUID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-0000000000a1");
-const OTHER_AUTHOR_UUID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-0000000000b2");
-
 fn author() -> AuthorSubject {
-    AuthorSubject::for_test_uuid(AUTHOR_UUID)
+    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"))
 }
-
 fn other_author() -> AuthorSubject {
-    AuthorSubject::for_test_uuid(OTHER_AUTHOR_UUID)
+    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"))
 }
 
 fn public_schema_convert() -> JazzSchema {
@@ -172,14 +168,25 @@ fn seed_data(db: &BenchDb, scale: usize) -> BenchmarkData {
         let owner = if is_owned { author() } else { other_author() };
 
         let write = db
-            .insert_with_id("folders", folder, folder_cells(index, owner))
+            .insert(
+                "folders",
+                folder_cells(index, owner),
+                jazz::db::InsertOptions {
+                    row_id: Some(folder),
+                    ..Default::default()
+                },
+            )
             .expect("seed folder");
         wait_local(write);
 
         if is_owned || is_team_accessible {
             let role = if is_owned { "owner" } else { "member" };
             let write = db
-                .insert("folder_access", access_cells(folder, author(), role))
+                .insert(
+                    "folder_access",
+                    access_cells(folder, author(), role),
+                    Default::default(),
+                )
                 .expect("seed folder access");
             wait_local(write);
         }
@@ -212,6 +219,7 @@ fn seed_data(db: &BenchDb, scale: usize) -> BenchmarkData {
                     author,
                     index as u64,
                 ),
+                Default::default(),
             )
             .expect("seed document");
         wait_local(write);
@@ -246,6 +254,7 @@ fn insert_own_folder(c: &mut Criterion) {
                             author(),
                             current_timestamp(),
                         ),
+                        Default::default(),
                     )
                     .expect("own-folder insert should succeed");
                 wait_local(write)
@@ -279,6 +288,7 @@ fn insert_team_folder(c: &mut Criterion) {
                             other_author(),
                             current_timestamp(),
                         ),
+                        Default::default(),
                     )
                     .expect("team-folder insert should succeed via folder access");
                 wait_local(write)
@@ -325,6 +335,7 @@ fn insert_batch(c: &mut Criterion) {
                                     author(),
                                     timestamp + index as u64,
                                 ),
+                                Default::default(),
                             )
                             .expect("batch insert should succeed");
                         wait_local(write);

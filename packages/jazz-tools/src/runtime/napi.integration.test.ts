@@ -74,6 +74,10 @@ type PolicyTodo = {
   owner_id: string;
 };
 
+type PolicyTodoWithProvenance = PolicyTodo & {
+  $createdBy: string;
+};
+
 type PolicyTodoInit = {
   title: string;
   done: boolean;
@@ -239,6 +243,27 @@ function makePolicyTodoByIdQuery(schema: WasmSchema, id: string): QueryBuilder<P
         includes: {},
         orderBy: [],
         offset: 0,
+      });
+    },
+  };
+}
+
+function makePolicyTodoProvenanceByIdQuery(
+  schema: WasmSchema,
+  id: string,
+): QueryBuilder<PolicyTodoWithProvenance> {
+  return {
+    _table: "todos",
+    _schema: schema,
+    _rowType: undefined as unknown as PolicyTodoWithProvenance,
+    _build() {
+      return JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "id", op: "eq", value: id }],
+        includes: {},
+        orderBy: [],
+        offset: 0,
+        select: ["*", "$createdBy"],
       });
     },
   };
@@ -542,6 +567,21 @@ describe("NAPI integration", () => {
         claims: { role: "editor", team: "alpha" },
         authMode: "external",
       });
+      const aliceAuthor = JSON.stringify(["https://issuer.example", "alice"]);
+      const systemAuthor = JSON.stringify(["urn:jazz:system", "system"]);
+
+      const backendCreatedTodo = await withTimeout(
+        backendDb
+          .insert(policyTodosTable, {
+            title: "backend-system-provenance",
+            done: false,
+            description: "created via asBackend",
+            owner_id: "backend-owner",
+          })
+          .wait({ tier: "edge" }),
+        10_000,
+        "backend insert timed out",
+      );
 
       const createdTodo = await withTimeout(
         aliceDb
@@ -554,6 +594,33 @@ describe("NAPI integration", () => {
           .wait({ tier: "edge" }),
         10_000,
         "session insert timed out",
+      );
+
+      await vi.waitFor(
+        async () => {
+          const backendRow = await withTimeout(
+            backendDb.one(
+              makePolicyTodoProvenanceByIdQuery(todoServerSchema, backendCreatedTodo.id),
+              { tier: "edge" },
+            ),
+            10_000,
+            "backend provenance read timed out",
+          );
+          expect(backendRow).toMatchObject({
+            id: backendCreatedTodo.id,
+            $createdBy: systemAuthor,
+          });
+          const sessionRow = await withTimeout(
+            backendDb.one(makePolicyTodoProvenanceByIdQuery(todoServerSchema, createdTodo.id), {
+              tier: "edge",
+            }),
+            10_000,
+            "session provenance read timed out",
+          );
+          expect(sessionRow).toMatchObject({ id: createdTodo.id, $createdBy: aliceAuthor });
+          expect(sessionRow?.$createdBy).not.toBe(systemAuthor);
+        },
+        { timeout: 20_000 },
       );
 
       await vi.waitFor(

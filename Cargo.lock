@@ -1492,6 +1492,7 @@ dependencies = [
  "bytes",
  "futures",
  "futures-test",
+ "getrandom 0.3.4",
  "hdrhistogram",
  "idb-tree",
  "internment",
@@ -2142,6 +2143,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-native-relay"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "getrandom 0.3.4",
+ "jazz",
+ "jazz-storage-sqlite",
+ "postcard",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "jazz-native-transport"
 version = "0.1.0"
 dependencies = [
@@ -2255,6 +2271,16 @@ dependencies = [
  "rust-rocksdb",
  "serde",
  "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "jazz-storage-sqlite"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "groove",
+ "rusqlite",
  "tempfile",
 ]
 

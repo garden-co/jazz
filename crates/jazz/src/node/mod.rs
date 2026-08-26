@@ -595,14 +595,19 @@ pub struct NodeState<S> {
     initial_sync_flush_completed: bool,
 }
 
+// A descriptor-only start performs durable work despite carrying no chunk
+// bytes. Charge one MiB of the existing ingress budget to bound that work rate.
+pub(crate) const LARGE_VALUE_UPLOAD_START_INGRESS_CHARGE_BYTES: u64 = 1 << 20;
+
 /// Jazz-owned limits for unpublished Groove staging roots.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LargeValueStagingPolicy {
-    /// Incoming upload bytes admitted during one fixed window.
+    /// Incoming upload-work budget. Chunk batches charge encoded bytes;
+    /// descriptor-only starts charge a fixed nonzero amount.
     pub incoming_bytes_per_window: u64,
     /// Fixed rate-limit window duration.
     pub window_ms: u64,
-    /// Maximum staging age; expired roots are evicted on policy checks.
+    /// Maximum staging age used by explicit maintenance eviction.
     pub max_age_ms: u64,
 }
 
@@ -663,6 +668,14 @@ struct SchemaCatalogue {
     lens_path_cache: BTreeMap<LensPathCacheKey, Option<Vec<MigrationLensId>>>,
     /// Table-specific, already-validated lens programs used by hot read/write paths.
     compiled_lens_cache: BTreeMap<CompiledLensCacheKey, Option<CompiledLensPath>>,
+    /// Immutable lowering plans reused by authored-to-physical row writes.
+    physical_write_plan_cache: BTreeMap<
+        SchemaVersionId,
+        BTreeMap<
+            String,
+            BTreeMap<physical::PhysicalWriteTarget, Arc<physical::PreparedPhysicalWritePlan>>,
+        >,
+    >,
     /// Schema version currently used for newly authored writes.
     current_write_schema: CurrentWriteSchema,
 }
@@ -700,8 +713,7 @@ struct Clock {
 
 impl Clock {
     fn allocate_global_time(&mut self, now_ms: u64) -> Result<GlobalTime, Error> {
-        let global_time = GlobalTime::tick(self.global_time_register, now_ms)
-            .ok_or(Error::InvalidStoredValue("global HLC exhausted"))?;
+        let global_time = GlobalTime::tick(self.global_time_register, now_ms)?;
         self.global_time_register = global_time;
         self.locally_minted_global_times.insert(global_time);
         Ok(global_time)
@@ -771,7 +783,11 @@ struct QueryServing {
     /// Registered validated query shapes keyed by stable shape ID.
     registered_shapes: BTreeMap<ShapeId, ValidatedQuery>,
     /// Registered query binding values keyed by shape and usage-site binding ID.
-    registered_bindings: BTreeMap<ShapeId, BTreeMap<BindingId, RegisteredBinding>>,
+    // A wire subscription is identified by its usage binding handle *and* read
+    // view. The same canonical binding id may legitimately be registered at
+    // Local, Edge, and Global views in one relay, so keying by BindingId alone
+    // lets one view silently overwrite another's routing metadata.
+    registered_bindings: BTreeMap<ShapeId, BTreeMap<(BindingId, ReadViewKey), RegisteredBinding>>,
     /// Monotonically increasing receiver receipts for applied authoritative
     /// updates. Attachments capture the current receipt and require a later
     /// one; this remains logical binding-view state, never a wire nonce.
@@ -1043,12 +1059,12 @@ struct PendingTransactionScan {
 pub struct RowProvenance {
     /// Principal that created the row.
     pub created_by: AuthorSubject,
-    /// Commit time of the row's first retained content version.
-    pub created_at: TxTime,
+    /// Unix milliseconds of the row's first retained content version.
+    pub created_at: u64,
     /// Principal that authored the visible row version.
     pub updated_by: AuthorSubject,
-    /// Commit time of the visible row version.
-    pub updated_at: TxTime,
+    /// Unix milliseconds of the visible row version.
+    pub updated_at: u64,
 }
 
 /// Directed relation edge emitted for an array-subquery payload.
@@ -1182,10 +1198,10 @@ impl CurrentRow {
         Ok(Some(RowProvenance {
             created_by: AuthorSubject::from_canonical(borrowed.get_str(created_by_idx)?)
                 .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
-            created_at: TxTime(borrowed.get_u64(created_at_idx)?),
+            created_at: borrowed.get_u64(created_at_idx)?,
             updated_by: AuthorSubject::from_canonical(borrowed.get_str(updated_by_idx)?)
                 .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
-            updated_at: TxTime(borrowed.get_u64(updated_at_idx)?),
+            updated_at: borrowed.get_u64(updated_at_idx)?,
         }))
     }
 
@@ -1231,9 +1247,9 @@ impl CurrentRow {
         }
         if let Some(provenance) = self.provenance()? {
             values.push(Value::String(provenance.created_by.canonical().to_owned()));
-            values.push(Value::U64(provenance.created_at.0));
+            values.push(Value::U64(provenance.created_at));
             values.push(Value::String(provenance.updated_by.canonical().to_owned()));
-            values.push(Value::U64(provenance.updated_at.0));
+            values.push(Value::U64(provenance.updated_at));
         } else {
             values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
             values.push(Value::U64(0));
@@ -1476,7 +1492,10 @@ pub struct MergeableCommit {
     /// provenance prevents callers from handcrafting physical descriptors.
     prepared_large_columns: BTreeSet<String>,
     staged_large_values: Vec<groove::large_values::StagedLargeValueId>,
-    resident_large_values: Vec<groove::large_values::ResidentLargeValueStage>,
+    /// Construction-time proof that the production UUID source generated this
+    /// insert's row id.
+    /// Kept private so direct commits and replicated writes cannot assert it.
+    known_fresh_row: bool,
 }
 
 impl MergeableCommit {
@@ -1496,8 +1515,13 @@ impl MergeableCommit {
             user_metadata_json: None,
             prepared_large_columns: BTreeSet::new(),
             staged_large_values: Vec::new(),
-            resident_large_values: Vec::new(),
+            known_fresh_row: false,
         }
+    }
+
+    pub(crate) fn known_fresh_row(mut self) -> Self {
+        self.known_fresh_row = true;
+        self
     }
 
     /// Target an exact branch-keyed row branch-local row.
@@ -1587,6 +1611,11 @@ impl MergeableCommit {
     }
 
     fn validate(&self) -> Result<(), Error> {
+        crate::time::TxTime::from_physical_ms(self.now_ms).map_err(|_| {
+            Error::InvalidMergeableCommit(
+                "commit now_ms exceeds packed HLC physical-millisecond range",
+            )
+        })?;
         validate_mergeable_write_shape(self.cells.is_empty(), self.deletion.is_some())?;
         if self.cells.iter().any(|(column, value)| {
             value_contains_indirect_descriptor(value)
@@ -1615,21 +1644,6 @@ fn value_contains_indirect_descriptor(value: &Value) -> bool {
             .to_values()
             .is_ok_and(|values| values.iter().any(value_contains_indirect_descriptor)),
         _ => false,
-    }
-}
-
-fn large_value_kind_matches(
-    value: &Value,
-    expected: Option<groove::large_values::LargeValueKind>,
-) -> bool {
-    let Some(expected) = expected else {
-        // Internal runtime-only schemas predate retained public type metadata.
-        return true;
-    };
-    match value {
-        Value::Large(value_ref) => value_ref.kind == expected,
-        Value::Nullable(Some(value)) => large_value_kind_matches(value, Some(expected)),
-        _ => true,
     }
 }
 
@@ -1723,10 +1737,6 @@ impl PublishedTransaction {
     /// Persist the resident publication in storage order.
     pub async fn persist(&self) -> PersistedBatch {
         self.persistence.persist().await
-    }
-
-    pub(crate) fn retracts_on_failed_persistence(&self) -> bool {
-        self.persistence.is_retractable()
     }
 }
 
@@ -1982,7 +1992,7 @@ pub enum Error {
     /// Jazz staging policy rejected an otherwise valid Groove preparation.
     #[error("large-value upload rate limit exceeded")]
     LargeValueIngressRateLimited,
-    /// The row write arrived after its Groove staging root expired.
+    /// Required staging state was removed by TTL maintenance before use.
     #[error("large-value staging root expired; upload again")]
     LargeValueStageExpired,
     /// Error returned by groove records.
@@ -1994,6 +2004,9 @@ pub enum Error {
     /// Error returned by storage.
     #[error(transparent)]
     Storage(#[from] storage::Error),
+    /// The internal packed HLC exhausted its final physical/logical position.
+    #[error(transparent)]
+    ClockOverflow(#[from] crate::time::HlcOverflow),
     /// Error returned by query validation or binding.
     #[error("{0}")]
     Query(#[source] Box<QueryError>),

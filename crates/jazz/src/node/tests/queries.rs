@@ -1246,7 +1246,7 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
             .registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&usage_binding_id)
+            .contains_key(&(usage_binding_id, usage_subscription.read_view))
     );
     assert!(matches!(
         node.apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
@@ -1276,13 +1276,13 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
         node.query.registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&usage_binding_id)
+            .contains_key(&(usage_binding_id, usage_subscription.read_view))
     );
     assert!(
         node.query.registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&other_usage_binding_id)
+            .contains_key(&(other_usage_binding_id, other_usage_subscription.read_view))
     );
 
     let canonical_subscription = SubscriptionKey {
@@ -1316,13 +1316,13 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
         !node.query.registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&usage_binding_id)
+            .contains_key(&(usage_binding_id, usage_subscription.read_view))
     );
     assert!(
         node.query.registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&other_usage_binding_id)
+            .contains_key(&(other_usage_binding_id, other_usage_subscription.read_view))
     );
     assert!(node.query.settled_result_sets.contains_key(&binding_view_key));
     assert!(node.query.settled_program_facts.contains_key(&binding_view_key));
@@ -1335,7 +1335,7 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
         !node.query.registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&other_usage_binding_id)
+            .contains_key(&(other_usage_binding_id, other_usage_subscription.read_view))
     );
     assert!(!node.query.settled_result_sets.contains_key(&binding_view_key));
     assert!(!node.query.settled_program_facts.contains_key(&binding_view_key));
@@ -1365,7 +1365,9 @@ fn binding_delta_cleanup_distinguishes_canonical_read_view() {
     };
     let branch_usage_subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
-        binding_id: BindingId(uuid::Uuid::from_bytes([0x88; 16])),
+        // The usage handle alone is not globally unique: relays may reuse the
+        // canonical binding id for distinct downstream read views.
+        binding_id: default_usage_subscription.binding_id,
         read_view: branch_read_view,
     };
 
@@ -2854,10 +2856,10 @@ fn query_payload_dedup_is_per_peer_across_subscriptions() {
         .rehydrate_query(&mut core, &all_shape, &all_binding)
         .unwrap();
     let version_bundles = version_bundles_for_update(&first);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
         ..
-    } = first
+    }) = first
     else {
         panic!("expected first view update");
     };
@@ -2869,10 +2871,10 @@ fn query_payload_dedup_is_per_peer_across_subscriptions() {
         .rehydrate_query(&mut core, &filtered_shape, &filtered_binding)
         .unwrap();
     let version_bundles = version_bundles_for_update(&second);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
         ..
-    } = second
+    }) = second
     else {
         panic!("expected second view update");
     };
@@ -2915,10 +2917,10 @@ fn partial_mergeable_payload_does_not_establish_tx_level_complete_tx_ref() {
         .rehydrate_query(&mut core, &first_shape, &first_binding)
         .unwrap();
     let version_bundles = version_bundles_for_update(&first);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
         ..
-    } = first
+    }) = first
     else {
         panic!("expected first view update");
     };
@@ -2931,10 +2933,10 @@ fn partial_mergeable_payload_does_not_establish_tx_level_complete_tx_ref() {
         .rehydrate_query(&mut core, &second_shape, &second_binding)
         .unwrap();
     let version_bundles = version_bundles_for_update(&second);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
         ..
-    } = second
+    }) = second
     else {
         panic!("expected second view update");
     };
@@ -2952,7 +2954,7 @@ fn db_facade_current_rows_match_seeded_create_delete_sequence() {
     let table = &crate::db::doctest_support::schema().tables[0];
 
     let write = db
-        .insert("todos", crate::db::doctest_support::todo_cells("a1", false))
+        .insert("todos", crate::db::doctest_support::todo_cells("a1", false), Default::default())
         .unwrap();
     let row_a = write.row_uuid();
     crate::db::doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
@@ -2963,7 +2965,7 @@ fn db_facade_current_rows_match_seeded_create_delete_sequence() {
     );
 
     let write = db
-        .insert("todos", crate::db::doctest_support::todo_cells("b1", false))
+        .insert("todos", crate::db::doctest_support::todo_cells("b1", false), Default::default())
         .unwrap();
     let row_b = write.row_uuid();
     crate::db::doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
@@ -2978,7 +2980,7 @@ fn db_facade_current_rows_match_seeded_create_delete_sequence() {
     );
 
     crate::db::doctest_support::block_on(
-        db.delete("todos", row_a)
+        db.delete("todos", row_a, Default::default())
             .unwrap()
             .wait(DurabilityTier::Local),
     )
@@ -2986,11 +2988,7 @@ fn db_facade_current_rows_match_seeded_create_delete_sequence() {
     assert_eq!(db_facade_row_ids(&db.read(&prepared).unwrap()), vec![row_b]);
 
     crate::db::doctest_support::block_on(
-        db.restore(
-            "todos",
-            row_a,
-            crate::db::doctest_support::todo_cells("a2", true),
-        )
+        db.restore("todos", row_a, Some(crate::db::doctest_support::todo_cells("a2", true)), Default::default())
         .unwrap()
         .wait(DurabilityTier::Local),
     )
@@ -3006,7 +3004,7 @@ fn db_facade_current_rows_match_seeded_create_delete_sequence() {
     );
 
     crate::db::doctest_support::block_on(
-        db.delete("todos", row_b)
+        db.delete("todos", row_b, Default::default())
             .unwrap()
             .wait(DurabilityTier::Local),
     )
@@ -3031,7 +3029,7 @@ fn db_facade_multi_row_query_matches_seeded_create_delete_sequence_via_write_han
     let table = &crate::db::doctest_support::schema().tables[0];
 
     let write = db
-        .insert("todos", crate::db::doctest_support::todo_cells("a1", false))
+        .insert("todos", crate::db::doctest_support::todo_cells("a1", false), Default::default())
         .unwrap();
     let row_a = write.row_uuid();
     crate::db::doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
@@ -3043,7 +3041,7 @@ fn db_facade_multi_row_query_matches_seeded_create_delete_sequence_via_write_han
     );
 
     let write = db
-        .insert("todos", crate::db::doctest_support::todo_cells("b1", false))
+        .insert("todos", crate::db::doctest_support::todo_cells("b1", false), Default::default())
         .unwrap();
     let row_b = write.row_uuid();
     crate::db::doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
@@ -3052,7 +3050,7 @@ fn db_facade_multi_row_query_matches_seeded_create_delete_sequence_via_write_han
             .unwrap();
     assert_eq!(db_facade_row_ids(&rows), vec![row_a, row_b]);
 
-    let write = db.delete("todos", row_a).unwrap();
+    let write = db.delete("todos", row_a, Default::default()).unwrap();
     crate::db::doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
     let rows = db.read(&prepared).unwrap();
     assert_eq!(db_facade_row_ids(&rows), vec![row_b]);
@@ -3062,11 +3060,7 @@ fn db_facade_multi_row_query_matches_seeded_create_delete_sequence_via_write_han
     );
 
     let write = db
-        .restore(
-            "todos",
-            row_a,
-            crate::db::doctest_support::todo_cells("a2", true),
-        )
+        .restore("todos", row_a, Some(crate::db::doctest_support::todo_cells("a2", true)), Default::default())
         .unwrap();
     crate::db::doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
     let rows = db.read(&prepared).unwrap();
@@ -3086,7 +3080,7 @@ fn db_facade_multi_row_query_matches_seeded_create_delete_sequence_via_write_han
         Some(Value::Bool(true))
     );
 
-    let write = db.delete("todos", row_b).unwrap();
+    let write = db.delete("todos", row_b, Default::default()).unwrap();
     crate::db::doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
     let rows =
         crate::db::doctest_support::block_on(db.all(&prepared, crate::db::ReadOpts::default()))

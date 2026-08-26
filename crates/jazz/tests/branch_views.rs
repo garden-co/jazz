@@ -74,7 +74,7 @@ fn branch_owner_policy() -> PolicyExpr {
             PolicyExpr::Cmp {
                 column: "owner".to_owned(),
                 op: CmpOp::Eq,
-                value: PolicyValue::SessionRef(vec!["author".to_owned()]),
+                value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
             },
         ])),
     }
@@ -86,6 +86,13 @@ fn policy_with_all_writes(read: PolicyExpr) -> TablePolicies {
         .with_insert(read.clone())
         .with_update(Some(read.clone()), read.clone())
         .with_delete(read)
+}
+
+fn set_test_user_claims(db: &Db<MemoryStorage>, identity: AuthorSubject) {
+    db.set_identity_claims(
+        identity,
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(identity.test_uuid()))]),
+    );
 }
 
 fn open_db() -> (Db<MemoryStorage>, JazzSchema) {
@@ -174,20 +181,28 @@ fn indexed_branch_view_masks_base_before_applying_the_predicate() {
     let overridden = RowUuid::from_bytes([0x7f; 16]);
     let inherited = RowUuid::from_bytes([0x80; 16]);
     for row in [overridden, inherited] {
-        db.insert_with_id_in_branch(
+        db.insert(
             "todos",
-            base.clone(),
-            row,
             BTreeMap::from([("title".to_owned(), Value::String("needle".to_owned()))]),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
-    db.update_in_branch_view(
+    db.update(
         "todos",
-        head.clone(),
-        Some(BranchViewBase::Current(base.clone())),
         overridden,
         BTreeMap::from([("title".to_owned(), Value::String("hidden".to_owned()))]),
+        jazz::db::UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: head.clone(),
+                base: Some(BranchViewBase::Current(base.clone())),
+            },
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -222,27 +237,38 @@ fn branch_view_reduction_precedes_aggregation_and_ordered_windows() {
     let inherited = RowUuid::from_bytes([0x9a; 16]);
     let added = RowUuid::from_bytes([0x9b; 16]);
     for (row, title) in [(replaced, "alpha"), (inherited, "bravo")] {
-        db.insert_with_id_in_branch(
+        db.insert(
             "todos",
-            base.clone(),
-            row,
             BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
-    db.update_in_branch_view(
+    db.update(
         "todos",
-        head.clone(),
-        Some(BranchViewBase::Current(base.clone())),
         replaced,
         BTreeMap::from([("title".to_owned(), Value::String("zulu".to_owned()))]),
+        jazz::db::UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: head.clone(),
+                base: Some(BranchViewBase::Current(base.clone())),
+            },
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id_in_branch(
+    db.insert(
         "todos",
-        head.clone(),
-        added,
         BTreeMap::from([("title".to_owned(), Value::String("charlie".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(added),
+            target: jazz::db::ExactWriteTarget::Branch(head.clone()),
+            ..Default::default()
+        },
     )
     .unwrap();
     let opts = ReadOpts::default().branch_view(head, Some(BranchViewBase::Current(base)));
@@ -306,37 +332,52 @@ fn branch_view_join_projects_branch_column_subsets_and_shared_tables() {
     let workspace = uuid::Uuid::from_bytes([0x84; 16]);
     let branch = uuid::Uuid::from_bytes([0x85; 16]);
     let owner = RowUuid::from_bytes([0x86; 16]);
-    db.insert_with_id(
+    db.insert(
         "workspaces",
-        RowUuid(workspace),
         BTreeMap::from([("name".to_owned(), Value::String("shared".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(RowUuid(workspace)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "users",
-        owner,
         BTreeMap::from([("name".to_owned(), Value::String("shared".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(owner),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id_in_branch(
+    db.insert(
         "memberships",
-        BranchSelector::new([("workspace_id", Value::Uuid(workspace))]),
-        RowUuid::from_bytes([0x87; 16]),
         BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(RowUuid::from_bytes([0x87; 16])),
+            target: jazz::db::ExactWriteTarget::Branch(BranchSelector::new([(
+                "workspace_id",
+                Value::Uuid(workspace),
+            )])),
+            ..Default::default()
+        },
     )
     .unwrap();
     let document = RowUuid::from_bytes([0x88; 16]);
-    db.insert_with_id_in_branch(
+    db.insert(
         "documents",
-        BranchSelector::new([
-            ("workspace_id", Value::Uuid(workspace)),
-            ("branch_id", Value::Uuid(branch)),
-        ]),
-        document,
         BTreeMap::from([
             ("owner".to_owned(), Value::Uuid(owner.0)),
             ("title".to_owned(), Value::String("draft".to_owned())),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(document),
+            target: jazz::db::ExactWriteTarget::Branch(BranchSelector::new([
+                ("workspace_id", Value::Uuid(workspace)),
+                ("branch_id", Value::Uuid(branch)),
+            ])),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -413,28 +454,37 @@ fn branch_view_reachability_consumes_effective_sources() {
     let allowed_team = uuid::Uuid::from_bytes([0xa2; 16]);
     let denied_team = uuid::Uuid::from_bytes([0xa3; 16]);
     for (team, name) in [(allowed_team, "allowed"), (denied_team, "denied")] {
-        db.insert_with_id(
+        db.insert(
             "teams",
-            RowUuid(team),
             BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+            jazz::db::InsertOptions {
+                row_id: Some(RowUuid(team)),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
-    db.insert_with_id_in_branch(
+    db.insert(
         "documents",
-        base.clone(),
-        document,
         BTreeMap::from([("title".to_owned(), Value::String("reachable".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(document),
+            target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id_in_branch(
+    db.insert(
         "access",
-        base.clone(),
-        access,
         BTreeMap::from([
             ("document".to_owned(), Value::Uuid(document.0)),
             ("team".to_owned(), Value::Uuid(allowed_team)),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(access),
+            target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+            ..Default::default()
+        },
     )
     .unwrap();
     let query = db
@@ -456,12 +506,17 @@ fn branch_view_reachability_consumes_effective_sources() {
         1
     );
 
-    db.update_in_branch_view(
+    db.update(
         "access",
-        head.clone(),
-        Some(BranchViewBase::Current(base.clone())),
         access,
         BTreeMap::from([("team".to_owned(), Value::Uuid(denied_team))]),
+        jazz::db::UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: head.clone(),
+                base: Some(BranchViewBase::Current(base.clone())),
+            },
+            ..Default::default()
+        },
     )
     .unwrap();
     assert!(
@@ -482,7 +537,7 @@ fn open_policy_db() -> (Db<MemoryStorage>, JazzSchema) {
                 TableSchemaBuilder::new("branches")
                     .fk_column("branch_key", "branches")
                     .column("name", ColumnType::Text)
-                    .column("owner", ColumnType::Text)
+                    .column("owner", ColumnType::Uuid)
                     .policies(allow_all_policies()),
             )
             .table(
@@ -516,19 +571,21 @@ fn branch_column_reference_policy_controls_effective_reads() {
     let (db, _schema) = open_policy_db();
     let owner = AuthorSubject::for_test_bytes([0x76; 16]);
     let outsider = AuthorSubject::for_test_bytes([0x77; 16]);
+    set_test_user_claims(&db, owner);
+    set_test_user_claims(&db, outsider);
     let branch = RowUuid::from_bytes([0x78; 16]);
     let selector = BranchSelector::new([("branch_id", Value::Uuid(branch.0))]);
-    db.insert_with_id(
+    db.insert(
         "branches",
-        branch,
         BTreeMap::from([
             ("branch_key".to_owned(), Value::Uuid(branch.0)),
             ("name".to_owned(), Value::String("draft".to_owned())),
-            (
-                "owner".to_owned(),
-                Value::String(owner.canonical().to_owned()),
-            ),
+            ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(branch),
+            ..Default::default()
+        },
     )
     .unwrap();
     let branches = db.prepare_query(&db.table("branches")).unwrap();
@@ -546,22 +603,22 @@ fn branch_column_reference_policy_controls_effective_reads() {
     );
 
     let todo = RowUuid::from_bytes([0x79; 16]);
-    db.insert_with_id_in_branch_for_identity(
-        owner,
+    db.insert(
         "todos",
-        selector.clone(),
-        todo,
         BTreeMap::from([("title".to_owned(), Value::String("allowed".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(todo),
+            identity: jazz::db::WriteIdentity::Session(owner),
+            target: jazz::db::ExactWriteTarget::Branch(selector.clone()),
+            ..Default::default()
+        },
     )
     .expect("the ordinary referenced branch row authorizes its owner");
     let joined = db
         .prepare_query(&Query::from("todos").join_via_row_id(
             "branches",
             "branch_id",
-            [eq(
-                col("owner"),
-                jazz::query::lit(owner.canonical().to_owned()),
-            )],
+            [eq(col("owner"), jazz::query::lit(owner.test_uuid()))],
         ))
         .unwrap();
     assert_eq!(
@@ -611,7 +668,7 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
                     .column("branch_id", ColumnType::Uuid)
                     .fk_column("branch_key", "branches")
                     .column("name", ColumnType::Text)
-                    .column("owner", ColumnType::Text)
+                    .column("owner", ColumnType::Uuid)
                     .branch_by("branch_id")
                     .policies(allow_all_policies()),
             )
@@ -636,34 +693,39 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
     .unwrap();
     let before = AuthorSubject::for_test_bytes([0xad; 16]);
     let after = AuthorSubject::for_test_bytes([0xae; 16]);
+    set_test_user_claims(&db, before);
+    set_test_user_claims(&db, after);
     let base_branch = RowUuid::from_bytes([0xaa; 16]);
     let head_branch = RowUuid::from_bytes([0xab; 16]);
     let base = BranchSelector::new([("branch_id", Value::Uuid(base_branch.0))]);
     let head = BranchSelector::new([("branch_id", Value::Uuid(head_branch.0))]);
     for branch in [base_branch, head_branch] {
-        db.insert_with_id_in_branch(
+        db.insert(
             "branches",
-            base.clone(),
-            branch,
             BTreeMap::from([
                 ("branch_key".to_owned(), Value::Uuid(branch.0)),
                 ("name".to_owned(), Value::String("branch".to_owned())),
-                (
-                    "owner".to_owned(),
-                    Value::String(before.canonical().to_owned()),
-                ),
+                ("owner".to_owned(), Value::Uuid(before.test_uuid())),
             ]),
+            jazz::db::InsertOptions {
+                row_id: Some(branch),
+                target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
     let row = RowUuid::from_bytes([0xac; 16]);
     let authored = db
-        .insert_with_id_in_branch_for_identity(
-            before,
+        .insert(
             "todos",
-            base.clone(),
-            row,
             BTreeMap::from([("title".to_owned(), Value::String("frozen".to_owned()))]),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                identity: jazz::db::WriteIdentity::Session(before),
+                target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+                ..Default::default()
+            },
         )
         .unwrap()
         .mergeable_tx_id();
@@ -673,14 +735,17 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
         local_base: authored.time,
         dots: Vec::new(),
     };
-    db.update_in_branch(
+    db.update(
         "branches",
-        base.clone(),
         head_branch,
-        BTreeMap::from([(
-            "owner".to_owned(),
-            Value::String(after.canonical().to_owned()),
-        )]),
+        BTreeMap::from([("owner".to_owned(), Value::Uuid(after.test_uuid()))]),
+        jazz::db::UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: base.clone(),
+                base: None,
+            },
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -701,7 +766,7 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
         .find(|table| table.name == "branches")
         .unwrap();
     assert!(branch_rows.iter().all(|row| {
-        row.cell(branch_table, "owner") == Some(Value::String(before.canonical().to_owned()))
+        row.cell(branch_table, "owner") == Some(Value::Uuid(before.test_uuid()))
             && row.cell(branch_table, "branch_id") == Some(Value::Uuid(head_branch.0))
     }));
     let system_rows = block_on(db.all(&query, opts.clone())).unwrap();
@@ -738,28 +803,33 @@ fn branch_view_subscription_tracks_reference_policy_revoke_and_grant() {
     let (db, _schema) = open_policy_db();
     let owner = AuthorSubject::for_test_bytes([0xb5; 16]);
     let outsider = AuthorSubject::for_test_bytes([0xb6; 16]);
+    set_test_user_claims(&db, owner);
+    set_test_user_claims(&db, outsider);
     let branch = RowUuid::from_bytes([0xb7; 16]);
     let selector = BranchSelector::new([("branch_id", Value::Uuid(branch.0))]);
-    db.insert_with_id(
+    db.insert(
         "branches",
-        branch,
         BTreeMap::from([
             ("branch_key".to_owned(), Value::Uuid(branch.0)),
             ("name".to_owned(), Value::String("draft".to_owned())),
-            (
-                "owner".to_owned(),
-                Value::String(owner.canonical().to_owned()),
-            ),
+            ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(branch),
+            ..Default::default()
+        },
     )
     .unwrap();
     let row = RowUuid::from_bytes([0xb8; 16]);
-    db.insert_with_id_in_branch_for_identity(
-        owner,
+    db.insert(
         "todos",
-        selector.clone(),
-        row,
         BTreeMap::from([("title".to_owned(), Value::String("visible".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            identity: jazz::db::WriteIdentity::Session(owner),
+            target: jazz::db::ExactWriteTarget::Branch(selector.clone()),
+            ..Default::default()
+        },
     )
     .unwrap();
     let query = db.prepare_query(&db.table("todos")).unwrap();
@@ -778,10 +848,8 @@ fn branch_view_subscription_tracks_reference_policy_revoke_and_grant() {
     db.update(
         "branches",
         branch,
-        BTreeMap::from([(
-            "owner".to_owned(),
-            Value::String(outsider.canonical().to_owned()),
-        )]),
+        BTreeMap::from([("owner".to_owned(), Value::Uuid(outsider.test_uuid()))]),
+        Default::default(),
     )
     .unwrap();
     assert!(matches!(
@@ -793,10 +861,8 @@ fn branch_view_subscription_tracks_reference_policy_revoke_and_grant() {
     db.update(
         "branches",
         branch,
-        BTreeMap::from([(
-            "owner".to_owned(),
-            Value::String(owner.canonical().to_owned()),
-        )]),
+        BTreeMap::from([("owner".to_owned(), Value::Uuid(owner.test_uuid()))]),
+        Default::default(),
     )
     .unwrap();
     assert!(matches!(
@@ -814,18 +880,24 @@ fn one_mergeable_transaction_can_atomically_write_multiple_branches() {
     let right = selector(0x73);
 
     let tx = db.mergeable_tx().unwrap();
-    tx.insert_with_id_in_branch(
+    tx.insert(
         "todos",
-        left.clone(),
-        row,
         BTreeMap::from([("title".to_owned(), Value::String("left".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            target: jazz::db::ExactWriteTarget::Branch(left.clone()),
+            ..Default::default()
+        },
     )
     .unwrap();
-    tx.insert_with_id_in_branch(
+    tx.insert(
         "todos",
-        right.clone(),
-        row,
         BTreeMap::from([("title".to_owned(), Value::String("right".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            target: jazz::db::ExactWriteTarget::Branch(right.clone()),
+            ..Default::default()
+        },
     )
     .unwrap();
     tx.commit().unwrap();
@@ -859,11 +931,14 @@ fn branch_move_is_explicit_source_delete_and_destination_restore() {
     let source = selector(0x94);
     let target = selector(0x95);
     let row = RowUuid::from_bytes([0x96; 16]);
-    db.insert_with_id_in_branch(
+    db.insert(
         "todos",
-        source.clone(),
-        row,
         BTreeMap::from([("title".to_owned(), Value::String("move me".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            target: jazz::db::ExactWriteTarget::Branch(source.clone()),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -897,22 +972,39 @@ fn cross_branch_transaction_and_independent_winners_survive_reopen() {
     {
         let db = open_rocks_db(directory.path(), &schema);
         let tx = db.mergeable_tx().unwrap();
-        tx.insert_with_id_in_branch(
+        tx.insert(
             "todos",
-            left.clone(),
-            row,
             BTreeMap::from([("title".to_owned(), Value::String("left".to_owned()))]),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                target: jazz::db::ExactWriteTarget::Branch(left.clone()),
+                ..Default::default()
+            },
         )
         .unwrap();
-        tx.insert_with_id_in_branch(
+        tx.insert(
             "todos",
-            right.clone(),
-            row,
             BTreeMap::from([("title".to_owned(), Value::String("right".to_owned()))]),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                target: jazz::db::ExactWriteTarget::Branch(right.clone()),
+                ..Default::default()
+            },
         )
         .unwrap();
         tx.commit().unwrap();
-        db.delete_in_branch("todos", left.clone(), row).unwrap();
+        db.delete(
+            "todos",
+            row,
+            jazz::db::DeleteOptions {
+                target: jazz::db::WriteTarget::BranchView {
+                    head: left.clone(),
+                    base: None,
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
     }
 
     let db = open_rocks_db(directory.path(), &schema);
@@ -959,11 +1051,14 @@ fn sibling_branch_view_subscriptions_isolate_first_writes() {
     ));
 
     let row = RowUuid::from_bytes([0x8b; 16]);
-    db.insert_with_id_in_branch(
+    db.insert(
         "todos",
-        left,
-        row,
         BTreeMap::from([("title".to_owned(), Value::String("left".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            target: jazz::db::ExactWriteTarget::Branch(left),
+            ..Default::default()
+        },
     )
     .unwrap();
     assert!(matches!(
@@ -976,11 +1071,14 @@ fn sibling_branch_view_subscriptions_isolate_first_writes() {
         "a sibling branch key must not receive the first-write delta"
     );
 
-    db.insert_with_id_in_branch(
+    db.insert(
         "todos",
-        right,
-        row,
         BTreeMap::from([("title".to_owned(), Value::String("right".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            target: jazz::db::ExactWriteTarget::Branch(right),
+            ..Default::default()
+        },
     )
     .unwrap();
     assert!(matches!(
@@ -990,14 +1088,34 @@ fn sibling_branch_view_subscriptions_isolate_first_writes() {
     ));
     assert!(left_stream.try_next_event().is_none());
 
-    db.delete_in_branch("todos", selector(0x89), row).unwrap();
+    db.delete(
+        "todos",
+        row,
+        jazz::db::DeleteOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: selector(0x89),
+                base: None,
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert!(matches!(
         block_on(left_stream.next_event()).unwrap(),
         SubscriptionEvent::Delta { reset: false, ref removed, .. }
             if removed.iter().any(|candidate| candidate.row_uuid == row)
     ));
     assert!(right_stream.try_next_event().is_none());
-    db.restore_in_branch("todos", selector(0x89), row).unwrap();
+    db.restore(
+        "todos",
+        row,
+        None,
+        jazz::db::RestoreOptions {
+            target: jazz::db::ExactWriteTarget::Branch(selector(0x89)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert!(matches!(
         block_on(left_stream.next_event()).unwrap(),
         SubscriptionEvent::Delta { reset: false, ref added, .. }
@@ -1033,11 +1151,14 @@ fn seeded_branch_view_subscription_matches_one_shot_reduction() {
         .map(|index| RowUuid::from_bytes([index.wrapping_add(0xb1); 16]))
         .collect::<Vec<_>>();
     for (index, row) in rows.iter().enumerate() {
-        db.insert_with_id_in_branch(
+        db.insert(
             "todos",
-            base.clone(),
-            *row,
             BTreeMap::from([("title".to_owned(), Value::String(format!("seed-{index}")))]),
+            jazz::db::InsertOptions {
+                row_id: Some(*row),
+                target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
@@ -1080,43 +1201,68 @@ fn seeded_branch_view_subscription_matches_one_shot_reduction() {
         seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
         let row = rows[(seed as usize) % rows.len()];
         let result = match (seed >> 32) % 5 {
-            0 => block_on(db.update_in_branch(
+            0 => block_on(db.update(
                 "todos",
-                base.clone(),
                 row,
                 BTreeMap::from([("title".to_owned(), Value::String(format!("base-{step}")))]),
+                jazz::db::UpdateOptions {
+                    target: jazz::db::WriteTarget::BranchView {
+                        head: base.clone(),
+                        base: None,
+                    },
+                    ..Default::default()
+                },
             ))
             .map(|_| ()),
-            1 => block_on(db.update_in_branch_view(
+            1 => block_on(db.update(
                 "todos",
-                head.clone(),
-                Some(BranchViewBase::Current(base.clone())),
                 row,
                 BTreeMap::from([("title".to_owned(), Value::String(format!("head-{step}")))]),
+                jazz::db::UpdateOptions {
+                    target: jazz::db::WriteTarget::BranchView {
+                        head: head.clone(),
+                        base: Some(BranchViewBase::Current(base.clone())),
+                    },
+                    ..Default::default()
+                },
             ))
             .map(|_| ()),
-            2 => block_on(db.delete_in_branch_view(
+            2 => block_on(db.delete(
                 "todos",
-                head.clone(),
-                Some(BranchViewBase::Current(base.clone())),
                 row,
+                jazz::db::DeleteOptions {
+                    target: jazz::db::WriteTarget::BranchView {
+                        head: head.clone(),
+                        base: Some(BranchViewBase::Current(base.clone())),
+                    },
+                    ..Default::default()
+                },
             ))
             .map(|_| ()),
-            3 => block_on(db.restore_with_cells_in_branch(
+            3 => block_on(db.restore(
                 "todos",
-                head.clone(),
                 row,
-                BTreeMap::from([(
+                Some(BTreeMap::from([(
                     "title".to_owned(),
                     Value::String(format!("restored-{step}")),
-                )]),
+                )])),
+                jazz::db::RestoreOptions {
+                    target: jazz::db::ExactWriteTarget::Branch(head.clone()),
+                    ..Default::default()
+                },
             ))
             .map(|_| ()),
-            _ => block_on(db.update_in_branch(
+            _ => block_on(db.update(
                 "todos",
-                head.clone(),
                 row,
                 BTreeMap::from([("title".to_owned(), Value::String(format!("exact-{step}")))]),
+                jazz::db::UpdateOptions {
+                    target: jazz::db::WriteTarget::BranchView {
+                        head: head.clone(),
+                        base: None,
+                    },
+                    ..Default::default()
+                },
             ))
             .map(|_| ()),
         };
@@ -1146,11 +1292,14 @@ fn db_exact_mutations_and_branch_view_reads_compose_head_over_base() {
     let row = RowUuid::from_bytes([0x64; 16]);
     let base = selector(0x65);
     let head = selector(0x66);
-    db.insert_with_id_in_branch(
+    db.insert(
         "todos",
-        base.clone(),
-        row,
         BTreeMap::from([("title".to_owned(), Value::String("base".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -1186,11 +1335,17 @@ fn db_exact_mutations_and_branch_view_reads_compose_head_over_base() {
         SubscriptionEvent::Delta { reset: true, .. }
     ));
 
-    db.update_in_branch(
+    db.update(
         "todos",
-        selector(0x65),
         row,
         BTreeMap::from([("title".to_owned(), Value::String("base edited".to_owned()))]),
+        jazz::db::UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: selector(0x65),
+                base: None,
+            },
+            ..Default::default()
+        },
     )
     .unwrap();
     let base_changed = block_on(subscription.next_event()).unwrap();
@@ -1202,12 +1357,17 @@ fn db_exact_mutations_and_branch_view_reads_compose_head_over_base() {
         "unexpected live-base subscription delta: {base_changed:?}"
     );
 
-    db.update_in_branch_view(
+    db.update(
         "todos",
-        head.clone(),
-        Some(BranchViewBase::Current(selector(0x65))),
         row,
         BTreeMap::from([("title".to_owned(), Value::String("draft".to_owned()))]),
+        jazz::db::UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: head.clone(),
+                base: Some(BranchViewBase::Current(selector(0x65))),
+            },
+            ..Default::default()
+        },
     )
     .unwrap();
     let changed = block_on(subscription.next_event()).unwrap();
@@ -1218,11 +1378,17 @@ fn db_exact_mutations_and_branch_view_reads_compose_head_over_base() {
         ),
         "unexpected branch subscription delta: {changed:?}"
     );
-    db.update_in_branch(
+    db.update(
         "todos",
-        head.clone(),
         row,
         BTreeMap::from([("title".to_owned(), Value::String("edited".to_owned()))]),
+        jazz::db::UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: head.clone(),
+                base: None,
+            },
+            ..Default::default()
+        },
     )
     .unwrap();
     let rows = block_on(db.all(&prepared, opts.clone())).unwrap();
@@ -1231,7 +1397,18 @@ fn db_exact_mutations_and_branch_view_reads_compose_head_over_base() {
         Some(Value::String("edited".to_owned()))
     );
 
-    db.delete_in_branch("todos", head, row).unwrap();
+    db.delete(
+        "todos",
+        row,
+        jazz::db::DeleteOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: head,
+                base: None,
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert!(block_on(db.all(&prepared, opts)).unwrap().is_empty());
 }
 
@@ -1241,11 +1418,14 @@ fn inherited_delete_is_a_head_register_and_can_be_restored() {
     let row = RowUuid::from_bytes([0x67; 16]);
     let base = selector(0x68);
     let head = selector(0x69);
-    db.insert_with_id_in_branch(
+    db.insert(
         "todos",
-        base.clone(),
-        row,
         BTreeMap::from([("title".to_owned(), Value::String("base".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+            ..Default::default()
+        },
     )
     .unwrap();
     let prepared = db.prepare_query(&db.table("todos")).unwrap();
@@ -1264,14 +1444,19 @@ fn inherited_delete_is_a_head_register_and_can_be_restored() {
         SubscriptionEvent::Delta { reset: true, .. }
     ));
 
-    db.delete_in_branch_view(
+    db.delete(
         "todos",
-        head.clone(),
-        match &opts.read_view.source {
-            ReadViewSourceSpec::BranchView { base, .. } => base.clone(),
-            _ => unreachable!(),
-        },
         row,
+        jazz::db::DeleteOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: head.clone(),
+                base: match &opts.read_view.source {
+                    ReadViewSourceSpec::BranchView { base, .. } => base.clone(),
+                    _ => unreachable!(),
+                },
+            },
+            ..Default::default()
+        },
     )
     .unwrap();
     let deleted = block_on(subscription.next_event()).unwrap();
@@ -1288,11 +1473,17 @@ fn inherited_delete_is_a_head_register_and_can_be_restored() {
             .is_empty()
     );
 
-    db.restore_with_cells_in_branch(
+    db.restore(
         "todos",
-        head.clone(),
         row,
-        BTreeMap::from([("title".to_owned(), Value::String("restored".to_owned()))]),
+        Some(BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("restored".to_owned()),
+        )])),
+        jazz::db::RestoreOptions {
+            target: jazz::db::ExactWriteTarget::Branch(head.clone()),
+            ..Default::default()
+        },
     )
     .unwrap();
     let restored = block_on(subscription.next_event()).unwrap();
@@ -1318,11 +1509,14 @@ fn frozen_base_subscription_keeps_the_base_fixed_and_the_head_live() {
     let base = selector(0x75);
     let head = selector(0x76);
     let seeded = db
-        .insert_with_id_in_branch(
+        .insert(
             "todos",
-            base.clone(),
-            row,
             BTreeMap::from([("title".to_owned(), Value::String("base".to_owned()))]),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+                ..Default::default()
+            },
         )
         .unwrap()
         .mergeable_tx_id();
@@ -1346,24 +1540,35 @@ fn frozen_base_subscription_keeps_the_base_fixed_and_the_head_live() {
         SubscriptionEvent::Delta { reset: true, .. }
     ));
 
-    db.update_in_branch(
+    db.update(
         "todos",
-        base,
         row,
         BTreeMap::from([("title".to_owned(), Value::String("later base".to_owned()))]),
+        jazz::db::UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: base,
+                base: None,
+            },
+            ..Default::default()
+        },
     )
     .unwrap();
     assert!(subscription.try_next_event().is_none());
 
-    db.update_in_branch_view(
+    db.update(
         "todos",
-        head.clone(),
-        match &opts.read_view.source {
-            ReadViewSourceSpec::BranchView { base, .. } => base.clone(),
-            _ => unreachable!(),
-        },
         row,
         BTreeMap::from([("title".to_owned(), Value::String("live head".to_owned()))]),
+        jazz::db::UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: head.clone(),
+                base: match &opts.read_view.source {
+                    ReadViewSourceSpec::BranchView { base, .. } => base.clone(),
+                    _ => unreachable!(),
+                },
+            },
+            ..Default::default()
+        },
     )
     .unwrap();
     let changed = block_on(subscription.next_event()).unwrap();
@@ -1377,19 +1582,33 @@ fn frozen_base_subscription_keeps_the_base_fixed_and_the_head_live() {
         Some(Value::String("live head".to_owned()))
     );
 
-    db.delete_in_branch("todos", head.clone(), row).unwrap();
+    db.delete(
+        "todos",
+        row,
+        jazz::db::DeleteOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: head.clone(),
+                base: None,
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert!(matches!(
         block_on(subscription.next_event()).unwrap(),
         SubscriptionEvent::Delta { reset: false, ref removed, .. } if removed.len() == 1
     ));
-    db.restore_with_cells_in_branch(
+    db.restore(
         "todos",
-        head,
         row,
-        BTreeMap::from([(
+        Some(BTreeMap::from([(
             "title".to_owned(),
             Value::String("restored head".to_owned()),
-        )]),
+        )])),
+        jazz::db::RestoreOptions {
+            target: jazz::db::ExactWriteTarget::Branch(head),
+            ..Default::default()
+        },
     )
     .unwrap();
     assert!(matches!(
@@ -1404,11 +1623,14 @@ fn db_contribution_merge_is_an_ordinary_retry_safe_transaction() {
     let source = selector(0x91);
     let target = selector(0x92);
     let row = RowUuid::from_bytes([0x93; 16]);
-    db.insert_with_id_in_branch(
+    db.insert(
         "todos",
-        source.clone(),
-        row,
         BTreeMap::from([("title".to_owned(), Value::String("source".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            target: jazz::db::ExactWriteTarget::Branch(source.clone()),
+            ..Default::default()
+        },
     )
     .unwrap();
 

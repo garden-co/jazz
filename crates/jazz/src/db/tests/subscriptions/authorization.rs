@@ -23,6 +23,7 @@ fn maintained_subscription_emits_created_by_scoped_insert_after_empty_seed() {
                 ),
                 ("done".to_owned(), Value::Bool(false)),
             ]),
+            Default::default(),
         )
         .unwrap();
     block_on(write.wait(DurabilityTier::Local)).unwrap();
@@ -129,7 +130,11 @@ fn dropping_one_local_stream_preserves_a_sibling_on_the_same_binding() {
     );
 
     let write = db
-        .insert("todos", doctest_support::todo_cells("match", false))
+        .insert(
+            "todos",
+            doctest_support::todo_cells("match", false),
+            Default::default(),
+        )
         .unwrap();
     let (added, updated, removed) = delta_rows(block_on(survivor.next_raw()).unwrap());
     assert_eq!(row_ids(&added), vec![write.row_uuid()]);
@@ -159,6 +164,7 @@ fn maintained_subscription_emits_created_by_scoped_insert_for_explicit_identity(
                 ),
                 ("done".to_owned(), Value::Bool(false)),
             ]),
+            Default::default(),
         )
         .unwrap();
     block_on(write.wait(DurabilityTier::Local)).unwrap();
@@ -207,6 +213,7 @@ fn local_propagating_subscription_emits_created_by_scoped_insert_after_empty_see
                 ),
                 ("done".to_owned(), Value::Bool(false)),
             ]),
+            Default::default(),
         )
         .unwrap();
     block_on(write.wait(DurabilityTier::Local)).unwrap();
@@ -249,6 +256,7 @@ fn local_propagating_subscription_coerces_user_id_claim_for_created_by() {
         .insert(
             "todos",
             doctest_support::todo_cells("created by alice", false),
+            Default::default(),
         )
         .unwrap();
     block_on(write.wait(DurabilityTier::Local)).unwrap();
@@ -369,10 +377,6 @@ fn string_grant_role_access_filter_matches_uuid_literal_in_list() {
     let schema = uuid_string_grant_role_schema(role);
     let server = open_core(0x6d, AuthorSubject::SYSTEM, &schema);
     let member = AuthorSubject::for_test_bytes([0x6e; 16]);
-    server
-        .node()
-        .borrow_mut()
-        .set_session_claims(member, test_provider_claims(member));
     let member_team = row(0x61);
     let resource_team = row(0x62);
     let doc = row(0x63);
@@ -441,7 +445,6 @@ fn string_grant_role_access_filter_matches_uuid_literal_in_list() {
         id_source: Some(Box::new(SeededRowIdSource::new(0x6f))),
     }))
     .unwrap();
-    db.set_identity_claims(member, test_provider_claims(member));
     for (table, row_id, cells) in [
         (
             "teams",
@@ -485,6 +488,10 @@ fn string_grant_role_access_filter_matches_uuid_literal_in_list() {
         db.seed_settled_mergeable_for_bootstrap(table, row_id, AuthorSubject::SYSTEM, cells)
             .unwrap();
     }
+    db.node
+        .node
+        .borrow_mut()
+        .set_session_claims(member, test_provider_claims(member));
     let prepared = db.prepare_query(&Query::from("docs")).unwrap();
     let one_shot = block_on(db.all_for_identity(
         &prepared,
@@ -586,13 +593,19 @@ fn direct_multi_identity_subscribe_reuses_shared_seeded_fragments_without_leakin
     let member = AuthorSubject::for_test_bytes([0x12; 16]);
     let other = AuthorSubject::for_test_bytes([0x13; 16]);
     let spy = AuthorSubject::for_test_bytes([0x99; 16]);
-    db.set_identity_claims(member, test_provider_claims(member));
-    db.set_identity_claims(other, test_provider_claims(other));
-    db.set_identity_claims(spy, test_provider_claims(spy));
-    db.insert_with_id(
+    for identity in [member, other, spy] {
+        db.node
+            .node
+            .borrow_mut()
+            .set_session_claims(identity, test_provider_claims(identity));
+    }
+    db.insert(
         "org",
-        row(0x01),
         BTreeMap::from([("label".to_owned(), Value::String("org".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x01)),
+            ..Default::default()
+        },
     )
     .unwrap();
     let direct_group = row(0x31);
@@ -606,24 +619,41 @@ fn direct_multi_identity_subscribe_reuses_shared_seeded_fragments_without_leakin
         (transitive_group, "transitive"),
         (hidden_group, "hidden"),
     ] {
-        db.insert_with_id("group", group, team_cells(name)).unwrap();
+        db.insert(
+            "group",
+            team_cells(name),
+            crate::db::InsertOptions {
+                row_id: Some(group),
+                ..Default::default()
+            },
+        )
+        .unwrap();
     }
-    db.insert_with_id(
+    db.insert(
         "group_access_edges",
-        row(0xa1),
         group_access_test_cells(direct_group, member),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa1)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "group_access_edges",
-        row(0xa2),
         group_access_test_cells(hidden_group, other),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa2)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "group_entry",
-        row(0xc1),
         group_entry_test_cells(direct_group, transitive_group, false),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xc1)),
+            ..Default::default()
+        },
     )
     .unwrap();
     for (resource, title) in [
@@ -631,18 +661,28 @@ fn direct_multi_identity_subscribe_reuses_shared_seeded_fragments_without_leakin
         (transitive, "transitive"),
         (hidden, "hidden"),
     ] {
-        db.insert_with_id("res_i", resource, resource_test_cells(title))
-            .unwrap();
+        db.insert(
+            "res_i",
+            resource_test_cells(title),
+            crate::db::InsertOptions {
+                row_id: Some(resource),
+                ..Default::default()
+            },
+        )
+        .unwrap();
     }
     for (edge, resource, group) in [
         (row(0xb1), direct, direct_group),
         (row(0xb2), transitive, transitive_group),
         (row(0xb3), hidden, hidden_group),
     ] {
-        db.insert_with_id(
+        db.insert(
             "res_i_access_edges",
-            edge,
             resource_access_test_cells(resource, group, false),
+            crate::db::InsertOptions {
+                row_id: Some(edge),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
@@ -699,28 +739,48 @@ fn direct_same_identity_subscribe_reuses_shared_seeded_fragments_across_shapes()
     let schema = customer_two_resource_policy_minimal_schema();
     let db = open_db(0x6a, AuthorSubject::SYSTEM, &schema);
     let member = AuthorSubject::for_test_bytes([0x12; 16]);
-    db.set_identity_claims(member, test_provider_claims(member));
-    db.insert_with_id(
+    db.node
+        .node
+        .borrow_mut()
+        .set_session_claims(member, test_provider_claims(member));
+    db.insert(
         "org",
-        row(0x01),
         BTreeMap::from([("label".to_owned(), Value::String("org".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x01)),
+            ..Default::default()
+        },
     )
     .unwrap();
     let direct_group = row(0x31);
     let transitive_group = row(0x32);
     for (group, name) in [(direct_group, "direct"), (transitive_group, "transitive")] {
-        db.insert_with_id("group", group, team_cells(name)).unwrap();
+        db.insert(
+            "group",
+            team_cells(name),
+            crate::db::InsertOptions {
+                row_id: Some(group),
+                ..Default::default()
+            },
+        )
+        .unwrap();
     }
-    db.insert_with_id(
+    db.insert(
         "group_access_edges",
-        row(0xa1),
         group_access_test_cells(direct_group, member),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa1)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "group_entry",
-        row(0xc1),
         group_entry_test_cells(direct_group, transitive_group, false),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xc1)),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -734,8 +794,15 @@ fn direct_same_identity_subscribe_reuses_shared_seeded_fragments_across_shapes()
         ("res_j", res_j_direct, "j-direct"),
         ("res_j", res_j_transitive, "j-transitive"),
     ] {
-        db.insert_with_id(table, resource, resource_test_cells(title))
-            .unwrap();
+        db.insert(
+            table,
+            resource_test_cells(title),
+            crate::db::InsertOptions {
+                row_id: Some(resource),
+                ..Default::default()
+            },
+        )
+        .unwrap();
     }
     for (table, edge, resource, group) in [
         ("res_i_access_edges", row(0xb1), res_i_direct, direct_group),
@@ -753,10 +820,13 @@ fn direct_same_identity_subscribe_reuses_shared_seeded_fragments_across_shapes()
             transitive_group,
         ),
     ] {
-        db.insert_with_id(
+        db.insert(
             table,
-            edge,
             resource_access_test_cells(resource, group, false),
+            crate::db::InsertOptions {
+                row_id: Some(edge),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
@@ -1191,7 +1261,14 @@ fn inherited_child_insert_uses_parent_update_where_old_only() {
     let _member_upstream = crate::db::block_on(member_db.connect_upstream(member_transport));
     let _member_subscriber = server.accept_subscriber(server_member_transport, member);
     let allowed = member_db
-        .insert_with_id("children", row(0xf2), child_insert_cells(parent, "allowed"))
+        .insert(
+            "children",
+            child_insert_cells(parent, "allowed"),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xf2)),
+                ..Default::default()
+            },
+        )
         .unwrap();
     member_db.tick().unwrap();
     server.tick().unwrap();
@@ -1210,7 +1287,14 @@ fn inherited_child_insert_uses_parent_update_where_old_only() {
     let _other_upstream = crate::db::block_on(other_db.connect_upstream(other_transport));
     let _other_subscriber = server.accept_subscriber(server_other_transport, other);
     let denied = other_db
-        .insert_with_id("children", row(0xf3), child_insert_cells(parent, "denied"))
+        .insert(
+            "children",
+            child_insert_cells(parent, "denied"),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xf3)),
+                ..Default::default()
+            },
+        )
         .unwrap();
     assert_authority_rejects_staged_write(&other_db, &server, &denied);
     let other_rows = prepared_read(&other_db, &Query::from("children"));
@@ -1667,15 +1751,43 @@ fn served_subscription_rows_for_author(
     author: AuthorSubject,
     table: &str,
 ) -> Vec<RowUuid> {
-    let node_byte = match author {
-        AuthorSubject::System => 0,
+    served_subscription_rows_for_author_with_claims(
+        schema,
+        server,
+        author,
+        table,
+        test_provider_claims(author),
+    )
+}
+
+fn served_subscription_rows_for_author_with_claims(
+    schema: &JazzSchema,
+    server: &CoreDb,
+    author: AuthorSubject,
+    table: &str,
+    claims: BTreeMap<String, Value>,
+) -> Vec<RowUuid> {
+    let client_node = match author {
+        AuthorSubject::System => 0x5d,
         AuthorSubject::Authenticated(_) => author.test_uuid().as_bytes()[0],
     };
-    let client = open_db(node_byte, author, schema);
-    client.set_identity_claims(author, test_provider_claims(author));
+    let client = open_db(client_node, author, schema);
+    client
+        .node
+        .node
+        .borrow_mut()
+        .set_session_claims(author, claims.clone());
+    server
+        .node()
+        .borrow_mut()
+        .set_session_claims(author, claims.clone());
     let (client_transport, server_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);
+    server
+        .node()
+        .borrow_mut()
+        .set_session_claims(author, claims);
     let query = Query::from(table);
     let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
@@ -1715,12 +1827,20 @@ fn served_many_subscription_rows_for_author(
     author: AuthorSubject,
     tables: &[&str],
 ) -> BTreeMap<String, Vec<RowUuid>> {
-    let node_byte = match author {
-        AuthorSubject::System => 0x40,
-        AuthorSubject::Authenticated(_) => author.test_uuid().as_bytes()[0].wrapping_add(0x40),
-    };
-    let client = open_db(node_byte, author, schema);
-    client.set_identity_claims(author, test_provider_claims(author));
+    let client = open_db(
+        author.test_uuid().as_bytes()[0].wrapping_add(0x40),
+        author,
+        schema,
+    );
+    client
+        .node
+        .node
+        .borrow_mut()
+        .set_session_claims(author, test_provider_claims(author));
+    server
+        .node()
+        .borrow_mut()
+        .set_session_claims(author, test_provider_claims(author));
     let (client_transport, server_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);

@@ -63,6 +63,7 @@ describe("typed column modifiers", () => {
           lt?: number;
           lte?: number;
           in?: number[];
+          notIn?: number[];
         }
       | undefined
     >();
@@ -74,6 +75,7 @@ describe("typed column modifiers", () => {
           ne?: string;
           contains?: string;
           in?: string[];
+          notIn?: string[];
         }
       | undefined
     >();

@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Debug;
 use std::future::Future;
 use std::rc::Rc;
@@ -8,17 +8,64 @@ mod common;
 
 use jazz::db::{
     Db, DbConfig, DbIdentity, Propagation, ReadOpts, SubscriptionEvent, TickScheduler, TickUrgency,
-    block_on,
+    Transport, block_on,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid};
-use jazz::query::{OrderDirection, Query, col, eq, lit};
+use jazz::protocol::{
+    RegisterShapeOptions, ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage,
+};
+use jazz::query::{BindingId, OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::{DurabilityTier, Fate};
 use jazz_storage_rocksdb::RocksDbStorage;
 use jazz_testkit::duplex_transport::duplex;
+
+#[derive(Default)]
+struct AuthorityTransportState {
+    inbound: VecDeque<SyncMessage>,
+    outbound: Vec<SyncMessage>,
+    rejection: Option<SubscribeRejectReason>,
+}
+
+/// Minimal scripted authority used to make relay lifecycle tests independent
+/// of timing and of the authority's query evaluator.
+struct ScriptedAuthorityTransport(Rc<RefCell<AuthorityTransportState>>);
+
+impl Transport for ScriptedAuthorityTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), jazz::wire::TransportError> {
+        let mut state = self.0.borrow_mut();
+        if let SyncMessage::Subscribe(subscribe) = &message
+            && let Some(reason) = state.rejection.clone()
+        {
+            state.inbound.push_back(SyncMessage::SubscribeRejected {
+                subscription: subscribe.subscription,
+                reason,
+            });
+        }
+        state.outbound.push(message);
+        Ok(())
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.0.borrow_mut().inbound.pop_front()
+    }
+}
+
+fn scripted_authority(
+    rejection: Option<SubscribeRejectReason>,
+) -> (Box<dyn Transport>, Rc<RefCell<AuthorityTransportState>>) {
+    let state = Rc::new(RefCell::new(AuthorityTransportState {
+        rejection,
+        ..Default::default()
+    }));
+    (
+        Box::new(ScriptedAuthorityTransport(Rc::clone(&state))),
+        state,
+    )
+}
 
 use common::compile_schema;
 
@@ -195,6 +242,7 @@ fn non_durable_browser_client_waits_for_worker_local_ack() {
                 "title".to_owned(),
                 Value::String("persist me in the worker".to_owned()),
             )]),
+            Default::default(),
         )
         .expect("insert optimistic todo");
     let tx_id = write.mergeable_tx_id();
@@ -281,6 +329,7 @@ fn browser_worker_initial_view_preserves_newer_optimistic_membership() {
         .insert(
             "todos",
             BTreeMap::from([("title".to_owned(), Value::String("open".to_owned()))]),
+            Default::default(),
         )
         .expect("insert optimistic open todo");
     let row = insert.row_uuid();
@@ -329,6 +378,7 @@ fn browser_worker_initial_view_preserves_newer_optimistic_membership() {
             "todos",
             row,
             BTreeMap::from([("title".to_owned(), Value::String("done".to_owned()))]),
+            Default::default(),
         )
         .expect("move optimistic todo out of filtered subscription");
     assert!(
@@ -381,6 +431,7 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
                 "title".to_owned(),
                 Value::String("relay me unchanged".to_owned()),
             )]),
+            Default::default(),
         )
         .expect("insert relayed todo");
     let tx_id = write.mergeable_tx_id();
@@ -459,6 +510,7 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
             "todos",
             row,
             BTreeMap::from([("title".to_owned(), Value::String("relay update".to_owned()))]),
+            Default::default(),
         )
         .expect("update through settled relay");
     let update_tx = update.mergeable_tx_id();
@@ -498,6 +550,7 @@ fn browser_client_hydrates_local_subscription_from_worker_relay() {
                 "title".to_owned(),
                 Value::String("persisted before main thread opens".to_owned()),
             )]),
+            Default::default(),
         )
         .expect("seed worker-local todo");
 
@@ -537,6 +590,515 @@ fn browser_client_hydrates_local_subscription_from_worker_relay() {
     );
 }
 
+/// A main-thread Local subscription and a one-shot Edge read have distinct
+/// downstream serving options, but both canonicalize to the worker's Global
+/// upstream coverage. Retiring the one-shot usage site must not unsubscribe
+/// that shared upstream coverage while the live Local subscription still owns
+/// it.
+#[test]
+fn one_shot_edge_read_does_not_retire_live_browser_subscription_coverage() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xac; 16]);
+    let main_thread = open_db(0x1e, alice, &schema);
+    let worker = open_db(0x2e, AuthorSubject::SYSTEM, &schema);
+    let core = open_core(0x3e, &schema);
+    let writer = open_db(0x4e, AuthorSubject::for_test_bytes([0xbc; 16]), &schema);
+    main_thread.set_non_durable_client();
+
+    let (main_transport, worker_subscriber_transport) = duplex();
+    let _main_connection = block_on(main_thread.connect_upstream(main_transport));
+    let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
+    let (worker_upstream_transport, core_transport) = duplex();
+    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
+    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let (writer_transport, core_writer_transport) = duplex();
+    let _writer_upstream = block_on(writer.connect_upstream(writer_transport));
+    let _core_writer = core.accept_subscriber(
+        core_writer_transport,
+        AuthorSubject::for_test_bytes([0xbc; 16]),
+    );
+
+    let todos = main_thread
+        .prepare_query(&main_thread.table("todos"))
+        .expect("prepare todos query");
+    let mut subscription = block_on(main_thread.subscribe(&todos, ReadOpts::default()))
+        .expect("open browser Local subscription");
+    assert_truthful_empty_local_opening(subscription.try_next_event());
+
+    for _ in 0..8 {
+        main_thread
+            .tick()
+            .expect("send Local subscription to worker");
+        worker.tick().expect("relay Local subscription to Core");
+        core.tick().expect("serve shared upstream coverage");
+        worker.tick().expect("apply Core coverage at worker");
+        main_thread
+            .tick()
+            .expect("apply worker coverage on main thread");
+    }
+    while subscription.try_next_event().is_some() {}
+
+    let edge_read = main_thread
+        .attach_query_with_opts(
+            &todos,
+            ReadOpts {
+                tier: DurabilityTier::Edge,
+                ..ReadOpts::default()
+            },
+        )
+        .expect("attach one-shot Edge read");
+    for _ in 0..8 {
+        main_thread.tick().expect("send one-shot Edge coverage");
+        worker.tick().expect("refresh canonical worker coverage");
+        core.tick().expect("serve refreshed canonical coverage");
+        worker.tick().expect("apply refreshed canonical coverage");
+        main_thread.tick().expect("apply one-shot Edge receipt");
+        if main_thread.query_attachment_is_covered(&edge_read) {
+            break;
+        }
+    }
+    assert!(
+        main_thread.query_attachment_is_covered(&edge_read),
+        "the one-shot Edge usage site never received its own authority receipt",
+    );
+
+    main_thread.detach_query(edge_read);
+    for _ in 0..4 {
+        main_thread.tick().expect("retire one-shot Edge usage site");
+        worker.tick().expect("retain shared worker coverage");
+        core.tick().expect("process any upstream lifecycle traffic");
+        worker.tick().expect("apply upstream lifecycle traffic");
+    }
+
+    writer
+        .insert(
+            "todos",
+            BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("still live after one-shot read".to_owned()),
+            )]),
+            Default::default(),
+        )
+        .expect("insert writer row after one-shot detach");
+    for _ in 0..8 {
+        writer.tick().expect("upload writer row");
+        core.tick().expect("publish authority row");
+        writer.tick().expect("apply writer settlement");
+        worker
+            .tick()
+            .expect("relay authority row to browser worker");
+        main_thread
+            .tick()
+            .expect("apply authority row on main thread");
+    }
+
+    let events = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            SubscriptionEvent::Delta { added, .. } if added.len() == 1
+        )),
+        "retiring the one-shot Edge read also retired live Local subscription coverage: {events:?}",
+    );
+}
+
+/// Dropping a downstream relay link has no stream `Drop` to clean up. Each
+/// connection-scoped upstream owner must therefore be retired exactly once,
+/// while an identical coverage request on a sibling connection remains live.
+#[test]
+fn worker_relay_abrupt_detach_and_reconnect_keep_upstream_owners_bounded() {
+    let schema = schema();
+    let worker = open_db(0x60, AuthorSubject::SYSTEM, &schema);
+    let (authority, authority_state) = scripted_authority(None);
+    let _worker_upstream = block_on(worker.connect_upstream(authority));
+
+    let attach_browser = |node, author| {
+        let browser = open_db(node, author, &schema);
+        browser.set_non_durable_client();
+        let (browser_transport, worker_transport) = duplex();
+        let browser_connection = block_on(browser.connect_upstream(browser_transport));
+        let worker_connection = worker.accept_subscriber(worker_transport, author);
+        let todos = browser
+            .prepare_query(&browser.table("todos"))
+            .expect("prepare browser todos query");
+        let subscription = block_on(browser.subscribe(&todos, ReadOpts::default()))
+            .expect("open browser subscription");
+        (browser, browser_connection, worker_connection, subscription)
+    };
+
+    let alice = AuthorSubject::for_test_bytes([0x61; 16]);
+    let (alice_browser, alice_upstream, alice_downstream, _alice_subscription) =
+        attach_browser(0x61, alice);
+    for _ in 0..3 {
+        alice_browser.tick().expect("send Alice subscription");
+        worker.tick().expect("relay Alice subscription");
+    }
+    assert_eq!(worker.relay_upstream_subscription_owner_count_for_test(), 1);
+
+    let bob = AuthorSubject::for_test_bytes([0x62; 16]);
+    let (bob_browser, bob_upstream, bob_downstream, _bob_subscription) = attach_browser(0x62, bob);
+    for _ in 0..3 {
+        bob_browser.tick().expect("send Bob subscription");
+        worker.tick().expect("relay Bob subscription");
+    }
+    assert_eq!(worker.relay_upstream_subscription_owner_count_for_test(), 2);
+
+    assert!(worker.detach_connection(&alice_downstream));
+    assert_eq!(
+        worker.relay_upstream_subscription_owner_count_for_test(),
+        1,
+        "abruptly detaching Alice must retain Bob's identical coverage owner",
+    );
+    worker.tick().expect("retire only Alice upstream owner");
+    assert!(!worker.detach_connection(&alice_downstream));
+    assert!(alice_browser.detach_connection(&alice_upstream));
+
+    for (node, author) in [(0x63, [0x63; 16]), (0x64, [0x64; 16]), (0x65, [0x65; 16])] {
+        let author = AuthorSubject::for_test_bytes(author);
+        let (browser, upstream, downstream, _subscription) = attach_browser(node, author);
+        for _ in 0..3 {
+            browser
+                .tick()
+                .expect("send reconnected browser subscription");
+            worker
+                .tick()
+                .expect("relay reconnected browser subscription");
+        }
+        assert_eq!(
+            worker.relay_upstream_subscription_owner_count_for_test(),
+            2,
+            "one reconnect owner plus Bob's still-live owner",
+        );
+        assert!(worker.detach_connection(&downstream));
+        worker.tick().expect("retire reconnect owner");
+        assert_eq!(
+            worker.relay_upstream_subscription_owner_count_for_test(),
+            1,
+            "a detached reconnect must not accumulate an orphaned owner",
+        );
+        assert!(browser.detach_connection(&upstream));
+    }
+
+    assert!(worker.detach_connection(&bob_downstream));
+    worker.tick().expect("retire final sibling owner");
+    assert_eq!(worker.relay_upstream_subscription_owner_count_for_test(), 0);
+    assert!(bob_browser.detach_connection(&bob_upstream));
+
+    let messages = &authority_state.borrow().outbound;
+    let subscribes = messages
+        .iter()
+        .filter(|message| matches!(message, SyncMessage::Subscribe(_)))
+        .count();
+    let unsubscribes = messages
+        .iter()
+        .filter(|message| matches!(message, SyncMessage::Unsubscribe { .. }))
+        .count();
+    assert_eq!(subscribes, 5, "one upstream owner per downstream session");
+    assert_eq!(
+        unsubscribes, 5,
+        "each propagated owner is retired exactly once across detach/reconnect",
+    );
+}
+
+/// Replacing the authority link must replay every still-owned relay coverage
+/// group. The downstream browser remains connected throughout, so it has no
+/// reason to send another Subscribe after the worker reconnects upstream.
+#[test]
+fn worker_relay_replays_live_coverage_after_upstream_reconnect() {
+    let schema = schema();
+    let worker = open_db(0x66, AuthorSubject::SYSTEM, &schema);
+    let (first_authority, first_authority_state) = scripted_authority(None);
+    let first_upstream = block_on(worker.connect_upstream(first_authority));
+
+    let alice = AuthorSubject::for_test_bytes([0x66; 16]);
+    let browser = open_db(0x67, alice, &schema);
+    browser.set_non_durable_client();
+    let (browser_transport, worker_transport) = duplex();
+    let _browser_upstream = block_on(browser.connect_upstream(browser_transport));
+    let _worker_downstream = worker.accept_subscriber(worker_transport, alice);
+    let todos = browser
+        .prepare_query(&browser.table("todos"))
+        .expect("prepare browser todos query");
+    let _subscription = block_on(browser.subscribe(&todos, ReadOpts::default()))
+        .expect("open browser subscription");
+
+    for _ in 0..3 {
+        browser.tick().expect("send browser subscription");
+        worker.tick().expect("relay browser subscription");
+    }
+    assert_eq!(
+        first_authority_state
+            .borrow()
+            .outbound
+            .iter()
+            .filter(|message| matches!(message, SyncMessage::Subscribe(_)))
+            .count(),
+        1,
+        "the original authority receives the live relay coverage",
+    );
+    assert_eq!(worker.relay_upstream_subscription_owner_count_for_test(), 1);
+
+    assert!(worker.detach_connection(&first_upstream));
+    let (second_authority, second_authority_state) = scripted_authority(None);
+    let _second_upstream = block_on(worker.connect_upstream(second_authority));
+    for _ in 0..3 {
+        worker
+            .tick()
+            .expect("replay relay coverage after reconnect");
+    }
+
+    assert_eq!(
+        second_authority_state
+            .borrow()
+            .outbound
+            .iter()
+            .filter(|message| matches!(message, SyncMessage::Subscribe(_)))
+            .count(),
+        1,
+        "a still-connected browser must retain authority coverage across worker reconnect",
+    );
+    assert_eq!(
+        worker.relay_upstream_subscription_owner_count_for_test(),
+        1,
+        "reconnect must retain the downstream relay owner",
+    );
+}
+
+/// A rejected relay-owned upstream usage site can represent multiple active
+/// downstream subscription keys in one coverage group. The authority result
+/// must reach every key before the relay retires the group and its owner.
+#[test]
+fn worker_relay_forwards_upstream_subscription_rejection_to_every_group_member() {
+    let schema = schema();
+    let worker = open_db(0x70, AuthorSubject::SYSTEM, &schema);
+    let rejection = SubscribeRejectReason::UnsupportedShapeCapability {
+        detail: "scripted authority rejection".to_owned(),
+    };
+    let (authority, authority_state) = scripted_authority(Some(rejection.clone()));
+    let _worker_upstream = block_on(worker.connect_upstream(authority));
+
+    let browser = open_db(0x71, AuthorSubject::for_test_bytes([0x71; 16]), &schema);
+    browser.set_non_durable_client();
+    let (browser_transport, worker_transport) = duplex();
+    let _browser_upstream = block_on(browser.connect_upstream(browser_transport));
+    let _worker_downstream =
+        worker.accept_subscriber(worker_transport, AuthorSubject::for_test_bytes([0x71; 16]));
+    let todos = browser
+        .prepare_query(&browser.table("todos"))
+        .expect("prepare browser todos query");
+    let mut first = block_on(browser.subscribe(&todos, ReadOpts::default()))
+        .expect("open first browser subscription");
+    let mut second = block_on(browser.subscribe(&todos, ReadOpts::default()))
+        .expect("open second browser subscription");
+    assert_truthful_empty_local_opening(first.try_next_event());
+    assert_truthful_empty_local_opening(second.try_next_event());
+
+    for _ in 0..5 {
+        browser.tick().expect("send grouped browser subscriptions");
+        worker
+            .tick()
+            .expect("receive authority rejection and forward it");
+    }
+
+    for events in [&mut first, &mut second] {
+        let events = std::iter::from_fn(|| events.try_next_event()).collect::<Vec<_>>();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                SubscriptionEvent::Rejected { reason } if reason == &rejection
+            )),
+            "every active downstream key must receive the authority rejection: {events:?}",
+        );
+    }
+    assert_eq!(worker.relay_upstream_subscription_owner_count_for_test(), 0);
+    assert_eq!(
+        worker.relay_registered_query_binding_count_for_test(),
+        0,
+        "rejection must unregister each distinct wire usage site",
+    );
+    let messages = &authority_state.borrow().outbound;
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| matches!(message, SyncMessage::Subscribe(_)))
+            .count(),
+        1,
+        "both browser keys share one relay coverage-group owner",
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| matches!(message, SyncMessage::Unsubscribe { .. }))
+            .count(),
+        1,
+        "the rejected relay owner is retired exactly once",
+    );
+}
+
+/// One downstream wire connection can attach two independent usage-site keys
+/// to the same canonical coverage. When authority rejects the one relayed
+/// coverage request, the worker must address both original keys before
+/// retiring the shared group.
+///
+/// alice wire client ──Subscribe(A), Subscribe(B)──► worker relay ──Subscribe──► authority
+/// alice wire client ◄─Rejected(A), Rejected(B)──── worker relay ◄─Rejected─── authority
+#[test]
+fn worker_relay_fans_upstream_subscription_rejection_to_distinct_wire_group_members() {
+    let schema = schema();
+    let worker = open_db(0x72, AuthorSubject::SYSTEM, &schema);
+    let rejection = SubscribeRejectReason::UnsupportedShapeCapability {
+        detail: "scripted authority rejection".to_owned(),
+    };
+    let (authority, authority_state) = scripted_authority(Some(rejection.clone()));
+    let _worker_upstream = block_on(worker.connect_upstream(authority));
+
+    let alice = AuthorSubject::for_test_bytes([0x72; 16]);
+    let (mut alice_transport, worker_transport) = duplex();
+    let _worker_downstream = worker.accept_subscriber(worker_transport, alice);
+    let prepared = worker
+        .prepare_query(&worker.table("todos"))
+        .expect("prepare worker todos shape");
+    let shape = prepared.shape();
+    let opts = RegisterShapeOptions::default();
+    let first = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: BindingId(uuid::Uuid::from_bytes([0x72; 16])),
+        read_view: opts.read_view_key(),
+    };
+    let second = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: BindingId(uuid::Uuid::from_bytes([0x73; 16])),
+        read_view: opts.read_view_key(),
+    };
+
+    alice_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(shape),
+            opts: opts.clone(),
+        })
+        .expect("register relay shape");
+    worker.tick().expect("register shape at worker");
+    for subscription in [first, second] {
+        alice_transport
+            .send(SyncMessage::Subscribe(Subscribe {
+                shape_id: shape.shape_id(),
+                subscription,
+                values: Vec::new(),
+                known_state: None,
+            }))
+            .expect("subscribe with distinct wire key");
+    }
+
+    for _ in 0..3 {
+        worker.tick().expect("relay authority rejection");
+    }
+
+    let rejected = std::iter::from_fn(|| alice_transport.try_recv())
+        .filter_map(|message| match message {
+            SyncMessage::SubscribeRejected {
+                subscription,
+                reason,
+            } if reason == rejection => Some(subscription),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rejected,
+        vec![first, second],
+        "the authority rejection must fan out to both distinct wire usage sites",
+    );
+    assert_eq!(worker.relay_upstream_subscription_owner_count_for_test(), 0);
+    assert_eq!(
+        worker.relay_registered_query_binding_count_for_test(),
+        0,
+        "rejection must unregister each distinct wire usage site",
+    );
+    {
+        let authority_state = authority_state.borrow();
+        let messages = &authority_state.outbound;
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| matches!(message, SyncMessage::Subscribe(_)))
+                .count(),
+            1,
+            "identical wire members share one relayed coverage request",
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| matches!(message, SyncMessage::Unsubscribe { .. }))
+                .count(),
+            1,
+            "the rejected shared owner is retired exactly once",
+        );
+    }
+
+    // Keep one relay connection open while authority rejects fresh wire keys.
+    // Every failure must leave it reusable; otherwise a hostile or buggy peer
+    // can retain unbounded registration and known-state entries without ever
+    // disconnecting.
+    for byte in 0x74..0x7c {
+        let subscription = SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: BindingId(uuid::Uuid::from_bytes([byte; 16])),
+            read_view: opts.read_view_key(),
+        };
+        alice_transport
+            .send(SyncMessage::Subscribe(Subscribe {
+                shape_id: shape.shape_id(),
+                subscription,
+                values: Vec::new(),
+                known_state: None,
+            }))
+            .expect("subscribe with a fresh rejected wire key");
+        for _ in 0..3 {
+            worker.tick().expect("reject fresh wire key");
+        }
+        assert_eq!(
+            worker.relay_registered_query_binding_count_for_test(),
+            0,
+            "a rejected wire key must not accumulate state while the relay remains connected",
+        );
+        assert!(
+            std::iter::from_fn(|| alice_transport.try_recv()).any(|message| matches!(
+                message,
+                SyncMessage::SubscribeRejected {
+                    subscription: rejected,
+                    reason: ref rejected_reason,
+                } if rejected == subscription && rejected_reason == &rejection
+            )),
+            "authority rejection must reach each fresh wire key",
+        );
+    }
+
+    // Reusing an earlier rejected key must perform a fresh lifecycle rather
+    // than observe a retained registration from its previous attempt.
+    alice_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription: first,
+            values: Vec::new(),
+            known_state: None,
+        }))
+        .expect("resubscribe a previously rejected wire key");
+    for _ in 0..3 {
+        worker.tick().expect("reject reused wire key");
+    }
+    assert_eq!(worker.relay_registered_query_binding_count_for_test(), 0);
+    assert!(
+        std::iter::from_fn(|| alice_transport.try_recv()).any(|message| matches!(
+            message,
+            SyncMessage::SubscribeRejected {
+                subscription,
+                reason: ref rejected_reason,
+            } if subscription == first && rejected_reason == &rejection
+        )),
+        "a reused wire key must receive a fresh rejection rather than stale relay state",
+    );
+}
+
 /// A freshly reopened persistent worker must hydrate a downstream Local
 /// subscription without requiring an unrelated one-shot query to warm its
 /// resident view first.
@@ -554,6 +1116,7 @@ fn reopened_browser_worker_hydrates_local_subscription_without_query_warmup() {
                 "title".to_owned(),
                 Value::String("persisted before worker restart".to_owned()),
             )]),
+            Default::default(),
         )
         .expect("seed worker-local todo");
     first_worker.tick().expect("persist worker-local todo");
@@ -609,6 +1172,7 @@ fn worker_baseline_arriving_during_cold_main_hydration_is_delivered_exactly_once
             .insert(
                 "todos",
                 BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+                Default::default(),
             )
             .expect("seed worker-local todo");
     }
@@ -678,11 +1242,13 @@ fn browser_client_local_only_subscription_stops_at_worker() {
         .insert(
             "todos",
             BTreeMap::from([("title".to_owned(), Value::String("worker-local".to_owned()))]),
+            Default::default(),
         )
         .expect("seed worker-local todo");
     core.insert(
         "todos",
         BTreeMap::from([("title".to_owned(), Value::String("server-only".to_owned()))]),
+        Default::default(),
     )
     .expect("seed server-only todo");
 
@@ -755,6 +1321,7 @@ fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
                 "title".to_owned(),
                 Value::String("already settled at the authority".to_owned()),
             )]),
+            Default::default(),
         )
         .expect("seed authority todo");
     let seeded_tx = seeded.mergeable_tx_id();
@@ -854,6 +1421,7 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
         .insert(
             "profiles",
             BTreeMap::from([("name".to_owned(), Value::String("Alice".to_owned()))]),
+            Default::default(),
         )
         .expect("seed included profile");
     let message = seeder
@@ -867,6 +1435,7 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
                 ),
                 ("created".to_owned(), Value::U64(1)),
             ]),
+            Default::default(),
         )
         .expect("seed included message");
     seeder.tick().expect("upload seeded relation");
@@ -1011,6 +1580,7 @@ fn browser_relay_replays_causal_ancestors_before_pending_write_fates() {
                 "title".to_owned(),
                 Value::String("accepted parent".to_owned()),
             )]),
+            Default::default(),
         )
         .expect("insert base row");
     let row = base.row_uuid();
@@ -1055,6 +1625,7 @@ fn browser_relay_replays_causal_ancestors_before_pending_write_fates() {
                 "title".to_owned(),
                 Value::String("pending child".to_owned()),
             )]),
+            Default::default(),
         )
         .expect("update accepted row offline");
     let update_tx = update.mergeable_tx_id();
@@ -1123,6 +1694,7 @@ fn worker_relay_forwards_authority_rejection_to_browser_client() {
                 "title".to_owned(),
                 Value::String("reject after local persistence".to_owned()),
             )]),
+            Default::default(),
         )
         .expect("insert optimistic todo");
     let tx_id = write.mergeable_tx_id();
@@ -1171,6 +1743,7 @@ fn reopened_worker_replays_pending_commit_before_later_fate() {
                 "title".to_owned(),
                 Value::String("pending across worker restart".to_owned()),
             )]),
+            Default::default(),
         )
         .expect("insert pending todo");
     let tx_id = write.mergeable_tx_id();
@@ -1236,6 +1809,7 @@ fn reopened_worker_routes_later_rejection_to_same_main_thread_identity() {
                 "title".to_owned(),
                 Value::String("reject after worker restart".to_owned()),
             )]),
+            Default::default(),
         )
         .expect("insert pending todo");
     let tx_id = write.mergeable_tx_id();

@@ -25,11 +25,33 @@ exact contiguous coverage and the full digest, then decompresses and decodes
 the semantic message. No partial semantic message reaches `Db`.
 
 Reconnect creates a new adapter/codec epoch and discards incomplete assembly.
-Known-state replay remains the retry mechanism; fragments themselves do not
-outlive a connection. Implementations bound physical frames, concurrent
-incomplete messages, aggregate staged bytes, advertised logical length, and
-recent-completion deduplication. These are configurable/resource-defense
-budgets, not query semantics and not a 2 MiB logical-message ceiling.
+While a connection remains live, an incomplete message expires 30 seconds after
+its last novel, non-overlapping extent and no later than five minutes after its
+first accepted extent. An exact duplicate or rejected extent is not progress and
+does not refresh the inactivity deadline. Expiry runs before every adapter send
+or receive poll and before fragment admission, reclaiming the id and all staged
+bytes.
+Fragments arriving after expiry begin a new incomplete assembly; known-state
+replay remains the retry mechanism. An otherwise legal message remains
+admissible while it makes progress inside the inactivity window and completes
+before the maximum age.
+
+Completion deduplication is intentionally bounded rather than an exactly-once
+delivery guarantee. Each live adapter retains the 64 most recently completed
+message ids and digests, in completion order. A replay whose completion is
+still retained is ignored when its digest matches and rejected when its digest
+conflicts. Completing the next message evicts the oldest retained completion;
+after that eviction, an otherwise valid replay of the old message may assemble
+and be delivered again. This bounded horizon permits older active or expired
+message ids to finish after a later id on a reordering transport without an
+unbounded per-connection completed-id set.
+
+Implementations also bound physical frames, concurrent incomplete messages,
+aggregate staged bytes, advertised logical length, and recent-completion
+deduplication. These are configurable/resource-defense budgets, not query
+semantics and not a 2 MiB logical-message ceiling. The named expiry constants
+are `MAX_FRAGMENT_REASSEMBLY_IDLE_MS` and
+`MAX_FRAGMENT_REASSEMBLY_AGE_MS`.
 
 ## Limit inventory
 
@@ -45,7 +67,8 @@ Transport-only limits to remove:
 Limits retained for semantic or adversarial-resource reasons:
 
 - `MAX_WIRE_FRAME_BYTES`: allocation bound before frame decode;
-- `MAX_SHAPE_AST_BYTES`: executable query/shape complexity admission;
+- `MAX_SHAPE_REGISTRATION_BYTES`: retained query/shape AST and read-view option
+  admission budget;
 - commit-version, repair-ref, branch-key-qualified repair, known-state-ref and structured
   result depth/width limits: CPU/fan-out/state bounds independent of framing;
 - receiver in-flight/aggregate/advertised-length budgets and WebSocket frame

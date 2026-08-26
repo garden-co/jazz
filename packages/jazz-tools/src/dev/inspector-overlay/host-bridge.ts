@@ -39,8 +39,14 @@ function buildOverlayDbConfig(config: DbConfig): DbConfig {
  * Publish the same-origin host handle and the one-way active-subscription feed.
  * No live Db crosses the iframe boundary and no devtools protocol is involved.
  */
-export function installInspectorHost(db: Db, iframeWindow: Window, origin: string): () => void {
+export function installInspectorHost(
+  db: Db,
+  iframeWindow: Window,
+  origin: string,
+  inspectorWindows = new Set<Window>(),
+): () => void {
   db.setDevMode(true);
+  inspectorWindows.add(iframeWindow);
 
   const handle: JazzInspectorHost = {
     getConnectionConfig() {
@@ -59,22 +65,43 @@ export function installInspectorHost(db: Db, iframeWindow: Window, origin: strin
     getActiveSubscriptions() {
       return serializeActiveSubscriptions(db.getActiveQuerySubscriptions());
     },
+    registerInspectorWindow(target) {
+      inspectorWindows.add(target);
+    },
+    unregisterInspectorWindow(target) {
+      inspectorWindows.delete(target);
+    },
   };
   (window as unknown as Record<string, unknown>)[INSPECTOR_HOST_GLOBAL] = handle;
 
   const push = () => {
-    iframeWindow.postMessage(
-      {
-        type: INSPECTOR_SUBSCRIPTIONS_MESSAGE,
-        list: handle.getActiveSubscriptions(),
-      },
-      origin,
-    );
+    const message = {
+      type: INSPECTOR_SUBSCRIPTIONS_MESSAGE,
+      list: handle.getActiveSubscriptions(),
+    };
+    for (const target of inspectorWindows) {
+      try {
+        if (target.closed) inspectorWindows.delete(target);
+        else target.postMessage(message, origin);
+      } catch {
+        inspectorWindows.delete(target);
+      }
+    }
   };
-  const stop = db.onActiveQuerySubscriptionsChange(push);
+  // Db currently invokes this listener synchronously with its initial snapshot.
+  // Keep the host bridge correct if that delivery is ever deferred: a detached
+  // inspector retained across a host rebind must see the new Db immediately,
+  // rather than waiting for its next subscription mutation.
+  let receivedInitialSnapshot = false;
+  const stop = db.onActiveQuerySubscriptionsChange(() => {
+    receivedInitialSnapshot = true;
+    push();
+  });
+  if (!receivedInitialSnapshot) push();
 
   return () => {
     stop();
+    inspectorWindows.delete(iframeWindow);
     delete (window as unknown as Record<string, unknown>)[INSPECTOR_HOST_GLOBAL];
   };
 }

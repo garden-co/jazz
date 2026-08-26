@@ -60,16 +60,16 @@ Open `NEXT_PUBLIC_APP_ORIGIN`.
 ### Server — `src/lib/auth.ts`, `src/lib/auth-jazz-context.ts`, and `schema-better-auth/schema.ts`
 
 `auth.ts` wires up the Better Auth instance with four plugins and points the adapter at the
-root Better Auth schema module:
+root app schema, which includes both the generated Better Auth tables and the chat table:
 
 ```ts
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
-import { app as authSchema } from "../../schema-better-auth/schema";
+import { app } from "../../schema";
 
 betterAuth({
   database: jazzAdapter({
-    db: () => authJazzContext().asBackend(authSchema),
-    schema: authSchema,
+    db: () => authJazzContext().asBackend(app),
+    schema: app.wasmSchema,
   }),
   emailAndPassword: { enabled: true, autoSignIn: true, minPasswordLength: 1 },
   plugins: [
@@ -92,13 +92,14 @@ betterAuth({
 });
 ```
 
-`schema-better-auth/schema.ts` is the Better Auth schema source file that the Jazz adapter now
-generates for the new root-schema workflow. `authJazzContext()` is a lazy accessor that returns
-a server-side Jazz context configured with `driver: { type: "memory" }`, the same `serverUrl`,
-and the same backend secret as the local sync server. It caches the context on `globalThis` so
-route modules don't instantiate it at import time (which would fail during Next's build-time
-page data collection before env vars are available). That keeps Better Auth state out of Better Auth's in-process memory
-adapter while still avoiding local on-disk storage in the Next app.
+`schema-better-auth/schema.ts` is the generated Better Auth schema source file. Its deny-all
+`permissions` export is spread into the root `permissions.ts` alongside the message policies, so
+ordinary clients cannot read or mutate authentication rows. `authJazzContext()` uses
+`asBackend(app)` with the sync server's backend secret, so the adapter can still access those rows.
+It caches the context on `globalThis` so route modules don't instantiate it at import time (which
+would fail during Next's build-time page data collection before env vars are available). That
+keeps Better Auth state out of Better Auth's in-process memory adapter while still avoiding local
+on-disk storage in the Next app.
 
 - **`nextCookies` integration** — lets Better Auth session cookies participate in Next.js route
   handlers and server actions.
@@ -112,6 +113,21 @@ adapter while still avoiding local on-disk storage in the Next app.
 The JWKS endpoint (`/api/auth/jwks`) is automatically provided by the `jwt` plugin and is what
 the Jazz sync server polls to verify every incoming token. The same sync server also accepts the
 backend secret used by the Better Auth Jazz context so auth rows can sync through Jazz too.
+
+The root permission bundle composes the generated auth-table policies with the chat policies:
+
+```ts
+import { permissions as betterAuthPermissions } from "./schema-better-auth/schema";
+
+const messagePermissions = definePermissions(app, ({ policy }) => {
+  // Message policies...
+});
+
+export default {
+  ...betterAuthPermissions,
+  ...messagePermissions,
+};
+```
 
 ### Client — `src/lib/auth-client.ts`
 

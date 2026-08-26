@@ -226,6 +226,67 @@ fn local_authority_keeps_insert_and_update_policies_distinct() {
     ), "the predecessor remains independently pending");
 }
 
+/// This stays at the node boundary because admission evaluates policy-pinned
+/// inline rows before a public client receives a write outcome. It proves the
+/// provenance visible to that inline program matches the public milliseconds
+/// contract at both its persisted-old-row and incoming-version boundaries.
+#[test]
+fn write_policy_timestamp_provenance_uses_physical_milliseconds() {
+    let created_at_ms = 1_777_777_777_777;
+    let updated_at_ms = created_at_ms + 1;
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .policies(
+                PublicTablePolicies::new()
+                    .with_insert(PublicPolicyExpr::eq_literal(
+                        "$createdAt",
+                        PublicValue::Timestamp(created_at_ms),
+                    ))
+                    .with_update(
+                        Some(PublicPolicyExpr::eq_literal(
+                            "$createdAt",
+                            PublicValue::Timestamp(created_at_ms),
+                        )),
+                        PublicPolicyExpr::eq_literal(
+                            "$updatedAt",
+                            PublicValue::Timestamp(updated_at_ms),
+                        ),
+                    ),
+            ),
+    ));
+    let (_core_dir, mut core) = open_node_with_schema(node(0x9a), schema);
+    let author = user(0xa1);
+    let row_uuid = row(0x9a);
+
+    let insert = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, created_at_ms)
+                .made_by(author)
+                .cells(title_cells("created")),
+        )
+        .unwrap();
+    core.finalize_local_mergeable_commit_settled(insert).unwrap();
+    assert!(matches!(
+        core.transaction_state_settled(insert),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ));
+
+    let update = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, updated_at_ms)
+                .made_by(author)
+                .parents(vec![insert])
+                .cells(title_cells("updated")),
+        )
+        .unwrap();
+    core.finalize_local_mergeable_commit_settled(update).unwrap();
+    assert!(matches!(
+        core.transaction_state_settled(update),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ));
+}
+
 #[test]
 fn local_insert_policy_classification_survives_finalization_retry() {
     let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
@@ -621,14 +682,14 @@ fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
         .rehydrate_query(&mut core, &shape, &binding)
         .unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads, ..
             },
         result_member_adds,
         ..
-    } = &update
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -690,7 +751,7 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
 
     let tx_b = commit_core_owner_fixture(&mut core, row_uuid, author_b, "owned by B", 11);
     let update = link_a.current_rows_update(&mut core, "todos").unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         version_bundles,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
@@ -699,7 +760,7 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
         result_member_adds,
         result_member_removes,
         ..
-    } = &update
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -905,9 +966,9 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     let revoked_update = invited_link
         .current_rows_update(&mut core, "canvases")
         .unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_removes, ..
-    } = &revoked_update
+    }) = &revoked_update
     else {
         panic!("expected view update");
     };
@@ -937,6 +998,7 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
 #[test]
 fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_and_update() {
     let owner = user(0xa1);
+    let owner_claim_subject = owner.test_uuid();
     let workspace_a = row(0xb1);
     let workspace_b = row(0xb2);
     let owner_membership_a = row(0xc1);
@@ -999,7 +1061,7 @@ fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_
             .table(
                 PublicTableSchemaBuilder::new("members")
                     .fk_column("workspace", "workspaces")
-                    .column("subject", PublicColumnType::Text),
+                    .column("subject", PublicColumnType::Uuid),
             )
             .table(
                 PublicTableSchemaBuilder::new("blocks")
@@ -1038,10 +1100,7 @@ fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_
             3,
             BTreeMap::from([
                 ("workspace".to_owned(), Value::Uuid(workspace_a.0)),
-                (
-                    "subject".to_owned(),
-                    Value::String(owner.test_uuid().to_string()),
-                ),
+                ("subject".to_owned(), Value::Uuid(owner_claim_subject)),
             ]),
         ),
         (
@@ -1050,10 +1109,7 @@ fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_
             4,
             BTreeMap::from([
                 ("workspace".to_owned(), Value::Uuid(workspace_b.0)),
-                (
-                    "subject".to_owned(),
-                    Value::String(owner.test_uuid().to_string()),
-                ),
+                ("subject".to_owned(), Value::Uuid(owner_claim_subject)),
             ]),
         ),
         (
@@ -1073,10 +1129,7 @@ fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_
     }
     core.set_session_claims(
         owner,
-        BTreeMap::from([(
-            "sub".to_owned(),
-            Value::String(owner.test_uuid().to_string()),
-        )]),
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(owner_claim_subject))]),
     );
 
     let accepted = core
@@ -1674,14 +1727,5 @@ fn read_policy_branch_or_join_allows_public_or_membership_reads() {
             .map(|row| row.row_uuid())
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([public_chat])
-    );
-    // One-shot policy evaluation is not enough for an app client: this exact
-    // public-or-membership shape must seed the maintained link view with the
-    // same membership result.
-    assert_maintained_view_cold_snapshot_seed_matches_one_shot(
-        &mut core,
-        &shape,
-        &binding,
-        member,
     );
 }

@@ -662,7 +662,7 @@ fn collect_binding_source_params(graph: &GraphBuilder, domain: &mut ParameterDom
                         .claim_params
                         .entry(name.to_owned())
                         .or_insert_with(|| ClaimParameter {
-                            path: path.clone(),
+                            path,
                             ty: field.value_type.clone(),
                         });
                     if claim_route_is_ordered_scalar(&field.value_type) {

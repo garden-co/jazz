@@ -1,31 +1,4 @@
 use super::*;
-
-/// Reverse an already-applied physical-record delta without consulting table
-/// storage.  Retraction uses this through the normal IVM tick, so maintained
-/// arrangements, indexes and subscribers observe the same negative facts they
-/// would observe for an ordinary delete.
-fn invert_table_deltas(table_deltas: &[TableDelta]) -> Vec<TableDelta> {
-    table_deltas
-        .iter()
-        .map(|table_delta| TableDelta {
-            table: table_delta.table.clone(),
-            variant_tag: table_delta.variant_tag,
-            descriptor: table_delta.descriptor,
-            deltas: table_delta
-                .deltas
-                .iter()
-                .map(|delta| RecordDelta {
-                    record: delta.record.clone(),
-                    weight: delta
-                        .weight
-                        .checked_neg()
-                        .expect("record delta cannot be i64::MIN"),
-                })
-                .collect(),
-        })
-        .collect()
-}
-
 impl Database {
     /// Run one IVM tick without base-table writes.
     ///
@@ -55,17 +28,20 @@ impl Database {
     /// ```
     pub async fn flush(&mut self) -> Result<(), Error> {
         self.ensure_not_poisoned()?;
-        self.ivm_runtime
-            .drive_pending_incremental()
-            .await
-            .map_err(Error::IvmRuntime)?;
+        if let Err(error) = self.ivm_runtime.drive_pending_incremental().await {
+            self.poisoned = true;
+            return Err(Error::IvmRuntime(error));
+        }
+        self.refresh_resident_writes();
         let resident = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
         let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
-        let tick = self
-            .ivm_runtime
-            .tick(Vec::new(), &storage)
-            .await
-            .map_err(Error::IvmRuntime)?;
+        let tick = match self.ivm_runtime.tick(Vec::new(), &storage).await {
+            Ok(tick) => tick,
+            Err(error) => {
+                self.poisoned = true;
+                return Err(Error::IvmRuntime(error));
+            }
+        };
         self.last_tick_metrics = Some(tick);
         Ok(())
     }
@@ -137,27 +113,11 @@ impl Database {
     pub async fn apply_batch(&mut self, batch: DatabaseBatch) -> Result<AppliedBatch, Error> {
         self.ensure_not_poisoned()?;
         let accepted_large_values = batch.accepted_large_values.clone();
-        let resident_large_values = batch.resident_large_values.clone();
-        let resident_stages = resident_large_values
-            .iter()
-            .map(|stage| (stage.id(), stage))
-            .collect::<BTreeMap<_, _>>();
-        let retractable =
-            batch.resident_publication == ResidentPublicationPolicy::RetractableBeforePersistence;
         let defer_notifications_until_durable =
             batch.notification_timing == NotificationTiming::AfterPersistence;
         let pending_writes = self.pending_writes_from_batch(batch)?;
         let mut accepted_staging = Vec::new();
         for staged_id in &accepted_large_values {
-            if let Some(stage) = resident_stages.get(staged_id) {
-                accepted_staging.push(crate::large_values::StagedLargeValue {
-                    id: *staged_id,
-                    value_ref: stage.value_ref().clone(),
-                    accounting: crate::large_values::StagedLargeValueAccounting::default(),
-                    created_at_ms: 0,
-                });
-                continue;
-            }
             let key = staged_large_value_key(*staged_id);
             let encoded = self
                 .storage
@@ -202,42 +162,6 @@ impl Database {
                 ));
             }
         }
-        // Resident direct values have authenticated nodes in the process-local
-        // chunk layer but deliberately no durable metadata yet.  Derive the
-        // same child-edge metadata that journaled staging would persist, so
-        // the final row batch can install references atomically after its
-        // pre-persist hook has made those nodes durable.
-        let mut resident_node_metadata = BTreeMap::new();
-        for stage in &resident_large_values {
-            for node_ref in stage.node_refs() {
-                let chunk = self
-                    .resident_chunks
-                    .staged_chunk(node_ref)
-                    .map_err(crate::chunks::ChunkError::from)
-                    .map_err(crate::ivm::runtime::IvmRuntimeError::from)
-                    .map_err(Error::from)?;
-                let node: crate::large_values::ChunkNode = postcard::from_bytes(&chunk.encoded)
-                    .map_err(|error| {
-                        Error::InvalidLargeValueMetadata(format!(
-                            "cannot decode resident large-value node: {error}"
-                        ))
-                    })?;
-                let children = match node {
-                    crate::large_values::ChunkNode::Leaf { .. } => Vec::new(),
-                    crate::large_values::ChunkNode::Branch { children, .. } => {
-                        children.into_iter().map(|child| child.node_ref).collect()
-                    }
-                };
-                resident_node_metadata.insert(
-                    node_ref.clone(),
-                    LargeValueNodeReferences {
-                        references: 0,
-                        upload_references: 0,
-                        children,
-                    },
-                );
-            }
-        }
         let descriptors = pending_writes
             .iter()
             .map(PendingTableWrite::descriptor)
@@ -256,11 +180,6 @@ impl Database {
             .collect::<Vec<_>>();
         let table_deltas =
             compute_table_deltas(&pending_writes, &stores, self.ivm_runtime.schema()).await?;
-        let inverse_table_deltas = retractable.then(|| invert_table_deltas(&table_deltas));
-        let resident_node_refs = resident_large_values
-            .iter()
-            .flat_map(|stage| stage.node_refs().iter().cloned())
-            .collect::<Vec<_>>();
         let mut durable_root_deltas = BTreeMap::<crate::large_values::NodeRef, i64>::new();
         for table_delta in &table_deltas {
             for delta in &table_delta.deltas {
@@ -284,18 +203,6 @@ impl Database {
             })
             .collect::<Vec<_>>();
         for staged_id in accepted_large_values {
-            if resident_stages.contains_key(&staged_id) {
-                // The receipt is produced immediately before this already
-                // computed atomic metadata/row write.  A Delete remains
-                // correct even if a storage backend treats absent deletes as
-                // no-ops, but it must not require the receipt before resident
-                // publication.
-                staged_operations.push(OwnedWriteOperation::Delete {
-                    cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                    key: staged_large_value_key(staged_id),
-                });
-                continue;
-            }
             let key = staged_large_value_key(staged_id);
             if self
                 .storage
@@ -313,171 +220,16 @@ impl Database {
             });
         }
         let mut accepted_roots = BTreeMap::<crate::large_values::NodeRef, u64>::new();
-        let mut resident_accepted_roots = BTreeMap::<crate::large_values::NodeRef, u64>::new();
         for staged in &accepted_staging {
             *accepted_roots
                 .entry(staged.value_ref.root.clone())
                 .or_default() += 1;
-            if resident_stages.contains_key(&staged.id) {
-                *resident_accepted_roots
-                    .entry(staged.value_ref.root.clone())
-                    .or_default() += 1;
-            }
         }
         let roots = durable_root_deltas
             .keys()
             .chain(accepted_roots.keys())
             .cloned()
             .collect::<BTreeSet<_>>();
-        let mut node_transitions = Vec::<(crate::large_values::NodeRef, i8)>::new();
-        for root in roots {
-            let key = large_value_root_key(&root)?;
-            let mut references = match self
-                .storage
-                .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
-                .await?
-            {
-                Some(encoded) => postcard::from_bytes(&encoded).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot decode root references: {error}"
-                    ))
-                })?,
-                None => LargeValueRootReferences::default(),
-            };
-            // Journaled staging ordinarily contributes this count before the
-            // row batch consumes it.  Resident staging deliberately defers
-            // that durable mutation until persist, but its final atomic batch
-            // must calculate the identical staged-to-durable transition.
-            references.staged = references
-                .staged
-                .checked_add(
-                    resident_accepted_roots
-                        .get(&root)
-                        .copied()
-                        .unwrap_or_default(),
-                )
-                .ok_or_else(|| {
-                    Error::InvalidLargeValueMetadata(
-                        "resident staged root count overflow".to_owned(),
-                    )
-                })?;
-            let previous_total = references.durable.saturating_add(references.staged);
-            let durable_delta = durable_root_deltas.get(&root).copied().unwrap_or_default();
-            references.durable = if durable_delta >= 0 {
-                references.durable.checked_add(durable_delta as u64)
-            } else {
-                references.durable.checked_sub(durable_delta.unsigned_abs())
-            }
-            .ok_or_else(|| {
-                Error::InvalidLargeValueMetadata("durable root count overflow/underflow".to_owned())
-            })?;
-            references.staged = references
-                .staged
-                .checked_sub(accepted_roots.get(&root).copied().unwrap_or_default())
-                .ok_or_else(|| {
-                    Error::InvalidLargeValueMetadata("staged root count underflow".to_owned())
-                })?;
-            let next_total = references.durable.saturating_add(references.staged);
-            if previous_total == 0 && next_total > 0 && !references.node_active {
-                if resident_node_metadata.contains_key(&root)
-                    || self
-                        .storage
-                        .get(
-                            LARGE_VALUE_METADATA_CF.to_owned(),
-                            large_value_node_key(&root)?,
-                        )
-                        .await?
-                        .is_some()
-                {
-                    references.node_active = true;
-                    node_transitions.push((root.clone(), 1));
-                }
-            } else if previous_total > 0 && next_total == 0 && references.node_active {
-                references.node_active = false;
-                node_transitions.push((root.clone(), -1));
-            }
-            staged_operations.push(OwnedWriteOperation::Set {
-                cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                key,
-                value: postcard::to_allocvec(&references).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot encode root references: {error}"
-                    ))
-                })?,
-            });
-        }
-        let mut node_updates =
-            BTreeMap::<crate::large_values::NodeRef, LargeValueNodeReferences>::new();
-        let mut pending = node_transitions;
-        while let Some((node_ref, delta)) = pending.pop() {
-            let mut metadata = if let Some(metadata) = node_updates.remove(&node_ref) {
-                metadata
-            } else if let Some(metadata) = resident_node_metadata.get(&node_ref) {
-                metadata.clone()
-            } else {
-                let encoded = self
-                    .storage
-                    .get(
-                        LARGE_VALUE_METADATA_CF.to_owned(),
-                        large_value_node_key(&node_ref)?,
-                    )
-                    .await?
-                    .ok_or_else(|| {
-                        Error::InvalidLargeValueMetadata(
-                            "active node reference metadata is missing".to_owned(),
-                        )
-                    })?;
-                postcard::from_bytes(&encoded).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot decode node references: {error}"
-                    ))
-                })?
-            };
-            let crossed_zero = if delta > 0 {
-                let crossed = metadata.references == 0;
-                metadata.references = metadata.references.checked_add(1).ok_or_else(|| {
-                    Error::InvalidLargeValueMetadata("node reference count overflow".to_owned())
-                })?;
-                crossed
-            } else {
-                metadata.references = metadata.references.checked_sub(1).ok_or_else(|| {
-                    Error::InvalidLargeValueMetadata("node reference count underflow".to_owned())
-                })?;
-                metadata.references == 0
-            };
-            if crossed_zero {
-                pending.extend(
-                    metadata
-                        .children
-                        .iter()
-                        .cloned()
-                        .map(|child| (child, delta)),
-                );
-            }
-            node_updates.insert(node_ref, metadata);
-        }
-        for (node_ref, metadata) in node_updates {
-            staged_operations.push(OwnedWriteOperation::Set {
-                cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                key: large_value_node_key(&node_ref)?,
-                value: postcard::to_allocvec(&metadata).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot encode node references: {error}"
-                    ))
-                })?,
-            });
-            if metadata.references == 0 {
-                staged_operations.push(OwnedWriteOperation::Set {
-                    cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                    key: large_value_reclaim_key(&node_ref)?,
-                    value: postcard::to_allocvec(&node_ref).map_err(|error| {
-                        Error::InvalidLargeValueMetadata(format!(
-                            "cannot encode reclaim entry: {error}"
-                        ))
-                    })?,
-                });
-            }
-        }
         let resident_overlay = Rc::new(StagedWriteOverlay::new_owned(
             Rc::clone(&self.storage),
             Rc::clone(&self.resident_writes),
@@ -487,16 +239,27 @@ impl Database {
             resident_overlay,
             Rc::clone(&staged_state),
         ));
-        let publication = PublicationId(self.next_publication_id);
-        self.next_publication_id = self.next_publication_id.saturating_add(1);
+        let resident_install_durable = Rc::new(Cell::new(false));
+        let resident_install_failures = crate::chunks::PublicationInstallFailures::default();
+        let resident_install_observer = Rc::new(MetadataChunkInstallObserver {
+            storage: Rc::downgrade(&self.storage),
+            lifecycle: std::sync::Arc::downgrade(&self.large_value_lifecycle),
+            resident_install: Some(ResidentLifecycleInstall {
+                storage: OwnedStorage::new(Rc::clone(&storage)),
+                staged: Rc::clone(&staged_state),
+                lifecycle_held: Rc::clone(&self.large_value_lifecycle_held),
+                durable: Rc::clone(&resident_install_durable),
+                install_failures: resident_install_failures.clone(),
+            }),
+        }) as Rc<dyn crate::chunks::ChunkInstallObserver>;
         let tick_start = Instant::now();
-        let tick = match self
+        let resident_tick = match self
             .ivm_runtime
             .tick_resident_staged(
                 table_deltas,
-                OwnedStorage::new(storage),
-                publication,
+                OwnedStorage::new(Rc::clone(&storage)),
                 defer_notifications_until_durable,
+                Some((resident_install_observer, resident_install_failures)),
             )
             .await
         {
@@ -507,39 +270,120 @@ impl Database {
             }
         };
         let ivm_tick_time = tick_start.elapsed();
-        let staged_operations = std::mem::take(&mut *staged_state.borrow_mut()).into_operations();
-        let operations = staged_operations
-            .iter()
-            .map(OwnedWriteOperation::as_write_operation)
-            .collect::<Vec<_>>();
-        let storage_writes = StorageWriteMetrics::from_operations(&operations);
+        // The IVM's resident observer uses the staged overlay. It takes the
+        // lifecycle lock itself only when another resident publication does
+        // not already hold it. After the tick settles, compute from the
+        // complete overlay. No publication id exists yet, so cancellation
+        // while waiting for this lock cannot leave an ordered-persistence hole.
+        let lifecycle_guard =
+            if roots.is_empty() || self.large_value_publication_lifecycle_guard.is_some() {
+                None
+            } else {
+                Some(self.large_value_lifecycle.clone().lock_owned().await)
+            };
+        if !roots.is_empty() {
+            let mut node_transitions = Vec::<(crate::large_values::NodeRef, i8)>::new();
+            let mut lifecycle_operations = Vec::new();
+            for root in &roots {
+                let key = large_value_root_key(root)?;
+                let mut references = match storage
+                    .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
+                    .await?
+                {
+                    Some(encoded) => postcard::from_bytes(&encoded).map_err(|error| {
+                        Error::InvalidLargeValueMetadata(format!(
+                            "cannot decode root references: {error}"
+                        ))
+                    })?,
+                    None => LargeValueRootReferences::default(),
+                };
+                let previous_total = references.durable.saturating_add(references.staged);
+                let durable_delta = durable_root_deltas.get(root).copied().unwrap_or_default();
+                references.durable = if durable_delta >= 0 {
+                    references.durable.checked_add(durable_delta as u64)
+                } else {
+                    references.durable.checked_sub(durable_delta.unsigned_abs())
+                }
+                .ok_or_else(|| {
+                    Error::InvalidLargeValueMetadata(
+                        "durable root count overflow/underflow".to_owned(),
+                    )
+                })?;
+                references.staged = references
+                    .staged
+                    .checked_sub(accepted_roots.get(root).copied().unwrap_or_default())
+                    .ok_or_else(|| {
+                        Error::InvalidLargeValueMetadata("staged root count underflow".to_owned())
+                    })?;
+                let next_total = references.durable.saturating_add(references.staged);
+                if previous_total == 0 && next_total > 0 && !references.node_active {
+                    if storage
+                        .get(
+                            LARGE_VALUE_METADATA_CF.to_owned(),
+                            large_value_node_key(root)?,
+                        )
+                        .await?
+                        .is_some()
+                    {
+                        references.node_active = true;
+                        node_transitions.push((root.clone(), 1));
+                    }
+                } else if previous_total > 0 && next_total == 0 && references.node_active {
+                    references.node_active = false;
+                    node_transitions.push((root.clone(), -1));
+                }
+                lifecycle_operations.push(OwnedWriteOperation::Set {
+                    cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                    key,
+                    value: postcard::to_allocvec(&references).map_err(|error| {
+                        Error::InvalidLargeValueMetadata(format!(
+                            "cannot encode root references: {error}"
+                        ))
+                    })?,
+                });
+            }
+            lifecycle_operations.extend(
+                large_value_node_transition_operations(
+                    storage.as_ref(),
+                    BTreeMap::new(),
+                    node_transitions,
+                    false,
+                )
+                .await?,
+            );
+            staged_state.borrow_mut().extend(lifecycle_operations);
+        }
+        // Every fallible/cancellable operation is complete. Allocate the id,
+        // bind buffered notifications, and register the publication without an
+        // intervening await.
+        let publication = PublicationId(self.next_publication_id);
+        self.next_publication_id = self.next_publication_id.saturating_add(1);
+        let tick = self
+            .ivm_runtime
+            .assign_resident_publication(resident_tick, publication);
+        let staged_operations = staged_state.borrow().clone().into_operations();
 
         self.resident_writes
             .borrow_mut()
             .extend(staged_operations.iter().cloned());
-        self.resident_publications.insert(
-            publication,
-            ResidentPublication {
-                operations: staged_operations.clone(),
-                inverse_table_deltas: inverse_table_deltas.unwrap_or_default(),
-                resident_node_refs,
-                notifications_deferred: defer_notifications_until_durable,
-                retractable,
-            },
-        );
+        self.resident_publications
+            .insert(publication, Rc::clone(&staged_state));
+        if !roots.is_empty() {
+            if let Some(guard) = lifecycle_guard {
+                self.large_value_publication_lifecycle_guard = Some(guard);
+                self.large_value_lifecycle_held.set(true);
+            }
+            self.large_value_lifecycle_publications.insert(publication);
+        }
         Ok(AppliedBatch {
             publication,
             storage: Rc::clone(&self.storage),
-            operations: staged_operations,
+            operations: staged_state,
+            resident_install_durable: Some(resident_install_durable),
             order: Rc::clone(&self.publication_persistence),
             ivm_tick_time,
-            storage_writes,
             tick,
             notifications_deferred: defer_notifications_until_durable,
-            retractable,
-            resident_large_values,
-            resident_chunks: self.resident_chunks.clone(),
-            large_value_stager: self.large_value_stager(),
             lifecycle: Rc::new(Cell::new(AppliedBatchLifecycle::Applied)),
             abandoned_application: Rc::clone(&self.abandoned_application),
         })
@@ -551,19 +395,19 @@ impl Database {
         &mut self,
         persistence: PersistedBatch,
     ) -> Result<PublicationId, Error> {
+        if !Rc::ptr_eq(&self.publication_persistence, &persistence.receipt.order) {
+            return Err(Error::PublicationNotFound(persistence.publication));
+        }
         persistence.receipt.finish();
         self.last_tick_metrics = Some(persistence.metrics.tick.clone());
         self.last_commit_metrics = Some(persistence.metrics.clone());
         if let Err(error) = persistence.result {
-            if self.retracted_publications.remove(&persistence.publication) {
-                return Err(Error::PublicationRetracted(persistence.publication));
-            }
             if persistence.notifications_deferred {
                 self.ivm_runtime
                     .discard_deferred_notifications(persistence.publication);
             }
             self.poisoned = true;
-            return Err(error.into_database_error());
+            return Err(Error::from(error));
         }
         if !self
             .resident_publications
@@ -572,12 +416,22 @@ impl Database {
             return Err(Error::PublicationNotFound(persistence.publication));
         }
         self.persisted_publications.insert(persistence.publication);
-        self.advance_durable_frontier();
-        let mut resident_writes = StagedWriteState::default();
-        for publication in self.resident_publications.values() {
-            resident_writes.extend(publication.operations.iter().cloned());
+        let mut frontier = self
+            .durable_publication_frontier
+            .map_or(1, |publication| publication.0.saturating_add(1));
+        while self.persisted_publications.remove(&PublicationId(frontier)) {
+            self.resident_publications.remove(&PublicationId(frontier));
+            self.large_value_lifecycle_publications
+                .remove(&PublicationId(frontier));
+            self.durable_publication_frontier = Some(PublicationId(frontier));
+            frontier = frontier.saturating_add(1);
         }
-        *self.resident_writes.borrow_mut() = resident_writes;
+        if self.large_value_lifecycle_publications.is_empty() {
+            let guard = self.large_value_publication_lifecycle_guard.take();
+            self.large_value_lifecycle_held.set(false);
+            drop(guard);
+        }
+        self.refresh_resident_writes();
         if persistence.notifications_deferred {
             self.ivm_runtime
                 .settle_deferred_notifications(persistence.publication);
@@ -585,136 +439,35 @@ impl Database {
         Ok(persistence.publication)
     }
 
-    /// Retract a failed explicitly-retractable resident publication before it
-    /// becomes durable.  Every later resident publication is retracted in
-    /// reverse order as well: its delta may have read the failed publication
-    /// through the resident overlay, so retaining it would manufacture state
-    /// with no durable predecessor.
-    ///
-    /// This is intentionally asynchronous because inverse deltas flow through
-    /// the same maintained IVM runtime as ordinary writes.  On success the
-    /// database remains usable; any inability to restore the runtime poisons
-    /// it rather than leaving a silently divergent resident view.
-    pub async fn retract_failed_persistence(
-        &mut self,
-        persistence: PersistedBatch,
-    ) -> Result<PublicationId, Error> {
-        persistence.receipt.finish();
-        self.last_tick_metrics = Some(persistence.metrics.tick.clone());
-        self.last_commit_metrics = Some(persistence.metrics.clone());
-        let failure = persistence.result.expect_err(
-            "retract_failed_persistence is only valid for a failed persistence receipt",
-        );
-        let failed = persistence.publication;
-        let Some(failed_publication) = self.resident_publications.get(&failed) else {
-            self.poisoned = true;
-            return Err(Error::PublicationNotFound(failed));
-        };
-        if !failed_publication.retractable {
-            self.poisoned = true;
-            return Err(Error::NonRetractablePublication(failed));
-        }
-        if self
-            .persisted_publications
-            .range((
-                std::ops::Bound::Excluded(failed),
-                std::ops::Bound::Unbounded,
-            ))
-            .next()
-            .is_some()
-        {
-            self.poisoned = true;
-            return Err(Error::InvalidResidentRetraction(
-                "a later publication is already durable".to_owned(),
-            ));
-        }
-
-        let retracted = self.resident_publications.split_off(&failed);
-        let mut resident_writes = StagedWriteState::default();
-        for publication in self.resident_publications.values() {
-            resident_writes.extend(publication.operations.iter().cloned());
-        }
-        *self.resident_writes.borrow_mut() = resident_writes;
-
-        for (publication_id, publication) in retracted.iter().rev() {
-            let resident_overlay = Rc::new(StagedWriteOverlay::new_owned(
-                Rc::clone(&self.storage),
-                Rc::clone(&self.resident_writes),
-            ));
-            let storage = OwnedStorage::new(resident_overlay);
-            if let Err(error) = self
-                .ivm_runtime
-                .tick_resident_staged(
-                    publication.inverse_table_deltas.clone(),
-                    storage,
-                    *publication_id,
-                    publication.notifications_deferred,
-                )
-                .await
-            {
-                self.poisoned = true;
-                return Err(Error::IvmRuntime(error));
-            }
-            if publication.notifications_deferred {
-                self.ivm_runtime
-                    .discard_deferred_notifications(*publication_id);
-            }
-            self.retracted_publications.insert(*publication_id);
-            self.resident_chunks
-                .release(&publication.resident_node_refs);
-        }
-
-        {
-            let mut order = self.publication_persistence.borrow_mut();
-            order.failure = None;
-            for publication_id in retracted.keys() {
-                order.cancelled.insert(publication_id.0);
-            }
-            advance_cancelled_publications(&mut order);
-        }
-        self.advance_durable_frontier();
-        Err(failure.into_database_error())
-    }
-
-    fn advance_durable_frontier(&mut self) {
-        let mut frontier = self
-            .durable_publication_frontier
-            .map_or(1, |publication| publication.0.saturating_add(1));
-        loop {
-            let publication = PublicationId(frontier);
-            if self.persisted_publications.remove(&publication) {
-                if let Some(released) = self.resident_publications.remove(&publication) {
-                    self.resident_chunks.release(&released.resident_node_refs);
-                }
-                self.durable_publication_frontier = Some(publication);
-                frontier = frontier.saturating_add(1);
-            } else if self.retracted_publications.contains(&publication) {
-                self.durable_publication_frontier = Some(publication);
-                frontier = frontier.saturating_add(1);
-            } else {
-                break;
-            }
-        }
-    }
-
     pub(super) fn pending_writes_from_batch(
         &self,
         batch: DatabaseBatch,
     ) -> Result<Vec<PendingTableWrite>, Error> {
-        self.pending_writes_from_operations(&batch.operations)
+        let mut pending_writes = Vec::with_capacity(batch.operations.len());
+        for operation in batch.operations {
+            pending_writes.push(self.pending_write_from_owned_operation(operation)?);
+        }
+        Ok(pending_writes)
     }
 
+    pub(super) fn refresh_resident_writes(&mut self) {
+        let mut resident_writes = StagedWriteState::default();
+        for operations in self.resident_publications.values() {
+            resident_writes.extend(operations.borrow().clone().into_operations());
+        }
+        *self.resident_writes.borrow_mut() = resident_writes;
+    }
+
+    #[cfg(any(test, feature = "test"))]
+    #[allow(dead_code)] // Used by the lib-test batch overlay helper, not non-test builds.
     pub(super) fn pending_writes_from_operations(
         &self,
         operations: &[BatchOperation],
     ) -> Result<Vec<PendingTableWrite>, Error> {
-        let mut pending_writes = Vec::with_capacity(operations.len());
-
-        for operation in operations {
-            pending_writes.push(self.pending_write_from_operation(operation)?);
-        }
-
-        Ok(pending_writes)
+        operations
+            .iter()
+            .map(|operation| self.pending_write_from_operation(operation))
+            .collect()
     }
 
     pub(super) fn ensure_batch_storage_txn(&self, batch: &DatabaseBatch) -> Result<(), Error> {
@@ -754,7 +507,9 @@ impl Database {
         match operation {
             BatchOperation::Insert { table, record } => {
                 let table_schema = self.table(table)?;
-                let (variant_tag, descriptor, record) = resolve_record_input(table_schema, record)?;
+                let descriptor = self.record_descriptor_for_input(table, record)?;
+                let (variant_tag, descriptor, record) =
+                    resolve_record_input(table_schema, record, descriptor)?;
                 let key = primary_key_bytes(table_schema, variant_tag, descriptor, &record)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Insert,
@@ -767,8 +522,9 @@ impl Database {
             }
             BatchOperation::InsertRaw { table, key, record } => {
                 let table_schema = self.table(table)?;
+                let descriptor = self.record_descriptor_for_raw_input(table, record)?;
                 let (variant_tag, descriptor, record) =
-                    resolve_raw_record_input(table_schema, record)?;
+                    resolve_raw_record_input(table_schema, record, descriptor)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Insert,
                     table: table.clone(),
@@ -780,8 +536,9 @@ impl Database {
             }
             BatchOperation::InsertRawFresh { table, key, record } => {
                 let table_schema = self.table(table)?;
+                let descriptor = self.record_descriptor_for_raw_input(table, record)?;
                 let (variant_tag, descriptor, record) =
-                    resolve_raw_record_input(table_schema, record)?;
+                    resolve_raw_record_input(table_schema, record, descriptor)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::InsertFresh,
                     table: table.clone(),
@@ -793,7 +550,9 @@ impl Database {
             }
             BatchOperation::Update { table, record } => {
                 let table_schema = self.table(table)?;
-                let (variant_tag, descriptor, record) = resolve_record_input(table_schema, record)?;
+                let descriptor = self.record_descriptor_for_input(table, record)?;
+                let (variant_tag, descriptor, record) =
+                    resolve_record_input(table_schema, record, descriptor)?;
                 let key = primary_key_bytes(table_schema, variant_tag, descriptor, &record)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Update,
@@ -806,8 +565,9 @@ impl Database {
             }
             BatchOperation::UpdateRaw { table, key, record } => {
                 let table_schema = self.table(table)?;
+                let descriptor = self.record_descriptor_for_raw_input(table, record)?;
                 let (variant_tag, descriptor, record) =
-                    resolve_raw_record_input(table_schema, record)?;
+                    resolve_raw_record_input(table_schema, record, descriptor)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Update,
                     table: table.clone(),
@@ -826,6 +586,142 @@ impl Database {
                 })
             }
         }
+    }
+
+    fn pending_write_from_owned_operation(
+        &self,
+        operation: BatchOperation,
+    ) -> Result<PendingTableWrite, Error> {
+        match operation {
+            BatchOperation::Insert { table, record } => {
+                let table_schema = self.table(&table)?;
+                let descriptor = self.record_descriptor_for_input(&table, &record)?;
+                let (variant_tag, descriptor, record) =
+                    resolve_owned_record_input(table_schema, record, descriptor)?;
+                let key = primary_key_bytes(table_schema, variant_tag, descriptor, &record)?;
+                Ok(PendingTableWrite::Set {
+                    mode: WriteMode::Insert,
+                    table,
+                    key,
+                    variant_tag,
+                    descriptor,
+                    record,
+                })
+            }
+            BatchOperation::InsertRaw { table, key, record } => {
+                let table_schema = self.table(&table)?;
+                let descriptor = self.record_descriptor_for_raw_input(&table, &record)?;
+                let (variant_tag, descriptor, record) =
+                    resolve_owned_raw_record_input(table_schema, record, descriptor)?;
+                Ok(PendingTableWrite::Set {
+                    mode: WriteMode::Insert,
+                    table,
+                    key: key.into_bytes(),
+                    variant_tag,
+                    descriptor,
+                    record,
+                })
+            }
+            BatchOperation::InsertRawFresh { table, key, record } => {
+                let table_schema = self.table(&table)?;
+                let descriptor = self.record_descriptor_for_raw_input(&table, &record)?;
+                let (variant_tag, descriptor, record) =
+                    resolve_owned_raw_record_input(table_schema, record, descriptor)?;
+                Ok(PendingTableWrite::Set {
+                    mode: WriteMode::InsertFresh,
+                    table,
+                    key: key.into_bytes(),
+                    variant_tag,
+                    descriptor,
+                    record,
+                })
+            }
+            BatchOperation::Update { table, record } => {
+                let table_schema = self.table(&table)?;
+                let descriptor = self.record_descriptor_for_input(&table, &record)?;
+                let (variant_tag, descriptor, record) =
+                    resolve_owned_record_input(table_schema, record, descriptor)?;
+                let key = primary_key_bytes(table_schema, variant_tag, descriptor, &record)?;
+                Ok(PendingTableWrite::Set {
+                    mode: WriteMode::Update,
+                    table,
+                    key,
+                    variant_tag,
+                    descriptor,
+                    record,
+                })
+            }
+            BatchOperation::UpdateRaw { table, key, record } => {
+                let table_schema = self.table(&table)?;
+                let descriptor = self.record_descriptor_for_raw_input(&table, &record)?;
+                let (variant_tag, descriptor, record) =
+                    resolve_owned_raw_record_input(table_schema, record, descriptor)?;
+                Ok(PendingTableWrite::Set {
+                    mode: WriteMode::Update,
+                    table,
+                    key: key.into_bytes(),
+                    variant_tag,
+                    descriptor,
+                    record,
+                })
+            }
+            BatchOperation::Delete { table, key } => {
+                let descriptor = self.table(&table)?.record_schema();
+                Ok(PendingTableWrite::Delete {
+                    table,
+                    key: key.into_bytes(),
+                    descriptor,
+                })
+            }
+        }
+    }
+
+    fn record_descriptor_for_input(
+        &self,
+        table: &str,
+        record: &RecordInput,
+    ) -> Result<RecordDescriptor, Error> {
+        let variant_tag = match record {
+            RecordInput::Values(_) => 0,
+            RecordInput::Record(record) => record.variant_tag(),
+        };
+        self.record_descriptor(table, variant_tag)
+    }
+
+    fn record_descriptor_for_raw_input(
+        &self,
+        table: &str,
+        record: &RawRecordInput,
+    ) -> Result<RecordDescriptor, Error> {
+        let variant_tag = match record {
+            RawRecordInput::Payload(_) => 0,
+            RawRecordInput::Record(record) => record.variant_tag(),
+            RawRecordInput::ValidatedRecord(record) => record.variant_tag(),
+        };
+        self.record_descriptor(table, variant_tag)
+    }
+
+    fn record_descriptor(&self, table: &str, variant_tag: u32) -> Result<RecordDescriptor, Error> {
+        if let Some(descriptor) = self
+            .ivm_runtime
+            .record_descriptor(table, variant_tag)
+            .copied()
+        {
+            return Ok(descriptor);
+        }
+        self.table(table)?
+            .record_schema_for_variant(variant_tag)
+            .ok_or_else(|| Error::UnknownTableVariant {
+                table: table.to_owned(),
+                version: u64::from(variant_tag),
+            })
+    }
+
+    pub(super) fn table_storage_descriptor(&self, table: &str) -> Result<RecordDescriptor, Error> {
+        self.ivm_runtime
+            .table_storage_descriptor(table)
+            .copied()
+            .ok_or_else(|| Error::TableNotFound(table.to_owned()))
     }
 
     pub(super) fn table(&self, table: &str) -> Result<&TableSchema, Error> {

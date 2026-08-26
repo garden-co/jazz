@@ -45,3 +45,16 @@ export function sourceIdentity(root) {
     dirty: headTree !== indexTree || unstaged !== sha256("") || untracked.length !== 0,
   };
 }
+
+// Dependency setup is allowed to create ignored build products, but it must
+// never alter the checked-out source used by a receipt.  A baseline captured
+// immediately after checkout therefore remains the source attestation when
+// the later measurement has the same tracked-source identity.
+export function sameTrackedSource(left, right) {
+  return (
+    left?.commit === right?.commit &&
+    left?.headTree === right?.headTree &&
+    left?.indexTree === right?.indexTree &&
+    left?.unstaged === right?.unstaged
+  );
+}

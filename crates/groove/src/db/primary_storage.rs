@@ -279,7 +279,7 @@ impl Database {
                 actual: key.len(),
             });
         }
-        let descriptor = table_schema.record_schema();
+        let descriptor = self.table_storage_descriptor(table)?;
         let mut encoded_key = Vec::new();
         for (value, column) in key.iter().zip(&primary_key.columns) {
             ensure_primary_key_value_type(table_schema, column, value)?;
@@ -334,7 +334,7 @@ impl Database {
                 actual: key.len(),
             });
         }
-        let descriptor = table_schema.record_schema();
+        let descriptor = self.table_storage_descriptor(table)?;
         let mut encoded_key = Vec::new();
         for (value, column) in key.iter().zip(&primary_key.columns) {
             ensure_primary_key_value_type(table_schema, column, value)?;
@@ -370,7 +370,7 @@ impl Database {
                 actual: prefix.len(),
             });
         }
-        let descriptor = table_schema.record_schema();
+        let descriptor = self.table_storage_descriptor(table)?;
         let mut key_prefix = Vec::new();
         for (value, column) in prefix.iter().zip(&primary_key.columns) {
             ensure_primary_key_value_type(table_schema, column, value)?;
@@ -407,7 +407,7 @@ impl Database {
                 actual: prefix.len(),
             });
         }
-        let descriptor = table_schema.record_schema();
+        let descriptor = self.table_storage_descriptor(table)?;
         let mut key_prefix = Vec::new();
         for (value, column) in prefix.iter().zip(&primary_key.columns) {
             ensure_primary_key_value_type(table_schema, column, value)?;
@@ -451,7 +451,7 @@ impl Database {
                 actual: end.len(),
             });
         }
-        let descriptor = table_schema.record_schema();
+        let descriptor = self.table_storage_descriptor(table)?;
         let mut start_key = Vec::new();
         for (value, column) in start.iter().zip(&primary_key.columns) {
             ensure_primary_key_value_type(table_schema, column, value)?;
@@ -539,7 +539,7 @@ impl Database {
                 actual: upper.len(),
             });
         }
-        let descriptor = table_schema.record_schema();
+        let descriptor = self.table_storage_descriptor(table)?;
         let mut key_prefix = Vec::new();
         for (value, column) in prefix.iter().zip(&primary_key.columns) {
             ensure_primary_key_value_type(table_schema, column, value)?;
@@ -735,7 +735,7 @@ impl Database {
         T: OrderedKvStorage,
     {
         let table_schema = self.table(table)?;
-        let storage_descriptor = table_schema.record_schema();
+        let storage_descriptor = self.table_storage_descriptor(table)?;
         let key_descriptor = table_schema
             .primary_key
             .as_ref()

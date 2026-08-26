@@ -28,11 +28,11 @@ fn core_creates_merge_versions_for_concurrent_heads() {
 
     let update = core.view_update_for_current_rows("todos").unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -414,9 +414,9 @@ fn ingest_direct_version(
             row_uuid,
             parents,
             AuthorSubject::SYSTEM,
-            TxTime(10),
+            10,
             AuthorSubject::SYSTEM,
-            TxTime(10),
+            10,
             &cells,
             None,
         )

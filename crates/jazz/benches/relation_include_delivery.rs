@@ -318,9 +318,8 @@ fn measure_single_child_insert(scale: usize, sample: usize) -> Measurement {
 
     reset_alloc_counter();
     let start = Instant::now();
-    block_on(db.insert_with_id(
+    block_on(db.insert(
         "children",
-        row(10_000_000),
         BTreeMap::from([
             ("parent_id".to_owned(), Value::Uuid(parent.0)),
             (
@@ -329,6 +328,10 @@ fn measure_single_child_insert(scale: usize, sample: usize) -> Measurement {
             ),
             ("ordinal".to_owned(), Value::I32(1)),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(row(10_000_000)),
+            ..Default::default()
+        },
     ))
     .expect("insert exactly one measured child");
     let event = block_on(stream.next_event()).expect("measured relation update");
@@ -346,9 +349,8 @@ fn measure_single_child_insert(scale: usize, sample: usize) -> Measurement {
 
 fn seed_relation_fixture(db: &Db<MemoryStorage>, child_rows: usize) -> RowUuid {
     let parent = row(1);
-    block_on(db.insert_with_id(
+    block_on(db.insert(
         "parents",
-        parent,
         BTreeMap::from([
             (
                 "label".to_owned(),
@@ -356,17 +358,24 @@ fn seed_relation_fixture(db: &Db<MemoryStorage>, child_rows: usize) -> RowUuid {
             ),
             ("ordinal".to_owned(), Value::I32(0)),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(parent),
+            ..Default::default()
+        },
     ))
     .expect("insert parent");
     for index in 0..child_rows {
-        block_on(db.insert_with_id(
+        block_on(db.insert(
             "children",
-            row(1_000 + index as u64),
             BTreeMap::from([
                 ("parent_id".to_owned(), Value::Uuid(parent.0)),
                 ("label".to_owned(), Value::String(format!("child-{index}"))),
                 ("ordinal".to_owned(), Value::I32(index as i32)),
             ]),
+            jazz::db::InsertOptions {
+                row_id: Some(row(1_000 + index as u64)),
+                ..Default::default()
+            },
         ))
         .unwrap_or_else(|error| panic!("seed child {index}: {error}"));
     }

@@ -57,6 +57,10 @@ export type BackendContextConfig = Omit<AppContext, "schema" | "driver" | "clien
   jwksUrl?: string;
   /** Single JWK object or PEM/JWK string used to verify external bearer JWTs in `forRequest()`. */
   jwtPublicKey?: BackendJwtPublicKey;
+  /** Required issuer for external bearer JWTs accepted by `forRequest()`. */
+  jwtIssuer?: string;
+  /** Required audience, or audiences, for external bearer JWTs accepted by `forRequest()`. */
+  jwtAudience?: string | readonly string[];
   /** Whether local-first bearer JWTs are accepted in `forRequest()`. Defaults to `true`. */
   allowLocalFirstAuth?: boolean;
 } & BackendContextSchemaConfig;
@@ -114,21 +118,18 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
       NapiDb,
       schema,
       deterministicBytes(`${this.config.appId}:${env}:${this.nodeIdentityScope}:node`),
-      authorBytesForSession({
-        issuer: "urn:jazz:runtime-host",
-        user_id: `${this.config.appId}:${env}:${this.nodeIdentityScope}`,
-      }),
+      authorBytesForSession({ issuer: "https://jazz.invalid", user_id: "backend-open" }),
       1,
       true,
       this.config.driver.type === "persistent"
         ? {
             persistentPath: this.config.driver.dataPath,
             readAuthorizationHost: "trusted-serving",
-            backendCredential: this.config.backendSecret,
+            backendMode: true,
           }
         : {
             readAuthorizationHost: "trusted-serving",
-            backendCredential: this.config.backendSecret,
+            backendMode: true,
           },
     );
 
@@ -353,7 +354,7 @@ export class JazzContext {
   asBackend(source?: BackendSchemaInput): Db {
     const { client, schema } = this.getClientAndSchema(source);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(client, schema, SYSTEM_READ_SESSION, undefined, true, true);
+    return this.wrapDb(client, schema, undefined, undefined, true, false);
   }
 
   /**
@@ -366,7 +367,7 @@ export class JazzContext {
     return this.wrapDb(
       client,
       schema,
-      SYSTEM_READ_SESSION,
+      undefined,
       canonicalAuthorSubject(issuer, subject),
       true,
       true,
@@ -404,6 +405,8 @@ export class JazzContext {
       appId: this.config.appId,
       jwksUrl: this.config.jwksUrl,
       jwtPublicKey: this.config.jwtPublicKey,
+      jwtIssuer: this.config.jwtIssuer,
+      jwtAudience: this.config.jwtAudience,
       allowLocalFirstAuth: this.config.allowLocalFirstAuth,
     });
   }

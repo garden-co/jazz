@@ -1,47 +1,71 @@
 # jazz-rn
 
-A React Native native module that provides high-performance cryptographic operations for the Jazz framework, built with Rust and UniFFI. This package exposes the same cryptographic primitives as `jazz-napi` and `jazz-wasm` but specifically designed for React Native applications running on iOS and Android.
+This directory is the React Native package for Jazz's native relay boundary.
+It is not yet a supported React Native Jazz client: its autolinked Android and
+iOS modules deliberately report that the Rust relay artifact is unavailable.
 
-## What is jazz-rn?
+The active restoration work is deliberately split in two:
 
-`jazz-rn` is a React Native Turbo Module that bridges Rust-based cryptographic code to JavaScript/TypeScript. It uses [uniffi-bindgen-react-native](https://jhugman.github.io/uniffi-bindgen-react-native/) that uses [UniFFI](https://mozilla.github.io/uniffi-rs/) (Unified Foreign Function Interface) to automatically generate type-safe bindings between Rust and React Native, enabling you to use high-performance cryptographic operations in your React Native applications.
+- `jazz-storage-sqlite` implements the portable ordered-KV storage contract
+  that a native host will use.
+- `jazz-native-relay` establishes the process-local, scope-keyed native relay
+  boundary: a durable relay `Db` and ordinary in-memory UI clients communicating
+  through Jazz's normal peer protocol.
 
-### Architecture
+Those crates have Rust contract tests, but they are not wired through this
+package yet. The former UniFFI/JSI surface has been removed rather than left as
+a broken alternative runtime path.
 
-The package consists of:
+The package reserves a generated `JazzRelay` TurboModule boundary. Android and
+iOS autolink the module, report ABI `0` (unavailable), and explicitly reject
+commands unless a development or release assembly stages the shared Rust relay
+artifact. Staged Android libraries, the shared header, and the iOS XCFramework
+are included by the npm package file contract. `expo prebuild` and bare React
+Native integration can therefore succeed without an artifact, but they do
+**not** make Jazz usable on a device yet.
 
-- **Rust Core** (`rust/`): The core cryptographic implementation, shared with `jazz` and `jazz-napi`
-- **UniFFI Bindings**: Automatically generated bindings that bridge Rust to React Native
-- **Native Modules**:
-  - **iOS**: XCFramework containing static libraries for arm64 (device) and arm64-simulator
-  - **Android**: CMake-based native library compiled for multiple architectures
-- **TypeScript Wrapper**: Type-safe JavaScript/TypeScript API that wraps the native bindings
+`jazz-rn` requires the React Native **New Architecture**. Android Gradle and
+iOS CocoaPods fail early with an install/configuration instruction otherwise.
+For Expo, add `"plugins": ["jazz-rn"]` and run `expo prebuild`; the plugin
+sets `newArchEnabled`. Bare React Native apps must enable the New Architecture
+themselves. This requirement does not make Expo Go capable of loading Jazz.
 
-## Installation
+The current repository gate executes Expo prebuild for Android and iOS, then
+inspects Expo's autolinking contracts for this package. It is intentionally not
+a native build receipt: this Linux development environment has neither Java
+nor CocoaPods, so Gradle configuration/build and `pod install` must run on the
+respective Blacksmith runners before claiming platform or device support.
+The shared host codec now stages trusted native scope admission/revocation via
+random 256-bit capabilities, client open-close, bounded `Pump`, directional
+bounded peer-frame send/drain, and handle/queue diagnostics. The thin JNI and
+Objective-C++ wrappers forward the
+opaque command channel when their staged artifacts are present; platform-owned
+scope admission remains part of the device integration. This is still a
+platform checkpoint, not device support: there is no assembled release-package
+or Expo development-build receipt yet.
 
-### In the Jazz Monorepo
+The shared artifact seam is `jazz_native_relay_abi_version` from
+`jazz-native-relay`'s C ABI (`include/jazz_native_relay.h`). Android/JNI will
+link that artifact directly when the Android build pipeline exists; it must not
+route through the obsolete UniFFI library. The remaining Android runner gate is
+a real Gradle/NDK AAR build and emulator installation against that linked
+artifact.
 
-If you're working within the Jazz monorepo, the package is already available as a workspace dependency:
+The wrapper accepts ABI 3, which uses opaque host-generated admission
+capabilities and trusted revocation.
 
-```bash
-# From the monorepo root
-pnpm install
-pnpm build:rn
-```
+## What remains before React Native is supported
 
-### As a Standalone Package
+1. Link the staged host lifecycle codec through thin JNI/Swift translation and
+   extend it with shared event/peer-frame drainage (not an object-per-row API).
+2. Build real iOS XCFramework and Android AAR/shared-library slices from that
+   module.
+3. Verify bare React Native autolinking plus Expo prebuild/development builds
+   on Android and iOS in CI, using a first-party device app and structured
+   scenario results.
 
-```bash
-pnpm install jazz-rn
-```
+Expo Go cannot load Jazz native code. Expo development builds will be supported
+once the native module and artifacts above exist.
 
-The package includes pre-built native binaries for:
-
-- **iOS**: arm64 (device) and arm64-simulator
-- **Android**: Multiple architectures (arm64, arm, x86_64, etc.)
-
-## Building from Source
-
-### Prerequisites
-
-Before building `jazz-rn`, ensure you followed this [guide](https://jhugman.github.io/uniffi-bindgen-react-native/guides/rn/pre-installation.html).
+The normative host design and its implementation ledger live in
+[`crates/jazz/SPEC/19_native_relays.md`](../jazz/SPEC/19_native_relays.md).

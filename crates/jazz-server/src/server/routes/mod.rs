@@ -17,13 +17,13 @@ use std::sync::Arc;
 use axum::{
     Router,
     body::Body,
-    extract::{OriginalUri, State},
+    extract::{DefaultBodyLimit, OriginalUri, State},
     http::{Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::server::ServerState;
@@ -36,6 +36,12 @@ use http::{
 };
 use utils::parse_app_id_param;
 use websocket::ws_handler;
+
+/// Admin catalogue uploads are ordinary JSON requests and must be bounded
+/// before an extractor buffers their bodies. Eight MiB accommodates large
+/// schemas and migration bundles without leaving an unauthenticated memory
+/// amplification path.
+const MAX_ADMIN_REQUEST_BODY_BYTES: usize = 8 << 20;
 
 async fn app_id_gate(
     State(state): State<Arc<ServerState>>,
@@ -95,7 +101,8 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .route(
             "/introspection/subscriptions",
             get(admin_subscription_introspection_handler),
-        );
+        )
+        .layer(DefaultBodyLimit::max(MAX_ADMIN_REQUEST_BODY_BYTES));
     let traced_routes = Router::new()
         .route("/ws", axum::routing::any(ws_handler))
         .route("/schema/{hash}", get(schema_handler))
@@ -112,7 +119,10 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .route("/health", get(health_handler))
         .route("/internal/shutdown", post(internal_shutdown_handler))
         .nest("/apps/{app_id}", traced_routes)
-        .layer(CorsLayer::permissive())
+        // `*` does not authorize `Authorization` in a browser CORS preflight.
+        // Mirror the requested names while retaining the intentionally
+        // credential-free permissive policy.
+        .layer(CorsLayer::permissive().allow_headers(AllowHeaders::mirror_request()))
         .with_state(state)
 }
 
@@ -122,7 +132,7 @@ mod tests {
     use super::*;
 
     use axum::extract::{Path, Query};
-    use axum::http::{HeaderMap, StatusCode, Uri};
+    use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
     use axum::response::Json;
 
     use jazz::tools::AppId;
@@ -263,6 +273,60 @@ mod tests {
 
     fn named_test_app_route(path: &str) -> String {
         format!("/apps/test-app/{}", path.trim_start_matches('/'))
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_mirrors_requested_auth_headers_without_credentials() {
+        let app = make_test_router(make_sync_test_state("test-backend-secret").await);
+        let requested_headers = "authorization, x-jazz-admin-secret";
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri(test_app_route("/admin/schemas"))
+                    .header(header::ORIGIN, "http://localhost:3000")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .header(header::ACCESS_CONTROL_REQUEST_HEADERS, requested_headers)
+                    .body(axum::body::Body::empty())
+                    .expect("valid CORS preflight"),
+            )
+            .await
+            .expect("CORS layer handles preflight");
+
+        assert!(response.status().is_success());
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+                .and_then(|value| value.to_str().ok()),
+            Some(requested_headers),
+            "preflight must explicitly allow the requested authorization headers"
+        );
+        assert!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+                .is_none(),
+            "the shared server CORS policy must not enable cookie credentials"
+        );
+
+        let vary = response
+            .headers()
+            .get(header::VARY)
+            .and_then(|value| value.to_str().ok())
+            .expect("CORS response must vary by preflight inputs");
+        for required in [
+            "origin",
+            "access-control-request-method",
+            "access-control-request-headers",
+        ] {
+            assert!(
+                vary.split(',')
+                    .any(|value| value.trim().eq_ignore_ascii_case(required)),
+                "Vary must include {required}; got {vary:?}"
+            );
+        }
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]

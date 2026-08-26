@@ -26,4 +26,12 @@ export default defineConfig([
   {
     ignores: ["node_modules/", "lib/"],
   },
+  {
+    files: ["app.plugin.js", "react-native.config.js"],
+    languageOptions: {
+      parserOptions: {
+        requireConfigFile: false,
+      },
+    },
+  },
 ]);

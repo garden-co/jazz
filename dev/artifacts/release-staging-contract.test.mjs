@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -72,6 +72,25 @@ test("release NAPI staging rejects a valid sealed manifest whose fingerprint dis
   );
 });
 
+test("release NAPI staging rejects a symlinked active native binding", () => {
+  const root = releaseFixture();
+  const packageDir = join(root, "crates/jazz-napi");
+  const generation = join(packageDir, ".native-artifacts/generation-test");
+  writeFileSync(
+    join(packageDir, "native-binding.pointer.cjs"),
+    `const nativeBinding = require("./.native-artifacts/generation-test/index.js");\nmodule.exports = { nativeBinding, expectedNativeArtifactFingerprint: "${fingerprint}" };\n`,
+  );
+  const outside = join(root, "outside.node");
+  writeFileSync(outside, "outside native bytes");
+  symlinkSync(outside, join(generation, "jazz-napi.linux-x64-gnu.node"));
+  writeFileSync(join(generation, "index.js"), "module.exports = {};\n");
+  writeFileSync(
+    join(generation, ".jazz-artifact-manifest.json"),
+    JSON.stringify({ kind: "napi", profile: "release", nativeArtifactFingerprint: fingerprint }),
+  );
+  assert.throws(() => stageNapiLoader(root, "linux-x64-gnu"), /real regular file/);
+});
+
 test("release fingerprint staging verifies downloaded WASM bytes before deriving expectations", () => {
   const root = releaseFixture();
   const wasmDir = join(root, "crates/jazz-wasm/pkg");
@@ -80,6 +99,29 @@ test("release fingerprint staging verifies downloaded WASM bytes before deriving
   writeReleaseNapiManifest(root);
 
   stageNativeFingerprints(root);
+  const generatedNapi = readFileSync(
+    join(root, "packages/jazz-tools/src/runtime/native-artifact-fingerprint-napi.ts"),
+    "utf8",
+  );
+  const generatedWasm = readFileSync(
+    join(root, "packages/jazz-tools/src/runtime/native-artifact-fingerprint-wasm.ts"),
+    "utf8",
+  );
+  stageNativeFingerprints(root);
+  assert.equal(
+    readFileSync(
+      join(root, "packages/jazz-tools/src/runtime/native-artifact-fingerprint-napi.ts"),
+      "utf8",
+    ),
+    generatedNapi,
+  );
+  assert.equal(
+    readFileSync(
+      join(root, "packages/jazz-tools/src/runtime/native-artifact-fingerprint-wasm.ts"),
+      "utf8",
+    ),
+    generatedWasm,
+  );
   assert.match(
     readFileSync(
       join(root, "packages/jazz-tools/src/runtime/native-artifact-fingerprint-wasm.ts"),

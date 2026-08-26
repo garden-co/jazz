@@ -188,7 +188,11 @@ impl Session {
 /// `session` controls permission evaluation. `attribution`, when present,
 /// controls who is recorded as the commit author without changing permission
 /// identity. `updated_at`, when present, overrides the row provenance
-/// timestamp recorded for update-like writes.
+/// physical-millisecond timestamp recorded for update-like writes. Core packs
+/// this input into an HLC with a zero logical counter. Public reads expose the
+/// same Unix-millisecond value; packed HLCs remain internal ordering state. It
+/// cannot be combined with `transaction_id`, whose staged-write API has no
+/// per-write timestamp slot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WriteContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -214,6 +218,11 @@ impl WriteContext {
         }
     }
 
+    /// Override provenance for a non-transactional upsert or update.
+    ///
+    /// The value is physical milliseconds, not a packed HLC value. Combining
+    /// this with [`Self::with_transaction_id`] is rejected because staged
+    /// writes do not yet carry a per-write timestamp override.
     pub fn with_updated_at(mut self, updated_at: u64) -> Self {
         self.updated_at = Some(updated_at);
         self

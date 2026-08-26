@@ -14,8 +14,6 @@ import { createJazzContext, type Db } from "jazz-tools/backend";
 import { app as schemaApp } from "../schema.js";
 import permissions from "../permissions.js";
 
-const DEFAULT_OWNER_ID = "93c209ee-dbae-5071-a90d-02f8c0bbcf6a";
-
 // ============================================================================
 // Types
 // ============================================================================
@@ -25,12 +23,12 @@ export interface Todo {
   title: string;
   done: boolean;
   description?: string;
+  owner_id: string;
 }
 
 interface CreateTodoRequest {
   title: string;
   description?: string;
-  owner_id?: string;
 }
 
 interface UpdateTodoRequest {
@@ -52,6 +50,11 @@ export interface RunningServer extends TodoServer {
   baseUrl: string;
 }
 
+export interface TodoServerOptions {
+  /** URL of the external issuer's JWKS endpoint for HTTP request authentication. */
+  jwksUrl?: string;
+}
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -60,9 +63,12 @@ export interface RunningServer extends TodoServer {
  * Create a todo server.
  *
  * @param dataPath Optional path to local Fjall database file. If omitted, uses a temp directory.
- * @returns TodoServer with app, db, and shutdown function
+ * @returns TodoServer with the Express app, administrative database handle, and lifecycle functions
  */
-export async function createServer(dataPath?: string): Promise<TodoServer> {
+export async function createServer(
+  dataPath?: string,
+  options: TodoServerOptions = {},
+): Promise<TodoServer> {
   const dbPath = dataPath ?? join(mkdtempSync(join(tmpdir(), "jazz-todo-")), "jazz.db");
   const appId = process.env.JAZZ_APP_ID ?? "019d4349-244c-74d4-8573-8e1b24cf21e2";
 
@@ -72,28 +78,32 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     permissions,
     driver: { type: "persistent", dataPath: dbPath },
     env: "dev",
+    jwksUrl: options.jwksUrl ?? process.env.JAZZ_JWKS_URL,
+    jwtPublicKey: process.env.JAZZ_JWT_PUBLIC_KEY,
   });
+  // Preserve the programmatic administrative handle for embedding and tests.
+  // Network routes below exclusively use request-scoped databases.
   const db = context.asBackend();
 
-  // Create Express app
   const app = express();
-  app.use(express.json());
 
-  // Track active SSE connections for live updates
-  const sseConnections = new Set<Response>();
+  const sseConnections = new Map<Response, Db>();
 
-  // Helper to broadcast current todos to all SSE connections
   async function broadcastTodos() {
-    if (sseConnections.size === 0) {
-      return;
-    }
+    await Promise.all(
+      Array.from(sseConnections, async ([res, requestDb]) => {
+        const todos = await requestDb.all(schemaApp.todos);
+        res.write(`data: ${JSON.stringify(todos)}\n\n`);
+      }),
+    );
+  }
 
-    const todos = await db.all(schemaApp.todos);
-    const data = `data: ${JSON.stringify(todos)}\n\n`;
-
-    for (const res of sseConnections) {
-      res.write(data);
+  function requestDb(res: Response): Db {
+    const db = res.locals.requestDb as Db | undefined;
+    if (!db) {
+      throw new Error("Authenticated request database is unavailable");
     }
+    return db;
   }
 
   // ========================================================================
@@ -105,17 +115,35 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     res.json({ status: "healthy" });
   });
 
-  // List all todos
+  // Authenticate every todo request before selecting a session-scoped database.
+  app.use("/todos", async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const db = await context.forRequest(req);
+      const session = db.getAuthState().session;
+      if (!session) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+      res.locals.requestDb = db;
+      res.locals.userId = session.user_id;
+      next();
+    } catch {
+      res.status(401).json({ error: "Unauthorized" });
+    }
+  });
+  app.use(express.json());
+
+  // List the authenticated caller's todos
   app.get("/todos", async (_req: Request, res: Response, next: NextFunction) => {
     try {
-      const todos = await db.all(schemaApp.todos);
+      const todos = await requestDb(res).all(schemaApp.todos);
       res.json(todos);
     } catch (e) {
       next(e);
     }
   });
 
-  // Create a todo
+  // Create a todo owned by the authenticated caller
   app.post("/todos", async (req: Request, res: Response, next: NextFunction) => {
     try {
       const body = req.body as CreateTodoRequest;
@@ -125,66 +153,48 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
         return;
       }
 
-      const inserted = db.insert(schemaApp.todos, {
+      const inserted = requestDb(res).insert(schemaApp.todos, {
         title: body.title,
         done: false,
         description: body.description?.trim(),
-        owner_id: body.owner_id ?? DEFAULT_OWNER_ID,
+        owner_id: res.locals.userId as string,
       });
       await inserted.wait({ tier: "local" });
+      await broadcastTodos();
 
       res.status(201).json(inserted.value);
-
-      // Notify SSE connections
-      await broadcastTodos();
     } catch (e) {
       next(e);
     }
   });
 
-  // List todos as a specific session user (for policy verification/testing)
-  app.get("/todos/as/:userId", async (req: Request, res: Response, next: NextFunction) => {
+  // Live SSE stream of the authenticated caller's todos (must be before /todos/:id)
+  app.get("/todos/live", async (_req: Request, res: Response, next: NextFunction) => {
     try {
-      const userDb = context.forSession({
-        issuer: "https://issuer.jazz.test",
-        user_id: req.params.userId,
-        authMode: "external",
-        claims: {},
+      const db = requestDb(res);
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.flushHeaders();
+
+      sseConnections.set(res, db);
+
+      const todos = await db.all(schemaApp.todos);
+      res.write(`data: ${JSON.stringify(todos)}\n\n`);
+
+      res.on("close", () => {
+        sseConnections.delete(res);
       });
-      const todos = await userDb.all(schemaApp.todos);
-      res.json(todos);
     } catch (e) {
       next(e);
     }
   });
 
-  // Live SSE stream of all todos (must be before /todos/:id)
-  app.get("/todos/live", async (_req: Request, res: Response) => {
-    // Set SSE headers
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
-    res.flushHeaders();
-
-    // Register this connection
-    sseConnections.add(res);
-
-    // Send initial state
-    const todos = await db.all(schemaApp.todos);
-    res.write(`data: ${JSON.stringify(todos)}\n\n`);
-
-    // Clean up on disconnect
-    res.on("close", () => {
-      sseConnections.delete(res);
-    });
-  });
-
-  // Get a single todo
+  // Get a single todo visible to the authenticated caller
   app.get("/todos/:id", async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { id } = req.params;
-
-      const todo = await db.one(schemaApp.todos.where({ id }));
+      const todo = await requestDb(res).one(schemaApp.todos.where({ id }));
       if (!todo) {
         res.status(404).json({ error: "Todo not found" });
         return;
@@ -196,11 +206,17 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     }
   });
 
-  // Update a todo
+  // Update a todo visible to the authenticated caller
   app.put("/todos/:id", async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { id } = req.params;
       const body = req.body as UpdateTodoRequest;
+      const db = requestDb(res);
+      const existing = await db.one(schemaApp.todos.where({ id }));
+      if (!existing) {
+        res.status(404).json({ error: "Todo not found" });
+        return;
+      }
 
       const updates = {
         title: body.title,
@@ -208,51 +224,38 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
         description: body.description === undefined ? undefined : body.description.trim(),
       };
 
-      if (Object.values(updates).every((value) => value === undefined)) {
-        // No updates, just return the current todo
-        const todo = await db.one(schemaApp.todos.where({ id }));
-        if (!todo) {
-          res.status(404).json({ error: "Todo not found" });
-          return;
-        }
-        res.json(todo);
-        return;
+      if (Object.values(updates).some((value) => value !== undefined)) {
+        await db.update(schemaApp.todos, id, updates).wait({ tier: "local" });
+        await broadcastTodos();
       }
 
-      await db.update(schemaApp.todos, id, updates).wait({ tier: "local" });
-
-      // Fetch updated todo
       const todo = await db.one(schemaApp.todos.where({ id }));
       if (!todo) {
         res.status(404).json({ error: "Todo not found after update" });
         return;
       }
       res.json(todo);
-
-      // Notify SSE connections
-      await broadcastTodos();
     } catch (e) {
       next(e);
     }
   });
 
-  // Delete a todo
+  // Delete a todo visible to the authenticated caller
   app.delete("/todos/:id", async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { id } = req.params;
+      const db = requestDb(res);
+      const existing = await db.one(schemaApp.todos.where({ id }));
+      if (!existing) {
+        res.status(404).json({ error: "Todo not found" });
+        return;
+      }
 
       await db.delete(schemaApp.todos, id).wait({ tier: "local" });
-      res.status(204).send();
-
-      // Notify SSE connections
       await broadcastTodos();
+      res.status(204).send();
     } catch (e) {
-      const error = e as Error;
-      if (error.message?.includes("NotFound")) {
-        res.status(404).json({ error: "Todo not found" });
-      } else {
-        next(e);
-      }
+      next(e);
     }
   });
 

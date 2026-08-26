@@ -28,6 +28,7 @@ declare module "jazz-wasm" {
   export class WasmWrite {
     readonly batchId: string;
     readonly payload: Uint8Array;
+    readonly rowId: Uint8Array;
     writeState(): unknown;
     wait(tier: string): Promise<void>;
     close(): boolean;
@@ -42,36 +43,56 @@ declare module "jazz-wasm" {
   export class WasmTransport {
     sendWireFrame(frame: Uint8Array): void;
     recvWireFrames(): Uint8Array[];
+    routeAuxiliaryWireFrame(frame: Uint8Array): Promise<Uint8Array | undefined>;
+    recvAuxiliaryWireFrames(maxFrames?: number, maxBytes?: number): Uint8Array[];
+    auxiliaryOutboundReady(): Promise<void>;
     tick(): Promise<number>;
     updateAuthenticatedClaims(claims: Record<string, unknown>): Promise<void>;
     close(): boolean;
   }
 
+  export type WriteOptions = {
+    author?: Uint8Array;
+    updatedAtMs?: number;
+  };
+
+  export type InsertOptions = WriteOptions & {
+    rowId?: Uint8Array;
+    branch?: unknown;
+  };
+
+  export type UpdateOptions = WriteOptions & {
+    head?: unknown;
+    base?: unknown;
+  };
+
+  export type UpsertOptions = WriteOptions & {
+    branch?: unknown;
+  };
+
+  export type DeleteOptions = UpdateOptions;
+  export type RestoreOptions = UpsertOptions;
+
   export class WasmTx {
-    insertWithIdEncoded(
-      table: string,
-      rowId: Uint8Array,
-      cells: Uint8Array,
-      updatedAtMs?: number | null,
-    ): void;
+    insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions): Uint8Array;
     updateEncoded(
       table: string,
       rowId: Uint8Array,
       patch: Uint8Array,
-      updatedAtMs?: number | null,
+      options?: UpdateOptions,
     ): void;
     upsertEncoded(
       table: string,
       rowId: Uint8Array,
       cells: Uint8Array,
-      updatedAtMs?: number | null,
+      options?: UpsertOptions,
     ): void;
-    delete(table: string, rowId: Uint8Array, updatedAtMs?: number | null): void;
+    deleteEncoded(table: string, rowId: Uint8Array, options?: DeleteOptions): void;
     restoreEncoded(
       table: string,
       rowId: Uint8Array,
       cells: Uint8Array,
-      updatedAtMs?: number | null,
+      options?: RestoreOptions,
     ): void;
     commit(): WasmWrite;
     rollback(): void;
@@ -106,7 +127,6 @@ declare module "jazz-wasm" {
       rowId: Uint8Array,
       cells: Uint8Array,
       column: string,
-      kind: "Text" | "Json" | "Bytea",
       mutation?: "insert" | "update" | "upsert",
       author?: Uint8Array,
       updatedAtMs?: number,
@@ -182,26 +202,18 @@ declare module "jazz-wasm" {
       opts: unknown,
     ): ReadableStream<unknown>;
 
-    insertEncoded(table: string, cells: Uint8Array): WasmWrite;
+    insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions): WasmWrite;
     canInsertEncoded(table: string, cells: Uint8Array): "allowed" | "denied" | "unknown";
     requestInsertPermissionAdviceEncoded(
       table: string,
       cells: Uint8Array,
     ): WasmPermissionAdviceRequest;
     requestReadPermissionAdvice(table: string, rowId: Uint8Array): WasmPermissionAdviceRequest;
-    insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite;
-    insertWithIdEncodedForIdentity(
-      table: string,
-      rowId: Uint8Array,
-      cells: Uint8Array,
-      author: Uint8Array,
-    ): WasmWrite;
-    updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): WasmWrite;
-    updateEncodedForIdentity(
+    updateEncoded(
       table: string,
       rowId: Uint8Array,
       patch: Uint8Array,
-      author: Uint8Array,
+      options?: UpdateOptions,
     ): WasmWrite;
     requestUpdatePermissionAdviceEncoded(
       table: string,
@@ -209,26 +221,18 @@ declare module "jazz-wasm" {
       patch: Uint8Array,
     ): WasmPermissionAdviceRequest;
     requestDeletePermissionAdvice(table: string, rowId: Uint8Array): WasmPermissionAdviceRequest;
-    upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite;
-    upsertEncodedForIdentity(
+    upsertEncoded(
       table: string,
       rowId: Uint8Array,
       cells: Uint8Array,
-      author: Uint8Array,
+      options?: UpsertOptions,
     ): WasmWrite;
-    delete(table: string, rowId: Uint8Array, updatedAtMs?: number | null): WasmWrite;
-    deleteForIdentity(
-      table: string,
-      rowId: Uint8Array,
-      author: Uint8Array,
-      updatedAtMs?: number | null,
-    ): WasmWrite;
-    restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite;
-    restoreEncodedForIdentity(
+    deleteEncoded(table: string, rowId: Uint8Array, options?: DeleteOptions): WasmWrite;
+    restoreEncoded(
       table: string,
       rowId: Uint8Array,
       cells: Uint8Array,
-      author: Uint8Array,
+      options?: RestoreOptions,
     ): WasmWrite;
     setTickScheduler(
       callback: (urgency: "immediate" | "deferred" | `after:${number}`) => void,

@@ -40,8 +40,14 @@ describe("translateQuery", () => {
       table: "todos",
       include_deleted: true,
       conditions: [
-        { column: "done", op: "eq", value: false },
-        { column: "ownerId", op: "isNull", value: true },
+        {
+          Cmp: {
+            left: { column: "done" },
+            op: "Eq",
+            right: { Literal: { type: "Boolean", value: false } },
+          },
+        },
+        { IsNull: { column: { column: "ownerId" } } },
       ],
       select_columns: ["title"],
       order_by: [{ column: "title", direction: "Desc" }],
@@ -50,6 +56,39 @@ describe("translateQuery", () => {
     });
     expect(translated.relation_ir).toBeUndefined();
     expect(translated.array_subqueries).toHaveLength(1);
+  });
+
+  it("uses the same canonical predicate IR for root and included membership filters", () => {
+    const translated = JSON.parse(
+      translateQuery(
+        app.projects
+          .where({ id: { notIn: ["00000000-0000-0000-0000-000000000001"] } })
+          .include({
+            todosViaProject: app.todos.where({ title: { notIn: ["hidden"] } }),
+          })
+          ._build(),
+        app.wasmSchema,
+      ),
+    );
+
+    const rootPredicate = translated.conditions[0];
+    const includePredicate = translated.array_subqueries[0].filters[0];
+    expect(rootPredicate).toEqual({
+      Not: {
+        In: {
+          left: { column: "id" },
+          values: [{ Literal: { type: "Uuid", value: "00000000-0000-0000-0000-000000000001" } }],
+        },
+      },
+    });
+    expect(includePredicate).toEqual({
+      Not: {
+        In: {
+          left: { column: "title" },
+          values: [{ Literal: { type: "Text", value: "hidden" } }],
+        },
+      },
+    });
   });
 
   it("keeps provenance order keys internal unless the caller selects them", () => {
@@ -87,6 +126,16 @@ describe("translateQuery", () => {
     });
   });
 
+  for (const op of ["in", "notIn"]) {
+    it(`rejects null ${op} membership entries before serializing a query`, () => {
+      const built = JSON.parse(app.todos._build());
+      built.conditions = [{ column: "ownerId", op, value: [null] }];
+
+      expect(() => translateQuery(JSON.stringify(built), app.wasmSchema)).toThrow(
+        `"${op}" does not accept null membership values; use isNull or isNotNull separately.`,
+      );
+    });
+  }
   it("keeps native relation IR for relation traversal queries", () => {
     const translated = JSON.parse(
       translateQuery(app.todos.where({ done: false }).hopTo("owner")._build(), app.wasmSchema),

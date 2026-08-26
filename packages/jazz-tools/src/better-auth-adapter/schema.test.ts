@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { BetterAuthDBSchema } from "better-auth/db";
-import { buildJazzSchemaSourceTextFromTables, buildJazzSchemaFromTables } from "./schema.js";
+import {
+  buildJazzSchemaSourceText,
+  buildJazzSchemaSourceTextFromTables,
+  buildJazzSchemaFromTables,
+} from "./schema.js";
 
 describe("better-auth schema helpers", () => {
   it("builds a Jazz schema from Better Auth tables using transformed names", () => {
@@ -188,7 +192,72 @@ describe("better-auth schema helpers", () => {
         "export const app: s.App<AppSchema> = s.defineApp(schema);",
         "export const wasmSchema = app.wasmSchema;",
         "",
+        "export const permissions = s.definePermissions(app, ({ policy }) => {",
+        "  policy.accountHolders.allowRead.never();",
+        "  policy.accountHolders.allowInsert.never();",
+        "  policy.accountHolders.allowUpdate.never();",
+        "  policy.accountHolders.allowDelete.never();",
+        "",
+        "  policy.devices.allowRead.never();",
+        "  policy.devices.allowInsert.never();",
+        "  policy.devices.allowUpdate.never();",
+        "  policy.devices.allowDelete.never();",
+        "",
+        "  policy.sessions.allowRead.never();",
+        "  policy.sessions.allowInsert.never();",
+        "  policy.sessions.allowUpdate.never();",
+        "  policy.sessions.allowDelete.never();",
+        "});",
+        "",
       ].join("\n"),
+    );
+  });
+
+  it("generates deny-all policies for every Better Auth table", () => {
+    const tables = {
+      user: {
+        modelName: "user",
+        fields: {
+          id: {
+            type: "string",
+            required: true,
+          },
+        },
+      },
+      session: {
+        modelName: "session",
+        fields: {
+          id: {
+            type: "string",
+            required: true,
+          },
+        },
+      },
+    } as BetterAuthDBSchema;
+    const tableNamesByModel = {
+      user: "better_auth_user",
+      session: "better-auth-session",
+    } as const;
+    const source = buildJazzSchemaSourceText({
+      tables,
+      getModelName: (model) => tableNamesByModel[model as keyof typeof tableNamesByModel],
+      getFieldName: ({ field }) => field,
+    });
+
+    for (const tableName of Object.values(tableNamesByModel)) {
+      const policyTarget =
+        tableName === "better_auth_user"
+          ? "policy.better_auth_user"
+          : 'policy["better-auth-session"]';
+
+      expect(source).toContain(`${policyTarget}.allowRead.never();`);
+      expect(source).toContain(`${policyTarget}.allowInsert.never();`);
+      expect(source).toContain(`${policyTarget}.allowUpdate.never();`);
+      expect(source).toContain(`${policyTarget}.allowDelete.never();`);
+    }
+
+    expect(source.match(/\.allow(Read|Insert|Update|Delete)\.never\(\);/g)).toHaveLength(
+      Object.keys(tables).length * 4,
     );
   });
 

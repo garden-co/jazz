@@ -143,7 +143,7 @@ fn seed_documents(db: &DirectDb, count: usize) -> Vec<RowUuid> {
     (0..count)
         .map(|index| {
             let write = db
-                .insert("documents", cells(index))
+                .insert("documents", cells(index), Default::default())
                 .expect("seed core benchmark row");
             block_on(write.wait(DurabilityTier::Local)).expect("seed row should be local");
             write.row_uuid()
@@ -155,7 +155,7 @@ fn seed_filtered_documents(db: &DirectDb, count: usize) -> Vec<RowUuid> {
     (0..count)
         .map(|index| {
             let write = db
-                .insert("documents", filtered_cells(index))
+                .insert("documents", filtered_cells(index), Default::default())
                 .expect("seed core benchmark row");
             block_on(write.wait(DurabilityTier::Local)).expect("seed row should be local");
             write.row_uuid()
@@ -166,10 +166,13 @@ fn seed_filtered_documents(db: &DirectDb, count: usize) -> Vec<RowUuid> {
 fn seed_reachable_policy_fixture(db: &DirectDb, count: usize) -> Vec<RowUuid> {
     for (row, name) in [(USER_TEAM, "user team"), (PARENT_TEAM, "parent team")] {
         let write = db
-            .insert_with_id(
+            .insert(
                 "teams",
-                row,
                 BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+                jazz::db::InsertOptions {
+                    row_id: Some(row),
+                    ..Default::default()
+                },
             )
             .expect("seed team");
         block_on(write.wait(DurabilityTier::Local)).expect("seed team should be local");
@@ -182,6 +185,7 @@ fn seed_reachable_policy_fixture(db: &DirectDb, count: usize) -> Vec<RowUuid> {
                 ("member".to_owned(), Value::Uuid(USER_TEAM.0)),
                 ("parent".to_owned(), Value::Uuid(PARENT_TEAM.0)),
             ]),
+            Default::default(),
         )
         .expect("seed team edge");
     block_on(write.wait(DurabilityTier::Local)).expect("seed edge should be local");
@@ -195,6 +199,7 @@ fn seed_reachable_policy_fixture(db: &DirectDb, count: usize) -> Vec<RowUuid> {
                     ("document".to_owned(), Value::Uuid(row.0)),
                     ("team".to_owned(), Value::Uuid(PARENT_TEAM.0)),
                 ]),
+                Default::default(),
             )
             .expect("seed document access");
         block_on(write.wait(DurabilityTier::Local)).expect("seed access should be local");
@@ -232,7 +237,7 @@ fn core_insert(c: &mut Criterion) {
                 b.iter(|| {
                     next += 1;
                     let write = db
-                        .insert("documents", cells(next))
+                        .insert("documents", cells(next), Default::default())
                         .expect("core insert should succeed");
                     block_on(write.wait(DurabilityTier::Local)).expect("insert should be local");
                     write.row_uuid()
@@ -268,6 +273,7 @@ fn core_update_and_read(c: &mut Criterion) {
                             "content".to_owned(),
                             Value::String(format!("Updated content {index}")),
                         )]),
+                        Default::default(),
                     )
                     .expect("core update should succeed");
                     db.read(&query).expect("core read should succeed").len()
@@ -355,7 +361,7 @@ fn core_subscribed_write(c: &mut Criterion) {
 
                 b.iter(|| {
                     next += 1;
-                    db.insert("documents", cells(next))
+                    db.insert("documents", cells(next), Default::default())
                         .expect("core subscribed insert should succeed");
                     match block_on(subscription.next_event()) {
                         Some(SubscriptionEvent::Delta { added, .. }) => added.len(),
@@ -391,7 +397,7 @@ fn core_owner_policy_insert(c: &mut Criterion) {
                         PermissionAdvice::Unknown,
                     );
                     let write = db
-                        .insert("documents", candidate)
+                        .insert("documents", candidate, Default::default())
                         .expect("owner policy insert should succeed");
                     block_on(write.wait(DurabilityTier::Local))
                         .expect("owner policy insert should be local");

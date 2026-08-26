@@ -7,7 +7,9 @@ import { createJazzContext } from "./create-jazz-context.js";
 const mocks = vi.hoisted(() => {
   const resolveRequestSession = vi.fn();
   const openMemory = vi.fn();
+  const openMemoryAsBackend = vi.fn();
   const openPersistent = vi.fn();
+  const openPersistentAsBackend = vi.fn();
   const nativeRuntimeCtor = vi.fn();
   const runtimeInstances: Array<{ close: ReturnType<typeof vi.fn> }> = [];
   const clients: Array<{
@@ -35,10 +37,20 @@ const mocks = vi.hoisted(() => {
       openMemory(schemaBytes, configBytes);
       return fakeDb;
     }),
+    openMemoryAsBackend: vi.fn((schemaBytes: Uint8Array, configBytes: Uint8Array) => {
+      openMemoryAsBackend(schemaBytes, configBytes);
+      return fakeDb;
+    }),
     openPersistent: vi.fn((dataPath: string, schemaBytes: Uint8Array, configBytes: Uint8Array) => {
       openPersistent(dataPath, schemaBytes, configBytes);
       return fakeDb;
     }),
+    openPersistentAsBackend: vi.fn(
+      (dataPath: string, schemaBytes: Uint8Array, configBytes: Uint8Array) => {
+        openPersistentAsBackend(dataPath, schemaBytes, configBytes);
+        return fakeDb;
+      },
+    ),
   };
 
   class MockNativeRuntimeAdapter {
@@ -50,12 +62,23 @@ const mocks = vi.hoisted(() => {
       author: Uint8Array,
       sourceId: number,
       historyComplete: boolean,
-      opts?: { persistentPath?: string },
+      opts?: { persistentPath?: string; backendMode?: boolean },
     ) {
       nativeRuntimeCtor(Runtime, schema, node, author, sourceId, historyComplete, opts);
-      if (opts?.persistentPath) {
+      if (opts?.persistentPath && opts.backendMode) {
+        Runtime.openPersistentAsBackend(
+          opts.persistentPath,
+          new TextEncoder().encode(JSON.stringify(schema)),
+          new Uint8Array(),
+        );
+      } else if (opts?.persistentPath) {
         Runtime.openPersistent(
           opts.persistentPath,
+          new TextEncoder().encode(JSON.stringify(schema)),
+          new Uint8Array(),
+        );
+      } else if (opts?.backendMode) {
+        Runtime.openMemoryAsBackend(
           new TextEncoder().encode(JSON.stringify(schema)),
           new Uint8Array(),
         );
@@ -76,7 +99,9 @@ const mocks = vi.hoisted(() => {
     MockJazzClient,
     resolveRequestSession,
     openMemory,
+    openMemoryAsBackend,
     openPersistent,
+    openPersistentAsBackend,
     nativeRuntimeCtor,
     runtimeInstances,
     connectWithRuntime,
@@ -84,10 +109,14 @@ const mocks = vi.hoisted(() => {
     reset() {
       resolveRequestSession.mockReset();
       openMemory.mockReset();
+      openMemoryAsBackend.mockReset();
       openPersistent.mockReset();
+      openPersistentAsBackend.mockReset();
       nativeRuntimeCtor.mockReset();
       MockNapiDb.openMemory.mockClear();
+      MockNapiDb.openMemoryAsBackend.mockClear();
       MockNapiDb.openPersistent.mockClear();
+      MockNapiDb.openPersistentAsBackend.mockClear();
       fakeDb.close.mockClear();
       runtimeInstances.length = 0;
       connectWithRuntime.mockClear();
@@ -208,8 +237,8 @@ describe("backend/create-jazz-context", () => {
 
     expect(dbA).not.toBe(dbB);
     expect(mocks.nativeRuntimeCtor).toHaveBeenCalledTimes(1);
-    expect(mocks.openPersistent).toHaveBeenCalledTimes(1);
-    expect(mocks.openMemory).not.toHaveBeenCalled();
+    expect(mocks.openPersistentAsBackend).toHaveBeenCalledTimes(1);
+    expect(mocks.openMemoryAsBackend).not.toHaveBeenCalled();
     expect(mocks.connectWithRuntime).toHaveBeenCalledTimes(1);
     expect(mocks.nativeRuntimeCtor).toHaveBeenCalledWith(
       mocks.MockNapiDb,
@@ -221,6 +250,7 @@ describe("backend/create-jazz-context", () => {
       {
         persistentPath: "/tmp/jazz.db",
         readAuthorizationHost: "trusted-serving",
+        backendMode: true,
       },
     );
   });
@@ -315,6 +345,15 @@ describe("backend/create-jazz-context", () => {
     const attributedDb = context.withAttribution("https://issuer.example", "u2");
     const attributedSessionDb = context.withAttributionForSession(session);
     const attributedRequestDb = await context.withAttributionForRequest(req);
+
+    // An un-attributed backend read deliberately passes no logical session:
+    // it is trusted serving, not a public request impersonating SYSTEM. A
+    // request keeps its external session and therefore remains policy-scoped.
+    expect((backendDb as any).getRuntimeOperationContext()).toBeNull();
+    expect((requestDb as any).getRuntimeOperationContext()).toMatchObject({
+      session,
+      readSession: undefined,
+    });
 
     for (const scopedDb of [
       db,
@@ -595,8 +634,8 @@ describe("backend/create-jazz-context", () => {
 
     context.db();
 
-    expect(mocks.openMemory).toHaveBeenCalledTimes(1);
-    expect(mocks.openPersistent).not.toHaveBeenCalled();
+    expect(mocks.openMemoryAsBackend).toHaveBeenCalledTimes(1);
+    expect(mocks.openPersistentAsBackend).not.toHaveBeenCalled();
     expect(mocks.nativeRuntimeCtor).toHaveBeenCalledWith(
       mocks.MockNapiDb,
       SCHEMA_A,
@@ -604,7 +643,7 @@ describe("backend/create-jazz-context", () => {
       expect.any(Uint8Array),
       1,
       true,
-      { readAuthorizationHost: "trusted-serving" },
+      { readAuthorizationHost: "trusted-serving", backendMode: true },
     );
   });
 

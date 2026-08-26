@@ -1,0 +1,127 @@
+---
+title: "Invite links"
+description: Let users share a URL that grants another user access to a private resource without knowing their identity in advance.
+reviewedAt: "9712a744f"
+---
+
+import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
+
+Invite links are a pattern that let a resource owner share a URL that grants access to anyone who
+has it without knowing the recipient's identity in advance. The URL carries the resource ID plus a
+secret that the owner stores in a private invite row.
+
+When an invitee opens the URL, your backend validates the code and inserts a membership row for
+their already-authenticated session. From that point on, access flows through the normal membership
+rule.
+
+This recipe deliberately keeps redemption on a backend. A link is a bearer capability: it must be
+checked at the same authority that performs the membership write. Do not model the code as a
+client-supplied session claim or authorize the write from a one-off read; that would let the read
+and write run under different credentials.
+
+## Schema
+
+Keep invite codes in their own table, not on the resource row. Jazz permissions are row-level, so a
+`joinCode` on the chat would be visible to every chat member. This table has no client read rule;
+only the backend checks its code. The members table records which invite each user used to join, so
+you can audit or revoke individual memberships later.
+
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-server-ts/src/invite-snippets.ts#invite-schema
+</include>
+
+## Permissions
+
+A user can read a chat once they have a membership row. A chat creator can bootstrap their own
+membership and create or revoke invite links, but no client can write a membership for somebody
+else. The only way for an invitee to join is the server route below. The server has a
+[backend identity](/docs/getting-started/server-setup#backend-identity-pattern) and inserts the row
+on their behalf after validating the join code.
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/invite-snippets.ts#invite-permissions
+</include>
+
+See [Permissions](/docs/auth/permissions) for more on `exists.where`, `allOf`, and `anyOf`, and [Session identity and authorship](/docs/auth/sessions#session-identity-and-authorship) for how the backend stamps the user as the row's author while keeping backend permissions.
+
+## Generating a link
+
+The creator inserts the chat, their own membership, and a private invite row client-side. These
+writes are allowed by the permission rules above&hairsp;—&hairsp;the chat row is open to insert, and
+the membership and invite rules let the creator bootstrap resources that match their
+`$createdBy`. The code goes only in the invite row and URL.
+
+<include cwd lang="ts" meta='title="createInviteLink.ts"'>
+  ../examples/docs/todo-client-localfirst-react/src/invite-snippets.tsx#invite-create-link
+</include>
+
+<Callout type="warn">
+  The code lives in the URL fragment (after `#`) to keep it out of server access logs, CDN logs, and
+  `Referer` headers. Don't pass the code as a route parameter or query string&hairsp;—&hairsp;those
+  land in server logs.
+</Callout>
+
+## Accepting an invite
+
+The invitee opens the link while signed in. The client posts the chat ID and code to a server route.
+The server uses one exclusive transaction to read the private invite, check whether the user is
+already a member, insert their membership, and consume a single-use invite. The route is
+idempotent&hairsp;—&hairsp;it skips the insert if the user already has a membership, so re-opening the
+link or retrying after a transient error won't create duplicate rows.
+
+### Server route
+
+The route reads and writes as the backend: the invitee has no read access to the chat until they're
+a member, and the `chatMembers.allowInsert` rule only admits the chat's creator, so they can't
+insert their own membership directly. Your normal auth middleware resolves the caller to a Jazz
+`Session` first. `withAttributionForSession` then keeps backend permissions while stamping the
+membership's edit metadata to that exact issuer/subject pair.
+
+The transaction is what makes redemption correct under concurrency. A multi-use invite stays in
+the table, so it is deliberately replayable by anyone holding the link. A single-use invite is
+deleted in the same exclusive transaction as the membership insert: two simultaneous redeems
+cannot both succeed. If the authority rejects the transaction because another redemption won the
+race, report that failure to the client and let it retry only if that remains appropriate for your
+UI.
+
+The `context` referenced below is the backend Jazz context for your app&hairsp;—&hairsp;see [Backend context setup](/docs/getting-started/server-setup#backend-context-setup) for how to create one.
+
+<include cwd lang="ts" meta='title="api/invite/redeem.ts"'>
+  ../examples/docs/todo-server-ts/src/invite-snippets.ts#invite-redeem-route
+</include>
+
+<Accordions type="single">
+<Accordion title="Single-use, expiring, or role-scoped codes">
+
+Pass `{ singleUse: true }` when creating a link to consume it atomically on successful redemption.
+For richer requirements (expiry, codes that grant specific roles, audit metadata), add those fields
+to the invite table and check them in the same exclusive transaction.
+
+The example uses the full `crypto.randomUUID()` value. Keep at least that much entropy for a link
+that is not single-use or expiring.
+
+</Accordion>
+</Accordions>
+
+### Client handler
+
+Route `/#/invite/:chatId/:code` to a component that calls the server route and then redirects.
+
+<include cwd lang="tsx" meta='title="InviteHandler.tsx"'>
+  ../examples/docs/todo-client-localfirst-react/src/invite-snippets.tsx#invite-handler-primary
+</include>
+
+Once the route returns, the user's subscription picks the chat up via the membership rule, and access persists for as long as the membership row exists.
+
+## Revoking access
+
+Delete a member's row to revoke their access immediately. The server stops syncing the resource to
+them as soon as the row is gone.
+
+<include cwd lang="ts" meta='title="revokeMember.ts"'>
+  ../examples/docs/todo-client-localfirst-react/src/invite-snippets.tsx#invite-revoke
+</include>
+
+An invite link is a bearer capability: deleting a membership alone does not stop somebody who kept
+the link from redeeming it again. Delete or rotate the private invite row too when you need to
+invalidate the link for future redeemers.

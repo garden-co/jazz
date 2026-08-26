@@ -24,9 +24,21 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
 
     let initial_tx = commit_global_issue(&mut server, 0, "open", author(0), 1);
     let mut peer = PeerState::edge_client(AuthorSubject::SYSTEM);
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
     let initial = peer
-        .rehydrate_query_with_opts(&mut server, &shape, &binding, opts.clone())
-        .expect("serve initial settled issues view");
+        .rehydrate_query_for_subscription_with_opts(
+            &mut server,
+            subscription,
+            &shape,
+            &binding,
+            opts.clone(),
+        )
+        .expect("serve initial settled issues view")
+        .expect("initial settled issues view is ready");
     client
         .apply_sync_message_settled(initial)
         .expect("apply initial settled issues view");
@@ -217,10 +229,10 @@ fn recursive_reachability_subscription_grants_and_revokes_incrementally() {
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     assert!(matches!(
         initial,
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             result_member_adds,
             ..
-        } if result_member_adds.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, _)| row_uuid == resource1)
+        }) if result_member_adds.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, _)| row_uuid == resource1)
             && result_member_adds.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).all(|(_, row_uuid, _)| row_uuid != resource2)
     ));
 
@@ -239,11 +251,11 @@ fn recursive_reachability_subscription_grants_and_revokes_incrementally() {
     let grant = peer.query_update(&mut core, &shape, &binding).unwrap();
     assert!(matches!(
         grant,
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             result_member_adds,
             result_member_removes,
             ..
-        } if result_member_adds.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, _)| row_uuid == resource2)
+        }) if result_member_adds.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, _)| row_uuid == resource2)
             && result_member_removes.is_empty()
     ));
 
@@ -251,11 +263,11 @@ fn recursive_reachability_subscription_grants_and_revokes_incrementally() {
     let revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
     assert!(matches!(
         revoke,
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             result_member_adds,
             result_member_removes,
             ..
-        } if result_member_adds.is_empty()
+        }) if result_member_adds.is_empty()
             && result_member_removes.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, _)| row_uuid == resource1)
             && result_member_removes.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, _)| row_uuid == resource2)
     ));

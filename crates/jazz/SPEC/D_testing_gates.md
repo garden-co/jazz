@@ -92,7 +92,8 @@ cargo test -p jazz --lib node::tests::harness::m3_maintained_one_shot_differenti
   full workspace, including examples.
 - **Server shell** — the server-shell tests are included in the `jazz` package
   gates above. They exercise the in-memory Rust server shell over the public
-  frame pump, loopback HTTP and WebSocket listeners, and real ABI clients.
+  frame pump, production Axum HTTP routes, loopback WebSocket listeners, and
+  real ABI clients.
 
 ### D.3 Simulation-first discipline
 

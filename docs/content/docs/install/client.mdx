@@ -90,7 +90,10 @@ Start with a fresh app. If you already have one, skip to [Install](#install).
     pnpm add -D @babel/plugin-transform-flow-strip-types
     ```
 
-    `jazz-rn` is mandatory in Expo / React Native environments and must be installed alongside `jazz-tools`.
+    `jazz-rn` is the native relay package and must be installed directly alongside
+    `jazz-tools`. React Native runtime support is currently under restoration:
+    this setup can be prebuilt into a development build, but the embedded Rust
+    relay artifact is not available yet, so it is not a usable Jazz client.
 
     <Accordions type="single">
     <Accordion title="Expo setup: entry point, Babel, and Metro config">

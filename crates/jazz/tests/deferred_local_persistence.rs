@@ -44,10 +44,27 @@ fn rocksdb_writes_are_resident_before_the_sync_call_returns() {
     db.set_non_durable_client();
     let row_id = jazz::ids::RowUuid::from_bytes([0; 16]);
 
-    block_on(db.insert_with_id_at_ms("todos", row_id, row! { title: "first" }, 1))
-        .expect("first insert");
+    block_on(db.insert(
+        "todos",
+        row! { title: "first" },
+        jazz::db::InsertOptions {
+            row_id: Some(row_id),
+            updated_at_ms: Some(1),
+            ..Default::default()
+        },
+    ))
+    .expect("first insert");
     assert!(
-        block_on(db.insert_with_id_at_ms("todos", row_id, row! { title: "duplicate" }, 2)).is_err(),
+        block_on(db.insert(
+            "todos",
+            row! { title: "duplicate" },
+            jazz::db::InsertOptions {
+                row_id: Some(row_id),
+                updated_at_ms: Some(2),
+                ..Default::default()
+            }
+        ))
+        .is_err(),
         "a second synchronous write must observe the resident first write",
     );
 }
@@ -70,18 +87,25 @@ fn deferred_persistence_keeps_resident_write_sync_and_local_durability_pending()
     db.set_deferred_local_persistence(true);
 
     control.pause_on(TestStorageOperation::WriteMany);
-    let write = block_on(db.insert("todos", row! { title: "resident now" }))
+    let write = block_on(db.insert("todos", row! { title: "resident now" }, Default::default()))
         .expect("resident insert does not await persistence");
 
     let query = db.prepare_query(&db.table("todos")).expect("prepare query");
     let rows = block_on(db.all(&query, ReadOpts::default())).expect("read resident rows");
     assert_eq!(rows.len(), 1, "the write is immediately query-visible");
     assert!(
-        block_on(db.insert_with_id("todos", write.row_uuid(), row! { title: "duplicate" },))
-            .is_err(),
+        block_on(db.insert(
+            "todos",
+            row! { title: "duplicate" },
+            jazz::db::InsertOptions {
+                row_id: Some(write.row_uuid()),
+                ..Default::default()
+            }
+        ))
+        .is_err(),
         "resident currency checks must reject a duplicate before persistence",
     );
-    block_on(db.delete("todos", write.row_uuid()))
+    block_on(db.delete("todos", write.row_uuid(), Default::default()))
         .expect("resident row can be deleted before insert persistence");
     assert!(
         block_on(db.all(&query, ReadOpts::default()))
@@ -89,8 +113,13 @@ fn deferred_persistence_keeps_resident_write_sync_and_local_durability_pending()
             .is_empty(),
         "the deletion is immediately query-visible",
     );
-    block_on(db.restore("todos", write.row_uuid(), row! { title: "restored now" }))
-        .expect("restore observes the resident deletion before persistence");
+    block_on(db.restore(
+        "todos",
+        write.row_uuid(),
+        Some(row! { title: "restored now" }),
+        Default::default(),
+    ))
+    .expect("restore observes the resident deletion before persistence");
     assert_eq!(
         block_on(db.all(&query, ReadOpts::default()))
             .expect("read resident restoration")

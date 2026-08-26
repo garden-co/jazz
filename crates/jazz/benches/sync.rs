@@ -79,15 +79,21 @@ impl SyncBench {
     fn new(config: Config) -> Self {
         let schema = schema();
         let mut dirs = Vec::new();
-        let (dir, ui) = open_node(node(1), schema.clone());
+        let (dir, mut ui) = open_node(node(1), schema.clone());
         dirs.push(dir);
-        let (dir, worker) = open_node(node(2), schema.clone());
+        let (dir, mut worker) = open_node(node(2), schema.clone());
         dirs.push(dir);
-        let (dir, edge) = open_node(node(3), schema.clone());
+        let (dir, mut edge) = open_node(node(3), schema.clone());
         dirs.push(dir);
-        let (dir, core) = open_node(node(4), schema);
+        let (dir, mut core) = open_node(node(4), schema);
         dirs.push(dir);
         let ui_author = AuthorSubject::for_test_bytes([7; 16]);
+        for node in [&mut ui, &mut worker, &mut edge, &mut core] {
+            node.admit_test_session_claims(
+                ui_author,
+                BTreeMap::from([("user_id".to_owned(), Value::Uuid(ui_author.test_uuid()))]),
+            );
+        }
         Self {
             config,
             ui,
@@ -426,9 +432,6 @@ fn relay_ingest(node: &mut NodeState<RocksDbStorage>, message: &SyncMessage) {
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
-    if let Some(identity) = tx.permission_subject {
-        install_uuid_user_claim(node, identity);
-    }
     node.ingest_relay_commit_unit(tx.clone(), versions.clone())
         .expect("relay ingest");
 }
@@ -441,7 +444,6 @@ fn core_ingest(
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
-    install_uuid_user_claim(core, tx.permission_subject.unwrap_or(tx.made_by));
     let outcome = core
         .ingest_commit_unit(tx.clone(), versions.clone(), now_ms)
         .expect("core ingest");
@@ -456,24 +458,10 @@ fn refresh(
     downstream: &mut NodeState<RocksDbStorage>,
     peer: &mut PeerState,
 ) {
-    install_uuid_user_claim(upstream, peer.identity());
     let update = peer
         .current_rows_update(upstream, TABLE)
         .expect("view update");
     support::apply_and_settle(downstream, update);
-}
-
-fn install_uuid_user_claim(node: &mut NodeState<RocksDbStorage>, identity: AuthorSubject) {
-    if identity != AuthorSubject::SYSTEM {
-        let raw = identity.test_uuid().to_string();
-        node.admit_test_session_claims(
-            identity,
-            BTreeMap::from([
-                ("sub".to_owned(), Value::String(raw.clone())),
-                ("user_id".to_owned(), Value::String(raw)),
-            ]),
-        );
-    }
 }
 
 fn content_unit_row(unit: &SyncMessage) -> Option<RowUuid> {
@@ -499,8 +487,8 @@ fn current_rows(
                 .columns
                 .iter()
                 .filter_map(|column| {
-                    row.cell(table, &column.name)
-                        .map(|value| (column.name.clone(), value))
+                    row.cell(table, column.name())
+                        .map(|value| (column.name().to_owned(), value))
                 })
                 .collect();
             (row.row_uuid(), cells)

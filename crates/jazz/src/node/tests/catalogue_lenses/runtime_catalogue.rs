@@ -354,9 +354,9 @@ fn publishing_schema_registers_new_tables_without_storage_reopen() {
     .unwrap();
     let update = peer.current_rows_update(&mut core, "notes").unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds, ..
-    } = update
+    }) = update
     else {
         panic!("current-row subscription should produce a view update");
     };

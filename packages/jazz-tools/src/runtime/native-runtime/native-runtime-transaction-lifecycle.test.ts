@@ -26,6 +26,7 @@ const testSchema = {
     columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
   },
 } satisfies WasmSchema;
+const TEST_RUNTIME_AUTHOR = new TextEncoder().encode('["urn:jazz:test","runtime"]');
 
 type EncodedTestRow = {
   table: string;
@@ -51,7 +52,7 @@ function encodeRows(rows: EncodedTestRow[]): Uint8Array {
       row.bytes(source.rowId);
       row.bool(false);
       row.bytes(
-        createRecord(descriptor, [Uint8Array.from([0, ...new TextEncoder().encode(source.title)])]),
+        createRecord(descriptor, [Uint8Array.from([2, ...new TextEncoder().encode(source.title)])]),
       );
     }, tableRows.length);
   }, byTable.size);
@@ -60,17 +61,13 @@ function encodeRows(rows: EncodedTestRow[]): Uint8Array {
 
 function fakeDb<T extends object>(
   db: T,
-): T & {
-  setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void;
-  tick(): Promise<void>;
-} {
+): T & { setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void } {
   type FakeOpenBatch = {
     kind: "mergeable" | "exclusive";
     author?: Uint8Array;
     tx?: TxForTest;
   };
   const implementation = db as T & {
-    tick?(): void | Promise<void>;
     mergeableTx?(openBatchId: string): TxForTest;
     mergeableTxForIdentity?(openBatchId: string, author: Uint8Array): TxForTest;
     exclusiveTx?(openBatchId: string): TxForTest;
@@ -108,11 +105,6 @@ function fakeDb<T extends object>(
       openBatches.delete(openBatchId);
     },
     ...db,
-    // Every adapter-facing fake needs a tick: production wakeups may arrive
-    // independently of a particular test's explicit progress call.
-    tick: async () => {
-      await implementation.tick?.();
-    },
   };
 }
 
@@ -120,11 +112,11 @@ function fakeTx(overrides: Partial<TxForTest> = {}): TxForTest {
   return {
     commit: () => fakeWrite(),
     rollback: () => undefined,
-    insertWithIdEncoded: () => undefined,
+    insertEncoded: (_table, _cells, options) => options?.rowId ?? new Uint8Array(16),
     restoreEncoded: () => undefined,
     updateEncoded: () => undefined,
     upsertEncoded: () => undefined,
-    delete: () => undefined,
+    deleteEncoded: () => undefined,
     ...overrides,
   };
 }
@@ -141,31 +133,34 @@ function fakeWrite() {
 type TxForTest = {
   commit(): ReturnType<typeof fakeWrite>;
   rollback(): void;
-  insertWithIdEncoded(
+  insertEncoded(
     table: string,
-    rowId: Uint8Array,
     cells: Uint8Array,
-    updatedAtMs?: number | null,
-  ): void;
+    options?: { rowId?: Uint8Array; branch?: unknown; updatedAtMs?: number },
+  ): Uint8Array;
   restoreEncoded(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
-    updatedAtMs?: number | null,
+    options?: { branch?: unknown; updatedAtMs?: number },
   ): void;
   updateEncoded(
     table: string,
     rowId: Uint8Array,
     patch: Uint8Array,
-    updatedAtMs?: number | null,
+    options?: { head?: unknown; base?: unknown; updatedAtMs?: number },
   ): void;
   upsertEncoded(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
-    updatedAtMs?: number | null,
+    options?: { branch?: unknown; updatedAtMs?: number },
   ): void;
-  delete(table: string, rowId: Uint8Array, updatedAtMs?: number | null): void;
+  deleteEncoded(
+    table: string,
+    rowId: Uint8Array,
+    options?: { head?: unknown; base?: unknown; updatedAtMs?: number },
+  ): void;
 };
 
 function uuidBytes(value: string): Uint8Array {
@@ -185,12 +180,9 @@ it("stages authenticated client mutations through the optimistic local core path
         fakeDb({
           all: () => encodeRows([]),
           allForIdentity: () => encodeRows([]),
-          insertWithIdEncoded: (table: string) => {
+          insertEncoded: (table: string, _cells: Uint8Array, options?: { rowId?: Uint8Array }) => {
             staged.push(table);
-            return fakeWrite();
-          },
-          insertWithIdEncodedForIdentity: () => {
-            throw new Error("ordinary client mutation must not use trusted serving");
+            return { ...fakeWrite(), rowId: options?.rowId ?? new Uint8Array(16) };
           },
           prepareQuery: () => ({}),
           tick: () => undefined,
@@ -201,7 +193,7 @@ it("stages authenticated client mutations through the optimistic local core path
     } as never,
     testSchema,
     new Uint8Array(16),
-    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
     1,
     true,
   );
@@ -236,7 +228,14 @@ it("preserves logical user columns that share names with native storage metadata
       openMemory: () =>
         fakeDb({
           all: () => encodeRows([]),
-          insertWithIdEncoded: () => fakeWrite(),
+          insertEncoded: (
+            _table: string,
+            _cells: Uint8Array,
+            options?: { rowId?: Uint8Array },
+          ) => ({
+            ...fakeWrite(),
+            rowId: options?.rowId ?? new Uint8Array(16),
+          }),
           prepareQuery: () => ({}),
           tick: () => undefined,
         }),
@@ -246,7 +245,7 @@ it("preserves logical user columns that share names with native storage metadata
     } as never,
     collisionSchema,
     new Uint8Array(16),
-    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
     1,
     true,
   );
@@ -277,7 +276,10 @@ it("uses identity-aware core txs only on an explicit trusted-serving host", () =
           mergeableTxForIdentity: (_openBatchId: string, author: Uint8Array) => {
             authors.push(new TextDecoder().decode(author));
             return fakeTx({
-              insertWithIdEncoded: (table: string) => staged.push(table),
+              insertEncoded: (table, _cells, options) => {
+                staged.push(table);
+                return options?.rowId ?? new Uint8Array(16);
+              },
             });
           },
           prepareQuery: () => ({}),
@@ -289,7 +291,7 @@ it("uses identity-aware core txs only on an explicit trusted-serving host", () =
     } as never,
     testSchema,
     new Uint8Array(16),
-    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
     1,
     true,
     { readAuthorizationHost: "trusted-serving" },
@@ -349,7 +351,7 @@ it("binds a trusted-serving exclusive transaction to its opening identity", () =
     } as never,
     policySchema,
     new Uint8Array(16),
-    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
     1,
     true,
     { readAuthorizationHost: "trusted-serving" },
@@ -408,7 +410,7 @@ it("uses the opening identity for trusted-serving transaction reads", async () =
     } as never,
     testSchema,
     new Uint8Array(16),
-    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
     1,
     true,
     { readAuthorizationHost: "trusted-serving" },
@@ -442,7 +444,12 @@ it("rejects a duplicate live OpenBatchId without replacing its staged transactio
           mergeableTx: () => {
             const staged: string[] = [];
             stagedTransactions.push(staged);
-            return fakeTx({ insertWithIdEncoded: (table: string) => staged.push(table) });
+            return fakeTx({
+              insertEncoded: (table, _cells, options) => {
+                staged.push(table);
+                return options?.rowId ?? new Uint8Array(16);
+              },
+            });
           },
         }),
       openBrowser: async () => {
@@ -451,7 +458,7 @@ it("rejects a duplicate live OpenBatchId without replacing its staged transactio
     } as never,
     testSchema,
     new Uint8Array(16),
-    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
     1,
     true,
   );
@@ -485,7 +492,7 @@ it("commits empty exclusive transactions, rejects empty mergeable transactions, 
     } as never,
     testSchema,
     new Uint8Array(16),
-    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
     1,
     true,
   );
@@ -515,13 +522,74 @@ it("commits empty exclusive transactions, rejects empty mergeable transactions, 
     } as never,
     testSchema,
     new Uint8Array(16),
-    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
     1,
     true,
   );
   await expect(reopened.waitForTransaction(committed, "local")).rejects.toThrow(
     `Wait for transaction failed: unknown transaction ${committed}`,
   );
+});
+
+it("binds the trusted-serving identity when an exclusive transaction begins", () => {
+  const alice = "00000000-0000-0000-0000-0000000000a1";
+  const observed: Array<{ phase: "begin" | "commit"; author?: string }> = [];
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          beginTransaction: (
+            _openBatchId: string,
+            _kind: "mergeable" | "exclusive",
+            author?: Uint8Array,
+          ) =>
+            observed.push({
+              phase: "begin",
+              author: author && new TextDecoder().decode(author),
+            }),
+          attachExclusiveTx: () => fakeTx(),
+          commitTransaction: (
+            _openBatchId: string,
+            _kind?: "mergeable" | "exclusive",
+            author?: Uint8Array,
+          ) => {
+            observed.push({ phase: "commit", author: author && new TextDecoder().decode(author) });
+            return fakeWrite();
+          },
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    TEST_RUNTIME_AUTHOR,
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+    { readAuthorizationHost: "trusted-serving" },
+  );
+
+  const openBatchId = createOpenBatchId();
+  runtime.beginTransaction(
+    "exclusive",
+    openBatchId,
+    JSON.stringify({ issuer: "https://issuer.example", user_id: alice }),
+  );
+  runtime.insert(
+    "todos",
+    { title: { type: "Text", value: "exclusive" } },
+    JSON.stringify({
+      batch_id: openBatchId,
+      session: { issuer: "https://issuer.example", user_id: alice },
+    }),
+  );
+  runtime.commitTransaction(openBatchId);
+
+  expect(observed).toEqual([
+    { phase: "begin", author: `["https://issuer.example","${alice}"]` },
+    // The native core persists the bound subject; commit must not accept a replacement.
+    { phase: "commit", author: undefined },
+  ]);
 });
 
 it("emits an onMutationError event for an unawaited rejected write", async () => {
@@ -537,7 +605,7 @@ it("emits an onMutationError event for an unawaited rejected write", async () =>
     {
       openMemory: () =>
         fakeDb({
-          insertWithIdEncoded: () => write,
+          insertEncoded: () => write,
           onMutationError: (callback: (event: MutationErrorEvent) => void) => {
             mutationErrorCallback = callback;
           },
@@ -545,7 +613,7 @@ it("emits an onMutationError event for an unawaited rejected write", async () =>
     } as never,
     testSchema,
     new Uint8Array(16),
-    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
     1,
     true,
   );
@@ -604,7 +672,6 @@ it("does not emit onMutationError when an active wait handles the rejection", as
     batchId,
     payload: new Uint8Array(),
     wait: async () => {
-      if (rejected) throw new Error("WriteRejected: AuthorizationDenied");
       await nextWriteStateChange();
       if (rejected) throw new Error("WriteRejected: AuthorizationDenied");
     },
@@ -614,13 +681,13 @@ it("does not emit onMutationError when an active wait handles the rejection", as
     {
       openMemory: () =>
         fakeDb({
-          insertWithIdEncoded: () => write,
+          insertEncoded: () => write,
           onMutationError: () => undefined,
         }),
     } as never,
     testSchema,
     new Uint8Array(16),
-    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
     1,
     true,
   );
@@ -634,7 +701,7 @@ it("does not emit onMutationError when an active wait handles the rejection", as
     "00000000-0000-0000-0000-000000000043",
   );
   const wait = runtime.waitForTransaction(batchId, "edge");
-  await vi.waitFor(() => expect(stateChangeWaiters).toHaveLength(1));
+  await Promise.resolve();
   rejected = true;
   stateChangeWaiters.splice(0).forEach((resolve) => resolve());
 
@@ -648,8 +715,8 @@ it("does not emit onMutationError when an active wait handles the rejection", as
 });
 
 it("passes caller-supplied updatedAt into staged mergeable transaction writes", () => {
-  const updatedAt = 1_704_067_200_123_000;
-  const expectedUpdatedAtMs = Math.trunc(updatedAt / 1_000);
+  const updatedAt = 1_704_067_200_123;
+  const expectedUpdatedAtMs = updatedAt;
   const staged: Array<{ op: string; updatedAtMs: number | null | undefined }> = [];
   const runtime = new NativeRuntimeAdapter(
     {
@@ -658,15 +725,18 @@ it("passes caller-supplied updatedAt into staged mergeable transaction writes", 
           all: () => encodeRows([]),
           mergeableTx: () =>
             fakeTx({
-              insertWithIdEncoded: (_table, _rowId, _cells, updatedAtMs) =>
-                staged.push({ op: "insert", updatedAtMs }),
-              updateEncoded: (_table, _rowId, _patch, updatedAtMs) =>
-                staged.push({ op: "update", updatedAtMs }),
-              upsertEncoded: (_table, _rowId, _cells, updatedAtMs) =>
-                staged.push({ op: "upsert", updatedAtMs }),
-              restoreEncoded: (_table, _rowId, _cells, updatedAtMs) =>
-                staged.push({ op: "restore", updatedAtMs }),
-              delete: (_table, _rowId, updatedAtMs) => staged.push({ op: "delete", updatedAtMs }),
+              insertEncoded: (_table, _cells, options) => {
+                staged.push({ op: "insert", updatedAtMs: options?.updatedAtMs });
+                return options?.rowId ?? new Uint8Array(16);
+              },
+              updateEncoded: (_table, _rowId, _patch, options) =>
+                staged.push({ op: "update", updatedAtMs: options?.updatedAtMs }),
+              upsertEncoded: (_table, _rowId, _cells, options) =>
+                staged.push({ op: "upsert", updatedAtMs: options?.updatedAtMs }),
+              restoreEncoded: (_table, _rowId, _cells, options) =>
+                staged.push({ op: "restore", updatedAtMs: options?.updatedAtMs }),
+              deleteEncoded: (_table, _rowId, options) =>
+                staged.push({ op: "delete", updatedAtMs: options?.updatedAtMs }),
             }),
           prepareQuery: () => ({}),
           tick: () => undefined,
@@ -677,7 +747,7 @@ it("passes caller-supplied updatedAt into staged mergeable transaction writes", 
     } as never,
     testSchema,
     new Uint8Array(16),
-    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
     1,
     true,
   );
@@ -718,7 +788,7 @@ it("rejects mixed identities within one trusted-serving mergeable transaction", 
     } as never,
     testSchema,
     new Uint8Array(16),
-    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
     1,
     true,
     { readAuthorizationHost: "trusted-serving" },
@@ -784,7 +854,7 @@ it("keeps session-scoped transaction reads on the client-local native method", a
     } as never,
     testSchema,
     new Uint8Array(16),
-    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
     1,
     true,
   );

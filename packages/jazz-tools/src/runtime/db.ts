@@ -34,6 +34,8 @@ import {
   type QueryPropagation,
   type QueryVisibility,
   resolveEffectiveQueryExecutionOptions,
+  resolveReadTier,
+  ReadTier,
   type BranchSelector,
   type BranchView,
   type OpenBatchId,
@@ -565,10 +567,22 @@ function resolveNativeSubscriptionColumns(
   rootTerminal = true,
 ): ColumnDescriptor[] {
   const wildcard = projection === undefined || projection.length === 0;
-  const columns = resolveSelectedColumns(tableName, schema, projection)
+  const selectedColumns = resolveSelectedColumns(tableName, schema, projection);
+  // IDs are implicit in query results, so an explicit `select("id")` resolves
+  // to no ordinary public columns. The native query projection represents that
+  // state with its empty/default sentinel and therefore retains the full
+  // physical record; decode that carrier fully before the row transformer
+  // applies the public ID-only projection.
+  const usesDefaultNativeProjection = wildcard || selectedColumns.length === 0;
+  const nativeColumns = usesDefaultNativeProjection
+    ? resolveSelectedColumns(tableName, schema, undefined)
+    : selectedColumns;
+  const columns = nativeColumns
     .map((columnName) => {
       const column = resolveOutputColumnDescriptor(tableName, schema, columnName);
-      return column && wildcard && rootTerminal ? { ...column, sparse: true } : column;
+      return column && usesDefaultNativeProjection && rootTerminal
+        ? { ...column, sparse: true }
+        : column;
     })
     .filter((column): column is ColumnDescriptor => column !== undefined);
 
@@ -1911,6 +1925,9 @@ export class Db {
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = requireSchemaWithTable(query._schema, outputTable);
     const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
+    const remoteIfPossibleOffline =
+      options?.tier === ReadTier.RemoteIfPossible && this.connection.isExplicitlyOffline();
+    if (remoteIfPossibleOffline) queryOptions.tier = "local";
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
     const context = this.getRuntimeOperationContext();
@@ -2010,22 +2027,62 @@ export class Db {
     };
 
     const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
+    const remoteIfPossibleOffline =
+      options?.tier === ReadTier.RemoteIfPossible && this.connection.isExplicitlyOffline();
+    const strictRemoteReadTier =
+      options?.tier === ReadTier.Remote || options?.tier === ReadTier.RemoteIfPossible;
+    if (remoteIfPossibleOffline) queryOptions.tier = "local";
     const context = this.getRuntimeOperationContext();
-    let subId: number | null = null;
+    type NativeSubscription = { id: number; generation: number };
+    let activeSubscription: NativeSubscription | null = null;
+    let nextSubscriptionGeneration = 1;
     let unsubscribed = false;
     const readyAbort = new AbortController();
-    const startNativeSubscription = () => {
-      if (unsubscribed || subId !== null) return;
-      subId = client.subscribe(
-        wasmQuery,
-        handleDelta,
-        queryOptions,
-        context?.readSession ?? context?.session ?? session,
-      );
-      if (unsubscribed) {
-        client.unsubscribe(subId);
-        subId = null;
+    const startNativeSubscription = (subscriptionOptions = queryOptions, replace = false) => {
+      if (unsubscribed || (!replace && activeSubscription !== null)) return null;
+      const generation = nextSubscriptionGeneration++;
+      const previous = activeSubscription;
+      // Select the new stream before entering the native call because a runtime
+      // may synchronously publish its opening snapshot from subscribe(). A
+      // callback retained by a retired runtime is rejected by this generation.
+      activeSubscription = { id: -1, generation };
+      const openingDeltas: Parameters<SubscriptionManager<T>["handleDelta"]>[0][] = [];
+      let installationComplete = false;
+      let id: number;
+      try {
+        id = client.subscribe(
+          wasmQuery,
+          (delta) => {
+            if (unsubscribed || activeSubscription?.generation !== generation) return;
+            if (!installationComplete) {
+              openingDeltas.push(delta);
+              return;
+            }
+            handleDelta(delta);
+          },
+          subscriptionOptions,
+          context?.readSession ?? context?.session ?? session,
+        );
+      } catch (error) {
+        activeSubscription = previous;
+        throw error;
       }
+      const subscription = { id, generation };
+      activeSubscription = subscription;
+      installationComplete = true;
+      if (unsubscribed) {
+        client.unsubscribe(id);
+        activeSubscription = null;
+        return null;
+      }
+      try {
+        for (const delta of openingDeltas) handleDelta(delta);
+      } catch (error) {
+        client.unsubscribe(id);
+        activeSubscription = previous;
+        throw error;
+      }
+      return subscription;
     };
     const traceId = this.registerActiveQuerySubscriptionTrace(
       wasmQuery,
@@ -2035,13 +2092,15 @@ export class Db {
     if (queryOptions.tier == null || queryOptions.tier === "local") {
       callback(manager.seed([]));
     }
-    if (this.connection.shouldDeferSubscriptionStart(queryOptions.tier)) {
+    if (
+      this.connection.shouldDeferSubscriptionStart(resolveReadTier(queryOptions.tier ?? "local"))
+    ) {
       // The worker can only classify the initial authority-tier snapshot as
       // settled after its own server transport is attached. Delay native
       // subscription creation until that topology is ready; the native stream
       // then owns the settled-snapshot gate and remains the sole data source.
-      void this.ensureReady(queryOptions.tier, readyAbort.signal)
-        .then(startNativeSubscription)
+      void this.ensureReady(resolveReadTier(queryOptions.tier ?? "local"), readyAbort.signal)
+        .then(() => startNativeSubscription())
         .catch((error: unknown) => {
           if (unsubscribed || readyAbort.signal.aborted || this.isShuttingDown) return;
           setTimeout(() => {
@@ -2051,15 +2110,46 @@ export class Db {
     } else {
       startNativeSubscription();
     }
+    // A remote-if-possible subscription opened during an explicit disconnect
+    // truthfully starts from local state, then replaces that native stream with
+    // the ordinary edge-gated stream after reconnect. Transport errors never
+    // take this branch.
+    if (remoteIfPossibleOffline) {
+      void this.connection
+        .waitForReconnect(readyAbort.signal)
+        .then(async () => {
+          if (unsubscribed || readyAbort.signal.aborted) return;
+          await this.ensureReady("edge", readyAbort.signal);
+          if (unsubscribed || readyAbort.signal.aborted) return;
+          const retired = activeSubscription;
+          // Keep the local stream live while the remote authority is not ready.
+          // Installing the replacement changes the accepted callback generation
+          // atomically; only then is the retired local stream detached.
+          const replacement = startNativeSubscription({ ...queryOptions, tier: "edge" }, true);
+          if (retired && replacement?.generation !== retired.generation) {
+            client.unsubscribe(retired.id);
+          }
+        })
+        .catch((error: unknown) => {
+          if (!unsubscribed && !readyAbort.signal.aborted)
+            setTimeout(() => {
+              throw error;
+            }, 0);
+        });
+    }
     if (
       this.config.serverUrl &&
+      !remoteIfPossibleOffline &&
+      !strictRemoteReadTier &&
       // `edge` and `global` promise that their first callback is the worker's
       // authority-tier snapshot.  A browser worker cannot establish that
       // snapshot until its server transport is ready, so never race it with a
       // main-thread local-storage seed (including after Db.disconnect()).
-      !this.connection.shouldDeferSubscriptionStart(queryOptions.tier) &&
+      !this.connection.shouldDeferSubscriptionStart(
+        resolveReadTier(queryOptions.tier ?? "local"),
+      ) &&
       queryOptions.propagation !== "local-only" &&
-      queryOptions.tier !== "global" &&
+      resolveReadTier(queryOptions.tier ?? "local") !== "global" &&
       !queryUsesRelationTraversal(builtQuery)
     ) {
       const seedQuery = () =>
@@ -2085,9 +2175,10 @@ export class Db {
       unsubscribed = true;
       readyAbort.abort();
       this.unregisterActiveQuerySubscriptionTrace(traceId);
-      if (subId !== null) {
-        client.unsubscribe(subId);
+      if (activeSubscription !== null && activeSubscription.id >= 0) {
+        client.unsubscribe(activeSubscription.id);
       }
+      activeSubscription = null;
       manager.clear();
     };
   }

@@ -82,11 +82,16 @@ struct ValidationBench {
 impl ValidationBench {
     fn new(config: Config) -> Self {
         let schema = schema();
-        let (core_dir, core) = open_node(node(250), schema.clone());
+        let (core_dir, mut core) = open_node(node(250), schema.clone());
         let mut client_dirs = Vec::with_capacity(config.clients);
         let mut clients = Vec::with_capacity(config.clients);
         for idx in 0..config.clients {
-            let (dir, client) = open_node(node(idx as u8 + 1), schema.clone());
+            let (dir, mut client) = open_node(node(idx as u8 + 1), schema.clone());
+            let identity = author(idx);
+            let claims =
+                BTreeMap::from([("user_id".to_owned(), Value::Uuid(identity.test_uuid()))]);
+            client.admit_test_session_claims(identity, claims.clone());
+            core.admit_test_session_claims(identity, claims);
             client_dirs.push(dir);
             clients.push(client);
         }
@@ -566,7 +571,6 @@ fn core_ingest(core: &mut NodeState<RocksDbStorage>, unit: &SyncMessage) -> Sync
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("expected commit unit");
     };
-    install_uuid_user_claim(core, tx.permission_subject.unwrap_or(tx.made_by));
     let outcome = core
         .ingest_commit_unit(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
         .expect("core ingest");
@@ -590,19 +594,6 @@ fn accepted_global_time(fate: &SyncMessage) -> GlobalTime {
         panic!("expected accepted fate");
     };
     *global_time
-}
-
-fn install_uuid_user_claim(node: &mut NodeState<RocksDbStorage>, identity: AuthorSubject) {
-    if identity != AuthorSubject::SYSTEM {
-        let raw = identity.test_uuid().to_string();
-        node.admit_test_session_claims(
-            identity,
-            BTreeMap::from([
-                ("sub".to_owned(), Value::String(raw.clone())),
-                ("user_id".to_owned(), Value::String(raw)),
-            ]),
-        );
-    }
 }
 
 fn unit_versions(unit: &SyncMessage) -> Vec<VersionRecord> {

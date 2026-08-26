@@ -138,14 +138,51 @@ fn child_cells(parent: RowUuid, label: &str, rank: i32) -> BTreeMap<String, Valu
 
 fn seed_store(dir: &tempfile::TempDir, schema: &JazzSchema, node_byte: u8) {
     let db = open_db(dir, schema, node_byte, node_byte as u64);
-    block_on(db.insert_with_id("parents", row(1), parent_cells("alpha", 1))).expect("insert alpha");
-    block_on(db.insert_with_id("parents", row(2), parent_cells("beta", 2))).expect("insert beta");
-    block_on(db.insert_with_id("children", row(101), child_cells(row(1), "a-1", 1)))
-        .expect("insert a-1");
-    block_on(db.insert_with_id("children", row(102), child_cells(row(1), "a-2", 2)))
-        .expect("insert a-2");
-    block_on(db.insert_with_id("children", row(201), child_cells(row(2), "b-1", 1)))
-        .expect("insert b-1");
+    block_on(db.insert(
+        "parents",
+        parent_cells("alpha", 1),
+        jazz::db::InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    ))
+    .expect("insert alpha");
+    block_on(db.insert(
+        "parents",
+        parent_cells("beta", 2),
+        jazz::db::InsertOptions {
+            row_id: Some(row(2)),
+            ..Default::default()
+        },
+    ))
+    .expect("insert beta");
+    block_on(db.insert(
+        "children",
+        child_cells(row(1), "a-1", 1),
+        jazz::db::InsertOptions {
+            row_id: Some(row(101)),
+            ..Default::default()
+        },
+    ))
+    .expect("insert a-1");
+    block_on(db.insert(
+        "children",
+        child_cells(row(1), "a-2", 2),
+        jazz::db::InsertOptions {
+            row_id: Some(row(102)),
+            ..Default::default()
+        },
+    ))
+    .expect("insert a-2");
+    block_on(db.insert(
+        "children",
+        child_cells(row(2), "b-1", 1),
+        jazz::db::InsertOptions {
+            row_id: Some(row(201)),
+            ..Default::default()
+        },
+    ))
+    .expect("insert b-1");
     block_on(db.close()).expect("close seeded db");
 }
 
@@ -167,8 +204,8 @@ fn canonical_row(schema: &JazzSchema, row: &CurrentRow) -> CanonicalRow {
             .iter()
             .map(|column| {
                 (
-                    column.name.clone(),
-                    row.cell(table, &column.name)
+                    column.name().to_owned(),
+                    row.cell(table, column.name())
                         .map(|value| format!("{value:?}")),
                 )
             })
@@ -397,14 +434,22 @@ fn reopen_from_rebuild_and_persisted_placeholder_are_incrementally_equivalent() 
         (
             "related row insert",
             Box::new(|db| {
-                block_on(db.insert_with_id("children", row(103), child_cells(row(1), "a-3", 3)))
-                    .expect("insert child");
+                block_on(db.insert(
+                    "children",
+                    child_cells(row(1), "a-3", 3),
+                    jazz::db::InsertOptions {
+                        row_id: Some(row(103)),
+                        ..Default::default()
+                    },
+                ))
+                .expect("insert child");
             }),
         ),
         (
             "related row delete",
             Box::new(|db| {
-                block_on(db.delete("children", row(201))).expect("delete child");
+                block_on(db.delete("children", row(201), Default::default()))
+                    .expect("delete child");
             }),
         ),
     ];

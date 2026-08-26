@@ -2,6 +2,70 @@
 
 use super::*;
 
+/// This is intentionally structural: write-policy admission supplies inline
+/// rows before there is a public result to inspect. A provenance-only policy
+/// requirement must still acquire the hidden version capability used by the
+/// policy program; callers must not have to request that capability separately.
+#[test]
+fn inline_policy_provenance_requirement_synthesizes_version_witnesses() {
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("docs").column("title", PublicColumnType::Text)),
+    );
+    let table = &schema.tables[0];
+    let requirements = SourceRequirements {
+        app_fields: FieldRequirement::None,
+        metadata: BTreeSet::from([SourceMetadataRequirement::Provenance(
+            ProvenanceField::CreatedBy,
+        )]),
+    };
+    assert!(
+        !requirements
+            .metadata
+            .contains(&SourceMetadataRequirement::VersionWitnesses),
+        "the policy request itself must remain provenance-only"
+    );
+    let candidate = current_row_from_cells(
+        table,
+        row(0x21),
+        &BTreeMap::from([("title".to_owned(), Value::String("inline".to_owned()))]),
+    )
+    .unwrap();
+
+    let (_graph, descriptor, metadata) = inline_current_graph_with_source_metadata_for_test(
+        table,
+        vec![candidate],
+        SchemaVersionAlias(7),
+        "inline-policy",
+        &requirements,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        metadata.get(&SourceMetadataRequirement::VersionWitnesses),
+        Some(SourceMetadataFields::VersionWitnesses {
+            schema_version_field,
+            tx_time_field,
+            tx_node_field,
+            branch_or_prefix_field: None,
+        }) if schema_version_field == "schema_version"
+            && tx_time_field == "tx_time"
+            && tx_node_field == "tx_node_id"
+    ));
+    for field in [
+        "table",
+        "layer",
+        "schema_version",
+        "parents",
+        "authored_columns",
+    ] {
+        assert!(
+            descriptor.field_index(field).is_some(),
+            "synthesized witness descriptor must carry {field}"
+        );
+    }
+}
+
 #[test]
 fn reverse_table_lens_projects_membership_and_content_version_sources() {
     // This is intentionally an internal assertion: the public subscription
@@ -235,7 +299,7 @@ fn historical_cut_reads_only_table_global_time_range() {
 }
 
 #[test]
-fn denormalized_current_content_witness_matches_history_payload_bytes() {
+fn denormalized_current_content_witness_projects_history_provenance_to_unix_milliseconds() {
     let (_dir, mut node) = open_node();
     let first = commit_global_cells(
         &mut node,
@@ -287,7 +351,16 @@ fn denormalized_current_content_witness_matches_history_payload_bytes() {
     let current_rows = current_deltas
         .iter()
         .filter(|(_, weight)| *weight > 0)
-        .map(|(record, _)| record.raw().to_vec())
+        .map(|(record, _)| {
+            (
+                record
+                    .get_u64(record.descriptor().field_index("created_at").unwrap())
+                    .unwrap(),
+                record
+                    .get_u64(record.descriptor().field_index("updated_at").unwrap())
+                    .unwrap(),
+            )
+        })
         .collect::<Vec<_>>();
     assert_eq!(current_rows.len(), 1);
 
@@ -311,11 +384,26 @@ fn denormalized_current_content_witness_matches_history_payload_bytes() {
     let history_rows = history_deltas
         .iter()
         .filter(|(_, weight)| *weight > 0)
-        .map(|(record, _)| record.raw().to_vec())
+        .map(|(record, _)| {
+            (
+                record
+                    .get_u64(record.descriptor().field_index("created_at").unwrap())
+                    .unwrap(),
+                record
+                    .get_u64(record.descriptor().field_index("updated_at").unwrap())
+                    .unwrap(),
+            )
+        })
         .collect::<Vec<_>>();
     assert_eq!(history_rows.len(), 1);
     assert_eq!(
-        current_rows[0], history_rows[0],
-        "denormalized current witness payload must byte-match canonical history payload"
+        current_rows[0].0,
+        TxTime(history_rows[0].0).physical_ms(),
+        "current created_at must expose the history HLC's physical milliseconds"
+    );
+    assert_eq!(
+        current_rows[0].1,
+        TxTime(history_rows[0].1).physical_ms(),
+        "current updated_at must expose the history HLC's physical milliseconds"
     );
 }

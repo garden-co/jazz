@@ -7,6 +7,8 @@
 //! storage for tests lives in [`super`], and all schema-aware behavior lives
 //! above this adapter.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -22,6 +24,7 @@ use groove::storage::{
     BoxedStorage, ColumnFamilyName, Error, KeyValue, OrderedKvStorage, OwnedWriteOperation,
     ReopenableStorage, ScanBounds, ScanDirection, ScanRequest, StorageCursor, StorageFactory,
     StorageFuture, StorageScan, Value, apply_storage_delta, compact_storage_delta_operand,
+    storage_delta_requires_full_merge,
 };
 
 trait RocksResultExt<T> {
@@ -52,6 +55,41 @@ const CLASS_CHANGES_CF: &str = "__groove_class_changes";
 const CLASS_INDICES_CF: &str = "__groove_class_indices";
 const CLASS_META_CF: &str = "__groove_class_meta";
 
+// RocksDB merge operators must return a value, even when a delta removes a
+// key. Keep that internal state in an adapter-only value codec rather than
+// reserving a logical byte string. Every visible value is encoded, so either
+// tag can represent every possible user byte sequence without ambiguity.
+const ROCKSDB_INTERNAL_CF: &str = "__groove_storage_internal_v1";
+const ROCKSDB_VALUE_FORMAT_KEY: &[u8] = b"value-format";
+const ROCKSDB_VALUE_FORMAT_V2: &[u8] = b"v2";
+const ROCKSDB_VALUE_LIVE_TAG: u8 = 0;
+const ROCKSDB_VALUE_TOMBSTONE_TAG: u8 = 1;
+
+fn encode_rocks_value(value: Option<&[u8]>) -> Vec<u8> {
+    match value {
+        Some(value) => {
+            let mut encoded = Vec::with_capacity(1 + value.len());
+            encoded.push(ROCKSDB_VALUE_LIVE_TAG);
+            encoded.extend_from_slice(value);
+            encoded
+        }
+        None => vec![ROCKSDB_VALUE_TOMBSTONE_TAG],
+    }
+}
+
+fn decode_rocks_value(value: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+    match value.split_first() {
+        Some((&ROCKSDB_VALUE_LIVE_TAG, value)) => Ok(Some(value.to_vec())),
+        Some((&ROCKSDB_VALUE_TOMBSTONE_TAG, [])) => Ok(None),
+        Some((tag, _)) => Err(Error::InvalidStorageDelta(format!(
+            "invalid RocksDB private value tag {tag}"
+        ))),
+        None => Err(Error::InvalidStorageDelta(
+            "empty RocksDB private value".to_owned(),
+        )),
+    }
+}
+
 /// RocksDB durability tier used for writes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Durability {
@@ -70,6 +108,8 @@ pub struct RocksDbStorage {
     db: DB,
     write_options: WriteOptions,
     write_flush_cadence: RefCell<Option<WriteFlushCadence>>,
+    #[cfg(test)]
+    last_wal_flush_sync: Cell<Option<bool>>,
 }
 
 /// Opens a native persistent store at the exact shell-provided path.
@@ -162,7 +202,10 @@ impl StorageCursor for RocksDbCursor<'_> {
                     self.done = true;
                     break;
                 }
-                batch.push((key.into_vec(), value.into_vec()));
+                let Some(value) = decode_rocks_value(&value)? else {
+                    continue;
+                };
+                batch.push((key.into_vec(), value));
             }
             if let Some(remaining) = &mut self.remaining {
                 *remaining -= batch.len();
@@ -218,30 +261,52 @@ impl RocksDbStorage {
         durability: Durability,
     ) -> Result<Self, Error> {
         let path = path.as_ref().to_path_buf();
+        if column_families.contains(&ROCKSDB_INTERNAL_CF) {
+            return Err(Error::InvalidStorageLayout(
+                "RocksDB internal column family name is reserved".to_owned(),
+            ));
+        }
         // Share one 256MB block cache and one 256MB write-buffer budget across
         // all column families opened by this storage instance.
         let block_cache = Cache::new_lru_cache(ROCKSDB_BLOCK_CACHE_BYTES);
         let write_buffer_manager =
             WriteBufferManager::new_write_buffer_manager(ROCKSDB_WRITE_BUFFER_MANAGER_BYTES, false);
-        let mut options = rocksdb_options(&block_cache, &write_buffer_manager);
-        options.create_if_missing(true);
-        options.create_missing_column_families(true);
-        if matches!(durability, Durability::FullSync) {
-            options.set_use_fsync(true);
-        }
-        if matches!(durability, Durability::WalNoSync) {
-            options.set_wal_bytes_per_sync(1 << 20);
-        }
-
-        let mut opened_column_families = column_families
+        let requested_column_families = column_families
             .iter()
             .map(|name| (*name).to_owned())
             .collect::<BTreeSet<_>>();
+
+        let mut write_options = WriteOptions::default();
+        write_options.disable_wal(false);
+        write_options.set_sync(matches!(durability, Durability::FullSync));
+
+        let listed_column_families = DB::list_cf(&Options::default(), &path).ok();
+        let is_new_store = listed_column_families.is_none();
+        if let Some(existing) = &listed_column_families {
+            validate_or_initialize_rocks_value_format(
+                &path,
+                existing,
+                &block_cache,
+                &write_buffer_manager,
+                &write_options,
+            )?;
+        }
+
+        let mut opened_column_families = requested_column_families;
         opened_column_families.insert("default".to_owned());
-        if path.exists()
-            && let Ok(existing) = DB::list_cf(&options, &path)
-        {
+        if let Some(existing) = listed_column_families {
             opened_column_families.extend(existing);
+        }
+        opened_column_families.insert(ROCKSDB_INTERNAL_CF.to_owned());
+
+        let mut final_options = rocksdb_options(&block_cache, &write_buffer_manager);
+        final_options.create_if_missing(true);
+        final_options.create_missing_column_families(true);
+        if matches!(durability, Durability::FullSync) {
+            final_options.set_use_fsync(true);
+        }
+        if matches!(durability, Durability::WalNoSync) {
+            final_options.set_wal_bytes_per_sync(1 << 20);
         }
         let descriptors = opened_column_families
             .iter()
@@ -253,27 +318,62 @@ impl RocksDbStorage {
                     rocksdb_options_for_cf(name, &block_cache, &write_buffer_manager),
                 )
             });
-
-        let db = DB::open_cf_descriptors(&options, &path, descriptors).storage()?;
-
-        let mut write_options = WriteOptions::default();
-        write_options.disable_wal(false);
-        write_options.set_sync(matches!(durability, Durability::FullSync));
+        let db = DB::open_cf_descriptors(&final_options, &path, descriptors).storage()?;
+        let internal_cf = db
+            .cf_handle(ROCKSDB_INTERNAL_CF)
+            .expect("RocksDB internal column family was opened");
+        match db.get_cf(internal_cf, ROCKSDB_VALUE_FORMAT_KEY).storage()? {
+            Some(marker) if marker.as_slice() == ROCKSDB_VALUE_FORMAT_V2 => {}
+            Some(_) => {
+                return Err(Error::InvalidStorageLayout(
+                    "incompatible RocksDB storage format: unsupported private value format marker"
+                        .to_owned(),
+                ));
+            }
+            None if is_new_store => db
+                .put_cf_opt(
+                    internal_cf,
+                    ROCKSDB_VALUE_FORMAT_KEY,
+                    ROCKSDB_VALUE_FORMAT_V2,
+                    &write_options,
+                )
+                .storage()?,
+            None => {
+                return Err(Error::InvalidStorageLayout(
+                    "incompatible RocksDB storage format: private value format marker is missing"
+                        .to_owned(),
+                ));
+            }
+        }
 
         Ok(Self {
             path,
             durability,
-            column_families: opened_column_families,
+            column_families: opened_column_families
+                .into_iter()
+                .filter(|name| name != ROCKSDB_INTERNAL_CF)
+                .collect(),
             db,
             write_options,
             write_flush_cadence: RefCell::new(None),
+            #[cfg(test)]
+            last_wal_flush_sync: Cell::new(None),
         })
     }
 
     fn cf_handle(&self, cf: &ColumnFamilyName) -> Result<&rocksdb::ColumnFamily, Error> {
+        if !self.column_families.contains(cf) {
+            return Err(Error::ColumnFamilyNotFound(cf.to_owned()));
+        }
         self.db
             .cf_handle(cf)
             .ok_or_else(|| Error::ColumnFamilyNotFound(cf.to_owned()))
+    }
+
+    fn flush_wal(&self, sync: bool) -> Result<(), Error> {
+        #[cfg(test)]
+        self.last_wal_flush_sync.set(Some(sync));
+        self.db.flush_wal(sync).storage()
     }
 
     /// Snapshot RocksDB's per-column-family size and background-work
@@ -457,14 +557,97 @@ impl ReopenableStorage for RocksDbStorage {
     }
 }
 
+fn validate_or_initialize_rocks_value_format(
+    path: &Path,
+    column_families: &[String],
+    block_cache: &Cache,
+    write_buffer_manager: &WriteBufferManager,
+    write_options: &WriteOptions,
+) -> Result<(), Error> {
+    let mut options = rocksdb_options(block_cache, write_buffer_manager);
+    options.create_if_missing(false);
+    options.create_missing_column_families(false);
+    let descriptors = column_families
+        .iter()
+        .map(String::as_str)
+        .filter(|name| *name != "default")
+        .map(|name| {
+            ColumnFamilyDescriptor::new(
+                name,
+                rocksdb_options_for_cf(name, block_cache, write_buffer_manager),
+            )
+        });
+    let mut db = DB::open_cf_descriptors(&options, path, descriptors).storage()?;
+
+    if column_families.iter().any(|cf| cf == ROCKSDB_INTERNAL_CF) {
+        let internal_cf = db
+            .cf_handle(ROCKSDB_INTERNAL_CF)
+            .expect("listed RocksDB column family was opened");
+        match db
+            .get_cf(internal_cf, ROCKSDB_VALUE_FORMAT_KEY)
+            .storage()?
+            .as_deref()
+        {
+            Some(ROCKSDB_VALUE_FORMAT_V2) => return Ok(()),
+            Some(_) => {
+                return Err(Error::InvalidStorageLayout(
+                    "incompatible RocksDB storage format: unsupported private value format marker"
+                        .to_owned(),
+                ));
+            }
+            None => {}
+        }
+    }
+
+    let is_empty = column_families.iter().all(|cf| {
+        let first = if cf == "default" {
+            db.iterator(IteratorMode::Start).next()
+        } else {
+            db.iterator_cf(
+                db.cf_handle(cf)
+                    .expect("listed RocksDB column family was opened"),
+                IteratorMode::Start,
+            )
+            .next()
+        };
+        first.is_none()
+    });
+    if !is_empty {
+        return Err(Error::InvalidStorageLayout(
+            "incompatible RocksDB storage format: non-empty store is missing the v2 private value format marker"
+                .to_owned(),
+        ));
+    }
+
+    if db.cf_handle(ROCKSDB_INTERNAL_CF).is_none() {
+        db.create_cf(
+            ROCKSDB_INTERNAL_CF,
+            &rocksdb_options_for_cf(ROCKSDB_INTERNAL_CF, block_cache, write_buffer_manager),
+        )
+        .storage()?;
+    }
+    db.put_cf_opt(
+        db.cf_handle(ROCKSDB_INTERNAL_CF)
+            .expect("new RocksDB internal column family has a handle"),
+        ROCKSDB_VALUE_FORMAT_KEY,
+        ROCKSDB_VALUE_FORMAT_V2,
+        write_options,
+    )
+    .storage()
+}
+
 impl OrderedKvStorage for RocksDbStorage {
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         Box::pin(async move {
-            if cf == "default" {
+            let value = if cf == "default" {
                 self.db.get(key).storage()
             } else {
                 self.db.get_cf(self.cf_handle(&cf)?, key).storage()
-            }
+            }?;
+            value
+                .map(|value| decode_rocks_value(&value))
+                .transpose()
+                .map(Option::flatten)
         })
     }
 
@@ -505,6 +688,7 @@ impl OrderedKvStorage for RocksDbStorage {
         value: Vec<u8>,
     ) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
+            let value = encode_rocks_value(Some(&value));
             if cf == "default" {
                 self.db.put_opt(key, value, &self.write_options).storage()
             } else {
@@ -527,6 +711,10 @@ impl OrderedKvStorage for RocksDbStorage {
         })
     }
 
+    fn close(&self) -> StorageFuture<'_, Result<(), Error>> {
+        self.flush_write_boundary()
+    }
+
     fn set_write_flush_cadence(&self, every: usize) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
             assert!(every > 0, "write flush cadence must be non-zero");
@@ -537,7 +725,7 @@ impl OrderedKvStorage for RocksDbStorage {
 
     fn flush_write_boundary(&self) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
-            self.db.flush_wal(true).storage()?;
+            self.flush_wal(true)?;
             if let Some(cadence) = self.write_flush_cadence.borrow_mut().as_mut() {
                 cadence.pending = 0;
             }
@@ -627,6 +815,7 @@ impl OrderedKvStorage for RocksDbStorage {
             for operation in operations {
                 match operation {
                     OwnedWriteOperation::Set { cf, key, value } => {
+                        let value = encode_rocks_value(Some(&value));
                         if cf == "default" {
                             batch.put(key, value);
                         } else {
@@ -666,7 +855,7 @@ impl OrderedKvStorage for RocksDbStorage {
             write_options.disable_wal(false);
             self.db.write_opt(&batch, &write_options).storage()?;
             if should_flush {
-                self.db.flush_wal(true).storage()?;
+                self.flush_wal(true)?;
             }
             Ok(())
         })
@@ -690,13 +879,21 @@ fn rocksdb_partial_merge_delta(
     left_operand: Option<&[u8]>,
     operands: &MergeOperands,
 ) -> Option<Vec<u8>> {
+    if left_operand
+        .is_some_and(|operand| !matches!(storage_delta_requires_full_merge(operand), Ok(false)))
+        || operands
+            .iter()
+            .any(|operand| !matches!(storage_delta_requires_full_merge(operand), Ok(false)))
+    {
+        return None;
+    }
     let mut value = match left_operand {
-        Some(operand) => Some(apply_storage_delta(None, operand).ok()?),
+        Some(operand) => apply_storage_delta(None, operand).ok()?,
         None => None,
     };
     let template = left_operand.or_else(|| operands.iter().next())?;
     for operand in operands {
-        value = Some(apply_storage_delta(value.as_deref(), operand).ok()?);
+        value = apply_storage_delta(value.as_deref(), operand).ok()?;
     }
     compact_storage_delta_operand(template, value?).ok()
 }
@@ -705,11 +902,11 @@ fn apply_merge_operands(
     initial: Option<&[u8]>,
     operands: &MergeOperands,
 ) -> Result<Vec<u8>, Error> {
-    let mut value = initial.map(<[u8]>::to_vec);
+    let mut value = initial.map(decode_rocks_value).transpose()?.flatten();
     for operand in operands {
-        value = Some(apply_storage_delta(value.as_deref(), operand)?);
+        value = apply_storage_delta(value.as_deref(), operand)?;
     }
-    value.ok_or_else(|| Error::InvalidStorageDelta("merge operator received no value".to_owned()))
+    Ok(encode_rocks_value(value.as_deref()))
 }
 
 fn advance_prefix_upper_bound(prefix: &mut [u8]) -> bool {
@@ -732,9 +929,13 @@ mod tests {
 
     use crate::{
         CLASS_AHEAD_CURRENT_CF, CLASS_CHANGES_CF, CLASS_GLOBAL_CURRENT_CF, CLASS_HISTORY_CF,
-        CLASS_INDICES_CF, CLASS_META_CF, CLASS_REGISTER_CF, RocksDbClassProfile, RocksDbStorage,
-        any_available, rocksdb_class_profile, sum_available,
+        CLASS_INDICES_CF, CLASS_META_CF, CLASS_REGISTER_CF, Cache, ColumnFamilyDescriptor, DB,
+        Options, ROCKSDB_BLOCK_CACHE_BYTES, ROCKSDB_INTERNAL_CF, ROCKSDB_VALUE_FORMAT_KEY,
+        ROCKSDB_VALUE_FORMAT_V2, ROCKSDB_WRITE_BUFFER_MANAGER_BYTES, RocksDbClassProfile,
+        RocksDbStorage, WriteBufferManager, any_available, rocksdb_class_profile, rocksdb_options,
+        rocksdb_options_for_cf, sum_available,
     };
+    use groove::storage::{OwnedWriteOperation, StorageDelta, storage_delta_requires_full_merge};
 
     fn ready<F: Future>(future: F) -> F::Output {
         let mut future = pin!(future);
@@ -783,6 +984,314 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
         assert!(storage.write_flush_cadence.borrow().is_none());
+    }
+
+    #[test]
+    fn close_flushes_a_partial_write_cadence() {
+        use groove::storage::{OrderedKvStorage, OwnedWriteOperation};
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        ready(storage.set_write_flush_cadence(8)).unwrap();
+        ready(storage.write_many(vec![OwnedWriteOperation::Set {
+            cf: "records".to_owned(),
+            key: b"pending".to_vec(),
+            value: b"value".to_vec(),
+        }]))
+        .unwrap();
+        assert_eq!(
+            storage
+                .write_flush_cadence
+                .borrow()
+                .as_ref()
+                .map(|cadence| cadence.pending),
+            Some(1)
+        );
+
+        ready(storage.close()).unwrap();
+
+        assert_eq!(
+            storage.last_wal_flush_sync.get(),
+            Some(true),
+            "close must synchronously flush the RocksDB WAL"
+        );
+
+        assert_eq!(
+            storage
+                .write_flush_cadence
+                .borrow()
+                .as_ref()
+                .map(|cadence| cadence.pending),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn conditional_insert_merge_keeps_the_first_durable_value() {
+        use groove::storage::OrderedKvStorage;
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path(), &["chunks"]).unwrap();
+        let key = b"same-opaque-locator".to_vec();
+        ready(storage.write_many(vec![OwnedWriteOperation::Delta {
+            cf: "chunks".to_owned(),
+            key: key.clone(),
+            delta: StorageDelta::set_if_absent(b"first authenticated bytes".to_vec()),
+        }]))
+        .unwrap();
+        ready(storage.write_many(vec![OwnedWriteOperation::Delta {
+            cf: "chunks".to_owned(),
+            key: key.clone(),
+            delta: StorageDelta::set_if_absent(b"second conflicting bytes".to_vec()),
+        }]))
+        .unwrap();
+
+        assert_eq!(
+            ready(storage.get("chunks".to_owned(), key)).unwrap(),
+            Some(b"first authenticated bytes".to_vec())
+        );
+    }
+
+    #[test]
+    fn conditional_operands_defer_to_full_merges() {
+        assert!(
+            storage_delta_requires_full_merge(
+                &StorageDelta::set_if_absent(b"first authenticated bytes".to_vec())
+                    .encode()
+                    .unwrap()
+            )
+            .unwrap()
+        );
+        assert!(
+            storage_delta_requires_full_merge(
+                &StorageDelta::delete_if_value_matches(b"first authenticated bytes".to_vec())
+                    .encode()
+                    .unwrap()
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn conditional_delete_merge_removes_only_the_matching_durable_value() {
+        use groove::storage::OrderedKvStorage;
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path(), &["chunks"]).unwrap();
+        let key = b"same-opaque-locator".to_vec();
+        let old = b"old authenticated bytes".to_vec();
+        let new = b"new authenticated bytes".to_vec();
+        ready(storage.set("chunks".to_owned(), key.clone(), old.clone())).unwrap();
+
+        ready(storage.write_many(vec![OwnedWriteOperation::Delta {
+            cf: "chunks".to_owned(),
+            key: key.clone(),
+            delta: StorageDelta::delete_if_value_matches(b"different bytes".to_vec()),
+        }]))
+        .unwrap();
+        assert_eq!(
+            ready(storage.get("chunks".to_owned(), key.clone())).unwrap(),
+            Some(old.clone())
+        );
+
+        ready(storage.write_many(vec![OwnedWriteOperation::Delta {
+            cf: "chunks".to_owned(),
+            key: key.clone(),
+            delta: StorageDelta::delete_if_value_matches(old),
+        }]))
+        .unwrap();
+        assert_eq!(
+            ready(storage.get("chunks".to_owned(), key.clone())).unwrap(),
+            None
+        );
+
+        ready(storage.write_many(vec![OwnedWriteOperation::Delta {
+            cf: "chunks".to_owned(),
+            key: key.clone(),
+            delta: StorageDelta::set_if_absent(new.clone()),
+        }]))
+        .unwrap();
+        assert_eq!(
+            ready(storage.get("chunks".to_owned(), key)).unwrap(),
+            Some(new)
+        );
+    }
+
+    #[test]
+    fn former_delta_tombstone_bytes_are_an_ordinary_value_in_get_and_scan() {
+        use groove::storage::{OrderedKvStorage, ScanRequest, collect_scan};
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        let key = b"former-tombstone".to_vec();
+        let value = b"\0groove-storage-delta-tombstone-v1".to_vec();
+
+        ready(storage.set("records".to_owned(), key.clone(), value.clone())).unwrap();
+        assert_eq!(
+            ready(storage.get("records".to_owned(), key.clone())).unwrap(),
+            Some(value.clone())
+        );
+        assert_eq!(
+            ready(async {
+                collect_scan(
+                    storage
+                        .scan(ScanRequest::prefix("records".to_owned(), Vec::new()))
+                        .await
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }),
+            vec![(key.clone(), value.clone())]
+        );
+
+        ready(storage.write_many(vec![OwnedWriteOperation::Delta {
+            cf: "records".to_owned(),
+            key: key.clone(),
+            delta: StorageDelta::delete_if_value_matches(value.clone()),
+        }]))
+        .unwrap();
+        assert_eq!(ready(storage.get("records".to_owned(), key)).unwrap(), None);
+        assert!(
+            ready(async {
+                collect_scan(
+                    storage
+                        .scan(ScanRequest::prefix("records".to_owned(), Vec::new()))
+                        .await
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            })
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn unmarked_nonempty_store_is_rejected_repeatedly_without_mutation() {
+        const FORMER_SENTINEL: &[u8] = b"\0groove-storage-delta-tombstone-v1";
+        let dir = tempfile::tempdir().unwrap();
+        let block_cache = Cache::new_lru_cache(ROCKSDB_BLOCK_CACHE_BYTES);
+        let write_buffer_manager =
+            WriteBufferManager::new_write_buffer_manager(ROCKSDB_WRITE_BUFFER_MANAGER_BYTES, false);
+        let mut options = rocksdb_options(&block_cache, &write_buffer_manager);
+        options.create_if_missing(true);
+        options.create_missing_column_families(true);
+        let db = DB::open_cf_descriptors(
+            &options,
+            dir.path(),
+            [ColumnFamilyDescriptor::new(
+                "records",
+                rocksdb_options_for_cf("records", &block_cache, &write_buffer_manager),
+            )],
+        )
+        .unwrap();
+        let records = db.cf_handle("records").unwrap();
+        db.put_cf(records, b"ordinary", FORMER_SENTINEL).unwrap();
+        drop(db);
+
+        for _ in 0..2 {
+            let error = match RocksDbStorage::open(dir.path(), &["records", "must-not-be-created"])
+            {
+                Ok(_) => panic!("an unmarked non-empty store must fail closed"),
+                Err(error) => error,
+            };
+            assert!(matches!(
+                error,
+                groove::storage::Error::InvalidStorageLayout(message)
+                    if message.contains("incompatible RocksDB storage format")
+                        && message.contains("non-empty")
+            ));
+
+            let cfs = DB::list_cf(&Options::default(), dir.path()).unwrap();
+            assert!(!cfs.iter().any(|cf| cf == ROCKSDB_INTERNAL_CF));
+            assert!(!cfs.iter().any(|cf| cf == "must-not-be-created"));
+            let db = DB::open_cf_descriptors(
+                &options,
+                dir.path(),
+                [ColumnFamilyDescriptor::new(
+                    "records",
+                    rocksdb_options_for_cf("records", &block_cache, &write_buffer_manager),
+                )],
+            )
+            .unwrap();
+            assert_eq!(
+                db.get_cf(db.cf_handle("records").unwrap(), b"ordinary")
+                    .unwrap()
+                    .as_deref(),
+                Some(FORMER_SENTINEL)
+            );
+            drop(db);
+        }
+    }
+
+    #[test]
+    fn empty_unmarked_store_initializes_v2_and_reopens() {
+        use groove::storage::OrderedKvStorage;
+
+        let dir = tempfile::tempdir().unwrap();
+        let block_cache = Cache::new_lru_cache(ROCKSDB_BLOCK_CACHE_BYTES);
+        let write_buffer_manager =
+            WriteBufferManager::new_write_buffer_manager(ROCKSDB_WRITE_BUFFER_MANAGER_BYTES, false);
+        let mut options = rocksdb_options(&block_cache, &write_buffer_manager);
+        options.create_if_missing(true);
+        options.create_missing_column_families(true);
+        let db = DB::open_cf_descriptors(
+            &options,
+            dir.path(),
+            [ColumnFamilyDescriptor::new(
+                "records",
+                rocksdb_options_for_cf("records", &block_cache, &write_buffer_manager),
+            )],
+        )
+        .unwrap();
+        drop(db);
+
+        let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        ready(storage.set("records".to_owned(), b"empty".to_vec(), Vec::new())).unwrap();
+        drop(storage);
+        let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        assert_eq!(
+            ready(storage.get("records".to_owned(), b"empty".to_vec())).unwrap(),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            storage
+                .db
+                .get_cf(
+                    storage.db.cf_handle(ROCKSDB_INTERNAL_CF).unwrap(),
+                    ROCKSDB_VALUE_FORMAT_KEY,
+                )
+                .unwrap()
+                .as_deref(),
+            Some(ROCKSDB_VALUE_FORMAT_V2)
+        );
+    }
+
+    #[test]
+    fn pending_conditional_merge_survives_v2_reopen() {
+        use groove::storage::OrderedKvStorage;
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        let operand = StorageDelta::set_if_absent(b"installed".to_vec())
+            .encode()
+            .unwrap();
+        storage
+            .db
+            .merge_cf(
+                storage.db.cf_handle("records").unwrap(),
+                b"pending",
+                operand,
+            )
+            .unwrap();
+        drop(storage);
+
+        let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        assert_eq!(
+            ready(storage.get("records".to_owned(), b"pending".to_vec())).unwrap(),
+            Some(b"installed".to_vec())
+        );
     }
 
     #[test]

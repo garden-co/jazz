@@ -754,11 +754,11 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
     client
         .apply_sync_message_settled(update.clone())
         .expect("apply maintained v2 flat join on client");
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         result_member_adds,
         ..
-    } = update
+    }) = update
     else {
         panic!("flat join rehydrate must emit a view update");
     };
@@ -814,7 +814,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
         )
         .expect("publish flat tuple replacement")
         .expect("expected view update");
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         version_carriers,
         version_bundles,
@@ -823,7 +823,7 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
         program_fact_adds,
         program_fact_removes,
         ..
-    } = &replacement
+    }) = &replacement
     else {
         panic!("flat tuple replacement must emit a view update");
     };

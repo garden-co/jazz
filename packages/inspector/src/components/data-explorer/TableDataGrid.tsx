@@ -24,7 +24,7 @@ import {
   type RefObject,
   type SetStateAction,
 } from "react";
-import { Link, Navigate, useParams, useSearchParams } from "react-router";
+import { Link, Navigate, useOutletContext, useParams, useSearchParams } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { GenericQueryBuilder } from "../../utility/generic-query-builder.js";
 import { useLocalStorageState } from "../../utility/use-local-storage-state.js";
@@ -133,6 +133,46 @@ type QueuedRowEdits = Record<string, QueuedCellEdit>;
 interface StagedInsert {
   id: string;
   edits: QueuedRowEdits;
+}
+
+export interface TableMutationState {
+  queuedEdits: Record<string, QueuedRowEdits>;
+  stagedInserts: StagedInsert[];
+  isQueuedSavePending: boolean;
+  queuedSaveError: string | null;
+  queuedDeletes: Set<string>;
+  pendingScrollToRowId: string | null;
+  nextEntryRevision: number;
+  queuedEditRevisions: Record<string, Record<string, number>>;
+  stagedInsertRevisions: Record<string, number>;
+  queuedDeleteRevisions: Record<string, number>;
+}
+
+function createTableMutationState(): TableMutationState {
+  return {
+    queuedEdits: {},
+    stagedInserts: [],
+    isQueuedSavePending: false,
+    queuedSaveError: null,
+    queuedDeletes: new Set(),
+    pendingScrollToRowId: null,
+    nextEntryRevision: 0,
+    queuedEditRevisions: {},
+    stagedInsertRevisions: {},
+    queuedDeleteRevisions: {},
+  };
+}
+
+function queuedCellEditsEqual(a: QueuedCellEdit | undefined, b: QueuedCellEdit | undefined) {
+  return a?.text === b?.text && a?.isNull === b?.isNull;
+}
+
+function queuedRowEditsEqual(a: QueuedRowEdits, b: QueuedRowEdits) {
+  const aColumns = Object.keys(a);
+  return (
+    aColumns.length === Object.keys(b).length &&
+    aColumns.every((key) => queuedCellEditsEqual(a[key], b[key]))
+  );
 }
 
 interface EditableGridRow extends AnimatedGridRow {
@@ -715,13 +755,121 @@ export function TableDataGrid() {
       { replace: true },
     );
   };
-  const [queuedEdits, setQueuedEdits] = useState<Record<string, QueuedRowEdits>>({});
-  const [stagedInserts, setStagedInserts] = useState<StagedInsert[]>([]);
+  const explorerContext = useOutletContext<{
+    mutationStateByTable: Record<string, TableMutationState>;
+    setMutationStateByTable: Dispatch<SetStateAction<Record<string, TableMutationState>>>;
+    beginSave: (table: string) => symbol | null;
+    finishSave: (table: string, token: symbol) => boolean;
+  } | null>();
+  const [fallbackMutationStateByTable, setFallbackMutationStateByTable] = useState<
+    Record<string, TableMutationState>
+  >({});
+  const fallbackSaveTokens = useRef(new Map<string, symbol>());
+  const mutationStateByTable =
+    explorerContext?.mutationStateByTable ?? fallbackMutationStateByTable;
+  const setMutationStateByTable =
+    explorerContext?.setMutationStateByTable ?? setFallbackMutationStateByTable;
+  const beginSave =
+    explorerContext?.beginSave ??
+    ((targetTable: string) => {
+      if (fallbackSaveTokens.current.has(targetTable)) return null;
+      const token = Symbol(targetTable);
+      fallbackSaveTokens.current.set(targetTable, token);
+      return token;
+    });
+  const finishSave =
+    explorerContext?.finishSave ??
+    ((targetTable: string, token: symbol) => {
+      if (fallbackSaveTokens.current.get(targetTable) !== token) return false;
+      fallbackSaveTokens.current.delete(targetTable);
+      return true;
+    });
   const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(new Set());
-  const [isQueuedSavePending, setIsQueuedSavePending] = useState(false);
-  const [queuedSaveError, setQueuedSaveError] = useState<string | null>(null);
-  const [queuedDeletes, setQueuedDeletes] = useState<Set<string>>(new Set());
-  const [pendingScrollToRowId, setPendingScrollToRowId] = useState<string | null>(null);
+  const mutationState = mutationStateByTable[table] ?? createTableMutationState();
+  const updateCurrentTableMutationState = (update: SetStateAction<TableMutationState>) => {
+    setMutationStateByTable((current) => {
+      const previous = current[table] ?? createTableMutationState();
+      const next = typeof update === "function" ? update(previous) : update;
+      return { ...current, [table]: next };
+    });
+  };
+  const queuedEdits = mutationState.queuedEdits;
+  const stagedInserts = mutationState.stagedInserts;
+  const isQueuedSavePending = mutationState.isQueuedSavePending;
+  const queuedSaveError = mutationState.queuedSaveError;
+  const queuedDeletes = mutationState.queuedDeletes;
+  const pendingScrollToRowId = mutationState.pendingScrollToRowId;
+  const setQueuedEdits: Dispatch<SetStateAction<Record<string, QueuedRowEdits>>> = (update) =>
+    updateCurrentTableMutationState((current) => {
+      const nextEdits = typeof update === "function" ? update(current.queuedEdits) : update;
+      let nextRevision = current.nextEntryRevision;
+      const nextRevisions: Record<string, Record<string, number>> = {};
+      for (const [rowId, rowEdits] of Object.entries(nextEdits)) {
+        const rowRevisions: Record<string, number> = {};
+        for (const [columnId, value] of Object.entries(rowEdits)) {
+          const unchanged = queuedCellEditsEqual(value, current.queuedEdits[rowId]?.[columnId]);
+          rowRevisions[columnId] = unchanged
+            ? (current.queuedEditRevisions[rowId]?.[columnId] ?? ++nextRevision)
+            : ++nextRevision;
+        }
+        if (Object.keys(rowRevisions).length > 0) nextRevisions[rowId] = rowRevisions;
+      }
+      return {
+        ...current,
+        queuedEdits: nextEdits,
+        queuedEditRevisions: nextRevisions,
+        nextEntryRevision: nextRevision,
+      };
+    });
+  const setStagedInserts: Dispatch<SetStateAction<StagedInsert[]>> = (update) =>
+    updateCurrentTableMutationState((current) => {
+      const nextInserts = typeof update === "function" ? update(current.stagedInserts) : update;
+      const currentById = new Map(current.stagedInserts.map((insert) => [insert.id, insert]));
+      let nextRevision = current.nextEntryRevision;
+      const nextRevisions: Record<string, number> = {};
+      for (const insert of nextInserts) {
+        nextRevisions[insert.id] = queuedRowEditsEqual(
+          insert.edits,
+          currentById.get(insert.id)?.edits ?? {},
+        )
+          ? (current.stagedInsertRevisions[insert.id] ?? ++nextRevision)
+          : ++nextRevision;
+      }
+      return {
+        ...current,
+        stagedInserts: nextInserts,
+        stagedInsertRevisions: nextRevisions,
+        nextEntryRevision: nextRevision,
+      };
+    });
+  const setQueuedSaveError: Dispatch<SetStateAction<string | null>> = (update) =>
+    updateCurrentTableMutationState((current) => ({
+      ...current,
+      queuedSaveError: typeof update === "function" ? update(current.queuedSaveError) : update,
+    }));
+  const setQueuedDeletes: Dispatch<SetStateAction<Set<string>>> = (update) =>
+    updateCurrentTableMutationState((current) => {
+      const nextDeletes = typeof update === "function" ? update(current.queuedDeletes) : update;
+      let nextRevision = current.nextEntryRevision;
+      const nextRevisions: Record<string, number> = {};
+      for (const rowId of nextDeletes) {
+        nextRevisions[rowId] = current.queuedDeletes.has(rowId)
+          ? (current.queuedDeleteRevisions[rowId] ?? ++nextRevision)
+          : ++nextRevision;
+      }
+      return {
+        ...current,
+        queuedDeletes: nextDeletes,
+        queuedDeleteRevisions: nextRevisions,
+        nextEntryRevision: nextRevision,
+      };
+    });
+  const setPendingScrollToRowId: Dispatch<SetStateAction<string | null>> = (update) =>
+    updateCurrentTableMutationState((current) => ({
+      ...current,
+      pendingScrollToRowId:
+        typeof update === "function" ? update(current.pendingScrollToRowId) : update,
+    }));
   const [isColumnCustomizationOpen, setIsColumnCustomizationOpen] = useState(false);
   const columnPreferencesStorageKey = `${COLUMN_PREFERENCES_STORAGE_KEY_PREFIX}.${table}`;
   const [storedColumnPreferences, setStoredColumnPreferences] = useLocalStorageState<
@@ -927,9 +1075,24 @@ export function TableDataGrid() {
       return;
     }
 
+    const mutationTable = table;
+    const saveToken = beginSave(mutationTable);
+    if (!saveToken) return;
+    const submittedQueuedEdits = queuedEdits;
+    const submittedStagedInserts = stagedInserts;
+    const submittedQueuedDeletes = queuedDeletes;
+    const submittedQueuedEditRevisions = mutationState.queuedEditRevisions;
+    const submittedStagedInsertRevisions = mutationState.stagedInsertRevisions;
+    const submittedQueuedDeleteRevisions = mutationState.queuedDeleteRevisions;
     try {
-      setIsQueuedSavePending(true);
-      setQueuedSaveError(null);
+      setMutationStateByTable((current) => ({
+        ...current,
+        [mutationTable]: {
+          ...(current[mutationTable] ?? createTableMutationState()),
+          isQueuedSavePending: true,
+          queuedSaveError: null,
+        },
+      }));
 
       const rowUpdates = Object.entries(queuedEdits)
         .filter(([rowId]) => !queuedDeletes.has(rowId))
@@ -964,17 +1127,74 @@ export function TableDataGrid() {
         }),
       ]);
 
-      setQueuedEdits({});
-      setStagedInserts([]);
-      setQueuedDeletes(new Set());
+      setMutationStateByTable((current) => ({
+        ...current,
+        [mutationTable]: {
+          ...(() => {
+            const previous = current[mutationTable] ?? createTableMutationState();
+            const nextQueuedEdits: Record<string, QueuedRowEdits> = {};
+            for (const [rowId, rowEdits] of Object.entries(previous.queuedEdits)) {
+              const submittedRowEdits = submittedQueuedEdits[rowId];
+              const remainingRowEdits = { ...rowEdits };
+              for (const [columnId, queuedEdit] of Object.entries(rowEdits)) {
+                if (
+                  queuedCellEditsEqual(queuedEdit, submittedRowEdits?.[columnId]) &&
+                  previous.queuedEditRevisions[rowId]?.[columnId] ===
+                    submittedQueuedEditRevisions[rowId]?.[columnId]
+                ) {
+                  delete remainingRowEdits[columnId];
+                }
+              }
+              if (Object.keys(remainingRowEdits).length > 0)
+                nextQueuedEdits[rowId] = remainingRowEdits;
+            }
+            const submittedInsertById = new Map(
+              submittedStagedInserts.map((insert) => [insert.id, insert]),
+            );
+            const nextStagedInserts = previous.stagedInserts.filter((insert) => {
+              const submitted = submittedInsertById.get(insert.id);
+              return (
+                !submitted ||
+                !queuedRowEditsEqual(insert.edits, submitted.edits) ||
+                previous.stagedInsertRevisions[insert.id] !==
+                  submittedStagedInsertRevisions[insert.id]
+              );
+            });
+            const nextQueuedDeletes = new Set(previous.queuedDeletes);
+            for (const rowId of submittedQueuedDeletes) {
+              if (previous.queuedDeleteRevisions[rowId] === submittedQueuedDeleteRevisions[rowId]) {
+                nextQueuedDeletes.delete(rowId);
+              }
+            }
+            return {
+              ...previous,
+              queuedEdits: nextQueuedEdits,
+              stagedInserts: nextStagedInserts,
+              queuedDeletes: nextQueuedDeletes,
+            };
+          })(),
+        },
+      }));
     } catch (error) {
-      setQueuedSaveError(
-        error instanceof Error || (typeof Error.isError === "function" && Error.isError(error))
-          ? error.message
-          : "Could not persist queued cell edits.",
-      );
+      setMutationStateByTable((current) => ({
+        ...current,
+        [mutationTable]: {
+          ...(current[mutationTable] ?? createTableMutationState()),
+          queuedSaveError:
+            error instanceof Error || (typeof Error.isError === "function" && Error.isError(error))
+              ? error.message
+              : "Could not persist queued cell edits.",
+        },
+      }));
     } finally {
-      setIsQueuedSavePending(false);
+      setMutationStateByTable((current) => ({
+        ...current,
+        [mutationTable]: {
+          ...(current[mutationTable] ?? createTableMutationState()),
+          isQueuedSavePending: false,
+        },
+      }));
+      finishSave(mutationTable, saveToken);
     }
   };
 

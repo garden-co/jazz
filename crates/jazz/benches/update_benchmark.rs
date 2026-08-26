@@ -108,6 +108,7 @@ fn seed_fixture(db: &CoreDb, count: usize) -> Fixture {
                 .insert(
                     "folders",
                     BTreeMap::from([("name".to_owned(), Value::String(format!("Folder {index}")))]),
+                    Default::default(),
                 )
                 .expect("seed folder");
             block_on(write.wait(DurabilityTier::Local)).expect("folder seed should be local");
@@ -119,7 +120,11 @@ fn seed_fixture(db: &CoreDb, count: usize) -> Fixture {
         .map(|index| {
             let folder = owned_folders[index % owned_folders.len()];
             let write = db
-                .insert("documents", document_cells(index, folder))
+                .insert(
+                    "documents",
+                    document_cells(index, folder),
+                    Default::default(),
+                )
                 .expect("seed owned document");
             block_on(write.wait(DurabilityTier::Local)).expect("document seed should be local");
             write.row_uuid()
@@ -159,6 +164,7 @@ fn update_own_documents(c: &mut Criterion) {
                             format!("Updated Title {update_counter}"),
                             "Updated content",
                         ),
+                        Default::default(),
                     )
                     .expect("update own document should succeed");
                 block_on(write.wait(DurabilityTier::Local)).expect("update should be local");
@@ -206,6 +212,7 @@ fn update_batch(c: &mut Criterion) {
                                     format!("Batch {batch_counter} Update {i}"),
                                     "Batch updated content",
                                 ),
+                                Default::default(),
                             )
                             .expect("batch update should succeed");
                         block_on(write.wait(DurabilityTier::Local))

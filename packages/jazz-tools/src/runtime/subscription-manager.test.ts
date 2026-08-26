@@ -101,7 +101,7 @@ function nativeRowData(name: string, count: number): Uint8Array {
   const text = new TextEncoder().encode(name);
   const data = new Uint8Array(5 + text.byteLength);
   new DataView(data.buffer).setInt32(0, count, true);
-  data[4] = 0;
+  data[4] = 2;
   data.set(text, 5);
   return data;
 }
@@ -122,7 +122,7 @@ function terminalRootWithEmptyChildren(id: string, title: string): Uint8Array {
   // The root uses CurrentRow's nullable carrier. The child collection stays a
   // terminal record when it is populated by a descendant operation.
   pushU32(bytes, 22 + text.byteLength);
-  bytes.push(1, 0, ...text, 1, 0, 0, 0, 0);
+  bytes.push(1, 2, ...text, 1, 0, 0, 0, 0);
   return Uint8Array.from(bytes);
 }
 
@@ -130,7 +130,7 @@ function nativeRootWithEmptyChildren(title: string): Uint8Array {
   const text = new TextEncoder().encode(title);
   const bytes: number[] = [];
   pushU32(bytes, 5 + text.byteLength);
-  bytes.push(0, ...text);
+  bytes.push(2, ...text);
   pushU32(bytes, 0);
   return Uint8Array.from(bytes);
 }
@@ -142,7 +142,7 @@ function currentRowColumns(columns: readonly ColumnDescriptor[]): readonly Colum
 function terminalDescriptor(columns: readonly ColumnDescriptor[]): number[] {
   const writer = new PostcardWriter();
   writeDescriptor(writer, [
-    { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },
+    { name: "__jazz_terminal_row_key", valueType: { tag: 11 } },
     ...columns.map((column) => ({
       name: column.name,
       valueType: storageColumnValueType(column),
@@ -154,7 +154,7 @@ function terminalDescriptor(columns: readonly ColumnDescriptor[]): number[] {
 function currentRowTerminalDescriptor(columns: readonly ColumnDescriptor[]): number[] {
   const writer = new PostcardWriter();
   writeDescriptor(writer, [
-    { name: "row_uuid", valueType: { tag: 10 } },
+    { name: "row_uuid", valueType: { tag: 11 } },
     ...currentRowColumns(columns).map((column) => ({
       name: `user_${column.name}`,
       valueType: storageColumnValueType(column),
@@ -167,7 +167,7 @@ function collectorTerminalDescriptor(columns: readonly ColumnDescriptor[]): numb
   const logicalColumns = logicalStorageColumns(columns);
   const writer = new PostcardWriter();
   writeDescriptor(writer, [
-    { name: "row_uuid", valueType: { tag: 10 } },
+    { name: "row_uuid", valueType: { tag: 11 } },
     ...logicalColumns.map((column) => ({
       name: `user_${column.name}`,
       valueType: storageColumnValueType(column),
@@ -177,7 +177,7 @@ function collectorTerminalDescriptor(columns: readonly ColumnDescriptor[]): numb
 }
 
 function terminalTextChild(id: string, name: string): Uint8Array {
-  return Uint8Array.from([...uuidBytes(id), 0, ...new TextEncoder().encode(name)]);
+  return Uint8Array.from([...uuidBytes(id), 2, ...new TextEncoder().encode(name)]);
 }
 
 function nativeAddedRecord(id: string, index: number, name: string, count: number): Uint8Array {
@@ -1025,7 +1025,7 @@ describe("SubscriptionManager", () => {
     ]);
     const unknownTagWriter = new PostcardWriter();
     writeDescriptor(unknownTagWriter, [
-      { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },
+      { name: "__jazz_terminal_row_key", valueType: { tag: 11 } },
       { name: "name", valueType: { tag: 99 } },
       { name: "count", valueType: { tag: 4 } },
     ]);
@@ -1203,7 +1203,7 @@ describe("SubscriptionManager", () => {
     ];
     const descriptorWriter = new PostcardWriter();
     writeDescriptor(descriptorWriter, [
-      { name: "row_uuid", valueType: { tag: 10 } },
+      { name: "row_uuid", valueType: { tag: 11 } },
       { name: "$createdBy", valueType: { tag: 8 } },
       { name: "$createdAt", valueType: { tag: 3 } },
     ]);
@@ -1214,7 +1214,10 @@ describe("SubscriptionManager", () => {
           { name: "$createdBy", valueType: { tag: 8 } },
           { name: "$createdAt", valueType: { tag: 3 } },
         ],
-        [new TextEncoder().encode(author), Uint8Array.of(42, 0, 0, 0, 0, 0, 0, 0)],
+        [
+          Uint8Array.from([2, ...new TextEncoder().encode(author)]),
+          Uint8Array.of(42, 0, 0, 0, 0, 0, 0, 0),
+        ],
       ),
     ]);
     const result = new SubscriptionManager<WasmRow>().handleDelta(
@@ -1371,10 +1374,10 @@ describe("SubscriptionManager", () => {
     const normalized = { ...columns[0]!, sparse: undefined };
     const writer = new PostcardWriter();
     writeDescriptor(writer, [
-      { name: "row_uuid", valueType: { tag: 10 } },
+      { name: "row_uuid", valueType: { tag: 11 } },
       {
         name: "user_profile",
-        valueType: { tag: 14, inner: storageColumnValueType(normalized) },
+        valueType: { tag: 15, inner: storageColumnValueType(normalized) },
       },
     ]);
     expect(() =>

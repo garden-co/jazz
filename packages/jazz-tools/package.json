@@ -121,13 +121,14 @@
   },
   "scripts": {
     "build": "pnpm build:runtime && pnpm build:test && pnpm build:svelte && pnpm build:solid",
-    "build:runtime": "node scripts/clean-dist.mjs && tsc && node scripts/bundle-broker-worker.mjs",
+    "build:runtime": "node scripts/clean-dist.mjs && tsc && node scripts/bundle-broker-worker.mjs && node scripts/verify-runtime-sourcemaps.mjs",
     "build:svelte": "svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json && node scripts/cleanup-generated-src-types.mjs",
     "build:solid": "vite build --config vite.config.solid.ts --mode solid-dom && vite build --config vite.config.solid.ts --mode solid-ssr && tsc --project tsconfig.solid.json --emitDeclarationOnly",
     "check": "tsc --noEmit",
     "test": "pnpm test:browser:contract || status=1; pnpm test:node || status=1; pnpm test:react || status=1; pnpm test:svelte || status=1; pnpm test:solid || status=1; pnpm typecheck:react-native || status=1; exit ${status:-0}",
     "test:node": "vitest run --config vitest.config.ts",
-    "test:topology-fixture": "vitest run --config vitest.config.ts tests/topology/harness.test.ts",
+    "test:topology-fixture": "pnpm typecheck:topology && vitest run --config vitest.config.ts tests/topology/harness.test.ts",
+    "typecheck:topology": "tsc --project tests/topology/tsconfig.json",
     "test:react": "vitest run --config vitest.config.react.ts",
     "test:solid": "vitest run --config vitest.config.solid.ts",
     "test:svelte": "vitest run --config vitest.config.svelte.ts",
@@ -163,7 +164,7 @@
     "web-streams-polyfill": "^4.2.0"
   },
   "devDependencies": {
-    "@better-auth/test-utils": "^1.5.5",
+    "@better-auth/test-utils": "^1.7.1",
     "@sveltejs/package": "^2.0.0",
     "@sveltejs/vite-plugin-svelte": "catalog:default",
     "@testing-library/react": "^16.3.2",
@@ -174,7 +175,7 @@
     "@vitest/browser": "catalog:default",
     "@vitest/browser-playwright": "catalog:default",
     "@vue/server-renderer": "^3.5.22",
-    "better-auth": "1.6.24",
+    "better-auth": "1.7.1",
     "fake-indexeddb": "^5.0.2",
     "jsdom": "^26.0.0",
     "react-dom": "^19.0.0",
@@ -191,7 +192,7 @@
     "zod": "^4.3.6"
   },
   "peerDependencies": {
-    "better-auth": "1.6.24",
+    "better-auth": "1.7.1",
     "expo": ">=54",
     "expo-crypto": ">=14.0.0",
     "expo-secure-store": ">=14.0.0",

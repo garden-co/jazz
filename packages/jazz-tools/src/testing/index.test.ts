@@ -137,27 +137,30 @@ describe("startLocalJazzServer", () => {
     }
   }, 15_000);
 
-  it("allocates a fresh port when no explicit port is provided", async () => {
+  it("atomically assigns distinct ports to concurrent automatic servers", async () => {
     const firstRoot = await createTempRoot("jazz-tools-testing-auto-port-a-");
     const secondRoot = await createTempRoot("jazz-tools-testing-auto-port-b-");
 
-    const firstServer = await startTrackedLocalJazzServer({
-      appId: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
-      dataDir: join(firstRoot, "data-dir"),
-    });
-    const firstPort = firstServer.port;
-    await stopTrackedLocalJazzServer(firstServer);
-
-    const secondServer = await startTrackedLocalJazzServer({
-      appId: "ffffffff-ffff-ffff-ffff-ffffffffffff",
-      dataDir: join(secondRoot, "data-dir"),
-    });
+    const [firstServer, secondServer] = await Promise.all([
+      startTrackedLocalJazzServer({
+        appId: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+        dataDir: join(firstRoot, "data-dir"),
+      }),
+      startTrackedLocalJazzServer({
+        appId: "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        dataDir: join(secondRoot, "data-dir"),
+      }),
+    ]);
 
     try {
-      expect(secondServer.port).not.toBe(firstPort);
-      const healthResponse = await fetch(`${secondServer.url}/health`);
-      expect(healthResponse.status).toBe(200);
+      expect(firstServer.port).not.toBe(secondServer.port);
+      const healthResponses = await Promise.all([
+        fetch(`${firstServer.url}/health`),
+        fetch(`${secondServer.url}/health`),
+      ]);
+      expect(healthResponses.map((response) => response.status)).toEqual([200, 200]);
     } finally {
+      await stopTrackedLocalJazzServer(firstServer);
       await stopTrackedLocalJazzServer(secondServer);
     }
   }, 20_000);
@@ -353,16 +356,16 @@ describe("createPolicyTestApp", () => {
       });
 
       const alice = policyTestApp.as({
-        issuer: "urn:jazz:local-first",
+        issuer: "https://policy-test.example",
         user_id: "alice",
         claims: {},
-        authMode: "local-first",
+        authMode: "external",
       });
       const bob = policyTestApp.as({
-        issuer: "urn:jazz:local-first",
+        issuer: "https://policy-test.example",
         user_id: "bob",
         claims: {},
-        authMode: "local-first",
+        authMode: "external",
       });
 
       await expect(alice.all(testApp.todos.where({ id: seeded.id }))).resolves.toEqual([
@@ -407,16 +410,16 @@ describe("createPolicyTestApp", () => {
 
     try {
       const alice = policyTestApp.as({
-        issuer: "urn:jazz:local-first",
+        issuer: "https://policy-test.example",
         user_id: "alice",
         claims: {},
-        authMode: "local-first",
+        authMode: "external",
       });
       const bob = policyTestApp.as({
-        issuer: "urn:jazz:local-first",
+        issuer: "https://policy-test.example",
         user_id: "bob",
         claims: {},
-        authMode: "local-first",
+        authMode: "external",
       });
 
       alice.expectAllowed((db) => {

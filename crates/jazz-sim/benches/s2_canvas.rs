@@ -1659,9 +1659,9 @@ fn observed_shape_tx_ids(update: &SyncMessage, read_tier: DurabilityTier) -> Vec
         return Vec::new();
     }
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             result_member_adds, ..
-        } => result_member_adds
+        }) => result_member_adds
             .iter()
             .filter_map(|entry| entry.as_row())
             .filter_map(|(table, _, tx_id)| (table.as_ref() == SHAPES).then_some(tx_id))
@@ -1675,9 +1675,9 @@ fn observed_at_read_tier(update: &SyncMessage, tier: DurabilityTier) -> bool {
         return true;
     }
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             version_bundles, ..
-        } => version_bundles
+        }) => version_bundles
             .iter()
             .any(|bundle| bundle.durability >= tier && matches!(bundle.fate, Fate::Accepted)),
         SyncMessage::FateUpdate { durability, .. } => durability.is_some_and(|seen| seen >= tier),
@@ -1843,13 +1843,19 @@ fn run_db_surface(config: &Config, coalesced: bool) -> DbSurfaceSummary {
     let canvas = canvas_id();
     let (_dir, db) = open_db(node(70), participant_author(0), schema.clone());
 
-    let canvas_write =
-        block_on(db.insert_with_id(CANVASES, canvas, canvas_cells())).expect("db canvas insert");
+    let canvas_write = block_on(db.insert(
+        CANVASES,
+        canvas_cells(),
+        jazz::db::InsertOptions {
+            row_id: Some(canvas),
+            ..Default::default()
+        },
+    ))
+    .expect("db canvas insert");
     block_on(canvas_write.wait(DurabilityTier::Local)).expect("db canvas local wait");
     for idx in 0..(config.active + config.passive) {
-        let invite = block_on(db.insert_with_id(
+        let invite = block_on(db.insert(
             INVITES,
-            row(10_000 + idx),
             BTreeMap::from([
                 ("canvas".to_owned(), Value::Uuid(canvas.0)),
                 (
@@ -1857,6 +1863,10 @@ fn run_db_surface(config: &Config, coalesced: bool) -> DbSurfaceSummary {
                     Value::String(participant_author(idx).test_uuid().to_string()),
                 ),
             ]),
+            jazz::db::InsertOptions {
+                row_id: Some(row(10_000 + idx)),
+                ..Default::default()
+            },
         ))
         .expect("db invite insert");
         block_on(invite.wait(DurabilityTier::Local)).expect("db invite local wait");
@@ -1865,8 +1875,12 @@ fn run_db_surface(config: &Config, coalesced: bool) -> DbSurfaceSummary {
     let mut shape_rows = Vec::with_capacity(config.shapes);
     let mut expected = BTreeMap::new();
     for idx in 0..config.shapes {
-        let write = block_on(db.insert(SHAPES, shape_cells(canvas, idx, idx as f64, idx as f64)))
-            .expect("db shape insert");
+        let write = block_on(db.insert(
+            SHAPES,
+            shape_cells(canvas, idx, idx as f64, idx as f64),
+            Default::default(),
+        ))
+        .expect("db shape insert");
         let row_uuid = write.row_uuid();
         block_on(write.wait(DurabilityTier::Local)).expect("db shape local wait");
         shape_rows.push(row_uuid);
@@ -1920,7 +1934,8 @@ fn run_db_surface(config: &Config, coalesced: bool) -> DbSurfaceSummary {
                 ("y".to_owned(), Value::F64(y)),
             ]);
             let start = Instant::now();
-            let write = block_on(db.update(SHAPES, row_uuid, patch)).expect("db shape update");
+            let write = block_on(db.update(SHAPES, row_uuid, patch, Default::default()))
+                .expect("db shape update");
             block_on(write.wait(DurabilityTier::Local)).expect("db update local wait");
             write_latencies.push(start.elapsed().as_micros() as u64);
             expected.insert(row_uuid, (x.to_bits(), y.to_bits()));
@@ -2634,9 +2649,9 @@ fn is_ancestor(
 
 fn result_output_count(update: &SyncMessage, table: &str) -> usize {
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             result_member_adds, ..
-        } => result_member_adds
+        }) => result_member_adds
             .iter()
             .filter_map(|entry| entry.as_row())
             .filter(|entry| entry.0.as_ref() == table)

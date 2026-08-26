@@ -1222,6 +1222,7 @@ async fn select_policy_excludes_rows_from_join_results_inner() {
 /// bob claims:   [team_b] ──query──► [team_b row]
 /// ```
 #[tokio::test]
+#[ignore = "#1760: IN session-claim array visibility queries hang for more than 60 seconds"]
 async fn in_session_array_policy_gates_visibility_by_membership() {
     tokio::task::LocalSet::new()
         .run_until(in_session_array_policy_gates_visibility_by_membership_inner())

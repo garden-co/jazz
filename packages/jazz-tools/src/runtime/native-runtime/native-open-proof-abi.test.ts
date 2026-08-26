@@ -11,7 +11,40 @@ const proof = {
 };
 
 function fakeDb() {
-  return { setTickScheduler: vi.fn() };
+  // The constructor returns a full NativeDb even though this narrow ABI test
+  // only reaches the scheduler and close boundary. Keep the fixture structural
+  // so production native-runtime contracts remain checked by TypeScript.
+  const unused = (): never => {
+    throw new Error("unexpected native database operation in open ABI test");
+  };
+  return {
+    registerSchema: unused,
+    beginTransaction: unused,
+    commitTransaction: unused,
+    rollbackTransaction: unused,
+    attachMergeableTx: unused,
+    all: unused,
+    allForIdentity: unused,
+    prepareQuery: unused,
+    insertEncoded: unused,
+    insertWithIdEncoded: unused,
+    insertWithIdEncodedForIdentity: unused,
+    restoreEncoded: unused,
+    restoreEncodedForIdentity: unused,
+    updateEncoded: unused,
+    updateEncodedForIdentity: unused,
+    upsertEncoded: unused,
+    upsertEncodedForIdentity: unused,
+    delete: unused,
+    deleteEncoded: unused,
+    deleteForIdentity: unused,
+    mergeableTx: unused,
+    setTickScheduler: vi.fn(),
+    onMutationError: unused,
+    connectUpstream: unused,
+    tick: unused,
+    close: vi.fn(),
+  };
 }
 
 describe("self-signed native open ABI", () => {
@@ -47,6 +80,27 @@ describe("self-signed native open ABI", () => {
       proof.token,
       proof.appId,
       proof.claimedAuthor,
+    );
+    void runtime.close();
+  });
+
+  it("uses only the distinct backend entrypoint for an intentional backend runtime", () => {
+    const openMemory = vi.fn(() => fakeDb());
+    const openMemoryAsBackend = vi.fn(() => fakeDb());
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory, openMemoryAsBackend },
+      schema,
+      node,
+      author,
+      1,
+      false,
+      { backendMode: true },
+    );
+
+    expect(openMemory).not.toHaveBeenCalled();
+    expect(openMemoryAsBackend).toHaveBeenCalledWith(
+      expect.any(Uint8Array),
+      expect.any(Uint8Array),
     );
     void runtime.close();
   });

@@ -349,9 +349,8 @@ fn seed_fixture(db: &BenchDb) {
 }
 
 fn insert_document(db: &BenchDb, row: RowUuid, team: usize, updated_at: u64) {
-    block_on(db.insert_with_id(
+    block_on(db.insert(
         DOCUMENTS,
-        row,
         BTreeMap::from([
             ("team".to_owned(), Value::Uuid(team_row(team).0)),
             ("updated_at".to_owned(), Value::U64(updated_at)),
@@ -360,6 +359,10 @@ fn insert_document(db: &BenchDb, row: RowUuid, team: usize, updated_at: u64) {
                 Value::String(format!("route {team} document {updated_at}")),
             ),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        },
     ))
     .expect("insert route curve document");
 }

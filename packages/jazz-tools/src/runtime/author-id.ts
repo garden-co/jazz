@@ -1,7 +1,7 @@
 import type { Session } from "./context.js";
 
 const canonicalAuthorDecoder = new TextDecoder("utf-8", { fatal: true });
-const STORED_SCALAR_INLINE_TAG = 0;
+const STORED_SCALAR_INLINE_TAG = 2;
 const CANONICAL_AUTHOR_OPEN_BRACKET = 0x5b;
 
 export type CanonicalAuthorSubject = {
@@ -67,9 +67,7 @@ export function decodeCanonicalAuthorSubjectBytes(bytes: Uint8Array): string {
       ? bytes[1] === CANONICAL_AUTHOR_OPEN_BRACKET
         ? bytes.subarray(1)
         : null
-      : bytes[0] === CANONICAL_AUTHOR_OPEN_BRACKET
-        ? bytes
-        : null;
+      : null;
   if (!logical) {
     throw new Error("invalid canonical author subject bytes");
   }

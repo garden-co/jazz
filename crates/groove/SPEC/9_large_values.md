@@ -31,14 +31,26 @@ Invariant digest:
 ## 9.1 Logical and physical values
 
 The public Groove type remains `bytes`, `string`, or `json`. Inline and indirect
-storage are physical arms of those types, conceptually:
+storage are physical arms of those types, encoded as one engine-owned ordinary
+Groove enum that is not visible in a schema, query, policy, index, or result:
 
 ```text
-StoredScalar = Inline(logical bytes) | Large(LargeValueRef)
+StoredScalar<kind> = enum {
+  Primitive { value: primitive for kind },
+  Chunked {
+    format_version,
+    logical_hash,
+    root: { object_hash, locator },
+    byte_length,
+    utf16_length?,
+    edit_tail: [ { offset, delete_length, insert_bytes,
+                   utf16_offset, delete_utf16_length, insert_utf16_length } ],
+  },
+}
 
 LargeValueRef {
-  kind,
   format_version,
+  kind,
   logical_hash,
   root: NodeRef { object_hash, locator },
   byte_length,
@@ -47,18 +59,44 @@ LargeValueRef {
 }
 ```
 
+The enum case tags are stable: `Primitive = 2`, `Chunked = 3`. Tags 0 and 1
+are permanently reserved so persisted values from the superseded private
+`[tag] + payload` codec fail closed instead of colliding with a canonical
+length-prefixed record. Its payloads use only Groove's canonical primitive,
+record, array, nullable, and enum codecs;
+there is no private tag byte or postcard envelope for a scalar descriptor.
+`bytes` uses the bytes primitive and `string` uses the string primitive. JSON
+retains Groove's existing canonical JSON-as-string logical representation, so
+its primitive backing is string as well. The ordinary enum schema is
+parameterized by the immutable kind supplied by schema lowering, so neither
+physical arm duplicates that context. Inline payloads are interpreted as the
+primitive selected by that schema; the same raw UTF-8 content can therefore be
+a valid string or JSON value when stored under the corresponding column kind.
+Every independently addressed immutable tree node carries and authenticates its
+own format and kind before traversal. Internal raw string/bytes backing primitives
+only terminate this self-hosting enum encoding and are impossible at the public
+schema or logical-operator boundary.
+
 `logical_hash` is deterministic content identity. `object_hash` authenticates
 the exact encoded node, including the child locators that it reveals, and
-`locator` is an opaque random storage key interpreted only by
-Groove's chunk subsystem. Groove treats object hashes and locators as non-semantic:
+`locator` is an opaque random 256-bit capability interpreted only by
+Groove's chunk subsystem. Storage adapters derive any backend-specific or
+prefixed key internally; such keys never cross the retrieval protocol. Groove
+treats object hashes and locators as non-semantic:
 changing only the retrieval graph cannot change logical equality, ordering,
 grouping, an IVM node id, an index key, or query output.
+
+Groove allocates every new locator internally from 32 unmodified bytes supplied
+by the operating system CSPRNG. Production construction, streaming,
+consolidation, append, and edit APIs do not accept locator allocators from
+callers; tests may inject deterministic allocators only through crate-private
+test helpers.
 
 Small logical values remain inline. Above a versioned threshold, Groove emits a
 large descriptor and immutable chunks. Once indirect, a value may remain
 indirect below the threshold; demotion is representation-only compaction.
 
-The physical tag is part of Groove's storage encoding, not a magic prefix in a
+The physical enum is part of Groove's storage encoding, not a magic prefix in a
 user string or JSON value. Every admitted cell has exactly one unambiguous arm.
 
 `INV-LARGE-1`: filters, policies lowered into Groove, joins, grouping, ordering,
@@ -102,19 +140,44 @@ and exact aggregate metrics:
 
 ```text
 NodeRef { object_hash, locator }
-Leaf    { format, bytes }
-Branch  { format, children: [{ node_ref, byte_length, utf16_length? }] }
+Leaf    { format, kind, bytes }
+Branch  { format, kind, children: [{ node_ref, byte_length, utf16_length? }] }
 ```
 
 Leaves are selected by a versioned FastCDC-like content-defined chunker with
 hard minimum, target, and maximum sizes. Branches use content-defined grouping
-over complete child descriptors. Recursive grouping produces a deterministic
-prolly tree: identical kind, format and logical base bytes produce the same
-logical hashes and shape independent of edit history. A branch's object hash
+over a private kind/format-neutral content fingerprint derived from complete
+child descriptors. Keeping this grouping fingerprint separate from logical
+identity means a representation-version or semantic-kind distinction does not
+arbitrarily reshuffle otherwise identical content. Recursive grouping produces
+a deterministic prolly tree: identical kind, format and logical base bytes
+produce the same logical hashes and shape independent of edit history. A branch's object hash
 commits to its exact child `NodeRef`s, including locators; the separate logical
 hash excludes retrieval identities. Unchanged nodes may retain their locators
 across versions, while an independently created equal value may have a different
 retrieval graph and the same logical identity.
+
+The current immutable-node format is version 2. Every leaf and branch embeds
+both that format and its semantic kind. Decoding MUST reject either field when
+it differs from the expected descriptor context. The locator-independent
+logical hash commits to the format and kind as well as the leaf bytes or branch
+child descriptors. Groove derives that logical identity from the grouping
+fingerprint with a reversible full-width kind/format domain mask, allowing
+localized consolidation to recover canonical grouping without persisting a
+second hash in each child descriptor. Consequently, identical UTF-8 or JSON-compatible bytes do
+not share logical identities across bytes, text, and JSON values. Candidate
+format-1 nodes fail closed; there is no compatibility decoder.
+
+Nodes use Groove's ordinary canonical enum/record codec rather than a private
+serialization envelope. A leaf is `{ format, kind, bytes }`; a branch is
+`{ format, kind, children }`, where each child is the ordinary record
+`{ object_hash, locator, byte_length, utf16_length?, logical_hash }`. The exact
+canonical bytes are object-hashed. A byte appended to a leaf's raw-bytes field
+is therefore authenticated content, not ignorable trailing data.
+Branch array counts are bounded before allocating or decoding child records.
+The same untyped authenticated structural validator (object hash, canonical
+encoding, format, kind-shaped metrics, leaf bounds, fanout, and overflow) is
+used by traversal, upload admission, and metadata-only storage observers.
 
 Text leaf boundaries are valid UTF-8 code-point boundaries. Text branches also
 carry exact aggregate UTF-16 code-unit lengths. JSON uses literal validated
@@ -124,8 +187,25 @@ Every decoded node is checked against the expected object hash learned from its
 parent (or the owner descriptor for the root). Branch fanout, depth, child
 metrics, total metrics and encoded sizes
 are bounded and checked. Unknown format versions, cycles, dishonest metrics,
-invalid UTF-8, invalid JSON, arithmetic overflow, trailing bytes, and malformed
+invalid UTF-8, invalid JSON, arithmetic overflow, and malformed
 child references fail the affected evaluation closure.
+
+Postcard decoding alone is insufficient because it accepts a valid value with
+trailing bytes. Every path that interprets node structure MUST require an exact
+byte-for-byte canonical re-encoding, including metadata-only traversal before
+the caller has an expected logical kind. Evaluation additionally verifies the
+expected object hash, format, kind, logical hash, and metrics.
+
+The authenticated structure is a DAG, not necessarily a tree physically: one
+exact `NodeRef` may occur repeatedly in a branch or beneath several parents.
+Physical reachability, upload-frontier, admission and collection walks visit
+that immutable node once while validating that every incoming edge agrees on
+its logical hash and metrics. They still retain the exact active path needed to
+reject a cycle. Logical evaluation is different: each edge occurrence denotes
+bytes at a distinct logical position and therefore remains observable. Every
+synchronous materialization or range attempt charges both visited occurrences
+and expanded child edges against a deterministic work budget; exceeding it is a
+typed failure rather than an unbounded allocation or CPU loop.
 
 The encoded-node size ceiling is checked before hashing or deserialization, so
 an authenticated transport envelope cannot turn one malicious node into an
@@ -146,12 +226,16 @@ Replace { offset, delete_length, insert_bytes, utf16_effects? }
 
 Each offset addresses the value produced by all preceding edits in the tail.
 Append is a replacement at the current length with zero deletion. Insert,
-delete, overwrite, text splice, file mutation, and JSON replacement lower to
-the same primitive.
+delete, overwrite, text splice, and file mutation lower to the same primitive.
+JSON currently admits only a complete replacement of the current logical value;
+the inserted source must itself be valid JSON.
 
 Admission bounds patch count, total encoded tail bytes, inserted bytes, and all
-range arithmetic. The final result must satisfy the logical kind; intermediate
-states within one atomic tail need not independently be valid text or JSON.
+range arithmetic. For text, the byte boundaries and the exact UTF-16 offset and
+length effects are recomputed against the source value produced by preceding
+edits. An untrusted staged descriptor is replayed from its immutable base before
+publication so forged text coordinates, partial JSON edits, and noncanonical
+tails fail closed.
 
 When adding an edit would exceed a bound, Groove streams the current logical
 value through the edit, rechunks until content boundaries resynchronize, stages
@@ -392,6 +476,10 @@ tree. Completion is derived from an empty validated frontier rather than a
 sender finalization assertion. Partial uploads and completed timestamped
 retainer claims carry persisted creation/accounting metadata so host-driven
 expiry can reclaim abandoned uploads without consulting Jazz row history.
+Those timestamps are GC and resource-management metadata, not synchronous
+admission deadlines: while a journal or receipt remains present, chunk pushes,
+finalization, and publication may proceed regardless of wall-clock age. Once
+maintenance evicts it, stale handles fail by absence and cannot recreate it.
 Frontier collection itself stops at the negotiated batch bound; it does not
 allocate an unbounded list and truncate it after returning. A stale frontier
 response racing another uploader is accepted only when its redundant nodes

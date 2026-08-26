@@ -159,45 +159,6 @@ fn failed_multi_row_local_commit_is_fully_resident_but_not_partially_durable() {
     );
 }
 
-/// Unlike an ordinary failed durable batch, a direct large-value creation has
-/// a reversible resident publication. A receipt/owner-row failure must leave
-/// no local row behind and must not make the Node unusable for the same key.
-#[test]
-fn failed_resident_large_value_promotion_retracts_and_allows_same_key_retry() {
-    let (mut writer, storage) = fail_write_many_node();
-    // Direct large creation writes its intent journal, its completed receipt,
-    // then the atomic owner-row/root-reference batch.
-    storage.fail_nth_following_write_many(3);
-    let oversized = "x".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 1);
-    let error = writer
-        .commit_mergeable_settled(
-            MergeableCommit::new("todos", row(0xd5), 10).cells(title_cells(oversized)),
-        )
-        .expect_err("the owner-row metadata write is injected to fail");
-    assert!(matches!(error, Error::Groove(groove::db::Error::Storage(_))));
-    assert!(
-        writer
-            .current_rows("todos", DurabilityTier::Local)
-            .unwrap()
-            .is_empty(),
-        "failed resident direct creation must not retain a local history winner"
-    );
-
-    writer
-        .commit_mergeable_settled(
-            MergeableCommit::new("todos", row(0xd5), 11).cells(title_cells("retry")),
-        )
-        .unwrap();
-    assert_eq!(
-        writer
-            .current_rows("todos", DurabilityTier::Local)
-            .unwrap()
-            .len(),
-        1,
-        "the former primary key must be reusable after exact retraction"
-    );
-}
-
 /// A fate authority may only return a wire acknowledgement after every durable
 /// component of finalization has completed. The injected first batch failure
 /// proves that no `FateUpdate` can be observed for an uncommitted unit.

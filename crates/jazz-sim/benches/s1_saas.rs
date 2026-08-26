@@ -16,7 +16,6 @@ use jazz::peer::{MaintainedSubscriptionViewMetrics, PeerState};
 use jazz::protocol::{RegisterShapeOptions, ShapeAst, Subscribe, SubscriptionKey, SyncMessage};
 use jazz::query::{Binding, Query, ValidatedQuery, col, eq, lit, ne, param};
 use jazz::schema::JazzSchema;
-use jazz::time::TxTime;
 use jazz::tools::public_schema::{
     ColumnType as PublicColumnType, SchemaBuilder, TableSchema as PublicTableSchema,
 };
@@ -242,9 +241,15 @@ pub fn db_surface_smoke() {
     assert!(subscription2_rows.is_empty());
 
     for commit in &fixture.commits {
-        let handle =
-            block_on(db.insert_with_id(&commit.table, commit.row_uuid, commit.cells.clone()))
-                .expect("db fixture insert");
+        let handle = block_on(db.insert(
+            &commit.table,
+            commit.cells.clone(),
+            jazz::db::InsertOptions {
+                row_id: Some(commit.row_uuid),
+                ..Default::default()
+            },
+        ))
+        .expect("db fixture insert");
         block_on(handle.wait(DurabilityTier::Local)).expect("fixture insert local wait");
         oracle.apply_insert(commit);
     }
@@ -287,7 +292,8 @@ pub fn db_surface_smoke() {
             Value::String("db-surface-state-transition".to_owned()),
         ),
     ]);
-    let handle = block_on(db.update(ISSUES, edited_issue, patch.clone())).expect("db issue update");
+    let handle = block_on(db.update(ISSUES, edited_issue, patch.clone(), Default::default()))
+        .expect("db issue update");
     block_on(handle.wait(DurabilityTier::Local)).expect("issue update local wait");
     oracle.apply_patch(ISSUES, edited_issue, patch);
 
@@ -1627,9 +1633,9 @@ fn apply_subscription_event(rows: &mut BTreeSet<(String, RowUuid)>, event: Subsc
 }
 
 fn collect_result_rows(update: &SyncMessage, rows: &mut BTreeSet<(String, RowUuid)>) {
-    if let SyncMessage::ViewUpdate {
+    if let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
         result_member_adds, ..
-    } = update
+    }) = update
     {
         for entry in result_member_adds {
             if let Some((table, row_uuid, _)) = entry.as_row() {
@@ -1641,9 +1647,9 @@ fn collect_result_rows(update: &SyncMessage, rows: &mut BTreeSet<(String, RowUui
 
 fn result_output_count(update: &SyncMessage, table: &str) -> usize {
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             result_member_adds, ..
-        } => result_member_adds
+        }) => result_member_adds
             .iter()
             .filter_map(|entry| entry.as_row())
             .filter(|entry| entry.0.as_str() == table)
@@ -1654,13 +1660,13 @@ fn result_output_count(update: &SyncMessage, table: &str) -> usize {
 
 fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
             ..
-        } => {
+        }) => {
             let bundle_bytes = version_bundles
                 .iter()
                 .flat_map(|bundle| bundle.versions.iter())
@@ -1677,9 +1683,9 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
 
 fn bytes_floor(update: &SyncMessage) -> u64 {
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             version_bundles, ..
-        } => version_bundles
+        }) => version_bundles
             .iter()
             .flat_map(|bundle| bundle.versions.iter())
             .map(|version| version.record().raw().len() as u64)
@@ -1701,7 +1707,7 @@ fn naive_refetch_ceiling_bytes(schema: &JazzSchema, fixture: &Fixture) -> u64 {
             let positional = table
                 .columns
                 .iter()
-                .map(|column| commit.cells.get(&column.name).cloned())
+                .map(|column| commit.cells.get(column.name()).cloned())
                 .collect::<Vec<_>>();
             jazz::protocol::VersionRecord::encode(
                 table,
@@ -1709,9 +1715,9 @@ fn naive_refetch_ceiling_bytes(schema: &JazzSchema, fixture: &Fixture) -> u64 {
                 commit.row_uuid,
                 Vec::new(),
                 AuthorSubject::SYSTEM,
-                TxTime(0),
+                0,
                 AuthorSubject::SYSTEM,
-                TxTime(0),
+                0,
                 &positional,
                 None,
             )

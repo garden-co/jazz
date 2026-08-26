@@ -293,7 +293,13 @@ where
                     batch.insert_raw(history_table.as_ref(), storage_key, groove_record);
                 }
             } else {
-                batch.insert_raw_fresh(history_table.as_ref(), storage_key, groove_record);
+                // SAFETY: transaction metadata and immutable history rows persist atomically, so
+                // an unknown transaction id proves that this history key is absent from storage.
+                // The bulk-ingest path also deduplicates transaction ids before staging, proving
+                // there is no earlier operation for this key in the same batch.
+                unsafe {
+                    batch.insert_raw_fresh(history_table.as_ref(), storage_key, groove_record);
+                }
             }
             if update_current_indexes && !matches!(fate, Fate::Rejected(_)) && global_time.is_none()
             {
@@ -387,6 +393,17 @@ where
     /// from an authored value and reintroduce partial-row sync semantics.
     fn malformed_authored_version_reason(&self, versions: &[VersionRecord]) -> Option<String> {
         for version in versions {
+            for (field, physical_ms) in [
+                ("created_at_ms", version.created_at_ms()),
+                ("updated_at_ms", version.updated_at_ms()),
+            ] {
+                if crate::time::TxTime::from_physical_ms(physical_ms).is_err() {
+                    return Some(format!(
+                        "row version for table '{}' has {field} outside the packed HLC physical-millisecond range",
+                        version.table()
+                    ));
+                }
+            }
             let Some(schema) = self
                 .catalogue
                 .catalogue_schemas
@@ -416,11 +433,6 @@ where
                 table,
                 version,
             ) {
-                return Some(reason);
-            }
-            if let Some(reason) =
-                Self::malformed_authored_large_value_kind_reason(&schema.schema, table, version)
-            {
                 return Some(reason);
             }
         }
@@ -464,46 +476,6 @@ where
         None
     }
 
-    fn malformed_authored_large_value_kind_reason(
-        schema: &JazzSchema,
-        table: &TableSchema,
-        version: &VersionRecord,
-    ) -> Option<String> {
-        let public_table = schema
-            .public_schema()
-            .iter()
-            .find(|(name, _)| name.as_str() == version.table())?
-            .1;
-        for public_column in &public_table.columns.columns {
-            let expected = match &public_column.column_type {
-                crate::tools::ColumnType::Text => groove::large_values::LargeValueKind::String,
-                crate::tools::ColumnType::Json { .. } => {
-                    groove::large_values::LargeValueKind::Json
-                }
-                crate::tools::ColumnType::Bytea => groove::large_values::LargeValueKind::Bytes,
-                _ => continue,
-            };
-            let Some(position) = table
-                .columns
-                .iter()
-                .position(|column| column.name == public_column.name.as_str())
-            else {
-                continue;
-            };
-            let Some(value) = version.cell_at(position) else {
-                continue;
-            };
-            if !large_value_kind_matches(&value, Some(expected)) {
-                return Some(format!(
-                    "row version for table '{}' carries the wrong large-value kind for column '{}'",
-                    version.table(),
-                    public_column.name.as_str()
-                ));
-            }
-        }
-        None
-    }
-
     /// Validate row versions carried by a view or repair payload before that
     /// payload may advance local receiver state. View payloads cannot park for
     /// a missing catalogue entry: unlike an authored commit unit, they have no
@@ -513,6 +485,13 @@ where
         versions: &[VersionRecord],
     ) -> Result<(), Error> {
         for version in versions {
+            if crate::time::TxTime::from_physical_ms(version.created_at_ms()).is_err()
+                || crate::time::TxTime::from_physical_ms(version.updated_at_ms()).is_err()
+            {
+                return Err(Error::MalformedViewUpdate(
+                    "row version provenance exceeds packed HLC physical-millisecond range",
+                ));
+            }
             let schema = self
                 .catalogue
                 .catalogue_schemas
@@ -536,13 +515,6 @@ where
             if Self::malformed_authored_branch_key_reason(&schema.schema, table, version).is_some() {
                 return Err(Error::MalformedViewUpdate(
                     "row version does not carry a valid authored branch key",
-                ));
-            }
-            if Self::malformed_authored_large_value_kind_reason(&schema.schema, table, version)
-                .is_some()
-            {
-                return Err(Error::MalformedViewUpdate(
-                    "row version carries a large-value kind that disagrees with its authored schema",
                 ));
             }
         }

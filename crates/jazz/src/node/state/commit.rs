@@ -9,7 +9,7 @@ where
     ) -> Result<PublishedTransaction, Error> {
         commit.validate()?;
         self.merge_commit_parent_times(std::slice::from_ref(&commit))?;
-        let made_at = self.mint_tx_time(commit.now_ms);
+        let made_at = self.mint_tx_time(commit.now_ms)?;
         self.commit_mergeable_at(commit, made_at).await
     }
 
@@ -47,7 +47,7 @@ where
             }
         }
         self.merge_commit_parent_times(&commits)?;
-        let made_at = self.mint_tx_time(commits[0].now_ms);
+        let made_at = self.mint_tx_time(commits[0].now_ms)?;
         self.commit_mergeable_many_at(commits, made_at).await
     }
 
@@ -151,7 +151,7 @@ where
             ));
         }
         self.merge_commit_parent_times(&commits)?;
-        let made_at = self.mint_tx_time(commits[0].now_ms);
+        let made_at = self.mint_tx_time(commits[0].now_ms)?;
         self.commit_mergeable_many_at_with_schema_versions_and_provenance(
             commits
                 .into_iter()
@@ -193,7 +193,7 @@ where
             }
         }
         self.merge_commit_parent_times(&commits)?;
-        let made_at = self.mint_tx_time(commits[0].now_ms);
+        let made_at = self.mint_tx_time(commits[0].now_ms)?;
         self.commit_mergeable_many_at_with_schema_versions(
             commits
                 .into_iter()
@@ -255,6 +255,12 @@ where
         made_at: TxTime,
         contribution_merge: Option<ContributionMergeProvenance>,
     ) -> Result<PublishedTransaction, Error> {
+        // `*_at` is also used by trusted internal paths, so do not rely on the
+        // public `commit_mergeable[_many]` wrapper to validate a public
+        // provenance millisecond before any staging or batch mutation begins.
+        for (_, commit) in &commits {
+            commit.validate()?;
+        }
         self.prepare_and_stage_large_commit_values(&mut commits).await?;
         let staged_ids = commits
             .iter()
@@ -286,9 +292,6 @@ where
             for staged_id in &commit.staged_large_values {
                 batch.accept_large_value(*staged_id);
             }
-            for stage in &commit.resident_large_values {
-                batch.accept_resident_large_value(stage.clone());
-            }
         }
         batch.insert(
             "jazz_transactions",
@@ -302,7 +305,13 @@ where
         );
         let mut stored_versions = Vec::new();
         let mut pending_parents = BTreeSet::new();
+        let mut authored_content_rows = BTreeSet::new();
         for (write_schema_version, commit) in commits {
+            let provenance_at = TxTime::from_physical_ms(commit.now_ms).map_err(|_| {
+                Error::InvalidMergeableCommit(
+                    "commit now_ms exceeds packed HLC physical-millisecond range",
+                )
+            })?;
             let schema_version_alias = self
                 .ensure_schema_version_alias(write_schema_version)
                 .await?;
@@ -335,21 +344,43 @@ where
                 }
             }
             let layer = VersionLayer::for_commit(&commit);
-            let previous_current =
-                match self.query_local_layer_winner_in_branch(
+            let first_content_occurrence_in_batch = layer != VersionLayer::Content
+                || authored_content_rows.insert((
+                    table_id,
+                    branch_key.clone(),
+                    commit.row_uuid,
+                ));
+            let known_fresh_content_row = commit.known_fresh_row
+                && layer == VersionLayer::Content
+                && first_content_occurrence_in_batch;
+            let previous_local_current = if known_fresh_content_row {
+                None
+            } else {
+                self.query_local_layer_winner_in_branch(
                     &table_schema.name,
                     &branch_key,
                     commit.row_uuid,
                     layer,
-                ).await? {
-                    Some(previous) => Some(previous),
-                    None => self.query_global_layer_winner_in_branch(
+                )
+                .await?
+            };
+            let known_first_local_content_version =
+                layer == VersionLayer::Content
+                    && first_content_occurrence_in_batch
+                    && (known_fresh_content_row || previous_local_current.is_none());
+            let previous_current = match previous_local_current {
+                Some(previous) => Some(previous),
+                None if !known_fresh_content_row => {
+                    self.query_global_layer_winner_in_branch(
                         &table_schema.name,
                         &branch_key,
                         commit.row_uuid,
                         layer,
-                    ).await?,
-                };
+                    )
+                    .await?
+                }
+                None => None,
+            };
             let creator_source = if let Some(previous) = previous_current.as_ref() {
                 Some(previous.clone())
             } else if layer == VersionLayer::Deletion {
@@ -373,7 +404,7 @@ where
             let (created_by, created_at) = creator_source
                 .as_ref()
                 .map(|version| (version.created_by(), version.created_at()))
-                .unwrap_or((commit.made_by, TxTime(commit.now_ms)));
+                .unwrap_or((commit.made_by, provenance_at));
 
             let parents = if commit.parents.is_empty() {
                 Vec::new()
@@ -397,6 +428,18 @@ where
                     .clone()
                     .unwrap_or_else(|| cells.keys().cloned().collect()),
             );
+            let history_descriptor = if commit.deletion.is_none() {
+                Some(
+                    self.prepared_physical_write_plan(
+                        write_schema_version,
+                        &table_schema.name,
+                        PhysicalWriteTarget::History,
+                    )?
+                    .logical_descriptor,
+                )
+            } else {
+                None
+            };
             let stored = VersionRow::from_parts_with_schema_version(
                 &table_schema,
                 VersionRowParts {
@@ -410,13 +453,14 @@ where
                     created_by,
                     created_at,
                     updated_by: commit.made_by,
-                    updated_at: TxTime(commit.now_ms),
+                    updated_at: provenance_at,
                     cells,
                     authored_columns,
                     deletion: commit.deletion,
                 },
                 (write_schema_version != self.catalogue.current_schema_version_id)
                     .then_some(write_schema_version),
+                history_descriptor,
             )?;
             let previous_winner = if let Some(previous) = previous_current.as_ref() {
                 Some((
@@ -436,8 +480,12 @@ where
                 self.version_storage_primary_key(&stored)?,
                 groove_record,
             );
-            self.update_merge_heads_for_content_version(&mut batch, &stored)
-                .await?;
+            self.update_merge_heads_for_content_version(
+                &mut batch,
+                &stored,
+                known_first_local_content_version,
+            )
+            .await?;
             self.write_ahead_current_insert(&mut batch, &stored)?;
             pending_parents.extend(stored.parents());
             stored_versions.push(stored);
@@ -483,15 +531,14 @@ where
         Ok(PublishedTransaction { tx_id, persistence })
     }
 
-    /// Lower oversized ordinary scalar cells through Groove. Complete direct
-    /// values become resident stages first so their ordinary row write retains
-    /// the same local-lane contract as inline scalars; `AppliedBatch::persist`
-    /// later runs the shared journal/blob/receipt lifecycle.
+    /// Lower oversized ordinary scalar cells through Groove and atomically
+    /// stage their immutable nodes before row publication begins.
     async fn prepare_and_stage_large_commit_values(
         &mut self,
         commits: &mut [(SchemaVersionId, MergeableCommit)],
     ) -> Result<(), Error> {
         for (schema_version, commit) in commits.iter_mut() {
+            let table_schema = self.table_in_schema(&commit.table, *schema_version)?;
             let inherited = if commit.cells.values().any(value_contains_indirect_descriptor) {
                 self.current_physical_cells_in_branch_schema(
                     *schema_version,
@@ -505,28 +552,25 @@ where
                 BTreeMap::new()
             };
             for (column, value) in commit.cells.iter_mut() {
-                let expected_kind = self.large_value_kind_for_column(
-                    *schema_version,
-                    &commit.table,
-                    column,
-                );
-                if !large_value_kind_matches(value, expected_kind) {
-                    return Err(Error::InvalidMergeableCommit(
-                        "large-value descriptor kind does not match its logical column",
-                    ));
-                }
                 if value_contains_indirect_descriptor(value)
                     && inherited.get(column) == Some(value)
                 {
                     commit.prepared_large_columns.insert(column.clone());
                     continue;
                 }
-                let Some(stage) = self
-                    .prepare_resident_large_scalar(value, expected_kind)?
+                let semantic_kind = table_schema
+                    .columns
+                    .iter()
+                    .find(|candidate| candidate.name == *column)
+                    .map(|column| column.large_value_kind)
+                    .unwrap_or(crate::schema::LargeValueSemanticKind::NotLarge);
+                let Some(staged) = self
+                    .prepare_and_stage_large_scalar(value, semantic_kind)
+                    .await?
                 else {
                     continue;
                 };
-                commit.resident_large_values.push(stage);
+                commit.staged_large_values.push(staged.id);
             }
         }
         Ok(())
@@ -538,60 +582,44 @@ where
     pub(crate) async fn prepare_and_stage_large_scalar(
         &mut self,
         value: &mut Value,
-        expected_kind: Option<groove::large_values::LargeValueKind>,
+        semantic_kind: crate::schema::LargeValueSemanticKind,
     ) -> Result<Option<groove::large_values::StagedLargeValue>, Error> {
         use groove::large_values::{INLINE_VALUE_MAX_BYTES, LargeValueKind};
 
-        fn candidate(value: &Value) -> Option<(LargeValueKind, &[u8], bool)> {
-            match value {
-            Value::String(text) if text.len() > INLINE_VALUE_MAX_BYTES => {
-                Some((LargeValueKind::String, text.as_bytes(), false))
-            }
+        let candidate = match value {
+            Value::String(text) if text.len() > INLINE_VALUE_MAX_BYTES => Some((
+                match semantic_kind {
+                    crate::schema::LargeValueSemanticKind::Json => LargeValueKind::Json,
+                    _ => LargeValueKind::String,
+                },
+                text.as_bytes().to_vec(),
+                false,
+            )),
             Value::Bytes(bytes) if bytes.len() > INLINE_VALUE_MAX_BYTES => {
-                Some((LargeValueKind::Bytes, bytes.as_slice(), false))
+                Some((LargeValueKind::Bytes, bytes.clone(), false))
             }
             Value::Nullable(Some(inner)) => match inner.as_ref() {
-                Value::String(text) if text.len() > INLINE_VALUE_MAX_BYTES => {
-                    Some((LargeValueKind::String, text.as_bytes(), true))
-                }
+                Value::String(text) if text.len() > INLINE_VALUE_MAX_BYTES => Some((
+                    match semantic_kind {
+                        crate::schema::LargeValueSemanticKind::Json => LargeValueKind::Json,
+                        _ => LargeValueKind::String,
+                    },
+                    text.as_bytes().to_vec(),
+                    true,
+                )),
                 Value::Bytes(bytes) if bytes.len() > INLINE_VALUE_MAX_BYTES => {
-                    Some((LargeValueKind::Bytes, bytes.as_slice(), true))
+                    Some((LargeValueKind::Bytes, bytes.clone(), true))
                 }
                 _ => None,
             },
             _ => None,
-            }
-        }
-        let candidate = candidate(value);
-        let Some((inferred_kind, bytes, nullable)) = candidate else {
-            return Ok(None);
         };
-        let kind = match expected_kind {
-            Some(groove::large_values::LargeValueKind::Bytes)
-                if inferred_kind != groove::large_values::LargeValueKind::Bytes =>
-            {
-                return Err(Error::InvalidMergeableCommit(
-                    "oversized scalar value does not match its logical column",
-                ));
-            }
-            Some(
-                expected @ (groove::large_values::LargeValueKind::String
-                | groove::large_values::LargeValueKind::Json),
-            ) if inferred_kind == groove::large_values::LargeValueKind::String => expected,
-            Some(
-                groove::large_values::LargeValueKind::String
-                | groove::large_values::LargeValueKind::Json,
-            ) if inferred_kind == groove::large_values::LargeValueKind::Bytes => {
-                return Err(Error::InvalidMergeableCommit(
-                    "oversized scalar value does not match its logical column",
-                ));
-            }
-            Some(expected) => expected,
-            None => inferred_kind,
+        let Some((kind, bytes, nullable)) = candidate else {
+            return Ok(None);
         };
         let staged = self
             .database
-            .prepare_and_stage_large_value(kind, bytes)
+            .prepare_and_stage_large_value(kind, &bytes)
             .await?;
         self.enforce_large_value_staging_policy(&staged).await?;
         let descriptor = Value::Large(staged.value_ref.clone());
@@ -601,95 +629,6 @@ where
             descriptor
         };
         Ok(Some(staged))
-    }
-
-    fn prepare_resident_large_scalar(
-        &mut self,
-        value: &mut Value,
-        expected_kind: Option<groove::large_values::LargeValueKind>,
-    ) -> Result<Option<groove::large_values::ResidentLargeValueStage>, Error> {
-        use groove::large_values::{INLINE_VALUE_MAX_BYTES, LargeValueKind};
-
-        fn candidate(value: &Value) -> Option<(LargeValueKind, &[u8], bool)> {
-            match value {
-                Value::String(text) if text.len() > INLINE_VALUE_MAX_BYTES => {
-                    Some((LargeValueKind::String, text.as_bytes(), false))
-                }
-                Value::Bytes(bytes) if bytes.len() > INLINE_VALUE_MAX_BYTES => {
-                    Some((LargeValueKind::Bytes, bytes.as_slice(), false))
-                }
-                Value::Nullable(Some(inner)) => match inner.as_ref() {
-                    Value::String(text) if text.len() > INLINE_VALUE_MAX_BYTES => {
-                        Some((LargeValueKind::String, text.as_bytes(), true))
-                    }
-                    Value::Bytes(bytes) if bytes.len() > INLINE_VALUE_MAX_BYTES => {
-                        Some((LargeValueKind::Bytes, bytes.as_slice(), true))
-                    }
-                    _ => None,
-                },
-                _ => None,
-            }
-        }
-        let Some((inferred_kind, bytes, nullable)) = candidate(value) else {
-            return Ok(None);
-        };
-        let kind = match expected_kind {
-            Some(LargeValueKind::Bytes) if inferred_kind != LargeValueKind::Bytes => {
-                return Err(Error::InvalidMergeableCommit(
-                    "oversized scalar value does not match its logical column",
-                ));
-            }
-            Some(expected @ (LargeValueKind::String | LargeValueKind::Json))
-                if inferred_kind == LargeValueKind::String =>
-            {
-                expected
-            }
-            Some(LargeValueKind::String | LargeValueKind::Json)
-                if inferred_kind == LargeValueKind::Bytes =>
-            {
-                return Err(Error::InvalidMergeableCommit(
-                    "oversized scalar value does not match its logical column",
-                ));
-            }
-            Some(expected) => expected,
-            None => inferred_kind,
-        };
-        let stage = self.database.prepare_resident_large_value(kind, bytes)?;
-        if !self.admit_large_value_ingress(stage.encoded_bytes()) {
-            self.database.discard_resident_large_value(&stage);
-            return Err(Error::LargeValueIngressRateLimited);
-        }
-        let descriptor = Value::Large(stage.value_ref().clone());
-        *value = if nullable {
-            Value::Nullable(Some(Box::new(descriptor)))
-        } else {
-            descriptor
-        };
-        Ok(Some(stage))
-    }
-
-    pub(crate) fn large_value_kind_for_column(
-        &self,
-        schema_version: SchemaVersionId,
-        table: &str,
-        column: &str,
-    ) -> Option<groove::large_values::LargeValueKind> {
-        use crate::tools::ColumnType;
-        use groove::large_values::LargeValueKind;
-
-        let schema = self.catalogue.catalogue_schemas.get(&schema_version)?;
-        let table = schema
-            .schema
-            .public_schema()
-            .iter()
-            .find(|(name, _)| name.as_str() == table)?
-            .1;
-        match &table.columns.column(column)?.column_type {
-            ColumnType::Text => Some(LargeValueKind::String),
-            ColumnType::Json { .. } => Some(LargeValueKind::Json),
-            ColumnType::Bytea => Some(LargeValueKind::Bytes),
-            _ => None,
-        }
     }
 
     /// Commit a local mergeable write and return its sync commit unit.
@@ -730,23 +669,13 @@ where
     }
 
     /// Settle a completed persistence receipt and release its storage boundary.
-    pub async fn settle_published_transaction(
+    pub fn settle_published_transaction(
         &mut self,
         tx_id: TxId,
         persistence: PersistedBatch,
-        retract_on_failure: bool,
     ) -> Result<(), Error> {
-        let result = if retract_on_failure && persistence.failed() {
-            self.database.retract_failed_persistence(persistence).await
-        } else {
-            self.database.finish_persistence(persistence)
-        };
-        // A resident failure has already been exactly removed from Groove. Do
-        // not leave the transaction marked as a pending durable publication:
-        // that would make a later scheduler pass retry a consumed receipt and
-        // hide the failed local write behind stale durability state.
+        self.database.finish_persistence(persistence)?;
         self.pending_persistence.remove(&tx_id);
-        let _ = result?;
         Ok(())
     }
 
@@ -756,10 +685,8 @@ where
         published: PublishedTransaction,
     ) -> Result<TxId, Error> {
         let tx_id = published.tx_id;
-        let retract_on_failure = published.retracts_on_failed_persistence();
         let persistence = published.persist().await;
-        self.settle_published_transaction(tx_id, persistence, retract_on_failure)
-            .await?;
+        self.settle_published_transaction(tx_id, persistence)?;
         Ok(tx_id)
     }
 
@@ -775,12 +702,7 @@ where
         loop {
             for publication in publications {
                 let persistence = publication.persist().await;
-                self.settle_published_transaction(
-                    publication.tx_id(),
-                    persistence,
-                    publication.retracts_on_failed_persistence(),
-                )
-                .await?;
+                self.settle_published_transaction(publication.tx_id(), persistence)?;
             }
             let Some(message) = work.pop_front() else {
                 break;

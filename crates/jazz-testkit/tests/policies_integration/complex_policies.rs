@@ -185,13 +185,15 @@ fn mixed_complex_select_policy() -> PolicyExpr {
     pe::all_of([
         pe::eq("published", true),
         pe::in_session("team_slug", "claims.team_slugs"),
-        pe::exists(pe::table("document_flags").where_(pe::rel::all_of([
-            pe::rel::eq_outer("document_id", "id"),
-            pe::rel::eq_literal("flag", "allow"),
-        ]))),
         pe::all_of([
-            pe::is_not_null("folder_id"),
-            pe::allowed_to_read("folder_id"),
+            pe::exists(pe::table("document_flags").where_(pe::rel::all_of([
+                pe::rel::eq_outer("document_id", "id"),
+                pe::rel::eq_literal("flag", "allow"),
+            ]))),
+            pe::all_of([
+                pe::is_not_null("folder_id"),
+                pe::allowed_to_read("folder_id"),
+            ]),
         ]),
     ])
 }

@@ -138,6 +138,22 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
     );
   });
 
+  it("continues database teardown after orchestrator shutdown fails", async () => {
+    const managerError = new Error("orchestrator shutdown failed");
+    const dbError = new Error("database shutdown failed");
+    const db = createMockDb("shutdown-failure");
+    db.shutdown.mockRejectedValueOnce(dbError);
+    mocks.createDb.mockResolvedValue(db);
+
+    const client = await createJazzClient({ appId: "shutdown-failure" });
+    const manager = mocks.orchestratorInstances[0]!;
+    manager.shutdown.mockRejectedValueOnce(managerError);
+
+    await expect(client.shutdown()).resolves.toBeUndefined();
+    expect(manager.shutdown).toHaveBeenCalledOnce();
+    expect(db.shutdown).toHaveBeenCalledOnce();
+  });
+
   it("AGC-02: rejects when db creation fails", async () => {
     const config: JazzClientConfig = {
       appId: "solid-unit-2",

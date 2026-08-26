@@ -80,8 +80,8 @@ fn stored_row(db: &Db<TestStorage>, row_id: RowUuid) -> BTreeMap<String, Value> 
         .columns
         .iter()
         .filter_map(|column| {
-            row.cell(&table, &column.name)
-                .map(|value| (column.name.clone(), value))
+            row.cell(&table, column.name())
+                .map(|value| (column.name().to_owned(), value))
         })
         .collect()
 }
@@ -90,10 +90,13 @@ fn stored_row(db: &Db<TestStorage>, row_id: RowUuid) -> BTreeMap<String, Value> 
 fn core_insert_applies_literal_defaults_for_omitted_columns() {
     let db = open_db();
 
-    jazz::block_on(db.insert_with_id(
+    jazz::block_on(db.insert(
         "events",
-        row(1),
         cells([("title", Value::String("created".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
     ))
     .expect("insert row");
 
@@ -119,13 +122,16 @@ fn core_insert_applies_literal_defaults_for_omitted_columns() {
 fn core_insert_preserves_explicit_null_instead_of_using_default() {
     let db = open_db();
 
-    jazz::block_on(db.insert_with_id(
+    jazz::block_on(db.insert(
         "events",
-        row(2),
         cells([
             ("title", Value::String("created".to_owned())),
             ("note", Value::Nullable(None)),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(row(2)),
+            ..Default::default()
+        },
     ))
     .expect("insert row");
 
@@ -138,9 +144,8 @@ fn core_insert_preserves_explicit_null_instead_of_using_default() {
 fn core_insert_keeps_explicit_values_for_defaulted_columns() {
     let db = open_db();
 
-    jazz::block_on(db.insert_with_id(
+    jazz::block_on(db.insert(
         "events",
-        row(3),
         cells([
             ("title", Value::String("created".to_owned())),
             ("count", Value::I64(7)),
@@ -150,6 +155,10 @@ fn core_insert_keeps_explicit_values_for_defaulted_columns() {
                 Value::Nullable(Some(Box::new(Value::String("explicit note".to_owned())))),
             ),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(row(3)),
+            ..Default::default()
+        },
     ))
     .expect("insert row");
 

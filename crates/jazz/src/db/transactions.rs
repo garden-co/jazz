@@ -102,17 +102,20 @@ where
             .map_err(Into::into)
     }
 
-    /// Open a mergeable transaction admitted as this trusted Db while keeping
-    /// every staged write and the committed unit attributed to `made_by`.
-    /// The open transaction already carries separate provenance and policy
-    /// fields; expose that existing split rather than rewriting CRUD staging.
+    /// Open a mergeable transaction admitted as this Db while retaining an
+    /// external provenance author for every staged write.
     #[doc(hidden)]
     pub async fn begin_mergeable_attributed(
         &self,
         id: OpenTransactionId,
         made_by: AuthorSubject,
     ) -> Result<(), Error> {
-        self.check_attribution_allowed(made_by)?;
+        if made_by != self.identity.author && !self.backend_attribution {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                "attribution requires a trusted serving node",
+            ));
+        }
         self.node
             .node
             .lock()
@@ -132,6 +135,25 @@ where
         MergeableTxRef { db: self, tx_id }
     }
 
+    async fn reject_attributed_mergeable_branch(
+        &self,
+        tx_id: OpenTransactionId,
+    ) -> Result<(), Error> {
+        if self
+            .node
+            .node
+            .lock()
+            .await
+            .mergeable_transaction_is_attributed(tx_id)?
+        {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                "backend-attributed transactions do not support branch targets",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) async fn stage_mergeable_insert(
         &self,
         tx_id: OpenTransactionId,
@@ -139,26 +161,25 @@ where
         row: RowUuid,
         cells: RowCells,
         now_ms: Option<u64>,
+        known_fresh_row: bool,
     ) -> Result<(), Error> {
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
-        self.node
-            .node
-            .lock()
-            .await
-            .tx_write_mergeable_in_schema(
-                tx_id,
-                self.schema_version_id,
-                table,
-                row,
-                cells,
-                None,
-                Vec::new(),
-                now_ms,
-                false,
-            )
-            .await
-            .map_err(Into::into)
+        let mut node = self.node.node.lock().await;
+        node.tx_write_mergeable_in_schema(
+            tx_id,
+            self.schema_version_id,
+            table,
+            row,
+            cells,
+            None,
+            Vec::new(),
+            now_ms,
+            false,
+            known_fresh_row,
+        )
+        .await?;
+        Ok(())
     }
 
     pub(super) async fn stage_mergeable_insert_in_branch(
@@ -169,25 +190,25 @@ where
         row: RowUuid,
         cells: RowCells,
         now_ms: Option<u64>,
+        known_fresh_row: bool,
     ) -> Result<(), Error> {
+        self.reject_attributed_mergeable_branch(tx_id).await?;
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
-        self.node
-            .node
-            .lock()
-            .await
-            .tx_write_mergeable_in_schema_and_branch(
-                tx_id,
-                self.schema_version_id,
-                table,
-                row,
-                cells,
-                None,
-                Vec::new(),
-                now_ms,
-                false,
-                branch,
-            )?;
+        let mut node = self.node.node.lock().await;
+        node.tx_write_mergeable_in_schema_and_branch(
+            tx_id,
+            self.schema_version_id,
+            table,
+            row,
+            cells,
+            None,
+            Vec::new(),
+            now_ms,
+            false,
+            branch,
+            known_fresh_row,
+        )?;
         Ok(())
     }
 
@@ -219,6 +240,7 @@ where
         patch: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        self.reject_attributed_mergeable_branch(tx_id).await?;
         if patch.is_empty() {
             return Err(Error::new(
                 ErrorCode::Schema,
@@ -264,7 +286,7 @@ where
             ));
         };
         inherited.extend(patch);
-        self.stage_mergeable_insert_in_branch(tx_id, table, head, row, inherited, now_ms)
+        self.stage_mergeable_insert_in_branch(tx_id, table, head, row, inherited, now_ms, false)
             .await
     }
 
@@ -290,6 +312,7 @@ where
                 Vec::new(),
                 now_ms,
                 false,
+                false,
             )
             .await
             .map_err(Into::into)
@@ -304,6 +327,7 @@ where
         row: RowUuid,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        self.reject_attributed_mergeable_branch(tx_id).await?;
         if self
             .node
             .node
@@ -334,6 +358,7 @@ where
                 now_ms,
                 true,
                 head,
+                false,
             )?;
         Ok(())
     }
@@ -346,6 +371,7 @@ where
         cells: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        self.reject_attributed_mergeable_branch(tx_id).await?;
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.node.node.lock().await;
@@ -369,6 +395,7 @@ where
             content_parents,
             now_ms,
             true,
+            false,
         )
         .await?;
         node.tx_write_mergeable_in_schema(
@@ -381,6 +408,7 @@ where
             deletion_parents,
             now_ms,
             true,
+            false,
         )
         .await?;
         Ok(())
@@ -419,6 +447,7 @@ where
             now_ms,
             true,
             branch.clone(),
+            false,
         )?;
         node.tx_write_mergeable_in_schema_and_branch(
             tx_id,
@@ -431,6 +460,7 @@ where
             now_ms,
             true,
             branch,
+            false,
         )?;
         Ok(())
     }
@@ -618,8 +648,9 @@ where
         table: &str,
         row: RowUuid,
         cells: RowCells,
+        updated_at_ms: Option<u64>,
     ) -> Result<(), Error> {
-        let now_ms = self.next_now_ms();
+        let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         let cells = self.apply_insert_defaults(table, cells)?;
         self.node
             .node
@@ -644,8 +675,9 @@ where
         table: &str,
         row: RowUuid,
         patch: RowCells,
+        updated_at_ms: Option<u64>,
     ) -> Result<(), Error> {
-        let now_ms = self.next_now_ms();
+        let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         let mut node = self.node.node.lock().await;
         let mut cells = node
             .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
@@ -665,13 +697,43 @@ where
         Ok(())
     }
 
+    pub(super) async fn stage_exclusive_upsert(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        updated_at_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
+        let mut node = self.node.node.lock().await;
+        let mut cells = node
+            .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
+            .await?
+            .unwrap_or_default();
+        cells.extend(patch);
+        let cells = self.apply_insert_defaults(table, cells)?;
+        node.tx_write_in_schema_at_ms(
+            tx_id,
+            self.schema_version_id,
+            table,
+            row,
+            cells,
+            None,
+            Some(now_ms),
+        )
+        .await?;
+        Ok(())
+    }
+
     pub(super) async fn stage_exclusive_delete(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
         row: RowUuid,
+        updated_at_ms: Option<u64>,
     ) -> Result<(), Error> {
-        let now_ms = self.next_now_ms();
+        let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         self.node
             .node
             .lock()
@@ -695,8 +757,9 @@ where
         table: &str,
         row: RowUuid,
         cells: RowCells,
+        updated_at_ms: Option<u64>,
     ) -> Result<(), Error> {
-        let now_ms = self.next_now_ms();
+        let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.node.node.lock().await;
         // Restore needs one content version and one deletion-register version:

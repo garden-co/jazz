@@ -144,7 +144,7 @@ describe("websocket frame carrier", () => {
     expect(issuerA).not.toBe(issuerB);
   });
 
-  it("matches verified external JWT issuer normalization while preserving the provider subject", () => {
+  it("preserves verified external JWT issuer and subject bytes exactly", () => {
     const fallback = new TextEncoder().encode('["urn:jazz:runtime-host","cache"]');
     const jwt = (iss: string) =>
       `header.${btoa(JSON.stringify({ iss, sub: " provider-subject " }))}.signature`;
@@ -155,10 +155,10 @@ describe("websocket frame carrier", () => {
         fallback,
       ),
     );
-    expect(normalized).toBe('["https://issuer.example"," provider-subject "]');
+    expect(normalized).toBe('[" https://issuer.example "," provider-subject "]');
 
-    // The server rejects a verified external token whose issuer is blank after
-    // normalization. Keep the client sessionless instead of fabricating an
+    // The server rejects a verified external token whose issuer is ASCII-blank.
+    // Keep the client sessionless instead of fabricating an
     // author that would only self-reject at WebSocket admission.
     expect(peerIdentityForWebSocketAuth(JSON.stringify({ jwt_token: jwt(" \t ") }), fallback)).toBe(
       fallback,
@@ -270,6 +270,29 @@ describe("websocket frame carrier", () => {
     expect(reader.u64()).toBe(CLIENT_WIRE_FEATURES);
     expect(reader.u64()).toBe(0);
     expect(reader.option((authority) => authority.bytes(false))).toBeUndefined();
+  });
+
+  it("rejects a v12 server without compatibility negotiation", async () => {
+    let socket: MessageWebSocket | undefined;
+    const carrier = new WebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      peerIdentity: new Uint8Array(16),
+      onFrame: () => {},
+      WebSocket: class extends MessageWebSocket {
+        constructor(url: string) {
+          super(url, (created) => {
+            socket = created;
+          });
+        }
+      },
+    });
+
+    socket!.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(1n, 12)]));
+
+    await expect(carrier.ready()).rejects.toThrow(
+      `does not support wire protocol ${WIRE_PROTOCOL_VERSION}`,
+    );
+    expect(socket!.closed).toBe(true);
   });
 
   it("sends an authority-unbound hello first on every reconnect", async () => {
@@ -546,11 +569,11 @@ function encodeWireError(code: number, retry: number, message: string): Uint8Arr
   return writer.finish();
 }
 
-function encodeServerHello(epoch: bigint): Uint8Array {
+function encodeServerHello(epoch: bigint, protocolVersion = WIRE_PROTOCOL_VERSION): Uint8Array {
   const writer = new PostcardWriter();
   writer.u64(0); // WireFrame::Hello
-  writer.u64(WIRE_PROTOCOL_VERSION);
-  writer.u64(WIRE_PROTOCOL_VERSION);
+  writer.u64(protocolVersion);
+  writer.u64(protocolVersion);
   writer.u64(CLIENT_WIRE_FEATURES);
   writer.u64(1); // WirePeerRole::Core
   writer.some((authority) => {

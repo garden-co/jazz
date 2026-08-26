@@ -87,6 +87,7 @@ fn nested_tree_preserves_projection_order_offset_and_reset() {
             ("title".to_owned(), Value::String("parent".to_owned())),
             ("rank".to_owned(), Value::I32(0)),
         ]),
+        Default::default(),
     ))
     .expect("insert parent")
     .row_uuid();
@@ -100,6 +101,7 @@ fn nested_tree_preserves_projection_order_offset_and_reset() {
                     ("label".to_owned(), Value::String(label.to_owned())),
                     ("rank".to_owned(), Value::I32(rank)),
                 ]),
+                Default::default(),
             ))
             .expect("insert child")
             .row_uuid(),
@@ -113,6 +115,7 @@ fn nested_tree_preserves_projection_order_offset_and_reset() {
                 ("label".to_owned(), Value::String(label.to_owned())),
                 ("rank".to_owned(), Value::I32(rank)),
             ]),
+            Default::default(),
         ))
         .expect("insert grandchild");
     }
@@ -213,6 +216,7 @@ fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
             ("title".to_owned(), Value::String("matching".to_owned())),
             ("rank".to_owned(), Value::I32(7)),
         ]),
+        Default::default(),
     ))
     .expect("insert matching parent")
     .row_uuid();
@@ -222,6 +226,7 @@ fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
             ("title".to_owned(), Value::String("other".to_owned())),
             ("rank".to_owned(), Value::I32(8)),
         ]),
+        Default::default(),
     ))
     .expect("insert non-matching parent");
     let initial_child = block_on(db.insert(
@@ -231,6 +236,7 @@ fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
             ("label".to_owned(), Value::String("initial".to_owned())),
             ("rank".to_owned(), Value::I32(0)),
         ]),
+        Default::default(),
     ))
     .expect("insert initial child")
     .row_uuid();
@@ -275,6 +281,7 @@ fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
             ("label".to_owned(), Value::String("later".to_owned())),
             ("rank".to_owned(), Value::I32(1)),
         ]),
+        Default::default(),
     ))
     .expect("insert later child")
     .row_uuid();
@@ -314,6 +321,7 @@ fn omitted_array_limit_is_unbounded_for_prepare_read_and_subscribe() {
             ("title".to_owned(), Value::String("parent".to_owned())),
             ("rank".to_owned(), Value::I32(0)),
         ]),
+        Default::default(),
     ))
     .expect("insert parent")
     .row_uuid();
@@ -324,6 +332,7 @@ fn omitted_array_limit_is_unbounded_for_prepare_read_and_subscribe() {
             ("label".to_owned(), Value::String("child".to_owned())),
             ("rank".to_owned(), Value::I32(0)),
         ]),
+        Default::default(),
     ))
     .expect("insert child");
 
@@ -381,6 +390,7 @@ fn large_parent_is_materialized_atomically_without_a_frame_bound() {
             ("title".to_owned(), Value::String("parent".to_owned())),
             ("rank".to_owned(), Value::I32(0)),
         ]),
+        Default::default(),
     ))
     .expect("insert parent")
     .row_uuid();
@@ -393,6 +403,7 @@ fn large_parent_is_materialized_atomically_without_a_frame_bound() {
                 ("label".to_owned(), Value::String(payload.clone())),
                 ("rank".to_owned(), Value::I32(rank)),
             ]),
+            Default::default(),
         ))
         .expect("insert individually valid child");
     }

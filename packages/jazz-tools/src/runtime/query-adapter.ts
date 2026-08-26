@@ -11,11 +11,7 @@
 import type { ColumnType, WasmSchema } from "../drivers/types.js";
 import { toJsonText } from "./json-text.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
-import {
-  isProvenanceMagicColumn,
-  isProvenanceMagicTimestampColumn,
-  magicColumnType,
-} from "../magic-columns.js";
+import { magicColumnType } from "../magic-columns.js";
 import {
   normalizeBuiltQuery,
   type BuiltCondition,
@@ -34,7 +30,6 @@ import type {
 } from "../ir.js";
 
 function relColumn(column: string, scope?: string): RelColumnRef {
-  if (isProvenanceMagicColumn(column)) return { column };
   return scope ? { scope, column } : { column };
 }
 
@@ -105,17 +100,17 @@ function toTimestampMs(value: unknown): number {
   throw new Error("Invalid timestamp condition. Expected Date, ISO string, or finite number.");
 }
 
-function toRuntimeTimestampValue(value: unknown, columnName?: string): number {
-  const timestampMs = toTimestampMs(value);
-  return columnName && isProvenanceMagicTimestampColumn(columnName)
-    ? timestampMs * 1_000
-    : timestampMs;
+function toRuntimeTimestampValue(value: unknown): number {
+  // Relation IR is evaluated by NAPI/WASM directly against core CurrentRows.
+  // Both ordinary and provenance timestamps are Unix milliseconds there and
+  // at every public result boundary.
+  return toTimestampMs(value);
 }
 
 /**
  * Translate a JavaScript value to the runtime value format.
  */
-function toRuntimeValue(value: unknown, columnType: ColumnType, columnName?: string): object {
+function toRuntimeValue(value: unknown, columnType: ColumnType): object {
   if (value === null || value === undefined) {
     return { type: "Null" };
   }
@@ -123,7 +118,7 @@ function toRuntimeValue(value: unknown, columnType: ColumnType, columnName?: str
     return { type: "Text", value: toJsonText(value) };
   }
   if (columnType.type === "Timestamp" && value instanceof Date) {
-    return { type: "Timestamp", value: toRuntimeTimestampValue(value, columnName) };
+    return { type: "Timestamp", value: toRuntimeTimestampValue(value) };
   }
   if (columnType.type === "Bytea") {
     if (value instanceof Uint8Array) {
@@ -155,7 +150,7 @@ function toRuntimeValue(value: unknown, columnType: ColumnType, columnName?: str
   }
   if (typeof value === "number") {
     if (columnType?.type === "Timestamp") {
-      return { type: "Timestamp", value: toRuntimeTimestampValue(value, columnName) };
+      return { type: "Timestamp", value: toRuntimeTimestampValue(value) };
     }
     if (columnType.type === "BigInt") {
       if (!Number.isSafeInteger(value)) {
@@ -175,7 +170,7 @@ function toRuntimeValue(value: unknown, columnType: ColumnType, columnName?: str
   }
   if (typeof value === "string") {
     if (columnType?.type === "Timestamp") {
-      return { type: "Timestamp", value: toRuntimeTimestampValue(value, columnName) };
+      return { type: "Timestamp", value: toRuntimeTimestampValue(value) };
     }
     if (columnType?.type === "Uuid") {
       return { type: "Uuid", value };
@@ -226,65 +221,6 @@ function validateIncludeBuilderSpec(
   }
 }
 
-function conditionToArraySubqueryFilter(
-  cond: BuiltCondition,
-  schema: WasmSchema,
-  table: string,
-): object {
-  const column = stripQualifier(cond.column);
-  const columnType = getColumnType(schema, table, column);
-  if (!columnType) {
-    throw new Error(`Unknown column "${column}" in table "${table}"`);
-  }
-
-  if (columnType.type === "Bytea" && ["gt", "gte", "lt", "lte"].includes(cond.op)) {
-    throw new Error(`BYTEA column "${column}" only supports eq/ne operators.`);
-  }
-  if (columnType.type === "Bytea" && cond.op === "contains") {
-    throw new Error(`BYTEA column "${column}" does not support contains filters.`);
-  }
-  if (columnType.type === "Json" && ["gt", "gte", "lt", "lte", "contains"].includes(cond.op)) {
-    throw new Error(`JSON column "${column}" only supports eq/ne/in/isNull operators.`);
-  }
-
-  const valueTypeForCondition =
-    cond.op === "contains" && columnType.type === "Array" ? columnType.element : columnType;
-  const literalValue = toRuntimeValue(cond.value, valueTypeForCondition, column);
-  const isNullValue = cond.value === undefined ? true : cond.value;
-
-  switch (cond.op) {
-    case "eq":
-      if (cond.value === null) {
-        return { IsNull: { column } };
-      }
-      return { Eq: { column, value: literalValue } };
-    case "ne":
-      if (cond.value === null) {
-        return { IsNotNull: { column } };
-      }
-      return { Ne: { column, value: literalValue } };
-    case "gt":
-      return { Gt: { column, value: literalValue } };
-    case "gte":
-      return { Ge: { column, value: literalValue } };
-    case "lt":
-      return { Lt: { column, value: literalValue } };
-    case "lte":
-      return { Le: { column, value: literalValue } };
-    case "isNull":
-      if (typeof isNullValue !== "boolean") {
-        throw new Error('"isNull" operator requires a boolean value.');
-      }
-      return isNullValue ? { IsNull: { column } } : { IsNotNull: { column } };
-    case "contains":
-      return { Contains: { column, value: literalValue } };
-    default:
-      throw new Error(
-        `Include builder for table "${table}" does not support "${cond.op}" filters.`,
-      );
-  }
-}
-
 function toArraySubqueries(
   includes: NormalizedIncludeSpec,
   tableName: string,
@@ -307,8 +243,10 @@ function toArraySubqueries(
     const resolvedSelectColumns = hasExplicitSelect
       ? resolveSelectedColumns(rel.toTable, schema, spec.select)
       : [];
+    // Root and included filters use the same public predicate IR. The native
+    // codec translates that IR once into the core Predicate representation.
     const filters = spec.conditions.map((condition) =>
-      conditionToArraySubqueryFilter(condition, schema, rel.toTable),
+      conditionToRelPredicate(condition, schema, rel.toTable),
     );
     const orderBy = spec.orderBy.map(([column, direction]) => [
       stripQualifier(column),
@@ -396,7 +334,7 @@ function conditionToRelPredicate(
           Cmp: {
             left: relColumn(field),
             op: "Eq" as const,
-            right: { Literal: toRuntimeValue(value, descriptor.column_type, field) },
+            right: { Literal: toRuntimeValue(value, descriptor.column_type) },
           },
         } satisfies RelPredicateExpr;
       },
@@ -410,18 +348,24 @@ function conditionToRelPredicate(
       },
     };
   }
-  if (cond.op === "in") {
+  if (cond.op === "in" || cond.op === "notIn") {
     if (!Array.isArray(cond.value)) {
-      throw new Error('"in" operator requires an array value');
+      throw new Error(`"${cond.op}" operator requires an array value.`);
     }
-    return {
+    if (cond.value.some((value) => value === null)) {
+      throw new Error(
+        `"${cond.op}" does not accept null membership values; use isNull or isNotNull separately.`,
+      );
+    }
+    const membership: RelPredicateExpr = {
       In: {
         left: columnRef,
         values: cond.value.map((value) => ({
-          Literal: toRuntimeValue(value, columnType, column),
+          Literal: toRuntimeValue(value, columnType),
         })),
       },
     };
+    return cond.op === "notIn" ? { Not: membership } : membership;
   }
   const valueTypeForCondition =
     cond.op === "contains" && columnType.type === "Array" ? columnType.element : columnType;
@@ -429,7 +373,7 @@ function conditionToRelPredicate(
     isFrontierRowIdToken(cond.value) && cond.op === "eq"
       ? { RowId: "Frontier" as const }
       : {
-          Literal: toRuntimeValue(cond.value, valueTypeForCondition, column),
+          Literal: toRuntimeValue(cond.value, valueTypeForCondition),
         };
   const isNullValue = cond.value === undefined ? true : cond.value;
   if (columnType.type === "Bytea" && ["gt", "gte", "lt", "lte"].includes(cond.op)) {
@@ -883,12 +827,15 @@ function toRuntimeOrderBy(
   });
 }
 
-function toFlatConditions(conditions: BuiltCondition[]): BuiltCondition[] {
-  return conditions.map((condition) =>
-    condition.op === "isNull" && condition.value === undefined
-      ? { ...condition, value: true }
-      : condition,
-  );
+function toFlatConditions(
+  conditions: BuiltCondition[],
+  schema: WasmSchema,
+  table: string,
+): RelPredicateExpr[] {
+  // Keep the legacy query envelope for ordinary table reads, but make its
+  // predicates the same canonical IR used by included relations. In
+  // particular, notIn is represented as Not(In(...)), never expanded in JS.
+  return conditions.map((condition) => conditionToRelPredicate(condition, schema, table));
 }
 
 /**
@@ -926,7 +873,7 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
   const clientOffset = typeof builder.offset === "number" ? builder.offset : undefined;
   const query = {
     table: builder.table,
-    conditions: toFlatConditions(builder.conditions),
+    conditions: toFlatConditions(builder.conditions, schema, builder.table),
     array_subqueries: arraySubqueries,
     ...(builder.includeDeleted ? { include_deleted: true } : {}),
     ...(projectedColumns ? { select_columns: projectedColumns } : {}),

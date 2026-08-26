@@ -290,7 +290,11 @@ impl RecordField for Vec<u8> {
                 expected: ValueType::Bytes,
             });
         }
-        Ok(crate::large_values::inline_scalar_bytes(bytes)?.to_vec())
+        Ok(crate::large_values::inline_scalar_bytes(
+            crate::large_values::LargeValueKind::Bytes,
+            bytes,
+        )?
+        .to_vec())
     }
 
     fn read_tuple_raw(_bytes: &[u8], value_type: &ValueType) -> Result<Self, Error> {
@@ -338,9 +342,12 @@ impl RecordField for String {
                 expected: ValueType::String,
             });
         }
-        std::str::from_utf8(crate::large_values::inline_scalar_bytes(bytes)?)
-            .map(str::to_owned)
-            .map_err(|_| Error::InvalidUtf8)
+        std::str::from_utf8(crate::large_values::inline_scalar_bytes(
+            crate::large_values::LargeValueKind::String,
+            bytes,
+        )?)
+        .map(str::to_owned)
+        .map_err(|_| Error::InvalidUtf8)
     }
 
     fn read_tuple_raw(_bytes: &[u8], value_type: &ValueType) -> Result<Self, Error> {

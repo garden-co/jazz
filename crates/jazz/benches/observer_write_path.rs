@@ -75,7 +75,7 @@ fn document_cells(index: usize) -> BTreeMap<String, Value> {
 fn seed_documents(db: &BenchDb, count: usize) -> Vec<RowUuid> {
     (0..count)
         .map(|index| {
-            db.insert("documents", document_cells(index))
+            db.insert("documents", document_cells(index), Default::default())
                 .expect("seed core observer benchmark row")
                 .row_uuid()
         })
@@ -117,8 +117,13 @@ fn update_write_path_with_and_without_observer(c: &mut Criterion) {
                     let row = rows[row_index % rows.len()];
                     row_index += 1;
 
-                    db.update("documents", row, content_update(update_index))
-                        .expect("core update without observer should succeed")
+                    db.update(
+                        "documents",
+                        row,
+                        content_update(update_index),
+                        Default::default(),
+                    )
+                    .expect("core update without observer should succeed")
                 });
             },
         );
@@ -149,8 +154,13 @@ fn update_write_path_with_and_without_observer(c: &mut Criterion) {
                     let row = rows[row_index % rows.len()];
                     row_index += 1;
 
-                    db.update("documents", row, content_update(update_index))
-                        .expect("core update with observer should succeed");
+                    db.update(
+                        "documents",
+                        row,
+                        content_update(update_index),
+                        Default::default(),
+                    )
+                    .expect("core update with observer should succeed");
                     match block_on(subscription.next_event()) {
                         Some(SubscriptionEvent::Delta { updated, .. }) => updated.len(),
                         other => panic!("expected subscription delta event, got {other:?}"),

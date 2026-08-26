@@ -382,13 +382,17 @@ where
                 ))
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        for bundle in version_bundles {
+        // One `RowVersionPayloads` message is one repair frame. Preflight and
+        // filter every bundle before ingesting the first one so a malformed
+        // later carrier cannot leave earlier transaction/history/clock state
+        // behind after the frame is rejected.
+        let mut prevalidated_bundles = Vec::new();
+        for mut bundle in version_bundles {
             ingest::validate_received_view_bundle_global_time_durability(
                 bundle.global_time,
                 bundle.durability,
             )?;
-            let versions = bundle
-                .versions
+            let versions = std::mem::take(&mut bundle.versions)
                 .into_iter()
                 .filter(|version| {
                     self.physical_table_id_for_schema(version.schema_version(), version.table())
@@ -428,9 +432,13 @@ where
                 }
             }
             self.validate_view_payload_versions(&versions)?;
+            bundle.versions = versions;
+            prevalidated_bundles.push(bundle);
+        }
+        for bundle in prevalidated_bundles {
             self.ingest_known_transaction(
                 bundle.tx,
-                versions,
+                bundle.versions,
                 bundle.fate,
                 bundle.global_time,
                 bundle.durability,
@@ -452,14 +460,14 @@ where
             version_bundles,
             program_fact_adds,
         ) = match message {
-            SyncMessage::ViewUpdate {
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription,
                 result_member_adds,
                 version_carriers,
                 version_bundles,
                 program_fact_adds,
                 ..
-            } => (
+            }) => (
                 *subscription,
                 result_member_adds,
                 version_carriers,
@@ -674,10 +682,10 @@ where
         Ok(None)
     }
 
-    fn mint_tx_time(&mut self, now_ms: u64) -> TxTime {
-        let made_at = TxTime::tick(self.clock.tx_time, now_ms);
+    fn mint_tx_time(&mut self, now_ms: u64) -> Result<TxTime, Error> {
+        let made_at = TxTime::tick(self.clock.tx_time, now_ms)?;
         self.clock.tx_time = made_at;
-        made_at
+        Ok(made_at)
     }
 
     fn merge_tx_time(&mut self, observed: TxTime) {

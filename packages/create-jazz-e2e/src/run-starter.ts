@@ -21,7 +21,7 @@ const PACKAGES_TO_PACK = ["jazz-tools", "jazz-napi", "jazz-wasm"] as const;
 export interface RunStarterOptions {
   starter: StarterName;
   repoRoot: string;
-  /** If provided, scaffold under here; else mkdtemp. */
+  /** If provided, scaffold under this caller-owned directory without removing it; else mkdtemp. */
   workDir?: string;
   /** Skip the playwright step (build-only). Useful for a fast smoke pass. */
   skipE2E?: boolean;
@@ -303,6 +303,7 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
   const config = getStarterConfig(opts.starter);
   const durations: PhaseTiming[] = [];
   let server: LocalJazzServerHandle | undefined;
+  const ownsWorkDir = opts.workDir === undefined;
   const workDir = opts.workDir ?? fs.mkdtempSync(path.join(os.tmpdir(), `cje2e-${opts.starter}-`));
   fs.mkdirSync(workDir, { recursive: true });
   const tarballDir = path.join(workDir, "_tarballs");
@@ -435,7 +436,7 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
         // Best-effort.
       }
     }
-    if (!opts.keepTempDir) {
+    if (ownsWorkDir && !opts.keepTempDir) {
       try {
         fs.rmSync(workDir, { recursive: true, force: true });
       } catch {

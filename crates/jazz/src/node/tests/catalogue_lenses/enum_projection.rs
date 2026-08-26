@@ -543,7 +543,7 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
     let initial = title_peer
         .rehydrate_query(&mut core, &title_only, &title_binding)
         .expect("old-schema title subscription opens over known case");
-    let SyncMessage::ViewUpdate { reset_result_set, result_member_adds, .. } = initial else {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { reset_result_set, result_member_adds, .. }) = initial else {
         panic!("expected initial maintained view update");
     };
     assert!(reset_result_set);
@@ -554,13 +554,13 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
     let unchanged = title_peer
         .query_update(&mut core, &title_only, &title_binding)
         .expect("identical projection target remains registered");
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         result_member_adds,
         result_member_removes,
         terminal_operations,
         ..
-    } = unchanged else {
+    }) = unchanged else {
         panic!("expected maintained view update");
     };
     assert!(!reset_result_set, "idempotent target registration must not reset");
@@ -579,7 +579,7 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
     let update = title_peer
         .query_update(&mut core, &title_only, &title_binding)
         .expect("unused unknown enum must not break maintained title output");
-    let SyncMessage::ViewUpdate { reset_result_set, result_member_adds, .. } = update else {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { reset_result_set, result_member_adds, .. }) = update else {
         panic!("expected maintained view update");
     };
     assert!(!reset_result_set);
@@ -620,7 +620,7 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
             status_options.clone(),
         )
         .expect("required unknown enum case is a row exclusion");
-    let SyncMessage::ViewUpdate { result_member_adds, .. } = update else {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { result_member_adds, .. }) = update else {
         panic!("expected initial maintained view update");
     };
     assert_eq!(result_member_adds.len(), 1);
@@ -648,7 +648,7 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
         )
         .expect("newly incompatible delta removes the row")
         .expect("expected view update");
-    let SyncMessage::ViewUpdate { result_member_removes, .. } = update else {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { result_member_removes, .. }) = update else {
         panic!("expected maintained view update");
     };
     assert!(result_member_removes.iter().any(|member| {
@@ -671,7 +671,7 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
         )
         .expect("newly compatible delta re-adds the row")
         .expect("expected view update");
-    let SyncMessage::ViewUpdate { result_member_adds, .. } = update else {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { result_member_adds, .. }) = update else {
         panic!("expected maintained view update");
     };
     assert!(result_member_adds.iter().any(|member| {
@@ -736,7 +736,7 @@ fn maintained_old_payload_enum_subscription_omits_new_case_without_aliasing() {
     let update = required_peer
         .rehydrate_query(&mut core, &required, &binding)
         .expect("unknown payload case is a row exclusion");
-    let SyncMessage::ViewUpdate { result_member_adds, .. } = update else {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { result_member_adds, .. }) = update else {
         panic!("expected initial maintained view update");
     };
     assert!(result_member_adds.is_empty());

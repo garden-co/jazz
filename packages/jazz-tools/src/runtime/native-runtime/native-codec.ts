@@ -125,7 +125,6 @@ export function openConfig(
   sourceId?: number,
   historyComplete = false,
   initialSyncFlushEvery?: number,
-  backendCredential?: string,
 ): Uint8Array {
   const writer = new PostcardWriter();
   writer.bytes(node);
@@ -141,17 +140,15 @@ export function openConfig(
   } else {
     writer.some((value) => value.u64(initialSyncFlushEvery));
   }
-  if (backendCredential == null) writer.none();
-  else writer.some((value) => value.string(backendCredential));
+  // The native binding keeps a trailing `backend_credential` slot solely to
+  // reject legacy raw ingress. New configs must never serialize one.
+  writer.none();
   return writer.finish();
 }
 
 /**
- * Core open configuration now carries a portable author subject rather than a
- * bare UUID. Keep the old 16-byte fixture/runtime identity shape compatible by
- * mapping it to the exact deterministic test subject used by Rust. External
- * callers already supply canonical `[issuer, subject]` JSON and keep it
- * byte-for-byte unchanged.
+ * Core open configuration carries a portable canonical `[issuer, subject]`
+ * JSON author. There is deliberately no UUID fallback.
  */
 function canonicalOpenAuthor(author: Uint8Array): string {
   try {
@@ -167,16 +164,9 @@ function canonicalOpenAuthor(author: Uint8Array): string {
       return canonical;
     }
   } catch {
-    // Legacy UUID bytes are intentionally handled below.
+    // Fall through to the consistent public-boundary diagnostic.
   }
-  if (author.byteLength !== 16) {
-    throw new Error(
-      "native open config author must be canonical UTF-8 JSON or 16 legacy UUID bytes",
-    );
-  }
-  const hex = Array.from(author, (byte) => byte.toString(16).padStart(2, "0")).join("");
-  const uuid = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-  return JSON.stringify(["urn:jazz:test", uuid]);
+  throw new Error("native open config author must be canonical UTF-8 JSON [issuer, subject]");
 }
 
 export function queryFromTable(table: string): Uint8Array {
@@ -216,6 +206,10 @@ export type QueryPredicate =
   | {
       op: "All" | "Any";
       predicates: QueryPredicate[];
+    }
+  | {
+      op: "Not";
+      predicate: QueryPredicate;
     }
   | {
       column: string;
@@ -409,6 +403,11 @@ function writePredicate(writer: PostcardWriter, predicate: QueryPredicate): void
       (predicateWriter, index) => writePredicate(predicateWriter, predicate.predicates[index]!),
       predicate.predicates.length,
     );
+    return;
+  }
+  if (predicate.op === "Not") {
+    writer.u64(2); // Predicate::Not
+    writePredicate(writer, predicate.predicate);
     return;
   }
   if (predicate.op === "In") {

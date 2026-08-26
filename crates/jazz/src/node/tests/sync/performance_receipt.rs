@@ -143,9 +143,9 @@ fn policy_graph_version(
         row_uuid,
         Vec::new(),
         AuthorSubject::SYSTEM,
-        tx_id.time,
+        tx_id.time.physical_ms(),
         AuthorSubject::SYSTEM,
-        tx_id.time,
+        tx_id.time.physical_ms(),
         cells,
         None,
     )
@@ -336,11 +336,11 @@ fn policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt() {
     let serve_start = std::time::Instant::now();
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     let serve_elapsed = serve_start.elapsed();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         version_bundles,
         ..
-    } = &update
+    }) = &update
     else {
         panic!("expected view update");
     };

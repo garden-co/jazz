@@ -3,8 +3,8 @@ module.exports = {
     platforms: {
       android: {
         packageName: "com.jazzrn",
-        packageImportPath: "import com.jazzrn.JazzRnPackage;",
-        packageInstance: "new JazzRnPackage()",
+        packageImportPath: "import com.jazzrn.JazzRelayPackage;",
+        packageInstance: "new JazzRelayPackage()",
       },
     },
   },

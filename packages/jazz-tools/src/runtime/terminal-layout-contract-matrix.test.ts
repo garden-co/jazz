@@ -101,17 +101,17 @@ function descriptorFor(
   carriers: readonly Carrier[],
 ): DescriptorField[] {
   return [
-    { name: "row_uuid", valueType: { tag: 10 } },
+    { name: "row_uuid", valueType: { tag: 11 } },
     ...logicalStorageColumns(columns).map((column, index) => ({
       name: physicalNames[index]!,
       // CurrentRow adds a carrier around the already-declared nullable type;
       // nullable public cells therefore intentionally have two wrappers.
       valueType:
         carriers[index] === "CurrentRow"
-          ? { tag: 14, inner: storageColumnValueType(column) }
+          ? { tag: 15, inner: storageColumnValueType(column) }
           : storageColumnValueType(column),
     })),
-    { name: "__route_provenance", valueType: { tag: 10 } },
+    { name: "__route_provenance", valueType: { tag: 11 } },
   ];
 }
 
@@ -291,6 +291,8 @@ describe("TerminalRootLayout encoding contract matrix", () => {
         names: string[];
       }>();
       const delta = emptyDelta([layout]);
+      // Terminal occurrence keys use their own stable row-key arm, independent
+      // of the ValueType enum's shifted UUID discriminant.
       const key = [10, ...uuidBytes(ROOT_ID)];
       delta.terminalOperations = [
         {
@@ -326,10 +328,10 @@ describe("TerminalRootLayout encoding contract matrix", () => {
       { name: "count", column_type: { type: "Integer" }, nullable: false, sparse: true },
     ];
     const descriptor: DescriptorField[] = [
-      { name: "row_uuid", valueType: { tag: 10 } },
-      { name: "user_title", valueType: { tag: 14, inner: { tag: 8 } } },
+      { name: "row_uuid", valueType: { tag: 11 } },
+      { name: "user_title", valueType: { tag: 15, inner: { tag: 8 } } },
       { name: "user_count", valueType: { tag: 4 } },
-      { name: "__route_provenance", valueType: { tag: 10 } },
+      { name: "__route_provenance", valueType: { tag: 11 } },
     ];
     const layout: NativeTerminalRootLayout = {
       id: "mixed-root-and-child-paths",
@@ -417,9 +419,9 @@ describe("TerminalRootLayout encoding contract matrix", () => {
         {
           ...valid,
           rootDescriptor: encodedDescriptor([
-            { name: "row_uuid", valueType: { tag: 10 } },
+            { name: "row_uuid", valueType: { tag: 11 } },
             { name: "user_title", valueType: { tag: 4 } },
-            { name: "__route_provenance", valueType: { tag: 10 } },
+            { name: "__route_provenance", valueType: { tag: 11 } },
           ]),
         },
       ],

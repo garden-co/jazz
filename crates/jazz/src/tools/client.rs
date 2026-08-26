@@ -16,7 +16,9 @@ use crate::db::{
     TerminalRootLayout, TickScheduler, TickUrgency, Transport as CoreTransport,
     WireTransportAdapter,
 };
-use crate::groove::records::{BorrowedRecord, OwnedRecord, Value as CoreValue};
+use crate::groove::records::{
+    BorrowedRecord, OwnedRecord, Value as CoreValue, ValueType as CoreValueType,
+};
 use crate::groove::storage::{BoxedStorage as CoreStorage, MemoryStorage as CoreMemoryStorage};
 use crate::ids::{
     AuthorSubject as CoreAuthorSubject, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid,
@@ -34,7 +36,7 @@ use crate::tools::public_schema::{OrderedRowDelta, QueryResult, Row};
 use crate::tools::public_schema::{Schema, validate_json_value};
 #[cfg(feature = "testing")]
 use crate::tools::sync::ClientId;
-use crate::tools::sync::DurabilityTier;
+use crate::tools::sync::{DurabilityTier, ReadTier};
 use crate::tools::transaction::TransactionId;
 use crate::tools::websocket_prelude_auth::AuthConfig as WsAuthConfig;
 use crate::tx::{
@@ -287,7 +289,7 @@ impl Backend {
         table: &str,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
-        let write = crate::db::block_on(self.0.insert(table, cells))?;
+        let write = crate::db::block_on(self.0.insert(table, cells, Default::default()))?;
         Ok((write.row_uuid(), write.mergeable_tx_id()))
     }
 
@@ -297,7 +299,14 @@ impl Backend {
         table: &str,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
-        let write = crate::db::block_on(self.0.insert_for_identity(identity, table, cells))?;
+        let write = crate::db::block_on(self.0.insert(
+            table,
+            cells,
+            crate::db::InsertOptions {
+                identity: crate::db::WriteIdentity::Session(identity),
+                ..Default::default()
+            },
+        ))?;
         Ok((write.row_uuid(), write.mergeable_tx_id()))
     }
 
@@ -307,7 +316,15 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::db::block_on(self.0.insert_with_id(table, row_id, cells))?.mergeable_tx_id())
+        Ok(crate::db::block_on(self.0.insert(
+            table,
+            cells,
+            crate::db::InsertOptions {
+                row_id: Some(row_id),
+                ..Default::default()
+            },
+        ))?
+        .mergeable_tx_id())
     }
 
     fn insert_with_id_for_identity(
@@ -317,10 +334,15 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::db::block_on(
-            self.0
-                .insert_with_id_for_identity(identity, table, row_id, cells),
-        )?
+        Ok(crate::db::block_on(self.0.insert(
+            table,
+            cells,
+            crate::db::InsertOptions {
+                row_id: Some(row_id),
+                identity: crate::db::WriteIdentity::Session(identity),
+                ..Default::default()
+            },
+        ))?
         .mergeable_tx_id())
     }
 
@@ -329,8 +351,18 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
+        updated_at_ms: Option<u64>,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::db::block_on(self.0.upsert(table, row_id, cells))?.mergeable_tx_id())
+        Ok(crate::db::block_on(self.0.upsert(
+            table,
+            row_id,
+            cells,
+            crate::db::UpsertOptions {
+                updated_at_ms,
+                ..Default::default()
+            },
+        ))?
+        .mergeable_tx_id())
     }
 
     fn upsert_for_identity(
@@ -339,11 +371,19 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
+        updated_at_ms: Option<u64>,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(
-            crate::db::block_on(self.0.upsert_for_identity(identity, table, row_id, cells))?
-                .mergeable_tx_id(),
-        )
+        Ok(crate::db::block_on(self.0.upsert(
+            table,
+            row_id,
+            cells,
+            crate::db::UpsertOptions {
+                identity: crate::db::WriteIdentity::Session(identity),
+                updated_at_ms,
+                ..Default::default()
+            },
+        ))?
+        .mergeable_tx_id())
     }
 
     fn update(
@@ -351,8 +391,18 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
+        updated_at_ms: Option<u64>,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::db::block_on(self.0.update(table, row_id, cells))?.mergeable_tx_id())
+        Ok(crate::db::block_on(self.0.update(
+            table,
+            row_id,
+            cells,
+            crate::db::UpdateOptions {
+                updated_at_ms,
+                ..Default::default()
+            },
+        ))?
+        .mergeable_tx_id())
     }
 
     fn delete_for_identity(
@@ -361,10 +411,15 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(
-            crate::db::block_on(self.0.delete_for_identity(identity, table, row_id))?
-                .mergeable_tx_id(),
-        )
+        Ok(crate::db::block_on(self.0.delete(
+            table,
+            row_id,
+            crate::db::DeleteOptions {
+                identity: crate::db::WriteIdentity::Session(identity),
+                ..Default::default()
+            },
+        ))?
+        .mergeable_tx_id())
     }
 
     fn delete(
@@ -372,7 +427,10 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::db::block_on(self.0.delete(table, row_id))?.mergeable_tx_id())
+        Ok(
+            crate::db::block_on(self.0.delete(table, row_id, Default::default()))?
+                .mergeable_tx_id(),
+        )
     }
 
     fn prepare_query(
@@ -464,11 +522,15 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(), CoreDbError> {
-        crate::db::block_on(
-            self.0
-                .exclusive_tx_ref(tx_id)
-                .insert_with_id(table, row_id, cells),
-        )
+        crate::db::block_on(self.0.exclusive_tx_ref(tx_id).insert(
+            table,
+            cells,
+            crate::db::InsertOptions {
+                row_id: Some(row_id),
+                ..Default::default()
+            },
+        ))
+        .map(|_| ())
     }
 
     fn exclusive_update(
@@ -478,7 +540,12 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(), CoreDbError> {
-        crate::db::block_on(self.0.exclusive_tx_ref(tx_id).update(table, row_id, cells))
+        crate::db::block_on(self.0.exclusive_tx_ref(tx_id).update(
+            table,
+            row_id,
+            cells,
+            Default::default(),
+        ))
     }
 
     fn exclusive_delete(
@@ -487,7 +554,11 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<(), CoreDbError> {
-        crate::db::block_on(self.0.exclusive_tx_ref(tx_id).delete(table, row_id))
+        crate::db::block_on(self.0.exclusive_tx_ref(tx_id).delete(
+            table,
+            row_id,
+            Default::default(),
+        ))
     }
 
     fn commit_exclusive_handle(
@@ -748,15 +819,20 @@ impl ClientDb {
         row_id: Uuid,
         cells: crate::db::RowCells,
         identity: Option<CoreAuthorSubject>,
+        updated_at_ms: Option<u64>,
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
         let write = match identity {
-            Some(identity) => {
-                inner
-                    .db
-                    .upsert_for_identity(identity, &table, CoreRowUuid(row_id), cells)
-            }
-            None => inner.db.upsert(&table, CoreRowUuid(row_id), cells),
+            Some(identity) => inner.db.upsert_for_identity(
+                identity,
+                &table,
+                CoreRowUuid(row_id),
+                cells,
+                updated_at_ms,
+            ),
+            None => inner
+                .db
+                .upsert(&table, CoreRowUuid(row_id), cells, updated_at_ms),
         }
         .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_core_write_not_rejected(&inner.db, write)?;
@@ -798,18 +874,23 @@ impl ClientDb {
         row_id: ObjectId,
         cells: crate::db::RowCells,
         identity: Option<CoreAuthorSubject>,
+        updated_at_ms: Option<u64>,
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
             JazzError::Write("update requires a row created or observed by this client".to_string())
         })?;
         let write = match identity {
-            Some(identity) => {
-                inner
-                    .db
-                    .upsert_for_identity(identity, &table, CoreRowUuid(*row_id.uuid()), cells)
-            }
-            None => inner.db.update(&table, CoreRowUuid(*row_id.uuid()), cells),
+            Some(identity) => inner.db.upsert_for_identity(
+                identity,
+                &table,
+                CoreRowUuid(*row_id.uuid()),
+                cells,
+                updated_at_ms,
+            ),
+            None => inner
+                .db
+                .update(&table, CoreRowUuid(*row_id.uuid()), cells, updated_at_ms),
         }
         .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_core_write_not_rejected(&inner.db, write)?;
@@ -1889,9 +1970,97 @@ fn core_row_provenance_to_public(
 ) -> crate::tools::metadata::RowProvenance {
     crate::tools::metadata::RowProvenance {
         created_by: provenance.created_by.canonical().to_owned(),
-        created_at: provenance.created_at.0,
+        created_at: provenance.created_at,
         updated_by: provenance.updated_by.canonical().to_owned(),
-        updated_at: provenance.updated_at.0,
+        updated_at: provenance.updated_at,
+    }
+}
+
+/// Re-encode a subscription row for the public Jazz-client boundary.
+///
+/// Current rows already expose public provenance in Unix milliseconds. Packed
+/// HLC values remain internal version and transaction-ordering state.
+fn public_subscription_record(row: &crate::node::CurrentRow) -> Result<Vec<u8>> {
+    let (descriptor, raw) = row.encoded_record();
+    let mut values = BorrowedRecord::new(raw, descriptor)
+        .to_values()
+        .map_err(|error| JazzError::Query(format!("invalid subscription row: {error}")))?;
+    normalize_public_subscription_record_values(descriptor, &mut values)?;
+    descriptor
+        .create(&values)
+        .map_err(|error| JazzError::Query(format!("encode public subscription row: {error}")))
+}
+
+fn normalize_public_subscription_record_values(
+    descriptor: &crate::groove::records::RecordDescriptor,
+    values: &mut [CoreValue],
+) -> Result<()> {
+    if descriptor.fields().len() != values.len() {
+        return Err(JazzError::Query(
+            "subscription record value count does not match its descriptor".to_owned(),
+        ));
+    }
+    for (field, value) in descriptor.fields().iter().zip(values) {
+        normalize_public_subscription_value(field.name.as_deref(), &field.value_type, value)?;
+    }
+    Ok(())
+}
+
+fn normalize_public_subscription_value(
+    field_name: Option<&str>,
+    value_type: &CoreValueType,
+    value: &mut CoreValue,
+) -> Result<()> {
+    match (value_type, value) {
+        (CoreValueType::Nullable(inner), CoreValue::Nullable(Some(value))) => {
+            normalize_public_subscription_value(field_name, inner, value)
+        }
+        (CoreValueType::Nullable(_), CoreValue::Nullable(None)) => Ok(()),
+        (CoreValueType::Array(element), CoreValue::Array(values)) => {
+            for value in values {
+                normalize_public_subscription_value(None, element, value)?;
+            }
+            Ok(())
+        }
+        (CoreValueType::Record(descriptor), CoreValue::Record(record)) => {
+            if record.descriptor() != descriptor.as_ref() {
+                return Err(JazzError::Query(
+                    "subscription nested record does not match its descriptor".to_owned(),
+                ));
+            }
+            let mut values = record.to_values().map_err(|error| {
+                JazzError::Query(format!("invalid nested subscription record: {error}"))
+            })?;
+            normalize_public_subscription_record_values(descriptor, &mut values)?;
+            let raw = descriptor.create(&values).map_err(|error| {
+                JazzError::Query(format!("encode nested public subscription record: {error}"))
+            })?;
+            *record = OwnedRecord::new(raw, (**descriptor).clone());
+            Ok(())
+        }
+        (CoreValueType::Tuple(members), CoreValue::Tuple(values)) => {
+            if members.len() != values.len() {
+                return Err(JazzError::Query(
+                    "subscription tuple value count does not match its descriptor".to_owned(),
+                ));
+            }
+            for (member, value) in members.iter().zip(values) {
+                normalize_public_subscription_value(None, member, value)?;
+            }
+            Ok(())
+        }
+        (CoreValueType::U64, CoreValue::U64(_timestamp))
+            if matches!(field_name, Some("$createdAt" | "$updatedAt")) =>
+        {
+            Ok(())
+        }
+        (_, _) if matches!(field_name, Some("$createdAt" | "$updatedAt")) => {
+            Err(JazzError::Query(format!(
+                "subscription provenance field {} is not a u64 timestamp",
+                field_name.expect("matched provenance field")
+            )))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -2176,6 +2345,38 @@ impl JazzClient {
         Ok(Some(identity))
     }
 
+    /// Validate a public write-context physical-millisecond timestamp.
+    /// Core mints its packed HLC representation when it constructs provenance.
+    fn write_updated_at(&self) -> Result<Option<u64>> {
+        let Some(context) = self.write_context.as_ref() else {
+            return Ok(None);
+        };
+        let Some(updated_at) = context.updated_at() else {
+            return Ok(None);
+        };
+        if context.transaction_id().is_some() {
+            return Err(JazzError::Write(
+                "updated_at is not supported for transaction-scoped writes".to_owned(),
+            ));
+        }
+        const MAX_PHYSICAL_MS: u64 = crate::time::HLC_MAX_PHYSICAL_MS;
+        if updated_at > MAX_PHYSICAL_MS {
+            return Err(JazzError::Write(format!(
+                "updated_at {updated_at} exceeds the packed-HLC physical millisecond range"
+            )));
+        }
+        Ok(Some(updated_at))
+    }
+
+    fn reject_updated_at_override(&self, operation: &str) -> Result<()> {
+        if self.write_updated_at()?.is_some() {
+            return Err(JazzError::Write(format!(
+                "updated_at is not supported for {operation}"
+            )));
+        }
+        Ok(())
+    }
+
     fn check_core_write_not_rejected(db: &Backend, tx_id: CoreTxId) -> Result<()> {
         let state = db
             .write_state(tx_id)
@@ -2195,6 +2396,10 @@ impl JazzClient {
             include_deleted: false,
             read_view: CoreReadViewSpec::default(),
         }
+    }
+
+    fn core_read_opts_for_read_tier(tier: ReadTier) -> CoreReadOpts {
+        Self::core_read_opts(Some(tier.legacy_durability_tier()))
     }
 }
 
@@ -2428,7 +2633,7 @@ impl PublicQueryDecoder {
     ) -> Result<Row> {
         #[cfg(not(feature = "testing"))]
         let _ = query;
-        let (_, encoded) = row.row.encoded_record();
+        let encoded = public_subscription_record(&row.row)?;
         let provenance = db
             .row_provenance(&row.row)
             .map_err(|error| JazzError::Query(error.to_string()))?
@@ -2759,8 +2964,8 @@ impl PublicQueryDecoder {
                     )));
                 };
                 match column {
-                    "$createdAt" => Value::Timestamp(provenance.created_at.0),
-                    "$updatedAt" => Value::Timestamp(provenance.updated_at.0),
+                    "$createdAt" => Value::Timestamp(provenance.created_at),
+                    "$updatedAt" => Value::Timestamp(provenance.updated_at),
                     "$createdBy" => Value::Text(provenance.created_by.canonical().to_owned()),
                     "$updatedBy" => Value::Text(provenance.updated_by.canonical().to_owned()),
                     _ => unreachable!("matched provenance magic column"),
@@ -2889,11 +3094,21 @@ impl JazzClient {
     ///
     /// Returns a stream of row deltas as the data changes.
     pub async fn subscribe(&self, query: Query) -> Result<SubscriptionStream> {
-        self.subscribe_with_opts(
-            query,
-            Self::core_read_opts(Some(DurabilityTier::EdgeServer)),
-        )
-        .await
+        self.subscribe_with_read_tier(query, ReadTier::Remote).await
+    }
+
+    /// Subscribe using a product-level read tier.
+    ///
+    /// `RemoteIfPossible` remains strict in the native Rust facade because it
+    /// has no public explicit-disconnect state; host bindings can lower it to
+    /// local only after their caller explicitly disconnects.
+    pub async fn subscribe_with_read_tier(
+        &self,
+        query: Query,
+        tier: ReadTier,
+    ) -> Result<SubscriptionStream> {
+        self.subscribe_with_opts(query, Self::core_read_opts_for_read_tier(tier))
+            .await
     }
 
     /// Subscribe to a query with explicit core read options.
@@ -2911,9 +3126,24 @@ impl JazzClient {
         Ok(SubscriptionStream::new(rx, cancellation))
     }
 
-    /// One-shot query, optionally waiting for a durability tier.
+    /// One-shot query using a product-level read tier.
     ///
     /// Returns the current results as `Vec<(ObjectId, Vec<Value>)>`.
+    pub async fn query_with_read_tier(
+        &self,
+        query: Query,
+        tier: ReadTier,
+    ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
+        self.query_with_opts(query, Self::core_read_opts_for_read_tier(tier))
+            .await
+    }
+
+    /// One-shot query, optionally waiting for a legacy durability tier.
+    ///
+    /// Returns the current results as `Vec<(ObjectId, Vec<Value>)>`.
+    #[deprecated(
+        note = "read APIs should use query_with_read_tier(query, ReadTier); DurabilityTier remains supported for write waits"
+    )]
     pub async fn query(
         &self,
         query: Query,
@@ -2950,7 +3180,20 @@ impl JazzClient {
             .collect()
     }
 
-    /// One-shot query with a stable key for every result, including flat joins.
+    /// One-shot query with stable result keys using a product-level read tier.
+    pub async fn query_results_with_read_tier(
+        &self,
+        query: Query,
+        tier: ReadTier,
+    ) -> Result<Vec<QueryResult>> {
+        self.query_results_with_opts(query, Self::core_read_opts_for_read_tier(tier))
+            .await
+    }
+
+    /// One-shot query with stable keys using a legacy durability tier.
+    #[deprecated(
+        note = "read APIs should use query_results_with_read_tier(query, ReadTier); DurabilityTier remains supported for write waits"
+    )]
     pub async fn query_results(
         &self,
         query: Query,
@@ -3006,6 +3249,7 @@ impl JazzClient {
         values: HashMap<String, Value>,
     ) -> Result<(ObjectId, Vec<Value>, Option<TransactionId>)> {
         {
+            self.reject_updated_at_override("inserts")?;
             let row_values = self.core_ordered_values(table, &values)?;
             let cells = self.core_cells(table, values)?;
             if let Some(transaction_id) = self
@@ -3042,6 +3286,7 @@ impl JazzClient {
     ) -> Result<Option<TransactionId>> {
         {
             let cells = self.core_cells(table, values)?;
+            let updated_at = self.write_updated_at()?;
             if let Some(transaction_id) = self
                 .write_context
                 .as_ref()
@@ -3051,9 +3296,13 @@ impl JazzClient {
                     .stage_upsert(transaction_id, table.to_string(), object_id, cells)?;
                 Ok(None)
             } else {
-                let tx_id =
-                    self.db
-                        .upsert(table.to_string(), object_id, cells, self.write_identity()?)?;
+                let tx_id = self.db.upsert(
+                    table.to_string(),
+                    object_id,
+                    cells,
+                    self.write_identity()?,
+                    updated_at,
+                )?;
                 Ok(Some(core_batch_id(tx_id)))
             }
         }
@@ -3079,6 +3328,7 @@ impl JazzClient {
                     )
                 })?;
             let cells = self.core_cells(&table, updates.into_iter().collect())?;
+            let updated_at = self.write_updated_at()?;
             if let Some(transaction_id) = self
                 .write_context
                 .as_ref()
@@ -3087,7 +3337,9 @@ impl JazzClient {
                 self.db.stage_update(transaction_id, object_id, cells)?;
                 Ok(None)
             } else {
-                let tx_id = self.db.update(object_id, cells, self.write_identity()?)?;
+                let tx_id = self
+                    .db
+                    .update(object_id, cells, self.write_identity()?, updated_at)?;
                 Ok(Some(core_batch_id(tx_id)))
             }
         }
@@ -3096,6 +3348,7 @@ impl JazzClient {
     /// Delete a row.
     pub fn delete(&self, object_id: ObjectId) -> Result<Option<TransactionId>> {
         {
+            self.reject_updated_at_override("deletes")?;
             if let Some(transaction_id) = self
                 .write_context
                 .as_ref()
@@ -3244,6 +3497,25 @@ mod tests {
     use crate::tools::{ClientStorage, ColumnType, SchemaBuilder, TableSchema};
     use serde_json::json;
     use tempfile::TempDir;
+
+    /// Product read tiers lower to the unchanged facade durability contract,
+    /// keeping write durability independent of the read API migration.
+    #[test]
+    fn read_tier_lowers_without_changing_write_durability() {
+        assert_eq!(
+            ReadTier::LocalFirst.legacy_durability_tier(),
+            DurabilityTier::Local
+        );
+        assert_eq!(
+            ReadTier::Remote.legacy_durability_tier(),
+            DurabilityTier::EdgeServer
+        );
+        assert_eq!(
+            ReadTier::RemoteIfPossible.legacy_durability_tier(),
+            DurabilityTier::EdgeServer,
+            "the native facade has no explicit offline boundary"
+        );
+    }
 
     fn declared_todo_schema() -> Schema {
         SchemaBuilder::new()
@@ -3551,7 +3823,7 @@ mod tests {
             .record_tick_driver_failure(error.to_string());
 
         let error = client
-            .query(Query::from("todos"), Some(DurabilityTier::Local))
+            .query_with_read_tier(Query::from("todos"), ReadTier::LocalFirst)
             .await
             .expect_err("a stopped tick driver must be visible to the caller");
         assert!(
@@ -3593,7 +3865,7 @@ mod tests {
             .await
             .expect("reconnect offline persistent client");
         let rows = restarted
-            .query(Query::from("todos"), Some(DurabilityTier::Local))
+            .query_with_read_tier(Query::from("todos"), ReadTier::LocalFirst)
             .await
             .expect("query rehydrated rows");
 
@@ -3692,6 +3964,115 @@ mod tests {
                 &CoreRejectionReason::AuthorizationDenied,
             ),
             "transaction was rejected before reaching EdgeServer durability: authorization_denied",
+        );
+    }
+
+    #[test]
+    fn public_provenance_uses_unix_milliseconds_without_touching_other_timestamps() {
+        use crate::groove::records::ValueType;
+        use crate::time::TxTime;
+
+        let physical_ms = 1_777_777_777_777;
+        let created = TxTime::new(physical_ms, 17);
+        let provenance = core_row_provenance_to_public(crate::node::RowProvenance {
+            created_by: CoreAuthorSubject::SYSTEM,
+            created_at: physical_ms,
+            updated_by: CoreAuthorSubject::SYSTEM,
+            updated_at: physical_ms + 1,
+        });
+        assert_eq!(provenance.created_at, physical_ms);
+        assert_eq!(provenance.updated_at, physical_ms + 1);
+
+        let descriptor = crate::groove::records::RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("user_occurred_at", ValueType::U64),
+            ("$createdAt", ValueType::U64),
+            ("$updatedAt", ValueType::U64),
+            ("tx_time", ValueType::U64),
+        ]);
+        let row_id = Uuid::from_u128(1);
+        let raw = descriptor
+            .create(&[
+                CoreValue::Uuid(row_id),
+                CoreValue::U64(42),
+                CoreValue::U64(physical_ms),
+                CoreValue::U64(physical_ms + 1),
+                CoreValue::U64(created.0),
+            ])
+            .expect("encode current row");
+        let row = crate::node::CurrentRow::new("todos", OwnedRecord::new(raw, descriptor.clone()));
+        let encoded = public_subscription_record(&row).expect("encode public row");
+        let values = BorrowedRecord::new(&encoded, &descriptor)
+            .to_values()
+            .expect("decode public row");
+        assert_eq!(values[1], CoreValue::U64(42));
+        assert_eq!(values[2], CoreValue::U64(physical_ms));
+        assert_eq!(values[3], CoreValue::U64(physical_ms + 1));
+        assert_eq!(values[4], CoreValue::U64(created.0));
+    }
+
+    #[tokio::test]
+    async fn transaction_scoped_timestamp_override_is_rejected() {
+        let client = JazzClient::test_client(declared_todo_schema()).await;
+        let transaction = client.begin_transaction().expect("open transaction");
+        let scoped = transaction.client().with_write_context(
+            WriteContext::default()
+                .with_transaction_id(transaction.transaction_id())
+                .with_updated_at(1_700_000_000_001),
+        );
+        let error = scoped
+            .upsert(
+                "todos",
+                Uuid::from_u128(7),
+                HashMap::from([
+                    ("title".to_owned(), Value::Text("no staging".to_owned())),
+                    ("completed".to_owned(), Value::Boolean(false)),
+                ]),
+            )
+            .expect_err("a staged write cannot silently discard updated_at");
+        assert!(
+            error
+                .to_string()
+                .contains("updated_at is not supported for transaction-scoped writes")
+        );
+        transaction.rollback().expect("rollback empty transaction");
+    }
+
+    #[tokio::test]
+    async fn raw_core_provenance_predicates_and_public_results_use_ms() {
+        use crate::query::{Query, col, gte, lit};
+
+        let updated_at_ms = 1_777_777_777_777;
+        let client = JazzClient::test_client(declared_todo_schema()).await;
+        let writer =
+            client.with_write_context(WriteContext::default().with_updated_at(updated_at_ms));
+        writer
+            .upsert(
+                "todos",
+                Uuid::from_u128(9),
+                HashMap::from([
+                    (
+                        "title".to_owned(),
+                        Value::Text("timestamp receipt".to_owned()),
+                    ),
+                    ("completed".to_owned(), Value::Boolean(false)),
+                ]),
+            )
+            .expect("write with deterministic physical timestamp");
+        let query = Query::from("todos")
+            .filter(gte(col("$updatedAt"), lit(updated_at_ms)))
+            .select(["$updatedAt"]);
+        let results = client
+            .query_results(query, Some(DurabilityTier::Local))
+            .await
+            .expect("query with physical-ms provenance predicate");
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].fields,
+            vec![QueryResultField {
+                name: "$updatedAt".to_owned(),
+                value: Value::Timestamp(updated_at_ms),
+            }]
         );
     }
 }

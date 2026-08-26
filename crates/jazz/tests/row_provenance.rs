@@ -50,19 +50,25 @@ fn row_provenance_preserves_created_fields_and_advances_updated_at() {
     let row = RowUuid::from_bytes([0x33; 16]);
     let db = open_db(alice);
 
-    jazz::block_on(db.insert_with_id_at_ms(
+    jazz::block_on(db.insert(
         "todos",
-        row,
         BTreeMap::from([("title".to_owned(), Value::String("first".to_owned()))]),
-        1_000,
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            updated_at_ms: Some(1_000),
+            ..Default::default()
+        },
     ))
     .expect("insert row");
 
-    jazz::block_on(db.update_at_ms(
+    jazz::block_on(db.update(
         "todos",
         row,
         BTreeMap::from([("title".to_owned(), Value::String("second".to_owned()))]),
-        2_000,
+        jazz::db::UpdateOptions {
+            updated_at_ms: Some(2_000),
+            ..Default::default()
+        },
     ))
     .expect("update row");
 
@@ -74,11 +80,15 @@ fn row_provenance_preserves_created_fields_and_advances_updated_at() {
         .row_provenance(&rows[0])
         .expect("resolve provenance")
         .expect("row has provenance");
+    // `Db::row_provenance` exposes physical Unix milliseconds, like every
+    // public-facing provenance boundary. Packed HLC remains version-internal.
+    let created_at = 1_000;
+    let updated_at = 2_000;
 
     assert_eq!(provenance.created_by, alice);
-    assert_eq!(provenance.created_at.0, 1_000);
+    assert_eq!(provenance.created_at, created_at);
     assert_eq!(provenance.updated_by, alice);
-    assert_eq!(provenance.updated_at.0, 2_000);
+    assert_eq!(provenance.updated_at, updated_at);
     assert!(provenance.created_at < provenance.updated_at);
 
     let (descriptor, raw) = rows[0].encoded_record();
@@ -91,11 +101,11 @@ fn row_provenance_preserves_created_fields_and_advances_updated_at() {
         .expect("updatedAt field");
     assert_eq!(
         encoded.get_u64(created_at_idx).expect("createdAt value"),
-        1_000
+        created_at
     );
     assert_eq!(
         encoded.get_u64(updated_at_idx).expect("updatedAt value"),
-        2_000
+        updated_at
     );
 }
 
@@ -109,14 +119,25 @@ fn deletion_advances_updated_provenance_without_replacing_creation_provenance() 
     let row = RowUuid::from_bytes([0x44; 16]);
     let db = open_db(alice);
 
-    jazz::block_on(db.insert_with_id_at_ms(
+    jazz::block_on(db.insert(
         "todos",
-        row,
         BTreeMap::from([("title".to_owned(), Value::String("first".to_owned()))]),
-        1_000,
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            updated_at_ms: Some(1_000),
+            ..Default::default()
+        },
     ))
     .expect("insert row");
-    jazz::block_on(db.delete_at_ms("todos", row, 3_000)).expect("delete row");
+    jazz::block_on(db.delete(
+        "todos",
+        row,
+        jazz::db::DeleteOptions {
+            updated_at_ms: Some(3_000),
+            ..Default::default()
+        },
+    ))
+    .expect("delete row");
 
     let prepared = db.prepare_query(&db.table("todos")).expect("prepare query");
     let rows = jazz::block_on(db.all(
@@ -135,9 +156,9 @@ fn deletion_advances_updated_provenance_without_replacing_creation_provenance() 
         .expect("resolve provenance")
         .expect("row has provenance");
     assert_eq!(provenance.created_by, alice);
-    assert_eq!(provenance.created_at.0, 1_000);
+    assert_eq!(provenance.created_at, 1_000);
     assert_eq!(provenance.updated_by, alice);
-    assert_eq!(provenance.updated_at.0, 3_000);
+    assert_eq!(provenance.updated_at, 3_000);
 }
 
 /// Empty mergeable-batch updates remain no-ops only after validating both the
@@ -159,6 +180,7 @@ fn empty_batched_update_still_validates_handle_and_target() {
         "todos",
         row,
         BTreeMap::new(),
+        Default::default(),
     ))
     .expect_err("stale batch handle must be rejected");
     assert!(stale_error.message.contains("open transaction"));
@@ -169,6 +191,7 @@ fn empty_batched_update_still_validates_handle_and_target() {
         "todos",
         row,
         BTreeMap::new(),
+        Default::default(),
     ))
     .expect_err("absent target must be rejected");
     assert!(

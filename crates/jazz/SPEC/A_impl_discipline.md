@@ -85,7 +85,7 @@ State that has ordering semantics must make those semantics visible in its
 types. Time-like and lattice domains use distinct types with monotone
 transitions (`INV-DISC-5`): `GlobalTime`, `TxTime`, `Fate`, and
 `DurabilityTier` are separate newtypes; `GlobalTime::tick` explicitly packs a
-48-bit physical millisecond component and 16-bit logical counter; and
+46-bit physical millisecond component and 18-bit logical counter; and
 backward or conflicting transitions surface as `NonMonotoneState` /
 `ConflictingFate`. The column taxonomy from ch. 2 is preserved structurally:
 wire payloads carry only replicated-immutable data, derived currentness is

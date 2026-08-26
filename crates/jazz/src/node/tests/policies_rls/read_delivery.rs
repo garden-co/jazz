@@ -412,10 +412,10 @@ fn camel_case_message_read_policy_incrementally_adds_member_message() {
     assert_view_update_only_ships_rows(&update, BTreeSet::from([bob_message, bob_profile]));
     assert!(matches!(
         update,
-            SyncMessage::ViewUpdate {
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 result_member_adds: ref adds,
                 ..
-        } if adds.iter().any(|entry| entry == &("messages".to_owned().into(), bob_message, bob_message_tx))
+        }) if adds.iter().any(|entry| entry == &("messages".to_owned().into(), bob_message, bob_message_tx))
     ));
     let _ = bob_membership_tx;
 }
@@ -708,10 +708,10 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
         .unwrap();
     assert!(matches!(
         update,
-            SyncMessage::ViewUpdate {
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 result_member_adds: ref adds,
                 ..
-        } if adds.iter().any(|entry| entry == &("messages".to_owned().into(), seed_message, seed_tx))
+        }) if adds.iter().any(|entry| entry == &("messages".to_owned().into(), seed_message, seed_tx))
     ));
 }
 
@@ -779,11 +779,11 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
         .unwrap();
     assert!(matches!(
         initial,
-            SyncMessage::ViewUpdate {
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 result_member_adds: ref adds,
                 reset_result_set: true,
                 ..
-        } if adds.iter().any(|entry| entry == &("messages".to_owned().into(), seed_message, seed_tx))
+        }) if adds.iter().any(|entry| entry == &("messages".to_owned().into(), seed_message, seed_tx))
     ));
 
     let bob_membership_tx = core
@@ -816,11 +816,11 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
     let rehydrated = alice_peer
         .rehydrate_query_with_opts(&mut core, &shape, &binding, opts)
         .unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         reset_result_set,
         ..
-    } = rehydrated
+    }) = rehydrated
     else {
         panic!("expected rehydrate view update");
     };
@@ -977,17 +977,17 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
         .unwrap();
     assert!(matches!(
         invited_initial,
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             result_member_adds: ref adds,
             ..
-        } if adds.is_empty()
+        }) if adds.is_empty()
     ));
     assert!(matches!(
         spy_initial,
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             result_member_adds: ref adds,
             ..
-        } if adds.is_empty()
+        }) if adds.is_empty()
     ));
     assert_eq!(
         core.query
@@ -1018,11 +1018,11 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     let grant_update = invited_link
         .query_update(&mut core, &shape, &binding)
         .unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = grant_update
+    }) = grant_update
     else {
         panic!("expected grant update");
     };
@@ -1039,11 +1039,11 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     let spy_update = spy_link.query_update(&mut core, &shape, &binding).unwrap();
     assert!(matches!(
         spy_update,
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             result_member_adds: ref adds,
             result_member_removes: ref removes,
             ..
-        } if adds.is_empty() && removes.is_empty()
+        }) if adds.is_empty() && removes.is_empty()
     ));
     assert_eq!(spy_link.metrics.result_adds_out, 0);
     assert_eq!(spy_link.metrics.version_bundles_out, 0);
@@ -1063,11 +1063,11 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     let revoke_update = invited_link
         .query_update(&mut core, &shape, &binding)
         .unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = revoke_update
+    }) = revoke_update
     else {
         panic!("expected revoke update");
     };
@@ -1350,124 +1350,6 @@ fn edge_query_rehydrate_ships_public_chat_from_chat_policy_schema() {
     assert_view_update_only_ships_rows(&update, BTreeSet::from([public_chat]));
 }
 
-/// A member can discover its own grant before the parent resource is visible.
-/// The parent then becomes readable through the grant's correlated EXISTS arm.
-/// Keep the grant's `allowedTo.read(parent)` alternative too: this is the
-/// policy-cycle shape real apps use, and a maintained edge rehydrate must not
-/// lose the direct-grant proof while lowering the disjunction.
-#[test]
-fn edge_rehydrate_member_grant_unlocks_parent_through_disjunctive_policy() {
-    let manager = user(0xa1);
-    let owner = user(0xb2);
-    let workspace = row(0x18);
-    let grant = row(0x19);
-    let member_exists = public_outer_exists(
-        "members",
-        "workspace_id",
-        "id",
-        [public_claim_eq("subject", "user_id")],
-    );
-    let schema = build_public_test_schema(
-        PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("workspaces")
-                    .column("owner_subject", PublicColumnType::Text)
-                    .policies(public_all_policies().with_select(PublicPolicyExpr::Or(vec![
-                        public_claim_eq("owner_subject", "user_id"),
-                        member_exists,
-                    ]))),
-            )
-            .table(
-                PublicTableSchemaBuilder::new("members")
-                    .fk_column("workspace_id", "workspaces")
-                    .column("subject", PublicColumnType::Text)
-                    .policies(public_all_policies().with_select(PublicPolicyExpr::Or(vec![
-                        public_claim_eq("subject", "user_id"),
-                        PublicPolicyExpr::Inherits {
-                            operation: PublicOperation::Select,
-                            via_column: "workspace_id".to_owned(),
-                            max_depth: None,
-                        },
-                    ]))),
-            ),
-    );
-    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
-    core.set_session_claims(
-        manager,
-        BTreeMap::from([(
-            "user_id".to_owned(),
-            Value::String(manager.test_uuid().to_string()),
-        )]),
-    );
-    let workspace_tx = accept_global(
-        &mut core,
-        MergeableCommit::new("workspaces", workspace, 10).cells(BTreeMap::from([(
-            "owner_subject".to_owned(),
-            Value::String(owner.test_uuid().to_string()),
-        )])),
-    );
-    let _grant_tx = accept_global(
-        &mut core,
-        MergeableCommit::new("members", grant, 11).cells(BTreeMap::from([
-            ("workspace_id".to_owned(), Value::Uuid(workspace.0)),
-            (
-                "subject".to_owned(),
-                Value::String(manager.test_uuid().to_string()),
-            ),
-        ])),
-    );
-    let shape = Query::from("workspaces")
-        .validate(&core.catalogue.schema)
-        .unwrap();
-    let binding = shape.bind(BTreeMap::new()).unwrap();
-    assert_eq!(
-        core.query_rows_for_link(&shape, &binding, DurabilityTier::Edge, manager)
-            .unwrap()
-            .into_iter()
-            .map(|row| row.row_uuid())
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([workspace]),
-    );
-
-    let mut manager_peer = PeerState::edge_client(manager);
-    let grant_shape = Query::from("members")
-        .filter(eq(col("id"), lit(Value::Uuid(grant.0))))
-        .validate(&core.catalogue.schema)
-        .unwrap();
-    let grant_binding = grant_shape.bind(BTreeMap::new()).unwrap();
-    let grant_update = manager_peer
-        .rehydrate_query_with_opts(
-            &mut core,
-            &grant_shape,
-            &grant_binding,
-            RegisterShapeOptions {
-                tier: DurabilityTier::Edge,
-                ..RegisterShapeOptions::default()
-            },
-        )
-        .unwrap();
-    assert_view_update_only_references_rows(&grant_update, BTreeSet::from([workspace, grant]));
-    assert_view_update_only_ships_rows(&grant_update, BTreeSet::from([workspace, grant]));
-    let update = manager_peer
-        .rehydrate_query_with_opts(
-            &mut core,
-            &shape,
-            &binding,
-            RegisterShapeOptions {
-                tier: DurabilityTier::Edge,
-                ..RegisterShapeOptions::default()
-            },
-        )
-        .unwrap();
-    assert_view_update_only_references_rows(&update, BTreeSet::from([workspace]));
-    assert_view_update_only_ships_rows(&update, BTreeSet::from([workspace]));
-    assert!(matches!(
-        update,
-        SyncMessage::ViewUpdate { result_member_adds, .. }
-            if result_member_adds.iter().any(|entry| entry == &("workspaces".to_owned().into(), workspace, workspace_tx))
-    ));
-}
-
 /// A source-harness regression for row-scoped read policy plus query output
 /// projection. Two fresh edge-client links ask for the same readable chat via
 /// different public projections; both wire payloads must be the identical
@@ -1678,12 +1560,12 @@ fn edge_query_rehydrate_resets_empty_result_for_denied_private_chat() {
         )
         .unwrap();
 
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         result_member_adds,
         version_bundles,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };

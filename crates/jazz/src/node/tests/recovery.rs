@@ -584,7 +584,9 @@ fn global_time_allocates_max_once_then_stays_exhausted() {
         .unwrap();
     assert!(matches!(
         node.finalize_local_mergeable_commit_settled(after_exhaustion),
-        Err(Error::InvalidStoredValue("global HLC exhausted"))
+        Err(Error::ClockOverflow(crate::time::HlcOverflow {
+            physical_ms: crate::time::HLC_MAX_PHYSICAL_MS,
+        }))
     ));
     assert_eq!(
         node.transaction_state_settled(after_exhaustion).unwrap(),
@@ -622,7 +624,9 @@ fn recovery_rejects_global_time_allocation_after_max() {
         .unwrap();
     assert!(matches!(
         reopened.finalize_local_mergeable_commit_settled(next_tx),
-        Err(Error::InvalidStoredValue("global HLC exhausted"))
+        Err(Error::ClockOverflow(crate::time::HlcOverflow {
+            physical_ms: crate::time::HLC_MAX_PHYSICAL_MS,
+        }))
     ));
 }
 
@@ -1002,7 +1006,7 @@ fn reopen_in_place_recovers_history_watermarks_pending_edges_and_rehydrates_peer
         )
         .unwrap();
     let update = peer.current_rows_update(&mut core, "todos").unwrap();
-    assert!(matches!(update, SyncMessage::ViewUpdate { .. }));
+    assert!(matches!(update, SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. })));
 
     let mut reopened = core.reopen_in_place().unwrap();
     assert_eq!(
@@ -1024,7 +1028,7 @@ fn reopen_in_place_recovers_history_watermarks_pending_edges_and_rehydrates_peer
     );
 
     let rehydrated = peer.rehydrate_current_rows(&mut reopened, "todos").unwrap();
-    assert!(matches!(rehydrated, SyncMessage::ViewUpdate { .. }));
+    assert!(matches!(rehydrated, SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. })));
 }
 #[test]
 fn empty_string_cells_and_absent_cells_survive_restart() {

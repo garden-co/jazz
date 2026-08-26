@@ -1224,12 +1224,12 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
     let mut peer = PeerState::new();
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     let mut version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
         result_member_adds,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -1248,7 +1248,7 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
 
     register_shape_binding_for_receiver(&mut reader, &shape, &binding);
     reader
-        .apply_sync_message_settled(SyncMessage::ViewUpdate {
+        .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through,
             reset_result_set: false,
@@ -1260,7 +1260,7 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
                 terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
-        })
+        }))
         .unwrap();
     assert!(reader
         .current_rows("todos", DurabilityTier::Global)
@@ -1310,11 +1310,11 @@ fn malformed_exclusive_partial_result_row_add_is_rejected() {
     let mut peer = PeerState::new();
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -1325,7 +1325,7 @@ fn malformed_exclusive_partial_result_row_add_is_rejected() {
 
     register_shape_binding_for_receiver(&mut reader, &shape, &binding);
     let err = reader
-        .apply_sync_message_settled(SyncMessage::ViewUpdate {
+        .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through,
             reset_result_set: false,
@@ -1337,7 +1337,7 @@ fn malformed_exclusive_partial_result_row_add_is_rejected() {
                 terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
-        })
+        }))
         .unwrap_err();
 
     assert!(matches!(
@@ -1390,10 +1390,10 @@ fn partial_exclusive_payload_does_not_establish_tx_level_complete_tx_ref() {
         .rehydrate_query(&mut core, &first_shape, &first_binding)
         .unwrap();
     let version_bundles = version_bundles_for_update(&first);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
         ..
-    } = first
+    }) = first
     else {
         panic!("expected view update");
     };
@@ -1407,10 +1407,10 @@ fn partial_exclusive_payload_does_not_establish_tx_level_complete_tx_ref() {
         .rehydrate_query(&mut core, &second_shape, &second_binding)
         .unwrap();
     let version_bundles = version_bundles_for_update(&second);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory: crate::protocol::PeerPayloadInventory { complete_tx_payloads: complete_tx_payload_refs, .. },
         ..
-    } = second
+    }) = second
     else {
         panic!("expected view update");
     };
@@ -1453,10 +1453,10 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
     let mut link_a = PeerState::client_link(author_a);
     let update_a = link_a.current_rows_update(&mut core, "todos").unwrap();
     let version_bundles = version_bundles_for_update(&update_a);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         ..
-    } = &update_a
+    }) = &update_a
     else {
         panic!("expected view update");
     };

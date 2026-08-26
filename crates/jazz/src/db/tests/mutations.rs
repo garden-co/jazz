@@ -2,6 +2,24 @@
 
 use super::*;
 
+#[derive(Clone)]
+struct RetryableChunkResolver {
+    retry_after_ms: u32,
+}
+
+impl groove::chunks::MissingChunkResolver for RetryableChunkResolver {
+    fn resolve(
+        &self,
+        _request: groove::chunks::ChunkRequest,
+    ) -> groove::chunks::ChunkFuture<'_, Result<bytes::Bytes, groove::chunks::ChunkError>> {
+        Box::pin(async move {
+            Err(groove::chunks::ChunkError::Retryable {
+                retry_after_ms: self.retry_after_ms,
+            })
+        })
+    }
+}
+
 fn branch_column_reference_policy_schema() -> JazzSchema {
     let policy = PublicPolicyExpr::Exists {
         table: "branches".to_owned(),
@@ -71,11 +89,14 @@ fn admitted_server_authorizes_branch_write_through_referenced_application_row() 
     let _outsider_subscriber = server.accept_subscriber(outsider_server_transport, outsider);
 
     let accepted = owner_client
-        .insert_with_id_in_branch(
+        .insert(
             "todos",
-            selector.clone(),
-            row(0x79),
             BTreeMap::from([("title".to_owned(), Value::String("allowed".to_owned()))]),
+            crate::db::InsertOptions {
+                row_id: Some(row(0x79)),
+                target: crate::db::ExactWriteTarget::Branch(selector.clone()),
+                ..Default::default()
+            },
         )
         .unwrap();
     owner_client.tick().unwrap();
@@ -87,11 +108,14 @@ fn admitted_server_authorizes_branch_write_through_referenced_application_row() 
     );
 
     let denied = outsider_client
-        .insert_with_id_in_branch(
+        .insert(
             "todos",
-            selector,
-            row(0x7a),
             BTreeMap::from([("title".to_owned(), Value::String("denied".to_owned()))]),
+            crate::db::InsertOptions {
+                row_id: Some(row(0x7a)),
+                target: crate::db::ExactWriteTarget::Branch(selector),
+                ..Default::default()
+            },
         )
         .unwrap();
     assert_authority_rejects_staged_write(&outsider_client, &server, &denied);
@@ -104,7 +128,11 @@ fn db_facade_mutation_lifecycle_writes_reads_deletes_and_restores() {
     let table = &doctest_support::schema().tables[0];
 
     let write = db
-        .insert("todos", doctest_support::todo_cells("draft todo", false))
+        .insert(
+            "todos",
+            doctest_support::todo_cells("draft todo", false),
+            Default::default(),
+        )
         .unwrap();
     let todo = write.row_uuid();
     doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
@@ -122,6 +150,7 @@ fn db_facade_mutation_lifecycle_writes_reads_deletes_and_restores() {
             "todos",
             todo,
             BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            Default::default(),
         )
         .unwrap();
     doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
@@ -134,7 +163,7 @@ fn db_facade_mutation_lifecycle_writes_reads_deletes_and_restores() {
     );
     assert_eq!(rows[0].cell(table, "done"), Some(Value::Bool(true)));
 
-    let write = db.delete("todos", todo).unwrap();
+    let write = db.delete("todos", todo, Default::default()).unwrap();
     doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
     assert!(prepared_read(&db, &query).is_empty());
 
@@ -142,7 +171,8 @@ fn db_facade_mutation_lifecycle_writes_reads_deletes_and_restores() {
         .restore(
             "todos",
             todo,
-            doctest_support::todo_cells("restored todo", true),
+            Some(doctest_support::todo_cells("restored todo", true)),
+            Default::default(),
         )
         .unwrap();
     doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
@@ -159,10 +189,18 @@ fn db_facade_mutation_lifecycle_writes_reads_deletes_and_restores() {
 #[test]
 fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let chunks = std::rc::Rc::new(groove::chunks::MemoryChunkStorage::new());
+    block_on(async {
+        db.node.node.lock().await.set_chunk_storage(chunks.clone());
+    });
     let mut title = "a".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 257);
     title.push_str("🙂tail");
     let write = db
-        .insert("todos", doctest_support::todo_cells(&title, false))
+        .insert(
+            "todos",
+            doctest_support::todo_cells(&title, false),
+            Default::default(),
+        )
         .unwrap();
     let row = write.row_uuid();
     block_on(write.wait(DurabilityTier::Local)).unwrap();
@@ -184,6 +222,7 @@ fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
             "todos",
             row,
             BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            Default::default(),
         )
         .unwrap();
     block_on(unrelated.wait(DurabilityTier::Local)).unwrap();
@@ -242,7 +281,374 @@ fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
         .unwrap();
     assert_eq!(
         rows[0].cell(&doctest_support::schema().tables[0], "title"),
-        Some(Value::String(title))
+        Some(Value::String(title.clone()))
+    );
+
+    // This deliberately plants the internal descriptor immediately before
+    // the binding-only hydrator. The corresponding public WASM receipt covers the
+    // full encode/decode path; this focused lower-level assertion proves the
+    // boundary still rejects a regression even if a maintained terminal
+    // happens to materialize the same row earlier in the pipeline.
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let mut event = block_on(subscription.next_raw()).unwrap();
+    let (descriptor, title_index, terminal_value) = {
+        let SubscriptionEvent::Delta { added, .. } = &mut event else {
+            panic!("expected opening subscription delta");
+        };
+        let (descriptor, record) = added[0].row.encoded_record();
+        let descriptor = descriptor.clone();
+        let mut values = descriptor.bind(record).to_values().unwrap();
+        let title_index = values
+            .iter()
+            .position(|value| {
+                matches!(value, Value::String(value) if value == &title)
+                    || matches!(value, Value::Nullable(Some(value)) if matches!(value.as_ref(), Value::String(value) if value == &title))
+            })
+            .expect("opening row contains the logical title");
+        values[title_index] = match &values[title_index] {
+            Value::Nullable(_) => Value::Nullable(Some(Box::new(Value::Large(edited_ref.clone())))),
+            _ => Value::Large(edited_ref.clone()),
+        };
+        added[0].row = CurrentRow::new(
+            "todos",
+            OwnedRecord::new(descriptor.create(&values).unwrap(), descriptor.clone()),
+        );
+        assert!(
+            matches!(
+                added[0]
+                    .row
+                    .cell(&doctest_support::schema().tables[0], "title"),
+                Some(Value::Large(_))
+            ),
+            "planted positive: the maintained event reaches the binding with a physical descriptor"
+        );
+        (
+            descriptor,
+            title_index,
+            added[0].row.encoded_record().1.to_vec(),
+        )
+    };
+    let mut ordinary_event = event.clone();
+    let SubscriptionEvent::Delta {
+        terminal_operations,
+        ..
+    } = &mut event
+    else {
+        unreachable!("opening subscription event is a delta");
+    };
+    terminal_operations.push(groove::ivm::TerminalOperation {
+        root_descriptor: descriptor.clone(),
+        root_key: Vec::new(),
+        path: Vec::new(),
+        edit: groove::ivm::TerminalEdit::Update {
+            key: Vec::new(),
+            value: terminal_value.clone(),
+        },
+    });
+    // A locally absent chunk with no peer retry instruction is terminal. The
+    // event remains physically intact so a caller can safely abandon it; it is
+    // never silently retried forever.
+    block_on(async {
+        db.node
+            .node
+            .lock()
+            .await
+            .set_chunk_storage(std::rc::Rc::new(groove::chunks::MemoryChunkStorage::new()));
+        db.node
+            .node
+            .lock()
+            .await
+            .set_missing_chunk_resolver(std::rc::Rc::new(groove::chunks::UnavailableChunkResolver));
+    });
+    assert!(matches!(
+        block_on(db.hydrate_subscription_event_for_binding_outcome(&mut ordinary_event)),
+        Err(BindingHydrationError::Error(_))
+    ));
+    block_on(async {
+        db.node.node.lock().await.set_chunk_storage(chunks.clone());
+    });
+    block_on(db.hydrate_subscription_event_for_binding(&mut ordinary_event)).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = ordinary_event else {
+        panic!("expected opening subscription delta");
+    };
+    assert_eq!(
+        added[0]
+            .row
+            .cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String(title.clone())),
+        "the subscription binding boundary must materialize the indirect text scalar"
+    );
+    block_on(db.hydrate_subscription_event_for_binding(&mut event)).unwrap();
+    let mut nested_event = event.clone();
+    let SubscriptionEvent::Delta {
+        added: terminal_added,
+        terminal_operations,
+        ..
+    } = event
+    else {
+        panic!("expected terminal subscription delta");
+    };
+    assert!(matches!(
+        terminal_added[0]
+            .row
+            .cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::Large(_))
+    ));
+    let groove::ivm::TerminalEdit::Update { value, .. } = &terminal_operations[0].edit else {
+        unreachable!("planted terminal operation is an update");
+    };
+    let terminal_values = descriptor.bind(value).to_values().unwrap();
+    assert!(
+        matches!(&terminal_values[title_index], Value::String(value) if value == &title)
+            || matches!(
+                &terminal_values[title_index],
+                Value::Nullable(Some(value))
+                    if matches!(value.as_ref(), Value::String(value) if value == &title)
+            ),
+        "structured terminal operations must not encode physical indirect scalars for bindings"
+    );
+
+    // A root terminal insertion can contain a whole collected tree. Hydration
+    // must descend through arrays and nested records before that record reaches
+    // the binding, rather than only looking for a top-level descriptor.
+    let nested_root_descriptor = RecordDescriptor::new([(
+        "children",
+        groove::records::ValueType::Array(Box::new(groove::records::ValueType::Record(Box::new(
+            descriptor,
+        )))),
+    )]);
+    let root_insert_value = nested_root_descriptor
+        .create(&[Value::Array(vec![Value::Record(OwnedRecord::new(
+            terminal_value.clone(),
+            descriptor,
+        ))])])
+        .unwrap();
+    let mut root_insert_event = nested_event.clone();
+    let SubscriptionEvent::Delta {
+        terminal_operations,
+        ..
+    } = &mut root_insert_event
+    else {
+        unreachable!("expected terminal subscription delta");
+    };
+    terminal_operations.clear();
+    terminal_operations.push(groove::ivm::TerminalOperation {
+        root_descriptor: nested_root_descriptor,
+        root_key: Vec::new(),
+        path: Vec::new(),
+        edit: groove::ivm::TerminalEdit::Insert {
+            index: 0,
+            key: Vec::new(),
+            value: root_insert_value,
+        },
+    });
+    block_on(db.hydrate_subscription_event_for_binding(&mut root_insert_event)).unwrap();
+    let SubscriptionEvent::Delta {
+        terminal_operations,
+        ..
+    } = root_insert_event
+    else {
+        unreachable!("expected terminal subscription delta");
+    };
+    let groove::ivm::TerminalEdit::Insert { value, .. } = &terminal_operations[0].edit else {
+        unreachable!("expected root terminal insertion");
+    };
+    let root_values = nested_root_descriptor.bind(value).to_values().unwrap();
+    let [Value::Array(children)] = root_values.as_slice() else {
+        unreachable!("expected root terminal collection");
+    };
+    let [Value::Record(child)] = children.as_slice() else {
+        unreachable!("expected one root terminal child");
+    };
+    let root_child_values = descriptor.bind(child.raw()).to_values().unwrap();
+    assert!(
+        matches!(&root_child_values[title_index], Value::String(value) if value == &title)
+            || matches!(
+                &root_child_values[title_index],
+                Value::Nullable(Some(value))
+                    if matches!(value.as_ref(), Value::String(value) if value == &title)
+            ),
+        "root terminal insertions must recursively materialize nested large values"
+    );
+
+    // A nested terminal operation keeps the root descriptor for layout
+    // discovery, but its payload is a child record. Hydrating it as the root
+    // record corrupts the raw bytes and only becomes visible when the binding
+    // later decodes the operation.
+    let SubscriptionEvent::Delta {
+        terminal_operations,
+        ..
+    } = &mut nested_event
+    else {
+        unreachable!("expected terminal subscription delta");
+    };
+    terminal_operations.clear();
+    terminal_operations.push(groove::ivm::TerminalOperation {
+        root_descriptor: nested_root_descriptor,
+        root_key: Vec::new(),
+        path: vec![groove::ivm::TerminalPathSegment::Collection(
+            "children".to_owned(),
+        )],
+        edit: groove::ivm::TerminalEdit::Insert {
+            index: 0,
+            key: Vec::new(),
+            value: terminal_value.clone(),
+        },
+    });
+    block_on(db.hydrate_subscription_event_for_binding(&mut nested_event)).unwrap();
+    let SubscriptionEvent::Delta {
+        terminal_operations,
+        ..
+    } = &nested_event
+    else {
+        unreachable!("expected terminal subscription delta");
+    };
+    let groove::ivm::TerminalEdit::Insert { value, .. } = &terminal_operations[0].edit else {
+        unreachable!("expected nested terminal insertion");
+    };
+    let nested_values = descriptor.bind(value).to_values().unwrap();
+    assert!(
+        matches!(&nested_values[title_index], Value::String(value) if value == &title)
+            || matches!(
+                &nested_values[title_index],
+                Value::Nullable(Some(value))
+                    if matches!(value.as_ref(), Value::String(value) if value == &title)
+            ),
+        "nested terminal payloads must use their child descriptor when hydrating large values"
+    );
+
+    // Follow an actual Collection/Key/Collection terminal path and preserve
+    // the retained payload exactly when its chunk is only retryably absent.
+    let nested_child_descriptor = RecordDescriptor::new([(
+        "notes",
+        groove::records::ValueType::Array(Box::new(groove::records::ValueType::Record(Box::new(
+            descriptor,
+        )))),
+    )]);
+    let deep_root_descriptor = RecordDescriptor::new([(
+        "children",
+        groove::records::ValueType::Array(Box::new(groove::records::ValueType::Record(Box::new(
+            nested_child_descriptor,
+        )))),
+    )]);
+    let mut deep_event = nested_event.clone();
+    let SubscriptionEvent::Delta {
+        terminal_operations,
+        ..
+    } = &mut deep_event
+    else {
+        unreachable!("expected terminal subscription delta");
+    };
+    terminal_operations.clear();
+    terminal_operations.push(groove::ivm::TerminalOperation {
+        root_descriptor: deep_root_descriptor,
+        root_key: Vec::new(),
+        path: vec![
+            groove::ivm::TerminalPathSegment::Collection("children".to_owned()),
+            groove::ivm::TerminalPathSegment::Key(vec![1]),
+            groove::ivm::TerminalPathSegment::Collection("notes".to_owned()),
+        ],
+        edit: groove::ivm::TerminalEdit::Insert {
+            index: 0,
+            key: Vec::new(),
+            value: terminal_value,
+        },
+    });
+    let retained_deep_value = match &deep_event {
+        SubscriptionEvent::Delta {
+            terminal_operations,
+            ..
+        } => match &terminal_operations[0].edit {
+            groove::ivm::TerminalEdit::Insert { value, .. } => value.clone(),
+            _ => unreachable!("expected deep terminal insertion"),
+        },
+        _ => unreachable!("expected terminal subscription delta"),
+    };
+    block_on(async {
+        db.node
+            .node
+            .lock()
+            .await
+            .set_chunk_storage(std::rc::Rc::new(groove::chunks::MemoryChunkStorage::new()));
+        db.node
+            .node
+            .lock()
+            .await
+            .set_missing_chunk_resolver(std::rc::Rc::new(RetryableChunkResolver {
+                retry_after_ms: 37,
+            }));
+    });
+    assert!(matches!(
+        block_on(db.hydrate_subscription_event_for_binding_outcome(&mut deep_event)),
+        Err(BindingHydrationError::RetryableChunkUnavailable { retry_after_ms: 37 })
+    ));
+    let retained_after_retry = match &deep_event {
+        SubscriptionEvent::Delta {
+            terminal_operations,
+            ..
+        } => match &terminal_operations[0].edit {
+            groove::ivm::TerminalEdit::Insert { value, .. } => value,
+            _ => unreachable!("expected deep terminal insertion"),
+        },
+        _ => unreachable!("expected terminal subscription delta"),
+    };
+    assert_eq!(
+        retained_after_retry, &retained_deep_value,
+        "retryable hydration must leave the retained terminal payload unchanged"
+    );
+    block_on(async {
+        let mut node = db.node.node.lock().await;
+        node.set_chunk_storage(chunks.clone());
+        node.set_missing_chunk_resolver(std::rc::Rc::new(groove::chunks::UnavailableChunkResolver));
+    });
+    block_on(db.hydrate_subscription_event_for_binding(&mut deep_event)).unwrap();
+    let SubscriptionEvent::Delta {
+        terminal_operations,
+        ..
+    } = deep_event
+    else {
+        unreachable!("expected terminal subscription delta");
+    };
+    let groove::ivm::TerminalEdit::Insert { value, .. } = &terminal_operations[0].edit else {
+        unreachable!("expected deep terminal insertion");
+    };
+    let deep_values = descriptor.bind(value).to_values().unwrap();
+    assert!(
+        matches!(&deep_values[title_index], Value::String(value) if value == &title)
+            || matches!(
+                &deep_values[title_index],
+                Value::Nullable(Some(value))
+                    if matches!(value.as_ref(), Value::String(value) if value == &title)
+            ),
+        "deep terminal paths must hydrate their child descriptor after retry"
+    );
+
+    let mut snapshot = RelationSnapshot {
+        root_count: 1,
+        rows: vec![added[0].row.clone()],
+        edges: Vec::new(),
+    };
+    let (descriptor, record) = snapshot.rows[0].encoded_record();
+    let descriptor = descriptor.clone();
+    let mut values = descriptor.bind(record).to_values().unwrap();
+    values[title_index] = match &values[title_index] {
+        Value::Nullable(_) => Value::Nullable(Some(Box::new(Value::Large(edited_ref.clone())))),
+        _ => Value::Large(edited_ref.clone()),
+    };
+    snapshot.rows[0] = CurrentRow::new(
+        "todos",
+        OwnedRecord::new(descriptor.create(&values).unwrap(), descriptor),
+    );
+    assert!(matches!(
+        snapshot.rows[0].cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::Large(_))
+    ));
+    block_on(db.hydrate_relation_snapshot_for_binding(&mut snapshot)).unwrap();
+    assert_eq!(
+        snapshot.rows[0].cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String(title.clone())),
+        "relation snapshots must not encode physical indirect scalars for bindings"
     );
 
     let json = format!(
@@ -250,7 +656,11 @@ fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
         "p".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES)
     );
     let json_row = db
-        .insert("todos", doctest_support::todo_cells(&json, false))
+        .insert(
+            "todos",
+            doctest_support::todo_cells(&json, false),
+            Default::default(),
+        )
         .unwrap()
         .row_uuid();
     assert_eq!(
@@ -282,19 +692,25 @@ fn high_level_large_value_reads_authorize_before_descriptor_lookup() {
     let db = open_db(0x4e, reader, &schema);
     let visible = row(0x4e);
     let hidden = row(0x4f);
-    db.insert_with_id(
+    db.insert(
         "documents",
-        visible,
         BTreeMap::from([("body".to_owned(), Value::String(allowed.clone()))]),
+        InsertOptions {
+            row_id: Some(visible),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "documents",
-        hidden,
         BTreeMap::from([(
             "body".to_owned(),
             Value::String(format!("{}x", &allowed[..allowed.len() - 1])),
         )]),
+        InsertOptions {
+            row_id: Some(hidden),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -314,13 +730,16 @@ fn nullable_large_text_uses_the_same_high_level_read_and_edit_surface() {
     let db = open_db(0x4d, AuthorSubject::SYSTEM, &schema);
     let row = row(0x4d);
     let body = "n".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 73);
-    db.insert_with_id(
+    db.insert(
         "notes",
-        row,
         BTreeMap::from([(
             "body".to_owned(),
             Value::Nullable(Some(Box::new(Value::String(body.clone())))),
         )]),
+        InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -361,7 +780,11 @@ fn db_facade_runs_saas_shaped_local_lane_end_to_end() {
 
     let query = Query::from("todos");
     let write = db
-        .insert("todos", cells("ship facade", false, owner))
+        .insert(
+            "todos",
+            cells("ship facade", false, owner),
+            Default::default(),
+        )
         .unwrap();
     let todo = write.row_uuid();
     let table = &schema.tables[0];
@@ -377,6 +800,7 @@ fn db_facade_runs_saas_shaped_local_lane_end_to_end() {
         "todos",
         todo,
         BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        Default::default(),
     )
     .unwrap();
     let updated = prepared_all(&db, &query, ReadOpts::default());
@@ -415,7 +839,11 @@ fn db_sync_surface_uploads_client_writes_for_authority_fate() {
 
     // A local client write is Local and queued for upload.
     let write = client
-        .insert("todos", cells("from client", false, author))
+        .insert(
+            "todos",
+            cells("from client", false, author),
+            Default::default(),
+        )
         .unwrap();
     let row = write.row_uuid();
 
@@ -448,7 +876,11 @@ fn byte_wire_uploads_client_writes_for_authority_fate() {
     let _subscriber = server.accept_subscriber(server_transport, author);
 
     let write = client
-        .insert("todos", cells("from client", false, author))
+        .insert(
+            "todos",
+            cells("from client", false, author),
+            Default::default(),
+        )
         .unwrap();
     let row = write.row_uuid();
 
@@ -479,7 +911,14 @@ fn db_sync_surface_uploads_client_exclusive_commit_for_global_fate() {
     let row = row(0xe1);
     let exclusive = client.exclusive_tx().unwrap();
     exclusive
-        .insert_with_id("todos", row, cells("exclusive", false, author))
+        .insert(
+            "todos",
+            cells("exclusive", false, author),
+            crate::db::InsertOptions {
+                row_id: Some(row),
+                ..Default::default()
+            },
+        )
         .unwrap();
     let tx_id = exclusive.commit().unwrap();
 
@@ -522,10 +961,24 @@ fn db_sync_surface_returns_exclusive_conflict_fate_to_client() {
     let first = client.exclusive_tx().unwrap();
     let second = client.exclusive_tx().unwrap();
     first
-        .insert_with_id("todos", row, cells("first", false, author))
+        .insert(
+            "todos",
+            cells("first", false, author),
+            crate::db::InsertOptions {
+                row_id: Some(row),
+                ..Default::default()
+            },
+        )
         .unwrap();
     second
-        .insert_with_id("todos", row, cells("second", false, author))
+        .insert(
+            "todos",
+            cells("second", false, author),
+            crate::db::InsertOptions {
+                row_id: Some(row),
+                ..Default::default()
+            },
+        )
         .unwrap();
     let first_tx = first.commit().unwrap();
     let second_error = second.commit().unwrap_err();
@@ -570,7 +1023,11 @@ fn unhandled_rejection_is_delivered_as_mutation_error() {
     }));
 
     let write = client
-        .insert("todos", cells("rejected", false, author))
+        .insert(
+            "todos",
+            cells("rejected", false, author),
+            Default::default(),
+        )
         .unwrap();
     authority_transport
         .send(SyncMessage::FateUpdate {
@@ -619,7 +1076,11 @@ fn waited_rejection_is_not_delivered_as_mutation_error() {
     }));
 
     let write = client
-        .insert("todos", cells("waited rejection", false, author))
+        .insert(
+            "todos",
+            cells("waited rejection", false, author),
+            Default::default(),
+        )
         .unwrap();
     let wait_result = Rc::new(RefCell::new(None));
     let callback_result = Rc::clone(&wait_result);
@@ -671,7 +1132,11 @@ fn wait_after_rejection_suppresses_queued_mutation_error() {
     }));
 
     let write = client
-        .insert("todos", cells("late wait rejection", false, author))
+        .insert(
+            "todos",
+            cells("late wait rejection", false, author),
+            Default::default(),
+        )
         .unwrap();
     authority_transport
         .send(SyncMessage::FateUpdate {
@@ -731,7 +1196,11 @@ fn undelivered_mutation_error_is_recovered_after_reopen() {
     let (client_transport, mut authority_transport) = duplex();
     let upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let write = client
-        .insert("todos", cells("rejected before reopen", false, author))
+        .insert(
+            "todos",
+            cells("rejected before reopen", false, author),
+            Default::default(),
+        )
         .unwrap();
     let tx_id = write.mergeable_tx_id();
     authority_transport
@@ -802,7 +1271,11 @@ fn write_fate_and_durability_are_queryable_through_facade() {
     let _subscriber = server.accept_subscriber(server_transport, author);
 
     let write = client
-        .insert("todos", cells("facade state", false, author))
+        .insert(
+            "todos",
+            cells("facade state", false, author),
+            Default::default(),
+        )
         .unwrap();
     assert_eq!(
         write.write_state().unwrap(),
@@ -888,7 +1361,11 @@ fn session_upload_uses_connection_identity_for_write_policy() {
     let _subscriber = server.accept_subscriber(server_transport, session_author);
 
     let write = client
-        .insert("todos", cells("honest", false, session_author))
+        .insert(
+            "todos",
+            cells("honest", false, session_author),
+            Default::default(),
+        )
         .unwrap();
     let row = write.row_uuid();
 
@@ -949,6 +1426,7 @@ fn admitted_server_prepared_write_policy_binds_text_user_id_claim() {
                     Value::String("alice-subject".to_owned()),
                 ),
             ]),
+            Default::default(),
         )
         .unwrap();
     alice_client.tick().unwrap();
@@ -961,10 +1439,8 @@ fn admitted_server_prepared_write_policy_binds_text_user_id_claim() {
     );
 
     let denied = bob_client
-        .insert_with_id_for_identity(
-            bob,
+        .insert(
             "messages",
-            row(0xb2),
             BTreeMap::from([
                 (
                     "body".to_owned(),
@@ -975,6 +1451,11 @@ fn admitted_server_prepared_write_policy_binds_text_user_id_claim() {
                     Value::String("alice-subject".to_owned()),
                 ),
             ]),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xb2)),
+                identity: crate::db::WriteIdentity::Session(bob),
+                ..Default::default()
+            },
         )
         .unwrap();
     assert_authority_rejects_staged_write(&bob_client, &server, &denied);
@@ -1021,6 +1502,7 @@ fn admitted_server_prepared_write_policy_coerces_string_user_id_to_uuid_column()
                 ),
                 ("owner_id".to_owned(), Value::Uuid(alice.test_uuid())),
             ]),
+            Default::default(),
         )
         .unwrap();
     alice_client.tick().unwrap();
@@ -1033,10 +1515,8 @@ fn admitted_server_prepared_write_policy_coerces_string_user_id_to_uuid_column()
     );
 
     let denied = bob_client
-        .insert_with_id_for_identity(
-            bob,
+        .insert(
             "messages",
-            row(0xb3),
             BTreeMap::from([
                 (
                     "body".to_owned(),
@@ -1044,6 +1524,11 @@ fn admitted_server_prepared_write_policy_coerces_string_user_id_to_uuid_column()
                 ),
                 ("owner_id".to_owned(), Value::Uuid(alice.test_uuid())),
             ]),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xb3)),
+                identity: crate::db::WriteIdentity::Session(bob),
+                ..Default::default()
+            },
         )
         .unwrap();
     assert_authority_rejects_staged_write(&bob_client, &server, &denied);
@@ -1074,6 +1559,7 @@ fn admitted_server_prepared_write_policy_fails_closed_for_wrong_user_id_type() {
                 ),
                 ("owner_id".to_owned(), Value::String("true".to_owned())),
             ]),
+            Default::default(),
         )
         .unwrap();
 
@@ -1103,7 +1589,11 @@ fn session_delete_uses_current_row_for_owner_write_policy() {
     let _subscriber = server.accept_subscriber(server_transport, session_author);
 
     let write = client
-        .insert("todos", cells("owned", false, session_author))
+        .insert(
+            "todos",
+            cells("owned", false, session_author),
+            Default::default(),
+        )
         .unwrap();
     let row = write.row_uuid();
     client.tick().unwrap();
@@ -1112,7 +1602,14 @@ fn session_delete_uses_current_row_for_owner_write_policy() {
     block_on(write.wait(DurabilityTier::Global)).unwrap();
 
     let bad_delete = client
-        .delete_for_identity(other_author, "todos", row)
+        .delete(
+            "todos",
+            row,
+            crate::db::DeleteOptions {
+                identity: crate::db::WriteIdentity::Session(other_author),
+                ..Default::default()
+            },
+        )
         .unwrap();
     assert_authority_rejects_staged_write(&client, &server, &bad_delete);
     let client_rows = prepared_read(&client, &Query::from("todos"));
@@ -1123,7 +1620,14 @@ fn session_delete_uses_current_row_for_owner_write_policy() {
     assert_eq!(rows[0].row_uuid(), row);
 
     let delete = client
-        .delete_for_identity(session_author, "todos", row)
+        .delete(
+            "todos",
+            row,
+            crate::db::DeleteOptions {
+                identity: crate::db::WriteIdentity::Session(session_author),
+                ..Default::default()
+            },
+        )
         .unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
@@ -1208,11 +1712,14 @@ fn trusted_backend_upload_applies_session_claim_assertions_for_write_policy() {
         BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
     );
     let write = backend
-        .insert_with_id_for_identity(
-            editor_author,
+        .insert(
             "todos",
-            row(0xe1),
             cells("claim-backed", false, editor_author),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xe1)),
+                identity: crate::db::WriteIdentity::Session(editor_author),
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -1245,11 +1752,14 @@ fn session_claim_assertions_require_trusted_backend_upload() {
         BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
     );
     let write = client
-        .insert_with_id_for_identity(
-            session_author,
+        .insert(
             "todos",
-            row(0xe2),
             cells("claim-backed", false, session_author),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xe2)),
+                identity: crate::db::WriteIdentity::Session(session_author),
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -1284,11 +1794,14 @@ fn trusted_backend_delete_uses_permission_subject_parent_for_write_policy() {
     server.tick().unwrap();
 
     let insert = backend
-        .insert_with_id_for_identity(
-            attributed_user,
+        .insert(
             "todos",
-            row(0xf3),
             cells("attributed", false, attributed_user),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xf3)),
+                identity: crate::db::WriteIdentity::Session(attributed_user),
+                ..Default::default()
+            },
         )
         .unwrap();
     backend.tick().unwrap();
@@ -1297,7 +1810,14 @@ fn trusted_backend_delete_uses_permission_subject_parent_for_write_policy() {
     block_on(insert.wait(DurabilityTier::Global)).unwrap();
 
     let delete = backend
-        .delete_for_identity(attributed_user, "todos", row(0xf3))
+        .delete(
+            "todos",
+            row(0xf3),
+            crate::db::DeleteOptions {
+                identity: crate::db::WriteIdentity::Session(attributed_user),
+                ..Default::default()
+            },
+        )
         .unwrap();
     backend.tick().unwrap();
     server.tick().unwrap();
@@ -1359,7 +1879,14 @@ fn client_delete_advice_is_unknown_without_mutating() {
     other_db.set_identity_claims(other, test_provider_claims(other));
     let row = row(1);
     let write = owner_db
-        .insert_with_id("todos", row, cells("owned", false, owner))
+        .insert(
+            "todos",
+            cells("owned", false, owner),
+            crate::db::InsertOptions {
+                row_id: Some(row),
+                ..Default::default()
+            },
+        )
         .unwrap();
     block_on(write.wait(DurabilityTier::Local)).unwrap();
     other_db
@@ -1435,10 +1962,13 @@ fn client_attributed_insert_to_different_user_is_rejected() {
     let client = open_db(0xc1, client_author, &schema);
 
     let err = match client
-        .insert_attributed(
-            attributed_user,
+        .insert(
             "todos",
             cells("forged", false, client_author),
+            crate::db::InsertOptions {
+                identity: crate::db::WriteIdentity::Attribution(attributed_user),
+                ..Default::default()
+            },
         )
         .resolve()
     {
@@ -1450,38 +1980,429 @@ fn client_attributed_insert_to_different_user_is_rejected() {
     assert_eq!(prepared_read(&client, &client.table("todos")).len(), 0);
 }
 
-#[test]
-/// Internal capability receipt: a Db whose logical author happens to be SYSTEM
-/// is still an ordinary Db, and cannot stamp another author's provenance.
+/// A trusted backend admits a write as its own policy subject while recording
+/// the external author as durable provenance; an ordinary Db cannot mint that
+/// split. Alice's row is deliberately owned by the backend, not Alice, so the
+/// positive path proves that authorization did not accidentally follow
+/// provenance.
 ///
-/// This stays below the client/server surface because minting the native-only
-/// capability is intentionally not exposed through the public client API.
-fn ordinary_system_db_cannot_forge_external_attribution() {
-    let schema = build_public_db_test_schema(
-        PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("todos")
-                .column("title", PublicColumnType::Text)
-                .column("done", PublicColumnType::Boolean),
-        ),
-    );
-    let external = AuthorSubject::for_test_bytes([0xa1; 16]);
-    let db = open_db(0xc2, AuthorSubject::SYSTEM, &schema);
-    let result = db
-        .insert_attributed(
-            external,
+/// ```text
+/// trusted backend ──admit as backend──► owner policy ──allow──► row made_by=alice
+/// ordinary client ──claim made_by=alice──────────────────────► rejected locally
+/// ```
+#[test]
+fn backend_attribution_separates_owner_policy_from_external_provenance() {
+    let schema = owner_write_schema();
+    let backend_author = AuthorSubject::for_test_bytes([0xb0; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let trusted_backend = block_on(unsafe {
+        // SAFETY: this integration fixture represents the private capability
+        // minted only by an explicitly opened, authenticated backend runtime.
+        Db::open_with_backend_attribution(DbConfig {
+            schema: schema.clone(),
+            storage: rocks_storage(&schema),
+            identity: DbIdentity {
+                node: NodeUuid::from_bytes([0xb0; 16]),
+                author: backend_author,
+            },
+            id_source: Some(Box::new(SeededRowIdSource::new(0xb0))),
+        })
+    })
+    .unwrap();
+
+    let write = trusted_backend
+        .insert_with_id_attributed(
+            alice,
             "todos",
-            BTreeMap::from([
-                ("title".to_owned(), Value::String("forged".to_owned())),
-                ("done".to_owned(), Value::Bool(false)),
-            ]),
+            row(0xb1),
+            cells(
+                "admitted by backend, credited to alice",
+                false,
+                backend_author,
+            ),
         )
-        .resolve();
-    let err = match result {
-        Ok(_) => panic!("SYSTEM identity alone must not mint backend attribution"),
+        .unwrap();
+    let unit = trusted_backend
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(write.mergeable_tx_id())
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, .. } = unit else {
+        panic!("backend-attributed write must publish a commit unit");
+    };
+    assert_eq!(
+        tx.made_by, alice,
+        "external canonical subject is provenance"
+    );
+    assert_eq!(
+        prepared_read(&trusted_backend, &trusted_backend.table("todos")).len(),
+        1,
+        "the backend-owned policy row proves admission used backend_author rather than alice"
+    );
+
+    let ordinary_runtime = open_db(0xb2, backend_author, &schema);
+    let err = match ordinary_runtime
+        .insert(
+            "todos",
+            cells("forged external provenance", false, backend_author),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xb2)),
+                identity: crate::db::WriteIdentity::Attribution(alice),
+                ..Default::default()
+            },
+        )
+        .resolve()
+    {
+        Ok(_) => panic!("an ordinary Db must not gain backend attribution from its author value"),
         Err(err) => err,
     };
     assert_eq!(err.code, ErrorCode::WriteRejected);
-    assert!(prepared_read(&db, &db.table("todos")).is_empty());
+    assert!(prepared_read(&ordinary_runtime, &ordinary_runtime.table("todos")).is_empty());
+}
+
+/// Backend-attributed mergeable batches and resumable large-value uploads retain
+/// one external provenance subject for their final commit while each admission
+/// check remains the trusted backend's. Alice is never granted ownership of the
+/// backend-owned rows in this fixture.
+///
+/// ```text
+/// backend ──open attributed batch / finish streamed upload──► policy as backend
+///                                                       └──► committed made_by=alice
+/// ```
+#[test]
+fn backend_attribution_survives_mergeable_and_streaming_publication() {
+    let schema = owner_write_schema();
+    let backend_author = AuthorSubject::for_test_bytes([0xb6; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xa6; 16]);
+    let backend = block_on(unsafe {
+        // SAFETY: this fixture stands in for the binding's explicit backend
+        // constructor, the only production issuer of this capability.
+        Db::open_with_backend_attribution(DbConfig {
+            schema: schema.clone(),
+            storage: rocks_storage(&schema),
+            identity: DbIdentity {
+                node: NodeUuid::from_bytes([0xb6; 16]),
+                author: backend_author,
+            },
+            id_source: Some(Box::new(SeededRowIdSource::new(0xb6))),
+        })
+    })
+    .unwrap();
+
+    let batch = OpenTransactionId::new();
+    block_on(backend.begin_mergeable_attributed(batch, alice)).unwrap();
+    block_on(backend.mergeable_tx_ref(batch).insert(
+        "todos",
+        cells("mergeable provenance", false, backend_author),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xb7)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let batch_tx = block_on(backend.commit_mergeable_handle(batch)).unwrap();
+    let SyncMessage::CommitUnit { tx, .. } = backend
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(batch_tx)
+        .unwrap()
+    else {
+        panic!("mergeable batch must publish a commit unit");
+    };
+    assert_eq!(tx.made_by, alice);
+
+    // An empty attributed patch only checks whether the trusted backend may
+    // observe the row. It must not reinterpret external provenance as the
+    // admission identity and hide this backend-owned row from itself.
+    let no_op = block_on(backend.update(
+        "todos",
+        row(0xb7),
+        BTreeMap::new(),
+        crate::db::UpdateOptions {
+            identity: crate::db::WriteIdentity::Attribution(alice),
+            ..Default::default()
+        },
+    ))
+    .expect("an attributed no-op update uses backend admission for visibility");
+    assert_eq!(no_op.mergeable_tx_id(), batch_tx);
+
+    let streaming_cells = BTreeMap::from([
+        ("done".to_owned(), Value::Bool(false)),
+        ("owner".to_owned(), Value::Uuid(backend_author.test_uuid())),
+    ]);
+    let mut upload = backend
+        .begin_streaming_value_upload("todos", &streaming_cells, "title")
+        .unwrap();
+    block_on(backend.push_streaming_value_upload(&mut upload, b"streamed provenance")).unwrap();
+    let streamed = block_on(backend.finish_streaming_value_upload(
+        upload,
+        crate::db::StreamingMutationKind::Insert,
+        "todos",
+        row(0xb8),
+        streaming_cells,
+        "title",
+        None,
+        None,
+        None,
+        None,
+        Some(alice),
+    ))
+    .unwrap();
+    let SyncMessage::CommitUnit { tx, .. } = backend
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(streamed.mergeable_tx_id())
+        .unwrap()
+    else {
+        panic!("streamed attributed write must publish a commit unit");
+    };
+    assert_eq!(tx.made_by, alice);
+    assert_eq!(prepared_read(&backend, &backend.table("todos")).len(), 2);
+
+    let branch = BranchSelector::new([("draft", Value::String("alice".to_owned()))]);
+    let attributed = crate::db::WriteIdentity::Attribution(alice);
+    for result in [
+        block_on(backend.insert(
+            "todos",
+            BTreeMap::new(),
+            crate::db::InsertOptions {
+                identity: attributed,
+                target: crate::db::ExactWriteTarget::Branch(branch.clone()),
+                ..Default::default()
+            },
+        )),
+        block_on(backend.upsert(
+            "todos",
+            row(0xb9),
+            BTreeMap::new(),
+            crate::db::UpsertOptions {
+                identity: attributed,
+                target: crate::db::ExactWriteTarget::Branch(branch.clone()),
+                ..Default::default()
+            },
+        )),
+        block_on(backend.restore(
+            "todos",
+            row(0xb9),
+            None,
+            crate::db::RestoreOptions {
+                identity: attributed,
+                target: crate::db::ExactWriteTarget::Branch(branch.clone()),
+                ..Default::default()
+            },
+        )),
+    ] {
+        let err = match result {
+            Ok(_) => panic!("generic attributed branch writes must fail before lookup"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code, ErrorCode::WriteRejected);
+    }
+    for result in [
+        block_on(backend.update(
+            "todos",
+            row(0xb9),
+            BTreeMap::new(),
+            crate::db::UpdateOptions {
+                identity: attributed,
+                target: crate::db::WriteTarget::BranchView {
+                    head: branch.clone(),
+                    base: None,
+                },
+                ..Default::default()
+            },
+        )),
+        block_on(backend.delete(
+            "todos",
+            row(0xb9),
+            crate::db::DeleteOptions {
+                identity: attributed,
+                target: crate::db::WriteTarget::BranchView {
+                    head: branch.clone(),
+                    base: None,
+                },
+                ..Default::default()
+            },
+        )),
+    ] {
+        let err = match result {
+            Ok(_) => panic!("generic attributed branch views must fail before lookup"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code, ErrorCode::WriteRejected);
+    }
+
+    let transaction = OpenTransactionId::new();
+    block_on(backend.begin_mergeable_attributed(transaction, alice)).unwrap();
+    let err = match block_on(backend.mergeable_tx_ref(transaction).insert(
+        "todos",
+        BTreeMap::new(),
+        crate::db::InsertOptions {
+            target: crate::db::ExactWriteTarget::Branch(branch.clone()),
+            ..Default::default()
+        },
+    )) {
+        Ok(_) => panic!("attributed batches must reject branch staging before defaults or lookup"),
+        Err(err) => err,
+    };
+    assert_eq!(err.code, ErrorCode::WriteRejected);
+    backend.abandon_transaction_handle(transaction).unwrap();
+
+    let upload_cells = BTreeMap::from([
+        ("done".to_owned(), Value::Bool(false)),
+        ("owner".to_owned(), Value::Uuid(backend_author.test_uuid())),
+    ]);
+    let upload = backend
+        .begin_streaming_value_upload("todos", &upload_cells, "title")
+        .unwrap();
+    let err = match block_on(backend.finish_streaming_value_upload(
+        upload,
+        crate::db::StreamingMutationKind::Insert,
+        "todos",
+        row(0xba),
+        upload_cells,
+        "title",
+        None,
+        None,
+        Some(branch),
+        None,
+        Some(alice),
+    )) {
+        Ok(_) => panic!("attributed streaming branch targets must fail before final staging"),
+        Err(err) => err,
+    };
+    assert_eq!(err.code, ErrorCode::WriteRejected);
+
+    let mixed_cells = BTreeMap::from([
+        ("done".to_owned(), Value::Bool(false)),
+        ("owner".to_owned(), Value::Uuid(backend_author.test_uuid())),
+    ]);
+    let mixed_upload = backend
+        .begin_streaming_value_upload("todos", &mixed_cells, "title")
+        .unwrap();
+    let err = match block_on(backend.finish_streaming_value_upload(
+        mixed_upload,
+        crate::db::StreamingMutationKind::Insert,
+        "todos",
+        row(0xbb),
+        mixed_cells,
+        "title",
+        Some(backend_author),
+        None,
+        None,
+        None,
+        Some(alice),
+    )) {
+        Ok(_) => panic!("attributed streaming cannot mix an admission override"),
+        Err(err) => err,
+    };
+    assert_eq!(err.code, ErrorCode::WriteRejected);
+    assert_eq!(prepared_read(&backend, &backend.table("todos")).len(), 2);
+}
+
+/// A trusted backend admits a streamed value as `SYSTEM` while retaining the
+/// externally supplied canonical subject in the resulting commit provenance.
+///
+/// ```text
+/// SYSTEM (editor claim) ──authorizes upload──► commit.made_by = alice
+/// alice (no editor claim) ──cannot authorize the equivalent direct write
+/// ```
+#[test]
+fn attributed_streaming_uses_system_admission_without_losing_provenance() {
+    let schema = editor_claim_write_schema();
+    let alice = AuthorSubject::for_test_bytes([0xab; 16]);
+    let server = open_core(0xac, AuthorSubject::SYSTEM, &schema);
+    server.node().borrow_mut().set_session_claims(
+        AuthorSubject::SYSTEM,
+        BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
+    );
+    server
+        .node()
+        .borrow_mut()
+        .set_session_claims(alice, BTreeMap::new());
+    let backend = block_on(unsafe {
+        // SAFETY: this is the explicit trusted-backend constructor exercised by
+        // the native binding, with SYSTEM as its admission identity.
+        Db::open_with_backend_attribution(DbConfig {
+            schema: schema.clone(),
+            storage: rocks_storage(&schema),
+            identity: DbIdentity {
+                node: NodeUuid::from_bytes([0xab; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+            id_source: Some(Box::new(SeededRowIdSource::new(0xab))),
+        })
+    })
+    .unwrap();
+    let (backend_transport, server_transport) = duplex();
+    let _upstream = block_on(backend.connect_upstream(backend_transport));
+    let _subscriber = server.accept_subscriber_with_trust(
+        server_transport,
+        AuthorSubject::SYSTEM,
+        CommitUnitTrust::TrustedBackend,
+    );
+
+    let direct = block_on(backend.insert(
+        "todos",
+        cells("alice cannot admit", false, alice),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xab)),
+            identity: crate::db::WriteIdentity::Session(alice),
+            ..Default::default()
+        },
+    ))
+    .expect("the client may stage a write before the serving backend evaluates it");
+    for _ in 0..4 {
+        backend.tick().unwrap();
+        server.tick().unwrap();
+    }
+    let direct_err = block_on(direct.wait(DurabilityTier::Global))
+        .expect_err("planted negative: Alice must not inherit SYSTEM's editor claim");
+    assert_eq!(direct_err.code, ErrorCode::WriteRejected);
+
+    let cells = BTreeMap::from([
+        ("done".to_owned(), Value::Bool(false)),
+        ("owner".to_owned(), Value::Uuid(alice.test_uuid())),
+    ]);
+    let mut upload = backend
+        .begin_streaming_value_upload("todos", &cells, "title")
+        .unwrap();
+    block_on(backend.push_streaming_value_upload(&mut upload, b"SYSTEM-admitted")).unwrap();
+    let write = block_on(backend.finish_streaming_value_upload(
+        upload,
+        crate::db::StreamingMutationKind::Insert,
+        "todos",
+        row(0xac),
+        cells,
+        "title",
+        None,
+        None,
+        None,
+        None,
+        Some(alice),
+    ))
+    .expect("SYSTEM must authorize the attributed streaming write");
+    for _ in 0..8 {
+        backend.tick().unwrap();
+        server.tick().unwrap();
+    }
+    assert_eq!(
+        block_on(write.wait(DurabilityTier::Global)).unwrap(),
+        write.mergeable_tx_id()
+    );
+    let SyncMessage::CommitUnit { tx, .. } = backend
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(write.mergeable_tx_id())
+        .unwrap()
+    else {
+        panic!("streamed attributed write must publish a commit unit");
+    };
+    assert_eq!(tx.made_by, alice);
 }
 
 #[test]
@@ -1489,7 +2410,9 @@ fn default_insert_keeps_subject_and_made_by_equal() {
     let schema = owner_write_schema();
     let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
     let db = open_db(0xa1, owner, &schema);
-    let write = db.insert("todos", cells("default", false, owner)).unwrap();
+    let write = db
+        .insert("todos", cells("default", false, owner), Default::default())
+        .unwrap();
     let unit = db
         .node
         .node

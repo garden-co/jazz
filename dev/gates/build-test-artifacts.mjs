@@ -16,9 +16,9 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 
-function sharedGitDirectory(cwd = root) {
+function worktreeGitDirectory(cwd = root) {
   try {
-    const directory = execFileSync("git", ["rev-parse", "--git-common-dir"], {
+    const directory = execFileSync("git", ["rev-parse", "--git-dir"], {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
@@ -73,16 +73,16 @@ function ownerIsAlive(owner) {
 }
 
 /**
- * The common Git directory is shared by every linked worktree in a clone.
- * Put the lock there rather than in a checkout: linked worktrees share this
- * clone's default Cargo target and generated package outputs. Separate clones
- * do not share those resources and intentionally do not contend. A test hook
- * overrides the exact path without exposing a real checkout in receipts.
+ * Generated bindings and Cargo targets are per worktree. Keep the lock beside
+ * that worktree's Git metadata: independent lanes may build in parallel while
+ * children of one aggregate build still inherit one verified lease. Cargo and
+ * pnpm protect their genuinely shared caches themselves. A test/CI hook can
+ * still select one explicit parent lock for its children.
  */
 export function artifactLockPath(cwd = root) {
   return (
     process.env.JAZZ_TEST_ARTIFACT_LOCK_PATH ??
-    resolve(sharedGitDirectory(cwd), "jazz-test-artifacts.lock")
+    resolve(worktreeGitDirectory(cwd), "jazz-test-artifacts.lock")
   );
 }
 
@@ -108,7 +108,7 @@ function lockError(lockPath, owner) {
   );
 }
 
-/** Acquire an exclusive, clone-wide artifact build lock. */
+/** Acquire an exclusive, worktree-scoped artifact build lock. */
 export function acquireArtifactBuildLock(lockPath = artifactLockPath()) {
   const owner = {
     pid: process.pid,
@@ -146,7 +146,7 @@ export function acquireArtifactBuildLock(lockPath = artifactLockPath()) {
     removeQuietly(staging);
     throw lockError(lockPath, existing);
   }
-  console.log(`test-artifacts: acquired shared artifact lock (pid ${owner.pid})`);
+  console.log(`test-artifacts: acquired artifact lock (pid ${owner.pid})`);
   let released = false;
   return {
     lockPath,
@@ -162,7 +162,7 @@ export function acquireArtifactBuildLock(lockPath = artifactLockPath()) {
       } catch (error) {
         throw lockFilesystemError("release lock", error);
       }
-      console.log("test-artifacts: released shared artifact lock");
+      console.log("test-artifacts: released artifact lock");
     },
   };
 }

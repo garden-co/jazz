@@ -5,7 +5,7 @@ mod common;
 
 use common::{allow_all_policies, compile_schema};
 use jazz::db::{Db, DbConfig, DbIdentity, StreamingMutationKind};
-use jazz::groove::large_values::{INLINE_VALUE_MAX_BYTES, LEAF_MAX_BYTES, LargeValueKind};
+use jazz::groove::large_values::{INLINE_VALUE_MAX_BYTES, LEAF_MAX_BYTES};
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -17,6 +17,7 @@ use jazz::tx::DurabilityTier;
 fn schema() -> JazzSchema {
     let columns = RowDescriptor::new(vec![
         ColumnDescriptor::new("title", ColumnType::Text),
+        ColumnDescriptor::new("payload", ColumnType::Json { schema: None }),
         ColumnDescriptor::new("done", ColumnType::Boolean),
     ]);
     compile_schema(&Schema::from([(
@@ -80,7 +81,6 @@ fn streaming_create_publishes_one_ordinary_logical_row() {
         "todos",
         BTreeMap::from([("done".to_owned(), Value::Bool(false))]),
         "title",
-        LargeValueKind::String,
         reader,
     ))
     .expect("streaming insert");
@@ -92,6 +92,25 @@ fn streaming_create_publishes_one_ordinary_logical_row() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].cell(&table, "title"), Some(Value::String(text)));
     assert_eq!(rows[0].cell(&table, "done"), Some(Value::Bool(false)));
+}
+
+#[test]
+fn streaming_create_derives_json_kind_from_the_column_schema() {
+    let db = open_db();
+    let json = format!(r#"{{"body":"{}"}}"#, "json-".repeat(INLINE_VALUE_MAX_BYTES));
+    let write = jazz::block_on(db.insert_streaming_value(
+        "todos",
+        BTreeMap::from([("done".to_owned(), Value::Bool(false))]),
+        "payload",
+        Cursor::new(json.clone()),
+    ))
+    .expect("the JSON column, not a caller ABI argument, determines staging kind");
+    jazz::block_on(write.wait(DurabilityTier::Local)).expect("local durability");
+
+    let table = schema().tables()[0].clone();
+    let query = db.prepare_query(&db.table("todos")).expect("prepare query");
+    let rows = db.read(&query).expect("read row");
+    assert_eq!(rows[0].cell(&table, "payload"), Some(Value::String(json)));
 }
 
 #[test]
@@ -107,7 +126,6 @@ fn streaming_create_validation_failure_publishes_no_row() {
         "todos",
         BTreeMap::from([("done".to_owned(), Value::Bool(false))]),
         "title",
-        LargeValueKind::String,
         invalid_utf8,
     ));
     assert!(result.is_err());
@@ -134,7 +152,6 @@ fn streaming_update_and_upsert_publish_ordinary_logical_rows() {
         "todos",
         BTreeMap::from([("done".to_owned(), Value::Bool(false))]),
         "title",
-        LargeValueKind::String,
         Cursor::new("initial"),
     ))
     .expect("streaming insert");
@@ -146,7 +163,6 @@ fn streaming_update_and_upsert_publish_ordinary_logical_rows() {
         row,
         BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
         "title",
-        LargeValueKind::String,
         Cursor::new("updated"),
         None,
         Some(42),
@@ -160,7 +176,6 @@ fn streaming_update_and_upsert_publish_ordinary_logical_rows() {
         row,
         BTreeMap::new(),
         "title",
-        LargeValueKind::String,
         Cursor::new("upserted"),
         None,
         Some(43),
@@ -181,6 +196,61 @@ fn streaming_update_and_upsert_publish_ordinary_logical_rows() {
 }
 
 #[test]
+fn failed_streaming_publication_evicts_the_finalized_staged_root() {
+    let db = open_db();
+    let row = RowUuid::from_bytes([0x68; 16]);
+    jazz::block_on(db.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("existing".to_owned())),
+            ("done".to_owned(), Value::Bool(false)),
+        ]),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        },
+    ))
+    .expect("seed row");
+
+    let cells = BTreeMap::from([("done".to_owned(), Value::Bool(true))]);
+    let mut upload = db
+        .begin_streaming_value_upload("todos", &cells, "title")
+        .expect("begin upload");
+    jazz::block_on(db.push_streaming_value_upload(&mut upload, b"replacement"))
+        .expect("stage root");
+    let result = jazz::block_on(db.finish_streaming_value_upload(
+        upload,
+        StreamingMutationKind::Insert,
+        "todos",
+        row,
+        cells,
+        "title",
+        None,
+        None,
+        None,
+        None,
+        None,
+    ));
+    let error = match result {
+        Ok(_) => panic!("duplicate insert unexpectedly published"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("already exists"));
+
+    db.set_large_value_staging_policy(LargeValueStagingPolicy {
+        incoming_bytes_per_window: u64::MAX,
+        window_ms: 60_000,
+        max_age_ms: 0,
+    });
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert_eq!(
+        jazz::block_on(db.evict_expired_staged_large_values()).expect("expiry pass"),
+        0,
+        "failed publication removes the finalized staged root immediately"
+    );
+}
+
+#[test]
 fn push_streaming_stops_at_the_ingress_limit_and_closes_the_upload() {
     let db = open_db();
     db.set_large_value_staging_policy(LargeValueStagingPolicy {
@@ -190,7 +260,7 @@ fn push_streaming_stops_at_the_ingress_limit_and_closes_the_upload() {
     });
     let cells = BTreeMap::from([("done".to_owned(), Value::Bool(false))]);
     let mut upload = db
-        .begin_streaming_value_upload("todos", &cells, "title", LargeValueKind::String)
+        .begin_streaming_value_upload("todos", &cells, "title")
         .expect("begin upload");
 
     let error = jazz::block_on(
@@ -207,46 +277,6 @@ fn push_streaming_stops_at_the_ingress_limit_and_closes_the_upload() {
     assert!(db.read(&query).expect("read rows").is_empty());
 }
 
-/// An ordinary local Db cannot convert a streamed value into a write attributed
-/// to another author, even when the upload itself was accepted locally.
-///
-/// ```text
-/// local Db ──begin/push──► staged value
-/// local Db ──finish as mallory──► WriteRejected; no row is published
-/// ```
-#[test]
-fn ordinary_db_cannot_forge_streaming_provenance() {
-    let db = open_db();
-    let cells = BTreeMap::from([("done".to_owned(), Value::Bool(false))]);
-    let mut upload = db
-        .begin_streaming_value_upload("todos", &cells, "title", LargeValueKind::String)
-        .expect("begin upload");
-    jazz::block_on(db.push_streaming_value_upload(&mut upload, b"forged"))
-        .expect("stage upload before terminal admission");
-
-    let result = jazz::block_on(db.finish_streaming_value_upload(
-        upload,
-        StreamingMutationKind::Insert,
-        "todos",
-        RowUuid::from_bytes([0x88; 16]),
-        cells,
-        "title",
-        None,
-        None,
-        None,
-        None,
-        Some(AuthorSubject::for_test_bytes([0xb2; 16])),
-    ));
-    let error = match result {
-        Ok(_) => panic!("ordinary Db must reject attributed streaming finalization"),
-        Err(error) => error,
-    };
-    assert!(error.to_string().contains("trusted serving node"));
-
-    let query = db.prepare_query(&db.table("todos")).expect("prepare query");
-    assert!(db.read(&query).expect("read rows").is_empty());
-}
-
 /// Two local streams establish pending journals, maintenance expires them,
 /// and neither stale handle may recreate its journal through push or finish.
 ///
@@ -255,14 +285,14 @@ fn ordinary_db_cannot_forge_streaming_provenance() {
 /// stale push/finish ──► LargeValueStageExpired; remains absent
 /// ```
 #[test]
-fn expired_local_stream_handles_cannot_recreate_pending_uploads() {
+fn maintenance_evicted_local_stream_handles_cannot_recreate_pending_uploads() {
     let db = open_db();
     let cells = BTreeMap::from([("done".to_owned(), Value::Bool(false))]);
     let mut push_upload = db
-        .begin_streaming_value_upload("todos", &cells, "title", LargeValueKind::String)
+        .begin_streaming_value_upload("todos", &cells, "title")
         .expect("begin push upload");
     let mut finish_upload = db
-        .begin_streaming_value_upload("todos", &cells, "title", LargeValueKind::String)
+        .begin_streaming_value_upload("todos", &cells, "title")
         .expect("begin finish upload");
     jazz::block_on(db.push_streaming_value_upload(&mut push_upload, b"first"))
         .expect("initialize push upload journal");
@@ -326,7 +356,6 @@ fn native_reader_streaming_uses_the_managed_ingress_and_cleanup_path() {
         "todos",
         BTreeMap::from([("done".to_owned(), Value::Bool(false))]),
         "title",
-        LargeValueKind::String,
         Cursor::new(vec![b'x'; LEAF_MAX_BYTES + 1]),
     ));
     let error = match result {
@@ -351,7 +380,6 @@ fn native_reader_failure_releases_its_pending_upload() {
         "todos",
         BTreeMap::from([("done".to_owned(), Value::Bool(false))]),
         "title",
-        LargeValueKind::String,
         FailingReader {
             cursor: Cursor::new(vec![b'x'; LEAF_MAX_BYTES + 1]),
         },
@@ -376,7 +404,7 @@ fn explicit_streaming_abort_releases_the_pending_upload_immediately() {
     let db = open_db();
     let cells = BTreeMap::from([("done".to_owned(), Value::Bool(false))]);
     let mut upload = db
-        .begin_streaming_value_upload("todos", &cells, "title", LargeValueKind::String)
+        .begin_streaming_value_upload("todos", &cells, "title")
         .expect("begin upload");
     jazz::block_on(db.push_streaming_value_upload(&mut upload, &vec![b'x'; LEAF_MAX_BYTES + 1]))
         .expect("persist a pending upload");

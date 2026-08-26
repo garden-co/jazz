@@ -15,7 +15,7 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.14.4",
-    "better-auth": "1.6.24",
+    "better-auth": "1.7.1",
     "hono": "^4.7.11",
     "jazz-napi": "workspace:*",
     "jazz-tools": "workspace:*"

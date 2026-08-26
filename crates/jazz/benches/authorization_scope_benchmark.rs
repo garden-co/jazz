@@ -99,7 +99,11 @@ fn setup(row_count: usize, extra_columns: usize, seed: u64) -> DirectDb {
 
     for index in 0..row_count {
         let write = db
-            .insert("items", item_cells(index, extra_columns))
+            .insert(
+                "items",
+                item_cells(index, extra_columns),
+                Default::default(),
+            )
             .expect("insert benchmark item");
         block_on(write.wait(DurabilityTier::Local)).expect("seed row should be local");
     }

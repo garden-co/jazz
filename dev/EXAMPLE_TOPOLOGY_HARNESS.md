@@ -5,61 +5,6 @@ bounded named phases, disconnect/reconnect/restart/failure callbacks, receipts,
 and replay commands. App scenarios continue to own schemas, fixtures,
 operations, and assertions.
 
-## Envelope faults
-
-The same module also provides `TopologyEnvelopeScheduler`, a test-only virtual
-time boundary around an app test transport's _delivery callback_. It does not
-instrument, patch, or otherwise change Jazz's runtime transport. Give messages
-stable endpoint names and non-sensitive test labels, then wrap delivery:
-
-```ts
-const envelopes = new TopologyEnvelopeScheduler(seed);
-await envelopes.intercept(
-  { from: "browser", to: "edge", label: "write" },
-  encodedMessage,
-  (message) => testTransport.deliver(message),
-);
-```
-
-Arm faults before the next intercepted envelope with
-`duplicateNext`, `delayNext(ticks)`, `reorderNext`, or
-`dropNextThenRetry(ticks)`. `partition(a, b)` holds traffic in both directions;
-`heal(a, b)` releases ready traffic. `advance(ticks)` moves only virtual time,
-so tests never need wall-clock sleeps to reproduce a schedule. Delivery order,
-attempt number, virtual tick, endpoint names, labels, and fault actions are
-retained in a bounded recent-history window in the payload-free scheduler
-receipt. `activitiesTruncated` reports how many older activities were evicted.
-Pass each scheduler through
-`envelopeSchedulers` on `runTopologyScenario`; the runner closes it after app
-cleanup and records discarded held envelopes, preventing a test fault from
-leaking into another scenario. Delivery callbacks receive an `AbortSignal` and
-must stop work when it aborts: teardown awaits all in-flight callbacks up to
-the scenario's bounded fault timeout. A callback that ignores cancellation
-causes a visible cleanup-timeout receipt and scenario failure rather than a
-quiet cross-test leak.
-
-If a delivery itself produces another envelope, use the callback context's
-`enqueue(...)` function. That adds the follow-up to the same serialized drain
-without recursively waiting for the active callback. Ordinary concurrent calls
-to `intercept(...)` continue to resolve only after their deliveries settle.
-
-Envelope descriptors are deliberately narrow, immutable snapshots of
-`{ from, to, label? }`: endpoint names and labels are bounded, unknown metadata
-and NUL-containing endpoint names are rejected, and payloads are never recorded.
-Only one fault kind can be armed for an envelope (multiple duplicate copies are
-the sole composable case). The scheduler also bounds copies, virtual ticks,
-outstanding work, partition links, and receipt activities to keep a bad
-randomized soak schedule finite. A logical envelope id remains stable across
-copies/retry while each actual delivery has a separate sequence and attempt;
-retry is recorded when the retry is delivered, not merely scheduled. A callback
-failure fail-stops the scheduler and records discarded remaining deliveries
-deterministically.
-
-The scheduler deliberately models message delivery only. Connection lifecycle,
-real transport retry policy, and application assertions remain app-owned. An
-app should use an explicit test transport seam (or its existing simulation
-link), rather than adding app-specific production hooks just for topology tests.
-
 Register a scenario in `dev/example-topology-scenarios.json` with a stable id,
 topology labels, working directory, and an argv array. Run the bounded smoke
 locally with:

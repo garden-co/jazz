@@ -26,10 +26,12 @@ supported React Native runtime mode until an actual device smoke passes.
 
 Open decisions for the RN owner:
 
-- SQLite driver route: `op-sqlite`, `expo-sqlite`, or the surviving
-  `crates/jazz-rn` native-module route with JSI.
-- Runtime route: keep loading the WASM-backed v2 runtime in RN, or move the
-  runtime boundary into `crates/jazz-rn` as a native module.
+- SQLite driver route: the shared `jazz-native-relay` artifact owns SQLite;
+  its Android/iOS wrappers must link that artifact rather than introducing a
+  JavaScript storage driver.
+- Runtime route: move the runtime boundary into `crates/jazz-rn` as the thin
+  native relay command transport; it must not revive the removed UniFFI/JSI
+  runtime.
 - Storage ABI: map the future RN SQLite driver onto the portable ordered-KV
   contract, including migration reporting, corruption behavior, teardown, and
   durability tests.
@@ -37,7 +39,7 @@ Open decisions for the RN owner:
 Useful pointers:
 
 - Native module scaffold: `crates/jazz-rn/` (`android/`, `ios/`,
-  `JazzRn.podspec`, generated RN bridge files).
+  `JazzRn.podspec`, and the generated `JazzRelay` TurboModule contract).
 - Tracking issue: [#1756](https://github.com/garden-co/jazz/issues/1756).
 - Owning spec: `crates/jazz/SPEC/13_db_api.md`, open questions for binding
   storage and React Native runtime reuse.

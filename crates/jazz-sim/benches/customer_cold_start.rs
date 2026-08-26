@@ -755,13 +755,13 @@ struct CountedDuplex {
 impl Transport for DuplexTransport {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         self.metrics.messages.set(self.metrics.messages.get() + 1);
-        if let SyncMessage::ViewUpdate {
+        if let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             subscription,
             reset_result_set,
             version_bundles,
             result_member_adds,
             ..
-        } = &message
+        }) = &message
         {
             self.metrics
                 .view_updates

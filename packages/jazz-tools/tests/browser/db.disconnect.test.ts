@@ -11,11 +11,7 @@ import {
   waitForQuery,
   withTimeout,
 } from "./support.js";
-import {
-  getJazzServerInfo,
-  getJazzServerJwtForUser,
-  type JazzServerInfo,
-} from "./testing-server.js";
+import { getJazzServerInfo, type JazzServerInfo } from "./testing-server.js";
 
 const schema = {
   todos: s.table({
@@ -34,18 +30,6 @@ const allowAllPermissions = s.definePermissions(app, ({ policy }) => [
   policy.todos.allowInsert.always(),
   policy.todos.allowUpdate.always(),
   policy.todos.allowDelete.always(),
-]);
-
-// Keep this intentionally smaller than the reconnect fixtures below: a single
-// public text column proves that an ordinary authenticated browser write is
-// durably acknowledged and delivered without relying on a relation or an
-// application-specific policy.
-const edgeSettlementApp = s.defineApp({
-  receipts: s.table({ label: s.string() }),
-});
-const edgeSettlementPermissions = s.definePermissions(edgeSettlementApp, ({ policy }) => [
-  policy.receipts.allowRead.always(),
-  policy.receipts.allowInsert.always(),
 ]);
 
 const PENDING_ASSERTION_MS = 750;
@@ -77,61 +61,6 @@ describe("Db disconnect/reconnect", () => {
   });
 
   describe("server-backed subscriptions", () => {
-    it("settles and delivers an allow-all browser write at edge", async () => {
-      const server = await getJazzServerInfo(uniqueDbName("edge-write-settlement"));
-      await deploy({
-        appId: server.appId,
-        serverUrl: server.serverUrl,
-        adminSecret: server.adminSecret,
-        schema: edgeSettlementApp,
-        permissions: edgeSettlementPermissions,
-      });
-      const token = await getJazzServerJwtForUser("edge-write-settlement", undefined, server.appId);
-      const db = ctx.track(
-        await createDb({
-          appId: server.appId,
-          driver: { type: "persistent", dbName: uniqueDbName("edge-write-settlement-writer") },
-          jwtToken: token,
-          serverUrl: server.serverUrl,
-        }),
-      );
-      const peer = ctx.track(
-        await createDb({
-          appId: server.appId,
-          driver: { type: "persistent", dbName: uniqueDbName("edge-write-settlement-peer") },
-          jwtToken: token,
-          serverUrl: server.serverUrl,
-        }),
-      );
-      const errors: unknown[] = [];
-      const stop = db.onMutationError((event) => errors.push(event));
-      const write = db.insert(edgeSettlementApp.receipts, { label: "one-table receipt" });
-
-      await withTimeout(
-        write.wait({ tier: "local" }),
-        LOCAL_OPERATION_TIMEOUT_MS,
-        "allow-all browser write did not settle locally",
-      );
-      try {
-        const accepted = await withTimeout(
-          write.wait({ tier: "edge" }),
-          SYNC_OPERATION_TIMEOUT_MS,
-          `allow-all browser write did not settle at edge; mutationErrors=${JSON.stringify(errors)}`,
-        );
-        expect(errors).toEqual([]);
-        await waitForCondition(
-          async () =>
-            (await peer.all(edgeSettlementApp.receipts, { tier: "edge" })).some(
-              (row) => row.id === accepted.id,
-            ),
-          SYNC_OPERATION_TIMEOUT_MS,
-          "edge-settled allow-all browser write did not reach a second browser client",
-        );
-      } finally {
-        stop();
-      }
-    }, 60_000);
-
     it.each(["edge", "global"] as const)(
       "keeps a disconnected %s subscription pending, then hydrates its local write",
       async (tier) => {

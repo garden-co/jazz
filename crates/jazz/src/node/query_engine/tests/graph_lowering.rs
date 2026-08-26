@@ -537,6 +537,7 @@ fn current_join_via_can_use_union_relation_input() {
     assert_current_join_via_union_relation_input(
         source("todo_tags", SourceRole::Policy("direct".to_owned())),
         source("todo_tags", SourceRole::Policy("inherited".to_owned())),
+        false,
     );
 }
 
@@ -546,12 +547,21 @@ fn current_join_via_can_use_union_relation_input() {
 #[test]
 fn current_join_via_shared_alias_union_keeps_arm_and_row_carriers() {
     let shared = source("todo_tags", SourceRole::Alias("policy_branch".to_owned()));
-    assert_current_join_via_union_relation_input(shared.clone(), shared);
+    assert_current_join_via_union_relation_input(shared.clone(), shared, false);
+}
+
+/// The shared-alias UNION must retain its full `(arm, row)` occurrence identity
+/// when an additional INNER JOIN causes the first join input to be flattened.
+#[test]
+fn current_join_via_shared_alias_union_keeps_carriers_through_consecutive_inner_join() {
+    let shared = source("todo_tags", SourceRole::Alias("policy_branch".to_owned()));
+    assert_current_join_via_union_relation_input(shared.clone(), shared, true);
 }
 
 fn assert_current_join_via_union_relation_input(
     direct_source: SourceId,
     inherited_source: SourceId,
+    consecutive_inner_join: bool,
 ) {
     let root = RowSetNodeId("root".to_owned());
     let direct_source_node = RowSetNodeId("direct-source".to_owned());
@@ -560,26 +570,37 @@ fn assert_current_join_via_union_relation_input(
     let inherited_project = RowSetNodeId("inherited-project".to_owned());
     let union_node = RowSetNodeId("authorized-union".to_owned());
     let join_node = RowSetNodeId("join".to_owned());
+    let ordinary_source_node = RowSetNodeId("ordinary-source".to_owned());
+    let ordinary_project = RowSetNodeId("ordinary-project".to_owned());
+    let terminal_join = RowSetNodeId("terminal-join".to_owned());
     let root_source = source("todos", SourceRole::Root);
+    let ordinary_source = source("todo_tags", SourceRole::Alias("ordinary".to_owned()));
+    let mut sources = BTreeMap::from([
+        (
+            root_source.clone(),
+            requested_current_source(DurabilityTier::Global),
+        ),
+        (
+            direct_source.clone(),
+            requested_current_source(DurabilityTier::Global),
+        ),
+        (
+            inherited_source.clone(),
+            requested_current_source(DurabilityTier::Global),
+        ),
+    ]);
+    if consecutive_inner_join {
+        sources.insert(
+            ordinary_source.clone(),
+            requested_current_source(DurabilityTier::Global),
+        );
+    }
     let request = QueryProgramRequest {
         authorization_mode: QueryAuthorizationMode::TrustedServing,
         reads: QueryReadSet::primary(ReadView {
             read_schema: schema(0x10),
             policy_schema: schema(0x11),
-            sources: BTreeMap::from([
-                (
-                    root_source.clone(),
-                    requested_current_source(DurabilityTier::Global),
-                ),
-                (
-                    direct_source.clone(),
-                    requested_current_source(DurabilityTier::Global),
-                ),
-                (
-                    inherited_source.clone(),
-                    requested_current_source(DurabilityTier::Global),
-                ),
-            ]),
+            sources,
         }),
         policy: system_policy_context(),
         input: RowSetProgramInput {
@@ -588,7 +609,11 @@ fn assert_current_join_via_union_relation_input(
                     shape_id: shape(0x7a),
                     canonical: vec![0x7a],
                 },
-                root: join_node.clone(),
+                root: if consecutive_inner_join {
+                    terminal_join.clone()
+                } else {
+                    join_node.clone()
+                },
                 result: ResultId::RealRow {
                     table: "todos".to_owned(),
                     row: ResultRowRef::Source(root_source.clone()),
@@ -597,94 +622,140 @@ fn assert_current_join_via_union_relation_input(
                 closure_paths: Vec::new(),
                 join_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
-                nodes: BTreeMap::from([
-                    (
-                        root.clone(),
-                        RowSetExpr::Source {
-                            source: root_source.clone(),
-                            visibility: RowVisibility::Visible,
-                        },
-                    ),
-                    (
-                        direct_source_node.clone(),
-                        RowSetExpr::Source {
-                            source: direct_source.clone(),
-                            visibility: RowVisibility::Visible,
-                        },
-                    ),
-                    (
-                        direct_project.clone(),
-                        RowSetExpr::Project {
-                            input: direct_source_node,
-                            columns: vec![RowProjection {
-                                output: TypedOutputField {
-                                    name: "todo".to_owned(),
-                                    ty: ColumnType::Uuid,
-                                },
-                                value: NormalizedValueRef::SourceField {
-                                    source: direct_source,
-                                    field: "todo".to_owned(),
-                                },
-                            }],
-                        },
-                    ),
-                    (
-                        inherited_source_node.clone(),
-                        RowSetExpr::Source {
-                            source: inherited_source.clone(),
-                            visibility: RowVisibility::Visible,
-                        },
-                    ),
-                    (
-                        inherited_project.clone(),
-                        RowSetExpr::Project {
-                            input: inherited_source_node,
-                            columns: vec![RowProjection {
-                                output: TypedOutputField {
-                                    name: "todo".to_owned(),
-                                    ty: ColumnType::Uuid,
-                                },
-                                value: NormalizedValueRef::SourceField {
-                                    source: inherited_source,
-                                    field: "todo".to_owned(),
-                                },
-                            }],
-                        },
-                    ),
-                    (
-                        union_node.clone(),
-                        RowSetExpr::Union {
-                            inputs: vec![
-                                UnionInput {
-                                    node: direct_project,
-                                    label: "direct".to_owned(),
-                                },
-                                UnionInput {
-                                    node: inherited_project,
-                                    label: "inherited".to_owned(),
-                                },
-                            ],
-                        },
-                    ),
-                    (
-                        join_node,
-                        RowSetExpr::Join {
-                            left: root,
-                            right: union_node,
-                            mode: JoinMode::Inner,
-                            on: PredicateExpr::Compare {
-                                left: NormalizedValueRef::RowId(RowIdRef::Source(
-                                    root_source.clone(),
-                                )),
-                                op: ComparisonOp::Eq,
-                                right: NormalizedValueRef::SourceField {
-                                    source: root_source.clone(),
-                                    field: "todo".to_owned(),
+                nodes: {
+                    let mut nodes = BTreeMap::from([
+                        (
+                            root.clone(),
+                            RowSetExpr::Source {
+                                source: root_source.clone(),
+                                visibility: RowVisibility::Visible,
+                            },
+                        ),
+                        (
+                            direct_source_node.clone(),
+                            RowSetExpr::Source {
+                                source: direct_source.clone(),
+                                visibility: RowVisibility::Visible,
+                            },
+                        ),
+                        (
+                            direct_project.clone(),
+                            RowSetExpr::Project {
+                                input: direct_source_node,
+                                columns: vec![RowProjection {
+                                    output: TypedOutputField {
+                                        name: "todo".to_owned(),
+                                        ty: ColumnType::Uuid,
+                                    },
+                                    value: NormalizedValueRef::SourceField {
+                                        source: direct_source.clone(),
+                                        field: "todo".to_owned(),
+                                    },
+                                }],
+                            },
+                        ),
+                        (
+                            inherited_source_node.clone(),
+                            RowSetExpr::Source {
+                                source: inherited_source.clone(),
+                                visibility: RowVisibility::Visible,
+                            },
+                        ),
+                        (
+                            inherited_project.clone(),
+                            RowSetExpr::Project {
+                                input: inherited_source_node,
+                                columns: vec![RowProjection {
+                                    output: TypedOutputField {
+                                        name: "todo".to_owned(),
+                                        ty: ColumnType::Uuid,
+                                    },
+                                    value: NormalizedValueRef::SourceField {
+                                        source: inherited_source.clone(),
+                                        field: "todo".to_owned(),
+                                    },
+                                }],
+                            },
+                        ),
+                        (
+                            union_node.clone(),
+                            RowSetExpr::Union {
+                                inputs: vec![
+                                    UnionInput {
+                                        node: direct_project,
+                                        label: "direct".to_owned(),
+                                    },
+                                    UnionInput {
+                                        node: inherited_project,
+                                        label: "inherited".to_owned(),
+                                    },
+                                ],
+                            },
+                        ),
+                        (
+                            join_node.clone(),
+                            RowSetExpr::Join {
+                                left: root,
+                                right: union_node,
+                                mode: JoinMode::Inner,
+                                on: PredicateExpr::Compare {
+                                    left: NormalizedValueRef::RowId(RowIdRef::Source(
+                                        root_source.clone(),
+                                    )),
+                                    op: ComparisonOp::Eq,
+                                    right: NormalizedValueRef::SourceField {
+                                        source: root_source.clone(),
+                                        field: "todo".to_owned(),
+                                    },
                                 },
                             },
-                        },
-                    ),
-                ]),
+                        ),
+                    ]);
+                    if consecutive_inner_join {
+                        nodes.insert(
+                            ordinary_source_node.clone(),
+                            RowSetExpr::Source {
+                                source: ordinary_source.clone(),
+                                visibility: RowVisibility::Visible,
+                            },
+                        );
+                        nodes.insert(
+                            ordinary_project.clone(),
+                            RowSetExpr::Project {
+                                input: ordinary_source_node,
+                                columns: vec![RowProjection {
+                                    output: TypedOutputField {
+                                        name: "todo".to_owned(),
+                                        ty: ColumnType::Uuid,
+                                    },
+                                    value: NormalizedValueRef::SourceField {
+                                        source: ordinary_source.clone(),
+                                        field: "todo".to_owned(),
+                                    },
+                                }],
+                            },
+                        );
+                        nodes.insert(
+                            terminal_join,
+                            RowSetExpr::Join {
+                                left: join_node,
+                                right: ordinary_project,
+                                mode: JoinMode::Inner,
+                                on: PredicateExpr::Compare {
+                                    left: NormalizedValueRef::RowId(RowIdRef::Source(
+                                        root_source.clone(),
+                                    )),
+                                    op: ComparisonOp::Eq,
+                                    right: NormalizedValueRef::SourceField {
+                                        source: ordinary_source,
+                                        field: "todo".to_owned(),
+                                    },
+                                },
+                            },
+                        );
+                    }
+                    nodes
+                },
             },
             binding: ProgramBinding {
                 id: BindingId(uuid::Uuid::from_bytes([0x7a; 16])),
@@ -753,6 +824,16 @@ fn assert_current_join_via_union_relation_input(
             if fields.iter().any(|field| field.output_name == "__root_join_arm_0")
                 && fields.iter().any(|field| field.output_name == "__root_join_row_0")
     )));
+    if consecutive_inner_join {
+        assert!(graph_any(&membership.graph, &|graph| matches!(
+            graph,
+            GraphBuilder::Project { input, fields }
+                if fields.iter().any(|field| field.output_name == "__root_join_arm_0")
+                    && fields.iter().any(|field| field.output_name == "__root_join_row_0")
+                    && matches!(input.as_ref(), GraphBuilder::Join { right, .. }
+                        if !matches!(right.as_ref(), GraphBuilder::Union { .. }))
+        )));
+    }
 }
 
 #[test]
@@ -2151,6 +2232,9 @@ fn missing_sub_claim_lowers_to_deny_predicate() {
     assert!(graph.contains("Or([])"), "{graph}");
 }
 
+/// This is deliberately a lowering-level receipt: the parameter domain is an
+/// internal compiler boundary, while the policy integration receipt exercises
+/// the corresponding public behavior.
 #[test]
 fn only_ordered_scalar_claims_enter_collector_routing() {
     let scalar = ClaimPath(vec!["tier".to_owned()]);

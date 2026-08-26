@@ -199,7 +199,15 @@ fn commit_client_mergeable(
     cells: BTreeMap<String, Value>,
 ) -> SyncMessage {
     let tx = jazz::db::block_on(client.db.mergeable_tx()).unwrap();
-    jazz::db::block_on(tx.insert_with_id(table, row, cells)).unwrap();
+    jazz::db::block_on(tx.insert(
+        table,
+        cells,
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
     jazz::db::block_on(tx.commit()).unwrap();
     jazz::db::block_on(client.db.tick()).unwrap();
     client
@@ -382,7 +390,7 @@ fn measured_write_us(
     let mut timings = Vec::with_capacity(rows);
     for idx in 0..rows {
         let value = format!("write-{row_offset}-{idx}");
-        let cells = match schema.tables[0].columns[0].name.as_str() {
+        let cells = match schema.tables[0].columns[0].name() {
             "title" => BTreeMap::from([("title".to_owned(), v(value))]),
             "name" if schema.tables[0].columns.len() == 1 => {
                 BTreeMap::from([("name".to_owned(), v(value))])
@@ -420,8 +428,8 @@ fn row_cells(row: CurrentRow, table: &TableSchema) -> (RowUuid, BTreeMap<String,
         .columns
         .iter()
         .filter_map(|column| {
-            row.cell(table, &column.name)
-                .map(|value| (column.name.clone(), value))
+            row.cell(table, column.name())
+                .map(|value| (column.name().to_owned(), value))
         })
         .collect();
     (row.row_uuid(), cells)

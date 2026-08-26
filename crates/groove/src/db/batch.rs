@@ -1,4 +1,5 @@
 use super::*;
+use crate::records::ValidatedVariantRecord;
 
 /// Mutable staged table writes whose reads observe writes already added to the
 /// stage. Commit runs one normal database batch commit, so current callers of
@@ -49,8 +50,6 @@ pub struct DatabaseBatch {
     pub(super) txn_indexed_operations: Cell<usize>,
     pub(super) notification_timing: NotificationTiming,
     pub(super) accepted_large_values: Vec<crate::large_values::StagedLargeValueId>,
-    pub(super) resident_large_values: Vec<crate::large_values::ResidentLargeValueStage>,
-    pub(super) resident_publication: ResidentPublicationPolicy,
 }
 
 impl PartialEq for DatabaseBatch {
@@ -58,23 +57,7 @@ impl PartialEq for DatabaseBatch {
         self.operations == other.operations
             && self.notification_timing == other.notification_timing
             && self.accepted_large_values == other.accepted_large_values
-            && self.resident_large_values == other.resident_large_values
-            && self.resident_publication == other.resident_publication
     }
-}
-
-/// Whether a resident publication may be exactly retracted if its owned
-/// durability attempt fails before promotion.
-///
-/// Ordinary database publications intentionally poison on persistence failure:
-/// their caller has no rollback contract.  Asynchronous preparation paths use
-/// this explicit policy to retain the inverse IVM delta and resident ownership
-/// until their first durable promotion succeeds.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ResidentPublicationPolicy {
-    #[default]
-    DurableOnly,
-    RetractableBeforePersistence,
 }
 
 /// When subscription notifications produced by a batch become observable.
@@ -90,16 +73,6 @@ pub enum NotificationTiming {
 }
 
 impl DatabaseBatch {
-    /// Make this publication retractable until its first durable write settles.
-    ///
-    /// The caller that observes a failed [`AppliedBatch`](super::AppliedBatch)
-    /// persistence receipt must settle it through
-    /// [`Database::retract_failed_persistence`](super::Database::retract_failed_persistence),
-    /// rather than [`Database::finish_persistence`](super::Database::finish_persistence).
-    pub fn retract_if_persistence_fails(&mut self) {
-        self.resident_publication = ResidentPublicationPolicy::RetractableBeforePersistence;
-    }
-
     pub fn deliver_notifications(&mut self, timing: NotificationTiming) {
         self.notification_timing = timing;
     }
@@ -114,25 +87,6 @@ impl DatabaseBatch {
     pub fn accept_large_value(&mut self, id: crate::large_values::StagedLargeValueId) {
         if !self.accepted_large_values.contains(&id) {
             self.accepted_large_values.push(id);
-        }
-    }
-
-    /// Attach a direct value whose chunks are resident but not durable yet.
-    /// The enclosing batch is made retractable because its row and IVM delta
-    /// become visible before [`AppliedBatch::persist`](super::AppliedBatch::persist)
-    /// journal-stages the immutable chunks and atomically consumes the receipt.
-    pub fn accept_resident_large_value(
-        &mut self,
-        stage: crate::large_values::ResidentLargeValueStage,
-    ) {
-        self.retract_if_persistence_fails();
-        self.accept_large_value(stage.id());
-        if !self
-            .resident_large_values
-            .iter()
-            .any(|existing| existing.id() == stage.id())
-        {
-            self.resident_large_values.push(stage);
         }
     }
 
@@ -161,7 +115,12 @@ impl DatabaseBatch {
     /// This avoids a storage lookup during delta computation. It is only sound for
     /// internal append-only tables whose enclosing transaction identity proves
     /// freshness; ordinary insert callers must use [`Self::insert_raw`].
-    pub fn insert_raw_fresh(
+    /// # Safety
+    ///
+    /// The caller must guarantee that `key` is absent from both persisted storage
+    /// and earlier operations in this batch. A false proof would omit the previous
+    /// record's negative maintained-view delta.
+    pub unsafe fn insert_raw_fresh(
         &mut self,
         table: impl Into<String>,
         key: PrimaryKeyValue,
@@ -238,6 +197,7 @@ impl From<VariantRecord> for RecordInput {
 pub enum RawRecordInput {
     Payload(Vec<u8>),
     Record(VariantRecord),
+    ValidatedRecord(ValidatedVariantRecord),
 }
 
 impl From<Vec<u8>> for RawRecordInput {
@@ -249,6 +209,12 @@ impl From<Vec<u8>> for RawRecordInput {
 impl From<VariantRecord> for RawRecordInput {
     fn from(record: VariantRecord) -> Self {
         Self::Record(record)
+    }
+}
+
+impl From<ValidatedVariantRecord> for RawRecordInput {
+    fn from(record: ValidatedVariantRecord) -> Self {
+        Self::ValidatedRecord(record)
     }
 }
 

@@ -817,7 +817,7 @@ async fn apply_jazz_op(
             let district_cells = tx.read(DISTRICTS, d).await?.expect("district");
             tx.read(CUSTOMERS, c).await?;
             let order_number = u64_cell(&district_cells, "nextOrderNumber");
-            tx.insert_with_id(
+            tx.upsert(
                 DISTRICTS,
                 d,
                 cells([
@@ -826,10 +826,11 @@ async fn apply_jazz_op(
                     ("nextOrderNumber", Value::U64(order_number + 1)),
                     ("ytd", Value::F64(f64_cell(&district_cells, "ytd"))),
                 ]),
+                Default::default(),
             )
             .await?;
             let order = order_row(*warehouse, *district, order_number);
-            tx.insert_with_id(
+            tx.upsert(
                 ORDERS,
                 order,
                 cells([
@@ -840,6 +841,7 @@ async fn apply_jazz_op(
                     ("lineCount", Value::U64(items.len() as u64)),
                     ("delivered", Value::Bool(false)),
                 ]),
+                Default::default(),
             )
             .await?;
             for (line_idx, (item, quantity)) in items.iter().enumerate() {
@@ -850,7 +852,7 @@ async fn apply_jazz_op(
                 let price = f64_cell(&item_cells, "price");
                 let old_qty = u64_cell(&stock_cells, "quantity");
                 let new_qty = old_qty.saturating_sub(*quantity);
-                tx.insert_with_id(
+                tx.upsert(
                     STOCK,
                     stock,
                     cells([
@@ -859,9 +861,10 @@ async fn apply_jazz_op(
                         ("quantity", Value::U64(new_qty)),
                         ("ytd", Value::U64(u64_cell(&stock_cells, "ytd") + quantity)),
                     ]),
+                    Default::default(),
                 )
                 .await?;
-                tx.insert_with_id(
+                tx.upsert(
                     ORDER_LINES,
                     order_line_row(*warehouse, *district, order_number, line_idx),
                     cells([
@@ -872,6 +875,7 @@ async fn apply_jazz_op(
                         ("amount", Value::F64(price * *quantity as f64)),
                         ("delivered", Value::Bool(false)),
                     ]),
+                    Default::default(),
                 )
                 .await?;
             }
@@ -888,7 +892,7 @@ async fn apply_jazz_op(
             let warehouse_cells = tx.read(WAREHOUSES, w).await?.expect("warehouse");
             let district_cells = tx.read(DISTRICTS, d).await?.expect("district");
             let customer_cells = tx.read(CUSTOMERS, c).await?.expect("customer");
-            tx.insert_with_id(
+            tx.upsert(
                 WAREHOUSES,
                 w,
                 cells([
@@ -898,9 +902,10 @@ async fn apply_jazz_op(
                         Value::F64(f64_cell(&warehouse_cells, "ytd") + amount),
                     ),
                 ]),
+                Default::default(),
             )
             .await?;
-            tx.insert_with_id(
+            tx.upsert(
                 DISTRICTS,
                 d,
                 cells([
@@ -912,9 +917,10 @@ async fn apply_jazz_op(
                     ),
                     ("ytd", Value::F64(f64_cell(&district_cells, "ytd") + amount)),
                 ]),
+                Default::default(),
             )
             .await?;
-            tx.insert_with_id(
+            tx.upsert(
                 CUSTOMERS,
                 c,
                 cells([
@@ -930,9 +936,10 @@ async fn apply_jazz_op(
                         Value::U64(u64_cell(&customer_cells, "paymentCount") + 1),
                     ),
                 ]),
+                Default::default(),
             )
             .await?;
-            tx.insert_with_id(
+            tx.upsert(
                 PAYMENTS,
                 payment_row(*warehouse, *district, *customer, now_ms),
                 cells([
@@ -941,6 +948,7 @@ async fn apply_jazz_op(
                     ("customer", Value::Uuid(c.0)),
                     ("amount", Value::F64(*amount)),
                 ]),
+                Default::default(),
             )
             .await?;
         }
@@ -971,7 +979,7 @@ async fn apply_jazz_op(
                     Value::Uuid(value) => RowUuid(*value),
                     other => panic!("expected customer uuid, got {other:?}"),
                 };
-                tx.insert_with_id(
+                tx.upsert(
                     ORDERS,
                     order,
                     cells([
@@ -985,6 +993,7 @@ async fn apply_jazz_op(
                         ("lineCount", Value::U64(u64_cell(&order_cells, "lineCount"))),
                         ("delivered", Value::Bool(true)),
                     ]),
+                    Default::default(),
                 )
                 .await?;
                 let mut total = 0.0;
@@ -992,7 +1001,7 @@ async fn apply_jazz_op(
                     let line = order_line_row(*warehouse, *district, order_number, line_idx);
                     let line_cells = tx.read(ORDER_LINES, line).await?.expect("line");
                     total += f64_cell(&line_cells, "amount");
-                    tx.insert_with_id(
+                    tx.upsert(
                         ORDER_LINES,
                         line,
                         cells([
@@ -1003,11 +1012,12 @@ async fn apply_jazz_op(
                             ("amount", line_cells.get("amount").unwrap().clone()),
                             ("delivered", Value::Bool(true)),
                         ]),
+                        Default::default(),
                     )
                     .await?;
                 }
                 let customer_cells = tx.read(CUSTOMERS, customer).await?.expect("customer");
-                tx.insert_with_id(
+                tx.upsert(
                     CUSTOMERS,
                     customer,
                     cells([
@@ -1029,6 +1039,7 @@ async fn apply_jazz_op(
                             customer_cells.get("paymentCount").unwrap().clone(),
                         ),
                     ]),
+                    Default::default(),
                 )
                 .await?;
             }
@@ -2142,13 +2153,13 @@ fn table_schema<'a>(schema: &'a JazzSchema, table: &str) -> &'a TableSchema {
 
 fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
             ..
-        } => {
+        }) => {
             version_bundles
                 .iter()
                 .flat_map(|bundle| bundle.versions.iter())
@@ -2163,11 +2174,11 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
 
 fn result_row_count(update: &SyncMessage) -> usize {
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             result_member_adds,
             result_member_removes,
             ..
-        } => result_member_adds.len() + result_member_removes.len(),
+        }) => result_member_adds.len() + result_member_removes.len(),
         _ => 0,
     }
 }

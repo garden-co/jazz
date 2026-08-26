@@ -9,22 +9,13 @@ import { WebSocket } from "undici";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SubscriptionEvent as NapiSubscriptionEvent } from "jazz-napi";
 import type { ColumnType, Value, WasmSchema } from "../drivers/types.js";
-import {
-  TRUSTED_RESERVED_SESSION_TOKEN_FIELD,
-  trustedReservedSessionToken,
-} from "./client-session.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
 import { webSocketUrl } from "./native-runtime/websocket.js";
 import { openConfig } from "./native-runtime/native-codec.js";
-import {
-  encodeCellsForPatch,
-  encodeCellsForRow,
-  NativeRuntimeAdapter,
-} from "./native-runtime/native-runtime-adapter.js";
+import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
 import { encodeSchema } from "./native-runtime/native-runtime-adapter.js";
 import { hasJazzNapiBuild, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 import { SubscriptionManager } from "./subscription-manager.js";
-import { SYSTEM_READ_SESSION } from "./system-identity.js";
 import type { WasmRow } from "../drivers/types.js";
 import { createOpenBatchId, type BatchId, type OpenBatchId, type WriteReceipt } from "./client.js";
 
@@ -90,326 +81,25 @@ const BYTEA_SCHEMA: WasmSchema = {
   },
 };
 
-it("round-trips legacy and canonical authors through the NAPI open-config codec", async () => {
+it("accepts only canonical authors through the NAPI open-config codec", async () => {
   const { NapiDb } = await loadNapiModule();
-  const authors = [
-    deterministicBytes("napi-open-config:legacy-author"),
-    new TextEncoder().encode('["https://issuer.example","canonical-author"]'),
-  ];
-  for (const author of authors) {
-    const db = NapiDb.openMemory(
+  const canonical = new TextEncoder().encode('["https://issuer.example","canonical-author"]');
+  const db = NapiDb.openMemory(
+    encodeSchema(TEST_SCHEMA),
+    openConfig(deterministicBytes("napi-open-config:node"), canonical, 1, true),
+  );
+  db.close?.();
+  expect(() =>
+    NapiDb.openMemory(
       encodeSchema(TEST_SCHEMA),
-      openConfig(deterministicBytes("napi-open-config:node"), author, 1, true),
-    );
-    db.close?.();
-  }
-});
-
-it("gates direct NAPI provenance writes on a credentialed backend and preserves the author", async () => {
-  const { NapiDb } = await loadNapiModule();
-  const rowId = deterministicBytes("napi-attribution:row");
-  const provenance = testAuthorBytes("napi-attribution:external-author");
-  const cells = encodeCellsForRow(TEST_SCHEMA.todos, {
-    title: { type: "Text", value: "backend-admitted" },
-    done: { type: "Boolean", value: false },
-  });
-  const ordinary = NapiDb.openMemory(
-    encodeSchema(TEST_SCHEMA),
-    openConfig(
-      deterministicBytes("napi-attribution:ordinary-node"),
-      testAuthorBytes("napi-attribution:ordinary-author"),
-      1,
-      true,
+      openConfig(
+        deterministicBytes("napi-open-config:legacy-node"),
+        deterministicBytes("napi-open-config:legacy-author"),
+        1,
+        true,
+      ),
     ),
-  );
-  const attributedInsert = ordinary.insertWithIdEncodedAttributed as (
-    table: string,
-    id: Uint8Array,
-    values: Uint8Array,
-    author: Uint8Array,
-  ) => unknown;
-  expect(() => attributedInsert.call(ordinary, "todos", rowId, cells, provenance)).toThrow(
-    "backend-credential runtime",
-  );
-  const attributedStreaming = ordinary.beginStreamingMutationAttributedEncoded as (
-    table: string,
-    id: Uint8Array,
-    values: Uint8Array,
-    column: string,
-    kind: string,
-    mutation: string | undefined,
-    author: Uint8Array | undefined,
-    attribution: Uint8Array,
-    updatedAtMs: number | undefined,
-    head: unknown,
-    base: unknown,
-  ) => unknown;
-  expect(() =>
-    attributedStreaming.call(
-      ordinary,
-      "todos",
-      rowId,
-      cells,
-      "title",
-      "Text",
-      undefined,
-      undefined,
-      provenance,
-      undefined,
-      undefined,
-      undefined,
-    ),
-  ).toThrow("backend-credential runtime");
-  ordinary.close?.();
-
-  const backend = NapiDb.openMemory(
-    encodeSchema(TEST_SCHEMA),
-    openConfig(
-      deterministicBytes("napi-attribution:backend-node"),
-      testAuthorBytes("napi-attribution:backend-owner"),
-      1,
-      false,
-      undefined,
-      "test-backend-credential",
-    ),
-  );
-  const backendInsert = backend.insertWithIdEncodedAttributed as typeof attributedInsert;
-  backendInsert.call(backend, "todos", rowId, cells, provenance);
-  const backendStreaming =
-    backend.beginStreamingMutationAttributedEncoded as typeof attributedStreaming;
-  expect(() =>
-    backendStreaming.call(
-      backend,
-      "todos",
-      rowId,
-      cells,
-      "title",
-      "Text",
-      undefined,
-      provenance,
-      provenance,
-      undefined,
-      undefined,
-      undefined,
-    ),
-  ).toThrow("must not override backend admission identity");
-  const streamed = backendStreaming.call(
-    backend,
-    "todos",
-    deterministicBytes("napi-attribution:streamed-row"),
-    encodeCellsForPatch(TEST_SCHEMA.todos, { done: { type: "Boolean", value: false } }),
-    "title",
-    "Text",
-    "insert",
-    undefined,
-    provenance,
-    undefined,
-    undefined,
-    undefined,
-  ) as { push(chunk: Uint8Array): void; finish(): unknown };
-  streamed.push(new TextEncoder().encode("streamed backend-admitted"));
-  streamed.finish();
-  const runtime = NativeRuntimeAdapter.fromDb(
-    backend as never,
-    TEST_SCHEMA,
-    deterministicBytes("napi-attribution:backend-node"),
-    testAuthorBytes("napi-attribution:backend-owner"),
-    1,
-    true,
-  );
-  const author = JSON.stringify(["urn:jazz:test", "napi-attribution:external-author"]);
-  const rows = await runtime.query(
-    JSON.stringify({ table: "todos", select_columns: ["title", "$createdBy", "$updatedBy"] }),
-    null,
-    "local",
-  );
-  expect(rows).toEqual(
-    expect.arrayContaining([
-      {
-        table: "todos",
-        id: expect.any(String),
-        values: [
-          { type: "Text", value: "backend-admitted" },
-          { type: "Text", value: author },
-          { type: "Text", value: author },
-        ],
-      },
-      {
-        table: "todos",
-        id: expect.any(String),
-        values: [
-          { type: "Text", value: "streamed backend-admitted" },
-          { type: "Text", value: author },
-          { type: "Text", value: author },
-        ],
-      },
-    ]),
-  );
-  await runtime.close();
-});
-
-it("runs every supported backend-attributed mutation family through real NAPI provenance", async () => {
-  const { NapiDb } = await loadNapiModule();
-  const runtime = new NativeRuntimeAdapter(
-    { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
-    TEST_SCHEMA,
-    deterministicBytes("napi-attribution:matrix-node"),
-    testAuthorBytes("napi-attribution:matrix-owner"),
-    1,
-    true,
-    { backendCredential: "test-backend-credential" },
-  );
-  const provenance = JSON.stringify(["https://issuer.example", "matrix-author"]);
-  const context = (attribution: string | null = provenance, batchId?: string) =>
-    JSON.stringify({
-      session: {
-        ...SYSTEM_READ_SESSION,
-        [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: trustedReservedSessionToken(SYSTEM_READ_SESSION),
-      },
-      ...(attribution ? { attribution } : {}),
-      ...(batchId ? { batch_id: batchId } : {}),
-    });
-  const direct = "00000000-0000-0000-0000-000000000121";
-  const restored = "00000000-0000-0000-0000-000000000122";
-  const upserted = "00000000-0000-0000-0000-000000000123";
-  const transactional = "00000000-0000-0000-0000-000000000124";
-
-  const directInsert = runtime.insert(
-    "todos",
-    { title: { type: "Text", value: "direct" }, done: { type: "Boolean", value: false } },
-    context(),
-    direct,
-  );
-  await runtime.waitForTransaction(await committedBatchId(directInsert), "local");
-  const directUpdate = runtime.update(
-    "todos",
-    direct,
-    { title: { type: "Text", value: "updated" } },
-    context(),
-  );
-  await runtime.waitForTransaction(await committedBatchId(directUpdate), "local");
-  const upsert = runtime.upsert(
-    "todos",
-    upserted,
-    { title: { type: "Text", value: "upserted" }, done: { type: "Boolean", value: false } },
-    context(),
-  );
-  await runtime.waitForTransaction(await committedBatchId(upsert), "local");
-  const insertedForRestore = runtime.insert(
-    "todos",
-    { title: { type: "Text", value: "restore" }, done: { type: "Boolean", value: false } },
-    context(),
-    restored,
-  );
-  await runtime.waitForTransaction(await committedBatchId(insertedForRestore), "local");
-  const deleted = runtime.delete("todos", restored, context());
-  await runtime.waitForTransaction(await committedBatchId(deleted), "local");
-  const restore = runtime.restore(
-    "todos",
-    restored,
-    { title: { type: "Text", value: "restored" }, done: { type: "Boolean", value: true } },
-    context(),
-  );
-  await runtime.waitForTransaction(await committedBatchId(restore), "local");
-
-  const batch = createOpenBatchId();
-  runtime.beginTransaction("mergeable", batch, context(provenance, batch));
-  runtime.insert(
-    "todos",
-    { title: { type: "Text", value: "transactional" }, done: { type: "Boolean", value: false } },
-    context(provenance, batch),
-    transactional,
-  );
-  expect(() =>
-    runtime.update(
-      "todos",
-      transactional,
-      { done: { type: "Boolean", value: true } },
-      context(JSON.stringify(["https://issuer.example", "other-author"]), batch),
-    ),
-  ).toThrow("cannot mix provenance attributions");
-  expect(() => runtime.delete("todos", transactional, context(null, batch))).toThrow(
-    "cannot mix provenance attributions",
-  );
-  const committed = runtime.commitTransaction(batch);
-  await runtime.waitForTransaction(committed, "local");
-
-  const rows = await runtime.query(
-    JSON.stringify({ table: "todos", select_columns: ["title", "$createdBy", "$updatedBy"] }),
-    null,
-    "local",
-  );
-  if (
-    !Array.isArray(rows) ||
-    !rows.every(
-      (candidate: unknown): candidate is WasmRow =>
-        typeof candidate === "object" &&
-        candidate !== null &&
-        "id" in candidate &&
-        typeof candidate.id === "string" &&
-        "values" in candidate &&
-        Array.isArray(candidate.values),
-    )
-  ) {
-    throw new Error("expected attributed query to return rows");
-  }
-  const expectedAuthor = { type: "Text", value: provenance };
-  for (const title of ["updated", "upserted", "restored", "transactional"]) {
-    const row = rows.find(
-      (candidate) => candidate.values[0]?.type === "Text" && candidate.values[0].value === title,
-    );
-    expect(row).toMatchObject({
-      values: [{ type: "Text", value: title }, expectedAuthor, expectedAuthor],
-    });
-  }
-  await runtime.close();
-});
-
-it("retains trusted-process attribution when a real NAPI schema view is registered", async () => {
-  const { NapiDb } = await loadNapiModule();
-  const runtime = new NativeRuntimeAdapter(
-    { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
-    TEST_SCHEMA,
-    deterministicBytes("napi-attribution:view-node"),
-    testAuthorBytes("napi-attribution:view-owner"),
-    1,
-    true,
-    { backendCredential: "test-backend-credential" },
-  );
-  const view = runtime.registerSchemaView(TEST_SCHEMA);
-  const provenance = JSON.stringify(["https://issuer.example", "view-author"]);
-  const context = JSON.stringify({
-    session: {
-      ...SYSTEM_READ_SESSION,
-      [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: trustedReservedSessionToken(SYSTEM_READ_SESSION),
-    },
-    attribution: provenance,
-  });
-  const inserted = view.insert(
-    "todos",
-    { title: { type: "Text", value: "view-attributed" }, done: { type: "Boolean", value: false } },
-    context,
-    "00000000-0000-0000-0000-000000000125",
-  );
-  await view.waitForTransaction(await committedBatchId(inserted), "local");
-  await expect(
-    view.query(
-      JSON.stringify({ table: "todos", select_columns: ["title", "$createdBy", "$updatedBy"] }),
-      null,
-      "local",
-    ),
-  ).resolves.toEqual([
-    {
-      table: "todos",
-      id: "00000000-0000-0000-0000-000000000125",
-      values: [
-        { type: "Text", value: "view-attributed" },
-        { type: "Text", value: provenance },
-        { type: "Text", value: provenance },
-      ],
-    },
-  ]);
-  await runtime.close();
+  ).toThrow(/canonical UTF-8 JSON/i);
 });
 
 const SIGNED_DEFAULT_CASES: Array<{
@@ -919,6 +609,53 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         ],
       },
     ]);
+  });
+
+  it("allocates clock-backed ordered UUIDv7 ids in Rust for ordinary and staged inserts", async () => {
+    const { NapiDb } = await loadNapiModule();
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+      TEST_SCHEMA,
+      deterministicBytes("jazz-napi-native-runtime:uuidv7-node"),
+      testAuthorBytes("jazz-napi-native-runtime:uuidv7-author"),
+      1,
+      true,
+    );
+    runtimes.push(runtime);
+
+    const insert = (title: string, writeContext?: string) =>
+      runtime.insert(
+        "todos",
+        {
+          title: { type: "Text", value: title },
+          done: { type: "Boolean", value: false },
+        },
+        writeContext,
+      );
+
+    const first = insert("first");
+    const second = insert("second");
+    const openBatchId = beginTestBatch(runtime);
+    const writeContext = JSON.stringify({ batch_id: openBatchId });
+    const third = insert("third", writeContext);
+    const fourth = insert("fourth", writeContext);
+
+    for (const row of [first, second, third, fourth]) {
+      expect(row.id).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+    }
+
+    const generatedAtMs = Number.parseInt(first.id.replaceAll("-", "").slice(0, 12), 16);
+    expect(Math.abs(Date.now() - generatedAtMs)).toBeLessThan(60_000);
+    const ids = [first.id, second.id, third.id, fourth.id];
+    expect(ids).toEqual([...ids].sort());
+
+    await runtime.commitTransaction(openBatchId);
+    const rows = (await runtime.query(JSON.stringify({ table: "todos" }))) as Array<{
+      id: string;
+    }>;
+    expect(rows.map((row) => row.id)).toEqual([first.id, second.id, third.id, fourth.id]);
   });
 
   it("applies column defaults for direct napi inserts with omitted cells", async () => {

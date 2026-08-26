@@ -55,7 +55,7 @@ fn late_view_update_for_detached_subscription_is_dropped_and_counted() {
         binding_view_key
     );
     reader.apply_unsubscribe(usage_subscription);
-    let late = SyncMessage::ViewUpdate {
+    let late = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription: usage_subscription,
         settled_through: GlobalTime(2),
         reset_result_set: false,
@@ -71,7 +71,7 @@ fn late_view_update_for_detached_subscription_is_dropped_and_counted() {
         terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
-    };
+    });
     reader.apply_sync_message_settled(late).unwrap();
 
     assert_eq!(
@@ -100,7 +100,7 @@ fn late_view_update_for_never_registered_subscription_is_dropped_and_counted() {
         binding_id: BindingId(uuid::Uuid::from_bytes([0x66; 16])),
         read_view: Default::default(),
     };
-    let late = SyncMessage::ViewUpdate {
+    let late = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through: GlobalTime(1),
         reset_result_set: true,
@@ -112,7 +112,7 @@ fn late_view_update_for_never_registered_subscription_is_dropped_and_counted() {
         terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
-    };
+    });
 
     reader.apply_sync_message_settled(late).unwrap();
 
@@ -160,7 +160,7 @@ fn known_state_removal_without_local_body_clears_membership_without_repair() {
     );
 
     let invisible_tx = TxId::new(TxTime(999), node(44));
-    let removal = SyncMessage::ViewUpdate {
+    let removal = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through: GlobalTime(2),
         reset_result_set: false,
@@ -176,7 +176,7 @@ fn known_state_removal_without_local_body_clears_membership_without_repair() {
         terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
-    };
+    });
     assert!(
         reader
             .missing_known_state_row_version_refs(&removal)
@@ -209,7 +209,7 @@ fn known_state_removal_for_never_known_row_is_noop_but_settles() {
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
     let binding_view_key = BindingViewKey::from_canonical_subscription_key(subscription);
 
-    let removal = SyncMessage::ViewUpdate {
+    let removal = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through: GlobalTime(3),
         reset_result_set: false,
@@ -225,7 +225,7 @@ fn known_state_removal_for_never_known_row_is_noop_but_settles() {
         terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
-    };
+    });
 
     assert!(
         reader
@@ -305,7 +305,7 @@ fn empty_reset_for_duplicate_usage_subscription_does_not_degrade_canonical_view(
     );
 
     reader
-        .apply_sync_message_settled(SyncMessage::ViewUpdate {
+        .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription: duplicate_subscription,
             settled_through: GlobalTime(2),
             reset_result_set: true,
@@ -317,7 +317,7 @@ fn empty_reset_for_duplicate_usage_subscription_does_not_degrade_canonical_view(
             terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
-        })
+        }))
         .unwrap();
 
     assert_eq!(
@@ -376,10 +376,10 @@ fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
         .unwrap()
         .expect("expected view update");
     let control_version_bundles = version_bundles_for_update(&control_update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds: control_result_member_adds,
         ..
-    } = &control_update
+    }) = &control_update
     else {
         panic!("expected control view update");
     };
@@ -406,12 +406,12 @@ fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
         .unwrap()
         .expect("expected view update");
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         settled_through,
         reset_result_set,
         result_member_adds,
         ..
-    } = &update
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -487,13 +487,13 @@ fn fast_known_state_rehydrate_ships_only_members_after_declared_position() {
         .unwrap()
         .expect("expected view update");
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         settled_through,
         reset_result_set,
         result_member_adds,
         result_member_removes,
         ..
-    } = &update
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -572,10 +572,10 @@ fn exact_known_state_rehydrate_skips_known_bodies_but_preserves_membership() {
         .unwrap()
         .expect("expected view update");
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         ..
-    } = &update
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -626,12 +626,12 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_for_warm_reader() {
         .unwrap()
         .expect("expected view update");
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         result_member_adds,
         result_member_removes,
         ..
-    } = &update
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -716,12 +716,12 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_after_reader_reopen() {
         .unwrap()
         .expect("expected view update");
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         result_member_adds,
         result_member_removes,
         ..
-    } = &update
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -913,10 +913,10 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
         .unwrap()
         .expect("expected view update");
     let control_bundles = version_bundles_for_update(&control_update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds: control_members,
         ..
-    } = &control_update
+    }) = &control_update
     else {
         panic!("expected control update");
     };
@@ -936,10 +936,10 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
         .unwrap()
         .expect("expected view update");
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         ..
-    } = &update
+    }) = &update
     else {
         panic!("expected declared update");
     };
@@ -1010,10 +1010,10 @@ fn over_cap_slow_known_state_declaration_degrades_to_full_ship() {
         .unwrap()
         .expect("expected view update");
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected full update");
     };
@@ -1170,10 +1170,10 @@ fn known_state_declaration_never_skips_unfated_edge_members() {
         .unwrap()
         .expect("expected view update");
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };

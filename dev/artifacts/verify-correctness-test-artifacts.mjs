@@ -96,6 +96,26 @@ export function verifyCorrectnessTestArtifacts(rootDir = root) {
           `WASM ABI drift for WasmDb.${method}: consumer=${sourceArity}, d.ts=${typeArity}, glue=${glueArity}`,
         );
     }
+    const expectedTransport = classBody(
+      text("packages/jazz-tools/src/types/jazz-wasm.d.ts", rootDir),
+      "WasmTransport",
+    );
+    const generatedTransportTypes = classBody(
+      text("crates/jazz-wasm/pkg/jazz_wasm.d.ts", rootDir),
+      "WasmTransport",
+    );
+    const generatedTransportGlue = classBody(
+      text("crates/jazz-wasm/pkg/jazz_wasm.js", rootDir),
+      "WasmTransport",
+    );
+    const transportMethod = "recvAuxiliaryWireFrames";
+    const sourceArity = arityFromDeclaration(expectedTransport, transportMethod);
+    const typeArity = arityFromDeclaration(generatedTransportTypes, transportMethod);
+    const glueArity = arityFromGlue(generatedTransportGlue, transportMethod);
+    if (sourceArity !== typeArity || sourceArity !== glueArity)
+      failures.push(
+        `WASM ABI drift for WasmTransport.${transportMethod}: consumer=${sourceArity}, d.ts=${typeArity}, glue=${glueArity}`,
+      );
     const workerWasm = resolve(rootDir, "packages/jazz-tools/dist/worker/jazz_wasm_bg.wasm");
     const workerGlue = resolve(rootDir, "packages/jazz-tools/dist/worker/jazz-broker-worker.js");
     if (!existsSync(workerWasm) || !existsSync(workerGlue)) {

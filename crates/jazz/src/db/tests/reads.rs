@@ -19,6 +19,70 @@ fn indexed_documents_schema() -> JazzSchema {
 }
 
 #[test]
+fn negated_membership_uses_two_valued_null_semantics() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("items")
+                .nullable_column("label", PublicColumnType::Text)
+                .nullable_column("null_option", PublicColumnType::Text)
+                .nullable_column("blocked_option", PublicColumnType::Text),
+        ),
+    );
+    let db = open_db(0xb8, AuthorSubject::SYSTEM, &schema);
+    for (id, label) in [
+        (row(1), Value::Nullable(None)),
+        (
+            row(2),
+            Value::Nullable(Some(Box::new(Value::String("blocked".to_owned())))),
+        ),
+        (
+            row(3),
+            Value::Nullable(Some(Box::new(Value::String("allowed".to_owned())))),
+        ),
+    ] {
+        db.seed_settled_mergeable_for_bootstrap(
+            "items",
+            id,
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                ("label".to_owned(), label),
+                ("null_option".to_owned(), Value::Nullable(None)),
+                (
+                    "blocked_option".to_owned(),
+                    Value::Nullable(Some(Box::new(Value::String("blocked".to_owned())))),
+                ),
+            ]),
+        )
+        .unwrap();
+    }
+
+    let matching_ids = |options: &[&str]| {
+        let query = Query::from("items")
+            .filter(not(in_list(col("label"), options.iter().copied().map(col))));
+        let prepared = db.prepare_query(&query).unwrap();
+        row_ids(&db.read(&prepared).unwrap())
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+    };
+
+    assert_eq!(
+        matching_ids(&["null_option"]),
+        BTreeSet::from([row(2), row(3)]),
+        "NOT(null IN [null]) is false, while non-null values differ from null"
+    );
+    assert_eq!(
+        matching_ids(&["blocked_option"]),
+        BTreeSet::from([row(1), row(3)]),
+        "a null value differs from every non-null membership option"
+    );
+    assert_eq!(
+        matching_ids(&["null_option", "blocked_option"]),
+        BTreeSet::from([row(3)]),
+        "mixed options exclude both null and matching non-null values"
+    );
+}
+
+#[test]
 fn prepared_query_discards_graph_handle_when_runtime_changes() {
     let schema = issue_schema();
     let db = open_db(0xb7, AuthorSubject::SYSTEM, &schema);
@@ -172,8 +236,15 @@ fn simple_prepared_current_write_query_uses_lowered_plan() {
     let schema = schema();
     let author = AuthorSubject::for_test_bytes([0xa1; 16]);
     let db = open_db(0xa3, author, &schema);
-    db.insert_with_id("todos", row(1), cells("simple", false, author))
-        .unwrap();
+    db.insert(
+        "todos",
+        cells("simple", false, author),
+        crate::db::InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     let prepared = db.prepare_query(&Query::from("todos")).unwrap();
     assert!(!prepared.has_plan_for_tier(DurabilityTier::Local));
@@ -196,8 +267,15 @@ fn filtered_root_prepared_query_still_reads_without_preinstalled_plan() {
     let schema = schema();
     let author = AuthorSubject::for_test_bytes([0xa1; 16]);
     let db = open_db(0xa4, author, &schema);
-    db.insert_with_id("todos", row(1), cells("wanted", false, author))
-        .unwrap();
+    db.insert(
+        "todos",
+        cells("wanted", false, author),
+        crate::db::InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     let prepared = db
         .prepare_query(&Query::from("todos").filter(eq(col("title"), lit("wanted"))))
@@ -278,34 +356,46 @@ fn authoritative_global_bound_read_uses_the_declared_index() {
 fn relation_query_one_shot_hop_uses_unified_query_path() {
     let schema = relation_schema();
     let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
-    db.insert_with_id(
+    db.insert(
         "users",
-        row(0xa1),
         BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa1)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "users",
-        row(0xb1),
         BTreeMap::from([("name".to_owned(), Value::String("bob".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xb1)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "todos",
-        row(0x11),
         BTreeMap::from([
             ("title".to_owned(), Value::String("alice todo".to_owned())),
             ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x11)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "todos",
-        row(0x22),
         BTreeMap::from([
             ("title".to_owned(), Value::String("bob todo".to_owned())),
             ("owner_id".to_owned(), Value::Uuid(row(0xb1).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x22)),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -375,34 +465,46 @@ fn relation_query_one_shot_hop_uses_unified_query_path() {
 fn relation_query_one_shot_hop_accepts_runtime_uuid_literal_filter() {
     let schema = relation_schema();
     let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
-    db.insert_with_id(
+    db.insert(
         "users",
-        row(0xa1),
         BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa1)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "users",
-        row(0xb1),
         BTreeMap::from([("name".to_owned(), Value::String("bob".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xb1)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "todos",
-        row(0x11),
         BTreeMap::from([
             ("title".to_owned(), Value::String("alice todo".to_owned())),
             ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x11)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "todos",
-        row(0x22),
         BTreeMap::from([
             ("title".to_owned(), Value::String("bob todo".to_owned())),
             ("owner_id".to_owned(), Value::Uuid(row(0xb1).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x22)),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -476,21 +578,26 @@ fn relation_query_one_shot_hop_accepts_runtime_uuid_literal_filter() {
 fn relation_query_one_shot_multi_hop_scalar_fk_uses_nested_join_path() {
     let schema = relation_hop_schema();
     let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
-    db.insert_with_id(
+    db.insert(
         "orgs",
-        row(0x01),
         BTreeMap::from([("name".to_owned(), Value::String("Org A".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x01)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "orgs",
-        row(0x02),
         BTreeMap::from([("name".to_owned(), Value::String("Org B".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x02)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "teams",
-        row(0x11),
         BTreeMap::from([
             ("name".to_owned(), Value::String("Team A".to_owned())),
             (
@@ -498,11 +605,14 @@ fn relation_query_one_shot_multi_hop_scalar_fk_uses_nested_join_path() {
                 Value::Nullable(Some(Box::new(Value::Uuid(row(0x01).0)))),
             ),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x11)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "users",
-        row(0x21),
         BTreeMap::from([
             ("name".to_owned(), Value::String("User A".to_owned())),
             (
@@ -510,6 +620,10 @@ fn relation_query_one_shot_multi_hop_scalar_fk_uses_nested_join_path() {
                 Value::Nullable(Some(Box::new(Value::Uuid(row(0x11).0)))),
             ),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x21)),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -523,19 +637,25 @@ fn relation_query_one_shot_multi_hop_scalar_fk_uses_nested_join_path() {
 fn relation_query_subscription_hop_uses_unified_query_path() {
     let schema = relation_schema();
     let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
-    db.insert_with_id(
+    db.insert(
         "users",
-        row(0xa1),
         BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa1)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "todos",
-        row(0x11),
         BTreeMap::from([
             ("title".to_owned(), Value::String("alice todo".to_owned())),
             ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x11)),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -597,15 +717,17 @@ fn relation_query_subscription_hop_preserves_projected_self_reference_cells() {
     let parent = row(0x10);
     let team = row(0x11);
     let user = row(0x21);
-    db.insert_with_id(
+    db.insert(
         "teams",
-        parent,
         BTreeMap::from([("name".to_owned(), Value::String("Parent".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(parent),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "teams",
-        team,
         BTreeMap::from([
             ("name".to_owned(), Value::String("Team A".to_owned())),
             (
@@ -613,11 +735,14 @@ fn relation_query_subscription_hop_preserves_projected_self_reference_cells() {
                 Value::Nullable(Some(Box::new(Value::Uuid(parent.0)))),
             ),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(team),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "users",
-        user,
         BTreeMap::from([
             ("name".to_owned(), Value::String("User A".to_owned())),
             (
@@ -625,6 +750,10 @@ fn relation_query_subscription_hop_preserves_projected_self_reference_cells() {
                 Value::Nullable(Some(Box::new(Value::Uuid(team.0)))),
             ),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(user),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -659,6 +788,7 @@ fn relation_query_subscription_hop_preserves_projected_self_reference_cells() {
         "teams",
         team,
         BTreeMap::from([("name".to_owned(), Value::String("Team B".to_owned()))]),
+        Default::default(),
     )
     .unwrap();
     let (_, changed, removed) = delta_rows(stream.try_next_event().expect("updated event"));
@@ -745,15 +875,17 @@ fn relation_query_subscription_multi_hop_scalar_fk_uses_nested_join_path() {
     let mut stream = block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
     assert!(opened_rows(stream.try_next_event().expect("opened event")).is_empty());
 
-    db.insert_with_id(
+    db.insert(
         "orgs",
-        row(0x01),
         BTreeMap::from([("name".to_owned(), Value::String("Org A".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x01)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "teams",
-        row(0x11),
         BTreeMap::from([
             ("name".to_owned(), Value::String("Team A".to_owned())),
             (
@@ -761,11 +893,14 @@ fn relation_query_subscription_multi_hop_scalar_fk_uses_nested_join_path() {
                 Value::Nullable(Some(Box::new(Value::Uuid(row(0x01).0)))),
             ),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x11)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "users",
-        row(0x21),
         BTreeMap::from([
             ("name".to_owned(), Value::String("User A".to_owned())),
             (
@@ -773,6 +908,10 @@ fn relation_query_subscription_multi_hop_scalar_fk_uses_nested_join_path() {
                 Value::Nullable(Some(Box::new(Value::Uuid(row(0x11).0)))),
             ),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x21)),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -861,15 +1000,17 @@ fn relation_query_gather_uses_unified_reachable_lowering_for_reads_and_subscript
     let root = row(0x01);
     let middle = row(0x02);
     let leaf = row(0x03);
-    db.insert_with_id(
+    db.insert(
         "teams",
-        root,
         BTreeMap::from([("name".to_owned(), Value::String("root".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(root),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "teams",
-        middle,
         BTreeMap::from([
             ("name".to_owned(), Value::String("middle".to_owned())),
             (
@@ -877,11 +1018,14 @@ fn relation_query_gather_uses_unified_reachable_lowering_for_reads_and_subscript
                 Value::Nullable(Some(Box::new(Value::Uuid(root.0)))),
             ),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(middle),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "teams",
-        leaf,
         BTreeMap::from([
             ("name".to_owned(), Value::String("leaf".to_owned())),
             (
@@ -889,6 +1033,10 @@ fn relation_query_gather_uses_unified_reachable_lowering_for_reads_and_subscript
                 Value::Nullable(Some(Box::new(Value::Uuid(middle.0)))),
             ),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(leaf),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -1054,31 +1202,40 @@ fn teams_gather_relation_query() -> RelationQuery {
 fn relation_snapshot_reverse_array_skips_deleted_children() {
     let schema = relation_schema();
     let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
-    db.insert_with_id(
+    db.insert(
         "users",
-        row(0xa1),
         BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa1)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "todos",
-        row(0x11),
         BTreeMap::from([
             ("title".to_owned(), Value::String("deleted todo".to_owned())),
             ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x11)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "todos",
-        row(0x22),
         BTreeMap::from([
             ("title".to_owned(), Value::String("visible todo".to_owned())),
             ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x22)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.delete("todos", row(0x11)).unwrap();
+    db.delete("todos", row(0x11), Default::default()).unwrap();
 
     let query = Query::from("users")
         .filter(eq(col("id"), lit(Value::Uuid(row(0xa1).0))))
@@ -1159,11 +1316,11 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
         .unwrap();
 
     let message = drive_subscriber_until_payload(&subscriber, client_transport.as_mut());
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription: served,
         result_member_adds,
         ..
-    } = message
+    }) = message
     else {
         panic!("expected include subscription view update, got {message:?}");
     };
@@ -1188,11 +1345,11 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
         .unwrap();
 
     let message = drive_subscriber_until_payload(&subscriber, client_transport.as_mut());
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription: served,
         result_member_adds,
         ..
-    } = message
+    }) = message
     else {
         panic!("expected reopened include subscription view update, got {message:?}");
     };
@@ -1217,15 +1374,17 @@ fn relation_snapshot_reverse_array_skips_deleted_children_with_camel_case_ref() 
             ),
     );
     let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
-    db.insert_with_id(
+    db.insert(
         "users",
-        row(0xa1),
         BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa1)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "todos",
-        row(0x11),
         BTreeMap::from([
             ("title".to_owned(), Value::String("deleted todo".to_owned())),
             ("done".to_owned(), Value::Bool(false)),
@@ -1234,11 +1393,14 @@ fn relation_snapshot_reverse_array_skips_deleted_children_with_camel_case_ref() 
                 Value::Nullable(Some(Box::new(Value::Uuid(row(0xa1).0)))),
             ),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x11)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "todos",
-        row(0x22),
         BTreeMap::from([
             ("title".to_owned(), Value::String("visible todo".to_owned())),
             ("done".to_owned(), Value::Bool(false)),
@@ -1247,6 +1409,10 @@ fn relation_snapshot_reverse_array_skips_deleted_children_with_camel_case_ref() 
                 Value::Nullable(Some(Box::new(Value::Uuid(row(0xa1).0)))),
             ),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x22)),
+            ..Default::default()
+        },
     )
     .unwrap();
     let joined_before_delete = prepared_read(
@@ -1307,7 +1473,7 @@ fn relation_snapshot_reverse_array_skips_deleted_children_with_camel_case_ref() 
             .iter()
             .all(|output| output.occurrence_id.canonical_bytes().len() == 32)
     );
-    db.delete("todos", row(0x11)).unwrap();
+    db.delete("todos", row(0x11), Default::default()).unwrap();
     db.tick().unwrap();
     let SubscriptionEvent::Delta { removed, .. } = block_on(subscription.next_raw()).unwrap()
     else {
@@ -1354,6 +1520,7 @@ fn relation_snapshot_reverse_array_reads_local_nullable_ref_child() {
         .insert(
             "users",
             BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+            Default::default(),
         )
         .unwrap()
         .row_uuid();
@@ -1367,6 +1534,7 @@ fn relation_snapshot_reverse_array_reads_local_nullable_ref_child() {
                     Value::Nullable(Some(Box::new(Value::Uuid(user.0)))),
                 ),
             ]),
+            Default::default(),
         )
         .unwrap()
         .row_uuid();
@@ -1404,6 +1572,7 @@ fn relation_snapshot_reverse_array_limit_reads_local_child() {
         .insert(
             "projects",
             BTreeMap::from([("name".to_owned(), Value::String("Announcements".to_owned()))]),
+            Default::default(),
         )
         .unwrap()
         .row_uuid();
@@ -1414,6 +1583,7 @@ fn relation_snapshot_reverse_array_limit_reads_local_child() {
                 ("title".to_owned(), Value::String("visible todo".to_owned())),
                 ("projectId".to_owned(), Value::Uuid(project.0)),
             ]),
+            Default::default(),
         )
         .unwrap()
         .row_uuid();
@@ -1442,23 +1612,29 @@ fn relation_snapshot_unordered_array_offset_uses_child_row_id_order() {
     let schema = relation_schema();
     let db = open_db(0xd4, AuthorSubject::for_test_bytes([0xd4; 16]), &schema);
     let parent = row(0x41);
-    db.insert_with_id(
+    db.insert(
         "todos",
-        parent,
         BTreeMap::from([
             ("title".to_owned(), Value::String("parent".to_owned())),
             ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(parent),
+            ..Default::default()
+        },
     )
     .unwrap();
     for id in [0xb1, 0xb2, 0xb3] {
-        db.insert_with_id(
+        db.insert(
             "comments",
-            row(id),
             BTreeMap::from([
                 ("body".to_owned(), Value::String("tie".to_owned())),
                 ("todo_id".to_owned(), Value::Uuid(parent.0)),
             ]),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
@@ -1500,15 +1676,17 @@ fn relation_snapshot_reverse_array_projects_provenance_magic_columns() {
             .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text)),
     );
     let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
-    db.insert_with_id(
+    db.insert(
         "projects",
-        row(0xa1),
         BTreeMap::from([("name".to_owned(), Value::String("Announcements".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa1)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "todos",
-        row(0x22),
         BTreeMap::from([
             ("title".to_owned(), Value::String("Write tests".to_owned())),
             ("done".to_owned(), Value::Bool(false)),
@@ -1520,6 +1698,10 @@ fn relation_snapshot_reverse_array_projects_provenance_magic_columns() {
             ("ownerId".to_owned(), Value::Nullable(None)),
             ("assigneesIds".to_owned(), Value::Array(Vec::new())),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x22)),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -1562,11 +1744,14 @@ fn relation_snapshot_reverse_array_projects_provenance_magic_columns() {
 fn version_bearing_current_source_preserves_provenance_timestamps() {
     let db = block_on(doctest_support::open_todos_db()).unwrap();
     let id = row(0x7a);
-    db.insert_with_id_at_ms(
+    db.insert(
         "todos",
-        id,
         doctest_support::todo_cells("provenance", false),
-        1_234,
+        crate::db::InsertOptions {
+            row_id: Some(id),
+            updated_at_ms: Some(1_234),
+            ..Default::default()
+        },
     )
     .unwrap();
     {
@@ -1654,15 +1839,17 @@ fn db_query_builder_expresses_s1_shaped_filters_and_include_modes() {
     }))
     .unwrap();
 
-    db.insert_with_id(
+    db.insert(
         "projects",
-        row(10),
         BTreeMap::from([("name".to_owned(), Value::String("Platform".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(10)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "issues",
-        row(1),
         issue_cells(
             "ship api query builder",
             "open",
@@ -1672,24 +1859,37 @@ fn db_query_builder_expresses_s1_shaped_filters_and_include_modes() {
             &["api", "platform"],
             None,
         ),
+        crate::db::InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "issues",
-        row(2),
         issue_cells("closed work", "done", alice, row(10), 3, &["api"], Some(99)),
+        crate::db::InsertOptions {
+            row_id: Some(row(2)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "issues",
-        row(3),
         issue_cells("someone else", "open", bob, row(10), 8, &["platform"], None),
+        crate::db::InsertOptions {
+            row_id: Some(row(3)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "issues",
-        row(4),
         issue_cells("missing project", "open", alice, row(99), 6, &["api"], None),
+        crate::db::InsertOptions {
+            row_id: Some(row(4)),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -1766,16 +1966,22 @@ fn payload_enum_match_filters_one_shot_and_maintained_case_transitions() {
     let db = open_db(0xe7, AuthorSubject::for_test_bytes([0xe7; 16]), &schema);
     let matching = row(0xe1);
     let other_case = row(0xe2);
-    db.insert_with_id(
+    db.insert(
         "events",
-        matching,
         BTreeMap::from([("event".to_owned(), payload_message(2))]),
+        crate::db::InsertOptions {
+            row_id: Some(matching),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "events",
-        other_case,
         BTreeMap::from([("event".to_owned(), payload_closed(2))]),
+        crate::db::InsertOptions {
+            row_id: Some(other_case),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -1798,6 +2004,7 @@ fn payload_enum_match_filters_one_shot_and_maintained_case_transitions() {
         "events",
         matching,
         BTreeMap::from([("event".to_owned(), payload_closed(2))]),
+        Default::default(),
     )
     .unwrap();
     let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
@@ -1816,6 +2023,7 @@ fn payload_enum_match_filters_one_shot_and_maintained_case_transitions() {
         "events",
         other_case,
         BTreeMap::from([("event".to_owned(), payload_message(2))]),
+        Default::default(),
     )
     .unwrap();
     let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
@@ -1897,8 +2105,16 @@ fn client_read_advice_is_unknown_even_when_a_local_winner_exists() {
 
     let owner_db = open_db(0xa1, owner, &schema);
     let other_db = open_db(0xb2, other, &schema);
-    owner_db.set_identity_claims(owner, test_provider_claims(owner));
-    other_db.set_identity_claims(other, test_provider_claims(other));
+    owner_db
+        .node
+        .node
+        .borrow_mut()
+        .set_session_claims(owner, test_provider_claims(owner));
+    other_db
+        .node
+        .node
+        .borrow_mut()
+        .set_session_claims(other, test_provider_claims(other));
     let unit = core
         .node()
         .borrow_mut()
@@ -2007,7 +2223,11 @@ fn read_opts_default_and_effective_tier_preserve_local_update_contract() {
 fn edge_read_opts_and_wait_honor_edge_durability() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let write = db
-        .insert("todos", doctest_support::todo_cells("edge observed", false))
+        .insert(
+            "todos",
+            doctest_support::todo_cells("edge observed", false),
+            Default::default(),
+        )
         .unwrap();
     let query = db.table("todos");
     let prepared_query = prepared(&db, &query);

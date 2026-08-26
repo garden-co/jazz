@@ -836,6 +836,64 @@ describe("permissions DSL", () => {
     expect(JSON.stringify(rel.input.right)).toContain('"personBId"');
   });
 
+  it("keeps distinct filtered RHS scopes and binds the next join to the previous RHS", () => {
+    const compiled = definePermissions(socialApp, ({ policy, session }) => [
+      policy.profiles.allowRead.where((profile) =>
+        policy.exists(
+          policy.people
+            .where({ profileId: profile.id })
+            .join(policy.friendships.where({ personAId: session.personId }), {
+              left: "id",
+              right: "personAId",
+            })
+            .join(policy.profiles.where({ id: session.personId }), {
+              left: "personBId",
+              right: "id",
+            }),
+        ),
+      ),
+    ]);
+
+    const using = compiled.profiles!.select?.using;
+    expect(using?.type).toBe("ExistsRel");
+    if (!using || using.type !== "ExistsRel") {
+      throw new Error("Expected filtered join policy to compile to ExistsRel.");
+    }
+    const rel = toAssertionRelExprForTest(using.rel);
+    expect(rel.type).toBe("Filter");
+    if (rel.type !== "Filter" || rel.input.type !== "Join") {
+      throw new Error("Expected correlated filter over the second filtered join.");
+    }
+    expect(rel.input.on[0]?.left.scope).toBe("friendships");
+    expect(rel.input.on[0]?.right.scope).toBe("profiles");
+    expect(rel.input.right.type).toBe("Filter");
+  });
+
+  it("binds qualified filters after a filtered RHS to that relation's real scope", () => {
+    const compiled = definePermissions(socialApp, ({ policy, session }) => [
+      policy.profiles.allowRead.where((profile) =>
+        policy.exists(
+          policy.people
+            .where({ profileId: profile.id })
+            .join(policy.friendships.where({ personAId: session.personId }), {
+              left: "id",
+              right: "personAId",
+            })
+            .where({ "friendships.personBId": session.personId }),
+        ),
+      ),
+    ]);
+
+    const using = compiled.profiles!.select?.using;
+    expect(using?.type).toBe("ExistsRel");
+    if (!using || using.type !== "ExistsRel") {
+      throw new Error("Expected filtered join policy to compile to ExistsRel.");
+    }
+    const relation = JSON.stringify(toAssertionRelExprForTest(using.rel));
+    expect(relation).toContain('"scope":"friendships","column":"personBId"');
+    expect(relation).not.toContain('"scope":"__join_0","column":"personBId"');
+  });
+
   it("rejects filtered join RHS shapes the relation lowering cannot alias safely", () => {
     expect(() =>
       definePermissions(socialApp, ({ policy }) => [
@@ -860,7 +918,26 @@ describe("permissions DSL", () => {
           ),
         ),
       ]),
-    ).toThrow(/same-table RHS without an alias/i);
+    ).toThrow(/scope "people".*already present in the left relation/i);
+
+    expect(() =>
+      definePermissions(socialApp, ({ policy, session }) => [
+        policy.profiles.allowRead.where(
+          policy.exists(
+            policy.people
+              .where({})
+              .join(policy.friendships.where({ personBId: session.personId }), {
+                left: "id",
+                right: "personAId",
+              })
+              .join(policy.friendships.where({ personAId: session.personId }), {
+                left: "personBId",
+                right: "personAId",
+              }),
+          ),
+        ),
+      ]),
+    ).toThrow(/scope "friendships".*already present in the left relation/i);
 
     expect(() =>
       definePermissions(socialApp, ({ policy, session }) => [
@@ -1282,6 +1359,76 @@ describe("permissions DSL", () => {
       left: { scope: "__join_0", column: "child_team" },
       op: "Eq",
       right: { type: "Literal", value: "team-a" },
+    });
+  });
+
+  it("keeps chained relation joins anchored to the preceding joined table", () => {
+    let relation: PermissionRelation | undefined;
+    definePermissions(app, ({ policy }) => {
+      relation = policy.teams
+        .where({})
+        .join(policy.user_team_edges, { left: "id", right: "team" })
+        .join(policy.resource_access_edges, { left: "team", right: "team" });
+      return [];
+    });
+    if (!relation) {
+      throw new Error("Expected joined relation to be initialized.");
+    }
+
+    const ir = toAssertionRelExprForTest(relationToIr(relation));
+    expect(ir.type).toBe("Join");
+    if (ir.type !== "Join") {
+      throw new Error("Expected outer relation join.");
+    }
+    expect(ir.on[0]).toEqual({
+      left: { scope: "__join_0", column: "team" },
+      right: { scope: "__join_1", column: "team" },
+    });
+    expect(ir.left.type).toBe("Join");
+    if (ir.left.type !== "Join") {
+      throw new Error("Expected inner relation join.");
+    }
+    expect(ir.left.on[0]).toEqual({
+      left: { scope: "teams", column: "id" },
+      right: { scope: "__join_0", column: "team" },
+    });
+  });
+
+  it("anchors sibling qualified policy joins to the protected row", () => {
+    const compiled = definePermissions(app, ({ policy, session }) => [
+      policy.teams.allowRead.where({
+        "user_team_edges.user_id": session.userId,
+        "resource_access_edges.grant_role": "viewer",
+      } as Record<string, unknown>),
+    ]);
+
+    const using = compiled.teams!.select?.using;
+    expect(using?.type).toBe("ExistsRel");
+    if (!using || using.type !== "ExistsRel") {
+      throw new Error("Expected qualified rule predicate to compile to ExistsRel.");
+    }
+
+    const rel = toAssertionRelExprForTest(using.rel);
+    expect(rel.type).toBe("Filter");
+    if (rel.type !== "Filter" || rel.input.type !== "Filter") {
+      throw new Error("Expected correlated qualified policy filter.");
+    }
+    const siblingJoin = rel.input.input;
+    expect(siblingJoin.type).toBe("Join");
+    if (siblingJoin.type !== "Join") {
+      throw new Error("Expected outer sibling join.");
+    }
+    expect(siblingJoin.on[0]).toEqual({
+      left: { scope: "teams", column: "id" },
+      right: { scope: "__join_1", column: "team" },
+    });
+    expect(siblingJoin.left.type).toBe("Join");
+    if (siblingJoin.left.type !== "Join") {
+      throw new Error("Expected inner sibling join.");
+    }
+    expect(siblingJoin.left.on[0]).toEqual({
+      left: { scope: "teams", column: "id" },
+      right: { scope: "__join_0", column: "team" },
     });
   });
 

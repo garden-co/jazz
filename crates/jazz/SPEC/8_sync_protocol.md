@@ -76,12 +76,17 @@ replace row encoding. The same split applies at the binding ABI (ch. 13):
 commands, acks, and event metadata are postcard envelopes, while row-shaped
 payloads are descriptor/raw `Record` bytes at the hot boundary.
 
-**Decision, 2026-08-23 — wire v12 is a breaking authorship cut.** Transaction,
-row-version, session, and claim authors use the exact canonical `[iss,sub]` JSON
-string. Wire v11 UUID/hash/subject-only author encodings are rejected, not
-decoded or migrated. Every endpoint advertises exactly v12 and negotiation with
-v11 fails with `UnsupportedProtocolVersion`; the `jazz-wire-message-frames-v12`
-golden fixture set is the only supported message layout.
+**Decision, 2026-08-24 — wire v14 is a breaking storage/provenance cut.**
+Transaction, row-version, session, and claim authors use the exact canonical
+`[iss,sub]` JSON string. Large scalar descriptors use Groove's canonical
+internal enum/record encoding rather than the former private tagged/postcard
+payload. Wire row-version `$createdAt` and `$updatedAt` values are Unix
+milliseconds; the packed HLC is internal ordering state and is not protocol
+data. Wire v13's otherwise-current storage layout still carries packed-HLC
+provenance, so it and every earlier version are rejected rather than decoded or
+migrated. Every endpoint advertises exactly v14 and negotiation with an older
+peer fails with `UnsupportedProtocolVersion`; the v14 golden fixture set is the
+only supported message layout.
 
 Inside Rust, `Db` and `PeerConnection` keep the semantic `Transport` surface over
 `SyncMessage`. Binding/server byte transports use `WireFrame` and are bridged at
@@ -553,9 +558,10 @@ Protocol size limits are enforced at the layer that can recover correctly:
   ceiling. Generic fragmentation/reassembly carries an encoded `SyncMessage`
   of any ordinary database size atomically across bounded frames. Receivers
   enforce fixed advertised-length, decompressed-output, concurrent-assembly,
-  and aggregate staged-byte limits as adversarial resource
-  defenses; those budgets are transport policy, not query, catalogue, or
-  transaction semantics.
+  aggregate staged-byte, 30-second no-progress, and five-minute maximum-age
+  limits as adversarial resource defences. Exact duplicates and rejected
+  extents do not count as progress. Those budgets are transport policy, not
+  query, catalogue, or transaction semantics.
 - A `RegisterShape` AST is capped at 64 KiB encoded. This is a semantic
   admission limit for the shape-registration request; the connection may
   continue after the rejected request. Server shells may expose this as

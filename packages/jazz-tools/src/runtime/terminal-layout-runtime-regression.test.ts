@@ -79,11 +79,52 @@ async function expectProjectedIncludeTerminalLayout(
   );
 }
 
+async function expectProvenancePredicateUsesCoreMilliseconds(
+  runtime: Runtime,
+  label: string,
+): Promise<void> {
+  const updatedAtMs = 1_777_777_777_777;
+  const project = runtime.insert("projects", {
+    name: { type: "Text", value: `${label} provenance project` },
+  });
+  runtime.insert(
+    "todos",
+    {
+      title: { type: "Text", value: `${label} provenance todo` },
+      projectId: { type: "Uuid", value: project.id },
+    },
+    // Native runtime mutation contexts and CurrentRow provenance use Unix ms.
+    JSON.stringify({ updated_at: updatedAtMs }),
+  );
+
+  // The hop forces the relation-IR path shared by NAPI and WASM. That IR is
+  // evaluated against the physical-ms CurrentRow, so the user-facing Date
+  // must match without a second provenance conversion.
+  const query = translateQuery(
+    app.todos
+      .where({ $updatedAt: { gte: new Date(updatedAtMs) } })
+      .hopTo("project")
+      ._build(),
+    app.wasmSchema,
+  );
+  const rows = await runtime.query(query, null, "local");
+  expect(rows, `${label}: provenance predicate must retain the matching row`).toHaveLength(1);
+}
+
 describe.skipIf(!hasJazzNapiBuild())("NAPI projected terminal layout", () => {
   it("binds selected root and include names before emitting terminal operations", async () => {
     await expectProjectedIncludeTerminalLayout(
       await createNapiNativeRuntimeAdapter(app.wasmSchema, {
         appId: "terminal-layout-napi-regression",
+      }),
+      "NAPI",
+    );
+  });
+
+  it("evaluates relation provenance predicates in core physical milliseconds", async () => {
+    await expectProvenancePredicateUsesCoreMilliseconds(
+      await createNapiNativeRuntimeAdapter(app.wasmSchema, {
+        appId: "provenance-predicate-napi-regression",
       }),
       "NAPI",
     );
@@ -94,6 +135,15 @@ describe.skipIf(!hasJazzWasmBuild())("WASM projected terminal layout", () => {
   it("binds selected root and include names before emitting terminal operations", async () => {
     await expectProjectedIncludeTerminalLayout(
       await createWasmRuntime(app.wasmSchema, { appId: "terminal-layout-wasm-regression" }),
+      "WASM",
+    );
+  });
+
+  it("evaluates relation provenance predicates in core physical milliseconds", async () => {
+    await expectProvenancePredicateUsesCoreMilliseconds(
+      await createWasmRuntime(app.wasmSchema, {
+        appId: "provenance-predicate-wasm-regression",
+      }),
       "WASM",
     );
   });

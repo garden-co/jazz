@@ -36,14 +36,29 @@ export function resolveConfiguredUrl(url: string, locationHref: string | undefin
   return url;
 }
 
+export function versionRuntimeAssetUrl(url: string, runtime?: RuntimeSourcesConfig): string {
+  if (!runtime?.wasmVersion) return url;
+  try {
+    const versioned = new URL(url);
+    versioned.searchParams.set("jazz-runtime-version", runtime.wasmVersion);
+    return versioned.href;
+  } catch {
+    // Keep an unresolvable URL unchanged. Its consumer will report the
+    // actionable resolution/fetch error instead of hiding it here.
+    return url;
+  }
+}
+
 function resolveConfiguredBaseUrl(
   baseUrl: string,
   locationHref: string | undefined,
 ): string | null {
-  if (!locationHref) {
-    return null;
+  try {
+    return new URL(baseUrl).href;
+  } catch {
+    // Relative bases belong to the page selecting the runtime assets.
   }
-
+  if (!locationHref) return null;
   return new URL(baseUrl, locationHref).href;
 }
 
@@ -83,13 +98,13 @@ export function resolveRuntimeConfigWasmUrl(
   runtime?: RuntimeSourcesConfig,
 ): string | null {
   if (runtime?.wasmUrl) {
-    return resolveConfiguredUrl(runtime.wasmUrl, locationHref);
+    return versionRuntimeAssetUrl(resolveConfiguredUrl(runtime.wasmUrl, locationHref), runtime);
   }
 
   if (runtime?.baseUrl) {
     const baseUrl = resolveConfiguredBaseUrl(runtime.baseUrl, locationHref);
     if (baseUrl) {
-      return new URL("jazz_wasm_bg.wasm", baseUrl).href;
+      return versionRuntimeAssetUrl(new URL("jazz_wasm_bg.wasm", baseUrl).href, runtime);
     }
   }
 
@@ -109,16 +124,25 @@ export function resolveRuntimeConfigBrokerWorkerUrl(
   runtime?: RuntimeSourcesConfig,
 ): string {
   if (runtime?.brokerWorkerUrl) {
-    return resolveConfiguredUrl(runtime.brokerWorkerUrl, locationHref);
+    return versionRuntimeAssetUrl(
+      resolveConfiguredUrl(runtime.brokerWorkerUrl, locationHref),
+      runtime,
+    );
   }
   if (runtime?.baseUrl) {
     const baseUrl = resolveConfiguredBaseUrl(runtime.baseUrl, locationHref);
     if (baseUrl) {
-      return new URL("worker/jazz-broker-worker.js", baseUrl).href;
+      return versionRuntimeAssetUrl(new URL("worker/jazz-broker-worker.js", baseUrl).href, runtime);
     }
   }
   if (!locationHref || isHttpUrl(runtimeModuleUrl)) {
-    return new URL("../worker/jazz-broker-worker.js", runtimeModuleUrl).href;
+    return versionRuntimeAssetUrl(
+      new URL("../worker/jazz-broker-worker.js", runtimeModuleUrl).href,
+      runtime,
+    );
   }
-  return new URL("worker/jazz-broker-worker.js", resolveBrowserAssetBase(locationHref)).href;
+  return versionRuntimeAssetUrl(
+    new URL("worker/jazz-broker-worker.js", resolveBrowserAssetBase(locationHref)).href,
+    runtime,
+  );
 }

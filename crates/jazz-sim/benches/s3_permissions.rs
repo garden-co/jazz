@@ -1003,10 +1003,10 @@ fn revoke_phase(
     let update = block_on(client.peer.query_update(&mut edge.node, shape, binding)).unwrap();
     let query_update_us = query_start.elapsed().as_micros() as u64;
     let removed = match &update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             result_member_removes,
             ..
-        } => result_member_removes.len(),
+        }) => result_member_removes.len(),
         _ => 0,
     };
     assert!(
@@ -1510,9 +1510,9 @@ fn seed_block_tree_fixture_bulk(
                 page,
                 Vec::new(),
                 AuthorSubject::SYSTEM,
-                jazz::time::TxTime(0),
+                0,
                 AuthorSubject::SYSTEM,
-                jazz::time::TxTime(0),
+                0,
                 &page_cells,
                 None,
             )
@@ -1561,9 +1561,9 @@ fn seed_block_tree_fixture_bulk(
                     row,
                     Vec::new(),
                     AuthorSubject::SYSTEM,
-                    jazz::time::TxTime(0),
+                    0,
                     AuthorSubject::SYSTEM,
-                    jazz::time::TxTime(0),
+                    0,
                     &cells,
                     None,
                 )
@@ -1975,12 +1975,12 @@ fn deliver_update(
 }
 
 fn apply_client_update(client: &mut Client, message: SyncMessage) {
-    if let SyncMessage::ViewUpdate {
+    if let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
         reset_result_set,
         result_member_adds,
         result_member_removes,
         ..
-    } = &message
+    }) = &message
     {
         if *reset_result_set {
             client.visible_rows.clear();
@@ -2863,11 +2863,11 @@ fn visible_rows_db_client(client: &DbClient) -> BTreeSet<RowUuid> {
 
 fn result_rows(update: &SyncMessage) -> Vec<ResultRowEntry> {
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             result_member_adds,
             result_member_removes,
             ..
-        } => result_member_adds
+        }) => result_member_adds
             .iter()
             .chain(result_member_removes.iter())
             .filter_map(|entry| entry.as_row())
@@ -2878,12 +2878,12 @@ fn result_rows(update: &SyncMessage) -> Vec<ResultRowEntry> {
 
 fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             version_bundles,
             result_member_adds,
             result_member_removes,
             ..
-        } => {
+        }) => {
             let bundles = version_bundles
                 .iter()
                 .map(|bundle| {
@@ -2902,9 +2902,9 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
 
 fn bytes_floor(update: &SyncMessage) -> u64 {
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             version_bundles, ..
-        } => version_bundles
+        }) => version_bundles
             .iter()
             .flat_map(|bundle| bundle.versions.iter())
             .map(|version| version.record().raw().len() as u64)

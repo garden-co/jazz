@@ -494,7 +494,9 @@ test("CI uses the correctness artifact path while package builds keep release WA
   );
   const packageJson = readFileSync(new URL("../../../package.json", import.meta.url), "utf8");
   const pipeline = readFileSync(new URL("../build-test-artifacts.mjs", import.meta.url), "utf8");
-  assert.match(workflow, /pnpm build:test-artifacts/);
+  const localCi = readFileSync(new URL("../local-ci-equivalent.mjs", import.meta.url), "utf8");
+  assert.match(workflow, /local-ci-equivalent\.mjs --ci-partition typescript/);
+  assert.match(localCi, /correctness-test artifacts[\s\S]*pnpm[\s\S]*build:test-artifacts/);
   assert.match(packageJson, /"build:test-artifacts": "node dev\/gates\/build-test-artifacts\.mjs"/);
   assert.match(
     packageJson,
@@ -526,12 +528,19 @@ test("CI uses the correctness artifact path while package builds keep release WA
     "JAZZ_TEST_ARTIFACT_LOCK_PATH",
     "JAZZ_ARTIFACT_BUILD_LEASE",
     "JAZZ_ARTIFACT_BUILD_LOCK_PATH",
+    "JAZZ_TEST_SEALED_TOOLS_DIST",
   ];
   for (const task of ["jazz-napi#build", "jazz-wasm#build", "jazz-wasm#build:fast"])
     assert.deepEqual(
       turbo.tasks[task].passThroughEnv,
       expectedLease,
       `${task} must preserve the aggregate parent's selected artifact lock`,
+    );
+  for (const task of ["build", "jazz-tools#build", "test"])
+    assert.deepEqual(
+      turbo.tasks[task].passThroughEnv,
+      ["JAZZ_TEST_SEALED_TOOLS_DIST"],
+      `${task} must preserve the sealed shared test surface for child package scripts`,
     );
 });
 

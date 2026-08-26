@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -94,7 +102,7 @@ test("missing, stale, mismatch, and partial staged generations fail closed witho
           root,
           "partial",
         ),
-      /missing its generated loader, declarations, or sealed manifest/,
+      /missing generated loader/,
     );
     assert.equal(readFileSync(join(root, "native-binding.pointer.cjs"), "utf8"), prior);
     const stale = receipt(root, "require(process.argv[1]);");
@@ -107,6 +115,23 @@ test("missing, stale, mismatch, and partial staged generations fail closed witho
     rmSync(join(root, "native-binding.pointer.cjs"));
     const missing = receipt(root, "require(process.argv[1]);");
     assert.notEqual(missing.status, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("NAPI publication rejects symlinked generation files before the active pointer changes", () => {
+  const root = fixture();
+  try {
+    publishNapiGeneration(stage(root, ".napi-stage-good", "good"), root, "good");
+    const pointer = readFileSync(join(root, "native-binding.pointer.cjs"), "utf8");
+    const outside = join(root, "outside.node");
+    writeFileSync(outside, "outside");
+    const staged = stage(root, ".napi-stage-symlink", "next");
+    rmSync(join(staged, "jazz-napi.linux-x64-gnu.node"));
+    symlinkSync(outside, join(staged, "jazz-napi.linux-x64-gnu.node"));
+    assert.throws(() => publishNapiGeneration(staged, root, "next"), /real regular file/);
+    assert.equal(readFileSync(join(root, "native-binding.pointer.cjs"), "utf8"), pointer);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -148,13 +173,23 @@ test("a newly generated public export absent from the stable package declaration
       join(staged, "index.d.ts"),
       "export declare class NapiDb { tick(): void }\nexport declare function newlyGeneratedExport(): void\n",
     );
-    assert.throws(
-      () =>
-        validateNapiStage(staged, "jazz-napi.linux-x64-gnu.node", "next", "cross-target", {
-          stableDeclarationsPath: stableDeclarations,
-        }),
+    let error;
+    try {
+      validateNapiStage(staged, "jazz-napi.linux-x64-gnu.node", "next", "cross-target", {
+        stableDeclarationsPath: stableDeclarations,
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    assert.match(
+      error.message,
       /generated declarations that differ from the public package type surface/,
     );
+    assert.match(error.message, /checked-in declarations: /);
+    assert.match(error.message, /generated declarations: /);
+    assert.match(error.message, /first difference near line 2/);
+    assert.match(error.message, /--- checked-in/);
+    assert.match(error.message, /\+\s*2 \| export declare function newlyGeneratedExport/);
     assert.equal(existsSync(join(root, "native-binding.pointer.cjs")), false);
   } finally {
     rmSync(root, { recursive: true, force: true });

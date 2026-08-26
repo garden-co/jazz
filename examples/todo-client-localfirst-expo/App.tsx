@@ -1,8 +1,17 @@
 import * as React from "react";
 import { type DbConfig } from "jazz-tools";
 import { JazzProvider } from "jazz-tools/react";
-import { ActivityIndicator, SafeAreaView, StatusBar, StyleSheet, Text, View } from "react-native";
+import {
+  ActivityIndicator,
+  Pressable,
+  SafeAreaView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { ExpoAuthSecretStore } from "./src/expo-auth-secret-store";
+import { createResettablePromise, loadSecret, SecretLoadError } from "./src/secret-promise-cache";
 import { TodoList } from "./src/TodoList";
 
 // Expo's Metro bundler inlines process.env.EXPO_PUBLIC_* at bundle time.
@@ -17,6 +26,10 @@ function buildConfig(secret: string): DbConfig {
     secret,
   };
 }
+
+const authSecret = createResettablePromise(() =>
+  loadSecret(() => ExpoAuthSecretStore.getOrCreateSecret()),
+);
 
 const styles = StyleSheet.create({
   container: {
@@ -44,9 +57,34 @@ const styles = StyleSheet.create({
     color: "#374151",
     fontSize: 14,
   },
+  errorText: {
+    color: "#991b1b",
+    fontSize: 14,
+    textAlign: "center",
+  },
+  retryButton: {
+    backgroundColor: "#111827",
+    borderRadius: 6,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  retryButtonText: {
+    color: "#ffffff",
+    fontSize: 14,
+    fontWeight: "600",
+  },
 });
 
-const fallback = (
+const authFallback = (
+  <SafeAreaView style={styles.container}>
+    <View style={styles.loadingContainer}>
+      <ActivityIndicator size="small" />
+      <Text style={styles.loadingText}>Loading secure credentials...</Text>
+    </View>
+  </SafeAreaView>
+);
+
+const runtimeFallback = (
   <SafeAreaView style={styles.container}>
     <View style={styles.loadingContainer}>
       <ActivityIndicator size="small" />
@@ -55,12 +93,48 @@ const fallback = (
   </SafeAreaView>
 );
 
-export default function App() {
-  const secret = React.use(ExpoAuthSecretStore.getOrCreateSecret());
+class SecretLoadErrorBoundary extends React.Component<
+  React.PropsWithChildren,
+  { failed: boolean }
+> {
+  state = { failed: false };
+
+  static getDerivedStateFromError(error: unknown) {
+    if (!(error instanceof SecretLoadError)) {
+      throw error;
+    }
+    return { failed: true };
+  }
+
+  private retry = () => {
+    authSecret.reset();
+    this.setState({ failed: false });
+  };
+
+  render() {
+    if (this.state.failed) {
+      return (
+        <SafeAreaView style={styles.container}>
+          <View style={styles.loadingContainer}>
+            <Text style={styles.errorText}>Could not load secure credentials.</Text>
+            <Pressable accessibilityRole="button" onPress={this.retry} style={styles.retryButton}>
+              <Text style={styles.retryButtonText}>Try again</Text>
+            </Pressable>
+          </View>
+        </SafeAreaView>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
+export function App() {
+  const secret = React.use(authSecret.get());
   const config = React.useMemo(() => buildConfig(secret), [secret]);
 
   return (
-    <JazzProvider config={config} fallback={fallback}>
+    <JazzProvider config={config} fallback={runtimeFallback}>
       <SafeAreaView style={styles.container}>
         <StatusBar barStyle="dark-content" />
         <View style={styles.content}>
@@ -69,5 +143,15 @@ export default function App() {
         </View>
       </SafeAreaView>
     </JazzProvider>
+  );
+}
+
+export default function AppRoot() {
+  return (
+    <SecretLoadErrorBoundary>
+      <React.Suspense fallback={authFallback}>
+        <App />
+      </React.Suspense>
+    </SecretLoadErrorBoundary>
   );
 }

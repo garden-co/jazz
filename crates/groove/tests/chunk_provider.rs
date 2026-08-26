@@ -9,7 +9,7 @@ use groove::chunks::{ChunkError, ChunkProvider, ChunkRequest, TestChunkProvider}
 fn request(seed: u8) -> ChunkRequest {
     ChunkRequest {
         object_hash: [seed; 32],
-        locator: vec![seed; 24],
+        locator: groove::large_values::Locator::random(),
     }
 }
 

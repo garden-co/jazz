@@ -198,9 +198,8 @@ fn relation_query() -> Query {
 
 fn seed_relation_fixture(db: &Db<TestStorage>, child_rows: usize) -> RowUuid {
     let parent = row(1);
-    block_on(db.insert_with_id(
+    block_on(db.insert(
         "parents",
-        parent,
         BTreeMap::from([
             (
                 "label".to_owned(),
@@ -208,18 +207,25 @@ fn seed_relation_fixture(db: &Db<TestStorage>, child_rows: usize) -> RowUuid {
             ),
             ("ordinal".to_owned(), Value::I32(0)),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(parent),
+            ..Default::default()
+        },
     ))
     .expect("insert parent");
 
     for index in 0..child_rows {
-        block_on(db.insert_with_id(
+        block_on(db.insert(
             "children",
-            row(1_000 + index as u64),
             BTreeMap::from([
                 ("parent_id".to_owned(), Value::Uuid(parent.0)),
                 ("label".to_owned(), Value::String(format!("child-{index}"))),
                 ("ordinal".to_owned(), Value::I32(index as i32)),
             ]),
+            jazz::db::InsertOptions {
+                row_id: Some(row(1_000 + index as u64)),
+                ..Default::default()
+            },
         ))
         .unwrap_or_else(|err| panic!("insert child {index}: {err}"));
     }
@@ -319,9 +325,8 @@ fn measure_single_child_insert(scale: usize) -> AllocSnapshot {
     );
 
     reset_alloc_counter();
-    block_on(db.insert_with_id(
+    block_on(db.insert(
         "children",
-        row(10_000_000 + scale as u64),
         BTreeMap::from([
             ("parent_id".to_owned(), Value::Uuid(parent.0)),
             (
@@ -330,6 +335,10 @@ fn measure_single_child_insert(scale: usize) -> AllocSnapshot {
             ),
             ("ordinal".to_owned(), Value::I32((scale + 1) as i32)),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(row(10_000_000 + scale as u64)),
+            ..Default::default()
+        },
     ))
     .expect("insert measured child");
     expect_parent_snapshot(
@@ -439,13 +448,16 @@ fn write_cells(parent: RowUuid, index: usize) -> BTreeMap<String, Value> {
 
 fn seed_rocks_write_fixture(db: &Db<RocksDbStorage>, child_rows: usize) -> RowUuid {
     let parent = row(50_000_000);
-    block_on(db.insert_with_id(
+    block_on(db.insert(
         "parents",
-        parent,
         BTreeMap::from([
             ("label".to_owned(), Value::String("write-parent".to_owned())),
             ("ordinal".to_owned(), Value::I32(0)),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(parent),
+            ..Default::default()
+        },
     ))
     .expect("insert write parent");
 
@@ -455,10 +467,13 @@ fn seed_rocks_write_fixture(db: &Db<RocksDbStorage>, child_rows: usize) -> RowUu
         let end = (start + 200).min(child_rows);
         block_on(db.transaction(async |tx| {
             for index in start..end {
-                tx.insert_with_id(
+                tx.insert(
                     "children",
-                    row(60_000_000 + index as u64),
                     write_cells(parent, index),
+                    jazz::db::InsertOptions {
+                        row_id: Some(row(60_000_000 + index as u64)),
+                        ..Default::default()
+                    },
                 )
                 .await?;
             }
@@ -480,8 +495,13 @@ fn measure_rocks_write_transaction(existing_rows: usize) -> TxMeasurement {
     block_on(db.transaction(async |tx| {
         for offset in 0..200 {
             let index = start_index + offset;
-            tx.update("children", row(index as u64), write_cells(parent, index))
-                .await?;
+            tx.update(
+                "children",
+                row(index as u64),
+                write_cells(parent, index),
+                Default::default(),
+            )
+            .await?;
         }
         Ok(())
     }))

@@ -20,6 +20,7 @@ fn large_write_pushes_staging_before_syncing_its_referencing_row() {
                 ("done".to_owned(), Value::Bool(false)),
                 ("owner".to_owned(), Value::Uuid(author.test_uuid())),
             ]),
+            Default::default(),
         )
         .unwrap();
 
@@ -71,6 +72,7 @@ fn large_value_pushes_through_edge_then_pulls_from_core_after_edge_chunk_evictio
                 ("done".to_owned(), Value::Bool(false)),
                 ("owner".to_owned(), Value::Uuid(author.test_uuid())),
             ]),
+            Default::default(),
         )
         .unwrap();
 
@@ -192,7 +194,8 @@ fn rate_limited_push_waits_then_retries_the_exact_batch_without_rejecting_the_wr
     core.node()
         .borrow_mut()
         .set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
-            incoming_bytes_per_window: 1,
+            incoming_bytes_per_window: crate::node::LARGE_VALUE_UPLOAD_START_INGRESS_CHARGE_BYTES
+                + 1,
             window_ms: 60_000,
             max_age_ms: 10 * 60 * 1_000,
         });
@@ -226,6 +229,7 @@ fn rate_limited_push_waits_then_retries_the_exact_batch_without_rejecting_the_wr
                 ("done".to_owned(), Value::Bool(false)),
                 ("owner".to_owned(), Value::Uuid(author.test_uuid())),
             ]),
+            Default::default(),
         )
         .unwrap();
 
@@ -336,7 +340,8 @@ fn unauthenticated_reconnect_restarts_after_deadline_and_does_not_prevent_ttl_cl
     core.node()
         .borrow_mut()
         .set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
-            incoming_bytes_per_window: 1,
+            incoming_bytes_per_window: crate::node::LARGE_VALUE_UPLOAD_START_INGRESS_CHARGE_BYTES
+                + 1,
             window_ms: 60_000,
             max_age_ms: 10 * 60 * 1_000,
         });
@@ -361,6 +366,7 @@ fn unauthenticated_reconnect_restarts_after_deadline_and_does_not_prevent_ttl_cl
                 ("done".to_owned(), Value::Bool(false)),
                 ("owner".to_owned(), Value::Uuid(author.test_uuid())),
             ]),
+            Default::default(),
         )
         .unwrap();
 
@@ -451,7 +457,8 @@ fn assert_different_authenticated_destination_restarts_upload(
     core.node()
         .borrow_mut()
         .set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
-            incoming_bytes_per_window: 1,
+            incoming_bytes_per_window: crate::node::LARGE_VALUE_UPLOAD_START_INGRESS_CHARGE_BYTES
+                + 1,
             window_ms: 60_000,
             max_age_ms: 10 * 60 * 1_000,
         });
@@ -478,6 +485,7 @@ fn assert_different_authenticated_destination_restarts_upload(
                 ("done".to_owned(), Value::Bool(false)),
                 ("owner".to_owned(), Value::Uuid(author.test_uuid())),
             ]),
+            Default::default(),
         )
         .unwrap();
     writer.tick().unwrap();
@@ -607,7 +615,14 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_in_same_tick() {
     let _alice_upstream = crate::db::block_on(alice_edge.connect_upstream(alice_transport));
     let _core_alice = core.accept_subscriber(core_alice_transport, alice);
     let write = alice_edge
-        .insert_with_id("todos", row(0xd5), cells("later row", false, alice))
+        .insert(
+            "todos",
+            cells("later row", false, alice),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xd5)),
+                ..Default::default()
+            },
+        )
         .unwrap();
 
     // One edge tick uploads Alice's local commit; one Core tick finalizes it
@@ -620,11 +635,11 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_in_same_tick() {
         .filter(|message| {
             matches!(
                 message,
-                SyncMessage::ViewUpdate {
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     result_member_adds,
                     settled_through,
                     ..
-                } if *settled_through > GlobalTime(0)
+                }) if *settled_through > GlobalTime(0)
                     && result_member_adds.iter().any(|member| {
                         member.as_row().is_some_and(|(table, row_uuid, tx_id)| {
                             table.as_str() == "todos"
@@ -682,7 +697,14 @@ fn edge_later_client_upload_flushes_earlier_upstream_in_same_tick() {
     let _edge_client = edge.accept_subscriber(edge_client_transport, alice);
 
     let write = client
-        .insert_with_id("todos", row(0xd3), cells("later upload", false, alice))
+        .insert(
+            "todos",
+            cells("later upload", false, alice),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xd3)),
+                ..Default::default()
+            },
+        )
         .unwrap();
     client.tick().unwrap();
     edge.tick().unwrap();
@@ -733,7 +755,11 @@ fn write_state_waiter_resolves_on_remote_fate_update() {
     let _subscriber = server.accept_subscriber(server_transport, client_author);
 
     let write = client
-        .insert("todos", cells("wait for fate", false, owner))
+        .insert(
+            "todos",
+            cells("wait for fate", false, owner),
+            Default::default(),
+        )
         .unwrap();
     let tx_id = write.mergeable_tx_id();
     assert_eq!(
@@ -884,6 +910,7 @@ fn db_sync_surface_edge_session_read_policy_filters_private_table_query() {
                     Value::String(alice.test_uuid().to_string()),
                 ),
             ]),
+            Default::default(),
         )
         .unwrap();
     writer.tick().unwrap();
@@ -906,7 +933,7 @@ fn db_sync_surface_edge_session_read_policy_filters_private_table_query() {
 }
 
 /// A real client commonly reads its self-membership grant before querying the
-/// resource that grant authorizes.  The second subscription must publish a
+/// resource that grant authorizes. The second subscription must publish a
 /// result membership even when the first subscription already delivered the
 /// resource as policy support.
 fn membership_grant_then_parent_query_keeps_disjunctive_read_proof(indexed: bool) {
@@ -987,6 +1014,7 @@ fn membership_grant_then_parent_query_keeps_disjunctive_read_proof(indexed: bool
                 "owner_subject".to_owned(),
                 Value::String(owner.test_uuid().to_string()),
             )]),
+            Default::default(),
         )
         .unwrap();
     let grant = owner_client
@@ -1003,6 +1031,7 @@ fn membership_grant_then_parent_query_keeps_disjunctive_read_proof(indexed: bool
                 ),
                 ("role".to_owned(), Value::String("member".to_owned())),
             ]),
+            Default::default(),
         )
         .unwrap();
     for _ in 0..16 {
@@ -1066,11 +1095,15 @@ fn membership_grant_then_parent_query_keeps_disjunctive_read_proof(indexed: bool
     assert!(workspace_subscription.try_next_event().is_some());
 }
 
+/// Covers the normal source layout after the self-membership subscription has
+/// already delivered workspace policy support to the client.
 #[test]
 fn db_sync_surface_membership_grant_then_parent_query_keeps_disjunctive_read_proof() {
     membership_grant_then_parent_query_keeps_disjunctive_read_proof(false);
 }
 
+/// Covers the indexed layout, where a disjunctive proof must still retain the
+/// complete source path instead of selecting one arm's index for the union.
 #[test]
 fn db_sync_surface_indexed_membership_grant_then_parent_query_keeps_disjunctive_read_proof() {
     membership_grant_then_parent_query_keeps_disjunctive_read_proof(true);
@@ -1131,6 +1164,7 @@ fn prepared_server_read_binds_text_session_user_id_per_session() {
                     Value::Nullable(Some(Box::new(Value::String(alice_subject.into())))),
                 ),
             ]),
+            Default::default(),
         )
         .expect("system seed must write the protected message");
     block_on(seeded.wait(DurabilityTier::Local)).expect("seed must settle locally");
@@ -1213,6 +1247,7 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
                     Value::String(alice.test_uuid().to_string()),
                 ),
             ]),
+            Default::default(),
         )
         .unwrap();
     writer.tick().unwrap();
@@ -1801,7 +1836,7 @@ fn local_missing_upload_body_still_kills_sync_driver() {
     let (client_transport, _server_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let missing_tx = TxId::new(
-        crate::time::TxTime(client.next_now_ms()),
+        crate::time::TxTime::from(client.next_now_ms()),
         NodeUuid::from_bytes([0xee; 16]),
     );
     client.node.outbox.borrow_mut().push(PendingUpload {

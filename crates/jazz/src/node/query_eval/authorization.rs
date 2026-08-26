@@ -393,6 +393,40 @@ where
         identity: AuthorSubject,
         insert_candidate: bool,
     ) -> Result<bool, Error> {
+        self.write_policy_query_allows_candidate_with_provenance_for_schema(
+            policy_schema_version,
+            table,
+            policy,
+            row_uuid,
+            cells,
+            identity,
+            insert_candidate,
+            RowProvenance {
+                created_by: identity,
+                created_at: 0,
+                updated_by: identity,
+                updated_at: 0,
+            },
+        )
+        .await
+    }
+
+    /// Authorize an inline candidate with the provenance the pending version
+    /// will expose if accepted. Public provenance policies must evaluate this
+    /// metadata exactly like an ordinary current-row source; synthesizing it
+    /// from the permission subject would let an updater appear to be the
+    /// original creator.
+    pub(in crate::node) async fn write_policy_query_allows_candidate_with_provenance_for_schema(
+        &mut self,
+        policy_schema_version: SchemaVersionId,
+        table: &TableSchema,
+        policy: &crate::query::Query,
+        row_uuid: RowUuid,
+        cells: &BTreeMap<String, Value>,
+        identity: AuthorSubject,
+        insert_candidate: bool,
+        provenance: RowProvenance,
+    ) -> Result<bool, Error> {
         let mut policy = policy.clone();
         if insert_candidate {
             for inherits in &mut policy.inherits {
@@ -478,7 +512,9 @@ where
                 &self.catalogue.schema,
             ),
         };
-        let candidate = current_row_from_cells(table, row_uuid, cells)?;
+        let candidate = current_row_from_cells_with_explicit_provenance(
+            table, row_uuid, cells, provenance, None,
+        )?;
         let inline_sources = BTreeMap::from([(root_source, vec![candidate])]);
         let access_paths = self.current_query_primary_key_access_paths(&policy_shape, &binding)?;
         let program = Box::pin(

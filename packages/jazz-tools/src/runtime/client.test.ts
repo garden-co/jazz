@@ -2,7 +2,10 @@ import { describe, it, expect, vi } from "vitest";
 import {
   JazzClient,
   ExclusiveWriteHandle,
+  ReadTier,
   resolveDefaultDurabilityTier,
+  resolveEffectiveQueryExecutionOptions,
+  resolveReadTier,
   type Runtime,
   type TransactionalRuntime,
   type BatchId,
@@ -142,6 +145,26 @@ describe("JazzClient onAuthFailure wiring", () => {
   });
 });
 
+describe("JazzClient subscription ownership", () => {
+  it("releases a created handle when synchronous callback installation throws", () => {
+    const runtime = makeFakeRuntime();
+    const failure = new Error("executeSubscription failed after callback");
+    runtime.createSubscription.mockReturnValue(41);
+    runtime.executeSubscription.mockImplementation((_handle, onUpdate) => {
+      onUpdate([]);
+      throw failure;
+    });
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const callback = vi.fn();
+
+    expect(() => client.subscribe('{"table":"todos"}', callback)).toThrow(failure);
+
+    expect(callback).toHaveBeenCalledOnce();
+    expect(runtime.unsubscribe).toHaveBeenCalledOnce();
+    expect(runtime.unsubscribe).toHaveBeenCalledWith(41);
+  });
+});
+
 describe("JazzClient.updateAuthToken", () => {
   it("forwards refreshed JWT to the Rust runtime via runtime.updateAuth", () => {
     const runtime = makeFakeRuntime();
@@ -273,6 +296,29 @@ describe("resolveDefaultDurabilityTier", () => {
 
   it("still prefers edge when a server is configured outside the browser runtime", () => {
     expect(resolveDefaultDurabilityTier({ serverUrl: "https://example.test" })).toBe("edge");
+  });
+});
+
+describe("public read tiers", () => {
+  it("lowers each new public tier to the existing native durability contract", () => {
+    expect(resolveReadTier(ReadTier.LocalFirst)).toBe("local");
+    expect(resolveReadTier(ReadTier.Remote)).toBe("edge");
+    expect(resolveReadTier(ReadTier.RemoteIfPossible)).toBe("edge");
+  });
+
+  it("keeps legacy read durability controls byte-for-byte compatible", () => {
+    for (const tier of ["local", "edge", "global"] as const) {
+      expect(resolveReadTier(tier)).toBe(tier);
+      expect(resolveEffectiveQueryExecutionOptions({}, { tier })).toMatchObject({ tier });
+    }
+  });
+
+  it("does not reinterpret remote-if-possible as a third native tier", () => {
+    expect(
+      resolveEffectiveQueryExecutionOptions({}, { tier: ReadTier.RemoteIfPossible }),
+    ).toMatchObject({
+      tier: "edge",
+    });
   });
 });
 

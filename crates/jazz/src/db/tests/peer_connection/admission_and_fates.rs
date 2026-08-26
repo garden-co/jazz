@@ -235,7 +235,6 @@ fn permission_advice_uses_authenticated_link_identity_without_mutating() {
         .insert("todos", cells("secret", false, alice))
         .unwrap()
         .row_uuid();
-
     let alice_client = open_db(0xa1, alice, &schema);
     alice_client.set_identity_claims(alice, test_provider_claims(alice));
     let (alice_transport, alice_server_transport) = duplex_with_admitted_session_context(
@@ -340,29 +339,15 @@ fn distinct_advice_actions_with_one_compiled_scope_hydrate_once() {
 
 #[test]
 fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
-    // Keep the provider subject distinct from the canonical author. This is an
-    // internal test because trusted host-side claim refresh is not public API.
-    let schema = build_public_db_test_schema(
-        PublicSchemaBuilder::new().table(
-            PublicTableSchemaBuilder::new("todos")
-                .column("title", PublicColumnType::Text)
-                .column("done", PublicColumnType::Boolean)
-                .column("owner", PublicColumnType::Uuid)
-                .policies(
-                    PublicTablePolicies::new()
-                        .with_select(public_session_eq("owner", &["claims", "user_id"])),
-                ),
-        ),
-    );
+    let schema = owner_read_schema();
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
-    let provider_user_id = uuid::Uuid::from_bytes([0x17; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
-    let mut target_cells = cells("owned", false, alice);
-    target_cells.insert("owner".to_owned(), Value::Uuid(provider_user_id));
-    let target = server.insert("todos", target_cells).unwrap().row_uuid();
+    let target = server
+        .insert("todos", cells("owned", false, alice))
+        .unwrap()
+        .row_uuid();
     let client = open_db(0xa1, alice, &schema);
-    let session_claims = BTreeMap::from([("user_id".to_owned(), Value::Uuid(provider_user_id))]);
-    client.set_identity_claims(alice, session_claims.clone());
+    client.set_identity_claims(alice, test_provider_claims(alice));
     let (client_transport, server_transport) = duplex_with_admitted_session_context(
         alice,
         NodeUuid::from_bytes([0xa1; 16]),
@@ -371,7 +356,7 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
         1,
     );
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let subscriber = server.accept_subscriber_with_claims(server_transport, alice, session_claims);
+    let subscriber = server.accept_subscriber(server_transport, alice);
 
     let first = client.request_permission_advice(PermissionAdviceAction::Read {
         table: "todos".to_owned(),
@@ -382,9 +367,15 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
     client.tick().unwrap();
     assert_eq!(block_on(first), PermissionAdvice::Allowed);
 
-    let mut refreshed_claims =
-        BTreeMap::from([("user_id".to_owned(), Value::Uuid(provider_user_id))]);
-    refreshed_claims.insert("fresh".to_owned(), Value::Bool(true));
+    let refreshed_claims = BTreeMap::from([
+        ("user_id".to_owned(), Value::Uuid(alice.test_uuid())),
+        ("fresh".to_owned(), Value::Bool(true)),
+    ]);
+    // The client needs its own authenticated snapshot to evaluate the
+    // authority-supplied support rows. The authority separately receives the
+    // same refresh at its trusted connection-admission boundary; it must not
+    // trust the client's queued SessionClaims frame.
+    client.set_identity_claims(alice, refreshed_claims.clone());
     subscriber
         .borrow_mut()
         .update_authenticated_session_claims(refreshed_claims);
@@ -400,9 +391,11 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
     client.tick().unwrap();
     assert_eq!(block_on(refreshed), PermissionAdvice::Allowed);
 
-    let mut advanced_claims =
-        BTreeMap::from([("user_id".to_owned(), Value::Uuid(provider_user_id))]);
-    advanced_claims.insert("fresh".to_owned(), Value::Bool(false));
+    let advanced_claims = BTreeMap::from([
+        ("user_id".to_owned(), Value::Uuid(alice.test_uuid())),
+        ("fresh".to_owned(), Value::Bool(false)),
+    ]);
+    client.set_identity_claims(alice, advanced_claims.clone());
     subscriber
         .borrow_mut()
         .update_authenticated_session_claims(advanced_claims);
@@ -458,7 +451,7 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
     let subscriber = server.accept_subscriber(server_transport, alice);
 
     let inserted = client
-        .insert("todos", cells("owned", false, alice))
+        .insert("todos", cells("owned", false, alice), Default::default())
         .unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
@@ -471,6 +464,7 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
             "todos",
             inserted.row_uuid(),
             BTreeMap::from([("owner".to_owned(), Value::Uuid(bob.test_uuid()))]),
+            Default::default(),
         )
         .unwrap();
     client.tick().unwrap();
@@ -481,7 +475,9 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
         Fate::Rejected(_)
     ));
 
-    let deleted = client.delete("todos", inserted.row_uuid()).unwrap();
+    let deleted = client
+        .delete("todos", inserted.row_uuid(), Default::default())
+        .unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
@@ -597,6 +593,7 @@ fn edge_route_capacity_rejects_instead_of_reporting_edge_acceptance() {
         .insert(
             "todos",
             BTreeMap::from([("title".to_owned(), Value::String("bounded".to_owned()))]),
+            Default::default(),
         )
         .unwrap();
     let queue = Rc::new(RefCell::new(Vec::new()));
@@ -666,6 +663,7 @@ fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
         .insert(
             "todos",
             BTreeMap::from([("title".to_owned(), Value::String("routed".to_owned()))]),
+            Default::default(),
         )
         .unwrap();
     let tx_id = write.mergeable_tx_id();
@@ -947,6 +945,7 @@ fn edge_fate_handoff_redrives_real_downstream_write_and_ignores_old_authority() 
         .insert(
             "todos",
             BTreeMap::from([("title".to_owned(), Value::String("handoff".to_owned()))]),
+            Default::default(),
         )
         .unwrap();
     client.tick().unwrap();
@@ -1092,6 +1091,7 @@ fn edge_parks_downstream_fate_until_a_later_authority_connects() {
         .insert(
             "todos",
             BTreeMap::from([("title".to_owned(), Value::String("parked".to_owned()))]),
+            Default::default(),
         )
         .unwrap();
     client.tick().unwrap();
@@ -1166,7 +1166,11 @@ fn edge_write_before_upstream_admission_binds_and_redrives_fate_route() {
     );
 
     let write = client
-        .insert("todos", cells("startup race", false, alice))
+        .insert(
+            "todos",
+            cells("startup race", false, alice),
+            Default::default(),
+        )
         .unwrap();
     let tx_id = write.mergeable_tx_id();
     client.tick().unwrap();
@@ -1277,6 +1281,7 @@ fn stale_same_authority_session_cannot_settle_or_forward_a_routed_fate() {
         .insert(
             "todos",
             BTreeMap::from([("title".to_owned(), Value::String("epoch".to_owned()))]),
+            Default::default(),
         )
         .unwrap();
     client.tick().unwrap();

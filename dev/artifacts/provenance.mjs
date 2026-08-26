@@ -5,9 +5,9 @@
  * platform-specific stat/hash utilities.
  */
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -76,11 +76,6 @@ const isStagedNapiBinding = (repoPath) =>
     repoPath,
   );
 
-// Turbo writes its task receipt after the package's build command returns.
-// The NAPI wrapper seals provenance inside that command, so this local output
-// directory must not be part of the inputs it validates.  This is deliberately
-// scoped to the NAPI package; root turbo.json remains an input.
-const isNapiTurboOutputDirectory = (repoPath) => repoPath === "crates/jazz-napi/.turbo";
 const isNapiGeneratedOutput = (repoPath) =>
   repoPath === "crates/jazz-napi/index.js" ||
   repoPath === "crates/jazz-napi/index.d.ts" ||
@@ -98,9 +93,9 @@ function files(root, paths) {
     const stat = statSync(path);
     if (stat.isDirectory())
       for (const name of readdirSync(path).sort()) {
-        if (["pkg", "target", "node_modules"].includes(name) || name.startsWith(".pkg-")) continue;
+        if (["pkg", "target", "node_modules", ".turbo"].includes(name) || name.startsWith(".pkg-"))
+          continue;
         const child = join(path, name);
-        if (isNapiTurboOutputDirectory(relative(root, child))) continue;
         visit(child);
       }
     else if (stat.isFile()) {
@@ -123,38 +118,74 @@ function files(root, paths) {
   return found.sort();
 }
 
+const sharedInputs = [
+  "Cargo.toml",
+  "Cargo.lock",
+  "rust-toolchain.toml",
+  ".cargo/config",
+  ".cargo/config.toml",
+  "package.json",
+  "pnpm-lock.yaml",
+  "pnpm-workspace.yaml",
+  "turbo.json",
+  "dev/artifacts",
+];
+
+const artifactRoots = {
+  wasm: "crates/jazz-wasm/Cargo.toml",
+  napi: "crates/jazz-napi/Cargo.toml",
+};
+
+function workspaceDependencyInputs(root, kind) {
+  const result = spawnSync("cargo", ["metadata", "--format-version", "1", "--no-deps"], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    throw new Error(
+      `artifact provenance: cargo metadata failed for ${kind}: ${result.stderr.trim() || "unknown error"}`,
+    );
+  }
+  let metadata;
+  try {
+    metadata = JSON.parse(result.stdout);
+  } catch (error) {
+    throw new Error(
+      `artifact provenance: cargo metadata was invalid for ${kind}: ${error.message}`,
+    );
+  }
+  const packages = new Map(
+    metadata.packages.map((pkg) => [resolve(dirname(pkg.manifest_path)), pkg]),
+  );
+  const rootDirectory = resolve(root, dirname(artifactRoots[kind]));
+  if (!packages.has(rootDirectory)) {
+    throw new Error(`artifact provenance: cargo metadata omitted ${artifactRoots[kind]}`);
+  }
+  const pending = [rootDirectory];
+  const visited = new Set();
+  while (pending.length) {
+    const directory = pending.pop();
+    if (visited.has(directory)) continue;
+    const pkg = packages.get(directory);
+    if (!pkg) throw new Error(`artifact provenance: unresolved workspace dependency ${directory}`);
+    visited.add(directory);
+    for (const dependency of pkg.dependencies) {
+      if (!dependency.path || dependency.kind === "dev") continue;
+      const dependencyDirectory = resolve(dependency.path);
+      if (!packages.has(dependencyDirectory)) {
+        throw new Error(
+          `artifact provenance: cargo metadata omitted path dependency ${dependency.name} at ${dependencyDirectory}`,
+        );
+      }
+      pending.push(dependencyDirectory);
+    }
+  }
+  return [...visited].map((directory) => relative(root, directory)).sort();
+}
+
 const inputsFor = {
-  wasm: [
-    "Cargo.toml",
-    "Cargo.lock",
-    "rust-toolchain.toml",
-    ".cargo/config",
-    ".cargo/config.toml",
-    "package.json",
-    "pnpm-lock.yaml",
-    "pnpm-workspace.yaml",
-    "turbo.json",
-    "dev/artifacts",
-    "crates/jazz-wasm",
-    "crates/jazz",
-    "crates/groove",
-    "crates/wasm-tracing",
-  ],
-  napi: [
-    "Cargo.toml",
-    "Cargo.lock",
-    "rust-toolchain.toml",
-    ".cargo/config",
-    ".cargo/config.toml",
-    "package.json",
-    "pnpm-lock.yaml",
-    "pnpm-workspace.yaml",
-    "turbo.json",
-    "dev/artifacts",
-    "crates/jazz-napi",
-    "crates/jazz",
-    "crates/groove",
-  ],
+  wasm: [...sharedInputs],
+  napi: [...sharedInputs],
 };
 
 function artifactHashes(root, kind, options = {}) {
@@ -193,15 +224,27 @@ function activeNapiBindings(root) {
   );
   if (!match) return undefined;
   const generation = join(packageDir, ".native-artifacts", match[1]);
-  if (!existsSync(generation) || !statSync(generation).isDirectory()) return undefined;
+  if (
+    !existsSync(generation) ||
+    !lstatSync(generation).isDirectory() ||
+    lstatSync(generation).isSymbolicLink()
+  )
+    return undefined;
   return readdirSync(generation, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".node"))
+    .filter((entry) => {
+      const path = join(generation, entry.name);
+      return (
+        entry.name.endsWith(".node") &&
+        lstatSync(path).isFile() &&
+        !lstatSync(path).isSymbolicLink()
+      );
+    })
     .map((entry) => join(generation, entry.name));
 }
 
-export function expectedManifest(root, kind, profile, targetOverride, options = {}) {
+function packageInputsFingerprint(root, kind) {
   if (!(kind in inputsFor)) throw new Error(`unknown artifact kind: ${kind}`);
-  const trackedInputs = files(root, inputsFor[kind]);
+  const trackedInputs = files(root, [...inputsFor[kind], ...workspaceDependencyInputs(root, kind)]);
   const inputHash = createHash("sha256");
   for (const path of trackedInputs) {
     inputHash
@@ -209,6 +252,11 @@ export function expectedManifest(root, kind, profile, targetOverride, options = 
       .update(readFileSync(join(root, path)))
       .update("\0");
   }
+  return inputHash.digest("hex");
+}
+
+export function expectedManifest(root, kind, profile, targetOverride, options = {}) {
+  const packageInputs = packageInputsFingerprint(root, kind);
   const cargoLock = join(root, "Cargo.lock");
   const toolchain = join(root, "rust-toolchain.toml");
   const injectedGit =
@@ -251,7 +299,7 @@ export function expectedManifest(root, kind, profile, targetOverride, options = 
         ? "wasm32-unknown-unknown"
         : (toolVersion(root, "rustc", ["-vV"]).match(/^host: (.+)$/m)?.[1] ?? "unknown")),
     features: "default",
-    packageInputs: inputHash.digest("hex"),
+    packageInputs,
     artifacts: artifactHashes(root, kind, options),
   };
 }
@@ -265,7 +313,12 @@ export function expectedManifest(root, kind, profile, targetOverride, options = 
  * post-build circular fingerprint.
  */
 export function nativeArtifactFingerprint(root, kind, profile, targetOverride) {
-  const manifest = expectedManifest(root, kind, profile, targetOverride);
+  // Runtime compatibility is content-addressed by relevant producer inputs,
+  // never by commit identity or provenance receipts. In particular, do not
+  // derive this through `expectedManifest`: its git HEAD/tree fields must
+  // remain useful for local freshness without making the generated expected
+  // fingerprint self-referential when that expectation is committed.
+  const packageInputs = packageInputsFingerprint(root, kind);
   const surface =
     kind === "napi"
       ? ["crates/jazz-napi/index.cjs", "crates/jazz-napi/index.mjs"]
@@ -276,7 +329,7 @@ export function nativeArtifactFingerprint(root, kind, profile, targetOverride) {
     surfaceHash.update(existsSync(join(root, path)) ? readFileSync(join(root, path)) : "missing");
     surfaceHash.update("\0");
   }
-  return sha256(`${manifest.packageInputs}\0${surfaceHash.digest("hex")}`);
+  return sha256(`${packageInputs}\0${surfaceHash.digest("hex")}`);
 }
 
 export const manifestPath = (root, kind) => {

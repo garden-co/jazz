@@ -1,3 +1,6 @@
+// Global restart-persistent metadata ceiling across every connected peer.
+const MAX_PENDING_LARGE_VALUE_UPLOADS: usize = 1024;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CatalogueActivationMode {
     ColdOpen,
@@ -78,16 +81,35 @@ where
                 .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
             match message {
                 SyncMessage::ChunkUploadStart(start) => {
-                    // Expiry is an admission boundary, not merely a periodic
-                    // cleanup task. A new start may recreate the descriptor's
-                    // journal after eviction; an old one never resumes.
-                    self.evict_expired_staged_large_values().await?;
+                    if !self.admit_large_value_ingress(
+                        super::LARGE_VALUE_UPLOAD_START_INGRESS_CHARGE_BYTES,
+                    ) {
+                        return Ok(PublicationOutcome::settled(vec![
+                            SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                                value_ref: start.value_ref,
+                                status: crate::protocol::ChunkUploadStatus::RateLimited,
+                            }),
+                        ]));
+                    }
                     let progress = match self
                         .database
-                        .begin_large_value_upload(start.value_ref.clone())
+                        .begin_large_value_upload_with_pending_limit(
+                            start.value_ref.clone(),
+                            MAX_PENDING_LARGE_VALUE_UPLOADS,
+                        )
                         .await
                     {
                         Ok(progress) => progress,
+                        Err(groove::db::Error::PendingLargeValueUploadLimitExceeded { .. }) => {
+                            return Ok(PublicationOutcome::settled(vec![
+                                SyncMessage::ChunkUploadResult(
+                                    crate::protocol::ChunkUploadResult {
+                                        value_ref: start.value_ref,
+                                        status: crate::protocol::ChunkUploadStatus::RateLimited,
+                                    },
+                                ),
+                            ]));
+                        }
                         Err(error) if large_value_upload_is_rejected(&error) => {
                             return Ok(PublicationOutcome::settled(vec![
                                 SyncMessage::ChunkUploadResult(
@@ -117,7 +139,6 @@ where
                     ]))
                 }
                 SyncMessage::ChunkUploadNodes(batch) => {
-                    self.evict_expired_staged_large_values().await?;
                     let upload_exists = self
                         .database
                         .pending_large_value_uploads()
@@ -162,7 +183,6 @@ where
                         .continue_large_value_upload_if_current(
                             batch.value_ref.clone(),
                             batch.chunks,
-                            self.large_value_staging_policy.max_age_ms,
                         )
                         .await
                     {
@@ -252,7 +272,7 @@ where
                         .await?;
                     self.drain_parked_commit_units().await
                 }
-                SyncMessage::ViewUpdate {
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
                     settled_through,
                     reset_result_set,
@@ -264,7 +284,7 @@ where
                     terminal_operations,
                     program_fact_adds,
                     program_fact_removes,
-                } => {
+                }) => {
                     self.apply_view_update(ViewUpdateParts {
                         subscription,
                         settled_through,
@@ -287,10 +307,10 @@ where
                 SyncMessage::RegisterShape {
                     shape_id,
                     ast,
-                    opts: _,
+                    opts,
                 } => {
-                    validate_shape_ast_size(&ast).map_err(|_| {
-                        Error::UnsupportedSyncMessage("shape AST exceeds byte limit")
+                    validate_shape_registration_size(&ast, &opts).map_err(|_| {
+                        Error::UnsupportedSyncMessage("shape registration exceeds byte limit")
                     })?;
                     self.register_shape(shape_id, ast)?;
                     Ok(PublicationOutcome::settled(Vec::new()))
@@ -740,6 +760,7 @@ where
             .insert(staged.publication.schema.id, staged.mapping.clone());
         self.catalogue.lens_path_cache.clear();
         self.catalogue.compiled_lens_cache.clear();
+        self.catalogue.physical_write_plan_cache.clear();
         self.query.version_storage_sources_cache.clear();
         self.query.query_shape_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
@@ -761,6 +782,7 @@ where
             .remove(&staged.publication.schema.id);
         self.catalogue.lens_path_cache.clear();
         self.catalogue.compiled_lens_cache.clear();
+        self.catalogue.physical_write_plan_cache.clear();
         self.query.version_storage_sources_cache.clear();
         self.query.query_shape_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
@@ -1082,9 +1104,9 @@ where
                         if !physical_value_epoch_is_compatible(
                             &source_column.column_type,
                             &target_column.column_type,
-                        ) {
+                        ) || source_column.large_value_kind != target_column.large_value_kind {
                             return Err(Error::InvalidCatalogueUpdate(
-                                "column transform changes variant registry non-additively",
+                                "column transform changes physical value or large-value semantic kind",
                             ));
                         }
                         columns.insert(column.clone(), target_column.clone());

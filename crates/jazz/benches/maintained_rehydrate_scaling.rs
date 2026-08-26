@@ -164,13 +164,13 @@ fn run_rung(source_rows: usize) {
 }
 
 fn update_counts(update: &SyncMessage) -> (usize, usize, usize) {
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
         version_carriers,
         version_bundles,
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected one view update");
     };

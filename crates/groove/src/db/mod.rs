@@ -13,6 +13,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::str;
+use std::sync::{Arc, Weak};
 use std::task::{Poll, Waker};
 
 use futures::lock::Mutex as AsyncMutex;
@@ -93,9 +94,151 @@ struct LargeValueNodeReferences {
     children: Vec<crate::large_values::NodeRef>,
 }
 
+fn unique_large_value_children(
+    node: &crate::large_values::ChunkNode,
+) -> Vec<crate::large_values::NodeRef> {
+    match node {
+        crate::large_values::ChunkNode::Leaf { .. } => Vec::new(),
+        crate::large_values::ChunkNode::Branch { children, .. } => {
+            canonical_large_value_children(children.iter().map(|child| child.node_ref.clone()))
+        }
+    }
+}
+
+/// Metadata child edges describe physical ownership rather than a logical
+/// byte order. Normalize them on every read/write boundary so historical
+/// logical-order vectors and duplicate child occurrences retain their exact
+/// one-edge-per-physical-child meaning.
+fn canonical_large_value_children(
+    children: impl IntoIterator<Item = crate::large_values::NodeRef>,
+) -> Vec<crate::large_values::NodeRef> {
+    children
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Apply physical-node ownership transitions against one read-your-own-write
+/// overlay. Each active parent contributes one reference to each distinct
+/// child node, regardless of how many logical occurrences of that child the
+/// parent's branch contains. Shared descendants reached through distinct
+/// active parents still receive one reference from each parent.
+async fn large_value_node_transition_operations<S>(
+    storage: &S,
+    mut node_updates: BTreeMap<crate::large_values::NodeRef, LargeValueNodeReferences>,
+    mut pending: Vec<(crate::large_values::NodeRef, i8)>,
+    allow_missing_positive_metadata: bool,
+) -> Result<Vec<OwnedWriteOperation>, Error>
+where
+    S: OrderedKvStorage + ?Sized,
+{
+    let mut node_budget = crate::large_values::PhysicalTraversalNodeBudget::new();
+    node_budget
+        .consume_many(node_updates.len())
+        .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
+    let mut reclaim_candidates = BTreeSet::new();
+    while let Some((node_ref, delta)) = pending.pop() {
+        let mut metadata = if let Some(metadata) = node_updates.remove(&node_ref) {
+            metadata
+        } else {
+            node_budget
+                .consume()
+                .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
+            match storage
+                .get(
+                    LARGE_VALUE_METADATA_CF.to_owned(),
+                    large_value_node_key(&node_ref)?,
+                )
+                .await?
+            {
+                Some(encoded) => postcard::from_bytes(&encoded).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot decode node references: {error}"
+                    ))
+                })?,
+                None if delta > 0 && allow_missing_positive_metadata => {
+                    LargeValueNodeReferences::default()
+                }
+                None => {
+                    return Err(Error::InvalidLargeValueMetadata(
+                        "active node reference metadata is missing".to_owned(),
+                    ));
+                }
+            }
+        };
+        metadata.children = canonical_large_value_children(metadata.children);
+        let crossed_zero = if delta > 0 {
+            let crossed = metadata.references == 0;
+            metadata.references = metadata.references.checked_add(1).ok_or_else(|| {
+                Error::InvalidLargeValueMetadata("node reference count overflow".to_owned())
+            })?;
+            reclaim_candidates.remove(&node_ref);
+            crossed
+        } else {
+            metadata.references = metadata.references.checked_sub(1).ok_or_else(|| {
+                Error::InvalidLargeValueMetadata("node reference count underflow".to_owned())
+            })?;
+            let crossed = metadata.references == 0;
+            if crossed {
+                reclaim_candidates.insert(node_ref.clone());
+            }
+            crossed
+        };
+        if crossed_zero {
+            pending.extend(
+                metadata
+                    .children
+                    .iter()
+                    .cloned()
+                    .map(|child| (child, delta)),
+            );
+        }
+        node_updates.insert(node_ref, metadata);
+    }
+    let mut operations = Vec::new();
+    for (node_ref, metadata) in node_updates {
+        operations.push(OwnedWriteOperation::Set {
+            cf: LARGE_VALUE_METADATA_CF.to_owned(),
+            key: large_value_node_key(&node_ref)?,
+            value: postcard::to_allocvec(&metadata).map_err(|error| {
+                Error::InvalidLargeValueMetadata(format!("cannot encode node references: {error}"))
+            })?,
+        });
+        if metadata.references == 0 && reclaim_candidates.contains(&node_ref) {
+            operations.push(OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: large_value_reclaim_key(&node_ref)?,
+                value: postcard::to_allocvec(&node_ref).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot encode reclaim entry: {error}"
+                    ))
+                })?,
+            });
+        }
+    }
+    Ok(operations)
+}
+
 #[derive(Clone)]
 struct MetadataChunkInstallObserver {
     storage: std::rc::Weak<LayoutStorage>,
+    lifecycle: Weak<AsyncMutex<()>>,
+    resident_install: Option<ResidentLifecycleInstall>,
+}
+
+#[derive(Clone)]
+struct ResidentLifecycleInstall {
+    storage: OwnedStorage<'static>,
+    staged: Rc<RefCell<StagedWriteState>>,
+    /// Whether the database currently owns `lifecycle` on behalf of resident
+    /// publications. A late installer takes the regular lock only after that
+    /// guard is released.
+    lifecycle_held: Rc<Cell<bool>>,
+    /// Before durability, installation metadata belongs in the publication
+    /// snapshot; afterwards it is a serialized follow-on write.
+    durable: Rc<Cell<bool>>,
+    install_failures: crate::chunks::PublicationInstallFailures,
 }
 
 impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
@@ -110,18 +253,38 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
                     "database storage closed during chunk installation".to_owned(),
                 )
             })?;
-            let node: crate::large_values::ChunkNode = postcard::from_bytes(&encoded)
-                .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
-            let children = match node {
-                crate::large_values::ChunkNode::Leaf { .. } => Vec::new(),
-                crate::large_values::ChunkNode::Branch { children, .. } => children
-                    .into_iter()
-                    .map(|child| child.node_ref)
-                    .collect::<Vec<_>>(),
+            let resident_install = self.resident_install.clone();
+            let _lifecycle = if resident_install
+                .as_ref()
+                .is_none_or(|install| !install.lifecycle_held.get())
+            {
+                Some(
+                    self.lifecycle
+                        .upgrade()
+                        .ok_or_else(|| {
+                            crate::chunks::ChunkError::Backend(
+                                "database lifecycle closed during chunk installation".to_owned(),
+                            )
+                        })?
+                        .lock_owned()
+                        .await,
+                )
+            } else {
+                None
             };
+            let read_storage: &dyn OrderedKvStorage = match resident_install.as_ref() {
+                Some(install) if !install.durable.get() => install.storage.as_ref(),
+                _ => storage.as_ref(),
+            };
+            let node = crate::large_values::decode_node_untyped_authenticated(
+                node_ref.object_hash,
+                &encoded,
+            )
+            .map_err(|_| crate::chunks::ChunkError::Integrity)?;
+            let children = unique_large_value_children(&node);
             let node_key = large_value_node_key(&node_ref)
                 .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
-            let existing = storage
+            let existing = read_storage
                 .get(LARGE_VALUE_METADATA_CF.to_owned(), node_key.clone())
                 .await
                 .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
@@ -131,16 +294,18 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
                 .transpose()
                 .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?
                 .unwrap_or_default();
-            if !metadata.children.is_empty() && metadata.children != children {
+            let existing_children =
+                canonical_large_value_children(std::mem::take(&mut metadata.children));
+            if !existing_children.is_empty() && existing_children != children {
                 return Err(crate::chunks::ChunkError::Integrity);
             }
             let newly_discovered_active_children =
-                metadata.references > 0 && metadata.children.is_empty() && !children.is_empty();
+                metadata.references > 0 && existing_children.is_empty() && !children.is_empty();
             metadata.children = children.clone();
 
             let root_key = large_value_root_key(&node_ref)
                 .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
-            let root_encoded = storage
+            let root_encoded = read_storage
                 .get(LARGE_VALUE_METADATA_CF.to_owned(), root_key.clone())
                 .await
                 .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
@@ -157,18 +322,23 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
                 && !root_references.node_active;
             if activate_root {
                 root_references.node_active = true;
-                metadata.references = metadata.references.checked_add(1).ok_or_else(|| {
-                    crate::chunks::ChunkError::Backend("node reference count overflow".to_owned())
-                })?;
             }
-            let activate_children =
-                newly_discovered_active_children || (activate_root && metadata.references == 1);
-            let mut operations = vec![OwnedWriteOperation::Set {
-                cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                key: node_key,
-                value: postcard::to_allocvec(&metadata)
-                    .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?,
-            }];
+            let mut initial = BTreeMap::from([(node_ref.clone(), metadata)]);
+            let mut transitions = Vec::new();
+            if activate_root {
+                transitions.push((node_ref.clone(), 1));
+            }
+            if newly_discovered_active_children {
+                transitions.extend(children.into_iter().map(|child| (child, 1)));
+            }
+            let mut operations = large_value_node_transition_operations(
+                read_storage,
+                std::mem::take(&mut initial),
+                transitions,
+                true,
+            )
+            .await
+            .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
             if activate_root {
                 operations.push(OwnedWriteOperation::Set {
                     cf: LARGE_VALUE_METADATA_CF.to_owned(),
@@ -177,39 +347,26 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
                         .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?,
                 });
             }
-            if activate_children {
-                for child in children {
-                    let child_key = large_value_node_key(&child)
-                        .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
-                    let encoded = storage
-                        .get(LARGE_VALUE_METADATA_CF.to_owned(), child_key.clone())
-                        .await
-                        .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
-                    let mut child_metadata: LargeValueNodeReferences = encoded
-                        .as_deref()
-                        .map(postcard::from_bytes)
-                        .transpose()
-                        .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?
-                        .unwrap_or_default();
-                    child_metadata.references =
-                        child_metadata.references.checked_add(1).ok_or_else(|| {
-                            crate::chunks::ChunkError::Backend(
-                                "child reference count overflow".to_owned(),
-                            )
-                        })?;
-                    operations.push(OwnedWriteOperation::Set {
-                        cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                        key: child_key,
-                        value: postcard::to_allocvec(&child_metadata).map_err(|error| {
-                            crate::chunks::ChunkError::Backend(error.to_string())
-                        })?,
-                    });
+            if let Some(install) = resident_install {
+                if install.durable.get() {
+                    match storage.write_many(operations).await {
+                        Ok(()) => Ok(()),
+                        Err(error) => {
+                            let error = crate::chunks::ChunkError::Backend(error.to_string());
+                            install.install_failures.record(node_ref, error.clone());
+                            Err(error)
+                        }
+                    }
+                } else {
+                    install.staged.borrow_mut().extend(operations);
+                    Ok(())
                 }
+            } else {
+                storage
+                    .write_many(operations)
+                    .await
+                    .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))
             }
-            storage
-                .write_many(operations)
-                .await
-                .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))
         })
     }
 }
@@ -224,7 +381,6 @@ pub use crate::ivm::{
 pub struct Database {
     storage: Rc<LayoutStorage>,
     chunk_storage: Rc<dyn crate::chunks::ChunkStorage>,
-    resident_chunks: crate::chunks::ResidentChunkStorage,
     chunk_resolver: Rc<dyn crate::chunks::MissingChunkResolver>,
     /// Owns query/index maintenance over the storage-backed base tables.
     ivm_runtime: IvmRuntime,
@@ -233,32 +389,27 @@ pub struct Database {
     storage_read_metrics: Rc<RefCell<StorageReadMetrics>>,
     next_publication_id: u64,
     durable_publication_frontier: Option<PublicationId>,
-    resident_publications: BTreeMap<PublicationId, ResidentPublication>,
+    resident_publications: BTreeMap<PublicationId, Rc<RefCell<StagedWriteState>>>,
     persisted_publications: BTreeSet<PublicationId>,
-    retracted_publications: BTreeSet<PublicationId>,
     resident_writes: Rc<RefCell<StagedWriteState>>,
     publication_persistence: Rc<RefCell<PersistenceOrder>>,
     /// Serializes the durable upload journal, separate blob staging, expiry,
     /// promotion, and reclamation lifecycle. The blob backend may be separate
     /// from metadata storage, so this boundary prevents both intent eviction
     /// during an in-flight put and lost reference-count updates across uploads.
-    large_value_lifecycle: Rc<AsyncMutex<()>>,
+    large_value_lifecycle: Arc<AsyncMutex<()>>,
+    /// Retains the lifecycle mutex while resident publications contain a
+    /// root/node transition that has not crossed the durable frontier. Later
+    /// resident publications can join the same protected sequence without
+    /// waiting for themselves to persist; independent chunk installation is
+    /// held outside it until every such transition is durable.
+    large_value_publication_lifecycle_guard: Option<futures::lock::OwnedMutexGuard<()>>,
+    /// Shared with resident install observers so follow-on writes retain
+    /// lifecycle serialization after their publication becomes durable.
+    large_value_lifecycle_held: Rc<Cell<bool>>,
+    large_value_lifecycle_publications: BTreeSet<PublicationId>,
     abandoned_application: Rc<Cell<bool>>,
     poisoned: bool,
-}
-
-/// All state Grove must retain to undo one not-yet-durable resident
-/// publication through the same IVM runtime that made it visible.
-///
-/// This deliberately lives below Jazz: it is a general publication ownership
-/// primitive, not a large-value-specific overlay or evaluator.
-#[derive(Clone)]
-struct ResidentPublication {
-    operations: Vec<OwnedWriteOperation>,
-    inverse_table_deltas: Vec<TableDelta>,
-    resident_node_refs: Vec<crate::large_values::NodeRef>,
-    notifications_deferred: bool,
-    retractable: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -276,50 +427,19 @@ enum AppliedBatchLifecycle {
 pub struct AppliedBatch {
     publication: PublicationId,
     storage: Rc<LayoutStorage>,
-    operations: Vec<OwnedWriteOperation>,
+    operations: Rc<RefCell<StagedWriteState>>,
+    resident_install_durable: Option<Rc<Cell<bool>>>,
     order: Rc<RefCell<PersistenceOrder>>,
     ivm_tick_time: Duration,
-    storage_writes: StorageWriteMetrics,
     tick: TickMetrics,
     notifications_deferred: bool,
-    retractable: bool,
-    resident_large_values: Vec<crate::large_values::ResidentLargeValueStage>,
-    resident_chunks: crate::chunks::ResidentChunkStorage,
-    large_value_stager: crate::db::facade::LargeValueStager,
     lifecycle: Rc<Cell<AppliedBatchLifecycle>>,
     abandoned_application: Rc<Cell<bool>>,
-}
-
-/// A persistence attempt can fail either in the ordinary storage write or in
-/// the Groove-owned resident large-value finalization that precedes it.  Keep
-/// the latter typed so callers observe the same chunk/IVM failure they would
-/// get from the established staged-value path.
-#[derive(Debug, Error)]
-enum PersistenceFailure {
-    #[error(transparent)]
-    Storage(#[from] crate::storage::Error),
-    #[error(transparent)]
-    Database(#[from] Error),
-}
-
-impl PersistenceFailure {
-    fn into_database_error(self) -> Error {
-        match self {
-            Self::Storage(error) => Error::from(error),
-            Self::Database(error) => error,
-        }
-    }
 }
 
 impl AppliedBatch {
     pub fn publication(&self) -> PublicationId {
         self.publication
-    }
-
-    /// Whether a failed receipt must be settled through the reversible
-    /// resident-publication path.
-    pub fn is_retractable(&self) -> bool {
-        self.retractable
     }
 
     pub async fn persist(&self) -> PersistedBatch {
@@ -347,43 +467,24 @@ impl AppliedBatch {
             Poll::Pending
         })
         .await;
+        let operations = self.operations.borrow().clone().into_operations();
+        let storage_writes = StorageWriteMetrics::from_operations(
+            &operations
+                .iter()
+                .map(OwnedWriteOperation::as_write_operation)
+                .collect::<Vec<_>>(),
+        );
         let storage_start = Instant::now();
         let result = match turn {
-            Ok(()) => {
-                let mut staging_error = None;
-                let mut finalized_stages = Vec::new();
-                for stage in &self.resident_large_values {
-                    if let Err(error) = self
-                        .large_value_stager
-                        .stage_and_finalize_resident(stage, &self.resident_chunks)
-                        .await
-                    {
-                        staging_error = Some(error);
-                        break;
-                    }
-                    finalized_stages.push(stage.id());
-                }
-                match staging_error {
-                    Some(error) => Err(PersistenceFailure::Database(error)),
-                    None => {
-                        let result = self.storage.write_many(self.operations.clone()).await;
-                        if result.is_err() {
-                            // A receipt only becomes durable because this row
-                            // write was about to consume it.  When that write
-                            // fails, reverse the receipt immediately instead
-                            // of leaving an orphan for TTL. The resident IVM
-                            // publication itself is retracted by the caller.
-                            for id in finalized_stages {
-                                let _ = self.large_value_stager.evict_unconsumed_stage(id).await;
-                            }
-                        }
-                        result.map_err(PersistenceFailure::Storage)
-                    }
-                }
-            }
-            Err(error) => Err(PersistenceFailure::Storage(error)),
+            Ok(()) => self.storage.write_many(operations).await,
+            Err(error) => Err(error),
         };
         let storage_write_time = storage_start.elapsed();
+        if result.is_ok()
+            && let Some(durable) = &self.resident_install_durable
+        {
+            durable.set(true);
+        }
         self.lifecycle
             .set(AppliedBatchLifecycle::PersistenceComplete);
         attempt.completed = true;
@@ -417,13 +518,14 @@ impl AppliedBatch {
             metrics: CommitMetrics {
                 storage_write_time,
                 ivm_tick_time: self.ivm_tick_time,
-                storage_write_count: self.storage_writes.total.count,
-                storage_write_bytes: self.storage_writes.total.bytes,
-                storage_writes: self.storage_writes,
+                storage_write_count: storage_writes.total.count,
+                storage_write_bytes: storage_writes.total.bytes,
+                storage_writes,
                 tick: self.tick.clone(),
             },
             receipt: PersistenceReceipt {
                 lifecycle: Rc::clone(&self.lifecycle),
+                order: Rc::clone(&self.order),
                 abandoned_application: Rc::clone(&self.abandoned_application),
             },
         }
@@ -456,40 +558,21 @@ struct PersistenceOrder {
     next: u64,
     waiters: BTreeMap<u64, Waker>,
     failure: Option<String>,
-    /// Publication ids deliberately retracted before they reached storage.
-    /// They advance ordering without ever being written.
-    cancelled: BTreeSet<u64>,
-}
-
-fn advance_cancelled_publications(order: &mut PersistenceOrder) {
-    while order.cancelled.remove(&order.next) {
-        order.next = order.next.saturating_add(1);
-    }
-    if let Some(waiter) = order.waiters.remove(&order.next) {
-        waiter.wake();
-    }
 }
 
 /// Completion of one owned publication persistence operation.
 #[must_use = "persistence completion must be settled on its database"]
 pub struct PersistedBatch {
     publication: PublicationId,
-    result: Result<(), PersistenceFailure>,
+    result: Result<(), crate::storage::Error>,
     notifications_deferred: bool,
     metrics: CommitMetrics,
     receipt: PersistenceReceipt,
 }
 
-impl PersistedBatch {
-    /// Whether the owned ordered durability attempt failed.  Retractable
-    /// resident publications use this to select exact inverse settlement.
-    pub fn failed(&self) -> bool {
-        self.result.is_err()
-    }
-}
-
 struct PersistenceReceipt {
     lifecycle: Rc<Cell<AppliedBatchLifecycle>>,
+    order: Rc<RefCell<PersistenceOrder>>,
     abandoned_application: Rc<Cell<bool>>,
 }
 
@@ -535,12 +618,6 @@ pub enum Error {
     DatabasePoisoned,
     #[error("publication does not belong to this database: {0:?}")]
     PublicationNotFound(PublicationId),
-    #[error("resident publication was retracted after its durability attempt failed: {0:?}")]
-    PublicationRetracted(PublicationId),
-    #[error("publication is not marked retractable: {0:?}")]
-    NonRetractablePublication(PublicationId),
-    #[error("cannot safely retract resident publication: {0}")]
-    InvalidResidentRetraction(String),
     #[error("subscription ended")]
     SubscriptionEnded,
     #[error(transparent)]
@@ -559,6 +636,8 @@ pub enum Error {
     InvalidPersistedIndex(String),
     #[error("invalid persisted large-value metadata: {0}")]
     InvalidLargeValueMetadata(String),
+    #[error("pending large-value upload limit reached: {limit}")]
+    PendingLargeValueUploadLimitExceeded { limit: usize },
     #[error("index key arity mismatch for {index}: expected at most {expected}, got {actual}")]
     IndexKeyArity {
         index: String,
@@ -603,6 +682,8 @@ pub enum Error {
     TableFieldDefinitionMismatch { table: String, field: String },
     #[error("index definition does not match the live catalogue: {table}.{index}")]
     TableIndexDefinitionMismatch { table: String, index: String },
+    #[error("cannot register index {table}.{index} while database publications remain resident")]
+    TableIndexRegistrationWhilePublicationsResident { table: String, index: String },
     #[error("index {table}.{index} references unknown field {field}")]
     TableIndexFieldNotFound {
         table: String,

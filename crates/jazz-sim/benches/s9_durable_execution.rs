@@ -566,15 +566,18 @@ fn apply_transition(
     } else {
         "running"
     };
-    jazz::db::block_on(tx.insert_with_id(
+    jazz::db::block_on(tx.insert(
         INSTANCES,
-        row,
         cells_map([
             ("workflow", Value::Uuid(workflow.0)),
             ("state", Value::String(state.to_owned())),
             ("currentStep", Value::U64(next_step)),
             ("wakeAt", Value::U64(0)),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        },
     ))?;
     let _tx_id = jazz::db::block_on(tx.commit())?;
     jazz::db::block_on(client.db.tick())?;
@@ -1171,13 +1174,13 @@ fn storage_bytes(path: &std::path::Path) -> u64 {
 
 fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
             ..
-        } => {
+        }) => {
             version_bundles
                 .iter()
                 .flat_map(|bundle| bundle.versions.iter())

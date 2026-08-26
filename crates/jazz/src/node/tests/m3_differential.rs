@@ -1622,12 +1622,12 @@ fn apply_result_members(
     update: &SyncMessage,
     root_table: &str,
 ) {
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -1651,12 +1651,12 @@ fn apply_result_members(
 }
 
 fn apply_aggregate_payload(values: &mut BTreeMap<u64, Value>, update: &SyncMessage, output: &str) {
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         program_fact_adds,
         program_fact_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };

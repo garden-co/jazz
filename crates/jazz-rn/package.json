@@ -1,29 +1,34 @@
 {
   "name": "jazz-rn",
   "version": "2.0.0-alpha.53",
-  "description": "cojson core for react native",
+  "description": "React Native native-relay bridge for Jazz (development builds only)",
   "keywords": [
+    "JazzNativeRelay.xcframework",
     "android",
     "ios",
+    "native",
     "react-native"
   ],
-  "homepage": "https://github.com/antoniomuso/jazz-rn#readme",
+  "homepage": "https://github.com/garden-co/jazz/tree/main/crates/jazz-rn#readme",
   "bugs": {
-    "url": "https://github.com/antoniomuso/jazz-rn/issues"
+    "url": "https://github.com/garden-co/jazz/issues"
   },
   "license": "MIT",
   "author": "Antonio Musolino <antoniomusolino007@gmail.com> (https://github.com/antoniomuso)",
   "repository": {
     "type": "git",
-    "url": "git+https://https://github.com/garden-co/jazz.git"
+    "url": "git+https://github.com/garden-co/jazz.git"
   },
   "files": [
     "src",
+    "scripts",
     "lib",
     "android",
     "ios",
-    "cpp",
-    "JazzRnFramework.xcframework",
+    "native/**",
+    "android/src/main/jniLibs/**/*",
+    "JazzNativeRelay.xcframework/**",
+    "app.plugin.js",
     "*.podspec",
     "react-native.config.js",
     "!ios/build",
@@ -45,6 +50,13 @@
       "source": "./src/index.tsx",
       "default": "./lib/module/index.js"
     },
+    "./relay": {
+      "types": "./lib/typescript/src/relay.d.ts",
+      "source": "./src/relay.ts",
+      "default": "./lib/module/relay.js"
+    },
+    "./app.plugin": "./app.plugin.js",
+    "./app.plugin.js": "./app.plugin.js",
     "./package.json": "./package.json"
   },
   "publishConfig": {
@@ -53,22 +65,16 @@
     "tag": "alpha"
   },
   "scripts": {
-    "ubrn:ios": "ubrn build ios --and-generate --release",
-    "ubrn:android": "ubrn build android --and-generate --release",
-    "ubrn:checkout": "ubrn checkout",
-    "ubrn:clean": "rm -rfv cpp/ android/CMakeLists.txt android/src/main/java android/*.cpp ios/ src/Native* src/index.*ts* src/generated/",
-    "build:rn": "pnpm ubrn:ios && pnpm ubrn:android",
-    "build": "pnpm build:rn",
-    "build:rn:android": "pnpm ubrn:android",
-    "build:rn:ios": "pnpm ubrn:ios",
+    "build": "bob build",
+    "test:codegen": "bash scripts/test-codegen.sh",
+    "build:relay:android": "bash scripts/build-relay-artifacts.sh android",
+    "build:relay:ios": "bash scripts/build-relay-artifacts.sh ios",
     "test": "jest",
     "typecheck": "tsc",
     "lint": "eslint \"**/*.{js,ts,tsx}\"",
     "prepare": "bob build"
   },
-  "dependencies": {
-    "uniffi-bindgen-react-native": "0.30.0-1"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@commitlint/config-conventional": "^19.8.1",
     "@eslint/compat": "^1.3.2",
@@ -96,8 +102,14 @@
     "typescript": "catalog:default"
   },
   "peerDependencies": {
+    "expo": ">=54",
     "react": "*",
     "react-native": "*"
+  },
+  "peerDependenciesMeta": {
+    "expo": {
+      "optional": true
+    }
   },
   "commitlint": {
     "extends": [
@@ -120,7 +132,7 @@
   },
   "packageManager": "pnpm@10.16.1",
   "codegenConfig": {
-    "name": "JazzRnSpec",
+    "name": "JazzRelaySpec",
     "type": "modules",
     "jsSrcsDir": "src",
     "android": {

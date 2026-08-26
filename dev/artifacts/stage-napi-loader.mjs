@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -13,13 +13,19 @@ export function stageNapiLoader(root, platform) {
   const fingerprint = /expectedNativeArtifactFingerprint:\s*"([a-f0-9]{64})"/.exec(pointer)?.[1];
   if (!generation || !fingerprint) throw new Error("active NAPI generation pointer is invalid");
   const stage = join(packageDir, ".native-artifacts", generation);
+  if (!existsSync(stage) || !lstatSync(stage).isDirectory() || lstatSync(stage).isSymbolicLink())
+    throw new Error("active NAPI generation must be a real directory");
   const binding = join(stage, `jazz-napi.${platform}.node`);
-  for (const path of [
-    binding,
-    join(stage, "index.js"),
-    join(stage, ".jazz-artifact-manifest.json"),
-  ])
-    if (!existsSync(path)) throw new Error(`active NAPI generation is missing ${path}`);
+  for (const [path, label] of [
+    [binding, binding],
+    [join(stage, "index.js"), "generated loader"],
+    [join(stage, ".jazz-artifact-manifest.json"), "sealed manifest"],
+  ]) {
+    if (!existsSync(path)) throw new Error(`active NAPI generation is missing ${label}`);
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink())
+      throw new Error(`active NAPI generation ${label} must be a real regular file`);
+  }
   const manifest = JSON.parse(readFileSync(join(stage, ".jazz-artifact-manifest.json"), "utf8"));
   if (manifest.kind !== "napi" || manifest.profile !== "release")
     throw new Error("active NAPI generation manifest has the wrong kind/profile");

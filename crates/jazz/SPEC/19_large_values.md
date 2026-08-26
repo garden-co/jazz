@@ -16,6 +16,17 @@ view-specific grant check. Jazz never parses content trees, applies edit
 tails, computes UTF-16 metrics, interprets JSON, or decides which chunks an IVM
 operator needs.
 
+Each runtime column also freezes an internal large-value semantic kind at
+schema lowering: bytes, text, or JSON. JSON remains the existing logical
+string-shaped Groove value, but the physical-row descriptor carries its
+schema-derived JSON context. Inline primitives and chunked descriptors do not
+duplicate that context: their ordinary Groove enum schema is parameterized by
+the column kind. Every independently addressed immutable tree node carries a
+Groove-owned kind witness, checked against the schema-derived expected kind and
+bound into the locator-independent logical hash, so a JSON root cannot be
+replayed as text (or vice versa). The witness is not client-chosen or visible to
+logical queries, policies, indices, or application results.
+
 Invariant digest:
 
 - `INV-CONTENT-1`: Jazz does not duplicate Groove's large-value semantics.
@@ -65,7 +76,7 @@ Every retrievable node has two independent identities:
 ```text
 NodeRef {
   object_hash,     // commits to exact encoded bytes and child locators
-  locator,         // random opaque Groove storage key
+  locator,         // exact random 256-bit retrieval capability
 }
 ```
 
@@ -85,7 +96,8 @@ The private blob backend may deduplicate exact objects by object/content hash, b
 public/proxied namespace is opaque locator to internal object. Multiple locators
 may map to one physical blob without revealing that equality.
 
-Locators are random with sufficient entropy as defense in depth, excluded from Groove logical
+Locators are exactly 256 random bits drawn by Groove from the operating-system
+CSPRNG as defense in depth, excluded from Groove logical
 identity, and omitted or irreversibly redacted from logs, traces, analytics,
 error messages and metrics labels. Unknown, expired and unauthorized locator
 lookups expose indistinguishable public failure details.
@@ -145,57 +157,13 @@ staging before it is intentionally not atomic: unreachable immutable chunks are
 harmless and expire. The row MUST NOT publish unless its exact root is available
 and Groove can validate the bounded tree/descriptor. Finalization itself is
 that admission boundary: regardless of prior staging call order, it validates
-the complete authenticated reachable tree and final logical scalar, and binds
+the complete authenticated reachable tree, canonically replays the edit tail
+against that immutable base (including source-derived text coordinates and
+whole-value-only JSON replacement), validates the final logical scalar, and binds
 the pending upload to the exact canonical descriptor before issuing a receipt.
 A pending upload's chunk journal or accounting cannot be reused to finalize a
 different descriptor. A failed/rejected mutation publishes neither the row
 version nor root reachability.
-
-### Resident direct-value publication
-
-The ordinary synchronous `insert`/`insert_with_id` surface has the same local
-lane contract for an oversized complete primitive as for an inline value: once
-it returns its `WriteHandle`, the pending row is immediately visible to local
-reads, uniqueness checks, same-turn update/delete/restore calls, and local
-subscriptions. The handle, rather than an artificial async constructor, is
-the observation point for the later durable outcome. This is not an exception
-to `INV-CONTENT-4`: the transient descriptor and its chunks belong to one
-unpublished _resident publication_, not to Jazz history or to another reader.
-
-Groove may therefore construct direct host input in its bounded resident chunk
-store, apply the normal physical-record/IVM delta, and start the durable
-pipeline afterwards. The pipeline is strictly ordered:
-
-```text
-resident row + resident chunks (local lane only)
-  -> durable timestamped upload intent bound to the exact descriptor/receipt
-  -> immutable blob/node installation
-  -> durable staged receipt
-  -> one metadata write: consume receipt + install root references + row
-  -> durable promotion, or exact resident retraction on any failure
-```
-
-Before the final metadata write, a restart sees at most an ordinary expiring
-upload intent, never a durable row reference. On an error before promotion,
-Groove retracts that exact still-pending publication through the normal inverse
-IVM delta, drops its resident overlay and chunks, discards deferred
-notifications, and reports the same transaction rejected. A later resident
-publication remains usable only when its own ordering and dependencies still
-hold; a failure is not allowed to leave a phantom row, index entry, uniqueness
-claim, or subscription delta. Once durable promotion starts, the existing
-ordered-persistence failure rules apply; the database poisons only if it can no
-longer prove that resident state was restored.
-
-If the final owner-row write itself reports failure, Groove eagerly reverses
-the just-created receipt and its reference retainers before it retracts the
-resident publication; safe blob deletion then uses the normal reclaim queue.
-That differs from a process crash between receipt creation and owner-row
-acceptance: recovery deliberately retains that otherwise-unowned receipt for
-Jazz's ordinary bounded TTL policy, while never treating it as a row.
-
-This lifecycle is an internal Groove publication primitive, shared by any
-future asynchronous storage preparation. It is not a TypeScript overlay, a
-second evaluator, or a new asynchronous form of the ordinary mutation API.
 
 Groove persists timestamped retainer claims keyed by the completed descriptor.
 After ordinary Jazz write authorization, the same Groove physical-record batch
@@ -232,9 +200,11 @@ accounting. Jazz charges every upload against a simple incoming-byte
 rate limit, including an idempotent upload whose immutable mappings already
 exist. This bounds ingress work rather than retained physical storage. Jazz
 queries opaque receipts to evict expired roots and never enumerates locators or
-chunks. Expiry is checked again when accepting the referencing row and may also
-be driven periodically by a host scheduler. If the receipt is missing or too
-old, the row write fails safely and the client must upload the value again.
+chunks. Expiry is performed only by explicit host maintenance. Ordinary chunk
+push, finalization, and row acceptance check that the journal or receipt is
+still present, but do not reject it based on wall-clock age. If maintenance has
+removed it, the operation fails safely and the client must upload again; a
+stale handle cannot recreate an evicted journal.
 
 `RateLimited` is retryable backpressure, not rejection: the receiver retains
 the descriptor-scoped pending claim and every previously accepted node, and the
@@ -255,9 +225,10 @@ Rust `Db`, server-shell, NAPI, and WASM boundaries. Native servers/NAPI runtimes
 invoke maintenance from their host timer; browser runtimes use a JavaScript
 timer or worker alarm. A timer merely requests `evictExpiredStagedLargeValues`:
 the host never receives staging ids, locators, chunks, or deletion authority.
-Maintenance does not have to run for acceptance safety because every referencing
-row rechecks receipt age; periodic work only bounds retention of abandoned
-uploads while a process is otherwise idle.
+Maintenance is the only TTL enforcement point and bounds retention of abandoned
+uploads. Its eviction is serialized with upload continuation and receipt
+consumption, so an operation observes either a present journal/receipt or its
+absence rather than racing eviction into recreation.
 
 The initial unconfigured policy admits 256 MiB of pushed bytes per one-second
 window and expires unaccepted completed roots after ten minutes. The byte bound
@@ -441,8 +412,9 @@ UTF-16 text coordinates and byte coordinates for bytes. Invalid UTF-8 boundaries
 and UTF-16 positions splitting surrogate pairs fail rather than round.
 
 Native Rust additionally exposes `Db::insert_streaming_value`. The caller
-supplies the ordinary non-streamed row cells, the target column and scalar kind,
-and a `std::io::Read`. A bounded producer bridge feeds the same resumable push
+supplies the ordinary non-streamed row cells, the target column, and a
+`std::io::Read`; Jazz derives the scalar kind exclusively from that column's
+schema. A bounded producer bridge feeds the same resumable push
 constructor and persisted pending-upload lifecycle used by NAPI and WASM; there
 is no second reader-specific staging path. Jazz charges each finalized batch
 before Groove persists it. Jazz does not publish the row until EOF, complete

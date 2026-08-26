@@ -1326,7 +1326,7 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
     apply_message(
         &mut core,
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             subscription: SubscriptionKey {
                 shape_id: shape.shape_id(),
                 binding_id: binding.binding_id(),
@@ -1349,7 +1349,7 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
             terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
-        },
+        }),
     );
 
     let (fate, global_time, durability) = transaction_state(&mut core, tx_id);

@@ -324,9 +324,8 @@ fn seed_rows(db: &Db<RocksDbStorage>, config: ConfigRef, table_rows: usize) {
             } else {
                 (filler_row(index), filler_team(), index)
             };
-            block_on(tx.insert_with_id(
+            block_on(tx.insert(
                 TABLE,
-                row,
                 BTreeMap::from([
                     ("team".to_owned(), Value::Uuid(team.0)),
                     ("active".to_owned(), Value::Bool(true)),
@@ -336,6 +335,10 @@ fn seed_rows(db: &Db<RocksDbStorage>, config: ConfigRef, table_rows: usize) {
                         Value::String(format!("document-{index}")),
                     ),
                 ]),
+                jazz::db::InsertOptions {
+                    row_id: Some(row),
+                    ..Default::default()
+                },
             ))
             .expect("stage selective-hydration seed row");
         }
