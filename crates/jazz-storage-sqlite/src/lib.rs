@@ -45,8 +45,9 @@ impl Durability {
 /// One thread-affine SQLite ordered-KV store.
 ///
 /// The storage is executor-local like the rest of the async Groove seam. A
-/// relay owns exactly one instance per persistence scope; callers must not
-/// treat clones or separate processes as a multi-writer API.
+/// relay normally owns one instance per persistence scope. Independent handles
+/// are supported specifically for the atomic conditional primitives; this does
+/// not promote the rest of the interface to a general multi-writer API.
 pub struct SqliteStorage {
     path: PathBuf,
     durability: Durability,

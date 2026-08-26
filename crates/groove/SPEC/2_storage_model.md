@@ -118,8 +118,10 @@ commit. Backends must classify an uncertain acknowledgement conservatively as
 possibly committed; only a definitely-uncommitted outcome permits callers to
 roll back in-process state or retry the same batch.
 
-`put_if_absent` and `compare_and_delete` are atomic across independent handles
-to the same durable store (`INV-STORAGE-28`). Their comparison is over exact
+`put_if_absent` and `compare_and_delete` are atomic at the persistence scope
+(`INV-STORAGE-28`). A backend either serializes them across every concurrently
+open handle (IDB and SQLite), shares one primitive boundary across clones
+(memory), or enforces exclusive open (RocksDB). Their comparison is over exact
 stored bytes, so deleting and reinstalling the same logical object with a new
 installation receipt cannot be mistaken for the earlier installation (ABA).
 

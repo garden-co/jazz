@@ -1,6 +1,6 @@
 //! Async IDBTree adapter for Groove's ordered storage contract.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::task::Poll;
@@ -26,6 +26,7 @@ pub struct IdbStorage<S> {
     store: S,
     column_families: Rc<RefCell<BTreeSet<String>>>,
     mutation_gate: Rc<Mutex<()>>,
+    needs_reset: Rc<Cell<bool>>,
 }
 
 impl<S> IdbStorage<S>
@@ -42,6 +43,7 @@ where
                 column_families.iter().map(|cf| (*cf).to_owned()).collect(),
             )),
             mutation_gate: Rc::new(Mutex::new(())),
+            needs_reset: Rc::new(Cell::new(false)),
         })
     }
 
@@ -88,10 +90,19 @@ where
         // batch from the newly durable tree.
         let tree = IdbTree::open(self.store.clone(), Options::default()).await?;
         *self.tree.borrow_mut() = tree;
+        self.needs_reset.set(false);
+        Ok(())
+    }
+
+    async fn ensure_ready(&self) -> Result<(), Error> {
+        if self.needs_reset.get() {
+            self.reopen_after_generation_conflict().await?;
+        }
         Ok(())
     }
 
     async fn discard_failed_tree(&self, error: Error) -> Error {
+        self.needs_reset.set(true);
         match self.reopen_after_generation_conflict().await {
             Ok(()) => error,
             Err(reset_error) => reset_error,
@@ -186,6 +197,8 @@ where
 {
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         Box::pin(async move {
+            let _guard = self.mutation_gate.lock().await;
+            self.ensure_ready().await?;
             let key = self.encoded_key(&cf, &key)?;
             Ok(self.tree().get(&key).await?)
         })
@@ -200,6 +213,7 @@ where
         Box::pin(async move {
             self.ensure_cf(&cf)?;
             let _guard = self.mutation_gate.lock().await;
+            self.ensure_ready().await?;
             let encoded_key = self.encoded_key(&cf, &key)?;
             for retry in 0..=MAX_GENERATION_CONFLICT_RETRIES {
                 let tree = self.tree();
@@ -238,6 +252,7 @@ where
         Box::pin(async move {
             self.ensure_cf(&cf)?;
             let _guard = self.mutation_gate.lock().await;
+            self.ensure_ready().await?;
             let encoded_key = self.encoded_key(&cf, &key)?;
             for retry in 0..=MAX_GENERATION_CONFLICT_RETRIES {
                 let tree = self.tree();
@@ -276,6 +291,7 @@ where
             let operations = vec![OwnedWriteOperation::Set { cf, key, value }];
             self.prevalidate_write_many(&operations)?;
             let _guard = self.mutation_gate.lock().await;
+            self.ensure_ready().await?;
             self.write_many_replaying_generation_conflicts(&operations)
                 .await
         })
@@ -286,6 +302,7 @@ where
             let operations = vec![OwnedWriteOperation::Delete { cf, key }];
             self.prevalidate_write_many(&operations)?;
             let _guard = self.mutation_gate.lock().await;
+            self.ensure_ready().await?;
             self.write_many_replaying_generation_conflicts(&operations)
                 .await
         })
@@ -294,6 +311,7 @@ where
     fn close(&self) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
             let _guard = self.mutation_gate.lock().await;
+            self.ensure_ready().await?;
             match self.tree().flush().await {
                 Ok(()) => Ok(()),
                 Err(error) => Err(self.discard_failed_tree(error.into()).await),
@@ -304,6 +322,7 @@ where
     fn flush_write_boundary(&self) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
             let _guard = self.mutation_gate.lock().await;
+            self.ensure_ready().await?;
             match self.tree().flush().await {
                 Ok(()) => Ok(()),
                 Err(error) => Err(self.discard_failed_tree(error.into()).await),
@@ -313,6 +332,8 @@ where
 
     fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         Box::pin(async move {
+            let _guard = self.mutation_gate.lock().await;
+            self.ensure_ready().await?;
             let ScanRequest {
                 cf,
                 bounds,
@@ -349,6 +370,8 @@ where
         prefix: Vec<u8>,
     ) -> StorageFuture<'_, Result<Option<super::KeyValue>, Error>> {
         Box::pin(async move {
+            let _guard = self.mutation_gate.lock().await;
+            self.ensure_ready().await?;
             let start = self.encoded_key(&cf, &prefix)?;
             let end = key_codec::prefix_upper_bound(&start).unwrap_or_else(|| vec![0xff]);
             let row = self
@@ -368,6 +391,8 @@ where
         upper: Vec<u8>,
     ) -> StorageFuture<'_, Result<Option<super::KeyValue>, Error>> {
         Box::pin(async move {
+            let _guard = self.mutation_gate.lock().await;
+            self.ensure_ready().await?;
             let start = self.encoded_key(&cf, &prefix)?;
             let mut end = self.encoded_key(&cf, &upper)?;
             end.push(0);
@@ -392,6 +417,7 @@ where
         Box::pin(async move {
             self.prevalidate_write_many(&operations)?;
             let _guard = self.mutation_gate.lock().await;
+            self.ensure_ready().await?;
             self.write_many_replaying_generation_conflicts(&operations)
                 .await
         })
@@ -416,10 +442,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use idb_tree::{BoxFuture, Commit, MemoryPageStore, Metadata};
-    use std::cell::Cell;
-
     use super::*;
+    use idb_tree::{BoxFuture, Commit, MemoryPageStore, Metadata};
 
     #[derive(Clone)]
     struct ConflictInjectingPageStore {
@@ -565,6 +589,10 @@ mod tests {
         futures::executor::block_on(async {
             let pages = CommitErrorPageStore::default();
             let storage = IdbStorage::open(pages.clone(), &["records"]).await.unwrap();
+            storage
+                .set("records".into(), b"key".to_vec(), b"old".to_vec())
+                .await
+                .unwrap();
             pages.fail_next_commit.set(true);
             pages.fail_next_reopen.set(true);
             let error = storage
@@ -572,6 +600,29 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(error.to_string().contains("deterministic reset failure"));
+            assert_eq!(
+                storage
+                    .get("records".into(), b"key".to_vec())
+                    .await
+                    .unwrap(),
+                Some(b"old".to_vec())
+            );
+            storage
+                .set("records".into(), b"later".to_vec(), b"ok".to_vec())
+                .await
+                .unwrap();
+            let fresh = IdbStorage::open(pages, &["records"]).await.unwrap();
+            assert_eq!(
+                fresh.get("records".into(), b"key".to_vec()).await.unwrap(),
+                Some(b"old".to_vec())
+            );
+            assert_eq!(
+                fresh
+                    .get("records".into(), b"later".to_vec())
+                    .await
+                    .unwrap(),
+                Some(b"ok".to_vec())
+            );
         });
     }
 
