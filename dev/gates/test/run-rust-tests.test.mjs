@@ -35,19 +35,15 @@ test("seals an actual nested receipt across a container ownership boundary", () 
   const baseline = path.join(dir, "baseline.json");
   const source = { commit: checkedOutCommit(root), ...sourceIdentity(root) };
   fs.writeFileSync(baseline, JSON.stringify(source));
-  const result = spawnSync(
-    "node",
-    [runner, "--receipt", receipt, "--", "--version"],
-    {
-      cwd: root,
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        GIT_TEST_ASSUME_DIFFERENT_OWNER: "1",
-        RUST_SHADOW_SOURCE_BASELINE: baseline,
-      },
+  const result = spawnSync("node", [runner, "--receipt", receipt, "--", "--version"], {
+    cwd: root,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      GIT_TEST_ASSUME_DIFFERENT_OWNER: "1",
+      RUST_SHADOW_SOURCE_BASELINE: baseline,
     },
-  );
+  });
   assert.notEqual(result.status, 0, "the intentionally invalid Nextest selection must still fail");
   const value = JSON.parse(fs.readFileSync(receipt, "utf8"));
   assert.equal(value.source.commit, source.commit);
