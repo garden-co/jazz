@@ -5,8 +5,8 @@ import { JazzProvider as JazzBaseProvider, useDb } from "jazz-tools/react";
 import type { DbConfig } from "jazz-tools";
 import { authClient, getJwtFromBetterAuth } from "@/src/lib/auth-client";
 
-const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID;
-const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL;
+const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID ?? "poster-shop-local";
+const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL ?? "http://127.0.0.1:4200";
 
 export function JazzProvider({ children }: { children: React.ReactNode }) {
   const { data: session } = authClient.useSession();
@@ -16,7 +16,6 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
   );
   useEffect(() => {
     if (!principal) return void setConnection(null);
-    if (!appId || !serverUrl) throw new Error("withJazz must provide the public app configuration");
     setConnection(null);
     let cancelled = false;
     void getJwtFromBetterAuth().then((jwtToken) => {

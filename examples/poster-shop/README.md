@@ -30,6 +30,16 @@ the application's queries or policy evaluator.
 branch view, choose a winner, or claim canvas-specific concurrent ordering
 semantics; those requirements need a separate core contract.
 
+## Running the Next/Better Auth example
+
+Copy `apps/nextjs-betterauth/.env.example` to `.env.local`, then replace the
+local Jazz app id and server URL when connecting to a deployed backend. The
+checked-in defaults deliberately let `pnpm --dir apps/nextjs-betterauth build`
+evaluate auth routes without an unset configuration; they do not start a Jazz
+server for you. Memberships and cursor identity use canonical JSON
+`[issuer, subject]` authors, so equal provider subjects from different issuers
+cannot share access.
+
 Large asset bytes are intentionally not materialized by this first app slice.
 `assets` carries metadata and an optional `fileId`; the conventional file table
 integration remains linked to #1833, #1839, and #1844. Shape and asset metadata

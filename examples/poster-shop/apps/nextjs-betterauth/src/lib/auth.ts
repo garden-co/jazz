@@ -10,7 +10,8 @@ const appOrigin = process.env.NEXT_PUBLIC_APP_ORIGIN ?? "http://127.0.0.1:3000";
 export const auth = betterAuth({
   baseURL: appOrigin,
   trustedOrigins: [appOrigin],
-  secret: process.env.BETTER_AUTH_SECRET ?? "poster-shop-development-secret",
+  secret:
+    process.env.BETTER_AUTH_SECRET ?? "2SNhYRceYvKf1HnJ7mQxB3aWd6LeP9tR4uCg8Vz0Ds5FiOoAbXkMwZq",
   database: jazzAdapter({ db: () => authJazzContext().asBackend(app), schema: app.wasmSchema }),
   emailAndPassword: {
     enabled: true,

@@ -7,10 +7,12 @@ const schema = {
   canvasMembers: s
     .table({
       canvasId: s.ref("canvases"),
-      userId: s.string(),
+      // App-owned identity values are canonical JSON `[issuer, subject]`, not
+      // provider-local Better Auth ids. This keeps memberships issuer-scoped.
+      memberAuthor: s.string(),
       role: s.enum("viewer", "editor", "admin"),
     })
-    .indexOnly(["canvasId", "userId"]),
+    .indexOnly(["canvasId", "memberAuthor"]),
   // Every live canvas view is parent-scoped and ordered. Keep those indexes in
   // the app schema rather than relying on a renderer-side sort or scan.
   layers: s
@@ -53,12 +55,12 @@ const schema = {
   cursors: s
     .table({
       canvasId: s.ref("canvases"),
-      userId: s.string(),
+      author: s.string(),
       x: s.float(),
       y: s.float(),
       color: s.string(),
     })
-    .indexOnly(["canvasId", "userId"]),
+    .indexOnly(["canvasId", "author"]),
   // A checkpoint is an immutable, named application history marker. It does
   // not claim branch winner semantics that the core has not specified yet.
   checkpoints: s
