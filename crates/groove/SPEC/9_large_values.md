@@ -179,16 +179,29 @@ The same untyped authenticated structural validator (object hash, canonical
 encoding, format, kind-shaped metrics, leaf bounds, fanout, and overflow) is
 used by traversal, upload admission, and metadata-only storage observers.
 
+Every branch child MUST report a positive `byte_length`; only a root `Leaf`
+may represent an empty logical value. Canonical construction and consolidation
+omit empty replacement segments while other bytes remain and emit exactly one
+empty root leaf when the final value is empty. This keeps every branch edge a
+positive contribution to logical-size accounting.
+
+This rule is deliberately fail-closed for historical compatibility.
+Authenticated persisted or wire branch nodes containing a zero-byte child are
+malformed and may no longer be readable. Groove does not migrate them because
+discovering or reconstructing their descendants would traverse the adversarial
+graph that this rule excludes; physical metadata can still reclaim their raw
+chunks independently.
+
 Text leaf boundaries are valid UTF-8 code-point boundaries. Text branches also
 carry exact aggregate UTF-16 code-unit lengths. JSON uses literal validated
 UTF-8 source bytes; it is not stored as a persistent object graph.
 
 Every decoded node is checked against the expected object hash learned from its
-parent (or the owner descriptor for the root). Branch fanout, depth, child
-metrics, total metrics and encoded sizes
-are bounded and checked. Unknown format versions, cycles, dishonest metrics,
-invalid UTF-8, invalid JSON, arithmetic overflow, and malformed
-child references fail the affected evaluation closure.
+parent (or the owner descriptor for the root). Branch fanout, depth, positive
+child byte metrics, total metrics, and encoded sizes are bounded and checked.
+Unknown format versions, cycles, dishonest metrics, invalid UTF-8, invalid
+JSON, arithmetic overflow, and malformed child references fail the affected
+evaluation closure.
 
 Postcard decoding alone is insufficient because it accepts a valid value with
 trailing bytes. Every path that interprets node structure MUST require an exact

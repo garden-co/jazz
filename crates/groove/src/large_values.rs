@@ -33,8 +33,8 @@ pub const MAX_TREE_DEPTH: usize = 32;
 /// Maximum number of logical tree-edge occurrences one synchronous scalar
 /// operation may expand. Physical graph walks deduplicate shared nodes, but a
 /// shared node can occur at many logical positions. This bound prevents a
-/// small authenticated DAG with zero-length metrics from turning one
-/// materialization attempt into exponential CPU or memory work.
+/// small authenticated shared DAG from turning one attempt into
+/// disproportionate repeated traversal.
 pub const MAX_LOGICAL_TRAVERSAL_STEPS: usize = 128 * 1024;
 /// Maximum number of distinct immutable nodes a graph-oriented operation may
 /// retain while authenticating one descriptor. This matches the logical-work
@@ -1382,20 +1382,29 @@ pub(crate) fn consolidate_single_edit_attempt(
     let local_end = usize::try_from(edit_end - segment_start).map_err(|_| Error::MetricOverflow)?;
     segment.splice(local_start..local_end, edit.insert_bytes.iter().copied());
 
+    if value.byte_length == 0 {
+        if !segment.is_empty() {
+            return Err(Error::DescriptorMismatch.into());
+        }
+        return Ok(prepare_with_locator(value.kind, &segment, fresh_locator)?);
+    }
+
     let mut staged_chunks = Vec::new();
     let mut replacement = Vec::new();
-    for range in leaf_ranges(value.kind, &segment)? {
-        replacement.push(stage_node_reusing(
-            value.kind,
-            ChunkNode::Leaf {
-                format: FORMAT_VERSION,
-                kind: value.kind,
-                bytes: segment[range].to_vec(),
-            },
-            &existing,
-            &mut fresh_locator,
-            &mut staged_chunks,
-        )?);
+    if !segment.is_empty() {
+        for range in leaf_ranges(value.kind, &segment)? {
+            replacement.push(stage_node_reusing(
+                value.kind,
+                ChunkNode::Leaf {
+                    format: FORMAT_VERSION,
+                    kind: value.kind,
+                    bytes: segment[range].to_vec(),
+                },
+                &existing,
+                &mut fresh_locator,
+                &mut staged_chunks,
+            )?);
+        }
     }
 
     for depth in (0..left_path.len()).rev() {
@@ -1413,13 +1422,21 @@ pub(crate) fn consolidate_single_edit_attempt(
                 .cloned()
                 .map(built_from_child),
         );
-        replacement = stage_branch_level_reusing(
-            value.kind,
-            &level,
-            &existing,
-            &mut fresh_locator,
-            &mut staged_chunks,
-        )?;
+        let higher_path_has_siblings = left_path[..depth]
+            .iter()
+            .zip(&right_path[..depth])
+            .any(|(left, right)| left.selected > 0 || right.selected + 1 < right.children.len());
+        replacement = if level.len() == 1 && !higher_path_has_siblings {
+            level
+        } else {
+            stage_branch_level_reusing(
+                value.kind,
+                &level,
+                &existing,
+                &mut fresh_locator,
+                &mut staged_chunks,
+            )?
+        };
     }
     let mut tree_depth = left_path.len();
     while replacement.len() > 1 {
@@ -2582,6 +2599,7 @@ fn stage_node(
     locator_for: &mut impl FnMut(ContentHash) -> Locator,
     staged_chunks: &mut Vec<StagedChunk>,
 ) -> Result<BuiltNode, Error> {
+    validate_untyped_node_structure(&node)?;
     if node_metrics(node_kind(&node), &node)? != metrics {
         return Err(Error::DescriptorMismatch);
     }
@@ -2610,6 +2628,7 @@ fn stage_node_reusing(
     fresh_locator: &mut impl FnMut(ContentHash) -> Locator,
     staged_chunks: &mut Vec<StagedChunk>,
 ) -> Result<BuiltNode, Error> {
+    validate_untyped_node_structure(&node)?;
     let metrics = node_metrics(kind, &node)?;
     let structural_hash = node_logical_hash(&node);
     let encoded = encode_node(&node)?;
@@ -3070,7 +3089,10 @@ fn validate_untyped_node_structure(node: &ChunkNode) -> Result<(), Error> {
             children,
         } => {
             check_format(*format)?;
-            if children.is_empty() || children.len() > BRANCH_MAX_CHILDREN {
+            if children.is_empty()
+                || children.len() > BRANCH_MAX_CHILDREN
+                || children.iter().any(|child| child.metrics.byte_length == 0)
+            {
                 return Err(Error::MalformedNode);
             }
             let mut child_metrics = children.iter().map(|child| child.metrics);
@@ -4223,12 +4245,40 @@ fn gear(byte: u8) -> u64 {
     value ^ (value >> 31)
 }
 
-/// Build a valid bottom-up DAG whose every branch repeats the same child.
-/// Empty bytes keep all aggregate metrics at zero, so depth/fanout checks alone
-/// cannot bound its logical expansion. This is crate-private test scaffolding
-/// because canonical construction deliberately emits trees, not shared DAGs.
 #[cfg(test)]
-pub(crate) fn repeated_child_dag_fixture(depth: usize, fanout: usize) -> PreparedLargeValue {
+fn stage_unvalidated_fixture_node(
+    node: ChunkNode,
+    locator_for: &mut impl FnMut(ContentHash) -> Locator,
+    staged_chunks: &mut Vec<StagedChunk>,
+) -> BuiltNode {
+    let kind = node_kind(&node);
+    let metrics = node_metrics(kind, &node).unwrap();
+    let structural_hash = node_logical_hash(&node);
+    let encoded = encode_node(&node).unwrap();
+    let object_hash = object_hash(&encoded);
+    let node_ref = NodeRef {
+        object_hash,
+        locator: locator_for(object_hash),
+    };
+    staged_chunks.push(StagedChunk {
+        node_ref: node_ref.clone(),
+        encoded,
+    });
+    BuiltNode {
+        node_ref,
+        metrics,
+        structural_hash,
+    }
+}
+
+/// Build an explicitly malformed bottom-up DAG whose every branch repeats one
+/// zero-metric child. This fixture deliberately bypasses canonical staging so
+/// authenticated historical/wire nodes can exercise fail-closed admission.
+#[cfg(test)]
+pub(crate) fn zero_metric_repeated_child_dag_fixture(
+    depth: usize,
+    fanout: usize,
+) -> PreparedLargeValue {
     assert!(depth <= MAX_TREE_DEPTH);
     assert!((1..=BRANCH_MAX_CHILDREN).contains(&fanout));
     let mut staged_chunks = Vec::new();
@@ -4264,6 +4314,64 @@ pub(crate) fn repeated_child_dag_fixture(depth: usize, fanout: usize) -> Prepare
                 fanout
             ],
         };
+        current = stage_unvalidated_fixture_node(node, &mut locator, &mut staged_chunks);
+    }
+    PreparedLargeValue {
+        value_ref: LargeValueRef {
+            kind: LargeValueKind::Bytes,
+            format_version: FORMAT_VERSION,
+            logical_hash: current.structural_hash,
+            root: current.node_ref,
+            byte_length: 0,
+            utf16_length: None,
+            edit_tail: Vec::new(),
+        },
+        staged_chunks,
+    }
+}
+
+/// Build a shallow valid DAG whose every branch repeats one positive-byte
+/// child. Callers must keep the chosen depth and fanout within `u64` metrics.
+#[cfg(test)]
+pub(crate) fn positive_repeated_child_dag_fixture(
+    depth: usize,
+    fanout: usize,
+) -> PreparedLargeValue {
+    assert!(depth <= MAX_TREE_DEPTH);
+    assert!((1..=BRANCH_MAX_CHILDREN).contains(&fanout));
+    let mut staged_chunks = Vec::new();
+    let mut nonce = 0_u64;
+    let mut locator = |hash: ContentHash| {
+        let mut seed = hash.0.to_vec();
+        seed.extend_from_slice(&nonce.to_le_bytes());
+        nonce += 1;
+        Locator::from_seed(&seed)
+    };
+    let leaf = ChunkNode::Leaf {
+        format: FORMAT_VERSION,
+        kind: LargeValueKind::Bytes,
+        bytes: vec![0x5a],
+    };
+    let mut current = stage_node(
+        leaf.clone(),
+        node_metrics(LargeValueKind::Bytes, &leaf).unwrap(),
+        &mut locator,
+        &mut staged_chunks,
+    )
+    .unwrap();
+    for _ in 0..depth {
+        let node = ChunkNode::Branch {
+            format: FORMAT_VERSION,
+            kind: LargeValueKind::Bytes,
+            children: vec![
+                BranchChild {
+                    node_ref: current.node_ref.clone(),
+                    metrics: current.metrics,
+                    logical_hash: current.structural_hash,
+                };
+                fanout
+            ],
+        };
         current = stage_node(
             node.clone(),
             node_metrics(LargeValueKind::Bytes, &node).unwrap(),
@@ -4278,7 +4386,7 @@ pub(crate) fn repeated_child_dag_fixture(depth: usize, fanout: usize) -> Prepare
             format_version: FORMAT_VERSION,
             logical_hash: current.structural_hash,
             root: current.node_ref,
-            byte_length: 0,
+            byte_length: current.metrics.byte_length,
             utf16_length: None,
             edit_tail: Vec::new(),
         },
@@ -4311,7 +4419,7 @@ pub(crate) fn shared_child_dag_fixture() -> PreparedLargeValue {
     let leaf = stage(ChunkNode::Leaf {
         format: FORMAT_VERSION,
         kind: LargeValueKind::Bytes,
-        bytes: Vec::new(),
+        bytes: vec![0x7d],
     });
     let branch_node = ChunkNode::Branch {
         format: FORMAT_VERSION,
@@ -4348,7 +4456,7 @@ pub(crate) fn shared_child_dag_fixture() -> PreparedLargeValue {
             format_version: FORMAT_VERSION,
             logical_hash: root.structural_hash,
             root: root.node_ref,
-            byte_length: 0,
+            byte_length: root.metrics.byte_length,
             utf16_length: None,
             edit_tail: Vec::new(),
         },
@@ -4438,7 +4546,7 @@ mod tests {
 
     #[test]
     fn zero_byte_branch_child_is_rejected_before_descendant_discovery_or_materialization() {
-        let prepared = repeated_child_dag_fixture(1, BRANCH_MIN_CHILDREN);
+        let prepared = zero_metric_repeated_child_dag_fixture(1, BRANCH_MIN_CHILDREN);
         let root = prepared
             .staged_chunks
             .iter()
@@ -4474,9 +4582,8 @@ mod tests {
             object_hash: root.node_ref.object_hash.0,
             locator: root.node_ref.locator,
         };
-        assert_eq!(
-            visited,
-            std::collections::BTreeSet::from([root_request.clone()]),
+        assert!(
+            visited.is_empty(),
             "an authenticated malformed root must not expose its child frontier"
         );
 
@@ -4527,9 +4634,11 @@ mod tests {
     }
 
     #[test]
-    fn shared_dag_physical_walks_deduplicate_and_logical_materialization_is_bounded() {
-        let prepared = repeated_child_dag_fixture(MAX_TREE_DEPTH, BRANCH_MAX_CHILDREN);
-        assert_eq!(prepared.staged_chunks.len(), MAX_TREE_DEPTH + 1);
+    fn shared_dag_physical_walks_deduplicate_and_logical_materialization_preserves_occurrences() {
+        let depth = 2;
+        let fanout = 4;
+        let prepared = positive_repeated_child_dag_fixture(depth, fanout);
+        assert_eq!(prepared.staged_chunks.len(), depth + 1);
 
         let provider = PreparedProvider::new(&prepared);
         let mut visited = std::collections::BTreeSet::new();
@@ -4582,12 +4691,10 @@ mod tests {
                 bytes::Bytes::copy_from_slice(&chunk.encoded),
             );
         }
-        assert!(matches!(
-            materialize_attempt(&prepared.value_ref, &mut inputs),
-            Err(IvmRuntimeError::LargeValue(
-                Error::TraversalWorkLimitExceeded
-            ))
-        ));
+        assert_eq!(
+            materialize_attempt(&prepared.value_ref, &mut inputs).unwrap(),
+            vec![0x5a; fanout.pow(depth as u32)]
+        );
     }
 
     fn deterministic_locator(hash: ContentHash) -> Locator {
@@ -4746,7 +4853,7 @@ mod tests {
 
     #[test]
     fn physical_traversal_budget_allows_the_exact_distinct_node_boundary_for_shared_dag() {
-        let prepared = repeated_child_dag_fixture(2, BRANCH_MAX_CHILDREN);
+        let prepared = positive_repeated_child_dag_fixture(2, 4);
         assert_eq!(prepared.staged_chunks.len(), 3);
         assert_eq!(
             traverse_fixture_with_node_limit(&prepared, prepared.staged_chunks.len()),
@@ -4757,7 +4864,7 @@ mod tests {
 
     #[test]
     fn physical_traversal_budget_rejects_one_distinct_node_over_the_boundary() {
-        let prepared = repeated_child_dag_fixture(3, BRANCH_MAX_CHILDREN);
+        let prepared = positive_repeated_child_dag_fixture(3, 4);
         assert_eq!(prepared.staged_chunks.len(), 4);
         assert_eq!(
             traverse_fixture_with_node_limit(&prepared, prepared.staged_chunks.len() - 1),
@@ -5423,6 +5530,184 @@ mod tests {
         let materialized =
             materialize_attempt(&consolidated.value_ref, &mut materialize_inputs).unwrap();
         assert_eq!(materialized, Vec::<u8>::new());
+        assert!(materialize_inputs.take_missing_chunks().is_empty());
+    }
+
+    #[test]
+    fn complete_suffix_deletion_collapses_singleton_root_to_fresh_leaf() {
+        let retained = b"retained prefix".to_vec();
+        let deleted = b"deleted suffix".to_vec();
+        let mut staged_chunks = Vec::new();
+        let mut locator = deterministic_locator;
+
+        let retained_node = ChunkNode::Leaf {
+            format: FORMAT_VERSION,
+            kind: LargeValueKind::Bytes,
+            bytes: retained.clone(),
+        };
+        let retained_leaf = stage_node(
+            retained_node.clone(),
+            node_metrics(LargeValueKind::Bytes, &retained_node).unwrap(),
+            &mut locator,
+            &mut staged_chunks,
+        )
+        .unwrap();
+        let deleted_node = ChunkNode::Leaf {
+            format: FORMAT_VERSION,
+            kind: LargeValueKind::Bytes,
+            bytes: deleted.clone(),
+        };
+        let deleted_leaf = stage_node(
+            deleted_node.clone(),
+            node_metrics(LargeValueKind::Bytes, &deleted_node).unwrap(),
+            &mut locator,
+            &mut staged_chunks,
+        )
+        .unwrap();
+        let inner_node = ChunkNode::Branch {
+            format: FORMAT_VERSION,
+            kind: LargeValueKind::Bytes,
+            children: [retained_leaf.clone(), deleted_leaf]
+                .into_iter()
+                .map(|child| BranchChild {
+                    node_ref: child.node_ref,
+                    metrics: child.metrics,
+                    logical_hash: child.structural_hash,
+                })
+                .collect(),
+        };
+        let inner = stage_node(
+            inner_node.clone(),
+            node_metrics(LargeValueKind::Bytes, &inner_node).unwrap(),
+            &mut locator,
+            &mut staged_chunks,
+        )
+        .unwrap();
+        let root_node = ChunkNode::Branch {
+            format: FORMAT_VERSION,
+            kind: LargeValueKind::Bytes,
+            children: vec![BranchChild {
+                node_ref: inner.node_ref,
+                metrics: inner.metrics,
+                logical_hash: inner.structural_hash,
+            }],
+        };
+        let root = stage_node(
+            root_node.clone(),
+            node_metrics(LargeValueKind::Bytes, &root_node).unwrap(),
+            &mut locator,
+            &mut staged_chunks,
+        )
+        .unwrap();
+        let prepared = PreparedLargeValue {
+            value_ref: LargeValueRef {
+                kind: LargeValueKind::Bytes,
+                format_version: FORMAT_VERSION,
+                logical_hash: root.structural_hash,
+                root: root.node_ref,
+                byte_length: root.metrics.byte_length,
+                utf16_length: None,
+                edit_tail: Vec::new(),
+            },
+            staged_chunks,
+        };
+        for chunk in &prepared.staged_chunks {
+            if let ChunkNode::Branch { children, .. } = decode_node(
+                LargeValueKind::Bytes,
+                chunk.node_ref.object_hash,
+                &chunk.encoded,
+            )
+            .unwrap()
+            {
+                assert!(
+                    children.iter().all(|child| child.metrics.byte_length > 0),
+                    "the valid source fixture must contain only positive branch children"
+                );
+            }
+        }
+
+        let available = prepared
+            .staged_chunks
+            .iter()
+            .map(|chunk| {
+                (
+                    ChunkRequest {
+                        object_hash: chunk.node_ref.object_hash.0,
+                        locator: chunk.node_ref.locator,
+                    },
+                    bytes::Bytes::copy_from_slice(&chunk.encoded),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut edit_inputs = EvaluationInputs::default();
+        let TailEditOutcome::Updated(with_tail) = replace_tail_attempt(
+            &prepared.value_ref,
+            retained.len() as u64,
+            deleted.len() as u64,
+            Vec::new(),
+            &mut edit_inputs,
+        )
+        .unwrap() else {
+            panic!("one suffix deletion must fit the edit tail");
+        };
+        assert!(edit_inputs.take_missing_chunks().is_empty());
+
+        let mut inputs = EvaluationInputs::default();
+        let consolidated = loop {
+            match consolidate_single_edit_attempt(&with_tail, &mut inputs, deterministic_locator) {
+                Ok(value) => break value,
+                Err(IvmRuntimeError::EvaluationBlocked) => {
+                    for request in inputs.take_missing_chunks() {
+                        inputs.install_chunk(request.clone(), available[&request].clone());
+                    }
+                }
+                Err(error) => panic!("unexpected suffix-deletion failure: {error}"),
+            }
+        };
+        let fresh =
+            prepare_with_locator(LargeValueKind::Bytes, &retained, deterministic_locator).unwrap();
+        assert_eq!(
+            consolidated.value_ref.logical_hash,
+            fresh.value_ref.logical_hash
+        );
+        assert_eq!(consolidated.value_ref.root, fresh.value_ref.root);
+        assert_eq!(consolidated.value_ref.root, retained_leaf.node_ref);
+        assert!(
+            consolidated.staged_chunks.is_empty(),
+            "collapsing the root must reuse the unaffected leaf without staging wrappers"
+        );
+        let retained_chunk = prepared
+            .staged_chunks
+            .iter()
+            .find(|chunk| chunk.node_ref == consolidated.value_ref.root)
+            .unwrap();
+        assert_eq!(
+            decode_node(
+                LargeValueKind::Bytes,
+                retained_chunk.node_ref.object_hash,
+                &retained_chunk.encoded,
+            ),
+            Ok(ChunkNode::Leaf {
+                format: FORMAT_VERSION,
+                kind: LargeValueKind::Bytes,
+                bytes: retained.clone(),
+            })
+        );
+
+        let mut materialize_inputs = EvaluationInputs::default();
+        for chunk in &prepared.staged_chunks {
+            materialize_inputs.install_chunk(
+                ChunkRequest {
+                    object_hash: chunk.node_ref.object_hash.0,
+                    locator: chunk.node_ref.locator,
+                },
+                bytes::Bytes::copy_from_slice(&chunk.encoded),
+            );
+        }
+        assert_eq!(
+            materialize_attempt(&consolidated.value_ref, &mut materialize_inputs).unwrap(),
+            retained
+        );
         assert!(materialize_inputs.take_missing_chunks().is_empty());
     }
 
