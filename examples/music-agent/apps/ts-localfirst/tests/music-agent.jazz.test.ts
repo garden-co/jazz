@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "vitest";
 import { createDb, type Db } from "jazz-tools";
 import { app } from "../schema.js";
-import { DeterministicMusicAgent, JazzMusicStore, byteChunks } from "../src/music-agent.js";
+import { DeterministicMusicAgent, JazzMusicStore, byteChunks, chunks } from "../src/music-agent.js";
 
 let db: Db | undefined;
 
@@ -55,17 +55,25 @@ describe("MusicAgent Jazz persistence E2E", () => {
     ]);
     expect(await db!.all(app.tool_calls)).toHaveLength(1);
     expect(await db!.all(app.attachments)).toEqual([
-      expect.objectContaining({ id: attachment, byte_length: 6, filename: "clip.raw" }),
+      expect.objectContaining({
+        id: attachment,
+        byte_length: 6,
+        filename: "clip.raw",
+        payload: new TextEncoder().encode("abcdef"),
+      }),
     ]);
   });
 
-  test("concurrent application writes retain every published turn exactly once", async () => {
+  test("concurrent streamed turns retain every published turn exactly once", async () => {
     const store = await openMusicStore("concurrent-turns");
     const conversation = await store.createConversation("Parallel requests");
 
     await Promise.all(
       ["first request", "second request", "third request"].map((body, ordinal) =>
-        store.addTurn({ conversationId: conversation, role: "assistant", ordinal, body }),
+        store.streamTurn(
+          { conversationId: conversation, role: "assistant", ordinal },
+          chunks([body]),
+        ),
       ),
     );
 
