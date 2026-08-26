@@ -422,6 +422,16 @@ where
         self.node.set_non_durable_client();
     }
 
+    /// Restore unsettled writes relayed from a browser client sharing this
+    /// worker's author. Browser workers persist main-thread transactions whose
+    /// node differs from the worker node, so ordinary local-origin recovery
+    /// cannot discover them after a cold worker restart.
+    #[doc(hidden)]
+    pub fn restore_browser_relay_pending_uploads(&self) -> Result<(), Error> {
+        self.node
+            .restore_browser_relay_pending_uploads(self.identity.author)
+    }
+
     /// Let a single-threaded host return resident writes synchronously while
     /// its tick loop owns suspendable persistence and later peer visibility.
     pub fn set_deferred_local_persistence(&self, deferred: bool) {
@@ -788,6 +798,23 @@ where
     /// Test/bench-only runtime diagnostics used by performance receipts.
     pub fn runtime_stats_for_test(&self) -> groove::ivm::RuntimeStats {
         self.node.node.borrow().runtime_stats_for_test()
+    }
+
+    #[cfg(feature = "testing")]
+    /// Test-only count of relay-owned upstream usage sites. This deliberately
+    /// counts wire owners rather than coverage evaluators, so reconnect tests
+    /// can prove a detached downstream session left no orphaned owner behind.
+    pub fn relay_upstream_subscription_owner_count_for_test(&self) -> usize {
+        self.node.relay_upstream_subscription_owners.borrow().len()
+    }
+
+    #[cfg(feature = "testing")]
+    /// Test-only count of relay-registered downstream wire usage sites.
+    pub fn relay_registered_query_binding_count_for_test(&self) -> usize {
+        self.node
+            .node
+            .borrow()
+            .registered_query_binding_count_for_test()
     }
 
     #[cfg(feature = "testing")]

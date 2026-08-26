@@ -1,4 +1,4 @@
-import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { constants } from "node:fs";
 import {
   access,
@@ -13,9 +13,11 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import { afterEach, assert, describe, expect, it, vi } from "vitest";
 import { structuralSchemaHash } from "./dev/schema-utils.js";
+import { createMigration as createCatalogueMigration } from "./dev/catalogue-project.js";
 import {
   APP_ID_ENV_VARS,
   SERVER_URL_ENV_VARS,
@@ -88,11 +90,66 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
+function spawnMigrationCreate(
+  root: string,
+  migrationsDir: string,
+  pauseAt: "lock-held" | "lock-quarantined" | "between-publications" | "journaled",
+  marker: string,
+  releaseMarker?: string,
+) {
+  return spawn(
+    process.execPath,
+    [distCliPath, "migrations", "create", "--schema-dir", root, "--migrations-dir", migrationsDir],
+    {
+      env: {
+        ...process.env,
+        NODE_ENV: "test",
+        JAZZ_TEST_MIGRATION_PAUSE_AT: pauseAt,
+        JAZZ_TEST_MIGRATION_PAUSE_MARKER: marker,
+        ...(releaseMarker ? { JAZZ_TEST_MIGRATION_PAUSE_RELEASE_MARKER: releaseMarker } : {}),
+      },
+      stdio: "ignore",
+    },
+  );
+}
+
+async function waitForCrashMarker(marker: string, child: ReturnType<typeof spawn>): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (!(await fileExists(marker))) {
+    if (child.exitCode !== null) {
+      throw new Error(`migration child exited before reaching ${marker}`);
+    }
+    if (Date.now() >= deadline) throw new Error(`migration child did not reach ${marker}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+async function waitForMarkers(markers: readonly string[]): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (!(await Promise.all(markers.map(fileExists))).every(Boolean)) {
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `migration children did not all reach lock contention: ${markers.join(", ")}`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+async function killChild(child: ReturnType<typeof spawn>): Promise<void> {
+  if (child.exitCode !== null) return;
+  const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+  child.kill("SIGKILL");
+  await closed;
+}
+
 async function captureConsoleLogs<T>(
   run: () => Promise<T>,
 ): Promise<{ result: T; logs: string[] }> {
   const logs: string[] = [];
-  const stripAnsi = (line: string): string => line.replace(/\u001b\[[0-9;]*m/g, "");
+  const ansiEscape = String.fromCodePoint(27);
+  const ansiSgrPattern = new RegExp(`${ansiEscape}\\[[0-9;]*m`, "g");
+  const stripAnsi = (line: string): string => line.replace(ansiSgrPattern, "");
   const logSpy = vi
     .spyOn(console, "log")
     .mockImplementation((message?: unknown, ...rest: unknown[]) => {
@@ -936,6 +993,315 @@ describe("cli schema hash", () => {
 });
 
 describe("cli migrations", () => {
+  it("serializes simultaneous migration generation against one directory", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await mkdir(migrationsDir, { recursive: true });
+    const externalLock = join(migrationsDir, ".jazz-create-migration.lock");
+    await mkdir(externalLock);
+    await writeFile(
+      join(externalLock, "owner.json"),
+      `${JSON.stringify({ version: 1, pid: process.pid, hostname: hostname(), token: "00000000-0000-4000-8000-000000000001" })}\n`,
+    );
+
+    const contentionMarkers = Array.from({ length: 4 }, (_, index) =>
+      join(root, `migration-contention-${index}.marker`),
+    );
+    const resultsPromise = Promise.all(
+      Array.from(
+        { length: contentionMarkers.length },
+        (_, index) =>
+          new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+            const child = spawn(
+              process.execPath,
+              [
+                distCliPath,
+                "migrations",
+                "create",
+                "--schema-dir",
+                root,
+                "--migrations-dir",
+                migrationsDir,
+              ],
+              {
+                env: {
+                  ...process.env,
+                  NODE_ENV: "test",
+                  JAZZ_TEST_MIGRATION_LOCK_CONTENTION_MARKER: contentionMarkers[index],
+                },
+              },
+            );
+            let stdout = "";
+            let stderr = "";
+            child.stdout.setEncoding("utf8").on("data", (chunk) => (stdout += chunk));
+            child.stderr.setEncoding("utf8").on("data", (chunk) => (stderr += chunk));
+            child.on("close", (code) => resolve({ code, stdout, stderr }));
+          }),
+      ),
+    );
+
+    // The lock is a filesystem boundary, not an in-process mutex: independently
+    // launched CLI processes must all observe the external owner before it is released.
+    await waitForMarkers(contentionMarkers);
+    await expect(access(join(migrationsDir, "snapshots"))).rejects.toThrow();
+    await rm(externalLock, { recursive: true });
+    const results = await resultsPromise;
+
+    expect(
+      results.map((result) => result.code),
+      JSON.stringify(results, null, 2),
+    ).toEqual([0, 0, 0, 0]);
+    expect(
+      results.filter((result) => result.stdout.includes("Wrote initial schema snapshot:")),
+    ).toHaveLength(1);
+    expect(
+      results.filter((result) => result.stdout.includes("No structural schema changes")),
+    ).toHaveLength(3);
+    expect(
+      (await readdir(join(migrationsDir, "snapshots"))).filter((name) => name.endsWith(".json")),
+    ).toHaveLength(1);
+    await expect(access(join(migrationsDir, ".jazz-create-migration.lock"))).rejects.toThrow();
+  });
+
+  it("recovers a lock whose same-host owner was killed", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const marker = join(root, "lock-held.marker");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+
+    const child = spawnMigrationCreate(root, migrationsDir, "lock-held", marker);
+    await waitForCrashMarker(marker, child);
+    await killChild(child);
+
+    const results = await Promise.all([
+      createCatalogueMigration({ schemaDir: root, migrationsDir }),
+      createCatalogueMigration({ schemaDir: root, migrationsDir }),
+    ]);
+    expect(results.map((result) => result.status).sort()).toEqual([
+      "initial-snapshot",
+      "unchanged",
+    ]);
+    expect(
+      (await readdir(join(migrationsDir, "snapshots"))).filter((name) => name.endsWith(".json")),
+    ).toHaveLength(1);
+    await expect(access(join(migrationsDir, ".jazz-create-migration.lock"))).rejects.toThrow();
+  });
+
+  it("recovers when a stale lock quarantiner is killed", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const lockDir = join(migrationsDir, ".jazz-create-migration.lock");
+    const marker = join(root, "lock-quarantined.marker");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await mkdir(lockDir, { recursive: true });
+    await writeFile(
+      join(lockDir, "owner.json"),
+      `${JSON.stringify({ version: 1, pid: 2_147_483_647, hostname: hostname(), token: "00000000-0000-4000-8000-000000000002" })}\n`,
+    );
+
+    const child = spawnMigrationCreate(root, migrationsDir, "lock-quarantined", marker);
+    await waitForCrashMarker(marker, child);
+    await killChild(child);
+
+    const result = await createCatalogueMigration({ schemaDir: root, migrationsDir });
+    expect(result.status).toBe("initial-snapshot");
+    expect(await fileExists(lockDir)).toBe(false);
+  });
+
+  it.each([false, true])(
+    "fails closed for an unknown lock owner (nonempty=%s)",
+    async (nonempty) => {
+      const { root } = await createWorkspace();
+      const migrationsDir = join(root, "migrations");
+      const lockDir = join(migrationsDir, ".jazz-create-migration.lock");
+      await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+      await mkdir(lockDir, { recursive: true });
+      if (nonempty) await writeFile(join(lockDir, "unknown"), "unknown\n");
+
+      await expect(createCatalogueMigration({ schemaDir: root, migrationsDir })).rejects.toThrow(
+        "owner metadata is missing, invalid, or unsafe",
+      );
+      expect(await fileExists(lockDir)).toBe(true);
+      expect(await fileExists(join(migrationsDir, "snapshots"))).toBe(false);
+    },
+  );
+
+  it("fails closed for malformed dead-owner metadata", async () => {
+    const deadPid = 2_147_483_647;
+    const validToken = "00000000-0000-4000-8000-000000000003";
+    const malformedOwners = [
+      { version: 1, pid: deadPid, hostname: hostname(), token: null },
+      { version: 1, pid: deadPid, hostname: hostname(), token: "not-a-uuid" },
+      { version: 1, pid: deadPid, hostname: hostname() },
+      { version: 1, pid: deadPid, hostname: hostname(), token: validToken, extra: true },
+      { version: 1, pid: "2147483647", hostname: hostname(), token: validToken },
+      { version: 1, pid: deadPid, hostname: "", token: validToken },
+      { version: 2, pid: deadPid, hostname: hostname(), token: validToken },
+    ];
+
+    await Promise.all(
+      malformedOwners.map(async (malformedOwner) => {
+        const { root } = await createWorkspace();
+        const migrationsDir = join(root, "migrations");
+        const lockDir = join(migrationsDir, ".jazz-create-migration.lock");
+        const ownerText = `${JSON.stringify(malformedOwner)}\n`;
+        await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+        await mkdir(lockDir, { recursive: true });
+        await writeFile(join(lockDir, "owner.json"), ownerText);
+
+        await expect(createCatalogueMigration({ schemaDir: root, migrationsDir })).rejects.toThrow(
+          "owner metadata is missing, invalid, or unsafe",
+        );
+        expect(await readFile(join(lockDir, "owner.json"), "utf8")).toBe(ownerText);
+        expect(await fileExists(join(migrationsDir, "snapshots"))).toBe(false);
+      }),
+    );
+  });
+
+  it("recovers a killed migration between publishing its paired outputs", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const marker = join(root, "between-publications.marker");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await createCatalogueMigration({ schemaDir: root, migrationsDir });
+    await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
+
+    const child = spawnMigrationCreate(root, migrationsDir, "between-publications", marker);
+    await waitForCrashMarker(marker, child);
+    await killChild(child);
+
+    expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toHaveLength(1);
+    expect(await fileExists(join(migrationsDir, ".jazz-create-migration.journal.json"))).toBe(true);
+
+    const retry = await createCatalogueMigration({ schemaDir: root, migrationsDir });
+    expect(retry.status).toBe("unchanged");
+    expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toHaveLength(1);
+    expect(
+      (await readdir(join(migrationsDir, "snapshots"))).filter((name) => name.endsWith(".json")),
+    ).toHaveLength(2);
+    expect(await fileExists(join(migrationsDir, ".jazz-create-migration.journal.json"))).toBe(
+      false,
+    );
+    expect(await fileExists(join(migrationsDir, ".jazz-create-migration-stage"))).toBe(false);
+    expect(await fileExists(join(migrationsDir, ".jazz-create-migration.lock"))).toBe(false);
+  });
+
+  it.each(["contents", "symlink"])(
+    "rejects a %s-tampered published prefix even when its staged copy is gone",
+    async (tamperKind) => {
+      const { root } = await createWorkspace();
+      const migrationsDir = join(root, "migrations");
+      const marker = join(root, "between-publications.marker");
+      await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+      await createCatalogueMigration({ schemaDir: root, migrationsDir });
+      await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
+      const child = spawnMigrationCreate(root, migrationsDir, "between-publications", marker);
+      await waitForCrashMarker(marker, child);
+      await killChild(child);
+      const migration = (await readdir(migrationsDir)).find((name) => name.endsWith(".ts"));
+      expect(migration).toBeDefined();
+      const migrationPath = join(migrationsDir, migration!);
+      if (tamperKind === "contents") {
+        await writeFile(migrationPath, "tampered\n");
+      } else {
+        const outside = join(root, "outside-migration.ts");
+        await writeFile(outside, "tampered\n");
+        await rm(migrationPath);
+        await symlink(outside, migrationPath, "file");
+      }
+
+      await expect(createCatalogueMigration({ schemaDir: root, migrationsDir })).rejects.toThrow(
+        tamperKind === "contents"
+          ? "does not match its journal"
+          : "must not contain a symlink or junction",
+      );
+      expect(await fileExists(join(migrationsDir, ".jazz-create-migration.journal.json"))).toBe(
+        true,
+      );
+    },
+  );
+
+  it.each(["snapshots", ".jazz-create-migration-stage"])(
+    "rejects a symlinked migration publication path: %s",
+    async (linkedName) => {
+      const { root } = await createWorkspace();
+      const migrationsDir = join(root, "migrations");
+      const outside = join(root, "outside");
+      await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+      await mkdir(migrationsDir);
+      await mkdir(outside);
+      await symlink(outside, join(migrationsDir, linkedName), "dir");
+
+      await expect(createCatalogueMigration({ schemaDir: root, migrationsDir })).rejects.toThrow(
+        "must not contain a symlink or junction",
+      );
+      expect(await readdir(outside)).toEqual([]);
+    },
+  );
+
+  it("does not overwrite a destination created after publication is journaled", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const marker = join(root, "journaled.marker");
+    const releaseMarker = join(root, "journaled.release");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+
+    const child = spawnMigrationCreate(root, migrationsDir, "journaled", marker, releaseMarker);
+    await waitForCrashMarker(marker, child);
+    const journal = JSON.parse(
+      await readFile(join(migrationsDir, ".jazz-create-migration.journal.json"), "utf8"),
+    ) as { files: Array<{ finalRelativePath: string }> };
+    const destination = join(migrationsDir, journal.files[0]!.finalRelativePath);
+    await mkdir(dirname(destination), { recursive: true });
+    await writeFile(destination, "concurrent writer\n");
+    await writeFile(releaseMarker, "release\n");
+    const code = await new Promise<number | null>((resolve) => child.once("close", resolve));
+
+    expect(code).not.toBe(0);
+    expect(await readFile(destination, "utf8")).toBe("concurrent writer\n");
+  });
+
+  it.each(["outside", "in-tree"])(
+    "rejects a %s symlinked committed snapshot baseline in the CLI process",
+    async (targetKind) => {
+      const { root } = await createWorkspace();
+      const migrationsDir = join(root, "migrations");
+      const snapshotsDir = join(migrationsDir, "snapshots");
+      await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+      await createCatalogueMigration({ schemaDir: root, migrationsDir });
+      const snapshot = (await readdir(snapshotsDir)).find((name) => name.endsWith(".json"));
+      expect(snapshot).toBeDefined();
+      const snapshotPath = join(snapshotsDir, snapshot!);
+      const target =
+        targetKind === "outside"
+          ? join(root, "outside-snapshot.json")
+          : join(migrationsDir, "in-tree-snapshot.json");
+      await copyFile(snapshotPath, target);
+      await rm(snapshotPath);
+      await symlink(target, snapshotPath, "file");
+
+      const result = spawnSync(
+        process.execPath,
+        [
+          distCliPath,
+          "migrations",
+          "create",
+          "--schema-dir",
+          root,
+          "--migrations-dir",
+          migrationsDir,
+        ],
+        { encoding: "utf8" },
+      );
+
+      expect(result.status).not.toBe(0);
+      expect(`${result.stdout}\n${result.stderr}`).toContain(
+        "Migration path must not contain a symlink or junction",
+      );
+    },
+  );
+
   it("writes an initial committed snapshot on first run", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
@@ -968,48 +1334,58 @@ describe("cli migrations", () => {
     const snapshotsDir = join(migrationsDir, "snapshots");
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
 
-    await createMigration({
-      schemaDir: root,
-      serverUrl: "http://localhost:1625",
-      adminSecret: "admin-secret",
-      migrationsDir,
-    });
-
-    await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
-    // Wait for 1s to avoid migration timestamp collisions
-    await new Promise((resolve) => setTimeout(resolve, 1100));
-
-    const { result: filePath, logs } = await captureConsoleLogs(() =>
-      createMigration({
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-08-25T06:00:00.000Z"));
+    try {
+      await createMigration({
         schemaDir: root,
         serverUrl: "http://localhost:1625",
         adminSecret: "admin-secret",
         migrationsDir,
-      }),
-    );
+      });
 
-    expect(filePath).not.toBeNull();
-    if (!filePath) {
-      throw new Error("Expected createMigration() to return a migration file path.");
+      await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
+
+      const { result: filePath, logs } = await captureConsoleLogs(() =>
+        createMigration({
+          schemaDir: root,
+          serverUrl: "http://localhost:1625",
+          adminSecret: "admin-secret",
+          migrationsDir,
+        }),
+      );
+
+      expect(filePath).not.toBeNull();
+      if (!filePath) {
+        throw new Error("Expected createMigration() to return a migration file path.");
+      }
+      const generated = await readFile(filePath, "utf8");
+      expect(generated).toContain('"notes": s.add.string({ default: null }),');
+      const snapshotFiles = (await readdir(snapshotsDir))
+        .filter((name) => name.endsWith(".json"))
+        .sort();
+      expect(snapshotFiles).toEqual([
+        expect.stringMatching(/^20260825T060000-[0-9a-f]{12}\.json$/i),
+        expect.stringMatching(/^20260825T060001-[0-9a-f]{12}\.json$/i),
+      ]);
+      expect(logs.some((line) => line.startsWith("Generated:"))).toBe(true);
+
+      const filesBeforeNoop = await readdir(snapshotsDir);
+      const { result: noopResult, logs: noopLogs } = await captureConsoleLogs(() =>
+        createMigration({
+          schemaDir: root,
+          serverUrl: "http://localhost:1625",
+          adminSecret: "admin-secret",
+          migrationsDir,
+        }),
+      );
+
+      expect(noopResult).toBeNull();
+      expect(await readdir(snapshotsDir)).toEqual(filesBeforeNoop);
+      expect(noopLogs).toContain("No structural schema changes detected.");
+    } finally {
+      vi.useRealTimers();
     }
-    const generated = await readFile(filePath, "utf8");
-    expect(generated).toContain('"notes": s.add.string({ default: null }),');
-    expect((await readdir(snapshotsDir)).filter((name) => name.endsWith(".json"))).toHaveLength(2);
-    expect(logs.some((line) => line.startsWith("Generated:"))).toBe(true);
-
-    const filesBeforeNoop = await readdir(snapshotsDir);
-    const { result: noopResult, logs: noopLogs } = await captureConsoleLogs(() =>
-      createMigration({
-        schemaDir: root,
-        serverUrl: "http://localhost:1625",
-        adminSecret: "admin-secret",
-        migrationsDir,
-      }),
-    );
-
-    expect(noopResult).toBeNull();
-    expect(await readdir(snapshotsDir)).toEqual(filesBeforeNoop);
-    expect(noopLogs).toContain("No structural schema changes detected.");
   });
 
   it("skips creating a migration file when hashes differ but no row transforms are required", async () => {

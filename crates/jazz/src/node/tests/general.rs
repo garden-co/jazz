@@ -1,4 +1,192 @@
 #[test]
+fn subscription_equivalence_preserves_physical_to_public_provenance_changes() {
+    fn current_row(
+        physical: bool,
+        created_by: AuthorSubject,
+        created_at: u64,
+        updated_by: AuthorSubject,
+        updated_at: u64,
+        title: &str,
+    ) -> CurrentRow {
+        let row_uuid = row(0x68);
+        let (descriptor, values) = if physical {
+            (
+                records::RecordDescriptor::new([
+                    ("branch_key".to_owned(), records::ValueType::Bytes),
+                    ("row_uuid".to_owned(), records::ValueType::Uuid),
+                    ("schema_version".to_owned(), records::ValueType::U64),
+                    ("created_by".to_owned(), records::ValueType::String),
+                    ("created_at".to_owned(), records::ValueType::U64),
+                    ("updated_by".to_owned(), records::ValueType::String),
+                    ("updated_at".to_owned(), records::ValueType::U64),
+                    ("user_title".to_owned(), records::ValueType::String),
+                ]),
+                vec![
+                    Value::Bytes(Vec::new()),
+                    Value::Uuid(row_uuid.0),
+                    Value::U64(1),
+                    Value::String(created_by.canonical().to_owned()),
+                    Value::U64(created_at),
+                    Value::String(updated_by.canonical().to_owned()),
+                    Value::U64(updated_at),
+                    Value::String(title.to_owned()),
+                ],
+            )
+        } else {
+            (
+                records::RecordDescriptor::new([
+                    ("row_uuid".to_owned(), records::ValueType::Uuid),
+                    ("title".to_owned(), records::ValueType::String),
+                    ("$createdBy".to_owned(), records::ValueType::String),
+                    ("$createdAt".to_owned(), records::ValueType::U64),
+                    ("$updatedBy".to_owned(), records::ValueType::String),
+                    ("$updatedAt".to_owned(), records::ValueType::U64),
+                ]),
+                vec![
+                    Value::Uuid(row_uuid.0),
+                    Value::String(title.to_owned()),
+                    Value::String(created_by.canonical().to_owned()),
+                    Value::U64(created_at),
+                    Value::String(updated_by.canonical().to_owned()),
+                    Value::U64(updated_at),
+                ],
+            )
+        };
+        let raw = descriptor.create(&values).unwrap();
+        CurrentRow::new("todos", OwnedRecord::new(raw, descriptor))
+    }
+
+    let created_by = AuthorSubject::for_test_uuid(uuid::Uuid::from_bytes([0x68; 16]));
+    let original_updated_by = AuthorSubject::for_test_uuid(uuid::Uuid::from_bytes([0x69; 16]));
+    let changed_updated_by = AuthorSubject::for_test_uuid(uuid::Uuid::from_bytes([0x6a; 16]));
+    let physical = current_row(true, created_by, 10, original_updated_by, 20, "same title");
+    let same_public = current_row(false, created_by, 10, original_updated_by, 20, "same title");
+    let changed_provenance = current_row(false, created_by, 10, changed_updated_by, 21, "same title");
+    let changed_content = current_row(false, created_by, 10, original_updated_by, 20, "new title");
+
+    assert!(physical.subscription_equivalent(&same_public));
+    assert!(!physical.subscription_equivalent(&changed_provenance));
+    assert!(!physical.subscription_equivalent(&changed_content));
+}
+
+#[test]
+fn subscription_equivalence_canonicalizes_wide_rows_without_repeated_decoding() {
+    const CELL_COUNT: usize = 512;
+    let row_uuid = row(0x6b);
+    let mut physical_fields = vec![
+        ("branch_key".to_owned(), records::ValueType::Bytes),
+        ("row_uuid".to_owned(), records::ValueType::Uuid),
+        ("schema_version".to_owned(), records::ValueType::U64),
+        ("created_by".to_owned(), records::ValueType::String),
+        ("created_at".to_owned(), records::ValueType::U64),
+        ("updated_by".to_owned(), records::ValueType::String),
+        ("updated_at".to_owned(), records::ValueType::U64),
+    ];
+    let mut physical_values = vec![
+        Value::Bytes(Vec::new()),
+        Value::Uuid(row_uuid.0),
+        Value::U64(1),
+        Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+        Value::U64(10),
+        Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+        Value::U64(20),
+    ];
+    let mut public_fields = vec![
+        ("row_uuid".to_owned(), records::ValueType::Uuid),
+        ("$createdBy".to_owned(), records::ValueType::String),
+        ("$createdAt".to_owned(), records::ValueType::U64),
+        ("$updatedBy".to_owned(), records::ValueType::String),
+        ("$updatedAt".to_owned(), records::ValueType::U64),
+    ];
+    let mut public_values = vec![
+        Value::Uuid(row_uuid.0),
+        Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+        Value::U64(10),
+        Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+        Value::U64(20),
+    ];
+    for idx in 0..CELL_COUNT {
+        physical_fields.push((format!("user_column_{idx}"), records::ValueType::U64));
+        physical_values.push(Value::U64(idx as u64));
+    }
+    // Reverse public descriptor order to ensure equality is independent of
+    // layout while still decoding only the two linear cell iterators once.
+    for idx in (0..CELL_COUNT).rev() {
+        public_fields.push((format!("column_{idx}"), records::ValueType::U64));
+        public_values.push(Value::U64(idx as u64));
+    }
+    let physical_descriptor = records::RecordDescriptor::new(physical_fields);
+    let public_descriptor = records::RecordDescriptor::new(public_fields);
+    let physical_raw = physical_descriptor.create(&physical_values).unwrap();
+    let public_raw = public_descriptor.create(&public_values).unwrap();
+    let physical = CurrentRow::new(
+        "todos",
+        OwnedRecord::new(physical_raw, physical_descriptor),
+    );
+    let public = CurrentRow::new("todos", OwnedRecord::new(public_raw, public_descriptor));
+
+    assert!(physical.subscription_equivalent(&public));
+}
+
+#[test]
+fn subscription_equivalence_canonicalizes_duplicate_logical_names_by_value() {
+    fn query_row(fields: Vec<(String, records::ValueType)>, values: Vec<Value>) -> CurrentRow {
+        let descriptor = records::RecordDescriptor::new(
+            [("row_uuid".to_owned(), records::ValueType::Uuid)]
+                .into_iter()
+                .chain(fields)
+                .chain([
+                    ("$createdBy".to_owned(), records::ValueType::String),
+                    ("$createdAt".to_owned(), records::ValueType::U64),
+                    ("$updatedBy".to_owned(), records::ValueType::String),
+                    ("$updatedAt".to_owned(), records::ValueType::U64),
+                ]),
+        );
+        let values = [Value::Uuid(row(0x6c).0)]
+            .into_iter()
+            .chain(values)
+            .chain([
+                Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+                Value::U64(10),
+                Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+                Value::U64(20),
+            ])
+            .collect::<Vec<_>>();
+        let raw = descriptor.create(&values).unwrap();
+        CurrentRow::new("scores", OwnedRecord::new(raw, descriptor))
+    }
+
+    let aggregate_layout = query_row(
+        vec![
+            ("foo".to_owned(), records::ValueType::U64),
+            ("__jazz_aggregate_foo".to_owned(), records::ValueType::U64),
+        ],
+        vec![Value::U64(1), Value::U64(2)],
+    );
+    let public_layout = query_row(
+        vec![
+            (
+                "user___jazz_aggregate_foo".to_owned(),
+                records::ValueType::U64,
+            ),
+            ("user_foo".to_owned(), records::ValueType::U64),
+        ],
+        vec![Value::U64(2), Value::U64(1)],
+    );
+    let foo = query_row(
+        vec![("foo".to_owned(), records::ValueType::U64)],
+        vec![Value::U64(1)],
+    );
+    let bar = query_row(
+        vec![("bar".to_owned(), records::ValueType::U64)],
+        vec![Value::U64(1)],
+    );
+
+    assert!(aggregate_layout.subscription_equivalent(&public_layout));
+    assert!(!foo.subscription_equivalent(&bar));
+}
+
+#[test]
 fn ordinary_oversized_scalar_write_is_staged_indirect_and_reads_logically_inline() {
     let schema = two_column_schema();
     let node_uuid = node(0x71);

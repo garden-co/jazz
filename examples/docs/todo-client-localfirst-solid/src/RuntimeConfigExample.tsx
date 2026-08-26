@@ -7,7 +7,10 @@ export function RuntimeConfigExample(props: ParentProps) {
       config={{
         appId: "my-app",
         serverUrl: "https://my-jazz-server.example.com",
-        runtimeSources: { baseUrl: "/assets/jazz/" },
+        runtimeSources: {
+          baseUrl: "/assets/jazz/",
+          wasmVersion: "2026-08-25", // Change this for every deployed asset build.
+        },
       }}
     >
       {props.children}

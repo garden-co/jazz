@@ -1246,7 +1246,7 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
             .registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&usage_binding_id)
+            .contains_key(&(usage_binding_id, usage_subscription.read_view))
     );
     assert!(matches!(
         node.apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
@@ -1276,13 +1276,13 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
         node.query.registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&usage_binding_id)
+            .contains_key(&(usage_binding_id, usage_subscription.read_view))
     );
     assert!(
         node.query.registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&other_usage_binding_id)
+            .contains_key(&(other_usage_binding_id, other_usage_subscription.read_view))
     );
 
     let canonical_subscription = SubscriptionKey {
@@ -1316,13 +1316,13 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
         !node.query.registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&usage_binding_id)
+            .contains_key(&(usage_binding_id, usage_subscription.read_view))
     );
     assert!(
         node.query.registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&other_usage_binding_id)
+            .contains_key(&(other_usage_binding_id, other_usage_subscription.read_view))
     );
     assert!(node.query.settled_result_sets.contains_key(&binding_view_key));
     assert!(node.query.settled_program_facts.contains_key(&binding_view_key));
@@ -1335,7 +1335,7 @@ fn binding_delta_validates_shape_arity_binding_id_and_removes_result_set() {
         !node.query.registered_bindings
             .get(&shape.shape_id())
             .unwrap()
-            .contains_key(&other_usage_binding_id)
+            .contains_key(&(other_usage_binding_id, other_usage_subscription.read_view))
     );
     assert!(!node.query.settled_result_sets.contains_key(&binding_view_key));
     assert!(!node.query.settled_program_facts.contains_key(&binding_view_key));
@@ -1365,7 +1365,9 @@ fn binding_delta_cleanup_distinguishes_canonical_read_view() {
     };
     let branch_usage_subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
-        binding_id: BindingId(uuid::Uuid::from_bytes([0x88; 16])),
+        // The usage handle alone is not globally unique: relays may reuse the
+        // canonical binding id for distinct downstream read views.
+        binding_id: default_usage_subscription.binding_id,
         read_view: branch_read_view,
     };
 

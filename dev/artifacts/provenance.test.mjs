@@ -427,6 +427,19 @@ test("assembled NAPI packages carry only matching manifests and reject stale or 
     /provenance\/\*\.manifest\.json/,
   );
 
+  const previewPlatforms = Object.fromEntries(
+    Object.entries(platforms).filter(([platform]) => platform !== "win32-x64-msvc"),
+  );
+  const windowsManifest = join(
+    root,
+    "crates/jazz-napi/artifacts/jazz-napi.win32-x64-msvc.manifest.json",
+  );
+  const windowsManifestContents = readFileSync(windowsManifest, "utf8");
+  rmSync(windowsManifest);
+  assert.doesNotThrow(() => stageNapiManifests(root, previewPlatforms));
+  assert.throws(() => stageNapiManifests(root), /missing provenance manifest for win32-x64-msvc/);
+  writeFileSync(windowsManifest, windowsManifestContents);
+
   const darwinManifest = join(
     root,
     "crates/jazz-napi/artifacts/jazz-napi.darwin-x64.manifest.json",

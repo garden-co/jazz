@@ -1,4 +1,4 @@
-import { useCallback, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from "react";
 
 interface UseLocalStorageStateOptions<T> {
   /**
@@ -54,6 +54,15 @@ export function useLocalStorageState<T>(
 ): [T, Dispatch<SetStateAction<T>>] {
   const { isValid } = options;
   const [value, setValue] = useState(() => readLocalStorageState(key, defaultValue, options));
+
+  useEffect(() => {
+    const syncStoredValue = (event: StorageEvent) => {
+      if (event.key !== null && event.key !== key) return;
+      setValue(readLocalStorageState(key, defaultValue, { isValid }));
+    };
+    window.addEventListener("storage", syncStoredValue);
+    return () => window.removeEventListener("storage", syncStoredValue);
+  }, [defaultValue, isValid, key]);
 
   const setStoredValue = useCallback<Dispatch<SetStateAction<T>>>(
     (nextValue) => {

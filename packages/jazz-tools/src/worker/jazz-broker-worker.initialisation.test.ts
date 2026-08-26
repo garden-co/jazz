@@ -221,6 +221,50 @@ describe("broker worker context initialization", () => {
     expect(mocks.loadWasmModule).toHaveBeenCalledTimes(2);
   });
 
+  it("does not let a second context repoint the process-wide WASM realm at another origin", async () => {
+    const firstOptions = {
+      ...options("first-origin"),
+      runtimeSources: { wasmUrl: "http://vite-first.test/assets/jazz_wasm_bg.wasm" },
+    };
+    const secondOptions = {
+      ...options("second-origin"),
+      runtimeSources: { wasmUrl: "http://vite-second.test/assets/jazz_wasm_bg.wasm" },
+    };
+
+    expect((await connect(firstOptions, "first-tab")).outcome).toEqual({ type: "runtime-ready" });
+    expect(mocks.loadWasmModule).toHaveBeenCalledWith(firstOptions.runtimeSources);
+
+    // Different persistent contexts can reach one long-lived SharedWorker
+    // process. Its wasm-bindgen module is initialized exactly once, so a
+    // later page must not silently inherit an asset URL from a Vite origin
+    // which may already have been torn down.
+    expect((await connect(secondOptions, "second-tab")).outcome).toEqual({
+      type: "runtime-error",
+      message:
+        "incompatible WASM asset source for this SharedWorker; start a worker scoped to the new asset URL",
+    });
+    expect(mocks.loadWasmModule).toHaveBeenCalledTimes(1);
+  });
+
+  it("never aliases distinct supplied WASM byte arrays to the first worker realm", async () => {
+    const firstOptions = {
+      ...options("first-source"),
+      runtimeSources: { wasmSource: new Uint8Array([0, 97, 115, 109]) },
+    };
+    const secondOptions = {
+      ...options("second-source"),
+      runtimeSources: { wasmSource: new Uint8Array([0, 97, 115, 109]) },
+    };
+
+    expect((await connect(firstOptions, "first-tab")).outcome).toEqual({ type: "runtime-ready" });
+    expect((await connect(secondOptions, "second-tab")).outcome).toEqual({
+      type: "runtime-error",
+      message:
+        "incompatible WASM asset source for this SharedWorker; start a worker scoped to the new asset URL",
+    });
+    expect(mocks.loadWasmModule).toHaveBeenCalledTimes(1);
+  });
+
   it("evicts a context when telemetry installation fails so the same key can retry", async () => {
     mocks.installWasmTelemetry.mockImplementationOnce(() => {
       throw new Error("telemetry installation failed");

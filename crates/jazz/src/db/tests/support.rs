@@ -1749,6 +1749,15 @@ pub(super) struct CoreDb {
 }
 
 pub(super) fn open_core(node_byte: u8, author: AuthorSubject, schema: &JazzSchema) -> CoreDb {
+    open_core_with_claims(node_byte, author, schema, test_provider_claims(author))
+}
+
+pub(super) fn open_core_with_claims(
+    node_byte: u8,
+    author: AuthorSubject,
+    schema: &JazzSchema,
+    claims: BTreeMap<String, Value>,
+) -> CoreDb {
     let storage = rocks_storage(schema);
     let mut node = NodeState::new_history_complete(
         NodeUuid::from_bytes([node_byte; 16]),
@@ -1756,7 +1765,7 @@ pub(super) fn open_core(node_byte: u8, author: AuthorSubject, schema: &JazzSchem
         storage,
     )
     .unwrap();
-    node.set_session_claims(author, test_provider_claims(author));
+    node.set_session_claims(author, claims);
     CoreDb {
         server: Node::new(node),
         schema: schema.clone(),
@@ -2036,7 +2045,12 @@ impl CoreDb {
 
     pub(super) fn exclusive_tx(&self) -> Result<CoreExclusiveTx<'_>, Error> {
         let tx_id = OpenTransactionId::new();
-        block_on(self.server.node().borrow_mut().open_exclusive(tx_id))?;
+        block_on(
+            self.server
+                .node()
+                .borrow_mut()
+                .open_exclusive_for_identity(tx_id, self.author),
+        )?;
         Ok(CoreExclusiveTx {
             core: self,
             tx_id,

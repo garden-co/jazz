@@ -787,6 +787,9 @@ fn align_collect_join_key_types(
         for step in &path.child.steps {
             match step {
                 LinearStep::OrderBy(keys) => {
+                    for key in keys {
+                        retain_collect_slot_value(slot, &key.value, child)?;
+                    }
                     slot.order_cols = keys
                         .iter()
                         .map(|key| {
@@ -804,6 +807,9 @@ fn align_collect_join_key_types(
                     tie_breaker,
                     ..
                 } => {
+                    for value in tie_breaker {
+                        retain_collect_slot_value(slot, value, child)?;
+                    }
                     slot.offset = u64::from(*offset);
                     slot.limit = limit
                         .map(|limit| TopByLimit::Finite(u64::from(limit)))
@@ -894,12 +900,75 @@ fn align_collect_root_window(
     Ok(())
 }
 
+/// Keep values used to order or slice a nested collector slot in its internal
+/// input row. They are deliberately not public payload fields: a path can
+/// order by provenance even when its projection selects only ordinary columns.
+fn retain_collect_slot_value(
+    slot: &mut CollectSlotLayout,
+    value: &NormalizedValueRef,
+    source: &ResolvedSource,
+) -> CapabilityResult<()> {
+    let Some(requested_field) = collect_source_field_for_value(value) else {
+        return Ok(());
+    };
+    let source_field = if source
+        .row_shape
+        .descriptor
+        .field_index(requested_field)
+        .is_some()
+    {
+        requested_field.to_owned()
+    } else {
+        user_column_field(requested_field)
+    };
+    if slot
+        .fields
+        .iter()
+        .any(|field| field.source_field.as_deref() == Some(source_field.as_str()))
+    {
+        return Ok(());
+    }
+    let source_value_type = source_field_type(source, &source_field)
+        .cloned()
+        .ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Operator(format!(
+                "collector child source {:?} does not provide window key {requested_field:?}",
+                source.row_shape.source
+            )))
+        })?;
+    let prefix = slot
+        .row_id_input
+        .strip_suffix(&format!("_{}", source.row_shape.row_uuid_field))
+        .ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Runtime(format!(
+                "collector child row-id input {:?} does not match source row-id field {:?}",
+                slot.row_id_input, source.row_shape.row_uuid_field
+            )))
+        })?;
+    let value_type = if matches!(source_value_type, ValueType::Nullable(_)) {
+        source_value_type.clone()
+    } else {
+        ValueType::Nullable(Box::new(source_value_type.clone()))
+    };
+    slot.fields.push(CollectFlatField {
+        input: format!("{prefix}_{source_field}"),
+        output: source_field.clone(),
+        value_type,
+        output_value_type: source_value_type,
+        source_field: Some(source_field),
+        is_row_id: false,
+        is_presence: false,
+        is_output: false,
+    });
+    Ok(())
+}
+
 fn collect_root_input_for_value(
     layout: &CollectLayout,
     value: &NormalizedValueRef,
 ) -> CapabilityResult<String> {
-    match value {
-        NormalizedValueRef::SourceField { field, .. } => layout
+    match collect_source_field_for_value(value) {
+        Some(field) => layout
             .root_fields
             .iter()
             .find(|candidate| {
@@ -910,7 +979,7 @@ fn collect_root_input_for_value(
                         .is_some_and(|source| logical_user_column(source) == field)
             })
             .map(|candidate| candidate.input.clone()),
-        NormalizedValueRef::RowId(RowIdRef::Source(_)) => layout
+        None if matches!(value, NormalizedValueRef::RowId(RowIdRef::Source(_))) => layout
             .root_fields
             .iter()
             .find(|field| field.is_row_id)
@@ -928,8 +997,8 @@ fn collect_slot_input_for_value(
     slot: &CollectSlotLayout,
     value: &NormalizedValueRef,
 ) -> CapabilityResult<String> {
-    match value {
-        NormalizedValueRef::SourceField { field, .. } => slot
+    match collect_source_field_for_value(value) {
+        Some(field) => slot
             .fields
             .iter()
             .find(|candidate| {
@@ -940,7 +1009,9 @@ fn collect_slot_input_for_value(
                         .is_some_and(|source| logical_user_column(source) == field)
             })
             .map(|candidate| candidate.input.clone()),
-        NormalizedValueRef::RowId(RowIdRef::Source(_)) => Some(slot.row_id_input.clone()),
+        None if matches!(value, NormalizedValueRef::RowId(RowIdRef::Source(_))) => {
+            Some(slot.row_id_input.clone())
+        }
         _ => None,
     }
     .ok_or_else(|| {
@@ -948,6 +1019,22 @@ fn collect_slot_input_for_value(
             "collector window key {value:?} is not present in the child projection"
         )))
     })
+}
+
+/// Map a normalized field reference to the canonical name retained by a
+/// resolved source. Provenance is source metadata, not a public projection
+/// field, but ordered and sliced collectors still need it as an internal key.
+fn collect_source_field_for_value(value: &NormalizedValueRef) -> Option<&str> {
+    match value {
+        NormalizedValueRef::SourceField { field, .. } => Some(field),
+        NormalizedValueRef::Provenance { field, .. } => Some(match field {
+            ProvenanceField::CreatedAt => "$createdAt",
+            ProvenanceField::CreatedBy => "$createdBy",
+            ProvenanceField::UpdatedAt => "$updatedAt",
+            ProvenanceField::UpdatedBy => "$updatedBy",
+        }),
+        _ => None,
+    }
 }
 
 pub(super) fn root_join_occurrence_fields(

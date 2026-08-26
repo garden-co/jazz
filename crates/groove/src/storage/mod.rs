@@ -203,6 +203,17 @@ pub struct StorageDelta {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StorageDeltaKind {
     CurrentWinnerV1,
+    /// Preserve the first value ever installed for a key.
+    ///
+    /// This is the storage-level conditional insertion primitive used for
+    /// immutable large-value chunks.  Keeping it as a merge delta matters for
+    /// RocksDB: separate database handles/processes may race, but RocksDB
+    /// serializes merge operands for one key while materializing the winner.
+    SetIfAbsentV1,
+    /// Remove a key only when its current value is byte-for-byte equal to the
+    /// payload. This is the storage-level compare-and-delete primitive used
+    /// when reclaiming immutable large-value chunk locators.
+    DeleteIfValueMatchesV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,6 +233,27 @@ impl StorageDelta {
             payload: postcard::to_allocvec(&delta)
                 .map_err(|error| Error::InvalidStorageDelta(error.to_string()))?,
         })
+    }
+
+    /// Atomically install `value` only when the key has no existing value.
+    ///
+    /// Callers read the key after committing this delta to learn the immutable
+    /// winner.  Backends that do not have a native merge operator apply the
+    /// same transition inside their atomic write batch.
+    pub fn set_if_absent(value: Vec<u8>) -> Self {
+        Self {
+            kind: StorageDeltaKind::SetIfAbsentV1,
+            payload: value,
+        }
+    }
+
+    /// Atomically remove a key only when its current value still matches
+    /// `expected`. A missing or different value is left untouched.
+    pub fn delete_if_value_matches(expected: Vec<u8>) -> Self {
+        Self {
+            kind: StorageDeltaKind::DeleteIfValueMatchesV1,
+            payload: expected,
+        }
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
@@ -264,20 +296,46 @@ pub fn compact_storage_delta_operand(
             })?
             .encode()
         }
+        // The first conditional-insert operand remains the correct compact
+        // representation: applying it to an absent base recreates the winner,
+        // while applying it to a present base keeps that older value.
+        StorageDeltaKind::SetIfAbsentV1 => Ok(template_operand.to_vec()),
+        // A compare-and-delete must remain an individual merge operand: its
+        // effect depends on the durable value that a later full merge sees.
+        StorageDeltaKind::DeleteIfValueMatchesV1 => Ok(template_operand.to_vec()),
     }
+}
+
+/// Whether an operand's transition depends on the eventual durable base.
+/// RocksDB must defer these operands to a full merge rather than compacting
+/// them without that base. Conditional inserts are base-dependent too: they
+/// can only be compacted safely with another conditional insert, and the
+/// generic ordered-KV seam permits later deltas of other kinds for the key.
+pub fn storage_delta_requires_full_merge(encoded_delta: &[u8]) -> Result<bool, Error> {
+    Ok(matches!(
+        StorageDelta::decode(encoded_delta)?.kind,
+        StorageDeltaKind::SetIfAbsentV1 | StorageDeltaKind::DeleteIfValueMatchesV1
+    ))
 }
 
 pub fn apply_storage_delta(
     existing: Option<&[u8]>,
     encoded_delta: &[u8],
-) -> Result<Vec<u8>, Error> {
+) -> Result<Option<Vec<u8>>, Error> {
     let delta = StorageDelta::decode(encoded_delta)?;
     match delta.kind {
         StorageDeltaKind::CurrentWinnerV1 => {
             let candidate: CurrentWinnerDelta = postcard::from_bytes(&delta.payload)
                 .map_err(|error| Error::InvalidStorageDelta(error.to_string()))?;
-            apply_current_winner_delta(existing, &candidate)
+            apply_current_winner_delta(existing, &candidate).map(Some)
         }
+        StorageDeltaKind::SetIfAbsentV1 => {
+            Ok(Some(existing.map(<[u8]>::to_vec).unwrap_or(delta.payload)))
+        }
+        StorageDeltaKind::DeleteIfValueMatchesV1 => Ok((existing
+            != Some(delta.payload.as_slice()))
+        .then(|| existing.map(<[u8]>::to_vec))
+        .flatten()),
     }
 }
 
@@ -1546,7 +1604,7 @@ fn overlay_point_value(
             OwnedWriteOperation::Set { value: set, .. } => value = Some(set.clone()),
             OwnedWriteOperation::Delete { .. } => value = None,
             OwnedWriteOperation::Delta { delta, .. } => {
-                value = Some(apply_storage_delta(value.as_deref(), &delta.encode()?)?);
+                value = apply_storage_delta(value.as_deref(), &delta.encode()?)?;
             }
         }
     }
@@ -1682,21 +1740,30 @@ where
         }
 
         // A base limit of only the logical result size is unsound: every
-        // staged key whose final operation is a Delete may consume one of
-        // those physical entries without producing a logical result.  The
-        // final operation is sufficient here: Set and Delta always retain a
-        // key (or surface their own error only if traversal reaches it), while
-        // Delete removes it regardless of its base value.  Thus `limit +
-        // deletes` is both a hard physical ceiling and enough base entries to
-        // fill the requested logical result when they exist.
+        // staged key whose final operation can remove it may consume one of
+        // those physical entries without producing a logical result. A
+        // compare-and-delete has the same effect when its expected bytes
+        // match, so count it conservatively too. Thus `limit + removals` is
+        // both a hard physical ceiling and enough base entries to fill the
+        // requested logical result when they exist.
         let physical_max_items = request.max_items.map(|limit| {
-            let final_deletes = staged
+            let final_removals = staged
                 .values()
                 .filter(|operations| {
-                    matches!(operations.last(), Some(OwnedWriteOperation::Delete { .. }))
+                    matches!(
+                        operations.last(),
+                        Some(OwnedWriteOperation::Delete { .. })
+                            | Some(OwnedWriteOperation::Delta {
+                                delta: StorageDelta {
+                                    kind: StorageDeltaKind::DeleteIfValueMatchesV1,
+                                    ..
+                                },
+                                ..
+                            })
+                    )
                 })
                 .count();
-            limit.saturating_add(final_deletes)
+            limit.saturating_add(final_removals)
         });
         let base = base
             .scan(ScanRequest {
@@ -1872,6 +1939,8 @@ pub enum Error {
     InvalidStorageKey(String),
     #[error("invalid storage delta: {0}")]
     InvalidStorageDelta(String),
+    #[error("IndexedDB storage remained contended after {retries} generation-conflict retries")]
+    IdbGenerationContention { retries: usize },
     #[error("record error: {0}")]
     Record(#[source] Box<crate::records::Error>),
     #[error("{backend} storage error: {message}")]
@@ -2099,6 +2168,101 @@ pub(crate) mod conformance {
                 .unwrap(),
             Some(child)
         );
+    }
+
+    pub(crate) async fn conditional_delete_delta_matches_the_durable_value<S>(storage: S)
+    where
+        S: OrderedKvStorage,
+    {
+        let key = b"conditional-delete".to_vec();
+        let old = b"old authenticated bytes".to_vec();
+        let new = b"new authenticated bytes".to_vec();
+        storage
+            .set("records".into(), key.clone(), old.clone())
+            .await
+            .unwrap();
+
+        storage
+            .write_many(vec![OwnedWriteOperation::delta(
+                "records",
+                key.clone(),
+                StorageDelta::delete_if_value_matches(b"different bytes".to_vec()),
+            )])
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.get("records".into(), key.clone()).await.unwrap(),
+            Some(old.clone())
+        );
+
+        storage
+            .write_many(vec![OwnedWriteOperation::delta(
+                "records",
+                key.clone(),
+                StorageDelta::delete_if_value_matches(old),
+            )])
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.get("records".into(), key.clone()).await.unwrap(),
+            None
+        );
+
+        storage
+            .write_many(vec![OwnedWriteOperation::delta(
+                "records",
+                key.clone(),
+                StorageDelta::set_if_absent(new.clone()),
+            )])
+            .await
+            .unwrap();
+        assert_eq!(storage.get("records".into(), key).await.unwrap(), Some(new));
+    }
+
+    pub(crate) async fn former_rocksdb_tombstone_bytes_remain_an_ordinary_value<S>(storage: S)
+    where
+        S: OrderedKvStorage,
+    {
+        let key = b"former-tombstone".to_vec();
+        let value = b"\0groove-storage-delta-tombstone-v1".to_vec();
+        let replacement = b"must-not-replace-an-ordinary-value".to_vec();
+        storage
+            .set("records".into(), key.clone(), value.clone())
+            .await
+            .unwrap();
+        storage
+            .write_many(vec![OwnedWriteOperation::delta(
+                "records",
+                key.clone(),
+                StorageDelta::set_if_absent(replacement),
+            )])
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.get("records".into(), key.clone()).await.unwrap(),
+            Some(value.clone())
+        );
+        assert_eq!(
+            collect_scan(
+                storage
+                    .scan(ScanRequest::prefix("records".into(), b"former-".to_vec()))
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+            vec![(key.clone(), value.clone())]
+        );
+
+        storage
+            .write_many(vec![OwnedWriteOperation::delta(
+                "records",
+                key.clone(),
+                StorageDelta::delete_if_value_matches(value),
+            )])
+            .await
+            .unwrap();
+        assert_eq!(storage.get("records".into(), key).await.unwrap(), None);
     }
 }
 
@@ -3811,6 +3975,57 @@ mod tests {
     async fn memory_storage_conforms_to_delta_append_contract() {
         let storage = MemoryStorage::new(&["records"]);
         conformance::delta_append_current_winner_observes_merged_state(storage).await;
+    }
+
+    #[futures_test::test]
+    async fn memory_storage_conditional_delete_delta_matches_the_durable_value() {
+        let storage = MemoryStorage::new(&["records"]);
+        conformance::conditional_delete_delta_matches_the_durable_value(storage).await;
+    }
+
+    #[futures_test::test]
+    async fn memory_storage_preserves_former_rocksdb_tombstone_bytes() {
+        let storage = MemoryStorage::new(&["records"]);
+        conformance::former_rocksdb_tombstone_bytes_remain_an_ordinary_value(storage).await;
+    }
+
+    #[futures_test::test]
+    async fn staged_overlay_limited_scan_counts_conditional_deletes() {
+        // This is intentionally a storage-layer receipt: the overlay's
+        // read-your-own-writes scan limit is below Jazz's public query API.
+        let storage = MemoryStorage::new(&["records"]);
+        for (key, value) in [
+            (b"a".as_slice(), b"one".as_slice()),
+            (b"b".as_slice(), b"two".as_slice()),
+            (b"c".as_slice(), b"three".as_slice()),
+        ] {
+            storage
+                .set("records".into(), key.to_vec(), value.to_vec())
+                .await
+                .unwrap();
+        }
+        let staged = RefCell::new(StagedWriteState::from(vec![OwnedWriteOperation::delta(
+            "records",
+            b"a",
+            StorageDelta::delete_if_value_matches(b"one".to_vec()),
+        )]));
+        let overlay = StagedWriteOverlay::new(&storage, &staged);
+
+        let rows = collect_scan(
+            overlay
+                .scan(ScanRequest::prefix("records".into(), Vec::new()).with_max_items(2))
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (b"b".to_vec(), b"two".to_vec()),
+                (b"c".to_vec(), b"three".to_vec()),
+            ]
+        );
     }
 
     #[futures_test::test]

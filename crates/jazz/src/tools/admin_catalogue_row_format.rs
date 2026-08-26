@@ -192,31 +192,32 @@ fn encode_row_with_layout(
     layout: &CompiledRowLayout,
     values: &[Value],
 ) -> Result<Vec<u8>, EncodingError> {
-    if values.len() != descriptor.columns.len() {
+    let mut result = Vec::new();
+    encode_row_columns_into(
+        &mut result,
+        &descriptor.columns,
+        layout.fixed_section_size,
+        layout.variable_column_count,
+        values,
+    )?;
+    Ok(result)
+}
+
+fn encode_row_columns_into(
+    buf: &mut Vec<u8>,
+    columns: &[ColumnDescriptor],
+    fixed_section_size: usize,
+    variable_column_count: usize,
+    values: &[Value],
+) -> Result<(), EncodingError> {
+    if values.len() != columns.len() {
         return Err(EncodingError::ColumnCountMismatch {
-            expected: descriptor.columns.len(),
+            expected: columns.len(),
             actual: values.len(),
         });
     }
 
-    let offset_table_size = layout.variable_column_count.saturating_sub(1) * size_of::<u32>();
-    let estimated_var_data_len = descriptor
-        .columns
-        .iter()
-        .zip(values.iter())
-        .filter(|(col, _)| col.column_type.is_variable())
-        .map(|(col, val)| estimated_variable_value_len(col, val))
-        .sum::<usize>();
-
-    let mut fixed_data = Vec::with_capacity(layout.fixed_section_size);
-    let mut var_data = Vec::with_capacity(estimated_var_data_len);
-    let mut var_offsets: Vec<u32> = Vec::with_capacity(layout.variable_column_count);
-
-    // Separate fixed and variable columns while maintaining order
-    let mut var_columns: Vec<(usize, &ColumnDescriptor, &Value)> = Vec::new();
-
-    for (i, (col, val)) in descriptor.columns.iter().zip(values.iter()).enumerate() {
-        // Validate type match
+    for (col, val) in columns.iter().zip(values) {
         if !val.is_null() && !value_matches_column_type(val, &col.column_type) {
             return Err(EncodingError::TypeMismatch {
                 column: col.name.to_string(),
@@ -225,45 +226,93 @@ fn encode_row_with_layout(
             });
         }
 
-        // Check null allowed
         if val.is_null() && !col.nullable {
             return Err(EncodingError::NullNotAllowed {
                 column: col.name.to_string(),
             });
         }
 
-        // Enforce BYTEA payload limits (including nested bytea in arrays/rows).
         if !val.is_null() {
             validate_value_size(val, &col.column_type, col.name_str())?;
         }
+    }
 
-        if col.column_type.is_variable() {
-            var_columns.push((i, col, val));
-        } else {
-            // Encode fixed-size value
-            encode_fixed_value(&mut fixed_data, col, val);
+    let offset_table_size = variable_column_count.saturating_sub(1) * size_of::<u32>();
+    let estimated_var_data_len = columns
+        .iter()
+        .zip(values)
+        .filter(|(col, _)| col.column_type.is_variable())
+        .map(|(col, val)| estimated_variable_value_len(col, val))
+        .sum::<usize>();
+    buf.reserve(fixed_section_size + offset_table_size + estimated_var_data_len);
+
+    for (col, val) in columns.iter().zip(values) {
+        if !col.column_type.is_variable() {
+            encode_fixed_value(buf, col, val);
         }
     }
 
-    // Encode variable-length values and build offset table
-    for (_i, col, val) in &var_columns {
-        var_offsets.push(var_data.len() as u32);
-        encode_variable_value(&mut var_data, col, val);
+    let offset_table_start = buf.len();
+    buf.resize(offset_table_start + offset_table_size, 0);
+    let variable_data_start = buf.len();
+
+    for (variable_index, (col, val)) in columns
+        .iter()
+        .zip(values)
+        .filter(|(col, _)| col.column_type.is_variable())
+        .enumerate()
+    {
+        if variable_index > 0 {
+            let offset = (buf.len() - variable_data_start) as u32;
+            let offset_position = offset_table_start + (variable_index - 1) * size_of::<u32>();
+            buf[offset_position..offset_position + size_of::<u32>()]
+                .copy_from_slice(&offset.to_le_bytes());
+        }
+        encode_variable_value(buf, col, val)?;
     }
 
-    // Build final binary: fixed_data + offset_table (skip first) + var_data
-    let mut result =
-        Vec::with_capacity(layout.fixed_section_size + offset_table_size + var_data.len());
-    result.extend(fixed_data);
+    Ok(())
+}
 
-    // Write offsets (skip first, as it's implicitly 0)
-    for offset in var_offsets.iter().skip(1) {
-        result.extend_from_slice(&offset.to_le_bytes());
-    }
+fn row_encoding_layout(columns: &[ColumnDescriptor]) -> (usize, usize) {
+    columns
+        .iter()
+        .fold((0, 0), |(fixed_size, variable_count), column| {
+            if let Some(value_size) = column.column_type.fixed_size() {
+                (
+                    fixed_size + value_size + usize::from(column.nullable),
+                    variable_count,
+                )
+            } else {
+                (fixed_size, variable_count + 1)
+            }
+        })
+}
 
-    result.extend(var_data);
+fn estimated_row_columns_len(columns: &[ColumnDescriptor], values: &[Value]) -> usize {
+    let (fixed_section_size, variable_column_count) = row_encoding_layout(columns);
+    fixed_section_size
+        + variable_column_count.saturating_sub(1) * size_of::<u32>()
+        + columns
+            .iter()
+            .zip(values)
+            .filter(|(col, _)| col.column_type.is_variable())
+            .map(|(col, val)| estimated_variable_value_len(col, val))
+            .sum::<usize>()
+}
 
-    Ok(result)
+fn estimated_enum_payload_len(case: &str, values: &[Value], col_type: &ColumnType) -> usize {
+    let cases = match col_type {
+        ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. } => cases,
+        _ => return 0,
+    };
+    cases
+        .iter()
+        .find(|entry| entry.name == case)
+        .map(|entry| {
+            size_of::<u32>() + case.len() + estimated_row_columns_len(&entry.fields, values)
+        })
+        .unwrap_or(0)
 }
 
 fn estimated_variable_value_len(col: &ColumnDescriptor, val: &Value) -> usize {
@@ -284,6 +333,9 @@ fn estimated_variable_value_len(col: &ColumnDescriptor, val: &Value) -> usize {
                 } else {
                     id_len
                 }
+            }
+            Value::Enum { case, values } => {
+                estimated_enum_payload_len(case, values, &col.column_type)
             }
             _ => 0,
         }
@@ -327,6 +379,10 @@ fn estimated_array_len(elements: &[Value], column_type: &ColumnType) -> usize {
                     columns: descriptor,
                 },
             ) => 1 + id.map(|_| 16).unwrap_or(0) + estimated_row_len(descriptor, values),
+            (
+                Value::Enum { case, values },
+                ColumnType::EnumPayload { .. } | ColumnType::CatalogueEnumPayload { .. },
+            ) => estimated_enum_payload_len(case, values, element_type),
             _ => element_type.fixed_size().unwrap_or(0),
         })
         .sum::<usize>();
@@ -442,6 +498,21 @@ fn validate_value_size(
             }
             Ok(())
         }
+        (
+            Value::Enum { case, values },
+            ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. },
+        ) => {
+            if let Some(entry) = cases.iter().find(|entry| entry.name == *case) {
+                for (inner_value, inner_column) in values.iter().zip(&entry.fields) {
+                    validate_value_size(
+                        inner_value,
+                        &inner_column.column_type,
+                        inner_column.name_str(),
+                    )?;
+                }
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -515,12 +586,53 @@ fn encode_fixed_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value) {
     }
 }
 
+fn encode_enum_payload_into(
+    buf: &mut Vec<u8>,
+    case: &str,
+    values: &[Value],
+    col_type: &ColumnType,
+) -> Result<(), EncodingError> {
+    let cases = match col_type {
+        ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. } => cases,
+        _ => {
+            return Err(EncodingError::TypeMismatch {
+                column: "enum payload".into(),
+                expected: Box::new(col_type.clone()),
+                actual: None,
+            });
+        }
+    };
+    let entry = cases
+        .iter()
+        .find(|entry| entry.name == case)
+        .ok_or_else(|| EncodingError::TypeMismatch {
+            column: "enum payload case".into(),
+            expected: Box::new(col_type.clone()),
+            actual: None,
+        })?;
+    let (fixed_section_size, variable_column_count) = row_encoding_layout(&entry.fields);
+    let case_bytes = case.as_bytes();
+    buf.extend_from_slice(&(case_bytes.len() as u32).to_le_bytes());
+    buf.extend_from_slice(case_bytes);
+    encode_row_columns_into(
+        buf,
+        &entry.fields,
+        fixed_section_size,
+        variable_column_count,
+        values,
+    )
+}
+
 /// Encode a variable-length value to the buffer.
-fn encode_variable_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value) {
+fn encode_variable_value(
+    buf: &mut Vec<u8>,
+    col: &ColumnDescriptor,
+    val: &Value,
+) -> Result<(), EncodingError> {
     if col.nullable {
         if val.is_null() {
             buf.push(0); // null marker
-            return;
+            return Ok(());
         } else {
             buf.push(1); // present marker
         }
@@ -529,7 +641,7 @@ fn encode_variable_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value)
     match val {
         Value::Text(s) => buf.extend_from_slice(s.as_bytes()),
         Value::Bytea(bytes) => buf.extend_from_slice(bytes),
-        Value::Array(elements) => encode_array_into(buf, elements, &col.column_type),
+        Value::Array(elements) => encode_array_into(buf, elements, &col.column_type)?,
         Value::Row { id, values } => {
             // Encode row using its descriptor from the column type
             if let ColumnType::Row { columns: desc } = &col.column_type {
@@ -541,32 +653,17 @@ fn encode_variable_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value)
                     }
                     None => buf.push(0),
                 }
-                let row_bytes = encode_row(desc, values).unwrap_or_default();
+                let row_bytes = encode_row(desc, values)?;
                 buf.extend(row_bytes);
             }
         }
         Value::Enum { case, values } => {
-            let cases = match &col.column_type {
-                ColumnType::EnumPayload { cases }
-                | ColumnType::CatalogueEnumPayload { cases, .. } => cases,
-                _ => unreachable!("Enum value does not match column type"),
-            };
-            let descriptor = cases
-                .iter()
-                .find(|entry| entry.name == *case)
-                .map(|entry| RowDescriptor::new(entry.fields.clone()))
-                .unwrap_or_else(|| unreachable!("validated enum case"));
-            let case_bytes = case.as_bytes();
-            buf.extend_from_slice(&(case_bytes.len() as u32).to_le_bytes());
-            buf.extend_from_slice(case_bytes);
-            buf.extend(
-                encode_row(&descriptor, values)
-                    .unwrap_or_else(|_| unreachable!("validated enum payload")),
-            );
+            encode_enum_payload_into(buf, case, values, &col.column_type)?;
         }
         Value::Null => {} // Already handled above for nullable
         _ => unreachable!("Non-text/bytea/array/row types are fixed-size"),
     }
+    Ok(())
 }
 
 cfg_decode! {
@@ -994,6 +1091,16 @@ pub fn encode_value_with_type(value: &Value, col_type: &ColumnType) -> Vec<u8> {
         ) if col_type.fixed_size().is_some() => {
             vec![encode_enum_variant_index(variants, raw).unwrap_or_else(|_| unreachable!())]
         }
+        (
+            Value::Enum { case, values },
+            ColumnType::EnumPayload { .. } | ColumnType::CatalogueEnumPayload { .. },
+        ) => {
+            let mut buf = Vec::with_capacity(estimated_enum_payload_len(case, values, col_type));
+            match encode_enum_payload_into(&mut buf, case, values, col_type) {
+                Ok(()) => buf,
+                Err(_) => Vec::new(),
+            }
+        }
         (Value::Row { id, values }, ColumnType::Row { columns: desc }) => {
             let mut buf = Vec::new();
             // Encode optional row id: 1-byte flag + 16-byte UUID if present
@@ -1010,7 +1117,7 @@ pub fn encode_value_with_type(value: &Value, col_type: &ColumnType) -> Vec<u8> {
         (Value::Array(elements), ColumnType::Array { element: _ }) => {
             encode_array(elements, col_type)
         }
-        // For non-Row/Array types, fall back to simple encoding
+        // Values that do not require a descriptor use the simple encoder.
         _ => encode_value(value),
     }
 }
@@ -1064,23 +1171,29 @@ fn encode_array_simple(elements: &[Value]) -> Vec<u8> {
 /// The `array_type` parameter is needed to properly encode Row elements,
 /// which require their descriptor for encoding.
 fn encode_array(elements: &[Value], array_type: &ColumnType) -> Vec<u8> {
-    let mut result = Vec::new();
-    encode_array_into(&mut result, elements, array_type);
-    result
+    let mut result = Vec::with_capacity(estimated_array_len(elements, array_type));
+    match encode_array_into(&mut result, elements, array_type) {
+        Ok(()) => result,
+        Err(_) => Vec::new(),
+    }
 }
 
-fn encode_array_into(buf: &mut Vec<u8>, elements: &[Value], array_type: &ColumnType) {
+fn encode_array_into(
+    buf: &mut Vec<u8>,
+    elements: &[Value],
+    array_type: &ColumnType,
+) -> Result<(), EncodingError> {
     let count = elements.len() as u32;
     buf.extend_from_slice(&count.to_le_bytes());
 
     if elements.is_empty() {
-        return;
+        return Ok(());
     }
 
     // Get the element type from the array type
     let element_type = match array_type {
         ColumnType::Array { element: elem_type } => elem_type.as_ref(),
-        _ => return, // Not an array type
+        _ => return Ok(()), // Not an array type
     };
 
     // Check if element type is fixed-size
@@ -1089,36 +1202,55 @@ fn encode_array_into(buf: &mut Vec<u8>, elements: &[Value], array_type: &ColumnT
     if is_fixed {
         // Fixed-size elements: just concatenate encoded values (no offset table)
         for elem in elements {
-            encode_value_with_type_into(buf, elem, element_type);
+            encode_value_with_type_into(buf, elem, element_type)?;
         }
     } else {
-        // Variable-length elements: build offset table (skip first) + data
-        let mut element_data: Vec<Vec<u8>> = Vec::with_capacity(elements.len());
-        for elem in elements {
-            element_data.push(encode_value_with_type(elem, element_type));
-        }
+        let offset_table_start = buf.len();
+        let offset_table_size = elements.len().saturating_sub(1) * size_of::<u32>();
+        buf.resize(offset_table_start + offset_table_size, 0);
+        let element_data_start = buf.len();
 
-        // Build offset table (skip first offset, which is implicit 0)
-        let mut offset: u32 = 0;
-        for data in &element_data[..element_data.len().saturating_sub(1)] {
-            offset += data.len() as u32;
-            buf.extend(offset.to_le_bytes());
-        }
-
-        // Append element data
-        for data in element_data {
-            buf.extend(data);
+        for (index, elem) in elements.iter().enumerate() {
+            if index > 0 {
+                let offset = (buf.len() - element_data_start) as u32;
+                let offset_position = offset_table_start + (index - 1) * size_of::<u32>();
+                buf[offset_position..offset_position + size_of::<u32>()]
+                    .copy_from_slice(&offset.to_le_bytes());
+            }
+            encode_value_with_type_into(buf, elem, element_type)?;
         }
     }
+    Ok(())
 }
 
-fn encode_value_with_type_into(buf: &mut Vec<u8>, value: &Value, col_type: &ColumnType) {
+fn encode_value_with_type_into(
+    buf: &mut Vec<u8>,
+    value: &Value,
+    col_type: &ColumnType,
+) -> Result<(), EncodingError> {
     match (value, col_type) {
         (
             Value::Text(raw),
             ColumnType::Enum { variants } | ColumnType::ScalarEnum { variants, .. },
         ) if col_type.fixed_size().is_some() => {
             buf.push(encode_enum_variant_index(variants, raw).unwrap_or_else(|_| unreachable!()));
+        }
+        (
+            Value::Enum { case, values },
+            ColumnType::EnumPayload { .. } | ColumnType::CatalogueEnumPayload { .. },
+        ) => encode_enum_payload_into(buf, case, values, col_type)?,
+        (Value::Row { id, values }, ColumnType::Row { columns }) => {
+            match id {
+                Some(obj_id) => {
+                    buf.push(1);
+                    buf.extend_from_slice(obj_id.uuid().as_bytes());
+                }
+                None => buf.push(0),
+            }
+            buf.extend(encode_row(columns, values)?);
+        }
+        (Value::Array(elements), ColumnType::Array { .. }) => {
+            encode_array_into(buf, elements, col_type)?;
         }
         (Value::Integer(n), _) => buf.extend_from_slice(&n.to_le_bytes()),
         (Value::BigInt(n), _) => buf.extend_from_slice(&n.to_le_bytes()),
@@ -1129,6 +1261,7 @@ fn encode_value_with_type_into(buf: &mut Vec<u8>, value: &Value, col_type: &Colu
         (Value::TransactionId(bytes), _) => buf.extend_from_slice(bytes),
         _ => buf.extend(encode_value_with_type(value, col_type)),
     }
+    Ok(())
 }
 
 cfg_decode! {
@@ -1610,6 +1743,129 @@ mod tests {
         let encoded = encode_array(&elements, &array_type);
         let decoded = decode_array(&encoded, &row_type).unwrap();
         assert_eq!(decoded, elements);
+    }
+
+    #[test]
+    fn array_of_enum_payloads_in_row_roundtrip() {
+        let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new(
+            "events",
+            ColumnType::Array {
+                element: Box::new(ColumnType::EnumPayload {
+                    cases: vec![
+                        EnumCaseDescriptor {
+                            name: "heartbeat".into(),
+                            fields: vec![],
+                        },
+                        EnumCaseDescriptor {
+                            name: "message".into(),
+                            fields: vec![
+                                ColumnDescriptor::new("body", ColumnType::Text),
+                                ColumnDescriptor::new("priority", ColumnType::Integer).nullable(),
+                            ],
+                        },
+                    ],
+                }),
+            },
+        )]);
+        let values = vec![Value::Array(vec![
+            Value::Enum {
+                case: "message".into(),
+                values: vec![Value::Text("hello".into()), Value::Null],
+            },
+            Value::Enum {
+                case: "heartbeat".into(),
+                values: vec![],
+            },
+        ])];
+
+        let encoded = encode_row(&descriptor, &values).unwrap();
+        assert_eq!(decode_row(&descriptor, &encoded).unwrap(), values);
+
+        let err = encode_row(
+            &descriptor,
+            &[Value::Array(vec![Value::Enum {
+                case: "missing".into(),
+                values: vec![],
+            }])],
+        )
+        .unwrap_err();
+        assert!(matches!(err, EncodingError::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn enum_payload_bytea_limit_is_propagated_directly_and_in_arrays() {
+        let event_type = ColumnType::EnumPayload {
+            cases: vec![EnumCaseDescriptor {
+                name: "attachment".into(),
+                fields: vec![ColumnDescriptor::new("body", ColumnType::Bytea)],
+            }],
+        };
+        let oversized_event = Value::Enum {
+            case: "attachment".into(),
+            values: vec![Value::Bytea(vec![0; BYTEA_MAX_BYTES + 1])],
+        };
+
+        let direct_descriptor =
+            RowDescriptor::new(vec![ColumnDescriptor::new("event", event_type.clone())]);
+        let direct_error = encode_row(&direct_descriptor, &[oversized_event.clone()]).unwrap_err();
+        match direct_error {
+            EncodingError::ByteaTooLarge {
+                column,
+                actual,
+                max,
+            } => {
+                assert_eq!(column, "body");
+                assert_eq!(actual, BYTEA_MAX_BYTES + 1);
+                assert_eq!(max, BYTEA_MAX_BYTES);
+            }
+            other => panic!("expected ByteaTooLarge, got {other:?}"),
+        }
+
+        let row_descriptor = RowDescriptor::new(vec![ColumnDescriptor::new(
+            "record",
+            ColumnType::Row {
+                columns: Box::new(RowDescriptor::new(vec![ColumnDescriptor::new(
+                    "event",
+                    event_type.clone(),
+                )])),
+            },
+        )]);
+        let row_error = encode_row(
+            &row_descriptor,
+            &[Value::Row {
+                id: None,
+                values: vec![oversized_event.clone()],
+            }],
+        )
+        .unwrap_err();
+        assert!(matches!(row_error, EncodingError::ByteaTooLarge { .. }));
+
+        let array_descriptor = RowDescriptor::new(vec![ColumnDescriptor::new(
+            "events",
+            ColumnType::Array {
+                element: Box::new(event_type.clone()),
+            },
+        )]);
+        let array_error = encode_row(
+            &array_descriptor,
+            &[Value::Array(vec![oversized_event.clone()])],
+        )
+        .unwrap_err();
+        assert!(matches!(array_error, EncodingError::ByteaTooLarge { .. }));
+
+        // The direct encoder must remain fallible even if a future validation path drifts.
+        let mut encoded = Vec::new();
+        let encoder_error = encode_enum_payload_into(
+            &mut encoded,
+            "attachment",
+            match &oversized_event {
+                Value::Enum { values, .. } => values,
+                _ => unreachable!(),
+            },
+            &event_type,
+        )
+        .unwrap_err();
+        assert!(matches!(encoder_error, EncodingError::ByteaTooLarge { .. }));
     }
 
     #[test]

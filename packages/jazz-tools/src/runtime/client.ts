@@ -1759,7 +1759,7 @@ async function initializeWasmModule(runtime?: RuntimeSourcesConfig): Promise<Was
         : null;
 
     if (wasmUrl) {
-      await wasmModule.default({ module_or_path: wasmUrl });
+      await initializeWasmFromUrl(wasmModule, wasmUrl);
     } else {
       await wasmModule.default();
     }
@@ -1767,4 +1767,27 @@ async function initializeWasmModule(runtime?: RuntimeSourcesConfig): Promise<Was
 
   assertNativeArtifactCompatibility(wasmModule, "WASM", ["initSync", "WasmDb"]);
   return wasmModule;
+}
+
+async function initializeWasmFromUrl(wasmModule: any, wasmUrl: string): Promise<void> {
+  const response = await fetch(wasmUrl);
+  if (!response.ok) {
+    throw new Error(
+      `WASM asset request failed (${response.status} ${response.statusText}) for ${wasmUrl}`,
+    );
+  }
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (
+    bytes.length < 4 ||
+    bytes[0] !== 0x00 ||
+    bytes[1] !== 0x61 ||
+    bytes[2] !== 0x73 ||
+    bytes[3] !== 0x6d
+  ) {
+    const contentType = response.headers.get("content-type") ?? "unknown content type";
+    throw new Error(
+      `WASM asset response is not a WebAssembly binary for ${wasmUrl} (${contentType})`,
+    );
+  }
+  await wasmModule.default({ module_or_path: bytes });
 }

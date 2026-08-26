@@ -88,6 +88,9 @@ export async function openAggregatedBrowserInspectorControlPort(
         port.postMessage({ type: "contexts", id: message.id, contexts });
         return;
       }
+      if (message.type === "terminate-worker") {
+        throw new Error("Worker termination is only available on a direct browser control port");
+      }
       const route = routes.get(message.contextKey);
       if (!route) throw new Error("Inspector context is no longer available");
       const control = controls.find((candidate) => candidate.port === route.port)!;

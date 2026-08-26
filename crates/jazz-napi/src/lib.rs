@@ -32,7 +32,14 @@ use napi::sys;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 use serde::Deserialize;
-use serde_json::Value as JsonValue;
+/// Any JSON-compatible value crossing the native JavaScript boundary.
+///
+/// Keep this alias exported through napi-rs rather than relying on its Rust
+/// import name: exported methods use `JsonValue` throughout their generated
+/// declarations, so the package must define that name for TypeScript
+/// consumers.
+#[napi]
+pub type JsonValue = serde_json::Value;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::future::Future;

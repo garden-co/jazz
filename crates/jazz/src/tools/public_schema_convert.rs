@@ -1023,13 +1023,15 @@ fn convert_policy_with_native_select_inherits(
 }
 
 fn is_core_policy_clause(expr: &PolicyExpr) -> bool {
-    matches!(
-        expr,
+    match expr {
         PolicyExpr::Inherits { max_depth: _, .. }
-            | PolicyExpr::InheritsReferencing { .. }
-            | PolicyExpr::Exists { .. }
-            | PolicyExpr::ExistsRel { .. }
-    )
+        | PolicyExpr::InheritsReferencing { .. }
+        | PolicyExpr::Exists { .. }
+        | PolicyExpr::ExistsRel { .. } => true,
+        PolicyExpr::And(exprs) | PolicyExpr::Or(exprs) => exprs.iter().any(is_core_policy_clause),
+        PolicyExpr::Not(expr) => is_core_policy_clause(expr),
+        _ => false,
+    }
 }
 
 fn policy_requires_branch(expr: &PolicyExpr) -> bool {
@@ -1054,6 +1056,21 @@ fn append_policy_clause(
     native_select_inherits: bool,
 ) -> Result<Query, SchemaConversionError> {
     match expr {
+        PolicyExpr::And(exprs) => {
+            let mut query = query;
+            for (index, expr) in exprs.iter().enumerate() {
+                query = append_policy_clause(
+                    schema,
+                    table_schema,
+                    table,
+                    &format!("{path}.And[{index}]"),
+                    query,
+                    expr,
+                    native_select_inherits,
+                )?;
+            }
+            Ok(query)
+        }
         PolicyExpr::Inherits {
             operation,
             via_column,
@@ -3921,6 +3938,52 @@ mod tests {
         let policy = documents.read_policy.as_ref().unwrap();
         assert!(policy.filters.is_empty());
         assert!(policy.joins.is_empty());
+        assert_eq!(policy.inherits.len(), 1);
+        assert_eq!(policy.inherits[0].parent_column, "folder_id");
+        assert_eq!(policy.inherits[0].operation, InheritsOperation::Select);
+    }
+
+    #[test]
+    fn preserves_inherits_nested_under_a_conjunction() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("folders")
+                    .column("name", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+            )
+            .table(
+                TableSchemaBuilder::new("documents")
+                    .column("published", ColumnType::Boolean)
+                    .nullable_fk_column("folder_id", "folders")
+                    .policies(TablePolicies::new().with_select(PolicyExpr::And(vec![
+                        PolicyExpr::Cmp {
+                            column: "published".to_owned(),
+                            op: CmpOp::Eq,
+                            value: PolicyValue::Literal(Value::Boolean(true)),
+                        },
+                        PolicyExpr::And(vec![PolicyExpr::Inherits {
+                            operation: Operation::Select,
+                            via_column: "folder_id".to_owned(),
+                            max_depth: None,
+                        }]),
+                    ]))),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema).unwrap();
+        let documents = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "documents")
+            .unwrap();
+        let policy = documents.read_policy.as_ref().unwrap();
+        assert_eq!(
+            policy.filters,
+            vec![Predicate::Eq(
+                Operand::Column("published".to_owned()),
+                Operand::Literal(GrooveValue::Bool(true)),
+            )]
+        );
         assert_eq!(policy.inherits.len(), 1);
         assert_eq!(policy.inherits[0].parent_column, "folder_id");
         assert_eq!(policy.inherits[0].operation, InheritsOperation::Select);
