@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
+import { checkedOutCommit, sourceIdentity } from "../source-identity.mjs";
 
 const root = path.resolve(import.meta.dirname, "../../..");
 const runner = path.join(root, "dev/gates/run-rust-tests.mjs");
@@ -27,6 +28,27 @@ test("writes source, command, cache, and failure metadata", () => {
   assert.ok("cargoTargetDir" in value.environment);
   assert.equal(value.environment.rustMinStack, String(4 * 1024 * 1024));
   assert.equal(value.nextestProfile, hasNextest ? "jazz" : null);
+});
+test("seals an actual nested receipt across a container ownership boundary", () => {
+  const dir = temp();
+  const receipt = path.join(dir, "receipt.json");
+  const baseline = path.join(dir, "baseline.json");
+  const source = { commit: checkedOutCommit(root), ...sourceIdentity(root) };
+  fs.writeFileSync(baseline, JSON.stringify(source));
+  const result = spawnSync("node", [runner, "--receipt", receipt, "--", "--version"], {
+    cwd: root,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      GIT_TEST_ASSUME_DIFFERENT_OWNER: "1",
+      RUST_SHADOW_SOURCE_BASELINE: baseline,
+    },
+  });
+  assert.notEqual(result.status, 0, "the intentionally invalid Nextest selection must still fail");
+  const value = JSON.parse(fs.readFileSync(receipt, "utf8"));
+  assert.equal(value.source.commit, source.commit);
+  assert.equal(value.source.fingerprint, source.fingerprint);
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 test("forwards the requested Nextest profile and records it in the receipt", () => {
   const source = fs.readFileSync(runner, "utf8");
