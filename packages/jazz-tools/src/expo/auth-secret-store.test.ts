@@ -9,9 +9,9 @@ vi.mock("expo-secure-store", () => ({
 import { ExpoAuthSecretStore, type ExpoSecureStoreLike } from "./auth-secret-store.js";
 
 function recordingStore() {
-  const getItemAsync = vi.fn(async () => null);
-  const setItemAsync = vi.fn(async () => {});
-  const deleteItemAsync = vi.fn(async () => {});
+  const getItemAsync = vi.fn<ExpoSecureStoreLike["getItemAsync"]>(async () => null);
+  const setItemAsync = vi.fn<ExpoSecureStoreLike["setItemAsync"]>(async () => {});
+  const deleteItemAsync = vi.fn<ExpoSecureStoreLike["deleteItemAsync"]>(async () => {});
   const secureStore: ExpoSecureStoreLike = { getItemAsync, setItemAsync, deleteItemAsync };
   return { secureStore, getItemAsync, setItemAsync, deleteItemAsync };
 }
