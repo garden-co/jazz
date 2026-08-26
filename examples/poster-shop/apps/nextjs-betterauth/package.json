@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "next dev",
+    "prebuild": "node src/lib/build-config.mjs",
     "build": "jazz-tools validate && next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
