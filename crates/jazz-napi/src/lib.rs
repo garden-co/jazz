@@ -2986,25 +2986,51 @@ impl NapiDb {
         row_id: Uint8Array,
         column: String,
         pointer: String,
-    ) -> napi::Result<Option<String>> {
+    ) -> napi::Result<Either<Option<String>, PendingNativeRead>> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let value = match db {
+        let bytes = match db {
             NapiDbInnerStorage::Memory(db) => {
-                core_block_on(db.read_json_pointer(&table, row_id, &column, &pointer))
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    let value = db
+                        .read_json_pointer(&table, row_id, &column, &pointer)
+                        .await
+                        .map_err(napi_error)?;
+                    let text = value
+                        .map(|value| serde_json::to_string(&value))
+                        .transpose()
+                        .map_err(napi_error)?
+                        .unwrap_or_default();
+                    Ok(Uint8Array::new(text.into_bytes()))
+                }))?
             }
             NapiDbInnerStorage::Persistent(db) => {
-                core_block_on(db.read_json_pointer(&table, row_id, &column, &pointer))
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    let value = db
+                        .read_json_pointer(&table, row_id, &column, &pointer)
+                        .await
+                        .map_err(napi_error)?;
+                    let text = value
+                        .map(|value| serde_json::to_string(&value))
+                        .transpose()
+                        .map_err(napi_error)?
+                        .unwrap_or_default();
+                    Ok(Uint8Array::new(text.into_bytes()))
+                }))?
             }
-        }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        value
-            .map(|value| serde_json::to_string(&value))
-            .transpose()
-            .map_err(|error| napi::Error::from_reason(error.to_string()))
+        };
+        Ok(match bytes {
+            Either::A(bytes) => {
+                let text = String::from_utf8(bytes.to_vec()).expect("JSON is UTF-8");
+                Either::A((!text.is_empty()).then_some(text))
+            }
+            Either::B(pending) => Either::B(pending),
+        })
     }
 
     #[napi(js_name = "appendValue")]

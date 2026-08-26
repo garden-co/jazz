@@ -314,7 +314,7 @@ type NativeDb = {
     rowId: Uint8Array,
     column: string,
     pointer: string,
-  ): unknown | Promise<unknown>;
+  ): unknown | PendingNativeRead | Promise<unknown | PendingNativeRead>;
   appendValue?(
     table: string,
     rowId: Uint8Array,
@@ -907,7 +907,10 @@ export class NativeRuntimeAdapter implements Runtime {
       return await this.ownerRuntime.readJsonPointer(table, objectId, column, pointer);
     }
     if (!this.db.readJsonPointer) throw new Error("Native runtime does not expose JSON pointers");
-    const value = await this.db.readJsonPointer(table, parseUuid(objectId), column, pointer);
+    let value = await this.db.readJsonPointer(table, parseUuid(objectId), column, pointer);
+    if (isPendingNativeRead(value)) {
+      value = new TextDecoder().decode(await this.awaitNativeRead(value));
+    }
     return typeof value === "string" ? JSON.parse(value) : value;
   }
 

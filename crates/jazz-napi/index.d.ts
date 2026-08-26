@@ -104,7 +104,7 @@ export declare class NapiDb {
   evictExpiredStagedLargeValues(): number
   readValueRange(table: string, rowId: Uint8Array, column: string, start: number, end: number): Uint8Array | PendingNativeRead
   readTextUtf16Range(table: string, rowId: Uint8Array, column: string, start: number, end: number): string | PendingNativeRead
-  readJsonPointer(table: string, rowId: Uint8Array, column: string, pointer: string): string | null
+  readJsonPointer(table: string, rowId: Uint8Array, column: string, pointer: string): string | null | PendingNativeRead
   appendValue(table: string, rowId: Uint8Array, column: string, bytes: Uint8Array): Write
   spliceValue(table: string, rowId: Uint8Array, column: string, offset: number, deleteLength: number, insert: Uint8Array): Write
   setNonDurableClient(): void
