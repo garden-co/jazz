@@ -152,6 +152,20 @@ also stamp authorship as that user. Client bindings expose the same derived valu
 `session.author`; use it when an application needs to store or compare an author, rather than
 reconstructing the encoding from `issuer` and `user_id`.
 
+For trusted invite or membership input where you have an issuer and subject but no active Jazz
+session, use the shared constructor:
+
+```ts
+import { sessionAuthor } from "jazz-tools";
+
+const invitedAuthor = sessionAuthor(trustedIssuer, trustedSubject);
+await db.insert(app.members, { roomId, author: invitedAuthor });
+```
+
+`sessionAuthor(...)` only validates and canonically encodes the two components. It does not verify a
+JWT, authenticate the subject, or admit that identity to Jazz; only use identity components obtained
+from a trusted authentication boundary.
+
 ### Attribution without impersonation
 
 Sometimes backend code should keep backend-level permissions but still record a user's identity in
