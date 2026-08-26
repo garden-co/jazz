@@ -615,10 +615,11 @@ export class NativeRuntimeAdapter implements Runtime {
   // A non-durable follower needs one worker response before trusting native
   // coverage. Once that response covered a prepared query, reattaching the
   // same query may already be covered and legitimately emit no new frame.
-  // The response epoch that confirmed each prepared query. This lets a
-  // reattachment reuse a confirmation, but never lets it skip worker activity
-  // that arrived after that confirmation.
-  private readonly peerCoveredQueries = new Map<PreparedQuery, number>();
+  // The response epoch that confirmed each prepared query for an effective
+  // serving identity. This lets a reattachment reuse its own confirmation,
+  // but never lets it skip worker activity that arrived after that confirmation
+  // or borrow coverage confirmed for another policy subject.
+  private readonly peerCoveredQueries = new Map<PreparedQuery, Map<string, number>>();
   private coreTickScheduled = false;
   private coreTickRunning = false;
   private coreTickAgain = false;
@@ -2177,7 +2178,8 @@ export class NativeRuntimeAdapter implements Runtime {
       attachment = this.db.attachQuery(query, opts);
     }
     if (!this.db.queryAttachmentIsCovered) return attachment;
-    const confirmedPeerActivityEpoch = this.peerCoveredQueries.get(query);
+    const coverageIdentity = this.coverageIdentity(session);
+    const confirmedPeerActivityEpoch = this.peerCoveredQueries.get(query)?.get(coverageIdentity);
     // A prior confirmation can recover a reattachment only if no newer worker
     // frame has arrived. Otherwise the old coverage state could be exposed to
     // a query whose authorization (for example, an authorship-scoped policy)
@@ -2207,7 +2209,9 @@ export class NativeRuntimeAdapter implements Runtime {
       pendingPeerActivityEpoch,
     );
     if (this.nonDurableClient && this.db.queryAttachmentIsCovered(attachment)) {
-      this.peerCoveredQueries.set(query, this.peerTransportActivityEpoch);
+      const confirmations = this.peerCoveredQueries.get(query) ?? new Map<string, number>();
+      confirmations.set(coverageIdentity, this.peerTransportActivityEpoch);
+      this.peerCoveredQueries.set(query, confirmations);
     }
     return attachment;
   }
@@ -2237,6 +2241,12 @@ export class NativeRuntimeAdapter implements Runtime {
       }
       this.handleServerTransportError(error);
     });
+  }
+
+  /** Coverage is subject-specific only on the trusted-serving boundary. */
+  private coverageIdentity(session: RuntimeSession | null): string {
+    if (this.readAuthorizationHost !== "trusted-serving") return "client-local";
+    return bytesKey(session?.identity ?? this.peerIdentity);
   }
 
   private applySessionClaims(session: RuntimeSession | null | undefined): void {

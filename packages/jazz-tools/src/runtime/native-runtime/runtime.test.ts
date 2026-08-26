@@ -2694,6 +2694,83 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
+  it("does not reuse worker-confirmed coverage across trusted-serving identities", async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              allForIdentity: () => new Uint8Array([0]),
+              connectUpstream: () => new FakeTransport([]),
+              prepareQuery: () => ({}),
+              attachQuery: () => {
+                throw new Error("trusted-serving coverage must use identity attachment");
+              },
+              attachQueryForIdentity: () => ({}),
+              queryAttachmentIsCovered: () => true,
+              detachQuery: () => undefined,
+              setNonDurableClient: () => undefined,
+              tick: () => undefined,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+        { readAuthorizationHost: "trusted-serving" },
+      );
+      runtime.setNonDurableClient();
+      runtime.connectUpstreamPeer();
+      const alice = JSON.stringify({
+        issuer: "https://issuer.example",
+        user_id: "alice",
+        claims: {},
+        authMode: "external",
+      });
+      const bob = JSON.stringify({
+        issuer: "https://issuer.example",
+        user_id: "bob",
+        claims: {},
+        authMode: "external",
+      });
+
+      let aliceSettled = false;
+      const firstAlice = runtime
+        .query(JSON.stringify({ table: "todos" }), alice, "edge")
+        .then(() => (aliceSettled = true));
+      await vi.advanceTimersByTimeAsync(10);
+      expect(aliceSettled).toBe(false);
+      runtime.notifyPeerTransportActivity();
+      await vi.advanceTimersByTimeAsync(10);
+      await firstAlice;
+
+      let bobSettled = false;
+      const firstBob = runtime
+        .query(JSON.stringify({ table: "todos" }), bob, "edge")
+        .then(() => (bobSettled = true));
+      await vi.advanceTimersByTimeAsync(10);
+      expect(bobSettled).toBe(false);
+      runtime.notifyPeerTransportActivity();
+      await vi.advanceTimersByTimeAsync(10);
+      await firstBob;
+
+      let secondBobSettled = false;
+      const secondBob = runtime
+        .query(JSON.stringify({ table: "todos" }), bob, "edge")
+        .then(() => (secondBobSettled = true));
+      await vi.advanceTimersByTimeAsync(1);
+      expect(secondBobSettled).toBe(true);
+      await secondBob;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("accepts query coverage after consuming worker activity that arrived before attachment", async () => {
     vi.useFakeTimers();
     try {
