@@ -1,32 +1,9 @@
 import { definePermissions } from "jazz-tools/permissions";
+import { permissions as betterAuthPermissions } from "./schema-better-auth/schema";
 import { app } from "./schema.js";
 
-/** Tenant admission has one authority: a server-issued bootstrap-admin claim. */
-export default definePermissions(app, ({ policy, session, allowedTo, allOf }) => {
-  // Better Auth is accessed only by this Next app's backend context. Never
-  // expose its credential/session tables through ordinary Jazz clients.
-  policy.better_auth_user.allowRead.never();
-  policy.better_auth_user.allowInsert.never();
-  policy.better_auth_user.allowUpdate.never();
-  policy.better_auth_user.allowDelete.never();
-  policy.better_auth_session.allowRead.never();
-  policy.better_auth_session.allowInsert.never();
-  policy.better_auth_session.allowUpdate.never();
-  policy.better_auth_session.allowDelete.never();
-  policy.better_auth_account.allowRead.never();
-  policy.better_auth_account.allowInsert.never();
-  policy.better_auth_account.allowUpdate.never();
-  policy.better_auth_account.allowDelete.never();
-  policy.better_auth_verification.allowRead.never();
-  policy.better_auth_verification.allowInsert.never();
-  policy.better_auth_verification.allowUpdate.never();
-  policy.better_auth_verification.allowDelete.never();
-  policy.better_auth_jwks.allowRead.never();
-  policy.better_auth_jwks.allowInsert.never();
-  policy.better_auth_jwks.allowUpdate.never();
-  policy.better_auth_jwks.allowDelete.never();
-
-  const bootstrapAdmin = session.where({ "claims.biglabel_admin": true });
+/** Tenant admission has one authority: the app-owned backend bootstrap route. */
+const tenantPermissions = definePermissions(app, ({ policy, session, allowedTo, allOf }) => {
   // userId is deliberately denormalized so this is an indexed membership lookup.
   const member = (organizationId: unknown) =>
     policy.memberships.exists.where({
@@ -63,14 +40,17 @@ export default definePermissions(app, ({ policy, session, allowedTo, allOf }) =>
     });
 
   policy.people.allowRead.where({});
-  policy.people.allowInsert.where({ userId: session.user_id });
+  // Profiles are created only by the trusted bootstrap transaction. This
+  // prevents a client-created duplicate from splitting a user's membership
+  // identity before their personal tenant is established.
+  policy.people.allowInsert.never();
   policy.people.allowUpdate
     .whereOld({ userId: session.user_id })
     .whereNew({ userId: session.user_id });
-  policy.people.allowDelete.where({ userId: session.user_id });
+  policy.people.allowDelete.never();
 
   policy.organizations.allowRead.where((row) => member(row.id));
-  policy.organizations.allowInsert.where(bootstrapAdmin);
+  policy.organizations.allowInsert.never();
   policy.organizations.allowUpdate
     .whereOld((row) => admin(row.id))
     .whereNew((row) => admin(row.id));
@@ -148,3 +128,8 @@ export default definePermissions(app, ({ policy, session, allowedTo, allOf }) =>
     );
   policy.releaseAssignments.allowDelete.where(allowedTo.delete("releaseId"));
 });
+
+export default {
+  ...betterAuthPermissions,
+  ...tenantPermissions,
+};

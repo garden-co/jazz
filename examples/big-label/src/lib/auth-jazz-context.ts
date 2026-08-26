@@ -1,5 +1,6 @@
 import type { JazzContext } from "jazz-tools/backend";
 import { createRequire as createRequireFromModule } from "node:module";
+import { serverSecret } from "./server-secret";
 
 // Keep the N-API backend runtime external to Next/Turbopack. This mirrors how
 // an app consumes the published package, rather than bundling a platform .node
@@ -21,7 +22,7 @@ export function authJazzContext(): JazzContext {
       appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
       driver: { type: "memory" },
       serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
-      backendSecret: process.env.BACKEND_SECRET!,
+      backendSecret: serverSecret("BACKEND_SECRET", "big-label-dev-backend"),
       env: process.env.NODE_ENV === "production" ? "prod" : "dev",
       tier: "global",
     });

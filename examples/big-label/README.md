@@ -36,12 +36,23 @@ All identities, names, and IDs are generated public fixtures; no adopter data is
 ## Admission boundary
 
 The first organization is provisioned by the app-owned, authenticated bootstrap
-route—not by a client-settable JWT claim. It retries safely by looking up the
-stable `personal-<external-user-id>` slug after a conflicted exclusive write.
-After bootstrap, ordinary membership insertion requires an existing admin and
-cannot insert the `admin` role directly, so a proposed membership cannot grant
-itself authority. Production deployments must keep `BACKEND_SECRET` and Better
-Auth signing keys server-side.
+route—not by a client-settable JWT claim. Its exclusive transaction reads and
+then gets-or-creates the external user's one profile,
+`personal-<external-user-id>` organization, and admin membership as one
+durable triple. A concurrent request retries its transaction against the
+winner's committed triple. Any durable duplicate or mismatched personal
+membership is an explicit failure, never a "first row wins" choice.
+
+Browsers cannot insert or delete people or organizations; they may update only
+their existing profile. After bootstrap, ordinary membership insertion requires
+an existing admin and cannot insert the `admin` role directly, so a proposed
+membership cannot grant itself authority. This bootstrap is intentionally not a
+general invitation, account-linking, profile deletion, or cross-organization
+membership workflow.
+
+Production deployments must supply `BACKEND_SECRET` and `BETTER_AUTH_SECRET`
+server-side. The repository's deterministic development/build fixtures are not
+production fallbacks: startup fails if either production secret is absent.
 
 The deployed authority receipt also proves cross-tenant assignments are denied
 by the edge rather than hidden by a synthetic fixture.

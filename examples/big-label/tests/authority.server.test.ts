@@ -7,20 +7,33 @@ let testApp: PolicyTestApp | undefined;
 afterEach(async () => await testApp?.shutdown());
 
 describe("BigLabel deployed tenant authority", () => {
-  it("admits only the server-bootstrap identity or an existing organization admin", async () => {
+  it("admits client mutations only after the trusted backend bootstrap", async () => {
     testApp = await createPolicyTestApp(app, permissions, expect);
     const seeded = await seed(testApp);
-    const admin = testApp.as({ user_id: "admin", claims: {}, authMode: "local-first" });
-    const member = testApp.as({ user_id: "member", claims: {}, authMode: "local-first" });
-    const outsider = testApp.as({ user_id: "outsider", claims: {}, authMode: "local-first" });
-    const bootstrap = testApp.as({
-      user_id: "bootstrap",
-      claims: { biglabel_admin: true },
-      authMode: "external",
+    const admin = testApp.as({
+      issuer: "https://identity.big-label.test",
+      user_id: "admin",
+      claims: {},
+      authMode: "local-first",
+    });
+    const member = testApp.as({
+      issuer: "https://identity.big-label.test",
+      user_id: "member",
+      claims: {},
+      authMode: "local-first",
+    });
+    const outsider = testApp.as({
+      issuer: "https://identity.big-label.test",
+      user_id: "outsider",
+      claims: {},
+      authMode: "local-first",
     });
 
-    // A server-issued claim is the only first-tenant admission path; ordinary
-    // identities cannot turn a foreign organization into a readable tenant.
+    // First-tenant admission belongs only to the backend bootstrap route. No
+    // client claim can create an organization, a person, or its first admin.
+    await outsider.expectDenied((db) =>
+      db.insert(app.people, { userId: "outsider", name: "Forged profile" }),
+    );
     await outsider.expectDenied((db) =>
       db.insert(app.memberships, {
         organizationId: seeded.foreignOrg.id,
@@ -32,9 +45,10 @@ describe("BigLabel deployed tenant authority", () => {
     await outsider.expectDenied((db) =>
       db.insert(app.organizations, { name: "Forged", slug: "forged" }),
     );
-    bootstrap.expectAllowed((db) =>
-      db.insert(app.organizations, { name: "Bootstrap tenant", slug: "bootstrap" }),
+    admin.expectAllowed((db) =>
+      db.update(app.people, seeded.admin.id, { name: "Updated profile" }),
     );
+    await admin.expectDenied((db) => db.delete(app.people, seeded.admin.id));
 
     // A legitimate admin may admit a member; that member still cannot promote
     // themselves or mutate the tenant's operational rows.
