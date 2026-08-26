@@ -2820,7 +2820,9 @@ where
                 prepared_claim_binding_mode,
             )
             .await?;
-        if shape.query().array_subqueries.is_empty() {
+        let retains_structured_terminal =
+            !shape.query().array_subqueries.is_empty() || !shape.query().order_by.is_empty();
+        if !retains_structured_terminal {
             program
                 .lowered
                 .terminals
