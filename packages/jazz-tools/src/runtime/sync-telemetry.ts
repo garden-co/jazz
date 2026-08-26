@@ -41,6 +41,12 @@ type WasmTelemetryModule = {
   subscribeTraceEntries(callback: () => void): () => void;
 };
 
+// A broker worker can host several runtime contexts while all of them share one
+// loaded WASM module. Collection is a module-wide switch, so a context owns a
+// lease rather than the switch itself. In particular, tearing down a failed
+// second context must not turn off telemetry for an already-live first context.
+const wasmTelemetryCollectionOwners = new WeakMap<WasmTelemetryModule, number>();
+
 interface WasmTelemetryExporterState {
   tracer: Tracer;
   logger: {
@@ -169,14 +175,49 @@ export function installWasmTelemetry(options: {
   };
 
   const unsubscribeTraceEntries = wasmModule.subscribeTraceEntries(scheduleDrain);
-  wasmModule.setTraceEntryCollectionEnabled(true);
+  let releaseCollection: (() => void) | null = null;
+  try {
+    releaseCollection = retainWasmTelemetryCollection(wasmModule);
+  } catch (error) {
+    try {
+      unsubscribeTraceEntries();
+    } catch {
+      // Preserve the failure that prevented telemetry installation.
+    }
+    throw error;
+  }
 
   return () => {
     if (disposed) return;
     disposed = true;
-    unsubscribeTraceEntries();
-    drain();
-    wasmModule.setTraceEntryCollectionEnabled(false);
+    try {
+      unsubscribeTraceEntries();
+    } finally {
+      try {
+        drain();
+      } finally {
+        releaseCollection?.();
+      }
+    }
+  };
+}
+
+function retainWasmTelemetryCollection(wasmModule: WasmTelemetryModule): () => void {
+  const owners = wasmTelemetryCollectionOwners.get(wasmModule) ?? 0;
+  if (owners === 0) wasmModule.setTraceEntryCollectionEnabled(true);
+  wasmTelemetryCollectionOwners.set(wasmModule, owners + 1);
+
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const remainingOwners = (wasmTelemetryCollectionOwners.get(wasmModule) ?? 1) - 1;
+    if (remainingOwners === 0) {
+      wasmTelemetryCollectionOwners.delete(wasmModule);
+      wasmModule.setTraceEntryCollectionEnabled(false);
+    } else {
+      wasmTelemetryCollectionOwners.set(wasmModule, remainingOwners);
+    }
   };
 }
 

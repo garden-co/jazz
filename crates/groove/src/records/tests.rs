@@ -277,6 +277,58 @@ fn record_values_reject_non_canonical_child_bytes() {
 }
 
 #[test]
+fn structural_validation_matches_full_decode_for_corrupt_composite_records() {
+    let child = RecordDescriptor::new([
+        ("maybe_id", ValueType::Nullable(Box::new(ValueType::U8))),
+        ("active", ValueType::Bool),
+    ]);
+    let child_record = OwnedRecord::new(
+        child
+            .create(&[Value::Nullable(None), Value::Bool(true)])
+            .unwrap(),
+        child,
+    );
+    let descriptor = RecordDescriptor::new([
+        ("name", ValueType::String),
+        ("child", ValueType::Record(Box::new(child))),
+        ("aliases", ValueType::Array(Box::new(ValueType::String))),
+    ]);
+    let valid = descriptor
+        .create(&[
+            Value::String("kind of blue".into()),
+            Value::Record(child_record),
+            Value::Array(vec![
+                Value::String("blue in green".into()),
+                Value::String("all blues".into()),
+            ]),
+        ])
+        .unwrap();
+
+    let equivalent = |raw: &[u8]| {
+        assert_eq!(
+            descriptor.bind(raw).validate().is_ok(),
+            descriptor.bind(raw).to_values().is_ok(),
+            "structural validation and decoding disagreed for {raw:?}"
+        );
+    };
+
+    equivalent(&valid);
+    for len in 0..valid.len() {
+        equivalent(&valid[..len]);
+    }
+    let mut with_trailing_byte = valid.clone();
+    with_trailing_byte.push(0xff);
+    equivalent(&with_trailing_byte);
+    for index in 0..valid.len() {
+        for replacement in [0, 1, 0x7f, 0x80, 0xff] {
+            let mut mutated = valid.clone();
+            mutated[index] = replacement;
+            equivalent(&mutated);
+        }
+    }
+}
+
+#[test]
 fn pure_fixed_schema_bytes_are_unchanged() {
     let schema = RecordDescriptor::new([
         ("a", ValueType::U8),

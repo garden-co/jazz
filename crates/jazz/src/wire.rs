@@ -8,6 +8,7 @@
 
 use postcard::{from_bytes, to_allocvec};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 
 use crate::ids::{AuthorSubject, NodeUuid};
 use crate::protocol::SyncMessage;
@@ -604,18 +605,27 @@ impl WireStreamDecoder {
         Ok(Self { codec })
     }
 
-    /// Decode one message's stream chunk into one semantic sync payload.
+    /// Decode one message's stream chunk into one owned semantic sync payload.
     pub fn decode_message(
         &mut self,
         payload: &[u8],
         envelope_features: WireFeatures,
     ) -> Result<Vec<u8>, String> {
+        self.decode_message_borrowed(payload, envelope_features)
+            .map(Cow::into_owned)
+    }
+
+    pub(crate) fn decode_message_borrowed<'a>(
+        &mut self,
+        payload: &'a [u8],
+        envelope_features: WireFeatures,
+    ) -> Result<Cow<'a, [u8]>, String> {
         let active = envelope_features & FEATURE_PAYLOAD_COMPRESSION_MASK;
         if active.count_ones() > 1 {
             return Err("wire frame declares more than one payload compression codec".to_owned());
         }
         if active == FEATURE_NONE {
-            return Ok(payload.to_vec());
+            return Ok(Cow::Borrowed(payload));
         }
         if WireCompression::from_features(active) != self.codec {
             return Err("wire frame compression codec changed within one connection".to_owned());
@@ -624,7 +634,7 @@ impl WireStreamDecoder {
         if decoded.len() > crate::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES {
             return Err("decompressed logical message exceeds receiver budget".to_owned());
         }
-        Ok(decoded)
+        Ok(Cow::Owned(decoded))
     }
 }
 
@@ -1258,6 +1268,18 @@ mod tests {
                 .unwrap(),
             second
         );
+    }
+
+    #[test]
+    fn uncompressed_stream_decoder_borrows_payload() {
+        let mut decoder = WireStreamDecoder::new(FEATURE_NONE).unwrap();
+        let message = b"uncompressed logical message".to_vec();
+
+        let decoded = decoder
+            .decode_message_borrowed(&message, FEATURE_NONE)
+            .unwrap();
+
+        assert_eq!(decoded.as_ptr(), message.as_ptr());
     }
 
     #[cfg(feature = "transport-compression-zstd")]

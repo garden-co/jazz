@@ -198,6 +198,7 @@ export function InspectorApp() {
 }
 
 function InspectorRuntime({ config, wasmSchema }: { config: DbConfig; wasmSchema: WasmSchema }) {
+  const initialRoute = new URLSearchParams(window.location.search).get("route") ?? "/";
   return (
     <InspectorConnectionErrorBoundary>
       <JazzProvider
@@ -206,7 +207,7 @@ function InspectorRuntime({ config, wasmSchema }: { config: DbConfig; wasmSchema
         fallback={<p style={{ padding: 16 }}>Connecting…</p>}
       >
         <DevtoolsProvider wasmSchema={wasmSchema} runtime="overlay">
-          <MemoryRouter>
+          <MemoryRouter initialEntries={[initialRoute]}>
             <InspectorRoutes />
           </MemoryRouter>
         </DevtoolsProvider>

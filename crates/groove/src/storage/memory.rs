@@ -373,7 +373,7 @@ impl OrderedKvStorage for MemoryStorage {
                             None => values.get(&planned_key.1).map(Vec::as_slice),
                         };
                         let merged = apply_storage_delta(existing, &encoded)?;
-                        planned.insert(planned_key, Some(merged));
+                        planned.insert(planned_key, merged);
                     }
                 }
             }
