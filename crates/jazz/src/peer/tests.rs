@@ -1449,7 +1449,7 @@ fn maintained_branch_view_reconcile_retains_undeleted_base_members() {
             subscription,
             &shape,
             &binding,
-            opts,
+            opts.clone(),
         )
         .unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
@@ -1487,13 +1487,14 @@ fn maintained_branch_view_reconcile_retains_undeleted_base_members() {
         .map(|row| row.row_uuid())
         .collect::<BTreeSet<_>>();
     assert_eq!(fresh_rows, BTreeSet::from([retained_row]));
+    let mut fresh_peer = PeerState::new();
+    fresh_peer
+        .rehydrate_query_with_opts(&mut core, &shape, &binding, opts)
+        .unwrap();
     assert_eq!(
-        row_result_set(&peer, subscription)
-            .unwrap()
-            .into_iter()
-            .map(|(_, row_uuid, _)| row_uuid)
-            .collect::<BTreeSet<_>>(),
-        fresh_rows
+        row_result_set(&peer, subscription),
+        row_result_set(&fresh_peer, subscription),
+        "authoritative reconcile must match a fresh BranchView rehydrate by full result identity"
     );
 }
 

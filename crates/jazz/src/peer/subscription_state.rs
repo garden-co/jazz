@@ -6,6 +6,7 @@
 //! assignment.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use groove::ivm::MultisinkSubscription;
 
@@ -16,7 +17,7 @@ use super::super::node::maintained_subscription_view::{
 };
 use super::super::protocol::{
     KnownStateCompleteness, KnownStateDeclaration, ProgramFactEntry, ReadViewSpec,
-    ResultMemberEntry, SubscriptionKey, VersionRecord,
+    RegisterShapeOptions, ResultMemberEntry, SubscriptionKey, VersionRecord,
 };
 use super::super::query::{Binding, ValidatedQuery};
 use super::super::schema::TableSchema;
@@ -196,20 +197,26 @@ pub(super) enum MemberIndexKey {
 #[derive(Debug)]
 pub(super) struct CachedPeerQueryPlan {
     tier: DurabilityTier,
+    read_view: Rc<ReadViewSpec>,
     plan: Option<PreparedQueryPlanHandle>,
 }
 
 impl CachedPeerQueryPlan {
-    pub(super) fn with_plan(tier: DurabilityTier, plan: PreparedQueryPlanHandle) -> Self {
+    pub(super) fn with_plan(opts: &RegisterShapeOptions, plan: PreparedQueryPlanHandle) -> Self {
         Self {
-            tier,
+            tier: opts.tier,
+            read_view: Rc::new(opts.read_view.clone()),
             plan: Some(plan),
         }
     }
 
     pub(super) fn tier(&self) -> DurabilityTier {
-        let _retained_plan = &self.plan;
         self.tier
+    }
+
+    pub(super) fn context(&self) -> (DurabilityTier, Rc<ReadViewSpec>) {
+        let _retained_plan = &self.plan;
+        (self.tier, Rc::clone(&self.read_view))
     }
 }
 
