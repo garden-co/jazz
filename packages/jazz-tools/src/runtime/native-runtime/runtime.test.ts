@@ -6727,13 +6727,23 @@ class FakeTransport implements Transport {
   }
 }
 
+type FakeWebSocketEventMap = {
+  message: { data: unknown };
+  error: unknown;
+  close: { code: number; reason: string };
+};
+
 class FakeWebSocket {
   binaryType: "arraybuffer" | "blob" = "arraybuffer";
   readonly readyState = 1;
   readonly sent: Array<Uint8Array | string> = [];
-  private readonly messageListeners: Array<(event: { data: unknown }) => void> = [];
-  private readonly errorListeners: Array<(event: unknown) => void> = [];
-  private readonly closeListeners: Array<(event: { code: number; reason: string }) => void> = [];
+  private readonly listeners: {
+    [Type in keyof FakeWebSocketEventMap]: Array<(event: FakeWebSocketEventMap[Type]) => void>;
+  } = {
+    message: [],
+    error: [],
+    close: [],
+  };
   closed = false;
 
   private sawClientPrelude = false;
@@ -6759,25 +6769,24 @@ class FakeWebSocket {
     this.closed = true;
   }
 
-  addEventListener(type: string, listener: (event: { data: unknown }) => void): void {
-    if (type === "message") this.messageListeners.push(listener);
-    if (type === "error") this.errorListeners.push(listener as (event: unknown) => void);
-    if (type === "close") {
-      this.closeListeners.push(listener as (event: { code: number; reason: string }) => void);
-    }
+  addEventListener<Type extends keyof FakeWebSocketEventMap>(
+    type: Type,
+    listener: (event: FakeWebSocketEventMap[Type]) => void,
+  ): void {
+    this.listeners[type].push(listener);
   }
 
   emitMessage(data: Uint8Array): void {
-    for (const listener of this.messageListeners) listener({ data });
+    for (const listener of this.listeners.message) listener({ data });
   }
 
   emitError(): void {
-    for (const listener of this.errorListeners) listener(new Error("network failed"));
+    for (const listener of this.listeners.error) listener(new Error("network failed"));
   }
 
   emitClose(code = 1006, reason = "network lost"): void {
     this.closed = true;
-    for (const listener of this.closeListeners) listener({ code, reason });
+    for (const listener of this.listeners.close) listener({ code, reason });
   }
 }
 
