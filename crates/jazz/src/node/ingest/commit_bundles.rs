@@ -985,6 +985,7 @@ where
     pub(super) async fn ingest_reset_view_bundle_refs_in_bulk(
         &mut self,
         bundles: &[VersionBundleRef<'_>],
+        preflight_persisted_tx_ids: Option<&BTreeSet<TxId>>,
     ) -> Result<BTreeSet<TxId>, Error> {
         let mut bundles_by_tx = BTreeMap::<TxId, Vec<VersionBundleRef<'_>>>::new();
         for bundle in bundles {
@@ -1033,7 +1034,6 @@ where
                 (String, BranchKey, RowUuid, crate::ids::SchemaVersionId, bool),
                 &VersionRecord,
             >::new();
-            let mut duplicate_conflict = false;
             for bundle in &tx_bundles {
                 for version in bundle.versions {
                     let key = (
@@ -1045,8 +1045,7 @@ where
                     );
                     match unique_versions.get(&key) {
                         Some(existing) if *existing != version => {
-                            duplicate_conflict = true;
-                            break;
+                            return Err(Error::ConflictingCommitUnit(tx_id));
                         }
                         Some(_) => {}
                         None => {
@@ -1054,12 +1053,6 @@ where
                         }
                     }
                 }
-                if duplicate_conflict {
-                    break;
-                }
-            }
-            if duplicate_conflict {
-                continue;
             }
             let version_count = unique_versions.len();
             if first.tx.kind == TxKind::Exclusive
@@ -1068,7 +1061,10 @@ where
             {
                 continue;
             }
-            if self.query_transaction(tx_id).await?.is_some() {
+            if preflight_persisted_tx_ids.is_some_and(|known| known.contains(&tx_id))
+                || preflight_persisted_tx_ids.is_none()
+                    && self.query_transaction(tx_id).await?.is_some()
+            {
                 continue;
             }
             let mut missing_refs = false;

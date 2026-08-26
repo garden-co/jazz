@@ -256,6 +256,244 @@ async fn prepared_subscription_uses_route_terminal_with_clean_public_projection(
 }
 
 #[futures_test::test]
+async fn prepared_routed_collect_by_filters_flat_input_per_binding() {
+    fn parent(root: u64, children: &[u64]) -> Vec<Value> {
+        let child_descriptor = RecordDescriptor::new([("child", ColumnType::U64.clone())]);
+        vec![
+            Value::U64(root),
+            Value::Array(
+                children
+                    .iter()
+                    .map(|child| {
+                        Value::Record(crate::records::OwnedRecord::new(
+                            child_descriptor.create(&[Value::U64(*child)]).unwrap(),
+                            child_descriptor,
+                        ))
+                    })
+                    .collect(),
+            ),
+        ]
+    }
+
+    fn expect_routed_rows(
+        subscription: &crate::ivm::MultisinkSubscription,
+        label: &str,
+    ) -> Vec<(Vec<Value>, i64)> {
+        for _ in 0..100 {
+            match subscription.try_recv() {
+                Ok(deltas) if deltas.is_empty() => {}
+                Ok(deltas) => {
+                    let rows = deltas
+                        .get("rows")
+                        .unwrap_or_else(|| panic!("{label}: missing rows sink: {deltas:?}"));
+                    return rows.to_values().unwrap();
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(error) => panic!("{label}: routed subscription disconnected: {error:?}"),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("{label}: expected rows notification");
+    }
+
+    fn expect_routed_child_insert(
+        subscription: &crate::ivm::MultisinkSubscription,
+        label: &str,
+        expected_child: u64,
+    ) {
+        let child_descriptor = RecordDescriptor::new([("child", ColumnType::U64.clone())]);
+        for _ in 0..100 {
+            match subscription.try_recv() {
+                Ok(deltas) if deltas.is_empty() => {}
+                Ok(deltas) => {
+                    assert!(
+                        deltas.sinks.values().all(|sink| sink.is_empty()),
+                        "{label}: unexpected ordinary sink deltas: {:?}",
+                        deltas.sinks
+                    );
+                    assert_eq!(
+                        deltas.terminal_sinks.len(),
+                        1,
+                        "{label}: unexpected terminal sinks: {:?}",
+                        deltas.terminal_sinks
+                    );
+                    let terminal = deltas.terminal_sinks.get("rows").unwrap_or_else(|| {
+                        panic!(
+                            "{label}: missing rows terminal sink: {:?}",
+                            deltas.terminal_sinks
+                        )
+                    });
+                    let [operation] = terminal.operations.as_slice() else {
+                        panic!("{label}: expected one terminal operation: {terminal:?}");
+                    };
+                    assert!(
+                        matches!(
+                            operation.path.as_slice(),
+                            [TerminalPathSegment::Collection(field)] if field == "children"
+                        ),
+                        "{label}: unexpected terminal path: {:?}",
+                        operation.path
+                    );
+                    let TerminalEdit::Insert { index, value, .. } = &operation.edit else {
+                        panic!("{label}: expected child insert: {:?}", operation.edit);
+                    };
+                    assert_eq!(*index, 1, "{label}: unexpected child insert index");
+                    let child = crate::records::OwnedRecord::new(value.clone(), child_descriptor);
+                    assert_eq!(
+                        child.to_values().unwrap(),
+                        [Value::U64(expected_child)],
+                        "{label}: inserted the wrong child"
+                    );
+                    return;
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(error) => panic!("{label}: routed subscription disconnected: {error:?}"),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("{label}: expected child insert notification");
+    }
+
+    fn expect_no_routed_deltas(subscription: &crate::ivm::MultisinkSubscription, label: &str) {
+        for _ in 0..100 {
+            match subscription.try_recv() {
+                Ok(deltas) => assert!(
+                    deltas.is_empty(),
+                    "{label}: unexpected routed deltas: {deltas:?}"
+                ),
+                Err(TryRecvError::Empty) => {}
+                Err(error) => panic!("{label}: routed subscription disconnected: {error:?}"),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    let storage = MemoryStorage::new(&["routed_tree"]);
+    let mut database = Database::new(routed_collect_tree_schema(), storage)
+        .await
+        .unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "routed_tree",
+        vec![
+            Value::U64(1),
+            Value::U64(1),
+            Value::U64(10),
+            Value::U64(100),
+            Value::U64(1),
+            Value::U64(0),
+            Value::U64(0),
+        ],
+    );
+    batch.insert(
+        "routed_tree",
+        vec![
+            Value::U64(2),
+            Value::U64(1),
+            Value::U64(20),
+            Value::U64(200),
+            Value::U64(1),
+            Value::U64(0),
+            Value::U64(0),
+        ],
+    );
+    database.commit_batch(batch).await.unwrap();
+
+    let binding_descriptor = RecordDescriptor::new([("route", ColumnType::U64.clone())]);
+    let flat_input = GraphBuilder::join(
+        GraphBuilder::binding_source("routed_collect_by", binding_descriptor),
+        GraphBuilder::table("routed_tree"),
+        ["route"],
+        ["route"],
+    )
+    .project_fields([
+        ProjectField::renamed("right.root", "root"),
+        ProjectField::renamed("left.route", "route"),
+        ProjectField::renamed("right.child", "child"),
+        ProjectField::renamed("right.child_order", "child_order"),
+    ]);
+    let graph = GraphBuilder::collect_by(
+        flat_input,
+        ["root", "route"],
+        [
+            CollectByField::named("root"),
+            CollectByField::named("route"),
+        ],
+        [CollectByField::named("child")],
+        "children",
+        [TopByOrder::asc("child_order")],
+        ["child"],
+        0,
+        TopByLimit::Unbounded,
+    );
+    let shape = database
+        .prepare(
+            [RoutedMultisinkTerminal::new(
+                "rows",
+                graph,
+                ["route"],
+                ["root", "children"],
+            )],
+            "routed_collect_by",
+            binding_descriptor,
+        )
+        .await
+        .unwrap();
+    let route_10 = database
+        .bind_shape(shape.id(), &[Value::U64(10)])
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_routed_rows(&route_10, "route 10 initial hydration"),
+        [(parent(1, &[100]), 1)]
+    );
+    let route_20 = database
+        .bind_shape(shape.id(), &[Value::U64(20)])
+        .await
+        .unwrap();
+    assert_eq!(
+        expect_routed_rows(&route_20, "route 20 initial hydration"),
+        [(parent(1, &[200]), 1)]
+    );
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "routed_tree",
+        vec![
+            Value::U64(3),
+            Value::U64(1),
+            Value::U64(10),
+            Value::U64(101),
+            Value::U64(2),
+            Value::U64(0),
+            Value::U64(0),
+        ],
+    );
+    database.commit_batch(batch).await.unwrap();
+
+    expect_routed_child_insert(&route_10, "route 10 child insert", 101);
+    expect_no_routed_deltas(&route_20, "route 20 after route 10 insert");
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "routed_tree",
+        vec![
+            Value::U64(4),
+            Value::U64(1),
+            Value::U64(20),
+            Value::U64(201),
+            Value::U64(2),
+            Value::U64(0),
+            Value::U64(0),
+        ],
+    );
+    database.commit_batch(batch).await.unwrap();
+
+    expect_routed_child_insert(&route_20, "route 20 child insert", 201);
+    expect_no_routed_deltas(&route_10, "route 10 after route 20 insert");
+}
+
+#[futures_test::test]
 async fn prepared_subscription_routes_nullable_uuid_and_string_binding_keys() {
     let storage = MemoryStorage::new(&["docs"]);
     let mut database = Database::new(nullable_routed_docs_schema(), storage)

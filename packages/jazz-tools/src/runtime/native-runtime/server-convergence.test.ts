@@ -8,11 +8,16 @@ import { fetchSchemaHashes, fetchStoredWasmSchema, publishStoredSchema } from ".
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../../testing/index.js";
 import { JazzClient } from "../client.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "../testing/wasm-runtime-test-utils.js";
+import {
+  createNapiNativeRuntimeAdapter,
+  hasJazzNapiBuild,
+} from "../testing/napi-runtime-test-utils.js";
 import { encodeSchema } from "./native-runtime-adapter.js";
 import { decodeNativeDelta, isNativeRowDelta } from "../subscription-manager.js";
 import type { SubscriptionWireDelta } from "../../drivers/types.js";
 
 const maybeIt = hasJazzWasmBuild() ? it : it.skip;
+const maybeNapiIt = hasJazzNapiBuild() ? it : it.skip;
 const previousWebSocket = globalThis.WebSocket;
 
 const schema = {
@@ -26,7 +31,8 @@ const schema = {
 
 function normalizeTestDelta(delta: SubscriptionWireDelta, testSchema: WasmSchema) {
   if (isNativeRowDelta(delta)) {
-    const columns = testSchema.todos?.columns ?? testSchema.arrays?.columns;
+    const columns =
+      testSchema.todos?.columns ?? testSchema.arrays?.columns ?? testSchema.values?.columns;
     if (!columns) throw new Error("test schema has no decodable subscription table");
     return decodeNativeDelta(delta, columns);
   }
@@ -48,6 +54,16 @@ const writableTodoSchema = {
 const arraySchema = {
   arrays: {
     columns: [{ name: "data", column_type: { type: "Bytea" }, nullable: false }],
+  },
+} satisfies WasmSchema;
+
+const largeValueSchema = {
+  values: {
+    columns: [
+      { name: "kind", column_type: { type: "Text" }, nullable: false },
+      { name: "text", column_type: { type: "Text" }, nullable: true },
+      { name: "bytes", column_type: { type: "Bytea" }, nullable: true },
+    ],
   },
 } satisfies WasmSchema;
 
@@ -260,6 +276,77 @@ describe("NativeRuntimeAdapter server convergence", () => {
     20_000,
   );
 
+  maybeNapiIt(
+    "hydrates routed large-value chunks before NAPI query and subscription encoding",
+    async () => {
+      globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
+      const appId = "00000000-0000-0000-0000-00000000c005";
+      server = await startLocalJazzServer({
+        appId,
+        inMemory: true,
+        adminSecret: "native-runtime-large-value-admin",
+        schema: encodeSchema(largeValueSchema),
+      });
+      const writer = await createNapiClient({ appId, serverUrl: server.url, peer: "large-writer" });
+      const reader = await createNapiClient({ appId, serverUrl: server.url, peer: "large-reader" });
+      clients.push(writer, reader);
+      writer.connectTransport(server.url, { admin_secret: server.adminSecret });
+      reader.connectTransport(server.url, { admin_secret: server.adminSecret });
+
+      const text = "routed text ".repeat(9_000);
+      const bytes = Uint8Array.from({ length: 90_000 }, (_, index) => index % 251);
+
+      const textWrite = await writer.insertStreaming(
+        "values",
+        { kind: { type: "Text", value: "text" } },
+        "text",
+        streamOf(text),
+      );
+      await waitForPromise(textWrite.wait({ tier: "edge" }), "streamed Text did not settle");
+      const bytesWrite = await writer.insertStreaming(
+        "values",
+        { kind: { type: "Text", value: "bytes" } },
+        "bytes",
+        streamOf(bytes),
+      );
+      await waitForPromise(bytesWrite.wait({ tier: "edge" }), "streamed Bytea did not settle");
+      const received = await waitFor(async () => {
+        const rows = await reader.query(JSON.stringify({ table: "values" }), { tier: "edge" });
+        return rows.length === 2 ? rows : undefined;
+      }, 15_000);
+      const values = new Map(
+        received.map((row) => {
+          const kind = row.values[0];
+          if (kind?.type !== "Text") throw new Error("expected a Text kind discriminator");
+          return [kind.value, row.values] as const;
+        }),
+      );
+      expect(values.get("text")?.[1]).toEqual({ type: "Text", value: text });
+      expect(values.get("bytes")?.[2]).toEqual({ type: "Bytea", value: bytes });
+
+      // The NAPI subscription is independently encoded from one-shot rows.
+      const subscription = new Promise<void>((resolve) => {
+        reader.subscribe(
+          JSON.stringify({ table: "values" }),
+          (delta) => {
+            const rows = normalizeTestDelta(delta, largeValueSchema);
+            if (
+              rows.some((change) => {
+                if (!("row" in change) || !change.row) return false;
+                const kind = change.row.values[0];
+                return kind?.type === "Text" && kind.value === "bytes";
+              })
+            )
+              resolve();
+          },
+          { tier: "edge" },
+        );
+      });
+      await waitForPromise(subscription, "NAPI subscription did not publish hydrated large values");
+    },
+    30_000,
+  );
+
   maybeIt("replays accepted BYTEA rows to a fresh websocket subscriber", async () => {
     globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
 
@@ -447,6 +534,28 @@ async function createClient({
     appId,
     schema: clientSchema,
     serverUrl,
+  });
+}
+
+async function createNapiClient({
+  appId,
+  serverUrl,
+  peer,
+}: {
+  appId: string;
+  serverUrl: string;
+  peer: string;
+}): Promise<JazzClient> {
+  const runtime = await createNapiNativeRuntimeAdapter(largeValueSchema, { appId, peerId: peer });
+  return JazzClient.connectWithRuntime(runtime, { appId, schema: largeValueSchema, serverUrl });
+}
+
+function streamOf(...chunks: Array<string | Uint8Array>): ReadableStream<string | Uint8Array> {
+  return new ReadableStream({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(chunk);
+      controller.close();
+    },
   });
 }
 
