@@ -1,5 +1,14 @@
 # jazz-wasm
 
+## 2.0.0-alpha.54
+
+### Patch Changes
+
+- 62ddffe: Support Better Auth 1.7 in the Jazz database adapter with atomic `consumeOne` and
+  `incrementOne` operations. Exclusive transactions now preserve trusted-serving identities and
+  support identity-aware transaction reads across the native and WASM runtimes.
+- 7d39a1f: Introduce the new Jazz/Groove incremental view-maintenance core powering the Jazz v2 alpha.
+
 ## 2.0.0-alpha.53
 
 ## 2.0.0-alpha.52

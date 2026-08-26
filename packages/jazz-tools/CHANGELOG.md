@@ -1,5 +1,53 @@
 # jazz-tools
 
+## 2.0.0-alpha.54
+
+### Patch Changes
+
+- dcd08a9: Anchor qualified permission joins to their source relation scope
+
+  Sibling qualified filters on directly related tables now join each related table from the protected row, while explicitly chained relation joins continue from the preceding joined table.
+
+- fbad905: Enforce anonymous sessions as read-only by rejecting anonymous writes before table-policy evaluation.
+- 3e639ef: Honor `defaultDurabilityTier` independently from the backend node's durability tier.
+- 8233c8f: Pin Better Auth compatibility to the tested 1.6.24 release across the starters and workspace package metadata.
+- 62ddffe: Support Better Auth 1.7 in the Jazz database adapter with atomic `consumeOne` and
+  `incrementOne` operations. Exclusive transactions now preserve trusted-serving identities and
+  support identity-aware transaction reads across the native and WASM runtimes.
+- 1e6950e: Reduce peak memory use when decoding uncompressed inbound wire payloads by borrowing the assembled message bytes.
+- 03fdd88: Validate configured JWT issuers and audiences in backend request authentication.
+- 1135440: Add typed `notIn` query filters, including native handling of Better Auth's `not_in` operator. Membership filters now use one canonical predicate representation for root and included relations, so `notIn` reaches the core as `Not(In(...))` rather than client-side inequality expansion.
+- a5f6b67: Compile timestamp/`Date`, floating-point, byte-array, and array permission policy literals that the TypeScript authoring API already accepts. Invalid and pre-epoch dates, tagged timestamps outside the non-negative safe-integer millisecond range, and non-finite floating-point literals now fail at the TypeScript authoring boundary; core compilation independently enforces finite floating-point values.
+- 4bfa2d7: Scope browser client storage by identity for cookie sessions.
+- 0410f75: Fail server startup when the durable catalogue cannot be read safely instead of silently replacing it with an empty catalogue.
+- 0b6d070: Improve write and sync performance by replacing full row-history scans with batch-indexed or exact row lookups across batch tracking, transaction validation, permission rejection, and common parent resolution.
+
+  Disable automatic full-storage reconciliation when connecting to a server, avoiding a replay of all stored rows' history on every connection. This means rows that couldn't be synced to the server will not be sent on reconnection, instead needing to wait until a query loads them again. Also, the full client storage won't be automatically reconciled when connecting to a new server.
+
+- 1480b80: Fix reactive array truncation and expose `reconcileArray` as a public subpath.
+- 693c232: Let the in-app inspector move into a separate window that matches the dock dimensions and returns to the dock when the window closes. The detached window opens with Alt+Shift+D, and its toolbar button can be hidden in settings.
+- 5e1064b: Fix deletes of rows created under earlier schema versions when permission checks need the row's historical content. Rejected migrated deletes now also leave the row usable for a subsequent update.
+- 1983c09: Fix persisted row encoding for arrays whose elements are payload-bearing enums, preserving nested case payload data across storage round trips.
+- 7d39a1f: Introduce the new Jazz/Groove incremental view-maintenance core powering the Jazz v2 alpha.
+- c75f818: Complete browser and React Native client teardown even when an earlier shutdown step fails, while preserving the first failure.
+- 41f5012: Persist batch settlement and recovery metadata before publishing rows, so failed commits cannot expose partially durable writes.
+- 2890736: Keep a failed client shutdown as the persistent-store closing barrier so later client creation cannot overlap a runtime that did not shut down.
+- 8a29aae: Fix: preserve sorting after updates on sorted values for queries that use projections and magic columns.
+- acf4dec: Preserve stored row provenance when evaluating update and delete policies.
+- 61d3178: Stop indexing Bytea columns to reduce write and index storage overhead.
+- 6122619: Validate `s.int()` values against Jazz's signed 32-bit range before native writes and report actionable errors for invalid values.
+- dc8f624: Defer React `JazzProvider` client acquisition until the browser commit lifecycle so server rendering stays side-effect free and hydration starts from the configured fallback.
+- bbfa46f: BREAKING CHANGE: Align React and React Native `useAll` with the other framework bindings by returning `{ data, isLoading, error }` instead of a bare `T[] | undefined`. `useAllSuspense` still returns `T[]`.
+- eee104e: Flush pending RocksDB WAL writes synchronously when closing storage.
+- 763e735: Generate deny-all client permissions for Better Auth tables while retaining backend adapter access.
+- aaff21e: Deliver structured collector updates to every subscription and sink sharing the same terminal node.
+- 74717db: Prevent replay from resubmitting terminally rejected batches or echoing accepted rows back to the authoritative server that delivered them.
+- 9255074: Preserve specialised TypeScript types when chaining column merge and transform modifiers.
+- 82b704c: Clean up failed broker-worker initialisation so later connections can retry safely.
+- Updated dependencies [62ddffe]
+- Updated dependencies [7d39a1f]
+  - jazz-wasm@2.0.0-alpha.54
+
 ## 2.0.0-alpha.53
 
 ### Major Changes
@@ -180,7 +228,7 @@
 - 19dc2c4: **Breaking change — action required for Expo / React Native users:** you must now install `jazz-rn` as a direct dependency in every Expo / React Native project (e.g. `npm install jazz-rn` / `pnpm add jazz-rn` / `yarn add jazz-rn`). It used to be pulled in transitively through `jazz-tools`, but is now an optional peer dependency, so it will no longer be installed for you. Web/Node apps are unaffected (jazz-wasm continues to be bundled internally). If `jazz-rn` is missing at runtime, the new `loadJazzRn` loader surfaces an explicit install hint instead of a generic module-resolution error.
 - e9bb115: Compress WebSocket transport frame payloads with LZ4 by default.
 - 576531d: `ManagedDevRuntime` no longer throws when a prior in-process run leaves `*_JAZZ_SERVER_URL` set in `process.env`. The env var on its own is now treated as our own persisted value and ignored in favour of spinning up a fresh local server. The plugin still takes the "connect to an external server" path when the caller explicitly supplies an `adminSecret` option or sets `JAZZ_ADMIN_SECRET`. This makes Vite HMR restarts and repeated test runs work without stale-state errors.
-- fee4160: Switch native targets to `mimalloc` as the global allocator. The `jazz-tools` CLI server binary and the `jazz-napi` Node native module now run on `mimalloc` (via `mimalloc-safe` for napi, the napi-rs–maintained fork). Yields ~12–26% throughput on alloc-heavy database paths (insert/update/observer) on Linux and macOS without API changes. Bundle-size impact is negligible (~+43 KB gzipped on the napi `.node`).
+- fee4160: Switch native targets to `mimalloc` as the global allocator. The `jazz-tools` CLI server binary and the `jazz-napi` Node native module now run on `mimalloc` (via `mimalloc-safe` for napi, the napi-rs–maintained fork). Yields ~~12–26% throughput on alloc-heavy database paths (insert/update/observer) on Linux and macOS without API changes. Bundle-size impact is negligible (~~+43 KB gzipped on the napi `.node`).
 - 7f34895: Auto-reload the browser when the schema changes in a Next.js app.
   `withJazz` writes the live schema hash into a generated module that the
   React provider depends on, so Turbopack and Webpack reload the page
