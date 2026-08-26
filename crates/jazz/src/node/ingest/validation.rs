@@ -44,6 +44,40 @@ where
         .await
     }
 
+    pub(super) async fn stage_view_scoped_transaction_with_current_indexes(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        fate: Fate,
+        global_time: Option<GlobalTime>,
+        durability: DurabilityTier,
+        staged_global_times: &mut Vec<GlobalTime>,
+        staged_content_versions: &mut Vec<VersionRow>,
+    ) -> Result<(), Error> {
+        let staged_versions = self
+            .stage_transaction_and_versions_with_current_indexes(
+                batch,
+                tx,
+                versions,
+                fate.clone(),
+                global_time,
+                durability,
+                true,
+                true,
+                Some(staged_content_versions),
+            )
+            .await?;
+        self.finalize_staged_transaction_ingest(
+            batch,
+            fate,
+            global_time,
+            staged_global_times,
+            &staged_versions,
+        )
+        .await
+    }
+
     pub(super) async fn publish_pending_transaction_and_versions(
         &mut self,
         tx: Transaction,
