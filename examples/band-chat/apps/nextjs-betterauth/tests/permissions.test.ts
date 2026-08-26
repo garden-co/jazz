@@ -41,6 +41,15 @@ describe("BandChat room admission and authorship", () => {
     await owner
       .insert(app.roomMembers, { roomId: room.id, userId: ownerId })
       .wait({ tier: "edge" });
+    const sameSubjectFromAnotherIssuer = testApp.as({
+      issuer: "https://other-provider.example",
+      user_id: ownerId,
+      claims: {},
+      authMode: "external",
+    });
+    await sameSubjectFromAnotherIssuer.expectDenied((db) =>
+      db.insert(app.roomMembers, { roomId: room.id, userId: guestId }),
+    );
     await guest.expectDenied((db) =>
       db.insert(app.roomMembers, { roomId: room.id, userId: guestId }),
     );

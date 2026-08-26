@@ -1,14 +1,22 @@
 import { afterEach, expect, it } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import type { DbConfig } from "jazz-tools";
+import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue";
+import {
+  getJazzServerInfo,
+  getJazzServerJwtForUser,
+} from "../../../../../../packages/jazz-tools/tests/browser/testing-server";
+import permissions from "../../permissions";
+import { app } from "../../schema";
 import { BandChatPreview } from "../../src/BandChat";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const mounts: Array<{ root: Root; element: HTMLDivElement }> = [];
 
-async function waitFor(check: () => boolean, message: string) {
-  const deadline = Date.now() + 5_000;
+async function waitFor(check: () => boolean, message: string, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (check()) return;
     await act(async () => await new Promise((resolve) => setTimeout(resolve, 30)));
@@ -16,21 +24,19 @@ async function waitFor(check: () => boolean, message: string) {
   throw new Error(message);
 }
 
-async function mount() {
+async function mount(
+  config: DbConfig = {
+    appId: "band-chat-browser-receipt",
+    driver: { type: "memory" },
+    secret: "Tb9eLjnS22z-_s9FK0EtiFIIRDe4EAygLAdni55RvAs",
+  },
+) {
   const element = document.createElement("div");
   document.body.append(element);
   const root = createRoot(element);
   mounts.push({ root, element });
   await act(async () => {
-    root.render(
-      <BandChatPreview
-        config={{
-          appId: "band-chat-browser-receipt",
-          driver: { type: "memory" },
-          secret: "Tb9eLjnS22z-_s9FK0EtiFIIRDe4EAygLAdni55RvAs",
-        }}
-      />,
-    );
+    root.render(<BandChatPreview config={config} />);
   });
   await waitFor(() => element.querySelector("#room-name") !== null, "room composer should render");
   return element;
@@ -42,6 +48,107 @@ afterEach(async () => {
     element.remove();
   }
 });
+
+it("renders the serving-authority owner, guest-message, and removal flow", async () => {
+  const server = await getJazzServerInfo(
+    `019d4a17-4591-7c0a-a320-${crypto.randomUUID().slice(0, 12)}`,
+  );
+  await deploy({
+    appId: server.appId,
+    serverUrl: server.serverUrl,
+    adminSecret: server.adminSecret,
+    schema: app,
+    permissions,
+  });
+  const ownerUserId = "browser-owner";
+  const guestUserId = "browser-guest";
+  const owner = await mount({
+    appId: server.appId,
+    driver: { type: "persistent", dbName: `band-chat-owner-${crypto.randomUUID()}` },
+    jwtToken: await getJazzServerJwtForUser(ownerUserId, undefined, server.appId),
+    serverUrl: server.serverUrl,
+  });
+  await createRoom(owner, "Owner room");
+
+  const guest = await mount({
+    appId: server.appId,
+    driver: { type: "persistent", dbName: `band-chat-guest-${crypto.randomUUID()}` },
+    jwtToken: await getJazzServerJwtForUser(guestUserId, undefined, server.appId),
+    serverUrl: server.serverUrl,
+  });
+  await createRoom(guest, "Guest profile bootstrap");
+
+  const invitee = owner.querySelector<HTMLInputElement>("input[aria-label='Invite user ID']")!;
+  await setInputValue(invitee, guestUserId);
+  await act(async () =>
+    invitee
+      .closest("form")!
+      .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+  );
+  await waitFor(
+    () => owner.textContent?.includes(guestUserId) ?? false,
+    "owner should render the invited guest",
+    15_000,
+  );
+  await waitFor(
+    () =>
+      [...guest.querySelectorAll("button")].some((button) =>
+        button.textContent?.includes("Owner room"),
+      ),
+    "guest should receive the invited room",
+    15_000,
+  );
+  const ownerRoom = [...guest.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
+    button.textContent?.includes("Owner room"),
+  )!;
+  await act(async () => ownerRoom.click());
+  const guestMessage = guest.querySelector<HTMLInputElement>("input[aria-label='Message']")!;
+  await setInputValue(guestMessage, "Guest is on the setlist");
+  await act(async () =>
+    guestMessage
+      .closest("form")!
+      .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+  );
+  await waitFor(
+    () => owner.textContent?.includes("Guest is on the setlist") ?? false,
+    "owner should receive the guest message",
+    15_000,
+  );
+
+  const guestMembership = [...owner.querySelectorAll("li")].find((row) =>
+    row.textContent?.includes(guestUserId),
+  )!;
+  await act(async () => guestMembership.querySelector<HTMLButtonElement>("button")!.click());
+  await waitFor(
+    () => !owner.textContent?.includes(guestUserId),
+    "owner should render the guest removal",
+    15_000,
+  );
+  // Revocation is an authority boundary, not a promise to erase rows already
+  // retained in the guest's local-first store. The permission receipt proves
+  // that a post-removal write is rejected at the serving authority.
+});
+
+async function setInputValue(input: HTMLInputElement, value: string) {
+  Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!.call(
+    input,
+    value,
+  );
+  await act(async () => input.dispatchEvent(new Event("input", { bubbles: true })));
+}
+
+async function createRoom(element: HTMLDivElement, name: string) {
+  const input = element.querySelector<HTMLInputElement>("#room-name")!;
+  await setInputValue(input, name);
+  await act(async () =>
+    input.closest("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+  );
+  await waitFor(
+    () => element.textContent?.includes(`# ${name}`) ?? false,
+    `${name} should be visible`,
+    15_000,
+  );
+}
 
 it("creates a local room, sends a message, and applies client-side picker validation", async () => {
   const element = await mount();
@@ -61,6 +168,30 @@ it("creates a local room, sends a message, and applies client-side picker valida
     "room should be visible",
   );
 
+  const invitee = element.querySelector<HTMLInputElement>("input[aria-label='Invite user ID']")!;
+  Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!.call(
+    invitee,
+    "guest-user",
+  );
+  await act(async () => {
+    invitee.dispatchEvent(new Event("input", { bubbles: true }));
+    invitee
+      .closest("form")!
+      .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  });
+  await waitFor(
+    () => element.textContent?.includes("guest-user") ?? false,
+    "invited member should be visible",
+  );
+  const guestMembership = [...element.querySelectorAll("li")].find((row) =>
+    row.textContent?.includes("guest-user"),
+  )!;
+  await act(async () => guestMembership.querySelector<HTMLButtonElement>("button")!.click());
+  await waitFor(
+    () => !element.textContent?.includes("guest-user"),
+    "removed member should disappear",
+  );
+
   const message = element.querySelector<HTMLInputElement>("input[aria-label='Message']")!;
   Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!.call(
     message,
@@ -68,8 +199,8 @@ it("creates a local room, sends a message, and applies client-side picker valida
   );
   await act(async () => {
     message.dispatchEvent(new Event("input", { bubbles: true }));
-    element
-      .querySelector(".conversation form")!
+    message
+      .closest("form")!
       .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
   });
   await waitFor(

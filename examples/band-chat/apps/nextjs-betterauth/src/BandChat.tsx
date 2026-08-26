@@ -20,7 +20,14 @@ const allowedAttachmentTypes = new Set([
 /** Rendered inside the external-auth provider in the Next dashboard. */
 export function BandChat() {
   const session = useSession();
-  return session?.user_id ? <RoomWorkspace userId={session.user_id} /> : <p>Loading identity…</p>;
+  return session?.user_id ? (
+    <RoomWorkspace
+      author={JSON.stringify([session.issuer, session.user_id])}
+      userId={session.user_id}
+    />
+  ) : (
+    <p>Loading identity…</p>
+  );
 }
 
 /** Browser receipt entrypoint. The production dashboard never uses local-first auth here. */
@@ -32,9 +39,9 @@ export function BandChatPreview({ config }: { config: DbConfig }) {
   );
 }
 
-function RoomWorkspace({ userId }: { userId: string }) {
+function RoomWorkspace({ author, userId }: { author: string; userId: string }) {
   const db = useDb();
-  const { data: rooms = [] } = useAll(app.rooms.orderBy("name", "asc"));
+  const { data: rooms = [] } = useAll(app.rooms.select("*", "$createdBy").orderBy("name", "asc"));
   const { data: profiles = [] } = useAll(app.profiles.where({ userId }));
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
   const [newRoomName, setNewRoomName] = useState("");
@@ -100,7 +107,11 @@ function RoomWorkspace({ userId }: { userId: string }) {
           ))}
         </aside>
         {selectedRoom ? (
-          <Conversation roomId={selectedRoom.id} userId={userId} />
+          <Conversation
+            canEditMembership={selectedRoom.$createdBy === author}
+            roomId={selectedRoom.id}
+            userId={userId}
+          />
         ) : (
           <section className="empty">
             <h2>Start the soundcheck</h2>
@@ -115,7 +126,15 @@ function RoomWorkspace({ userId }: { userId: string }) {
   );
 }
 
-function Conversation({ roomId, userId }: { roomId: string; userId: string }) {
+function Conversation({
+  canEditMembership,
+  roomId,
+  userId,
+}: {
+  canEditMembership: boolean;
+  roomId: string;
+  userId: string;
+}) {
   const { data: rooms = [] } = useAll(app.rooms.where({ id: roomId }));
   const { data: messages = [] } = useAll(
     app.messages.where({ roomId }).select("*", "$createdAt").orderBy("$createdAt", "asc"),
@@ -140,7 +159,79 @@ function Conversation({ roomId, userId }: { roomId: string; userId: string }) {
           </li>
         ))}
       </ol>
+      {canEditMembership ? <MembershipEditor roomId={roomId} /> : null}
       <Composer roomId={roomId} profileId={profiles[0]?.id ?? null} />
+    </section>
+  );
+}
+
+function MembershipEditor({ roomId }: { roomId: string }) {
+  const db = useDb();
+  const { data: memberships = [] } = useAll(app.roomMembers.where({ roomId }));
+  const { data: profiles = [] } = useAll(app.profiles);
+  const [userId, setUserId] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  async function invite(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const invitedUserId = userId.trim();
+    if (!invitedUserId || memberships.some((member) => member.userId === invitedUserId)) return;
+    setError(null);
+    try {
+      await db.insert(app.roomMembers, { roomId, userId: invitedUserId });
+      setUserId("");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  async function remove(membershipId: string) {
+    setError(null);
+    try {
+      await db.delete(app.roomMembers, membershipId);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  return (
+    <section aria-label="Room membership">
+      <h3>Members</h3>
+      <ul>
+        {memberships.map((membership) => {
+          const profile = profiles.find((candidate) => candidate.userId === membership.userId);
+          return (
+            <li key={membership.id}>
+              <span>
+                {profile?.displayName ?? "Unknown profile"} <small>{membership.userId}</small>
+              </span>
+              <button onClick={() => void remove(membership.id)} type="button">
+                Remove
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      <form onSubmit={(event) => void invite(event)}>
+        <label>
+          Invite user ID
+          <input
+            aria-label="Invite user ID"
+            list="band-chat-profiles"
+            onChange={(event) => setUserId(event.target.value)}
+            value={userId}
+          />
+        </label>
+        <datalist id="band-chat-profiles">
+          {profiles.map((profile) => (
+            <option key={profile.id} value={profile.userId}>
+              {profile.displayName}
+            </option>
+          ))}
+        </datalist>
+        <button type="submit">Invite member</button>
+      </form>
+      {error ? <p role="alert">{error}</p> : null}
     </section>
   );
 }

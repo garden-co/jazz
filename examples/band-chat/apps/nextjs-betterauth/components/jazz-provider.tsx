@@ -10,27 +10,40 @@ const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL;
 
 export function JazzProvider({ children }: { children: React.ReactNode }) {
   const { data: session } = authClient.useSession();
-  const [config, setConfig] = useState<DbConfig | null>(null);
+  const [connection, setConnection] = useState<{
+    config: DbConfig;
+    principal: string;
+  } | null>(null);
 
   useEffect(() => {
-    if (!session) {
-      setConfig(null);
+    const principal = session?.user.id;
+    if (!principal) {
+      setConnection(null);
       return;
     }
     if (!appId || !serverUrl) throw new Error("withJazz must provide the public app configuration");
 
+    // Do not leave the previous principal's Jazz context mounted while the
+    // replacement token is in flight.
+    setConnection(null);
     let cancelled = false;
     void getJwtFromBetterAuth().then((jwtToken) => {
-      if (!cancelled && jwtToken) setConfig({ appId, serverUrl, jwtToken });
+      if (!cancelled && jwtToken) {
+        setConnection({ config: { appId, serverUrl, jwtToken }, principal });
+      }
     });
     return () => {
       cancelled = true;
     };
-  }, [session]);
+  }, [session?.user.id]);
 
-  if (!config) return <p className="loading-state">Connecting BandChat…</p>;
+  if (!connection) return <p className="loading-state">Connecting BandChat…</p>;
   return (
-    <JazzBaseProvider config={config} fallback={<p className="loading-state">Opening rooms…</p>}>
+    <JazzBaseProvider
+      config={connection.config}
+      fallback={<p className="loading-state">Opening rooms…</p>}
+      key={connection.principal}
+    >
       <JwtRefresh />
       {children}
     </JazzBaseProvider>
