@@ -67,6 +67,7 @@ type RuntimeContext = {
 };
 
 const workerGlobal = globalThis as SharedWorkerGlobal;
+const workerRealmId = crypto.randomUUID();
 const contexts = new Map<string, RuntimeContext>();
 const inspectorControlPorts = new Set<MessagePort>();
 let wasmModulePromise: Promise<WasmModule> | null = null;
@@ -453,6 +454,7 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
             context.runtime !== null,
         )
         .map((context) => ({
+          workerRealmId,
           key: context.key,
           appId: context.options.appId,
           dbName: context.options.dbName,
@@ -463,6 +465,22 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
         id: message.id,
         contexts: available,
       } satisfies BrowserInspectorControlEvent);
+      return;
+    }
+    if (message.type === "terminate-worker") {
+      if (contexts.size > 0) {
+        port.postMessage({
+          type: "result",
+          id: message.id,
+          error: "Worker still has live runtime contexts",
+        } satisfies BrowserInspectorControlEvent);
+        return;
+      }
+      port.postMessage({ type: "result", id: message.id } satisfies BrowserInspectorControlEvent);
+      // Termination happens in a later task so the acknowledgement crosses the
+      // MessagePort before this realm disappears. A subsequent connection's
+      // bootstrap retry advances to a distinct SharedWorker generation.
+      setTimeout(() => workerGlobal.close(), 0);
       return;
     }
     const context = contexts.get(message.contextKey);

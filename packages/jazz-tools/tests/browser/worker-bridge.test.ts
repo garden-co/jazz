@@ -70,6 +70,20 @@ async function waitForWorkerContextRelease(port: MessagePort, dbName: string): P
   );
 }
 
+async function terminateWorker(port: MessagePort): Promise<void> {
+  const id = nextInspectorRequestId++;
+  await new Promise<void>((resolve, reject) => {
+    const onMessage = (event: MessageEvent<BrowserInspectorControlEvent>) => {
+      if (event.data.type !== "result" || event.data.id !== id) return;
+      port.removeEventListener("message", onMessage);
+      if (event.data.error) reject(new Error(event.data.error));
+      else resolve();
+    };
+    port.addEventListener("message", onMessage);
+    port.postMessage({ type: "terminate-worker", id } satisfies BrowserInspectorControlRequest);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Test schema — a simple "todos" table
 // ---------------------------------------------------------------------------
@@ -1252,10 +1266,15 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     const inspectorControl = await dbBeforeRestart.openInspectorControlPort();
     inspectorControl.start();
+    const [initialContext] = (await listWorkerContexts(inspectorControl)).filter(
+      (context) => context.dbName === dbName,
+    );
+    expect(initialContext).toBeDefined();
     try {
       await dbBeforeRestart.shutdown();
       untrack(dbBeforeRestart);
       await waitForWorkerContextRelease(inspectorControl, dbName);
+      await terminateWorker(inspectorControl);
 
       const dbAfterAcknowledgement = track(await createPersistentDb(undefined));
       const replayAfterAckSpy = vi.fn();
@@ -1263,10 +1282,35 @@ describe("SharedWorker bridge with IndexedDB", () => {
       expect(await dbAfterAcknowledgement.all(allTodos, { tier: "local" })).toEqual([
         durableControl.value,
       ]);
+      const secondInspectorControl = await dbAfterAcknowledgement.openInspectorControlPort();
+      secondInspectorControl.start();
+      const [secondContext] = (await listWorkerContexts(secondInspectorControl)).filter(
+        (context) => context.dbName === dbName,
+      );
+      expect(secondContext?.workerRealmId).not.toBe(initialContext?.workerRealmId);
       // The destroyed worker context rehydrated the settled local view, but the
       // original tab's application notification is not a backlog for a later tab.
       await sleep(500);
       expect(replayAfterAckSpy).not.toHaveBeenCalled();
+
+      await dbAfterAcknowledgement.shutdown();
+      untrack(dbAfterAcknowledgement);
+      await waitForWorkerContextRelease(secondInspectorControl, dbName);
+      await terminateWorker(secondInspectorControl);
+
+      const dbAfterSecondRestart = track(await createPersistentDb(undefined));
+      expect(await dbAfterSecondRestart.all(allTodos, { tier: "local" })).toEqual([
+        durableControl.value,
+      ]);
+      const thirdInspectorControl = await dbAfterSecondRestart.openInspectorControlPort();
+      thirdInspectorControl.start();
+      const [thirdContext] = (await listWorkerContexts(thirdInspectorControl)).filter(
+        (context) => context.dbName === dbName,
+      );
+      expect(thirdContext?.workerRealmId).not.toBe(secondContext?.workerRealmId);
+      thirdInspectorControl.postMessage({
+        type: "close",
+      } satisfies BrowserInspectorControlRequest);
     } finally {
       inspectorControl.postMessage({ type: "close" } satisfies BrowserInspectorControlRequest);
     }
@@ -1299,8 +1343,15 @@ describe("SharedWorker bridge with IndexedDB", () => {
       "pending rejected insert should be durably recorded locally before restart",
     );
 
+    const inspectorBeforeRestart = await dbBeforeRestart.openInspectorControlPort();
+    inspectorBeforeRestart.start();
+    const [contextBeforeRestart] = (await listWorkerContexts(inspectorBeforeRestart)).filter(
+      (context) => context.dbName === dbName,
+    );
     await dbBeforeRestart.shutdown();
     untrack(dbBeforeRestart);
+    await waitForWorkerContextRelease(inspectorBeforeRestart, dbName);
+    await terminateWorker(inspectorBeforeRestart);
 
     const dbAfterRestart = track(await createPersistentDb(syncServer.serverUrl));
     const replayAfterRestartSpy = vi.fn();
@@ -1308,6 +1359,12 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     // Run a query to set up the runtime
     await dbAfterRestart.all(allTodos, { tier: "edge" });
+    const inspectorAfterRestart = await dbAfterRestart.openInspectorControlPort();
+    inspectorAfterRestart.start();
+    const [contextAfterRestart] = (await listWorkerContexts(inspectorAfterRestart)).filter(
+      (context) => context.dbName === dbName,
+    );
+    expect(contextAfterRestart?.workerRealmId).not.toBe(contextBeforeRestart?.workerRealmId);
 
     await waitForCondition(
       async () => (await dbAfterRestart.all(allTodos, { tier: "local" })).length === 0,
@@ -1316,6 +1373,23 @@ describe("SharedWorker bridge with IndexedDB", () => {
     );
     await sleep(500);
     expect(replayAfterRestartSpy).not.toHaveBeenCalled();
+
+    await dbAfterRestart.shutdown();
+    untrack(dbAfterRestart);
+    await waitForWorkerContextRelease(inspectorAfterRestart, dbName);
+    await terminateWorker(inspectorAfterRestart);
+
+    const dbAfterSecondRestart = track(await createPersistentDb(undefined));
+    expect(await dbAfterSecondRestart.all(allTodos, { tier: "local" })).toEqual([]);
+    const inspectorAfterSecondRestart = await dbAfterSecondRestart.openInspectorControlPort();
+    inspectorAfterSecondRestart.start();
+    const [contextAfterSecondRestart] = (
+      await listWorkerContexts(inspectorAfterSecondRestart)
+    ).filter((context) => context.dbName === dbName);
+    expect(contextAfterSecondRestart?.workerRealmId).not.toBe(contextAfterRestart?.workerRealmId);
+    inspectorAfterSecondRestart.postMessage({
+      type: "close",
+    } satisfies BrowserInspectorControlRequest);
   });
 
   describe("optimistic writes are reverted on server rejection", () => {
