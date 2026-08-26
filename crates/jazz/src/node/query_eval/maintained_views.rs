@@ -248,6 +248,9 @@ where
             .materialize_local_maintained_relation_snapshot_with_occurrences(&local)
             .await?;
         local.root_occurrence_ids = initial.root_occurrence_ids;
+        if shape.query().array_subqueries.is_empty() {
+            local.maintained.discard_structured_app_rows();
+        }
         Ok((local, initial.snapshot))
     }
 
