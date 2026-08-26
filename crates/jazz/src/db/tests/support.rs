@@ -2060,7 +2060,7 @@ impl CoreDb {
             self.server
                 .node()
                 .borrow_mut()
-                .open_exclusive_for_test(tx_id, self.author),
+                .open_exclusive_for_identity(tx_id, self.author),
         )?;
         Ok(CoreExclusiveTx {
             core: self,
