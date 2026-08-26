@@ -566,7 +566,7 @@ pub struct NodeState<S> {
     pub(crate) node_aliases: BTreeMap<NodeUuid, NodeAlias>,
     /// Exact ahead-current keys used to make peer replay idempotent. No caller
     /// needs ordering, so use the low-overhead deterministic hasher here.
-    ahead_current_keys: FxHashSet<(String, BranchKey, VersionLayer, RowUuid, TxTime, NodeAlias)>,
+    ahead_current_keys: FxHashSet<(PhysicalTableId, VersionLayer, Vec<u8>)>,
     /// Runtime counters for sync parking, draining, and ingestion behavior.
     sync_metrics: SyncMetrics,
     /// Runtime counters for query-engine read authorization paths.
