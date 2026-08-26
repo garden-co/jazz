@@ -135,6 +135,7 @@
     "typecheck:react-native": "tsc --project tsconfig.react-native-tests.json",
     "test:browser": "node ../../dev/artifacts/verify-correctness-test-artifacts.mjs && vitest run --config vitest.config.browser.ts",
     "test:browser:focused": "node scripts/test-browser-focused.mjs",
+    "typecheck:browser-helpers": "tsc --project tests/browser/tsconfig.browser-helpers.json",
     "test:browser:contract": "node scripts/test-browser-focused.test.mjs",
     "test:terminal-layout-contract": "vitest run --config vitest.config.ts src/runtime/terminal-layout-contract-matrix.test.ts --reporter=verbose --passWithNoTests=false",
     "bench:abstract:node": "JAZZ_ABSTRACT_BENCH=1 vitest run --config vitest.config.ts src/runtime/schema-marshalling.abstract-bench.test.ts",
