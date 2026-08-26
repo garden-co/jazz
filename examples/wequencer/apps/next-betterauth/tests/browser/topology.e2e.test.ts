@@ -189,6 +189,14 @@ describe("Wequencer cross-topology recovery", () => {
                   role: "owner",
                 })
                 .wait({ tier: "edge" });
+              await owner
+                .insert(app.transport_observations, {
+                  session_id: session.id,
+                  playing: false,
+                  bar: 0,
+                  observed_at: new Date(0),
+                })
+                .wait({ tier: "edge" });
               editorMembership = await owner
                 .insert(app.session_members, {
                   session_id: session.id,
@@ -452,7 +460,9 @@ describe("Wequencer cross-topology recovery", () => {
                 20_000,
                 "edge",
               );
-              expect(observations.find((row) => row.id === transport!.id)).toMatchObject({
+              expect(observations).toHaveLength(1);
+              expect(observations[0]).toMatchObject({
+                id: transport!.id,
                 playing: true,
                 bar: 2,
               });
@@ -543,7 +553,8 @@ function sessionQueries(sessionId: string) {
     tracks: app.tracks.where({ session_id: sessionId }).orderBy("position", "asc"),
     observations: app.transport_observations
       .where({ session_id: sessionId })
-      .orderBy("observed_at", "desc"),
+      .orderBy("observed_at", "desc")
+      .limit(1),
     presence: app.presence.where({ session_id: sessionId }),
   };
 }

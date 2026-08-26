@@ -21,8 +21,8 @@ const schema = {
       role: s.enum("owner", "editor", "viewer"),
     })
     .indexOnly(["session_id", "member_author"]),
-  // These compound indexes mirror the ordered, parent-scoped subscriptions
-  // below. Position is ordinary application data: concurrent reordering uses
+  // These per-column indexes support the parent filter and ordered subscriptions
+  // below. They are not one compound index. Position is ordinary application data: concurrent reordering uses
   // Jazz's normal row merge behavior, rather than a hidden list CRDT.
   tracks: s
     .table({

@@ -7,6 +7,7 @@ import { authorForSession } from "@/lib/identity";
 export default function DashboardPage() {
   const { data: session } = authClient.useSession();
   if (!session) return null;
+  const issuer = process.env.NEXT_PUBLIC_APP_ORIGIN ?? "http://127.0.0.1:3000";
 
   async function handleSignOut() {
     await authClient.signOut();
@@ -29,10 +30,8 @@ export default function DashboardPage() {
         </div>
       </header>
       <SessionBrowser
-        author={authorForSession(
-          process.env.NEXT_PUBLIC_APP_ORIGIN ?? "http://127.0.0.1:3000",
-          session.user.id,
-        )}
+        author={authorForSession(issuer, session.user.id)}
+        issuer={issuer}
         displayName={session.user.name}
       />
     </main>

@@ -4,7 +4,7 @@ export default withJazz(
   {},
   {
     server: {
-      jwksUrl: `${process.env.APP_ORIGIN ?? "http://localhost:3000"}/api/auth/jwks`,
+      jwksUrl: `${process.env.NEXT_PUBLIC_APP_ORIGIN ?? "http://127.0.0.1:3000"}/api/auth/jwks`,
     },
   },
 );

@@ -8,7 +8,14 @@ import { SequencerSession } from "@/components/sequencer-session";
 const TRACK_COLORS = ["#ff7a59", "#f5c451", "#5dd6c0", "#7998ff"];
 const INSTRUMENTS = ["Kick", "Snare", "Closed hat", "Bass"];
 
-export function SessionBrowser({ author, displayName }: { author: string; displayName: string }) {
+export function SessionBrowser({
+  author,
+  issuer,
+}: {
+  author: string;
+  issuer: string;
+  displayName: string;
+}) {
   const db = useDb();
   const { data: sessions = [], isLoading } = useAll(app.sessions.orderBy("$createdAt", "desc"));
   const { data: profiles = [] } = useAll(app.profiles.where({ author }));
@@ -53,7 +60,14 @@ export function SessionBrowser({ author, displayName }: { author: string; displa
   const selected = sessions.find((session) => session.id === selectedId) ?? sessions[0];
   const profileId = profiles[0]?.id;
   if (selected && profileId)
-    return <SequencerSession sessionId={selected.id} author={author} profileId={profileId} />;
+    return (
+      <SequencerSession
+        sessionId={selected.id}
+        author={author}
+        issuer={issuer}
+        profileId={profileId}
+      />
+    );
 
   return (
     <section className="session-empty">

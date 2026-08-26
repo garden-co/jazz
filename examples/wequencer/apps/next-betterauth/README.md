@@ -11,13 +11,14 @@ It is a product-shaped Jazz example, not an audio engine.
   canonical issuer-scoped author, not a raw provider user id.
 - The authenticated dashboard performs idempotent profile bootstrap on the
   server. Queries never create profiles, sessions, or membership rows.
-- A session creator can add the initial membership through the short
-  creator-owned bootstrap window. Owners manage membership; editors change
-  tracks, pads, and transport observations; viewers only read.
+- The session creator manages membership through creator-bound policy. The
+  `owner` role records the creator's initial membership but is not transferable;
+  richer ownership semantics are tracked in [#2100](https://github.com/garden-co/jazz/issues/2100).
+  Editors change tracks, pads, and transport observations; viewers only read.
 - Each pad is an ordinary indexed row. Parent-scoped ordered queries keep a
   4×16 grid locally responsive and converge independent edits after reconnect.
 - Presence heartbeats run every five seconds independently of subscription
-  rerenders. They are advisory and never authorize a write.
+  rerenders. Observations may remain stale; they are advisory and never authorize a write.
 
 ## Checks
 
@@ -28,7 +29,7 @@ pnpm test:browser:focused -- tests/browser/topology.e2e.test.ts
 cargo test -p jazz-example-wequencer-benchmark --tests
 ```
 
-The topology receipt covers owner bootstrap, editor admission, ordered 64-pad
+The topology receipt covers creator bootstrap, editor admission, ordered 64-pad
 projection, local offline edits, reconnect convergence, viewer denial, and
 advisory presence. The benchmark uses the same session/track/pad query shapes
 and asserts their ordering and subscription delivery contract.
@@ -48,5 +49,6 @@ cp .env.example .env
 pnpm dev
 ```
 
-`withJazz` supplies public Jazz configuration during local development. Set
-stable `BETTER_AUTH_SECRET` and `BACKEND_SECRET` values before deploying.
+`withJazz` supplies public Jazz configuration during local development. The
+same `NEXT_PUBLIC_APP_ORIGIN` is the Better Auth origin and the canonical author
+issuer. Set stable `BETTER_AUTH_SECRET` and `BACKEND_SECRET` values before deploying.

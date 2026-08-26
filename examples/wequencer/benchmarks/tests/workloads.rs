@@ -12,7 +12,14 @@ fn ordered_track_window_is_complete_and_stable() {
             .collect::<Vec<_>>(),
         (0..STEPS as u64).collect::<Vec<_>>()
     );
-    assert_eq!(fixture.playhead_window(12, 16).len(), 16);
+    assert_eq!(
+        fixture
+            .playhead_window(12, 16)
+            .into_iter()
+            .map(|(position, _)| position)
+            .collect::<Vec<_>>(),
+        (12..28).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -60,5 +67,5 @@ fn one_write_reaches_every_subscribed_pattern_listener() {
 
 #[test]
 fn playback_receipt_is_available_through_the_ordered_session_query() {
-    assert_eq!(Fixture::new().playback_receipt(), (false, 0));
+    assert_eq!(Fixture::new().playback_receipt(), (true, 7));
 }
