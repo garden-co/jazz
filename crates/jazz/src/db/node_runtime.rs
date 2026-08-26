@@ -2489,8 +2489,9 @@ where
                             terminal_operations,
                         } => {
                             let state_ref = &mut refresh;
-                            let previous_snapshot = state_ref.snapshot.clone();
-                            let previous_snapshot_index = state_ref.snapshot_index.clone();
+                            let previous = authoritative_membership_changed.then(|| {
+                                (state_ref.snapshot.clone(), state_ref.snapshot_index.clone())
+                            });
                             let mut event = apply_maintained_update_to_snapshot(
                                 &mut state_ref.snapshot,
                                 &mut state_ref.snapshot_index,
@@ -2506,6 +2507,9 @@ where
                                 None,
                             )?;
                             if authoritative_membership_changed {
+                                let (previous_snapshot, previous_snapshot_index) = previous.expect(
+                                    "authoritative membership changes retain prior snapshot",
+                                );
                                 order_maintained_snapshot_roots(
                                     &node.borrow(),
                                     &shape.query(),
