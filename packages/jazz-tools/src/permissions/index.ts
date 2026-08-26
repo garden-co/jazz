@@ -9,6 +9,7 @@ import type {
 import type { WasmSchema } from "../drivers/types.js";
 import {
   AmbiguousRelationNameError,
+  DuplicateColumnNameError,
   analyzeRelations,
   type Relation,
 } from "../codegen/relation-analyzer.js";
@@ -909,7 +910,7 @@ function collectRelationsByTable(app: AppLike): Map<string, Relation[]> {
   try {
     return analyzeRelations(typedSchema);
   } catch (error) {
-    if (error instanceof AmbiguousRelationNameError) {
+    if (error instanceof AmbiguousRelationNameError || error instanceof DuplicateColumnNameError) {
       throw error;
     }
     // Keep permissive behavior for partially-specified schemas used in tests/tooling.

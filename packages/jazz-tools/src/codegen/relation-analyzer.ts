@@ -28,6 +28,31 @@ export interface Relation {
 }
 
 export class AmbiguousRelationNameError extends Error {}
+export class DuplicateColumnNameError extends Error {}
+
+function columnDescriptorProvenance(
+  index: number,
+  column: WasmSchema[string]["columns"][number],
+): string {
+  const reference = column.references ? ` referencing "${column.references}"` : "";
+  return `descriptor #${index + 1} (${column.column_type.type}${reference})`;
+}
+
+function validateUniqueColumnDescriptors(schema: WasmSchema): void {
+  for (const [tableName, table] of Object.entries(schema)) {
+    const seen = new Map<string, number>();
+    for (const [index, column] of table.columns.entries()) {
+      const previousIndex = seen.get(column.name);
+      if (previousIndex !== undefined) {
+        const previous = table.columns[previousIndex]!;
+        throw new DuplicateColumnNameError(
+          `Table "${tableName}" has duplicate column descriptor "${column.name}": ${columnDescriptorProvenance(previousIndex, previous)} conflicts with ${columnDescriptorProvenance(index, column)}. Column names must be unique before relation names are derived.`,
+        );
+      }
+      seen.set(column.name, index);
+    }
+  }
+}
 
 function relationProvenance(relation: Relation): string {
   const referenceColumn = relation.type === "forward" ? relation.fromColumn : relation.toColumn;
@@ -94,6 +119,8 @@ function forwardRefNameFromFK(columnName: string): string {
  * @returns Map from table name to array of relations on that table
  */
 export function analyzeRelations(schema: WasmSchema): Map<string, Relation[]> {
+  validateUniqueColumnDescriptors(schema);
+
   const relations = new Map<string, Relation[]>();
   const outputColumnsByTable = new Map<string, Set<string>>();
 

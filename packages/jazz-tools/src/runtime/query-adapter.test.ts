@@ -52,6 +52,29 @@ describe("translateQuery", () => {
     );
   });
 
+  it("rejects duplicate external descriptors before allowing a reference-name alias", () => {
+    const duplicateDescriptorSchema = {
+      users: {
+        columns: [{ name: "name", column_type: { type: "Text" as const }, nullable: false }],
+      },
+      todos: {
+        columns: [
+          { name: "owner", column_type: { type: "Text" as const }, nullable: false },
+          {
+            name: "owner",
+            column_type: { type: "Uuid" as const },
+            nullable: false,
+            references: "users",
+          },
+        ],
+      },
+    };
+
+    expect(() => translateQuery(app.todos._build(), duplicateDescriptorSchema)).toThrow(
+      /Table "todos" has duplicate column descriptor "owner": descriptor #1 \(Text\) conflicts with descriptor #2 \(Uuid referencing "users"\)/,
+    );
+  });
+
   it("rejects a forward relation that would shadow a stored output column", () => {
     expect(() =>
       s.defineApp({
