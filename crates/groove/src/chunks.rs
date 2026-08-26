@@ -12,7 +12,7 @@ use bytes::Bytes;
 use thiserror::Error;
 
 use crate::large_values::{ContentHash, Locator, StagedChunk, object_hash};
-use crate::storage::{LayoutStorage, OrderedKvStorage, OwnedWriteOperation, StorageDelta};
+use crate::storage::{LayoutStorage, OrderedKvStorage};
 
 /// Opaque retrieval identity paired with the hash Groove must verify.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -446,12 +446,6 @@ impl OrderedChunkStorage {
         value
     }
 
-    // Ordered storage's conditional merge only returns the materialized
-    // winner, not whether this caller installed it.  An equal restage must be
-    // classified as an existing mapping for incoming-byte accounting, so each
-    // newly written chunk carries the installing call's opaque receipt. This
-    // lives only in Groove's private chunk-value format; legacy values retain
-    // their original hash-plus-bytes layout and decode without a receipt.
     const INSTALL_RECEIPT_MAGIC: [u8; 32] = *b"\0groove-chunk-install-receipt-v1";
 
     fn encode_with_install_receipt(hash: ContentHash, bytes: &[u8], receipt: [u8; 16]) -> Vec<u8> {
@@ -478,14 +472,6 @@ impl OrderedChunkStorage {
         let mut receipt_bytes = [0; 16];
         receipt_bytes.copy_from_slice(receipt);
         (Some(receipt_bytes), encoded)
-    }
-
-    /// The receipt identifies an attempted installation, but it is not an
-    /// integrity witness for the candidate bytes. Require the complete
-    /// private envelope too, so a matching receipt in corrupted storage
-    /// cannot be treated as this call's successful write.
-    fn is_installed_candidate(existing: &[u8], candidate: &[u8], receipt: [u8; 16]) -> bool {
-        Self::split_install_receipt(existing).0 == Some(receipt) && existing == candidate
     }
 
     fn decode(value: Vec<u8>) -> Result<(ContentHash, Bytes), ChunkStorageError> {
@@ -537,32 +523,15 @@ impl ChunkKvStorage for OrderedChunkStorage {
             let key = Self::key(locator.as_bytes());
             let receipt = *uuid::Uuid::new_v4().as_bytes();
             let candidate = Self::encode_with_install_receipt(hash, &bytes, receipt);
-            // This must be a conditional storage transition rather than a
-            // get-then-set sequence.  A durable backend can be shared by
-            // independent database instances, so an executor-local lock would
-            // still allow the loser to overwrite the immutable winner.
-            storage
-                .write_many(vec![OwnedWriteOperation::Delta {
-                    cf: crate::db::LARGE_VALUE_METADATA_CF.to_owned(),
-                    key: key.clone(),
-                    delta: StorageDelta::set_if_absent(candidate.clone()),
-                }])
+            let existing = storage
+                .put_if_absent(
+                    crate::db::LARGE_VALUE_METADATA_CF.to_owned(),
+                    key,
+                    candidate,
+                )
                 .await
                 .map_err(|error| ChunkStorageError::Backend(error.to_string()))?;
-            let existing = storage
-                .get(crate::db::LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
-                .await
-                .map_err(|error| ChunkStorageError::Backend(error.to_string()))?
-                .ok_or_else(|| {
-                    ChunkStorageError::Backend(
-                        "conditional chunk insert did not leave a winner".to_owned(),
-                    )
-                })?;
-            if Self::is_installed_candidate(&existing, &candidate, receipt) {
-                Ok(None)
-            } else {
-                Self::decode(existing).map(Some)
-            }
+            existing.map(Self::decode).transpose()
         })
     }
 
@@ -585,16 +554,10 @@ impl ChunkKvStorage for OrderedChunkStorage {
             if hash != expected_hash || object_hash(&bytes) != expected_hash {
                 return Err(ChunkStorageError::Integrity);
             }
-            // The read above is only an integrity proof. The durable compare
-            // and delete must happen as one delta so a newer mapping installed
-            // after that read survives this orphan cleanup.
             storage
-                .write_many(vec![OwnedWriteOperation::Delta {
-                    cf: crate::db::LARGE_VALUE_METADATA_CF.to_owned(),
-                    key,
-                    delta: StorageDelta::delete_if_value_matches(existing),
-                }])
+                .compare_and_delete(crate::db::LARGE_VALUE_METADATA_CF.to_owned(), key, existing)
                 .await
+                .map(|_| ())
                 .map_err(|error| ChunkStorageError::Backend(error.to_string()))
         })
     }
@@ -2087,31 +2050,6 @@ mod tests {
 
         assert!(installed.encoded_bytes > 0);
         assert_eq!(restaged, Default::default());
-    }
-
-    #[test]
-    fn ordered_chunk_install_receipt_requires_the_exact_candidate_envelope() {
-        let receipt = [0x5a; 16];
-        let candidate_bytes = b"candidate authenticated bytes";
-        let candidate = OrderedChunkStorage::encode_with_install_receipt(
-            object_hash(candidate_bytes),
-            candidate_bytes,
-            receipt,
-        );
-        let mismatched_bytes = b"different authenticated bytes";
-        let mismatched = OrderedChunkStorage::encode_with_install_receipt(
-            object_hash(mismatched_bytes),
-            mismatched_bytes,
-            receipt,
-        );
-
-        assert!(OrderedChunkStorage::is_installed_candidate(
-            &candidate, &candidate, receipt
-        ));
-        assert!(
-            !OrderedChunkStorage::is_installed_candidate(&mismatched, &candidate, receipt),
-            "a receipt collision or corrupted payload must not claim this call installed it"
-        );
     }
 
     #[test]

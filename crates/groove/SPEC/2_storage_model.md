@@ -90,8 +90,10 @@ choice, not part of the portable storage contract.
 The storage layer supplies exactly the ordered byte map groove needs. It is
 partitioned into named column families and exposes a small set of operations
 (`OrderedKvStorage` in the reference implementation): point `get`, `set`, and
-`delete`; explicit ordered scan requests over a prefix or half-open range in
-either direction; a last-with-prefix helper; and atomic batch writes through
+`delete`; atomic `put_if_absent` and `compare_and_delete` for immutable-object
+installation and ABA-safe reclamation; explicit ordered scan requests over a
+prefix or half-open range in either direction; a last-with-prefix helper; and
+atomic batch writes through
 `write_many`. A request may carry a finite item bound. It is a backend contract,
 not a caller-side collection hint: the complete cursor yields no more than that
 many rows and an adapter stops traversal/hydration at that boundary.

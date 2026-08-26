@@ -534,6 +534,29 @@ where
         self.storage.get(cf, key)
     }
 
+    fn put_if_absent(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> crate::storage::StorageFuture<
+        '_,
+        Result<Option<crate::storage::Value>, crate::storage::Error>,
+    > {
+        self.metrics.borrow_mut().record_point(&cf, &key);
+        self.storage.put_if_absent(cf, key, value)
+    }
+
+    fn compare_and_delete(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> crate::storage::StorageFuture<'_, Result<bool, crate::storage::Error>> {
+        self.metrics.borrow_mut().record_point(&cf, &key);
+        self.storage.compare_and_delete(cf, key, expected)
+    }
+
     fn set(
         &self,
         cf: String,
@@ -661,7 +684,6 @@ pub(super) fn write_operation_bytes(operation: &crate::storage::WriteOperation<'
     match operation {
         crate::storage::WriteOperation::Set { key, value, .. } => key.len() + value.len(),
         crate::storage::WriteOperation::Delete { key, .. } => key.len(),
-        crate::storage::WriteOperation::Delta { key, delta, .. } => key.len() + delta.payload.len(),
     }
 }
 
@@ -698,8 +720,7 @@ pub(super) fn storage_write_destination(
 ) -> StorageWriteDestination {
     match operation {
         crate::storage::WriteOperation::Set { cf, key, .. }
-        | crate::storage::WriteOperation::Delete { cf, key }
-        | crate::storage::WriteOperation::Delta { cf, key, .. } => {
+        | crate::storage::WriteOperation::Delete { cf, key } => {
             if *cf == "indices" {
                 storage_index_write_destination(key)
             } else {
