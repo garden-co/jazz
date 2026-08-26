@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { app } from "./schema.js";
+import { warehouseQueries } from "./src/warehouse.js";
 
 describe("Jamazon Warehouse operational indexes", () => {
   it("emits the production query and policy indexes into the runtime schema", () => {
@@ -22,5 +23,18 @@ describe("Jamazon Warehouse operational indexes", () => {
     ]);
     expect(app.wasmSchema.order_lines?.indexed_columns).toEqual(["warehouse_id", "order_id"]);
     expect(app.wasmSchema.payments?.indexed_columns).toEqual(["warehouse_id", "order_id"]);
+  });
+
+  it("keeps every public console order read ordered and bounded", () => {
+    const queries = warehouseQueries({ warehouseId: "warehouse", districtId: "district" });
+
+    expect(JSON.parse(queries.orders._build())).toMatchObject({
+      orderBy: [["order_number", "asc"]],
+      limit: 20,
+    });
+    expect(JSON.parse(queries.pendingOrders._build())).toMatchObject({
+      orderBy: [["order_number", "asc"]],
+      limit: 20,
+    });
   });
 });

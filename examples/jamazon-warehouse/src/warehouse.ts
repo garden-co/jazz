@@ -21,8 +21,9 @@ export interface PurchaseReceipt {
 
 /**
  * The bounded operational reads used by the warehouse console. Keep these
- * together with checkout so browser topology tests and a future UI exercise
- * the same access paths rather than generic table scans.
+ * together with checkout so the browser topology tests and a future UI use
+ * the same bounded reads. Complete-state convergence reads belong in the
+ * topology receipt, not in this public console API.
  */
 export function warehouseQueries({ warehouseId, districtId }: WarehouseScope) {
   return {
@@ -35,9 +36,10 @@ export function warehouseQueries({ warehouseId, districtId }: WarehouseScope) {
       .where({ warehouse_id: warehouseId, district_id: districtId, status: "pending" })
       .orderBy("order_number", "asc")
       .limit(20),
-    allOrders: app.orders
+    orders: app.orders
       .where({ warehouse_id: warehouseId, district_id: districtId })
-      .orderBy("order_number", "asc"),
+      .orderBy("order_number", "asc")
+      .limit(20),
   };
 }
 

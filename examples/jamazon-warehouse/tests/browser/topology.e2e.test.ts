@@ -18,7 +18,12 @@ import {
 } from "../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
-import { purchase, warehouseQueries, type PurchaseReceipt } from "../../src/warehouse.js";
+import {
+  purchase,
+  warehouseQueries,
+  type PurchaseReceipt,
+  type WarehouseScope,
+} from "../../src/warehouse.js";
 import type { Db as PublicDb } from "jazz-tools";
 
 const ctx = new TestCleanup();
@@ -413,9 +418,22 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
               );
               expect(boundedOrders.at(-1)?.order_number).toBe(117);
               expect(boundedOrders.some((order) => order.order_number === 118)).toBe(false);
+              const boundedConsoleOrders = await waitForQuery(
+                observer,
+                queries.orders,
+                (rows) =>
+                  rows.length === 20 &&
+                  rows.map((row) => row.order_number).join(",") ===
+                    [17, 18, ...Array.from({ length: 18 }, (_, offset) => 100 + offset)].join(","),
+                "observer sees the ordered, bounded console order page",
+                20_000,
+                "edge",
+              );
+              expect(boundedConsoleOrders.at(-1)?.order_number).toBe(117);
+              expect(boundedConsoleOrders.some((order) => order.order_number === 118)).toBe(false);
               await waitForQuery(
                 observer,
-                queries.allOrders,
+                completeOrdersForTopology({ warehouseId: warehouse.id, districtId: district.id }),
                 (rows) => rows.length === 21 && rows.at(-1)?.order_number === 118,
                 "observer converges the complete concurrently seeded operational set",
                 20_000,
@@ -517,7 +535,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
               );
               expect(observed[0]?.operator_id).toBe("jamazon-owner");
               const allOrders = await owner.all(
-                warehouseQueries({ warehouseId: warehouse.id, districtId: district.id }).allOrders,
+                completeOrdersForTopology({ warehouseId: warehouse.id, districtId: district.id }),
                 {
                   tier: "edge",
                 },
@@ -593,6 +611,18 @@ function publicDb(db: Db): PublicDb {
   // bundle, while the application workflow imports the public package. Both
   // paths resolve to the same database instance at runtime.
   return db as unknown as PublicDb;
+}
+
+/**
+ * Topology-only convergence oracle. The public console intentionally has no
+ * unbounded order read: it exposes `warehouseQueries(...).orders`, which is
+ * ordered and limited. This complete state read lets this receipt prove that
+ * all writes arrived after recovery without making it an application API.
+ */
+function completeOrdersForTopology({ warehouseId, districtId }: WarehouseScope) {
+  return app.orders
+    .where({ warehouse_id: warehouseId, district_id: districtId })
+    .orderBy("order_number", "asc");
 }
 
 /**

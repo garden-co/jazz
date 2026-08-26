@@ -27,7 +27,7 @@ pub struct Fixture {
     district_customers: PreparedQuery,
     stock_on_hand: PreparedQuery,
     district_next_order_number: PreparedQuery,
-    all_orders: PreparedQuery,
+    complete_orders_for_receipt: PreparedQuery,
     all_order_lines: PreparedQuery,
     all_payments: PreparedQuery,
     pending_orders: PreparedQuery,
@@ -249,7 +249,10 @@ impl Fixture {
                     .limit(1),
             )
             .expect("prepare district next order number");
-        let all_orders = db
+        // This complete-state read is a fixture-only receipt used to prove
+        // transaction atomicity. It is deliberately not the application
+        // console query: the public TS API exposes an ordered, bounded page.
+        let complete_orders_for_receipt = db
             .prepare_query(
                 &Query::from("orders")
                     .filter(eq(col("warehouse_id"), lit(warehouse.0)))
@@ -286,7 +289,7 @@ impl Fixture {
             district_customers,
             stock_on_hand,
             district_next_order_number,
-            all_orders,
+            complete_orders_for_receipt,
             all_order_lines,
             all_payments,
             pending_orders,
@@ -310,6 +313,19 @@ impl Fixture {
             .read(&self.pending_orders)
             .expect("pending orders")
             .len()
+    }
+
+    /// Fixture receipt for the console's bounded, ordered pending-order page.
+    pub fn pending_order_numbers_for_receipt(&self) -> Vec<i32> {
+        self.db
+            .read(&self.pending_orders)
+            .expect("pending orders")
+            .into_iter()
+            .map(|order| match order.cell_at(3) {
+                Some(Value::I32(number)) => number,
+                other => panic!("invalid pending order number: {other:?}"),
+            })
+            .collect()
     }
     pub fn low_stock_count(&self) -> usize {
         self.db
@@ -505,8 +521,11 @@ impl Fixture {
             other => panic!("invalid stock value: {other:?}"),
         }
     }
-    pub fn order_count(&self) -> usize {
-        self.db.read(&self.all_orders).expect("orders").len()
+    pub fn complete_order_count_for_receipt(&self) -> usize {
+        self.db
+            .read(&self.complete_orders_for_receipt)
+            .expect("complete orders")
+            .len()
     }
     pub fn order_line_count(&self) -> usize {
         self.db
