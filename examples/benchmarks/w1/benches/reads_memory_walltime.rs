@@ -88,6 +88,30 @@ fn resubscribe_activity_point_profile_s_memory(bencher: divan::Bencher<'_, '_>) 
     bencher.bench_local(|| fixture.subscribe_point_activity_once());
 }
 
+#[divan::bench(args = [900, 9_000], sample_count = 1)]
+fn delete_task_point_scaling_memory(bencher: divan::Bencher<'_, '_>, activity_events: usize) {
+    bencher
+        .with_inputs(|| Fixture::<MemoryStorage>::memory(300, 1_200, activity_events))
+        .bench_local_values(|fixture| {
+            fixture.delete_target_task();
+            fixture
+        });
+}
+
+#[divan::bench(args = [900, 9_000], sample_count = 1)]
+fn restore_task_point_scaling_memory(bencher: divan::Bencher<'_, '_>, activity_events: usize) {
+    bencher
+        .with_inputs(|| {
+            let fixture = Fixture::<MemoryStorage>::memory(300, 1_200, activity_events);
+            fixture.delete_target_task();
+            fixture
+        })
+        .bench_local_values(|fixture| {
+            fixture.restore_target_task();
+            fixture
+        });
+}
+
 /// Fixed-result scaling receipt exposing query-engine candidate hydration.
 #[divan::bench(args = [(300, 1_200, 900), (3_000, 12_000, 9_000)], sample_count = 5)]
 fn query_comments_scaling_memory(
