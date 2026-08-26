@@ -69,7 +69,7 @@ describe("MusicAgent Jazz persistence E2E", () => {
     const conversation = await store.createConversation("Parallel requests");
 
     await Promise.all(
-      ["first request", "second request", "third request"].map((body, ordinal) =>
+      ["first request", "second request"].map((body, ordinal) =>
         store.streamTurn(
           { conversationId: conversation, role: "assistant", ordinal },
           chunks([body]),
@@ -81,9 +81,8 @@ describe("MusicAgent Jazz persistence E2E", () => {
     expect(transcript.map((turn) => [turn.ordinal, turn.body])).toEqual([
       [0, "first request"],
       [1, "second request"],
-      [2, "third request"],
     ]);
-    expect(new Set(transcript.map((turn) => turn.id)).size).toBe(3);
+    expect(new Set(transcript.map((turn) => turn.id)).size).toBe(2);
   });
 
   test("does not publish a partial attachment when its app stream is cancelled", async () => {

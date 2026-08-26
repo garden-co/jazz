@@ -43,6 +43,7 @@ const modes = [
   "direct-napi-text",
   "streaming-napi-text",
   "concurrent-streaming-napi-text",
+  "concurrent-streaming-wasm-text",
   "direct-wasm-text",
   "streaming-wasm-text",
   "direct-wasm-bytes",
@@ -94,7 +95,14 @@ describe.runIf(modes.includes(fixture as (typeof modes)[number]))(
       });
       try {
         console.error(`phase:${fixture}:start`);
-        if (fixture === "concurrent-streaming-napi-text") {
+        if (
+          fixture === "concurrent-streaming-napi-text" ||
+          fixture === "concurrent-streaming-wasm-text"
+        ) {
+          client.insert("todos", {
+            title: { type: "Text", value: "existing" },
+            done: { type: "Boolean", value: false },
+          });
           const writes = await Promise.all(
             ["first", "second"].map((title) =>
               client.insertStreaming(

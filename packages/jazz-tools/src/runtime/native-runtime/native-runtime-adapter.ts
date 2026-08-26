@@ -588,6 +588,13 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly completedTxs: Map<string, CompletedTx>;
   private readonly writes: Map<string, Write>;
   private readonly pendingLocalSettlements = new Set<Promise<void>>();
+  // A streaming upload may consume its host source concurrently with other
+  // uploads, but its native finalization mutates the shared runtime. WASM
+  // keeps that runtime behind a single-threaded async borrow, so two
+  // simultaneous `finish()` calls can each await the other evaluator turn.
+  // Serialize only that atomic publication boundary; do not serialize source
+  // consumption or ordinary mutations.
+  private streamingFinalization: Promise<void> = Promise.resolve();
   private readonly ownerRuntime: NativeRuntimeAdapter;
   private readonly readAuthorizationHost: ReadAuthorizationHost;
   private readonly subscriptions = new Map<number, SubscriptionState>();
@@ -1147,7 +1154,20 @@ export class NativeRuntimeAdapter implements Runtime {
         }
       }
       if (pendingHighSurrogate) await pushBounded(encoder.encode(pendingHighSurrogate));
-      const receipt = this.finishMutation(await upload.finish());
+      const owner = this.ownerRuntime;
+      const previousFinalization = owner.streamingFinalization;
+      let releaseFinalization!: () => void;
+      const finalization = new Promise<void>((resolve) => {
+        releaseFinalization = resolve;
+      });
+      owner.streamingFinalization = previousFinalization.then(() => finalization);
+      await previousFinalization;
+      let receipt: MutationResult;
+      try {
+        receipt = this.finishMutation(await upload.finish());
+      } finally {
+        releaseFinalization();
+      }
       return { id: formatUuid(rowId), ...receipt };
     } catch (error) {
       await upload.abort();
