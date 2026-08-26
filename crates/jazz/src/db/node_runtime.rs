@@ -1017,6 +1017,20 @@ where
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn accept_test_subscriber_with_claims(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
+        let admitted = self
+            .node
+            .borrow_mut()
+            .set_test_provider_claims(identity, claims.clone());
+        self.accept_subscriber_with_claims(transport, identity, admitted)
+    }
+
     /// Accept a subscriber connection with an explicit commit-upload trust mode.
     pub fn accept_subscriber_with_trust(
         &self,

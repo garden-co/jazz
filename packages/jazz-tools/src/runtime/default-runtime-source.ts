@@ -25,7 +25,7 @@ import {
   ANONYMOUS_JWT_ISSUER,
   LOCAL_FIRST_JWT_ISSUER,
   isReservedJazzIssuer,
-  resolveClientSessionSync,
+  resolveClientInternalSessionSync,
 } from "./client-session.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { httpUrlToWs } from "./url.js";
@@ -66,7 +66,7 @@ function randomBytes(): Uint8Array {
 }
 
 function sessionFromConfig(config: DbConfig) {
-  return resolveClientSessionSync(config);
+  return resolveClientInternalSessionSync(config);
 }
 
 function runtimeAuthorFromConfig(config: DbConfig) {
@@ -223,7 +223,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       return new AttachedBrowserWorkerConnection(
         runtime,
         config.runtimeSources.browserWorkerPort,
-        resolveClientSessionSync(config)?.claims ?? {},
+        resolveClientInternalSessionSync(config)?.claims ?? {},
         dbName,
         { onAuthFailure, onAuthRestored, onFailure, onStorageReset, onStorageInvalidated },
       );
@@ -242,7 +242,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         authSessionKey: createBrowserAuthSessionKey(config),
         serverUrl: config.serverUrl ? httpUrlToWs(config.serverUrl, config.appId) : undefined,
         authJson: JSON.stringify(runtimeAuth(config)),
-        sessionClaims: resolveClientSessionSync(config)?.claims ?? {},
+        sessionClaims: resolveClientInternalSessionSync(config)?.claims ?? {},
         logLevel: config.logLevel,
         telemetryCollectorUrl: config.telemetryCollectorUrl,
       },
@@ -263,7 +263,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     if (!(runtime instanceof NativeRuntimeAdapter)) {
       throw new Error("Browser follower connections require the native runtime adapter");
     }
-    const sessionClaims = resolveClientSessionSync(config)?.claims ?? {};
+    const sessionClaims = resolveClientInternalSessionSync(config)?.claims ?? {};
     const connection = new MessagePortBrowserFollowerConnection(
       runtime,
       port,

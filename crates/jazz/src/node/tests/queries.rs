@@ -82,7 +82,7 @@ fn query_rows_by_uuid_for_identity(
         claims
             .entry("sub".to_owned())
             .or_insert_with(|| Value::Uuid(identity.test_uuid()));
-        node.set_session_claims(identity, claims);
+        node.set_test_provider_claims(identity, claims);
     }
     let shape = query.validate(&node.catalogue.schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
@@ -222,7 +222,7 @@ fn policy_access_path_receipt_is_not_reused_across_claim_bindings() {
     }
     let query = Query::from("docs");
 
-    core.set_session_claims(
+    core.set_test_provider_claims(
         reader,
         BTreeMap::from([("tenant".to_owned(), Value::Uuid(first_owner.test_uuid()))]),
     );
@@ -232,7 +232,7 @@ fn policy_access_path_receipt_is_not_reused_across_claim_bindings() {
         DurabilityTier::Global,
         reader,
     );
-    core.set_session_claims(
+    core.set_test_provider_claims(
         reader,
         BTreeMap::from([("tenant".to_owned(), Value::Uuid(second_owner.test_uuid()))]),
     );
@@ -333,7 +333,7 @@ fn policy_access_path_planner_falls_back_for_missing_or_nullable_claims_and_join
             ("status".to_owned(), Value::String("open".to_owned())),
         ])),
     );
-    nullable_core.set_session_claims(
+    nullable_core.set_test_provider_claims(
         reader,
         BTreeMap::from([("tenant".to_owned(), Value::Nullable(None))]),
     );

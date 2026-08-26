@@ -819,7 +819,7 @@ export class JazzClient {
       jwtToken: this.context.jwtToken,
       cookieSession: this.context.cookieSession,
       trustedReservedSession: this.context.trustedReservedSession,
-    }).session;
+    }).internalSession;
   }
 
   private buildTransportAuthPayload(): {

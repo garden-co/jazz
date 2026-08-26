@@ -14,6 +14,8 @@ export type ClientSessionTransport = "bearer" | "cookie";
 export interface ClientSessionState {
   transport: ClientSessionTransport | null;
   session: PublicSession | null;
+  /** @internal Private transport identity; never exposed as the public session. */
+  internalSession: Session | null;
 }
 
 export const LOCAL_FIRST_JWT_ISSUER = "urn:jazz:local-first";
@@ -170,6 +172,12 @@ export function parseJwtPayload(jwtToken: string): JwtPayload | null {
 }
 
 export function sessionFromJwtPayload(payload: JwtPayload): PublicSession | null {
+  const session = internalSessionFromJwtPayload(payload);
+  return session ? withCanonicalUser(session) : null;
+}
+
+/** @internal Keep transport identity private from the public session surface. */
+export function internalSessionFromJwtPayload(payload: JwtPayload): Session | null {
   const subject = asUsableSubjectString(payload.sub);
   const issuer = asUsableSubjectString(payload.iss);
   if (!subject || !issuer || isReservedJazzIssuer(issuer)) return null;
@@ -177,12 +185,12 @@ export function sessionFromJwtPayload(payload: JwtPayload): PublicSession | null
   const claimsSource = payload.claims;
   const claims: Record<string, unknown> = isRecord(claimsSource) ? { ...claimsSource } : {};
 
-  return withCanonicalUser({
+  return {
     issuer,
     user_id: subject,
     claims,
     authMode: "external",
-  });
+  };
 }
 
 export function sessionFromVerifiedReservedJwtPayload(
@@ -196,16 +204,27 @@ export function sessionFromVerifiedReservedJwtPayload(
 
   const claimsSource = payload.claims;
   const claims: Record<string, unknown> = isRecord(claimsSource) ? { ...claimsSource } : {};
-  return markTrustedReservedSession(
-    withCanonicalUser(
-      markTrustedReservedSession({
-        issuer,
-        user_id: subject,
-        claims,
-        authMode,
-      }),
-    ),
-  );
+  const internal = markTrustedReservedSession({
+    issuer,
+    user_id: subject,
+    claims,
+    authMode,
+  });
+  return withCanonicalUser(internal);
+}
+
+/** @internal Verified reserved-token form used by transport/auth plumbing. */
+export function internalSessionFromVerifiedReservedJwtPayload(
+  payload: JwtPayload,
+  authMode: Extract<Session["authMode"], "local-first" | "anonymous">,
+): Session | null {
+  const subject = asUsableSubjectString(payload.sub);
+  const issuer = asUsableSubjectString(payload.iss);
+  const expectedIssuer = authMode === "local-first" ? LOCAL_FIRST_JWT_ISSUER : ANONYMOUS_JWT_ISSUER;
+  if (!subject || issuer !== expectedIssuer) return null;
+  const claimsSource = payload.claims;
+  const claims: Record<string, unknown> = isRecord(claimsSource) ? { ...claimsSource } : {};
+  return markTrustedReservedSession({ issuer, user_id: subject, claims, authMode });
 }
 
 export function resolveJwtSession(jwtToken: string): PublicSession | null {
@@ -231,14 +250,17 @@ export function resolveClientSessionStateSync(config: ClientSessionInput): Clien
     return {
       transport: "bearer",
       session: withCanonicalUser(config.trustedReservedSession),
+      internalSession: config.trustedReservedSession,
     };
   }
 
-  const jwtSession = resolveJwtSession(config.jwtToken ?? "");
-  if (jwtSession) {
+  const payload = parseJwtPayload(config.jwtToken ?? "");
+  const jwtInternal = payload ? internalSessionFromJwtPayload(payload) : null;
+  if (jwtInternal) {
     return {
       transport: "bearer",
-      session: jwtSession,
+      session: withCanonicalUser(jwtInternal),
+      internalSession: jwtInternal,
     };
   }
 
@@ -251,15 +273,22 @@ export function resolveClientSessionStateSync(config: ClientSessionInput): Clien
     return {
       transport: "cookie",
       session: withCanonicalUser(config.cookieSession),
+      internalSession: config.cookieSession,
     };
   }
 
   return {
     transport: null,
     session: null,
+    internalSession: null,
   };
 }
 
 export function resolveClientSessionSync(config: ClientSessionInput): PublicSession | null {
   return resolveClientSessionStateSync(config).session;
+}
+
+/** @internal Transport/runtime identity; never expose this object to applications. */
+export function resolveClientInternalSessionSync(config: ClientSessionInput): Session | null {
+  return resolveClientSessionStateSync(config).internalSession;
 }

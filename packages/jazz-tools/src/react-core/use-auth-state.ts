@@ -22,7 +22,7 @@ export function useAuthState(): AuthStateInfo {
 
   return {
     authMode: state.authMode,
-    userId: state.session?.user_id ?? null,
+    userId: state.session?.user ?? null,
     claims: state.session?.claims ?? EMPTY_CLAIMS,
     error: state.error,
   };

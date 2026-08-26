@@ -486,8 +486,8 @@ fn session_owner_string_uuid_write_policy_accepts_matching_author() {
         "user_id".to_owned(),
         Value::String(author.test_uuid().to_string()),
     )]);
-    writer.set_session_claims(author, claims.clone());
-    core.set_session_claims(author, claims);
+    writer.set_test_provider_claims(author, claims.clone());
+    core.set_test_provider_claims(author, claims);
     let row_uuid = row(0x51);
     let (tx_id, unit) = writer
         .commit_mergeable_unit_settled(
@@ -1285,7 +1285,7 @@ fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_
     ] {
         accept_global(&mut core, MergeableCommit::new(table, row_uuid, time).cells(cells));
     }
-    core.set_session_claims(
+    core.set_test_provider_claims(
         owner,
         BTreeMap::from([("sub".to_owned(), Value::Uuid(owner_claim_subject))]),
     );
@@ -1628,7 +1628,7 @@ fn correlated_inherited_insert_policy_accepts_owner_and_denies_cross_tenant_memb
             ("title".to_owned(), Value::String("release".to_owned())),
         ])),
     );
-    core.set_session_claims(
+    core.set_test_provider_claims(
         owner,
         BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.test_uuid()))]),
     );
@@ -1826,14 +1826,14 @@ fn read_policy_branch_or_join_allows_public_or_membership_reads() {
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
     let (_member_dir, _member_reader) = open_node_with_schema(node(3), schema.clone());
     let (_other_dir, _other_reader) = open_node_with_schema(node(4), schema);
-    core.set_session_claims(
+    core.set_test_provider_claims(
         member,
         BTreeMap::from([(
             "user_id".to_owned(),
             Value::String(member.test_uuid().to_string()),
         )]),
     );
-    core.set_session_claims(
+    core.set_test_provider_claims(
         other,
         BTreeMap::from([(
             "user_id".to_owned(),

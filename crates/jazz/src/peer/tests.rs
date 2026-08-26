@@ -784,7 +784,7 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
     // The support rehydrate must temporarily evaluate the writer's bound
     // session claim even while the peer normally serves as another user.
     let (_bound_dir, mut bound_edge) = open_node_with_schema(node(0xa6), schema.clone());
-    bound_edge.set_session_claims(
+    bound_edge.set_test_provider_claims(
         writer,
         BTreeMap::from([("session_id".to_owned(), Value::Uuid(writer.test_uuid()))]),
     );
@@ -822,7 +822,7 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
     // A present but ill-typed claim remains a real binding error; only an
     // absent claim receives the fail-closed empty-proof treatment.
     let (_wrong_type_dir, mut wrong_type_edge) = open_node_with_schema(node(0xa7), schema);
-    wrong_type_edge.set_session_claims(
+    wrong_type_edge.set_test_provider_claims(
         writer,
         BTreeMap::from([(
             "session_id".to_owned(),
@@ -2605,7 +2605,7 @@ fn aggregate_policy_oracle_matches_visible_rows_per_identity() {
     for (identity, expected_count, expected_sum) in
         [(admin, 2, Some(30)), (member, 2, Some(40)), (spy, 0, None)]
     {
-        core.set_session_claims(
+        core.set_test_provider_claims(
             identity,
             BTreeMap::from([(
                 crate::query::provider_claim_key("sub"),
@@ -3405,7 +3405,7 @@ fn maintained_subscription_view_policy_view_exclusive_delta_ships_identity_scope
     accept_global(&mut core, grant_b, 3);
 
     let mut peer = PeerState::client_link(user_a);
-    core.set_session_claims(
+    core.set_test_provider_claims(
         user_a,
         BTreeMap::from([(
             crate::query::provider_claim_key("sub"),
@@ -3641,7 +3641,7 @@ fn current_rows_update_installs_maintained_subscription_for_relay_and_edge_clien
     assert!(view_update_added_rows(relay_update).contains(&doc));
 
     let mut edge_owner = PeerState::edge_client(owner);
-    core.set_session_claims(
+    core.set_test_provider_claims(
         owner,
         BTreeMap::from([(
             crate::query::provider_claim_key("sub"),
@@ -3657,7 +3657,7 @@ fn current_rows_update_installs_maintained_subscription_for_relay_and_edge_clien
     assert!(view_update_added_rows(edge_update).contains(&doc));
 
     let mut edge_other = PeerState::edge_client(other);
-    core.set_session_claims(
+    core.set_test_provider_claims(
         other,
         BTreeMap::from([(
             crate::query::provider_claim_key("sub"),
@@ -3710,7 +3710,7 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
     accept_global(&mut core, first_grant, 2);
 
     let mut peer = PeerState::client_link(user);
-    core.set_session_claims(
+    core.set_test_provider_claims(
         user,
         BTreeMap::from([(
             crate::query::provider_claim_key("sub"),

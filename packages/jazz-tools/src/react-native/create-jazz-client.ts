@@ -1,5 +1,4 @@
 import type { PublicSession } from "../runtime/context.js";
-import { withCanonicalUser } from "../runtime/author-id.js";
 import type { Db } from "../runtime/db.js";
 import { runCleanupSteps } from "../runtime/run-cleanup-steps.js";
 import { SubscriptionsOrchestrator, trackPromise } from "../subscriptions-orchestrator.js";
@@ -15,18 +14,22 @@ export interface JazzClient {
 async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
   const db = await createDb(config);
   let session = db.getAuthState().session;
-  const manager = new SubscriptionsOrchestrator({ appId: config.appId }, db, session);
+  const manager = new SubscriptionsOrchestrator(
+    { appId: config.appId },
+    db,
+    db.getInternalSession(),
+  );
   await manager.init();
   const stopSessionSync = db.onAuthChanged(({ session: nextSession }) => {
     session = nextSession ?? null;
-    manager.setSession(nextSession ?? null);
+    manager.setSession(db.getInternalSession());
   });
 
   return attachSubscriptionStore(
     {
       db,
       get session() {
-        return session ? withCanonicalUser(session) : null;
+        return session;
       },
       async shutdown() {
         await runCleanupSteps([

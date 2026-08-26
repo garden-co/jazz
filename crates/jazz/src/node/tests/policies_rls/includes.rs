@@ -91,7 +91,7 @@ fn point_read_authorization_keeps_using_physical_row_uuid_with_declared_id() {
             ),
     ));
     let (_core_dir, mut core) = open_node_with_schema(node(0xa9), schema);
-    core.set_session_claims(
+    core.set_test_provider_claims(
         alice,
         BTreeMap::from([("sub".to_owned(), Value::Uuid(alice.test_uuid()))]),
     );
@@ -137,7 +137,7 @@ fn required_include_rows(
 ) -> Vec<CurrentRow> {
     let binding = shape.bind(BTreeMap::new()).unwrap();
     if matches!(identity, AuthorSubject::Authenticated(_)) {
-        core.set_session_claims(
+        core.set_test_provider_claims(
             identity,
             BTreeMap::from([("user_id".to_owned(), Value::Uuid(identity.test_uuid()))]),
         );
@@ -147,7 +147,7 @@ fn required_include_rows(
 }
 
 fn seed_required_include_fixture(core: &mut NodeState<RocksDbStorage>, readable_owner: AuthorSubject) {
-    core.set_session_claims(
+    core.set_test_provider_claims(
         readable_owner,
         BTreeMap::from([(
             "user_id".to_owned(),
@@ -245,7 +245,7 @@ fn seed_multi_segment_include_fixture(
     core: &mut NodeState<RocksDbStorage>,
     readable_owner: AuthorSubject,
 ) {
-    core.set_session_claims(
+    core.set_test_provider_claims(
         readable_owner,
         BTreeMap::from([(
             "user_id".to_owned(),

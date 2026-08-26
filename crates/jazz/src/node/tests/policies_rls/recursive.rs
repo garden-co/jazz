@@ -72,7 +72,7 @@ fn recursive_reachable_write_policy_allows_direct_and_closure_docs() {
     let schema = recursive_doc_write_policy_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let reader = user(0xb2);
-    core.set_session_claims(
+    core.set_test_provider_claims(
         reader,
         BTreeMap::from([(
             crate::query::provider_claim_key("sub"),
@@ -185,7 +185,7 @@ fn recursive_reachable_insert_policy_allows_direct_and_closure_docs() {
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
     let reader = user(0xb2);
-    core.set_session_claims(
+    core.set_test_provider_claims(
         reader,
         BTreeMap::from([(
             crate::query::provider_claim_key("sub"),
@@ -277,7 +277,7 @@ fn recursive_reachable_read_policy_claim_seed_rehydrates_through_query_engine() 
     let schema = recursive_doc_policy_schema(recursive_doc_access_policy());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let reader = user(0xb2);
-    core.set_session_claims(
+    core.set_test_provider_claims(
         reader,
         BTreeMap::from([(
             crate::query::provider_claim_key("sub"),
@@ -382,14 +382,14 @@ fn reverse_referencing_select_policy_allows_root_row_through_source_row() {
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let alice = user(0xa1);
     let bob = user(0xb2);
-    core.set_session_claims(
+    core.set_test_provider_claims(
         alice,
         BTreeMap::from([(
             "user_id".to_owned(),
             Value::String(alice.test_uuid().to_string()),
         )]),
     );
-    core.set_session_claims(
+    core.set_test_provider_claims(
         bob,
         BTreeMap::from([(
             "user_id".to_owned(),

@@ -78,8 +78,15 @@ function createMockDb(
   return {
     getAuthState: vi.fn(() => ({
       status: session ? "authenticated" : "unauthenticated",
-      session,
+      session: session
+        ? {
+            user: JSON.stringify([session.issuer, session.user_id]),
+            claims: { ...session.claims, iss: session.issuer, sub: session.user_id },
+            authMode: session.authMode,
+          }
+        : null,
     })),
+    getInternalSession: vi.fn(() => session),
     onAuthChanged: vi.fn(() => () => {}),
     deleteClientStorage: vi.fn(async () => undefined),
     shutdown: vi.fn(async () => undefined),
@@ -128,8 +135,9 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
 
     expect(client.db).toBe(db);
     expect(client.session).toEqual({
-      ...session,
       user: canonicalAuthorSubject(session.issuer, session.user_id),
+      claims: { iss: session.issuer, sub: session.user_id },
+      authMode: session.authMode,
     });
     expect("manager" in client).toBe(false);
     expect(getSubscriptionStore(client)).toBe(manager);

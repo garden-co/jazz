@@ -722,6 +722,36 @@ where
         self.query.policy_authorization_graph_cache.clear();
     }
 
+    /// Admit application/provider claims for a synthetic test topology.
+    ///
+    /// Production admission already stores provider claims in the internal,
+    /// collision-proof namespace. Test fixtures use this named boundary so
+    /// their readable raw claim names cannot accidentally exercise the
+    /// forbidden legacy flat-claim lookup path.
+    #[cfg(test)]
+    pub(crate) fn set_test_provider_claims(
+        &mut self,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) -> BTreeMap<String, Value> {
+        let admitted: BTreeMap<String, Value> = claims
+            .into_iter()
+            .map(|(name, value)| {
+                let storage_name = if name == "user"
+                    || name == "authMode"
+                    || name.starts_with(crate::query::PROVIDER_CLAIM_PREFIX)
+                {
+                    name
+                } else {
+                    crate::query::provider_claim_key(&name)
+                };
+                (storage_name, value)
+            })
+            .collect();
+        self.set_session_claims(identity, admitted.clone());
+        admitted
+    }
+
     /// Install claims through the same local-admission path used by a trusted
     /// subscriber connection. This exists only for synthetic topology tests
     /// that exercise `NodeState`/`PeerState` directly and therefore have no
