@@ -344,7 +344,6 @@ pub(super) fn select_current_access_path(
         column,
         prefix,
         intersections: probes.into_iter().skip(1).collect(),
-        maintained: false,
         source_limit: None,
     })
 }

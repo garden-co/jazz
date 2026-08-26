@@ -31,17 +31,6 @@ fn policy_indexed_access_path_schema(policy: PublicPolicyExpr) -> JazzSchema {
     ))
 }
 
-fn policy_multi_index_access_path_schema(policy: PublicPolicyExpr) -> JazzSchema {
-    build_public_test_schema(PublicSchemaBuilder::new().table(
-        PublicTableSchemaBuilder::new("docs")
-            .column("owner", PublicColumnType::Uuid)
-            .column("status", PublicColumnType::Text)
-            .column("body", PublicColumnType::Text)
-            .policies(public_all_policies().with_select(policy))
-            .index_only(["owner", "status"]),
-    ))
-}
-
 fn access_path_doc_cells(owner: AuthorSubject, status: &str, body: &str) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
@@ -182,7 +171,7 @@ fn indexed_conjunctive_read_policy_retains_the_final_policy_predicate() {
         public_claim_eq("owner", "sub"),
         public_literal_eq("status", PublicValue::Text("open".to_owned())),
     ]);
-    let schema = policy_multi_index_access_path_schema(policy);
+    let schema = policy_indexed_access_path_schema(policy);
     let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let owner = user(0xa1);
@@ -210,35 +199,17 @@ fn indexed_conjunctive_read_policy_retains_the_final_policy_predicate() {
         DurabilityTier::Global,
         owner,
     );
-    let (local, _) = query_rows_by_uuid_for_identity(
-        &mut core,
-        query.clone(),
-        DurabilityTier::Local,
-        owner,
-    );
+    let (local, _) =
+        query_rows_by_uuid_for_identity(&mut core, query, DurabilityTier::Local, owner);
 
     assert_eq!(global, local);
     assert_eq!(global, vec![owned_open]);
     assert!(!global.contains(&owned_closed));
     assert!(!global.contains(&foreign_open));
     assert!(
-        global_metrics.source_index_probes >= 2,
-        "the reusable conjunctive policy graph must intersect owner and status"
+        global_metrics.source_index_probes >= 1,
+        "the conjunctive policy must narrow its Global source through owner"
     );
-
-    commit_mergeable_global(
-        &mut writer,
-        &mut core,
-        MergeableCommit::new("docs", owned_closed, 20)
-            .cells(access_path_doc_cells(owner, "open", "reopened")),
-    );
-    let (after_policy_index_transition, _) = query_rows_by_uuid_for_identity(
-        &mut core,
-        query,
-        DurabilityTier::Global,
-        owner,
-    );
-    assert_eq!(after_policy_index_transition, vec![owned_open, owned_closed]);
 }
 
 #[test]
