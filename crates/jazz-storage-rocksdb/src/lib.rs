@@ -876,8 +876,8 @@ fn rocksdb_full_merge_delta(
 
 fn rocksdb_partial_merge_delta(
     _key: &[u8],
-    _left_operand: Option<&[u8]>,
-    _operands: &MergeOperands,
+    left_operand: Option<&[u8]>,
+    operands: &MergeOperands,
 ) -> Option<Vec<u8>> {
     if left_operand
         .is_some_and(|operand| !matches!(storage_delta_requires_full_merge(operand), Ok(false)))
