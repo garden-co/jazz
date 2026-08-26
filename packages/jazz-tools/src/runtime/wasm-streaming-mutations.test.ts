@@ -16,6 +16,23 @@ async function committedBatchId(receipt: WriteReceipt): Promise<BatchId> {
   return await receipt.batchId;
 }
 
+async function withWatchdog<T>(promise: Promise<T>, label: string, timeoutMs = 3_000): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`${label} timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
   it("selects and filters public provenance authors as canonical text", async () => {
     const appId = "wasm-public-provenance";
@@ -110,6 +127,66 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
         table: "todos",
         values: [
           { type: "Text", value: "upserted" },
+          { type: "Boolean", value: true },
+          { type: "Null" },
+        ],
+      },
+    ]);
+  });
+
+  it("finishes concurrent streamed writes without wedging the shared WASM runtime", async () => {
+    const runtime = await createWasmRuntime(app.wasmSchema, {
+      appId: "wasm-concurrent-streaming-publication",
+    });
+    const source = async function* (prefix: string) {
+      yield `${prefix} first `;
+      await Promise.resolve();
+      yield `${prefix} second`;
+    };
+
+    const writes = await withWatchdog(
+      Promise.all([
+        runtime.streamingMutation!(
+          "insert",
+          "todos",
+          { done: { type: "Boolean", value: false } },
+          "title",
+          source("one"),
+          null,
+          "00000000-0000-4000-8000-000000000201",
+        ),
+        runtime.streamingMutation!(
+          "insert",
+          "todos",
+          { done: { type: "Boolean", value: true } },
+          "title",
+          source("two"),
+          null,
+          "00000000-0000-4000-8000-000000000202",
+        ),
+      ]),
+      "concurrent streamed WASM publication",
+    );
+    await withWatchdog(
+      Promise.all(writes.map((write) => runtime.waitForTransaction!(write.batchId, "local"))),
+      "concurrent streamed WASM local settlement",
+    );
+
+    await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([
+      {
+        id: "00000000-0000-4000-8000-000000000201",
+        table: "todos",
+        values: [
+          { type: "Text", value: "one first one second" },
+          { type: "Boolean", value: false },
+          { type: "Null" },
+        ],
+      },
+      {
+        id: "00000000-0000-4000-8000-000000000202",
+        table: "todos",
+        values: [
+          { type: "Text", value: "two first two second" },
           { type: "Boolean", value: true },
           { type: "Null" },
         ],
