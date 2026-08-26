@@ -288,6 +288,15 @@ export interface TopologyEnvelopeDeliveryContext {
   tick: number;
   sequence: number;
   signal: AbortSignal;
+  /**
+   * Enqueue a follow-up from this delivery without waiting on the drain which
+   * is currently awaiting this callback. Valid only until the callback settles.
+   */
+  intercept<T>(
+    envelope: TopologyTransportEnvelope,
+    value: T,
+    deliver: TopologyEnvelopeDelivery<T>,
+  ): Promise<void>;
 }
 
 export type TopologyEnvelopeDelivery<T> = (
@@ -385,7 +394,6 @@ export class TopologyEnvelopeScheduler {
   #closePromise: Promise<void> | undefined;
   #cleanup: TopologyActivityReceipt | undefined;
   #pumpPromise: Promise<void> | undefined;
-  #deliveryDepth = 0;
   #failure: unknown;
 
   constructor(seed: number) {
@@ -482,6 +490,15 @@ export class TopologyEnvelopeScheduler {
     value: T,
     deliver: TopologyEnvelopeDelivery<T>,
   ): Promise<void> {
+    await this.interceptInternal(envelope, value, deliver, false);
+  }
+
+  private async interceptInternal<T>(
+    envelope: TopologyTransportEnvelope,
+    value: T,
+    deliver: TopologyEnvelopeDelivery<T>,
+    reentrant: boolean,
+  ): Promise<void> {
     this.assertOpen();
     const descriptor = snapshotEnvelope(envelope);
     const pending: PendingEnvelope<T> = {
@@ -530,7 +547,7 @@ export class TopologyEnvelopeScheduler {
         this.#pending.push(duplicate as PendingEnvelope<unknown>);
       }
     }
-    await this.pump();
+    await this.pump(reentrant);
   }
 
   /**
@@ -587,25 +604,34 @@ export class TopologyEnvelopeScheduler {
       await waitForSettlement(
         [...this.#inFlight.values()].map(({ promise }) => promise),
         timeoutMs,
+        (timeoutError) => {
+          const message = errorMessage(timeoutError);
+          Object.assign(this.#cleanup!, {
+            status: "failed",
+            elapsedMs: elapsed(started),
+            error: message,
+          });
+          this.record({ action: "closeTimedOut", error: message });
+        },
       );
       Object.assign(this.#cleanup, { status: "completed", elapsedMs: elapsed(started) });
     } catch (error) {
       const message = errorMessage(error);
-      Object.assign(this.#cleanup, {
-        status: "failed",
-        elapsedMs: elapsed(started),
-        error: message,
-      });
-      this.record({ action: "closeTimedOut", error: message });
+      if (this.#cleanup.status !== "failed") {
+        Object.assign(this.#cleanup, {
+          status: "failed",
+          elapsedMs: elapsed(started),
+          error: message,
+        });
+      }
       throw error;
     }
   }
 
-  private async pump(): Promise<void> {
-    // A delivery callback may await `intercept` to enqueue a follow-up. Do not
-    // make it await its own serialized drain; the outer drain will pick up the
-    // follow-up after the callback returns. Other callers still join the drain.
-    if (this.#pumpPromise) return this.#deliveryDepth > 0 ? undefined : this.#pumpPromise;
+  private async pump(reentrant = false): Promise<void> {
+    // Only the callback-scoped intercept below may avoid joining its own drain.
+    // Independent concurrent callers always await the active serialized pump.
+    if (this.#pumpPromise) return reentrant ? undefined : this.#pumpPromise;
     this.#pumpPromise = this.pumpInternal();
     try {
       await this.#pumpPromise;
@@ -629,7 +655,7 @@ export class TopologyEnvelopeScheduler {
   private async deliver(pending: PendingEnvelope<unknown>): Promise<void> {
     const controller = new AbortController();
     const promise = Promise.resolve().then(async () => {
-      this.#deliveryDepth++;
+      let callbackActive = true;
       try {
         await pending.deliver(pending.value, {
           envelopeId: pending.envelopeId,
@@ -637,9 +663,19 @@ export class TopologyEnvelopeScheduler {
           tick: this.#tick,
           sequence: pending.sequence,
           signal: controller.signal,
+          intercept: async <T>(
+            envelope: TopologyTransportEnvelope,
+            value: T,
+            deliver: TopologyEnvelopeDelivery<T>,
+          ) => {
+            if (!callbackActive) {
+              throw new Error("topology delivery intercept is no longer active");
+            }
+            await this.interceptInternal(envelope, value, deliver, true);
+          },
         });
       } finally {
-        this.#deliveryDepth--;
+        callbackActive = false;
       }
     });
     this.#inFlight.set(pending.sequence, { pending, controller, promise });
@@ -673,7 +709,7 @@ export class TopologyEnvelopeScheduler {
       from: pending.envelope.from,
       to: pending.envelope.to,
       ...(pending.envelope.label === undefined ? {} : { label: pending.envelope.label }),
-      ...(error === undefined ? {} : { error: errorMessage(error) }),
+      ...(error === undefined ? {} : { error: topologyEnvelopeErrorClass(error) }),
     });
   }
 
@@ -689,7 +725,7 @@ export class TopologyEnvelopeScheduler {
   private assertOpen(): void {
     if (this.#closed) throw new Error("topology envelope scheduler is closed");
     if (this.#failure !== undefined) {
-      throw new Error(`topology envelope scheduler is failed: ${errorMessage(this.#failure)}`);
+      throw new Error("topology envelope scheduler is failed after a delivery error");
     }
   }
 
@@ -814,22 +850,37 @@ function assertTopologyTicks(name: string, ticks: unknown): asserts ticks is num
 async function waitForSettlement(
   promises: readonly Promise<void>[],
   timeoutMs: number,
+  onTimeout: (error: Error) => void,
 ): Promise<void> {
   if (promises.length === 0) return;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutError = new Error(`topology envelope cleanup timed out after ${timeoutMs}ms`);
+  const settlement = Promise.allSettled(promises).then(() => undefined);
+  let timedOut = false;
   try {
     await Promise.race([
-      Promise.allSettled(promises).then(() => undefined),
+      settlement,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`topology envelope cleanup timed out after ${timeoutMs}ms`)),
-          timeoutMs,
-        );
+        timer = setTimeout(() => {
+          timedOut = true;
+          onTimeout(timeoutError);
+          reject(timeoutError);
+        }, timeoutMs);
       }),
     ]);
+  } catch (error) {
+    if (!timedOut) throw error;
+    // A timeout is diagnostic, not permission for the scheduler to leak a
+    // still-mutating delivery into the next scenario.
+    await settlement;
+    throw timeoutError;
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+function topologyEnvelopeErrorClass(error: unknown): "error" | "non-error" {
+  return error instanceof Error ? "error" : "non-error";
 }
 
 export class TopologyScenarioError extends Error {

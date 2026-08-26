@@ -32,9 +32,13 @@ are retained in the payload-free scheduler receipt. Pass each scheduler through
 cleanup and records discarded held envelopes, preventing a test fault from
 leaking into another scenario. Delivery callbacks receive an `AbortSignal` and
 must stop work when it aborts: teardown awaits all in-flight callbacks up to
-the scenario's bounded fault timeout. A callback that ignores cancellation
-causes a visible cleanup-timeout receipt and scenario failure rather than a
-quiet cross-test leak.
+the scenario's bounded fault timeout. If a callback ignores cancellation, that
+timeout is recorded as a cleanup failure, but teardown still drains the callback
+before returning so it cannot quietly mutate a later scenario.
+Callbacks that need to enqueue a follow-up use their scoped
+`deliveryContext.intercept(...)`; ordinary concurrent callers continue to use
+the scheduler directly and their promise does not settle before their ready
+delivery has run.
 
 Envelope descriptors are deliberately narrow, immutable snapshots of
 `{ from, to, label? }`: endpoint names and labels are bounded, unknown metadata
@@ -45,7 +49,9 @@ outstanding work, partition links, and receipt activities to keep a bad randomiz
 envelope id remains stable across copies/retry while each actual delivery has a
 separate sequence and attempt; retry is recorded when the retry is delivered,
 not merely scheduled. A callback failure fail-stops the scheduler and records
-discarded remaining deliveries deterministically.
+discarded remaining deliveries deterministically. Delivery failures are recorded
+only as a bounded `error`/`non-error` classification; exception messages and
+payload values never enter scheduler receipts.
 
 The scheduler deliberately models message delivery only. Connection lifecycle,
 real transport retry policy, and application assertions remain app-owned. An
