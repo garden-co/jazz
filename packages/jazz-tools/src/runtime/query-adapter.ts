@@ -245,7 +245,13 @@ function visibleSelectColumns(
   schema?: WasmSchema,
   table?: string,
 ): WireSelectProjection[] | null {
-  const full = resolvedSelect.map((column) => ({ kind: "full" as const, column }));
+  // Object-form `select` already supplies a typed projection descriptor for
+  // each selected column. Do not also emit a whole-column projection for the
+  // same carrier: apart from duplicating the request, the native collector
+  // would be left to choose which occurrence wins.
+  const full = resolvedSelect
+    .filter((column) => !Object.hasOwn(partialSelect, column))
+    .map((column) => ({ kind: "full" as const, column }));
   const partial =
     schema && table
       ? Object.entries(partialSelect).map(([column, descriptor]) =>

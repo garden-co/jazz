@@ -1,6 +1,6 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { schema as s } from "../../src/index.js";
-import type { QueryBuilder, TableProxy } from "../../src/runtime/db.js";
+import type { Db, QueryBuilder, TableProxy } from "../../src/runtime/db.js";
 import type { Query, Table } from "../../src/typed-app.js";
 
 interface ProjectRecord {
@@ -499,7 +499,6 @@ describe("typed app prototype", () => {
       metadata: {
         edits: [{ op: "set", at: "/selected/answer", value: 43 }],
       },
-      done: true,
     } satisfies DocumentUpdate;
 
     const utf8TextUpdate = {
@@ -513,6 +512,13 @@ describe("typed app prototype", () => {
     void utf8TextUpdate;
 
     if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
+      // Whole-column updates continue to use the ordinary Db.update API; the
+      // narrow LargeValueUpdateOf surface intentionally accepts only diffs.
+      const db = null as unknown as Pick<Db, "update">;
+      db.update(largeValueUpdateApp.documents, "00000000-0000-0000-0000-000000000001", {
+        done: true,
+      });
+
       const byteUpdateWithText = {
         payload: {
           within: { from: 0, to: 1 },
