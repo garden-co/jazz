@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { applySubscriptionDelta } from "jazz-tools";
+import { applySubscriptionDelta, sessionAuthor } from "jazz-tools";
 import { createDb, type Db } from "../../../../../../packages/jazz-tools/src/runtime/db.js";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
@@ -165,13 +165,13 @@ describe("Wequencer cross-topology recovery", () => {
               editor = await openClient(server, "editor", editorToken, editorDbName);
               ownerProfile = await owner
                 .insert(app.profiles, {
-                  author: JSON.stringify(["urn:jazz:test", "wequencer-owner"]),
+                  author: sessionAuthor("urn:jazz:test", "wequencer-owner"),
                   displayName: "Owner",
                 })
                 .wait({ tier: "edge" });
               editorProfile = await editor
                 .insert(app.profiles, {
-                  author: JSON.stringify(["urn:jazz:test", "wequencer-editor"]),
+                  author: sessionAuthor("urn:jazz:test", "wequencer-editor"),
                   displayName: "Editor",
                 })
                 .wait({ tier: "edge" });
@@ -185,7 +185,7 @@ describe("Wequencer cross-topology recovery", () => {
               await owner
                 .insert(app.session_members, {
                   session_id: session.id,
-                  member_author: JSON.stringify(["urn:jazz:test", "wequencer-owner"]),
+                  member_author: sessionAuthor("urn:jazz:test", "wequencer-owner"),
                   role: "owner",
                 })
                 .wait({ tier: "edge" });
@@ -200,7 +200,7 @@ describe("Wequencer cross-topology recovery", () => {
               editorMembership = await owner
                 .insert(app.session_members, {
                   session_id: session.id,
-                  member_author: JSON.stringify(["urn:jazz:test", "wequencer-editor"]),
+                  member_author: sessionAuthor("urn:jazz:test", "wequencer-editor"),
                   role: "editor",
                 })
                 .wait({ tier: "edge" });
