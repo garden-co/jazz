@@ -6,6 +6,7 @@ import {
   markTrustedReservedSession,
   sessionFromVerifiedReservedJwtPayload,
 } from "./client-session.js";
+import { canonicalAuthorSubject } from "./author-id.js";
 import { selfSignedClientProofFromConfig } from "./default-runtime-source.js";
 
 describe("selfSignedClientProofFromConfig", () => {
@@ -35,6 +36,7 @@ describe("selfSignedClientProofFromConfig", () => {
     const staticBearer = markTrustedReservedSession({
       issuer: STATIC_BEARER_SESSION_ISSUER,
       user_id: "server",
+      author: canonicalAuthorSubject(STATIC_BEARER_SESSION_ISSUER, "server"),
       claims: {},
       authMode: "external",
     });
@@ -47,7 +49,13 @@ describe("selfSignedClientProofFromConfig", () => {
     expect(
       selfSignedClientProofFromConfig(
         { appId: "proof-app", jwtToken: "external-token" },
-        { issuer: "https://issuer.example", user_id: "alice", claims: {}, authMode: "external" },
+        {
+          issuer: "https://issuer.example",
+          user_id: "alice",
+          author: canonicalAuthorSubject("https://issuer.example", "alice"),
+          claims: {},
+          authMode: "external",
+        },
       ),
     ).toBeUndefined();
   });
