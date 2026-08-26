@@ -609,6 +609,81 @@ fn disconnect_mid_batch_stops_later_lookup_and_drops_the_resumed_result() {
     assert!(state.relay_responses.get(&pump.connection).is_none());
 }
 
+#[test]
+fn detach_during_peer_tick_chunk_lookup_drops_missing_and_found_outcomes() {
+    for found in [false, true] {
+        let schema = schema();
+        let server = open_db(
+            if found { 0x49 } else { 0x48 },
+            AuthorSubject::SYSTEM,
+            &schema,
+        );
+        let storage = Rc::new(DeferredChunkStorage::default());
+        crate::db::block_on(async {
+            server
+                .node
+                .node
+                .lock()
+                .await
+                .set_chunk_storage(storage.clone());
+        });
+        let (mut client_transport, server_transport) = duplex();
+        let subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
+        let resolver = server.node.chunk_resolver.clone();
+        let pump = subscriber.borrow().io_pump();
+        let request = ChunkRequestEntry {
+            request_id: if found { 49 } else { 48 },
+            locator: groove::large_values::Locator::random(),
+            expected_hash: if found { [0x49; 32] } else { [0x48; 32] },
+            remaining_hops: DEFAULT_CHUNK_FORWARD_HOPS,
+        };
+        let chunk = groove::chunks::ChunkRequest {
+            locator: request.locator.clone(),
+            object_hash: request.expected_hash,
+        };
+        client_transport
+            .send(SyncMessage::ChunkRequestBatch(ChunkRequestBatch {
+                requests: vec![request],
+            }))
+            .unwrap();
+
+        let mut connection = subscriber.borrow_mut();
+        let mut ticking = Box::pin(connection.tick());
+        let waker = futures::task::noop_waker();
+        let mut context = Context::from_waker(&waker);
+        assert!(matches!(ticking.as_mut().poll(&mut context), Poll::Pending));
+
+        // The connection's semantic tick owns its peer borrow. This is the
+        // binding-side close signal which must fence the suspended lookup.
+        pump.disconnect();
+        storage.release(if found {
+            Ok(bytes::Bytes::from_static(b"peer tick found after detach"))
+        } else {
+            Err(groove::chunks::ChunkStorageError::Unavailable)
+        });
+        assert!(matches!(
+            ticking.as_mut().poll(&mut context),
+            Poll::Ready(Ok(_))
+        ));
+        drop(ticking);
+        drop(connection);
+
+        let state = resolver.state.borrow();
+        assert!(
+            !state.pending_by_chunk.contains_key(&chunk),
+            "peer tick cannot restore missing relay demand after detach"
+        );
+        assert!(
+            state.relay_responses.get(&pump.connection).is_none(),
+            "peer tick cannot queue auxiliary output after detach"
+        );
+        assert!(
+            client_transport.try_recv().is_none(),
+            "peer tick cannot send a found response after detach"
+        );
+    }
+}
+
 // This stays at the auxiliary-pump boundary because the batch split is a
 // hop-local wire-protocol contract, not a user-visible database operation.
 #[test]

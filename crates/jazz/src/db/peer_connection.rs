@@ -2190,6 +2190,9 @@ where
                         SyncMessage::ChunkRequestBatch(batch) => {
                             let mut responses = Vec::new();
                             for request in batch.requests {
+                                if self.auxiliary_pump.is_disconnected() {
+                                    break;
+                                }
                                 let local = self
                                     .node
                                     .lock()
@@ -2199,6 +2202,9 @@ where
                                         groove::large_values::ContentHash(request.expected_hash),
                                     )
                                     .await;
+                                if self.auxiliary_pump.is_disconnected() {
+                                    break;
+                                }
                                 match local {
                                     Ok(bytes) => responses.push(ChunkResponseEntry {
                                         request_id: request.request_id,
@@ -2214,7 +2220,9 @@ where
                                     }),
                                 }
                             }
-                            if !responses.is_empty() {
+                            if !responses.is_empty()
+                                && !self.auxiliary_pump.is_disconnected()
+                            {
                                 self.transport
                                     .send(SyncMessage::ChunkResponseBatch(ChunkResponseBatch {
                                         responses,
