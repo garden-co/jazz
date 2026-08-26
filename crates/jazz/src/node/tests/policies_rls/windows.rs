@@ -9,7 +9,7 @@ fn maintained_subscription_view_top_by_partitions_windows_by_policy_claim_bindin
             .policies(
                 PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
                     "owner",
-                    vec!["user_id".to_owned()],
+                    vec!["claims".to_owned(), "user_id".to_owned()],
                 )),
             ),
     ));
@@ -77,7 +77,7 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
             "id",
             [PublicPolicyExpr::eq_session(
                 "reader",
-                vec!["user_id".to_owned()],
+                vec!["claims".to_owned(), "user_id".to_owned()],
             )],
         ),
         public_literal_eq("published", PublicValue::Boolean(true)),
