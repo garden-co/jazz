@@ -2991,11 +2991,10 @@ where
                             }
                             if let Some((tx_id, unit)) = local_upload {
                                 let mut outbox = outbox.borrow_mut();
-                                if !outbox.iter().any(|pending| pending.tx_id == tx_id) {
-                                    outbox.push(PendingUpload {
+                                if outbox.push(PendingUpload {
                                         tx_id,
                                         unit: Some(unit),
-                                    });
+                                    }) {
                                     schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
                                 }
                             }
