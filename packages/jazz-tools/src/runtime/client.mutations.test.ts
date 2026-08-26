@@ -8,6 +8,11 @@ import {
   type WriteReceipt,
 } from "./client.js";
 import type { AppContext, Session } from "./context.js";
+import {
+  LOCAL_FIRST_JWT_ISSUER,
+  TRUSTED_RESERVED_SESSION_TOKEN_FIELD,
+  sessionFromVerifiedReservedJwtPayload,
+} from "./client-session.js";
 
 function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
   const receipt = (
@@ -139,6 +144,32 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
 }
 
 describe("JazzClient write attribution", () => {
+  it("keeps public author out of serialized writes while retaining the trusted token", () => {
+    const { client, insertCalls } = makeClient();
+    const session = sessionFromVerifiedReservedJwtPayload(
+      { iss: LOCAL_FIRST_JWT_ISSUER, sub: "alice", claims: { role: "owner" } },
+      "local-first",
+    );
+    expect(session?.author).toBe('["urn:jazz:local-first","alice"]');
+
+    client.insert(
+      "todos",
+      { title: { type: "Text", value: "Private boundary" } },
+      undefined,
+      session ?? undefined,
+    );
+
+    const serialized = JSON.parse(insertCalls[0]?.[2] ?? "null");
+    expect(serialized).toEqual({
+      issuer: LOCAL_FIRST_JWT_ISSUER,
+      user_id: "alice",
+      claims: { role: "owner" },
+      authMode: "local-first",
+      [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: expect.any(String),
+    });
+    expect(serialized).not.toHaveProperty("author");
+  });
+
   it("routes dry-run permission checks through runtime methods", () => {
     const { client, dryRunCalls } = makeClient();
     const insertValues = { title: { type: "Text" as const, value: "Draft" } };
@@ -190,16 +221,13 @@ describe("JazzClient write attribution", () => {
 
     client.insert("todos", insertValues, undefined, session, "alice");
 
-    expect(insertCalls).toEqual([
-      [
-        "todos",
-        insertValues,
-        JSON.stringify({
-          session,
-          attribution: "alice",
-        }),
-        undefined,
-      ],
-    ]);
+    expect(insertCalls).toHaveLength(1);
+    expect(insertCalls[0]?.[0]).toBe("todos");
+    expect(insertCalls[0]?.[1]).toEqual(insertValues);
+    expect(JSON.parse(insertCalls[0]?.[2] ?? "null")).toEqual({
+      session,
+      attribution: "alice",
+    });
+    expect(insertCalls[0]?.[3]).toBeUndefined();
   });
 });

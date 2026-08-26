@@ -15,6 +15,7 @@ import {
 } from "./client.js";
 import type { AppContext } from "./context.js";
 import type { WasmSchema } from "../drivers/types.js";
+import { withCanonicalAuthor } from "./author-id.js";
 
 function makeFakeRuntime() {
   let mutationErrorCallback: ((event: MutationErrorEvent) => void) | null = null;
@@ -162,6 +163,32 @@ describe("JazzClient subscription ownership", () => {
     expect(callback).toHaveBeenCalledOnce();
     expect(runtime.unsubscribe).toHaveBeenCalledOnce();
     expect(runtime.unsubscribe).toHaveBeenCalledWith(41);
+  });
+});
+
+describe("JazzClient native session boundary", () => {
+  it("keeps public author out of serialized query sessions", async () => {
+    const runtime = makeFakeRuntime();
+    runtime.query.mockResolvedValue([]);
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const session = withCanonicalAuthor({
+      issuer: "https://issuer.example",
+      user_id: "alice",
+      claims: { role: "reader" },
+      authMode: "external",
+    });
+
+    expect(session.author).toBe('["https://issuer.example","alice"]');
+    await client.query('{"table":"todos"}', undefined, session);
+
+    const serialized = JSON.parse(runtime.query.mock.calls[0][1] ?? "null");
+    expect(serialized).toEqual({
+      issuer: "https://issuer.example",
+      user_id: "alice",
+      claims: { role: "reader" },
+      authMode: "external",
+    });
+    expect(serialized).not.toHaveProperty("author");
   });
 });
 
