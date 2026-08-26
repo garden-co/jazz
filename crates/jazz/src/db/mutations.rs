@@ -304,6 +304,7 @@ fn apply_json_set(
 
 fn apply_inline_splices(
     value: Value,
+    expected_kind: groove::large_values::LargeValueKind,
     page: &LargeValueUpdatePage,
     splices: &[LargeValueUpdateSplice],
 ) -> Result<Value, Error> {
@@ -317,6 +318,17 @@ fn apply_inline_splices(
             ));
         }
     };
+    let actual_kind = if is_text {
+        groove::large_values::LargeValueKind::String
+    } else {
+        groove::large_values::LargeValueKind::Bytes
+    };
+    if actual_kind != expected_kind {
+        return Err(Error::new(
+            ErrorCode::Schema,
+            "stored scalar kind does not match its column schema",
+        ));
+    }
     let (page_start, mut page_length) = match page {
         LargeValueUpdatePage::Bytes { from, to } if !is_text => {
             checked_range(*from, *to, bytes.len() as u64, "byte")?;
@@ -724,15 +736,17 @@ where
                         format!("unknown column {table}.{column}"),
                     )
                 })?;
+                let (column_kind, _) = self.large_value_column_kind(table, &column)?;
                 let (next, column_staged, obsolete) = match mutation {
                     LargeValueUpdate::Splice {
                         within, splices, ..
                     } => {
-                        self.apply_large_value_splices(current, &within, &splices)
+                        self.apply_large_value_splices(current, column_kind, &within, &splices)
                             .await?
                     }
                     LargeValueUpdate::JsonSet { edits, .. } => {
-                        self.apply_large_value_json_set(current, &edits).await?
+                        self.apply_large_value_json_set(current, column_kind, &edits)
+                            .await?
                     }
                 };
                 cleanup.extend(obsolete);
@@ -789,6 +803,7 @@ where
     async fn apply_large_value_splices(
         &self,
         value: Value,
+        expected_kind: groove::large_values::LargeValueKind,
         page: &LargeValueUpdatePage,
         splices: &[LargeValueUpdateSplice],
     ) -> Result<
@@ -800,14 +815,35 @@ where
         Error,
     > {
         let (value, nullable) = unwrap_present_nullable(value);
+        if !matches!(
+            expected_kind,
+            groove::large_values::LargeValueKind::Bytes
+                | groove::large_values::LargeValueKind::String
+        ) {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                "partial splice requires a bytes or string column",
+            ));
+        }
         let Value::Large(mut current) = value else {
             return Ok((
-                apply_inline_splices(preserve_nullable(value, nullable), page, splices)?,
+                apply_inline_splices(
+                    preserve_nullable(value, nullable),
+                    expected_kind,
+                    page,
+                    splices,
+                )?,
                 None,
                 Vec::new(),
             ));
         };
-        let text = matches!(current.kind, groove::large_values::LargeValueKind::String);
+        if current.kind != expected_kind {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                "stored large-value kind does not match its column schema",
+            ));
+        }
+        let text = matches!(expected_kind, groove::large_values::LargeValueKind::String);
         let (page_start, mut page_length) = match page {
             LargeValueUpdatePage::Bytes { from, to } if !text => {
                 checked_range(*from, *to, current.byte_length, "byte")?;
@@ -950,6 +986,7 @@ where
     async fn apply_large_value_json_set(
         &self,
         value: Value,
+        expected_kind: groove::large_values::LargeValueKind,
         edits: &[JsonSetEdit],
     ) -> Result<
         (
@@ -959,15 +996,17 @@ where
         ),
         Error,
     > {
+        if expected_kind != groove::large_values::LargeValueKind::Json {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                "JSON set requires a JSON column",
+            ));
+        }
         let (value, nullable) = unwrap_present_nullable(value);
         let (source, large) = match value {
             Value::String(text) => (text.into_bytes(), None),
             Value::Large(value_ref)
-                if matches!(
-                    value_ref.kind,
-                    groove::large_values::LargeValueKind::String
-                        | groove::large_values::LargeValueKind::Json
-                ) =>
+                if value_ref.kind == groove::large_values::LargeValueKind::Json =>
             {
                 let bytes = self
                     .node
@@ -1608,6 +1647,19 @@ where
                 format!("streamed column {table}.{column} was also supplied in row cells"),
             ));
         }
+        let (kind, nullable) = self.large_value_column_kind(table, column)?;
+        Ok((kind, nullable))
+    }
+
+    /// Resolve the physical large-value kind solely from the declared column.
+    /// Binding payloads are untrusted at this boundary: an inline JSON cell is
+    /// represented as a string, but it must never be treated as a text splice
+    /// target (and the inverse is true for JSON pointer edits).
+    fn large_value_column_kind(
+        &self,
+        table: &str,
+        column: &str,
+    ) -> Result<(groove::large_values::LargeValueKind, bool), Error> {
         let table_schema = self.table_schema(table)?;
         let column = table_schema
             .columns

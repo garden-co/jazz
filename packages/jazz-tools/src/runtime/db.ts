@@ -702,6 +702,115 @@ function rejectLargeValueDescriptorsInUpsert(descriptors: readonly WireLargeValu
   }
 }
 
+type PartialValueSelection =
+  | { from: number; to: number }
+  | { fromUtf8: number; toUtf8: number }
+  | { at: string };
+
+function utf16Boundary(text: string, offset: number): boolean {
+  if (offset < 0 || offset > text.length) return false;
+  if (offset === 0 || offset === text.length) return true;
+  const before = text.charCodeAt(offset - 1);
+  const after = text.charCodeAt(offset);
+  return !(before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff);
+}
+
+function jsonPointerToken(token: string): string {
+  let decoded = "";
+  for (let index = 0; index < token.length; index += 1) {
+    const character = token[index]!;
+    if (character !== "~") {
+      decoded += character;
+      continue;
+    }
+    const escape = token[++index];
+    if (escape === "0") decoded += "~";
+    else if (escape === "1") decoded += "/";
+    else throw new Error("JSON pointer has an invalid escape.");
+  }
+  return decoded;
+}
+
+function jsonPointerValue(value: unknown, pointer: string): unknown {
+  if (pointer === "") return value;
+  if (!pointer.startsWith("/")) throw new Error("JSON pointer must be empty or begin with '/'.");
+  let current: unknown = value;
+  for (const rawToken of pointer.slice(1).split("/")) {
+    const token = jsonPointerToken(rawToken);
+    if (Array.isArray(current)) {
+      if (!/^(0|[1-9]\d*)$/.test(token)) {
+        throw new Error("JSON array pointer token is not an index.");
+      }
+      const index = Number(token);
+      if (!Number.isSafeInteger(index) || index >= current.length) {
+        throw new Error("JSON pointer path does not exist.");
+      }
+      current = current[index];
+    } else if (typeof current === "object" && current !== null && Object.hasOwn(current, token)) {
+      current = (current as Record<string, unknown>)[token];
+    } else {
+      throw new Error("JSON pointer path does not exist.");
+    }
+  }
+  return current;
+}
+
+/**
+ * Temporary binding-level materialization until #2090 carries exact terminal
+ * demand into Groove. It preserves the public result/coordinate contract and
+ * only touches selected columns; it must not be used as a chunk-demand model.
+ */
+function applyPartialValueSelections<T>(
+  row: T,
+  selections: Record<string, PartialValueSelection>,
+): T {
+  if (Object.keys(selections).length === 0 || typeof row !== "object" || row === null) return row;
+  const projected = { ...(row as Record<string, unknown>) };
+  for (const [column, selection] of Object.entries(selections)) {
+    const value = projected[column];
+    if ("at" in selection) {
+      projected[column] = jsonPointerValue(value, selection.at);
+      continue;
+    }
+    if (value instanceof Uint8Array) {
+      if ("fromUtf8" in selection || selection.from > selection.to || selection.to > value.length) {
+        throw new Error(`Byte range for "${column}" is out of bounds.`);
+      }
+      projected[column] = value.slice(selection.from, selection.to);
+      continue;
+    }
+    if (typeof value !== "string") {
+      throw new Error(`Large-value selection for "${column}" has an incompatible column type.`);
+    }
+    if ("fromUtf8" in selection) {
+      const bytes = new TextEncoder().encode(value);
+      if (
+        selection.fromUtf8 > selection.toUtf8 ||
+        selection.toUtf8 > bytes.length ||
+        (selection.fromUtf8 < bytes.length &&
+          (bytes[selection.fromUtf8]! & 0b1100_0000) === 0b1000_0000) ||
+        (selection.toUtf8 < bytes.length &&
+          (bytes[selection.toUtf8]! & 0b1100_0000) === 0b1000_0000)
+      ) {
+        throw new Error(`UTF-8 range for "${column}" splits a code point or is out of bounds.`);
+      }
+      projected[column] = new TextDecoder("utf-8", { fatal: true }).decode(
+        bytes.slice(selection.fromUtf8, selection.toUtf8),
+      );
+      continue;
+    }
+    if (
+      selection.from > selection.to ||
+      !utf16Boundary(value, selection.from) ||
+      !utf16Boundary(value, selection.to)
+    ) {
+      throw new Error(`UTF-16 range for "${column}" splits a surrogate pair or is out of bounds.`);
+    }
+    projected[column] = value.slice(selection.from, selection.to);
+  }
+  return projected as T;
+}
+
 function escapeWriteErrorReason(message: string): string {
   return message.replaceAll('"', '\\"');
 }
@@ -1297,7 +1406,10 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       builtQuery.select,
     );
     return transformedRows.map((row) =>
-      transformOutputRow(outputTable === builtQuery.table ? query : {}, row),
+      transformOutputRow(
+        outputTable === builtQuery.table ? query : {},
+        applyPartialValueSelections(row, builtQuery.partialSelect),
+      ),
     );
   }
 
@@ -1936,7 +2048,9 @@ export class Db {
       table._table,
     );
     if (Object.keys(ordinary).length > 0 || descriptors.length === 0) {
-      throw new Error("applyDiffs accepts one or more field diff descriptors, not whole-column values.");
+      throw new Error(
+        "applyDiffs accepts one or more field diff descriptors, not whole-column values.",
+      );
     }
     const context = this.getRuntimeOperationContext();
     return this.wrapWriteWait(
@@ -2149,7 +2263,10 @@ export class Db {
       builtQuery.select,
     );
     return transformedRows.map((row) =>
-      transformOutputRow(outputTable === builtQuery.table ? query : {}, row),
+      transformOutputRow(
+        outputTable === builtQuery.table ? query : {},
+        applyPartialValueSelections(row, builtQuery.partialSelect),
+      ),
     );
   }
 
@@ -2222,7 +2339,10 @@ export class Db {
     const transform = (row: WasmRow): T =>
       transformOutputRow(
         outputTable === builtQuery.table ? query : {},
-        transformRow(row, outputSchema, outputTable, outputIncludes, builtQuery.select),
+        applyPartialValueSelections(
+          transformRow(row, outputSchema, outputTable, outputIncludes, builtQuery.select),
+          builtQuery.partialSelect,
+        ),
       );
     const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
       const typedDelta = manager.handleDelta(delta, transform, nativeOutputColumns);

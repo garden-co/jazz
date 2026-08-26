@@ -613,7 +613,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -639,7 +639,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(calls[0]?.[0]).toBe("todos");
     expect(formatUuid(calls[0]?.[1] as Uint8Array)).toBe("00000000-0000-0000-0000-000000000001");
     expect(calls[0]?.[3]).toBe(descriptors);
-    expect(calls[0]?.[4]).toBe(43);
+    expect(calls[0]?.[4]).toBe(43_000);
 
     expect(() =>
       runtime.updateLargeValues(
@@ -669,6 +669,43 @@ describe("NativeRuntimeAdapter server transport", () => {
       ),
     ).toThrow("Typed large-value updates do not yet support an attributed identity.");
     expect(calls).toHaveLength(1);
+  });
+
+  it("accepts typed partial projections as ordinary carrier columns", async () => {
+    const rowId = uuidBytes("00000000-0000-0000-0000-000000000001");
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => encodeRows([{ table: "todos", rowId, title: "A😀BC" }]),
+            prepareQuery: () => ({}),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    await expect(
+      runtime.query(
+        JSON.stringify({
+          table: "todos",
+          select_columns: [{ kind: "text_utf16", column: "title", from: 1, to: 3 }],
+        }),
+      ),
+    ).resolves.toEqual([
+      {
+        table: "todos",
+        id: "00000000-0000-0000-0000-000000000001",
+        values: [{ type: "Text", value: "A😀BC" }],
+      },
+    ]);
   });
 
   it("serves default and local queries from fresh local state", async () => {

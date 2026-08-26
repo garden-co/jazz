@@ -294,13 +294,19 @@ export function normalizeBuiltQuery(raw: unknown): NormalizedBuiltQuery {
     throw new Error("QueryBuilder._build() must include a non-empty table.");
   }
 
+  const partialSelect = normalizePartialSelect(value.select);
   return {
     table: value.table,
     conditions: normalizeConditions(value.conditions),
     includes: normalizeIncludeEntries(value.includes),
     requireIncludes: value[INTERNAL_REQUIRE_INCLUDES_KEY] === true,
-    select: normalizeSelect(value.select),
-    partialSelect: normalizePartialSelect(value.select),
+    // The core's current row projection is column-oriented. Preserve the
+    // public partial projection as a separate descriptor while selecting its
+    // carrier columns so the binding can return a correct sliced primitive.
+    select: Array.isArray(value.select)
+      ? normalizeSelect(value.select)
+      : Object.keys(partialSelect),
+    partialSelect,
     orderBy: normalizeOrderBy(value.orderBy),
     limit: typeof value.limit === "number" ? value.limit : undefined,
     offset: typeof value.offset === "number" ? value.offset : undefined,
