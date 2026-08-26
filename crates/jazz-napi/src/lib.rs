@@ -2073,7 +2073,7 @@ impl NapiDb {
             ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
-    ) -> napi::Result<Uint8Array> {
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -2085,28 +2085,76 @@ impl NapiDb {
         }
         let opts = core_read_opts_from_json(opts)?;
         let open_tx = tx.open_tx()?;
-        let rows = match (db, tx.kind) {
-            (NapiDbInnerStorage::Memory(db), NapiTxKind::Mergeable) => core_block_on(
-                db.mergeable_tx_ref(open_tx)
-                    .all_prepared_with_opts(&query.inner, opts),
-            ),
-            (NapiDbInnerStorage::Persistent(db), NapiTxKind::Mergeable) => core_block_on(
-                db.mergeable_tx_ref(open_tx)
-                    .all_prepared_with_opts(&query.inner, opts),
-            ),
-            (NapiDbInnerStorage::Memory(db), NapiTxKind::Exclusive) => core_block_on(
-                db.exclusive_tx_ref(open_tx)
-                    .all_prepared_with_opts(&query.inner, opts),
-            ),
-            (NapiDbInnerStorage::Persistent(db), NapiTxKind::Exclusive) => core_block_on(
-                db.exclusive_tx_ref(open_tx)
-                    .all_prepared_with_opts(&query.inner, opts),
-            ),
+        match (db, tx.kind) {
+            (NapiDbInnerStorage::Memory(db), NapiTxKind::Mergeable) => {
+                let db = Rc::clone(db);
+                let query = query.inner.clone();
+                native_read_or_pending(Box::pin(async move {
+                    let mut rows = db
+                        .mergeable_tx_ref(open_tx)
+                        .all_prepared_with_opts(&query, opts)
+                        .await
+                        .map_err(napi_error)?;
+                    db.hydrate_rows_for_binding(&mut rows)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
+            }
+            (NapiDbInnerStorage::Persistent(db), NapiTxKind::Mergeable) => {
+                let db = Rc::clone(db);
+                let query = query.inner.clone();
+                native_read_or_pending(Box::pin(async move {
+                    let mut rows = db
+                        .mergeable_tx_ref(open_tx)
+                        .all_prepared_with_opts(&query, opts)
+                        .await
+                        .map_err(napi_error)?;
+                    db.hydrate_rows_for_binding(&mut rows)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
+            }
+            (NapiDbInnerStorage::Memory(db), NapiTxKind::Exclusive) => {
+                let db = Rc::clone(db);
+                let query = query.inner.clone();
+                native_read_or_pending(Box::pin(async move {
+                    let mut rows = db
+                        .exclusive_tx_ref(open_tx)
+                        .all_prepared_with_opts(&query, opts)
+                        .await
+                        .map_err(napi_error)?;
+                    db.hydrate_rows_for_binding(&mut rows)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
+            }
+            (NapiDbInnerStorage::Persistent(db), NapiTxKind::Exclusive) => {
+                let db = Rc::clone(db);
+                let query = query.inner.clone();
+                native_read_or_pending(Box::pin(async move {
+                    let mut rows = db
+                        .exclusive_tx_ref(open_tx)
+                        .all_prepared_with_opts(&query, opts)
+                        .await
+                        .map_err(napi_error)?;
+                    db.hydrate_rows_for_binding(&mut rows)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
+            }
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        encode_core_rows(&rows)
-            .map(Uint8Array::new)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     #[napi(js_name = "setIdentityClaims")]

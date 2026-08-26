@@ -280,7 +280,7 @@ type NativeDb = {
   mergeableTx(openBatchId: OpenBatchId): Tx;
   mergeableTxForIdentity?(openBatchId: OpenBatchId, author: Uint8Array): Tx;
   exclusiveTx?(openBatchId: OpenBatchId): Tx;
-  allInTransaction?(query: PreparedQuery, tx: Tx, opts: unknown): Uint8Array;
+  allInTransaction?(query: PreparedQuery, tx: Tx, opts: unknown): NativeReadResult;
   setTickScheduler(
     callback:
       | ((urgency: "immediate" | "deferred") => void)
@@ -2091,7 +2091,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!this.db.allInTransaction) {
       throw new Error("Native runtime does not support transaction reads");
     }
-    return this.db.allInTransaction(query, this.txForRead(pendingTx), opts);
+    return this.awaitNativeRead(this.db.allInTransaction(query, this.txForRead(pendingTx), opts));
   }
 
   /**

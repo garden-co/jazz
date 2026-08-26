@@ -81,7 +81,7 @@ export declare class NapiDb {
   prepareQuery(query: Uint8Array): PreparedQuery
   all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   /** Read through an open transaction using the identity bound at begin. */
-  allInTransaction(query: PreparedQuery, tx: Tx, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
+  allInTransaction(query: PreparedQuery, tx: Tx, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   allRelationSnapshot(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
