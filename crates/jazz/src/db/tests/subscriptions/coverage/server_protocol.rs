@@ -580,9 +580,30 @@ fn assert_active_subscription_key_reuse(reuse: ActiveSubscriptionKeyReuse) {
         subscriber.borrow_mut().tick().unwrap();
     }
 
+    match reuse {
+        ActiveSubscriptionKeyReuse::ExactReplay => assert_protocol_view_update_rows(
+            try_recv_subscriber_payload(client_transport.as_mut())
+                .expect("exact replay should refresh the active usage"),
+            subscription,
+            true,
+            BTreeSet::from([initial_a]),
+        ),
+        ActiveSubscriptionKeyReuse::ChangedKnownState => assert_protocol_view_update_rows(
+            try_recv_subscriber_payload(client_transport.as_mut())
+                .expect("known-state replay should refresh the active usage"),
+            subscription,
+            true,
+            BTreeSet::from([initial_a]),
+        ),
+        ActiveSubscriptionKeyReuse::ChangedBinding
+        | ActiveSubscriptionKeyReuse::MismatchedShape => assert!(
+            try_recv_subscriber_payload(client_transport.as_mut()).is_none(),
+            "{reuse:?} must not emit a reset or rejection for conflicting reuse"
+        ),
+    }
     assert!(
         try_recv_subscriber_payload(client_transport.as_mut()).is_none(),
-        "{reuse:?} must not emit another reset or rejection for a live key"
+        "{reuse:?} emitted more than one replay response"
     );
     assert_eq!(
         server
@@ -666,7 +687,7 @@ fn assert_active_subscription_key_reuse(reuse: ActiveSubscriptionKeyReuse) {
 }
 
 #[test]
-fn active_subscription_key_exact_canonical_replay_is_a_no_op() {
+fn active_subscription_key_exact_canonical_replay_refreshes_existing_usage() {
     assert_active_subscription_key_reuse(ActiveSubscriptionKeyReuse::ExactReplay);
 }
 
@@ -676,7 +697,7 @@ fn active_subscription_key_drops_changed_binding_before_side_effects() {
 }
 
 #[test]
-fn active_subscription_key_drops_changed_known_state_before_side_effects() {
+fn active_subscription_key_changed_known_state_refreshes_existing_usage() {
     assert_active_subscription_key_reuse(ActiveSubscriptionKeyReuse::ChangedKnownState);
 }
 
@@ -708,7 +729,7 @@ fn current_row_subscription_key_rejects_ordinary_whole_table_collision() {
     assert_protocol_view_update_rows(
         current_rows_update,
         current_rows_subscription,
-        true,
+        false,
         BTreeSet::from([initial_row]),
     );
     assert_eq!(
@@ -797,6 +818,108 @@ fn current_row_subscription_key_rejects_ordinary_whole_table_collision() {
         try_recv_subscriber_payload(client_transport.as_mut()).is_none(),
         "whole-table collision produced mixed or duplicate delivery"
     );
+}
+
+#[test]
+fn current_row_subscription_key_refuses_existing_ordinary_owner() {
+    let schema = schema();
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let initial_row = seed(&server, "todos", cells("initial", false, owner));
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let subscription = server
+        .node()
+        .borrow()
+        .whole_table_subscription_key("todos")
+        .unwrap();
+    let active_before = active_groove_subscriptions(&server);
+
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    client_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values: Vec::new(),
+            known_state: None,
+        }))
+        .unwrap();
+
+    let error = subscriber
+        .borrow_mut()
+        .serve_current_rows("todos")
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Protocol);
+    assert!(
+        error
+            .message
+            .contains("already owned by an ordinary subscription")
+    );
+    assert!(
+        try_recv_subscriber_payload(client_transport.as_mut()).is_none(),
+        "current-row refusal must not send from either producer"
+    );
+    assert_eq!(active_groove_subscriptions(&server), active_before);
+    {
+        let subscriber = subscriber.borrow();
+        let ConnectionLink::Subscriber(state) = &subscriber.link else {
+            panic!("expected subscriber connection");
+        };
+        assert!(state.served_current_rows.is_empty());
+    }
+
+    subscriber.borrow_mut().tick().unwrap();
+    assert_protocol_view_update_rows(
+        try_recv_subscriber_payload(client_transport.as_mut())
+            .expect("ordinary owner should publish its pending initial reset"),
+        subscription,
+        true,
+        BTreeSet::from([initial_row]),
+    );
+    assert!(
+        try_recv_subscriber_payload(client_transport.as_mut()).is_none(),
+        "ordinary owner emitted more than one initial reset"
+    );
+    assert_eq!(active_groove_subscriptions(&server), active_before + 1);
+    {
+        let subscriber = subscriber.borrow();
+        let ConnectionLink::Subscriber(state) = &subscriber.link else {
+            panic!("expected subscriber connection");
+        };
+        assert_eq!(state.served.len(), 1);
+        assert_eq!(state.coverage_groups.len(), 1);
+        assert!(state.served.contains_key(&subscription));
+        assert!(state.served_current_rows.is_empty());
+    }
+    let added_row = seed(&server, "todos", cells("ordinary only", false, owner));
+    assert_protocol_view_update_rows(
+        drive_subscriber_until_payload(&subscriber, client_transport.as_mut()),
+        subscription,
+        false,
+        BTreeSet::from([added_row]),
+    );
+
+    client_transport
+        .send(SyncMessage::Unsubscribe { subscription })
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert_eq!(active_groove_subscriptions(&server), active_before);
+    let subscriber = subscriber.borrow();
+    let ConnectionLink::Subscriber(state) = &subscriber.link else {
+        panic!("expected subscriber connection");
+    };
+    assert!(state.served.is_empty());
+    assert!(state.coverage_groups.is_empty());
+    assert!(state.served_current_rows.is_empty());
+    assert!(state.peer.subscription_result_sets(subscription).is_none());
 }
 
 #[test]
