@@ -28,6 +28,10 @@ const packageBuild = fs.readFileSync(
   path.join(root, ".github/workflows/build-jazz-packages.yml"),
   "utf8",
 );
+const previewBuild = fs.readFileSync(
+  path.join(root, ".github/workflows/preview-build.yml"),
+  "utf8",
+);
 const codspeedWorkflow = fs.readFileSync(path.join(root, ".github/workflows/codspeed.yml"), "utf8");
 const realisticWorkflow = fs.readFileSync(
   path.join(root, ".github/workflows/benchmarks.yml"),
@@ -1359,6 +1363,15 @@ test("Windows NAPI release builds provision libclang for RocksDB bindgen", () =>
       assert.match(packageBuild.replace('"LIBCLANG_PATH=$libclangPath" | ', ""), windowsNapiSetup),
     /LIBCLANG_PATH/,
   );
+});
+
+test("pkg.pr.new previews omit Windows while release package builds retain it", () => {
+  assert.match(packageBuild, /default: .*win32-x64-msvc/);
+  assert.match(packageBuild, /include: \$\{\{ fromJSON\(inputs\.napi_matrix\) \}\}/);
+  assert.match(packageBuild, /Remove Windows package omitted by this build/);
+  assert.match(packageBuild, /stage-napi-manifests\.mjs linux-x64-gnu darwin-x64 darwin-arm64/);
+  assert.doesNotMatch(previewBuild, /win32-x64-msvc/);
+  assert.match(previewBuild, /napi_matrix: .*linux-x64-gnu.*darwin-x64.*darwin-arm64/);
 });
 
 test("TypeScript CI overlaps independent Node and browser suites after one artifact build", () => {
