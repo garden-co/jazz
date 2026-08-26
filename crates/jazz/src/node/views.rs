@@ -812,9 +812,6 @@ where
         // preceding valid bundle can advance clocks, allocate aliases, or
         // stage history before a later malformed bundle rejects the frame.
         self.validate_view_update_payloads(&updates)?;
-        if updates.iter().any(|update| update.reset_result_set) {
-            self.begin_initial_sync_flush_cadence().await?;
-        }
         let mut bulk_candidates = Vec::new();
         let mut initial_hydration_binding_views =
             self.query.initial_hydration_binding_views.clone();
@@ -847,6 +844,9 @@ where
         let bulk_loaded_tx_ids = self
             .ingest_reset_view_bundle_refs_in_bulk(&bulk_candidates)
             .await?;
+        if updates.iter().any(|update| update.reset_result_set) {
+            self.begin_initial_sync_flush_cadence().await?;
+        }
         let mut receiver_candidates = BTreeMap::<TxId, VersionBundle>::new();
         for update in &updates {
             for bundle in
@@ -981,6 +981,22 @@ where
             }
             Err(error) => return Err(error),
         };
+        let bulk_loaded_tx_ids = if let Some(preloaded) = preloaded_tx_ids {
+            preloaded.clone()
+        } else if reset_result_set
+            && peer_complete_tx_payload_refs.is_empty()
+            && result_member_removes.is_empty()
+        {
+            // A reset with bundles is a snapshot for this subscription even
+            // when other subscriptions already advanced the node watermark.
+            // Empty reset stamps stay orthogonal below: with no bundles there
+            // is no payload to bulk ingest and the stamp must not clear shared
+            // state that is already more settled.
+            self.ingest_reset_view_bundle_refs_in_bulk(&version_bundle_refs)
+                .await?
+        } else {
+            BTreeSet::new()
+        };
         if reset_result_set {
             self.query
                 .pending_terminal_operations_by_binding_view
@@ -1005,22 +1021,6 @@ where
                 .deferred_publication_binding_views
                 .remove(&binding_view_key);
         }
-        let bulk_loaded_tx_ids = if let Some(preloaded) = preloaded_tx_ids {
-            preloaded.clone()
-        } else if reset_result_set
-            && peer_complete_tx_payload_refs.is_empty()
-            && result_member_removes.is_empty()
-        {
-            // A reset with bundles is a snapshot for this subscription even
-            // when other subscriptions already advanced the node watermark.
-            // Empty reset stamps stay orthogonal below: with no bundles there
-            // is no payload to bulk ingest and the stamp must not clear shared
-            // state that is already more settled.
-            self.ingest_reset_view_bundle_refs_in_bulk(&version_bundle_refs)
-                .await?
-        } else {
-            BTreeSet::new()
-        };
         let row_result_adds = result_member_adds
             .iter()
             .filter_map(ResultMemberEntry::as_row)

@@ -1022,7 +1022,6 @@ where
                 (String, BranchKey, RowUuid, crate::ids::SchemaVersionId, bool),
                 &VersionRecord,
             >::new();
-            let mut duplicate_conflict = false;
             for bundle in &tx_bundles {
                 for version in bundle.versions {
                     let key = (
@@ -1033,9 +1032,8 @@ where
                         version.deletion().is_some(),
                     );
                     match unique_versions.get(&key) {
-                        Some(existing) if existing.record().raw() != version.record().raw() => {
-                            duplicate_conflict = true;
-                            break;
+                        Some(existing) if *existing != version => {
+                            return Err(Error::ConflictingCommitUnit(tx_id));
                         }
                         Some(_) => {}
                         None => {
@@ -1043,12 +1041,6 @@ where
                         }
                     }
                 }
-                if duplicate_conflict {
-                    break;
-                }
-            }
-            if duplicate_conflict {
-                continue;
             }
             let version_count = unique_versions.len();
             if first.tx.kind == TxKind::Exclusive
