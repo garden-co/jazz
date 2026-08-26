@@ -35,6 +35,20 @@ impl Fixture {
     /// Seed `stop_count` dated itinerary stops across a predictable map grid.
     pub fn new(stop_count: usize) -> Self {
         assert!(stop_count >= 32, "fixture needs a useful itinerary window");
+        Self::with_fixture(stop_count, stop_date, stop_status)
+    }
+
+    /// Seed a sparse fixture with one confirmed stop on each side of the
+    /// inclusive three-week window and three confirmed stops inside it.
+    pub fn boundary_receipt() -> Self {
+        Self::with_fixture(5, boundary_stop_date, confirmed_status)
+    }
+
+    fn with_fixture(
+        stop_count: usize,
+        date_for_stop: fn(usize) -> u64,
+        status_for_stop: fn(usize) -> &'static str,
+    ) -> Self {
         let schema = schema();
         let stops_table = schema
             .tables()
@@ -90,8 +104,8 @@ impl Fixture {
                 BTreeMap::from([
                     ("bandId".into(), Value::Uuid(band.0)),
                     ("venueId".into(), Value::Uuid(venue.0)),
-                    ("date".into(), Value::U64(stop_date(stop))),
-                    ("status".into(), Value::String(stop_status(stop).into())),
+                    ("date".into(), Value::U64(date_for_stop(stop))),
+                    ("status".into(), Value::String(status_for_stop(stop).into())),
                     (
                         "publicDescription".into(),
                         Value::String(format!("Stop {stop:05}")),
@@ -287,4 +301,19 @@ fn stop_status(stop: usize) -> &'static str {
     } else {
         "confirmed"
     }
+}
+
+fn boundary_stop_date(stop: usize) -> u64 {
+    match stop {
+        0 => WINDOW_START - DAY_SECONDS,
+        1 => WINDOW_START,
+        2 => WINDOW_START + DAY_SECONDS,
+        3 => WINDOW_START + WINDOW_DAYS * DAY_SECONDS,
+        4 => WINDOW_START + (WINDOW_DAYS + 1) * DAY_SECONDS,
+        _ => unreachable!("boundary fixture has exactly five stops"),
+    }
+}
+
+fn confirmed_status(_stop: usize) -> &'static str {
+    "confirmed"
 }

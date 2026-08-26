@@ -41,3 +41,29 @@ fn member_and_public_calendar_queries_keep_their_actual_semantics() {
         );
     }
 }
+
+#[test]
+fn member_calendar_keeps_both_inclusive_date_bounds() {
+    let fixture = Fixture::boundary_receipt();
+    assert_eq!(
+        fixture.member_calendar_window_start_times(),
+        [
+            1_700_000_000,
+            1_700_000_000 + 86_400,
+            1_700_000_000 + 21 * 86_400,
+        ]
+    );
+}
+
+#[test]
+fn public_calendar_keeps_both_inclusive_date_bounds() {
+    let fixture = Fixture::boundary_receipt();
+    assert_eq!(
+        fixture.public_calendar_window_start_times(),
+        [
+            1_700_000_000,
+            1_700_000_000 + 86_400,
+            1_700_000_000 + 21 * 86_400,
+        ]
+    );
+}
