@@ -32,7 +32,6 @@ import {
 } from "../client-session.js";
 import {
   authorBytesForSession,
-  canonicalAuthorSubject,
   decodeCanonicalAuthorSubjectBytes,
   isUsableSubject,
   parseCanonicalAuthorSubject,
