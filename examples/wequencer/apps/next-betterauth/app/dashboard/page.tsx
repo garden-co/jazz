@@ -2,7 +2,6 @@
 
 import { authClient } from "@/lib/auth-client";
 import { SessionBrowser } from "@/components/session-browser";
-import { authorForSession } from "@/lib/identity";
 
 export default function DashboardPage() {
   const { data: session } = authClient.useSession();
@@ -29,11 +28,7 @@ export default function DashboardPage() {
           </button>
         </div>
       </header>
-      <SessionBrowser
-        author={authorForSession(issuer, session.user.id)}
-        issuer={issuer}
-        displayName={session.user.name}
-      />
+      <SessionBrowser issuer={issuer} />
     </main>
   );
 }

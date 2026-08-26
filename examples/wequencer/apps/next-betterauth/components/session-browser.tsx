@@ -1,22 +1,17 @@
 "use client";
 
 import { useState } from "react";
-import { useAll, useDb } from "jazz-tools/react";
+import { useAll, useDb, useSession } from "jazz-tools/react";
 import { app } from "@/schema";
 import { SequencerSession } from "@/components/sequencer-session";
 
 const TRACK_COLORS = ["#ff7a59", "#f5c451", "#5dd6c0", "#7998ff"];
 const INSTRUMENTS = ["Kick", "Snare", "Closed hat", "Bass"];
 
-export function SessionBrowser({
-  author,
-  issuer,
-}: {
-  author: string;
-  issuer: string;
-  displayName: string;
-}) {
+export function SessionBrowser({ issuer }: { issuer: string }) {
   const db = useDb();
+  const session = useSession();
+  const author = session?.author;
   const { data: sessions = [], isLoading } = useAll(app.sessions.orderBy("$createdAt", "desc"));
   const { data: profiles = [] } = useAll(app.profiles.where({ author }));
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -59,7 +54,7 @@ export function SessionBrowser({
 
   const selected = sessions.find((session) => session.id === selectedId) ?? sessions[0];
   const profileId = profiles[0]?.id;
-  if (selected && profileId)
+  if (author && selected && profileId)
     return (
       <SequencerSession
         sessionId={selected.id}
@@ -68,6 +63,8 @@ export function SessionBrowser({
         profileId={profileId}
       />
     );
+
+  if (!author) return <p className="loading-state">Opening your Jazz session…</p>;
 
   return (
     <section className="session-empty">

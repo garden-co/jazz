@@ -5,7 +5,7 @@ import { useAll, useDb } from "jazz-tools/react";
 import { app } from "@/schema";
 import { TrackLane } from "@/components/track-lane";
 import { schedulePresenceHeartbeat } from "@/components/presence-heartbeat";
-import { authorForSession } from "@/lib/identity";
+import { sessionAuthor } from "@/lib/identity";
 
 export function SequencerSession({
   sessionId,
@@ -80,7 +80,7 @@ export function SequencerSession({
     if (!invitedUserId) return;
     db.insert(app.session_members, {
       session_id: sessionId,
-      member_author: authorForSession(issuer, invitedUserId),
+      member_author: sessionAuthor(issuer, invitedUserId),
       role: memberRole,
     });
     setMemberUserId("");
