@@ -12,7 +12,8 @@ import {
   acquireClient as registryAcquireClient,
   releaseClient as registryReleaseClient,
 } from "../runtime/client-registry.js";
-import type { Session } from "../runtime/context.js";
+import type { PublicSession, Session } from "../runtime/context.js";
+import { withCanonicalAuthor } from "../runtime/author-id.js";
 import type { DbConfig } from "../runtime/db.js";
 import { trackPromise } from "../subscriptions-orchestrator.js";
 
@@ -279,8 +280,10 @@ export function useDb<TDb = unknown>(): TDb {
 }
 
 /**
- * Get the current Jazz {@link Session}, including the user's id, claims and auth mode.
+ * Get the current Jazz {@link PublicSession}, including the raw provider id,
+ * canonical logical author, claims, and auth mode.
  */
-export function useSession(): Session | null {
-  return useJazzClient().session ?? null;
+export function useSession(): PublicSession | null {
+  const session = useJazzClient().session;
+  return session ? withCanonicalAuthor(session) : null;
 }

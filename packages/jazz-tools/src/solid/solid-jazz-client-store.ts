@@ -1,12 +1,13 @@
 import { createEffect, onCleanup, type Accessor } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import type { AuthState } from "../runtime/auth-state.js";
-import type { Session } from "../runtime/context.js";
+import type { PublicSession } from "../runtime/context.js";
+import { withCanonicalAuthor } from "../runtime/author-id.js";
 import type { JazzClient } from "../web/create-jazz-client.js";
 
 interface StoreState {
   authState: AuthState | null;
-  session: Session | null;
+  session: PublicSession | null;
 }
 
 const NULL_STATE: StoreState = {
@@ -22,7 +23,7 @@ function getStoreState(client: JazzClient | undefined): StoreState {
   const authState = client.db.getAuthState();
   return {
     authState,
-    session: authState.session,
+    session: authState.session ? withCanonicalAuthor(authState.session) : null,
   };
 }
 
@@ -42,7 +43,7 @@ export function createSolidJazzClientStore(client: Accessor<JazzClient | undefin
       setStore(
         reconcile({
           authState: nextAuthState,
-          session: nextAuthState.session,
+          session: nextAuthState.session ? withCanonicalAuthor(nextAuthState.session) : null,
         }),
       );
     });
