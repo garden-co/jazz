@@ -2867,7 +2867,7 @@ where
             ParamBindingMode::RetainAllParams,
         )?;
         let binding = shape.bind(binding.values().clone())?;
-        let mut program = self
+        let program = self
             .compile_current_query_program_with_settled_view_and_prepared_claim_mode(
                 &shape,
                 &binding,
@@ -2880,14 +2880,6 @@ where
                 prepared_claim_binding_mode,
             )
             .await?;
-        let retains_structured_terminal =
-            !shape.query().array_subqueries.is_empty() || !shape.query().order_by.is_empty();
-        if !retains_structured_terminal {
-            program
-                .lowered
-                .terminals
-                .retain(|terminal| terminal.sink != JAZZ_APP_ROWS_SINK);
-        }
         let tables = program.lowered.maintained_terminal_tables.clone();
         let terminal_schemas = MaintainedSubscriptionView::terminal_schemas_for_program(&program);
         let binding_source_shape = program
