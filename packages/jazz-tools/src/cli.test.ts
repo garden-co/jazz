@@ -124,6 +124,18 @@ async function waitForCrashMarker(marker: string, child: ReturnType<typeof spawn
   }
 }
 
+async function waitForMarkers(markers: readonly string[]): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (!(await Promise.all(markers.map(fileExists))).every(Boolean)) {
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `migration children did not all reach lock contention: ${markers.join(", ")}`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 async function killChild(child: ReturnType<typeof spawn>): Promise<void> {
   if (child.exitCode !== null) return;
   const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
@@ -991,20 +1003,33 @@ describe("cli migrations", () => {
       `${JSON.stringify({ version: 1, pid: process.pid, hostname: hostname(), token: "00000000-0000-4000-8000-000000000001" })}\n`,
     );
 
+    const contentionMarkers = Array.from({ length: 4 }, (_, index) =>
+      join(root, `migration-contention-${index}.marker`),
+    );
     const resultsPromise = Promise.all(
       Array.from(
-        { length: 4 },
-        () =>
+        { length: contentionMarkers.length },
+        (_, index) =>
           new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
-            const child = spawn(process.execPath, [
-              distCliPath,
-              "migrations",
-              "create",
-              "--schema-dir",
-              root,
-              "--migrations-dir",
-              migrationsDir,
-            ]);
+            const child = spawn(
+              process.execPath,
+              [
+                distCliPath,
+                "migrations",
+                "create",
+                "--schema-dir",
+                root,
+                "--migrations-dir",
+                migrationsDir,
+              ],
+              {
+                env: {
+                  ...process.env,
+                  NODE_ENV: "test",
+                  JAZZ_TEST_MIGRATION_LOCK_CONTENTION_MARKER: contentionMarkers[index],
+                },
+              },
+            );
             let stdout = "";
             let stderr = "";
             child.stdout.setEncoding("utf8").on("data", (chunk) => (stdout += chunk));
@@ -1015,8 +1040,8 @@ describe("cli migrations", () => {
     );
 
     // The lock is a filesystem boundary, not an in-process mutex: independently
-    // launched CLI processes must all wait for an external owner.
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    // launched CLI processes must all observe the external owner before it is released.
+    await waitForMarkers(contentionMarkers);
     await expect(access(join(migrationsDir, "snapshots"))).rejects.toThrow();
     await rm(externalLock, { recursive: true });
     const results = await resultsPromise;

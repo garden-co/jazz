@@ -973,6 +973,12 @@ async function pauseMigrationPublicationForTest(phase: string): Promise<void> {
   });
 }
 
+async function signalMigrationLockContentionForTest(): Promise<void> {
+  if (process.env.NODE_ENV !== "test") return;
+  const marker = process.env.JAZZ_TEST_MIGRATION_LOCK_CONTENTION_MARKER;
+  if (marker) await writeFile(marker, "contended");
+}
+
 /**
  * Publish one logical migration generation. Multiple renames cannot be atomic,
  * so a crash may briefly expose a prefix of the files. The fsynced journal is
@@ -1258,6 +1264,7 @@ async function withMigrationDirectoryLock<T>(
         continue;
       }
       unknownOwnerSince = null;
+      await signalMigrationLockContentionForTest();
       if (
         existing?.version === 1 &&
         existing.hostname === hostname() &&
