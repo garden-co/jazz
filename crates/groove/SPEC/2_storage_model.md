@@ -118,6 +118,11 @@ commit. Backends must classify an uncertain acknowledgement conservatively as
 possibly committed; only a definitely-uncommitted outcome permits callers to
 roll back in-process state or retry the same batch.
 
+`put_if_absent` and `compare_and_delete` are atomic across independent handles
+to the same durable store (`INV-STORAGE-28`). Their comparison is over exact
+stored bytes, so deleting and reinstalling the same logical object with a new
+installation receipt cannot be mistaken for the earlier installation (ABA).
+
 _Further invariants._ `INV-STORAGE-2` — a prefix scan request returns exactly the keys
 with the given byte prefix, in its requested direction, including prefixes with no finite upper
 bound. `INV-STORAGE-29` — an explicit scan limit applies across all cursor

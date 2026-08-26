@@ -91,6 +91,13 @@ where
         Ok(())
     }
 
+    async fn discard_failed_tree(&self, error: Error) -> Error {
+        match self.reopen_after_generation_conflict().await {
+            Ok(()) => error,
+            Err(reset_error) => reset_error,
+        }
+    }
+
     fn is_generation_conflict(error: &Error) -> bool {
         matches!(
             error,
@@ -167,7 +174,7 @@ where
                     self.reopen_after_generation_conflict().await?;
                     Self::back_off_after_generation_conflict(retries).await;
                 }
-                Err(error) => return Err(error),
+                Err(error) => return Err(self.discard_failed_tree(error).await),
             }
         }
     }
@@ -215,7 +222,7 @@ where
                         }
                         Self::back_off_after_generation_conflict(retry).await;
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => return Err(self.discard_failed_tree(error).await),
                 }
             }
             unreachable!("bounded retry loop returns")
@@ -252,7 +259,7 @@ where
                         }
                         Self::back_off_after_generation_conflict(retry).await;
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => return Err(self.discard_failed_tree(error).await),
                 }
             }
             unreachable!("bounded retry loop returns")
@@ -287,16 +294,20 @@ where
     fn close(&self) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
             let _guard = self.mutation_gate.lock().await;
-            self.tree().flush().await?;
-            Ok(())
+            match self.tree().flush().await {
+                Ok(()) => Ok(()),
+                Err(error) => Err(self.discard_failed_tree(error.into()).await),
+            }
         })
     }
 
     fn flush_write_boundary(&self) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
             let _guard = self.mutation_gate.lock().await;
-            self.tree().flush().await?;
-            Ok(())
+            match self.tree().flush().await {
+                Ok(()) => Ok(()),
+                Err(error) => Err(self.discard_failed_tree(error.into()).await),
+            }
         })
     }
 
@@ -416,6 +427,33 @@ mod tests {
         conflicts_remaining: Rc<Cell<usize>>,
     }
 
+    #[derive(Clone, Default)]
+    struct CommitErrorPageStore {
+        inner: MemoryPageStore,
+        fail_next_commit: Rc<Cell<bool>>,
+        fail_next_reopen: Rc<Cell<bool>>,
+    }
+
+    impl PageStore for CommitErrorPageStore {
+        fn load_metadata(&self) -> BoxFuture<'_, Result<Option<Metadata>, String>> {
+            if self.fail_next_reopen.replace(false) {
+                return Box::pin(async { Err("deterministic reset failure".to_owned()) });
+            }
+            self.inner.load_metadata()
+        }
+
+        fn read_page(&self, page_id: u64) -> BoxFuture<'_, Result<Option<Vec<u8>>, String>> {
+            self.inner.read_page(page_id)
+        }
+
+        fn commit<'a>(&'a self, commit: &'a Commit) -> BoxFuture<'a, Result<Metadata, String>> {
+            if self.fail_next_commit.replace(false) {
+                return Box::pin(async { Err("deterministic commit failure".to_owned()) });
+            }
+            self.inner.commit(commit)
+        }
+    }
+
     impl ConflictInjectingPageStore {
         fn with_conflicts(conflicts: usize) -> Self {
             Self {
@@ -470,6 +508,70 @@ mod tests {
                     .unwrap(),
                 Some(b"replayed-value".to_vec())
             );
+        });
+    }
+
+    #[test]
+    fn generic_commit_error_discards_dirty_pages_before_later_writes() {
+        futures::executor::block_on(async {
+            let pages = CommitErrorPageStore::default();
+            let storage = IdbStorage::open(pages.clone(), &["records"]).await.unwrap();
+            storage
+                .set("records".into(), b"key".to_vec(), b"old".to_vec())
+                .await
+                .unwrap();
+            pages.fail_next_commit.set(true);
+            let error = storage
+                .set("records".into(), b"key".to_vec(), b"failed".to_vec())
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("deterministic commit failure"));
+            assert_eq!(
+                storage
+                    .get("records".into(), b"key".to_vec())
+                    .await
+                    .unwrap(),
+                Some(b"old".to_vec())
+            );
+            let fresh = IdbStorage::open(pages.clone(), &["records"]).await.unwrap();
+            assert_eq!(
+                fresh.get("records".into(), b"key".to_vec()).await.unwrap(),
+                Some(b"old".to_vec())
+            );
+            storage
+                .set("records".into(), b"later".to_vec(), b"ok".to_vec())
+                .await
+                .unwrap();
+            let reopened = IdbStorage::open(pages, &["records"]).await.unwrap();
+            assert_eq!(
+                reopened
+                    .get("records".into(), b"key".to_vec())
+                    .await
+                    .unwrap(),
+                Some(b"old".to_vec())
+            );
+            assert_eq!(
+                reopened
+                    .get("records".into(), b"later".to_vec())
+                    .await
+                    .unwrap(),
+                Some(b"ok".to_vec())
+            );
+        });
+    }
+
+    #[test]
+    fn cache_reset_failure_wins_over_the_original_commit_error() {
+        futures::executor::block_on(async {
+            let pages = CommitErrorPageStore::default();
+            let storage = IdbStorage::open(pages.clone(), &["records"]).await.unwrap();
+            pages.fail_next_commit.set(true);
+            pages.fail_next_reopen.set(true);
+            let error = storage
+                .set("records".into(), b"key".to_vec(), b"failed".to_vec())
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("deterministic reset failure"));
         });
     }
 

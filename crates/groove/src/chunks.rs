@@ -458,24 +458,24 @@ impl OrderedChunkStorage {
         value
     }
 
-    fn split_install_receipt(value: &[u8]) -> (Option<[u8; 16]>, &[u8]) {
+    fn split_install_receipt(value: &[u8]) -> Result<([u8; 16], &[u8]), ChunkStorageError> {
         let Some((magic, remainder)) = value.split_at_checked(Self::INSTALL_RECEIPT_MAGIC.len())
         else {
-            return (None, value);
+            return Err(ChunkStorageError::Integrity);
         };
         if magic != Self::INSTALL_RECEIPT_MAGIC {
-            return (None, value);
+            return Err(ChunkStorageError::Integrity);
         }
         let Some((receipt, encoded)) = remainder.split_at_checked(16) else {
-            return (None, value);
+            return Err(ChunkStorageError::Integrity);
         };
         let mut receipt_bytes = [0; 16];
         receipt_bytes.copy_from_slice(receipt);
-        (Some(receipt_bytes), encoded)
+        Ok((receipt_bytes, encoded))
     }
 
     fn decode(value: Vec<u8>) -> Result<(ContentHash, Bytes), ChunkStorageError> {
-        let (_, value) = Self::split_install_receipt(&value);
+        let (_, value) = Self::split_install_receipt(&value)?;
         let (hash, bytes) = value
             .split_at_checked(32)
             .ok_or(ChunkStorageError::Integrity)?;
@@ -2053,9 +2053,7 @@ mod tests {
     }
 
     #[test]
-    fn ordered_chunk_storage_classifies_legacy_equal_mapping_as_existing() {
-        // This is intentionally an internal compatibility receipt: the
-        // legacy on-disk chunk representation predates the install receipt.
+    fn ordered_chunk_storage_rejects_unreceipted_mappings() {
         let storage = crate::storage::MemoryStorage::new(&[crate::db::LARGE_VALUE_METADATA_CF]);
         let layout = Rc::new(
             block_on(LayoutStorage::new(
@@ -2065,9 +2063,9 @@ mod tests {
             .unwrap(),
         );
         let backend = OrderedChunkStorage::new(Rc::downgrade(&layout));
-        let bytes = Bytes::from_static(b"legacy immutable chunk bytes");
+        let bytes = Bytes::from_static(b"unreceipted immutable chunk bytes");
         let hash = object_hash(&bytes);
-        let locator = Locator::from_seed(b"legacy-ordered-chunk-locator");
+        let locator = Locator::from_seed(b"unreceipted-ordered-chunk-locator");
         block_on(layout.set(
             crate::db::LARGE_VALUE_METADATA_CF.to_owned(),
             OrderedChunkStorage::key(locator.as_bytes()),
@@ -2076,8 +2074,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            block_on(backend.put_if_absent(locator, hash, bytes.clone())).unwrap(),
-            Some((hash, bytes))
+            block_on(backend.get_exact(locator)),
+            Err(ChunkStorageError::Integrity)
         );
     }
 
@@ -2159,8 +2157,6 @@ mod tests {
             let locator = Locator::from_seed(b"conditional-chunk-delete-race");
             let old_bytes = Bytes::from_static(b"old authenticated chunk");
             let old_hash = object_hash(&old_bytes);
-            let new_bytes = Bytes::from_static(b"new authenticated chunk");
-            let new_hash = object_hash(&new_bytes);
 
             assert_eq!(
                 backend
@@ -2193,7 +2189,7 @@ mod tests {
             control.resume_operation(crate::storage::TestStorageOperation::WriteMany);
             assert_eq!(
                 backend
-                    .put_if_absent(locator, new_hash, new_bytes.clone())
+                    .put_if_absent(locator, old_hash, old_bytes.clone())
                     .await
                     .unwrap(),
                 None
@@ -2202,7 +2198,7 @@ mod tests {
 
             assert_eq!(
                 backend.get_exact(locator).await.unwrap(),
-                Some((new_hash, new_bytes))
+                Some((old_hash, old_bytes))
             );
         });
     }

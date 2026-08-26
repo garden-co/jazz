@@ -730,3 +730,29 @@ fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::executor::block_on;
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn independent_handles_racing_put_if_absent_choose_one_winner() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("race.sqlite");
+        drop(SqliteStorage::open(&path, &["records"]).unwrap());
+        let barrier = Arc::new(Barrier::new(2));
+        let handles = [b"first".to_vec(), b"second".to_vec()].map(|value| {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let storage = SqliteStorage::open(path, &["records"]).unwrap();
+                barrier.wait();
+                block_on(storage.put_if_absent("records".into(), b"key".to_vec(), value)).unwrap()
+            })
+        });
+        let outcomes = handles.map(|handle| handle.join().unwrap());
+        assert_ne!(outcomes[0].is_none(), outcomes[1].is_none());
+    }
+}

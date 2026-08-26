@@ -54,6 +54,9 @@ const CLASS_AHEAD_CURRENT_CF: &str = "__groove_class_ahead_current";
 const CLASS_CHANGES_CF: &str = "__groove_class_changes";
 const CLASS_INDICES_CF: &str = "__groove_class_indices";
 const CLASS_META_CF: &str = "__groove_class_meta";
+const ROCKSDB_INTERNAL_CF: &str = "__groove_storage_internal_v3";
+const ROCKSDB_VALUE_FORMAT_KEY: &[u8] = b"value-format";
+const ROCKSDB_VALUE_FORMAT_V3: &[u8] = b"raw-v3";
 
 /// RocksDB durability tier used for writes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -224,6 +227,11 @@ impl RocksDbStorage {
         durability: Durability,
     ) -> Result<Self, Error> {
         let path = path.as_ref().to_path_buf();
+        if column_families.contains(&ROCKSDB_INTERNAL_CF) {
+            return Err(Error::InvalidStorageLayout(
+                "RocksDB internal column family name is reserved".to_owned(),
+            ));
+        }
         // Share one 256MB block cache and one 256MB write-buffer budget across
         // all column families opened by this storage instance.
         let block_cache = Cache::new_lru_cache(ROCKSDB_BLOCK_CACHE_BYTES);
@@ -239,12 +247,19 @@ impl RocksDbStorage {
         write_options.set_sync(matches!(durability, Durability::FullSync));
 
         let listed_column_families = DB::list_cf(&Options::default(), &path).ok();
+        let initialize_format = match &listed_column_families {
+            Some(existing) => {
+                validate_raw_v3_store(&path, existing, &block_cache, &write_buffer_manager)?
+            }
+            None => true,
+        };
 
         let mut opened_column_families = requested_column_families;
         opened_column_families.insert("default".to_owned());
         if let Some(existing) = listed_column_families {
             opened_column_families.extend(existing);
         }
+        opened_column_families.insert(ROCKSDB_INTERNAL_CF.to_owned());
 
         let mut final_options = rocksdb_options(&block_cache, &write_buffer_manager);
         final_options.create_if_missing(true);
@@ -266,10 +281,25 @@ impl RocksDbStorage {
                 )
             });
         let db = DB::open_cf_descriptors(&final_options, &path, descriptors).storage()?;
+        let internal_cf = db
+            .cf_handle(ROCKSDB_INTERNAL_CF)
+            .expect("internal RocksDB column family was opened");
+        if initialize_format {
+            db.put_cf_opt(
+                internal_cf,
+                ROCKSDB_VALUE_FORMAT_KEY,
+                ROCKSDB_VALUE_FORMAT_V3,
+                &write_options,
+            )
+            .storage()?;
+        }
         Ok(Self {
             path,
             durability,
-            column_families: opened_column_families,
+            column_families: opened_column_families
+                .into_iter()
+                .filter(|name| name != ROCKSDB_INTERNAL_CF)
+                .collect(),
             db,
             write_options,
             mutation_gate: Mutex::new(()),
@@ -362,6 +392,63 @@ fn rocksdb_options_for_cf(
     write_buffer_manager: &WriteBufferManager,
 ) -> Options {
     rocksdb_options_for_profile(rocksdb_class_profile(cf), block_cache, write_buffer_manager)
+}
+
+fn validate_raw_v3_store(
+    path: &Path,
+    column_families: &[String],
+    block_cache: &Cache,
+    write_buffer_manager: &WriteBufferManager,
+) -> Result<bool, Error> {
+    let mut options = rocksdb_options(block_cache, write_buffer_manager);
+    options.create_if_missing(false);
+    options.create_missing_column_families(false);
+    let descriptors = column_families
+        .iter()
+        .map(String::as_str)
+        .filter(|name| *name != "default")
+        .map(|name| {
+            ColumnFamilyDescriptor::new(
+                name,
+                rocksdb_options_for_cf(name, block_cache, write_buffer_manager),
+            )
+        });
+    let db = DB::open_cf_descriptors(&options, path, descriptors).storage()?;
+    if let Some(internal) = db.cf_handle(ROCKSDB_INTERNAL_CF) {
+        return match db
+            .get_cf(internal, ROCKSDB_VALUE_FORMAT_KEY)
+            .storage()?
+            .as_deref()
+        {
+            Some(ROCKSDB_VALUE_FORMAT_V3) => Ok(false),
+            Some(_) => Err(Error::InvalidStorageLayout(
+                "incompatible RocksDB storage format marker".to_owned(),
+            )),
+            None => Err(Error::InvalidStorageLayout(
+                "RocksDB raw-v3 format marker is missing".to_owned(),
+            )),
+        };
+    }
+    let empty = column_families.iter().all(|cf| {
+        let first = if cf == "default" {
+            db.iterator(IteratorMode::Start).next()
+        } else {
+            db.iterator_cf(
+                db.cf_handle(cf)
+                    .expect("listed RocksDB column family was opened"),
+                IteratorMode::Start,
+            )
+            .next()
+        };
+        first.is_none()
+    });
+    if empty {
+        Ok(true)
+    } else {
+        Err(Error::InvalidStorageLayout(
+            "unmarked non-empty RocksDB store cannot be opened as raw-v3".to_owned(),
+        ))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -780,9 +867,11 @@ mod tests {
 
     use crate::{
         CLASS_AHEAD_CURRENT_CF, CLASS_CHANGES_CF, CLASS_GLOBAL_CURRENT_CF, CLASS_HISTORY_CF,
-        CLASS_INDICES_CF, CLASS_META_CF, CLASS_REGISTER_CF, RocksDbClassProfile, RocksDbStorage,
-        any_available, rocksdb_class_profile, sum_available,
+        CLASS_INDICES_CF, CLASS_META_CF, CLASS_REGISTER_CF, ROCKSDB_INTERNAL_CF,
+        ROCKSDB_VALUE_FORMAT_KEY, RocksDbClassProfile, RocksDbStorage, any_available,
+        rocksdb_class_profile, sum_available,
     };
+    use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 
     fn ready<F: Future>(future: F) -> F::Output {
         let mut future = pin!(future);
@@ -831,6 +920,89 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
         assert!(storage.write_flush_cadence.borrow().is_none());
+    }
+
+    #[test]
+    fn raw_v3_round_trips_arbitrary_bytes_and_hides_its_marker() {
+        use groove::storage::OrderedKvStorage;
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        for (key, value) in [
+            (b"empty".to_vec(), Vec::new()),
+            (b"former-sentinel".to_vec(), vec![0xff, 0, 0xff, 17]),
+        ] {
+            ready(storage.set("records".into(), key, value)).unwrap();
+        }
+        assert!(
+            !storage
+                .column_family_names()
+                .unwrap()
+                .iter()
+                .any(|cf| cf == ROCKSDB_INTERNAL_CF)
+        );
+        drop(storage);
+        let reopened = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        assert_eq!(
+            ready(reopened.get("records".into(), b"empty".to_vec())).unwrap(),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            ready(reopened.get("records".into(), b"former-sentinel".to_vec())).unwrap(),
+            Some(vec![0xff, 0, 0xff, 17])
+        );
+    }
+
+    #[test]
+    fn unmarked_nonempty_store_is_rejected_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut options = Options::default();
+        options.create_if_missing(true);
+        options.create_missing_column_families(true);
+        let db = DB::open_cf_descriptors(
+            &options,
+            dir.path(),
+            [ColumnFamilyDescriptor::new("records", Options::default())],
+        )
+        .unwrap();
+        db.put_cf(db.cf_handle("records").unwrap(), b"key", b"value")
+            .unwrap();
+        drop(db);
+        for _ in 0..2 {
+            assert!(RocksDbStorage::open(dir.path(), &["records"]).is_err());
+        }
+        let db = DB::open_cf(&options, dir.path(), ["records"]).unwrap();
+        assert_eq!(
+            db.get_cf(db.cf_handle("records").unwrap(), b"key").unwrap(),
+            Some(b"value".to_vec())
+        );
+        assert!(db.cf_handle(ROCKSDB_INTERNAL_CF).is_none());
+    }
+
+    #[test]
+    fn unknown_raw_format_marker_is_rejected_repeatedly() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut options = Options::default();
+        options.create_if_missing(true);
+        options.create_missing_column_families(true);
+        let db = DB::open_cf_descriptors(
+            &options,
+            dir.path(),
+            [
+                ColumnFamilyDescriptor::new("records", Options::default()),
+                ColumnFamilyDescriptor::new(ROCKSDB_INTERNAL_CF, Options::default()),
+            ],
+        )
+        .unwrap();
+        db.put_cf(
+            db.cf_handle(ROCKSDB_INTERNAL_CF).unwrap(),
+            ROCKSDB_VALUE_FORMAT_KEY,
+            b"raw-v2",
+        )
+        .unwrap();
+        drop(db);
+        for _ in 0..2 {
+            assert!(RocksDbStorage::open(dir.path(), &["records"]).is_err());
+        }
     }
 
     #[test]
