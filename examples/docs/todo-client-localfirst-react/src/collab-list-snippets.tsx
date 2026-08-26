@@ -30,7 +30,7 @@ s.definePermissions(app, ({ policy, anyOf, allowedTo, session }) => {
       { $createdBy: session.user },
       policy.projectMembers.exists.where({
         projectId: project.id,
-        user_id: session.user_id,
+        user_id: session.user,
       }),
     ]),
   );
@@ -55,7 +55,7 @@ s.definePermissions(app, ({ policy, anyOf, allowedTo, session }) => {
         id: member.projectId,
         $createdBy: session.user,
       }),
-      { user_id: session.user_id },
+      { user_id: session.user },
     ]),
   );
 });

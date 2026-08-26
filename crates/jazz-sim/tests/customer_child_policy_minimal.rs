@@ -81,7 +81,7 @@ fn schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         GROUP,
         "id",
-        &["user_id"],
+        &["user"],
         "id",
     );
     let child_policy = seeded_recursive_access_policy(
@@ -96,7 +96,7 @@ fn schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         GROUP,
         "id",
-        &["user_id"],
+        &["user"],
         "id",
     );
     compile_public_schema(

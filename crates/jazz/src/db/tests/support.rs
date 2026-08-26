@@ -185,15 +185,16 @@ pub(super) fn open_db(node: u8, author: AuthorSubject, schema: &JazzSchema) -> D
 /// Construct the explicit provider-side identity fixture used by DB tests.
 ///
 /// Test `AuthorSubject`s identify Jazz provenance; application UUID columns
-/// intentionally compare against the separately admitted provider `user_id`.
+/// intentionally compare against the separately admitted provider `sub`.
 /// This helper keeps that distinction visible without inventing a provider
 /// `sub` from the logical author.
 pub(super) fn test_provider_claims(author: AuthorSubject) -> BTreeMap<String, Value> {
     match author {
         AuthorSubject::System => BTreeMap::new(),
-        AuthorSubject::Authenticated(_) => {
-            BTreeMap::from([("user_id".to_owned(), Value::Uuid(author.test_uuid()))])
-        }
+        AuthorSubject::Authenticated(_) => BTreeMap::from([(
+            crate::query::provider_claim_key("sub"),
+            Value::Uuid(author.test_uuid()),
+        )]),
     }
 }
 
@@ -790,10 +791,7 @@ pub(super) fn build_public_db_test_schema(builder: PublicSchemaBuilder) -> JazzS
 }
 
 pub(super) fn public_session_eq(column: &str, path: &[&str]) -> PublicPolicyExpr {
-    let path = match path {
-        ["user_id"] | ["userId"] => vec!["claims".to_owned(), "user_id".to_owned()],
-        _ => path.iter().map(|segment| (*segment).to_owned()).collect(),
-    };
+    let path = path.iter().map(|segment| (*segment).to_owned()).collect();
     PublicPolicyExpr::eq_session(column, path)
 }
 
@@ -864,15 +862,12 @@ pub(super) fn public_recursive_access_policy(
             predicate: public_rel_eq(
                 seed_alias,
                 seed_user_column,
-                PublicRelValueRef::SessionRef(match seed_claim_path {
-                    ["user_id"] | ["userId"] => {
-                        vec!["claims".to_owned(), "user_id".to_owned()]
-                    }
-                    _ => seed_claim_path
+                PublicRelValueRef::SessionRef(
+                    seed_claim_path
                         .iter()
                         .map(|segment| (*segment).to_owned())
                         .collect(),
-                }),
+                ),
             ),
         }),
         columns: vec![PublicRelProjectColumn {
@@ -1053,7 +1048,7 @@ pub(super) fn owner_read_schema() -> JazzSchema {
                 .column("owner", PublicColumnType::Uuid)
                 .policies(
                     PublicTablePolicies::new()
-                        .with_select(public_session_eq("owner", &["user_id"])),
+                        .with_select(public_session_eq("owner", &["claims", "sub"])),
                 ),
         ),
     )
@@ -1091,7 +1086,7 @@ pub(super) fn owner_write_schema() -> JazzSchema {
                 .column("owner", PublicColumnType::Uuid)
                 .policies(public_legacy_write_policy(public_session_eq(
                     "owner",
-                    &["user_id"],
+                    &["claims", "sub"],
                 ))),
         ),
     )
@@ -1122,8 +1117,8 @@ pub(super) fn owner_id_read_schema() -> JazzSchema {
                 .column("owner_id", PublicColumnType::Text)
                 .policies(
                     PublicTablePolicies::new()
-                        .with_select(public_session_eq("owner_id", &["user_id"]))
-                        .with_insert(public_session_eq("owner_id", &["user_id"])),
+                        .with_select(public_session_eq("owner_id", &["claims", "sub"]))
+                        .with_insert(public_session_eq("owner_id", &["claims", "sub"])),
                 ),
         ),
     )
@@ -1147,7 +1142,7 @@ pub(super) fn owner_id_session_write_schema() -> JazzSchema {
                 .column("owner_id", PublicColumnType::Text)
                 .policies(public_legacy_write_policy(public_session_eq(
                     "owner_id",
-                    &["user_id"],
+                    &["claims", "sub"],
                 ))),
         ),
     )
@@ -1161,7 +1156,7 @@ pub(super) fn owner_uuid_session_write_schema() -> JazzSchema {
                 .column("owner_id", PublicColumnType::Uuid)
                 .policies(public_legacy_write_policy(public_session_eq(
                     "owner_id",
-                    &["user_id"],
+                    &["claims", "sub"],
                 ))),
         ),
     )
@@ -1181,7 +1176,7 @@ pub(super) fn benchmark_shaped_recursive_reachable_read_schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         "group_access_edges",
         "user_id",
-        &["user_id"],
+        &["claims", "sub"],
         "group_id",
     );
     build_public_db_test_schema(
@@ -1266,7 +1261,7 @@ pub(super) fn customer_resource_policy_minimal_schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         "group_access_edges",
         "user_id",
-        &["user_id"],
+        &["claims", "sub"],
         "group_id",
     );
     build_public_db_test_schema(
@@ -1306,7 +1301,7 @@ pub(super) fn customer_two_resource_policy_minimal_schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         "group_access_edges",
         "user_id",
-        &["user_id"],
+        &["claims", "sub"],
         "group_id",
     );
     let res_j_policy = public_recursive_access_policy(
@@ -1322,7 +1317,7 @@ pub(super) fn customer_two_resource_policy_minimal_schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         "group_access_edges",
         "user_id",
-        &["user_id"],
+        &["claims", "sub"],
         "group_id",
     );
     build_public_db_test_schema(
@@ -1363,7 +1358,7 @@ pub(super) fn same_table_seeded_resource_policy_schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         "teams",
         "identity_key",
-        &["user_id"],
+        &["claims", "sub"],
         "id",
     );
     same_table_seeded_public_schema(PublicColumnType::Uuid, resource_policy)
@@ -1383,7 +1378,7 @@ pub(super) fn same_table_string_seeded_resource_policy_schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         "teams",
         "identity_key",
-        &["user_id"],
+        &["claims", "sub"],
         "id",
     );
     same_table_seeded_public_schema(PublicColumnType::Text, resource_policy)
@@ -1434,7 +1429,7 @@ pub(super) fn customer_inherited_child_policy_schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         "group_access_edges",
         "user_id",
-        &["user_id"],
+        &["claims", "sub"],
         "group_id",
     );
     let child_read = PublicPolicyExpr::and(vec![
@@ -1498,7 +1493,7 @@ pub(super) fn inherited_insert_policy_schema() -> JazzSchema {
                         PublicTablePolicies::new()
                             .with_select(PublicPolicyExpr::True)
                             .with_update(
-                                Some(public_session_eq("owner", &["user_id"])),
+                                Some(public_session_eq("owner", &["claims", "sub"])),
                                 public_literal_eq("locked", PublicValue::Boolean(false)),
                             ),
                     ),
@@ -1543,17 +1538,17 @@ pub(super) fn membership_scoped_relation_schema() -> JazzSchema {
             "chat_members",
             [
                 public_outer_eq("chat_id", "id"),
-                public_session_eq("user_id", &["user_id"]),
+                public_session_eq("user_id", &["claims", "sub"]),
             ],
         ),
     ]);
     let members_read = PublicPolicyExpr::or(vec![
-        public_session_eq("user_id", &["user_id"]),
+        public_session_eq("user_id", &["claims", "sub"]),
         public_exists(
             "chat_members",
             [
                 public_outer_eq("chat_id", "chat_id"),
-                public_session_eq("user_id", &["user_id"]),
+                public_session_eq("user_id", &["claims", "sub"]),
             ],
         ),
     ]);
@@ -1569,7 +1564,7 @@ pub(super) fn membership_scoped_relation_schema() -> JazzSchema {
             "chat_members",
             [
                 public_outer_eq("chat_id", "chat_id"),
-                public_session_eq("user_id", &["user_id"]),
+                public_session_eq("user_id", &["claims", "sub"]),
             ],
         ),
     ]);
@@ -1591,7 +1586,7 @@ pub(super) fn membership_scoped_relation_schema() -> JazzSchema {
                     .policies(
                         PublicTablePolicies::new()
                             .with_select(members_read)
-                            .with_insert(public_session_eq("user_id", &["user_id"])),
+                            .with_insert(public_session_eq("user_id", &["claims", "sub"])),
                     ),
             )
             .table(
@@ -1652,7 +1647,7 @@ pub(super) fn policy_relation_schema() -> JazzSchema {
                     .column("owner", PublicColumnType::Uuid)
                     .policies(
                         PublicTablePolicies::new()
-                            .with_select(public_session_eq("owner", &["user_id"])),
+                            .with_select(public_session_eq("owner", &["claims", "sub"])),
                     ),
             ),
     )
@@ -1668,7 +1663,7 @@ pub(super) fn evolved_owner_write_schema() -> JazzSchema {
                 .column("body", PublicColumnType::Text)
                 .policies(public_legacy_write_policy(public_session_eq(
                     "owner",
-                    &["user_id"],
+                    &["claims", "sub"],
                 ))),
         ),
     )

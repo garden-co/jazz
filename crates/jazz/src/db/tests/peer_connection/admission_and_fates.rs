@@ -368,7 +368,10 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
     assert_eq!(block_on(first), PermissionAdvice::Allowed);
 
     let refreshed_claims = BTreeMap::from([
-        ("user_id".to_owned(), Value::Uuid(alice.test_uuid())),
+        (
+            crate::query::provider_claim_key("sub"),
+            Value::Uuid(alice.test_uuid()),
+        ),
         ("fresh".to_owned(), Value::Bool(true)),
     ]);
     // The client needs its own authenticated snapshot to evaluate the
@@ -392,7 +395,10 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
     assert_eq!(block_on(refreshed), PermissionAdvice::Allowed);
 
     let advanced_claims = BTreeMap::from([
-        ("user_id".to_owned(), Value::Uuid(alice.test_uuid())),
+        (
+            crate::query::provider_claim_key("sub"),
+            Value::Uuid(alice.test_uuid()),
+        ),
         ("fresh".to_owned(), Value::Bool(false)),
     ]);
     client.set_identity_claims(alice, advanced_claims.clone());

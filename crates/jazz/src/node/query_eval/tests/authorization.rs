@@ -81,19 +81,22 @@ fn nested_read_policy_claim_slots_do_not_cross_validated_types() {
             [ColumnSchema::new("owner", ColumnType::String.nullable())],
         ),
     ]);
-    let plain_name = claim_param_field(&ClaimPath(vec!["user_id".to_owned()]));
+    let provider_sub = crate::query::provider_claim_key("sub");
+    let provider_path = ClaimPath(vec!["claims".to_owned(), "sub".to_owned()]);
+    let plain_name = claim_param_field(&provider_path);
     let outer_slots = BTreeMap::from([(
         plain_name.clone(),
         ProgramClaimParam {
-            path: ClaimPath(vec!["user_id".to_owned()]),
+            path: provider_path,
             ty: ColumnType::String,
         },
     )]);
-    let mut query = Query::from("uuid_owners").filter(eq(col("owner"), claim("user_id")));
+    let mut query =
+        Query::from("uuid_owners").filter(eq(col("owner"), claim(provider_sub.clone())));
     let mut binding_values = BTreeMap::new();
     bind_scope_claim_operands(
         &mut query,
-        &BTreeMap::from([("user_id".to_owned(), Value::String("not-a-uuid".to_owned()))]),
+        &BTreeMap::from([(provider_sub, Value::String("not-a-uuid".to_owned()))]),
         &mut binding_values,
     );
     let slots = disambiguate_policy_claim_params_with_outer_slots(
@@ -146,13 +149,15 @@ fn nested_read_policy_claim_slots_do_not_cross_validated_types() {
         "an outer user_id slot must not be reused by account_id merely because both are String"
     );
 
-    let mut nullable_query =
-        Query::from("nullable_string_owners").filter(eq(col("owner"), claim("user_id")));
+    let mut nullable_query = Query::from("nullable_string_owners").filter(eq(
+        col("owner"),
+        claim(crate::query::provider_claim_key("sub")),
+    ));
     let mut nullable_values = BTreeMap::new();
     bind_scope_claim_operands(
         &mut nullable_query,
         &BTreeMap::from([(
-            "user_id".to_owned(),
+            crate::query::provider_claim_key("sub"),
             Value::String("nullable-boundary".to_owned()),
         )]),
         &mut nullable_values,

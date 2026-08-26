@@ -112,7 +112,7 @@ example, an app can allow writes only when:
 ```text
 document.branch_id -> branches.id
 branches.workspace_id -> workspace_memberships.workspace_id
-workspace_memberships.user_id == session.user_id
+workspace_memberships.user_id == session.user
 branches.status == "open"
 ```
 

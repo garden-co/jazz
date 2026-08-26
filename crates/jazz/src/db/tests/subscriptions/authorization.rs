@@ -325,7 +325,7 @@ fn uuid_string_grant_role_schema(role: uuid::Uuid) -> JazzSchema {
         &[],
         "teams",
         "identity_key",
-        &["user_id"],
+        &["claims", "sub"],
         "id",
     );
     let access_policy = public_recursive_access_policy(
@@ -341,7 +341,7 @@ fn uuid_string_grant_role_schema(role: uuid::Uuid) -> JazzSchema {
         &[],
         "teams",
         "identity_key",
-        &["user_id"],
+        &["claims", "sub"],
         "id",
     );
     build_public_db_test_schema(

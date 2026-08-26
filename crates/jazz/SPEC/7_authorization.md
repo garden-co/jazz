@@ -443,15 +443,14 @@ must not widen those facts.
   to `SubscribeRejected` on the read path) so denied writes fail fast. Exposed
   by the auth example denial tests (both auth examples excluded from CI until
   this lands; see `dev/CI_NOTES.md` 2026-07-19).
-- **Non-claims session references (`session.authMode`).** Policy conversion
-  supports only `session.user_id` and `session.claims.*`; the betterauth
-  example references `session.authMode`. Decide: promote to a first-class
-  session attribute, or migrate such policies to claims.
+- ✅ **Session references are explicit.** Policy conversion supports the canonical
+  `session.user`, the reserved `session.authMode`, and raw provider values only
+  under `session.claims.*`. Former flat identity aliases are not retained.
 - **String claim validation.** String claim type mismatches in seeded lookups
   should become loud validation errors instead of depending on runtime
   empty-result behavior.
 - **Uncorrelated policy `EXISTS`.** Server-shell policy conversion currently
-  rejects `policy.<table>.exists.where({ userId: session.user_id })` when the
+  rejects an uncorrelated membership predicate when the
   predicate is used from another table and has no equality against the outer row
   (`__jazz_outer_row`). Decide whether intentionally uncorrelated membership
   checks are valid policy atoms, how to bound them, and how to lower them

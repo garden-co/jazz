@@ -20,10 +20,10 @@ const todoApp = s.defineApp({
 });
 
 const todoAppPermissions = s.definePermissions(todoApp, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner_id: session.user_id });
-  policy.todos.allowInsert.where({ owner_id: session.user_id });
-  policy.todos.allowUpdate.where({ owner_id: session.user_id });
-  policy.todos.allowDelete.where({ owner_id: session.user_id });
+  policy.todos.allowRead.where({ owner_id: session.user });
+  policy.todos.allowInsert.where({ owner_id: session.user });
+  policy.todos.allowUpdate.where({ owner_id: session.user });
+  policy.todos.allowDelete.where({ owner_id: session.user });
 });
 
 // ---------------------------------------------------------------------------

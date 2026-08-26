@@ -25,7 +25,7 @@ fn branch_column_reference_policy_schema() -> JazzSchema {
         table: "branches".to_owned(),
         condition: Box::new(PublicPolicyExpr::And(vec![
             public_outer_eq("branch_key", "branch_id"),
-            public_session_eq("owner", &["user_id"]),
+            public_session_eq("owner", &["claims", "sub"]),
         ])),
     };
     build_public_db_test_schema(
@@ -60,7 +60,7 @@ fn branch_column_reference_policy_schema() -> JazzSchema {
 }
 
 fn branch_update_read_policy_schema() -> JazzSchema {
-    let owner_write = public_session_eq("owner", &["user_id"]);
+    let owner_write = public_session_eq("owner", &["claims", "sub"]);
     build_public_db_test_schema(
         PublicSchemaBuilder::new().table(
             PublicTableSchemaBuilder::new("todos")
@@ -1620,12 +1620,12 @@ fn admitted_server_prepared_write_policy_binds_text_user_id_claim() {
     let alice_client = open_db(0xa1, alice, &schema);
     let bob_client = open_db(0xb2, bob, &schema);
     let alice_claims = BTreeMap::from([(
-        "user_id".to_owned(),
+        crate::query::provider_claim_key("sub"),
         Value::String("alice-subject".to_owned()),
     )]);
     alice_client.set_identity_claims(alice, alice_claims.clone());
     let bob_claims = BTreeMap::from([(
-        "user_id".to_owned(),
+        crate::query::provider_claim_key("sub"),
         Value::String("bob-subject".to_owned()),
     )]);
     bob_client.set_identity_claims(bob, bob_claims.clone());
@@ -1661,7 +1661,7 @@ fn admitted_server_prepared_write_policy_binds_text_user_id_claim() {
     assert_eq!(
         block_on(accepted.wait(DurabilityTier::Global)).unwrap(),
         accepted.mergeable_tx_id(),
-        "the admitted server must bind public session.user_id as Text in its prepared write-policy plan"
+        "the admitted server must bind public session.user as Text in its prepared write-policy plan"
     );
 
     let denied = bob_client
@@ -1699,11 +1699,11 @@ fn admitted_server_prepared_write_policy_coerces_string_user_id_to_uuid_column()
     let alice_client = open_db(0xa3, alice, &schema);
     let bob_client = open_db(0xb3, bob, &schema);
     let alice_claims = BTreeMap::from([(
-        "user_id".to_owned(),
+        crate::query::provider_claim_key("sub"),
         Value::String(alice.test_uuid().to_string()),
     )]);
     let bob_claims = BTreeMap::from([(
-        "user_id".to_owned(),
+        crate::query::provider_claim_key("sub"),
         Value::String(bob.test_uuid().to_string()),
     )]);
     alice_client.set_identity_claims(alice, alice_claims.clone());
@@ -1769,7 +1769,7 @@ fn admitted_server_prepared_write_policy_fails_closed_for_wrong_user_id_type() {
     let author = AuthorSubject::for_test_bytes([0xa4; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xa4, author, &schema);
-    let claims = BTreeMap::from([("user_id".to_owned(), Value::Bool(true))]);
+    let claims = BTreeMap::from([(crate::query::provider_claim_key("sub"), Value::Bool(true))]);
     client.set_identity_claims(author, claims.clone());
 
     let (client_transport, server_transport) = duplex();
@@ -1792,7 +1792,7 @@ fn admitted_server_prepared_write_policy_fails_closed_for_wrong_user_id_type() {
     client.tick().unwrap();
     let error = server.tick().unwrap_err();
     assert!(
-        error.to_string().contains("user_id has wrong type"),
+        error.to_string().contains("claims3:sub has wrong type"),
         "a non-coercible claim must fail before authorization support can admit the write: {error}"
     );
     assert!(

@@ -2371,7 +2371,7 @@ fn schema() -> JazzSchema {
         &[("onlyAdmins", PublicValue::Boolean(false))],
         TEAMS,
         "id",
-        &["user_id"],
+        &["user"],
         "id",
     );
     compile_public_schema(

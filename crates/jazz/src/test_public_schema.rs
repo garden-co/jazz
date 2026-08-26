@@ -49,15 +49,12 @@ pub(crate) fn seeded_recursive_access_policy(
             predicate: equals(
                 seed_alias,
                 seed_user_column,
-                RelValueRef::SessionRef(match seed_claim_path {
-                    ["user_id"] | ["userId"] => {
-                        vec!["claims".to_owned(), "user_id".to_owned()]
-                    }
-                    _ => seed_claim_path
+                RelValueRef::SessionRef(
+                    seed_claim_path
                         .iter()
                         .map(|segment| (*segment).to_owned())
                         .collect(),
-                }),
+                ),
             ),
         }),
         columns: vec![RelProjectColumn {

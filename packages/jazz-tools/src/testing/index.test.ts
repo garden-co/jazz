@@ -25,10 +25,8 @@ const testSchema = {
 type TestSchema = s.Schema<typeof testSchema>;
 const testApp: s.App<TestSchema> = s.defineApp(testSchema);
 const testPermissions = definePermissions(testApp, ({ policy, session }) => {
-  policy.todos.allowRead.where(
-    anyOf([{ ownerId: session.user_id }, { ownerId: { isNull: true } }]),
-  );
-  policy.todos.allowInsert.where({ ownerId: session.user_id });
+  policy.todos.allowRead.where(anyOf([{ ownerId: session.user }, { ownerId: { isNull: true } }]));
+  policy.todos.allowInsert.where({ ownerId: session.user });
 });
 
 afterEach(async () => {

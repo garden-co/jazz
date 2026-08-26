@@ -253,7 +253,7 @@ describe("world-tour Jazz + Vue integration", () => {
     const text = el.querySelector("#session")!.textContent ?? "";
 
     if (client.session) {
-      expect(text).toBe(`id:${client.session.user_id}`);
+      expect(text).toBe(`id:${client.session.user}`);
     } else {
       expect(text).toBe("anonymous");
     }

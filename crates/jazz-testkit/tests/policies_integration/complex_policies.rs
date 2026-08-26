@@ -134,7 +134,7 @@ fn join_membership_select_policy() -> PolicyExpr {
                 PredicateExpr::Cmp {
                     left: scoped_column("group_memberships", "user_id"),
                     op: PredicateCmpOp::Eq,
-                    right: ValueRef::SessionRef(vec!["user_id".into()]),
+                    right: ValueRef::SessionRef(vec!["user".to_owned()]),
                 },
             ]),
         },
@@ -154,7 +154,7 @@ fn hop_membership_select_policy() -> PolicyExpr {
                         predicate: PredicateExpr::Cmp {
                             left: scoped_column("group_memberships", "user_id"),
                             op: PredicateCmpOp::Eq,
-                            right: ValueRef::SessionRef(vec!["user_id".into()]),
+                            right: ValueRef::SessionRef(vec!["user".to_owned()]),
                         },
                     }),
                     right: Box::new(RelExpr::TableScan {

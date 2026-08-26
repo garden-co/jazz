@@ -22,7 +22,7 @@ const allowedAttachmentTypes = new Set([
 export function BandChat() {
   const session = useSession();
   return session?.user_id ? (
-    <RoomWorkspace author={authorForSession(session.issuer, session.user_id)} />
+    <RoomWorkspace author={authorForSession(session.issuer, session.user)} />
   ) : (
     <p>Loading identity…</p>
   );
