@@ -286,6 +286,55 @@ pub struct PendingNativeRead {
     future: Rc<RefCell<Option<LocalBoxFuture<'static, napi::Result<Uint8Array>>>>>,
 }
 
+struct PendingSubscriptionBatchCompletion {
+    events: Vec<SubscriptionEvent>,
+    layouts: HashSet<String>,
+}
+
+/// Opaque marker returned while the next bounded native subscription batch is
+/// waiting for chunk I/O. Call `readAll` again after transport progress.
+#[napi]
+pub struct PendingNativeSubscriptionBatch {
+    future: Rc<
+        RefCell<Option<LocalBoxFuture<'static, napi::Result<PendingSubscriptionBatchCompletion>>>>,
+    >,
+}
+
+impl Clone for PendingNativeSubscriptionBatch {
+    fn clone(&self) -> Self {
+        Self {
+            future: Rc::clone(&self.future),
+        }
+    }
+}
+
+impl PendingNativeSubscriptionBatch {
+    fn new(
+        future: LocalBoxFuture<'static, napi::Result<PendingSubscriptionBatchCompletion>>,
+    ) -> Self {
+        Self {
+            future: Rc::new(RefCell::new(Some(future))),
+        }
+    }
+
+    fn poll_once(&self) -> napi::Result<Option<PendingSubscriptionBatchCompletion>> {
+        let Some(mut future) = self.future.borrow_mut().take() else {
+            return Err(napi::Error::from_reason(
+                "native pending subscription batch is already complete",
+            ));
+        };
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        match Pin::new(&mut future).poll(&mut context) {
+            Poll::Ready(result) => result.map(Some),
+            Poll::Pending => {
+                *self.future.borrow_mut() = Some(future);
+                Ok(None)
+            }
+        }
+    }
+}
+
 impl PendingNativeRead {
     fn new(future: LocalBoxFuture<'static, napi::Result<Uint8Array>>) -> Self {
         Self {
@@ -562,8 +611,18 @@ impl NapiTransportInner {
 }
 
 enum NapiSubscription {
-    Memory(SubscriptionStream),
-    Persistent(SubscriptionStream),
+    Memory {
+        db: Rc<CoreDb<CoreMemoryStorage>>,
+        stream: SubscriptionStream,
+        pending_events: VecDeque<CoreSubscriptionEvent>,
+        pending_batch: Option<PendingNativeSubscriptionBatch>,
+    },
+    Persistent {
+        db: Rc<CoreDb<CoreRocksDbStorage>>,
+        stream: SubscriptionStream,
+        pending_events: VecDeque<CoreSubscriptionEvent>,
+        pending_batch: Option<PendingNativeSubscriptionBatch>,
+    },
 }
 
 #[napi(js_name = "Tx")]
@@ -780,36 +839,137 @@ impl Transport {
 #[napi]
 impl Subscription {
     #[napi(js_name = "readAll")]
-    pub fn read_all(&mut self) -> napi::Result<Vec<SubscriptionEvent>> {
+    pub fn read_all(
+        &mut self,
+    ) -> napi::Result<Either<Vec<SubscriptionEvent>, PendingNativeSubscriptionBatch>> {
         let subscription = self
             .inner
             .as_mut()
             .ok_or_else(|| napi::Error::from_reason("subscription is closed"))?;
-        let mut events = Vec::new();
-        loop {
-            let event = match subscription {
-                NapiSubscription::Memory(stream) => stream.try_next_event(),
-                NapiSubscription::Persistent(stream) => stream.try_next_event(),
-            };
-            let Some(event) = event else {
-                break;
-            };
-            events.push(core_subscription_event_to_napi(
-                &event,
+        let result = match subscription {
+            NapiSubscription::Memory {
+                db,
+                stream,
+                pending_events,
+                pending_batch,
+            } => read_or_start_subscription_batch(
+                db,
+                stream,
+                pending_events,
+                pending_batch,
                 &mut self.published_terminal_layouts,
-            )?);
+            ),
+            NapiSubscription::Persistent {
+                db,
+                stream,
+                pending_events,
+                pending_batch,
+            } => read_or_start_subscription_batch(
+                db,
+                stream,
+                pending_events,
+                pending_batch,
+                &mut self.published_terminal_layouts,
+            ),
+        };
+        match result {
+            Ok(Some(events)) => Ok(Either::A(events)),
+            Ok(None) => match subscription {
+                NapiSubscription::Memory { pending_batch, .. }
+                | NapiSubscription::Persistent { pending_batch, .. } => Ok(Either::B(
+                    pending_batch
+                        .as_ref()
+                        .expect("suspended batch is retained")
+                        .clone(),
+                )),
+            },
+            Err(error) => {
+                self.inner.take();
+                Err(error)
+            }
         }
-        Ok(events)
     }
 
     #[napi]
-    pub fn drain(&mut self) -> napi::Result<Vec<SubscriptionEvent>> {
+    pub fn drain(
+        &mut self,
+    ) -> napi::Result<Either<Vec<SubscriptionEvent>, PendingNativeSubscriptionBatch>> {
         self.read_all()
     }
 
     #[napi]
     pub fn close(&mut self) -> bool {
         self.inner.take().is_some()
+    }
+}
+
+const MAX_RETAINED_SUBSCRIPTION_BATCH_EVENTS: usize = 256;
+
+fn read_or_start_subscription_batch<S>(
+    db: &Rc<CoreDb<S>>,
+    stream: &mut SubscriptionStream,
+    pending_events: &mut VecDeque<CoreSubscriptionEvent>,
+    pending_batch: &mut Option<PendingNativeSubscriptionBatch>,
+    published_terminal_layouts: &mut HashSet<String>,
+) -> napi::Result<Option<Vec<SubscriptionEvent>>>
+where
+    S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
+{
+    if let Some(batch) = pending_batch.as_ref() {
+        match batch.poll_once()? {
+            Some(completion) => {
+                *pending_batch = None;
+                *published_terminal_layouts = completion.layouts;
+                return Ok(Some(completion.events));
+            }
+            None => return Ok(None),
+        }
+    }
+    let mut raw_events = Vec::with_capacity(MAX_RETAINED_SUBSCRIPTION_BATCH_EVENTS);
+    while raw_events.len() < MAX_RETAINED_SUBSCRIPTION_BATCH_EVENTS {
+        let Some(event) = pending_events
+            .pop_front()
+            .or_else(|| stream.try_next_event())
+        else {
+            break;
+        };
+        raw_events.push(event);
+    }
+    if raw_events.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    let db = Rc::clone(db);
+    let layouts = published_terminal_layouts.clone();
+    let batch = PendingNativeSubscriptionBatch::new(Box::pin(async move {
+        let mut raw_events = raw_events;
+        for event in &mut raw_events {
+            db.hydrate_subscription_event_for_binding_outcome(event)
+                .await
+                .map_err(|error| match error {
+                    jazz::db::BindingHydrationError::RetryableChunkUnavailable { .. } => {
+                        napi::Error::from_reason(
+                            "large-value chunk remains temporarily unavailable",
+                        )
+                    }
+                    jazz::db::BindingHydrationError::Error(error) => napi_error(error),
+                })?;
+        }
+        let mut layouts = layouts;
+        let events = raw_events
+            .iter()
+            .map(|event| core_subscription_event_to_napi(event, &mut layouts))
+            .collect::<napi::Result<Vec<_>>>()?;
+        Ok(PendingSubscriptionBatchCompletion { events, layouts })
+    }));
+    match batch.poll_once()? {
+        Some(completion) => {
+            *published_terminal_layouts = completion.layouts;
+            Ok(Some(completion.events))
+        }
+        None => {
+            *pending_batch = Some(batch);
+            Ok(None)
+        }
     }
 }
 
@@ -2494,14 +2654,18 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let inner = match db {
-            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory(
-                core_block_on(db.subscribe(&query.inner, opts))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent(
-                core_block_on(db.subscribe(&query.inner, opts))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
+            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory {
+                db: Rc::clone(db),
+                stream: core_block_on(db.subscribe(&query.inner, opts)).map_err(napi_error)?,
+                pending_events: VecDeque::new(),
+                pending_batch: None,
+            },
+            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent {
+                db: Rc::clone(db),
+                stream: core_block_on(db.subscribe(&query.inner, opts)).map_err(napi_error)?,
+                pending_events: VecDeque::new(),
+                pending_batch: None,
+            },
         };
         Ok(Subscription {
             inner: Some(inner),
@@ -2526,14 +2690,20 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let inner = match db {
-            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory(
-                core_block_on(db.subscribe_for_identity(&query.inner, opts, author))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent(
-                core_block_on(db.subscribe_for_identity(&query.inner, opts, author))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
+            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory {
+                db: Rc::clone(db),
+                stream: core_block_on(db.subscribe_for_identity(&query.inner, opts, author))
+                    .map_err(napi_error)?,
+                pending_events: VecDeque::new(),
+                pending_batch: None,
+            },
+            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent {
+                db: Rc::clone(db),
+                stream: core_block_on(db.subscribe_for_identity(&query.inner, opts, author))
+                    .map_err(napi_error)?,
+                pending_events: VecDeque::new(),
+                pending_batch: None,
+            },
         };
         Ok(Subscription {
             inner: Some(inner),
@@ -2557,14 +2727,20 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let inner = match db {
-            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory(
-                core_block_on(db.subscribe_relation_query(&query, opts))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent(
-                core_block_on(db.subscribe_relation_query(&query, opts))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
+            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory {
+                db: Rc::clone(db),
+                stream: core_block_on(db.subscribe_relation_query(&query, opts))
+                    .map_err(napi_error)?,
+                pending_events: VecDeque::new(),
+                pending_batch: None,
+            },
+            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent {
+                db: Rc::clone(db),
+                stream: core_block_on(db.subscribe_relation_query(&query, opts))
+                    .map_err(napi_error)?,
+                pending_events: VecDeque::new(),
+                pending_batch: None,
+            },
         };
         Ok(Subscription {
             inner: Some(inner),
@@ -2590,14 +2766,24 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let inner = match db {
-            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory(
-                core_block_on(db.subscribe_relation_query_for_identity(&query, opts, author))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent(
-                core_block_on(db.subscribe_relation_query_for_identity(&query, opts, author))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
+            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory {
+                db: Rc::clone(db),
+                stream: core_block_on(
+                    db.subscribe_relation_query_for_identity(&query, opts, author),
+                )
+                .map_err(napi_error)?,
+                pending_events: VecDeque::new(),
+                pending_batch: None,
+            },
+            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent {
+                db: Rc::clone(db),
+                stream: core_block_on(
+                    db.subscribe_relation_query_for_identity(&query, opts, author),
+                )
+                .map_err(napi_error)?,
+                pending_events: VecDeque::new(),
+                pending_batch: None,
+            },
         };
         Ok(Subscription {
             inner: Some(inner),

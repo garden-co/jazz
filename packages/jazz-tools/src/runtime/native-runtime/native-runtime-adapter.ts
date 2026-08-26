@@ -125,6 +125,7 @@ type NativeWriteOptions = {
 
 type PendingNativeRead = { poll(): Uint8Array | null };
 type NativeReadResult = Uint8Array | PendingNativeRead;
+type PendingNativeSubscriptionBatch = object;
 
 function isPendingNativeRead(value: unknown): value is PendingNativeRead {
   return typeof (value as PendingNativeRead | null)?.poll === "function";
@@ -357,8 +358,8 @@ type NativePermissionAdviceRequest = {
 type PreparedQuery = object;
 
 type Subscription = {
-  readAll(): unknown[];
-  drain?(): unknown[];
+  readAll(): unknown[] | PendingNativeSubscriptionBatch;
+  drain?(): unknown[] | PendingNativeSubscriptionBatch;
   close?(): boolean;
 };
 
@@ -2625,7 +2626,9 @@ export class NativeRuntimeAdapter implements Runtime {
     if (subscription.cancelled) return;
     for (const source of subscription.sources) {
       if (!isReadableSubscriptionReader(source.source)) {
-        this.drainNativeSubscription(handle, subscription, source);
+        if (source.reading) continue;
+        source.reading = true;
+        void this.drainNativeSubscription(handle, subscription, source);
         continue;
       }
       if (source.reading) continue;
@@ -2658,22 +2661,35 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
-  private drainNativeSubscription(
+  private async drainNativeSubscription(
     handle: number,
     subscription: SubscriptionState,
     source: SubscriptionSourceState,
-  ): void {
+  ): Promise<void> {
     if (isReadableSubscriptionReader(source.source)) return;
-    for (const event of source.source.readAll()) {
-      if (subscription.cancelled || this.subscriptions.get(handle) !== subscription) return;
-      try {
-        this.applySubscriptionChunk(subscription, event);
-      } catch (error) {
-        this.failSubscription(
-          subscription,
-          error instanceof Error ? error : new Error(String(error)),
-        );
+    try {
+      while (!subscription.cancelled && this.subscriptions.get(handle) === subscription) {
+        const batch = source.source.readAll();
+        if (!Array.isArray(batch)) {
+          await this.pumpServerTransport();
+          await sleep(0);
+          continue;
+        }
+        for (const event of batch) {
+          if (subscription.cancelled || this.subscriptions.get(handle) !== subscription) return;
+          try {
+            this.applySubscriptionChunk(subscription, event);
+          } catch (error) {
+            this.failSubscription(
+              subscription,
+              error instanceof Error ? error : new Error(String(error)),
+            );
+          }
+        }
+        if (batch.length === 0) return;
       }
+    } finally {
+      source.reading = false;
     }
   }
 

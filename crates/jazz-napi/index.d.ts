@@ -135,8 +135,8 @@ export declare class StreamingMutation {
 }
 
 export declare class Subscription {
-  readAll(): Array<SubscriptionEvent>
-  drain(): Array<SubscriptionEvent>
+  readAll(): Array<SubscriptionEvent> | PendingNativeSubscriptionBatch
+  drain(): Array<SubscriptionEvent> | PendingNativeSubscriptionBatch
   close(): boolean
 }
 
@@ -144,6 +144,9 @@ export declare class Subscription {
 export declare class PendingNativeRead {
   poll(): Uint8Array | null
 }
+
+/** A bounded native subscription batch waiting for large-value chunk I/O. */
+export declare class PendingNativeSubscriptionBatch {}
 
 export declare class TestJwtIssuer {
   static start(): Promise<TestJwtIssuer>
