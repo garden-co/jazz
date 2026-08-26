@@ -123,6 +123,13 @@ type NativeWriteOptions = {
   updatedAtMs?: number;
 };
 
+type PendingNativeRead = { poll(): Uint8Array | null };
+type NativeReadResult = Uint8Array | PendingNativeRead;
+
+function isPendingNativeRead(value: unknown): value is PendingNativeRead {
+  return typeof (value as PendingNativeRead | null)?.poll === "function";
+}
+
 type NativeInsertOptions = NativeWriteOptions & {
   rowId?: Uint8Array;
   branch?: unknown;
@@ -152,26 +159,29 @@ type NativeDb = {
   rollbackTransaction(openBatchId: string): void;
   attachMergeableTx(openBatchId: string): Tx;
   attachExclusiveTx?(openBatchId: string): Tx;
-  all(query: PreparedQuery, opts: unknown): Uint8Array;
-  allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
+  all(query: PreparedQuery, opts: unknown): NativeReadResult;
+  allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): NativeReadResult;
   allAsync?(query: PreparedQuery, opts: unknown): Uint8Array | Promise<Uint8Array>;
   allForIdentityAsync?(
     query: PreparedQuery,
     author: Uint8Array,
     opts: unknown,
   ): Uint8Array | Promise<Uint8Array>;
-  allRelationQuery?(queryJson: string, opts: unknown): Uint8Array | Promise<Uint8Array>;
+  allRelationQuery?(queryJson: string, opts: unknown): NativeReadResult | Promise<NativeReadResult>;
   allRelationQueryForIdentity?(
     queryJson: string,
     author: Uint8Array,
     opts: unknown,
-  ): Uint8Array | Promise<Uint8Array>;
-  allRelationSnapshot?(query: PreparedQuery, opts: unknown): Uint8Array | Promise<Uint8Array>;
+  ): NativeReadResult | Promise<NativeReadResult>;
+  allRelationSnapshot?(
+    query: PreparedQuery,
+    opts: unknown,
+  ): NativeReadResult | Promise<NativeReadResult>;
   allRelationSnapshotForIdentity?(
     query: PreparedQuery,
     author: Uint8Array,
     opts: unknown,
-  ): Uint8Array | Promise<Uint8Array>;
+  ): NativeReadResult | Promise<NativeReadResult>;
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
   attachQuery?(query: PreparedQuery, opts: unknown): unknown;
   attachQueryForIdentity?(query: PreparedQuery, author: Uint8Array, opts: unknown): unknown;
@@ -1627,17 +1637,19 @@ export class NativeRuntimeAdapter implements Runtime {
         if (!this.db.allRelationQueryForIdentity) {
           throw new Error("Native runtime does not support trusted-serving relation queries");
         }
-        const payload = await this.db.allRelationQueryForIdentity(
-          coreQueryJson,
-          session?.identity ?? this.peerIdentity,
-          opts,
+        const payload = await this.awaitNativeRead(
+          this.db.allRelationQueryForIdentity(
+            coreQueryJson,
+            session?.identity ?? this.peerIdentity,
+            opts,
+          ),
         );
         return rowsFromBatches(readRowBatches(payload), this.schema);
       }
       if (!this.db.allRelationQuery) {
         throw new Error("Native runtime does not support relation queries");
       }
-      const payload = await this.db.allRelationQuery(coreQueryJson, opts);
+      const payload = await this.awaitNativeRead(this.db.allRelationQuery(coreQueryJson, opts));
       return rowsFromBatches(readRowBatches(payload), this.schema);
     }
     const query = this.prepareQuery(coreQueryJson);
@@ -1650,10 +1662,12 @@ export class NativeRuntimeAdapter implements Runtime {
           if (!this.db.allRelationSnapshotForIdentity) {
             throw new Error("Native runtime does not support trusted-serving relation snapshots");
           }
-          const payload = await this.db.allRelationSnapshotForIdentity(
-            query,
-            session?.identity ?? this.peerIdentity,
-            opts,
+          const payload = await this.awaitNativeRead(
+            this.db.allRelationSnapshotForIdentity(
+              query,
+              session?.identity ?? this.peerIdentity,
+              opts,
+            ),
           );
           return rowsFromRelationSnapshot(
             readRelationSnapshot(payload),
@@ -1664,7 +1678,7 @@ export class NativeRuntimeAdapter implements Runtime {
         if (!this.db.allRelationSnapshot) {
           throw new Error("Native runtime does not support relation snapshots");
         }
-        const payload = await this.db.allRelationSnapshot(query, opts);
+        const payload = await this.awaitNativeRead(this.db.allRelationSnapshot(query, opts));
         return rowsFromRelationSnapshot(
           readRelationSnapshot(payload),
           this.schema,
@@ -2015,6 +2029,11 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     const query = this.prepareQuery(JSON.stringify({ table }));
     const rows = this.db.all(query, readOptions());
+    if (isPendingNativeRead(rows)) {
+      throw new Error(
+        "write merge cannot synchronously hydrate a large value; use the exact local row reader",
+      );
+    }
     return rowsFromBatches(readRowBatches(rows), this.schema).find(
       (row) => row.table === table && row.id === formatUuid(rowId),
     );
@@ -2081,10 +2100,16 @@ export class NativeRuntimeAdapter implements Runtime {
    * point, with a request session supplying its subject when present.
    */
   private readRowsForHost(query: PreparedQuery, opts: unknown, identity?: Uint8Array): Uint8Array {
-    if (this.trustedBackend && identity === undefined) return this.db.all(query, opts);
-    return this.readAuthorizationHost === "trusted-serving"
-      ? this.db.allForIdentity(query, identity ?? this.peerIdentity, opts)
-      : this.db.all(query, opts);
+    const result =
+      this.trustedBackend && identity === undefined
+        ? this.db.all(query, opts)
+        : this.readAuthorizationHost === "trusted-serving"
+          ? this.db.allForIdentity(query, identity ?? this.peerIdentity, opts)
+          : this.db.all(query, opts);
+    if (isPendingNativeRead(result)) {
+      throw new Error("large-value hydration is pending; use the asynchronous read boundary");
+    }
+    return result;
   }
 
   private async readRowsForHostAsync(
@@ -2093,14 +2118,35 @@ export class NativeRuntimeAdapter implements Runtime {
     identity?: Uint8Array,
   ): Promise<Uint8Array> {
     if (this.trustedBackend && identity === undefined) {
-      return await (this.db.allAsync?.(query, opts) ?? this.db.all(query, opts));
+      return this.awaitNativeRead(this.db.allAsync?.(query, opts) ?? this.db.all(query, opts));
     }
     if (this.readAuthorizationHost === "trusted-serving") {
       const author = identity ?? this.peerIdentity;
-      return await (this.db.allForIdentityAsync?.(query, author, opts) ??
-        this.db.allForIdentity(query, author, opts));
+      return this.awaitNativeRead(
+        this.db.allForIdentityAsync?.(query, author, opts) ??
+          this.db.allForIdentity(query, author, opts),
+      );
     }
-    return await (this.db.allAsync?.(query, opts) ?? this.db.all(query, opts));
+    return this.awaitNativeRead(this.db.allAsync?.(query, opts) ?? this.db.all(query, opts));
+  }
+
+  /**
+   * Native NAPI reads may suspend on a routed large-value chunk.  Keep the
+   * thread-affine Rust future in the binding and let the existing peer pump
+   * deliver the missing chunk between polls; never block the JS event loop.
+   */
+  private async awaitNativeRead(
+    started: NativeReadResult | Promise<NativeReadResult>,
+  ): Promise<Uint8Array> {
+    const result = await started;
+    if (!isPendingNativeRead(result)) return result;
+    for (;;) {
+      const bytes = result.poll();
+      if (bytes !== null) return bytes;
+      if (this.closed) throw new Error("large-value hydration was cancelled by runtime shutdown");
+      await this.pumpServerTransport();
+      await sleep(0);
+    }
   }
 
   /**

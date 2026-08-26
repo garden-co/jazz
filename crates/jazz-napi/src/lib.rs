@@ -43,13 +43,15 @@ pub type JsonValue = serde_json::Value;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Mutex;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use futures::future::LocalBoxFuture;
 use futures::lock::Mutex as LocalMutex;
 use jazz::db::StreamingMutationKind as CoreStreamingMutationKind;
 use jazz::db::{
@@ -273,6 +275,62 @@ pub struct Write {
     row_id: CoreRowUuid,
     batch_id: TransactionId,
     inner: Option<NapiWrite>,
+}
+
+/// A JavaScript-thread-owned binding read which suspended on asynchronous
+/// large-value storage. NAPI promises execute on a Send worker pool, whereas
+/// a Jazz runtime is deliberately `Rc`/thread-affine. The adapter drives this
+/// object after its peer transport makes progress instead of blocking Node.
+#[napi]
+pub struct PendingNativeRead {
+    future: Rc<RefCell<Option<LocalBoxFuture<'static, napi::Result<Uint8Array>>>>>,
+}
+
+impl PendingNativeRead {
+    fn new(future: LocalBoxFuture<'static, napi::Result<Uint8Array>>) -> Self {
+        Self {
+            future: Rc::new(RefCell::new(Some(future))),
+        }
+    }
+
+    fn poll_once(&self) -> napi::Result<Option<Uint8Array>> {
+        let Some(mut future) = self.future.borrow_mut().take() else {
+            return Err(napi::Error::from_reason(
+                "native pending read is already complete",
+            ));
+        };
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        match Pin::new(&mut future).poll(&mut context) {
+            Poll::Ready(result) => result.map(Some),
+            Poll::Pending => {
+                *self.future.borrow_mut() = Some(future);
+                Ok(None)
+            }
+        }
+    }
+}
+
+#[napi]
+impl PendingNativeRead {
+    #[napi]
+    pub fn poll(&self) -> napi::Result<Option<Uint8Array>> {
+        self.poll_once()
+    }
+}
+
+fn native_read_or_pending(
+    future: LocalBoxFuture<'static, napi::Result<Uint8Array>>,
+) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
+    let pending = PendingNativeRead::new(future);
+    match pending.poll_once()? {
+        Some(bytes) => Ok(Either::A(bytes)),
+        None => Ok(Either::B(pending)),
+    }
+}
+
+fn napi_error(error: impl std::fmt::Display) -> napi::Error {
+    napi::Error::from_reason(error.to_string())
 }
 
 #[napi(js_name = "Transport")]
@@ -1969,20 +2027,40 @@ impl NapiDb {
             ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
-    ) -> napi::Result<Uint8Array> {
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
         let opts = core_read_opts_from_json(opts)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let rows = match db {
-            NapiDbInnerStorage::Memory(db) => core_block_on(db.all(&query.inner, opts)),
-            NapiDbInnerStorage::Persistent(db) => core_block_on(db.all(&query.inner, opts)),
+        match db {
+            NapiDbInnerStorage::Memory(db) => {
+                let db = Rc::clone(db);
+                let query = query.inner.clone();
+                native_read_or_pending(Box::pin(async move {
+                    let mut rows = db.all(&query, opts).await.map_err(napi_error)?;
+                    db.hydrate_rows_for_binding(&mut rows)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                let db = Rc::clone(db);
+                let query = query.inner.clone();
+                native_read_or_pending(Box::pin(async move {
+                    let mut rows = db.all(&query, opts).await.map_err(napi_error)?;
+                    db.hydrate_rows_for_binding(&mut rows)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
+            }
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        encode_core_rows(&rows)
-            .map(Uint8Array::new)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     /// Read through an open transaction using the identity bound at begin.
@@ -2061,25 +2139,47 @@ impl NapiDb {
             ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
-    ) -> napi::Result<Uint8Array> {
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
         let author = core_author_id_from_bytes(&author)?;
         let opts = core_read_opts_from_json(opts)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let rows = match db {
+        match db {
             NapiDbInnerStorage::Memory(db) => {
-                core_block_on(db.all_for_identity(&query.inner, opts, author))
+                let db = Rc::clone(db);
+                let query = query.inner.clone();
+                native_read_or_pending(Box::pin(async move {
+                    let mut rows = db
+                        .all_for_identity(&query, opts, author)
+                        .await
+                        .map_err(napi_error)?;
+                    db.hydrate_rows_for_binding(&mut rows)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
             }
             NapiDbInnerStorage::Persistent(db) => {
-                core_block_on(db.all_for_identity(&query.inner, opts, author))
+                let db = Rc::clone(db);
+                let query = query.inner.clone();
+                native_read_or_pending(Box::pin(async move {
+                    let mut rows = db
+                        .all_for_identity(&query, opts, author)
+                        .await
+                        .map_err(napi_error)?;
+                    db.hydrate_rows_for_binding(&mut rows)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
             }
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        encode_core_rows(&rows)
-            .map(Uint8Array::new)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     #[napi(js_name = "allRelationSnapshot")]
@@ -4134,6 +4234,8 @@ mod tests {
     use std::collections::{BTreeMap, HashSet};
     use std::rc::Rc;
 
+    use futures::channel::oneshot;
+
     use crate::{
         CoreOpenDbConfig, CoreSelfSignedClientProof, InsertOptions, NapiDb, NapiDbInnerStorage,
         NapiTxKind, PreparedQuery, RestoreOptions, Tx, UpdateOptions, UpsertOptions,
@@ -4144,6 +4246,29 @@ mod tests {
         core_upsert_options, encode_core_subscription_delta, terminal_bytes_to_numbers,
         unknown_transaction_kind_message,
     };
+
+    #[test]
+    fn pending_native_read_retains_a_suspended_future_until_the_next_js_turn() {
+        let (sender, receiver) = oneshot::channel::<Uint8Array>();
+        let pending = PendingNativeRead::new(Box::pin(async move {
+            receiver
+                .await
+                .map_err(|_| napi::Error::from_reason("planned sender drop"))
+        }));
+
+        assert!(
+            pending.poll_once().unwrap().is_none(),
+            "planted suspension is retained"
+        );
+        sender
+            .send(Uint8Array::new(vec![7, 11]))
+            .expect("complete the retained future");
+        assert_eq!(pending.poll_once().unwrap().unwrap().to_vec(), vec![7, 11]);
+        assert!(
+            pending.poll_once().is_err(),
+            "completed reads cannot be replayed or double-encoded"
+        );
+    }
 
     /// Binding read choices lower without widening the write durability parser.
     #[test]
