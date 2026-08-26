@@ -5071,6 +5071,138 @@ describe("NativeRuntimeAdapter server transport", () => {
 });
 
 describe("NativeRuntimeAdapter streaming inserts", () => {
+  it("serializes finalization across schema views while source ingestion stays concurrent", async () => {
+    type Deferred<T> = {
+      promise: Promise<T>;
+      resolve(value: T): void;
+      reject(error: Error): void;
+    };
+    const deferred = <T>(): Deferred<T> => {
+      let resolve!: (value: T) => void;
+      let reject!: (error: Error) => void;
+      const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+        resolve = resolvePromise;
+        reject = rejectPromise;
+      });
+      return { promise, resolve, reject };
+    };
+    const completions = [
+      deferred<ReturnType<typeof fakeWrite>>(),
+      deferred<ReturnType<typeof fakeWrite>>(),
+    ];
+    const pushed: string[] = [];
+    const started: number[] = [];
+    let nextCompletion = 0;
+    let nativeDb!: NativeDbForTest;
+    const beginStreamingMutationEncoded = vi.fn(() => ({
+      push(chunk: Uint8Array) {
+        pushed.push(new TextDecoder().decode(chunk));
+      },
+      finish() {
+        const completion = nextCompletion++;
+        started.push(completion);
+        return completions[completion]!.promise;
+      },
+      abort: vi.fn(),
+    }));
+    nativeDb = fakeDb({
+      beginStreamingMutationEncoded,
+      registerSchema: () => nativeDb,
+    });
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => nativeDb,
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const view = runtime.registerSchemaView(testSchema);
+    const source = async function* (value: string) {
+      yield value;
+    };
+
+    const first = runtime.streamingMutation("insert", "todos", {}, "title", source("first"));
+    const second = view.streamingMutation("insert", "todos", {}, "title", source("second"));
+
+    await vi.waitFor(() => expect(pushed).toEqual(expect.arrayContaining(["first", "second"])));
+    await vi.waitFor(() => expect(started).toEqual([0]));
+    completions[0]!.resolve(fakeWrite());
+    await vi.waitFor(() => expect(started).toEqual([0, 1]));
+    completions[1]!.resolve(fakeWrite());
+
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+  });
+
+  it("releases the next streaming finalization after a failed finish", async () => {
+    type Deferred<T> = {
+      promise: Promise<T>;
+      resolve(value: T): void;
+      reject(error: Error): void;
+    };
+    const deferred = <T>(): Deferred<T> => {
+      let resolve!: (value: T) => void;
+      let reject!: (error: Error) => void;
+      const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+        resolve = resolvePromise;
+        reject = rejectPromise;
+      });
+      return { promise, resolve, reject };
+    };
+    const completions = [
+      deferred<ReturnType<typeof fakeWrite>>(),
+      deferred<ReturnType<typeof fakeWrite>>(),
+    ];
+    const started: number[] = [];
+    const aborts = [vi.fn(), vi.fn()];
+    let nextCompletion = 0;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            beginStreamingMutationEncoded: () => {
+              const upload = nextCompletion++;
+              return {
+                push: () => undefined,
+                finish() {
+                  started.push(upload);
+                  return completions[upload]!.promise;
+                },
+                abort: aborts[upload]!,
+              };
+            },
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const source = async function* () {
+      yield "value";
+    };
+
+    const first = runtime.streamingMutation("insert", "todos", {}, "title", source());
+    const second = runtime.streamingMutation("insert", "todos", {}, "title", source());
+
+    await vi.waitFor(() => expect(started).toEqual([0]));
+    completions[0]!.reject(new Error("native finish failed"));
+    await expect(first).rejects.toThrow("native finish failed");
+    expect(aborts[0]).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(started).toEqual([0, 1]));
+    completions[1]!.resolve(fakeWrite());
+    await expect(second).resolves.toEqual(expect.objectContaining({ id: expect.any(String) }));
+  });
+
   it("infers the physical kind and applies backpressure to async chunks", async () => {
     const pushed: Uint8Array[] = [];
     let finished = false;
