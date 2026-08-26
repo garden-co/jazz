@@ -27,8 +27,8 @@ pub struct Fixture {
     db: BenchDb,
     stops_table: TableSchema,
     venues_table: TableSchema,
-    calendar_window: PreparedQuery,
-    map_viewport: PreparedQuery,
+    member_calendar_window: PreparedQuery,
+    public_calendar_window: PreparedQuery,
 }
 
 impl Fixture {
@@ -91,7 +91,7 @@ impl Fixture {
                     ("bandId".into(), Value::Uuid(band.0)),
                     ("venueId".into(), Value::Uuid(venue.0)),
                     ("date".into(), Value::U64(stop_date(stop))),
-                    ("status".into(), Value::String("confirmed".into())),
+                    ("status".into(), Value::String(stop_status(stop).into())),
                     (
                         "publicDescription".into(),
                         Value::String(format!("Stop {stop:05}")),
@@ -100,7 +100,7 @@ impl Fixture {
             );
         }
 
-        let calendar_window = db
+        let member_calendar_window = db
             .prepare_query(
                 &Query::from("stops")
                     .filter(gte(col("date"), lit(WINDOW_START)))
@@ -112,37 +112,67 @@ impl Fixture {
                     .order_by("date", OrderDirection::Asc)
                     .limit(WINDOW_LIMIT),
             )
-            .expect("prepare calendar window");
-        let map_viewport = db
+            .expect("prepare member calendar window");
+        let public_calendar_window = db
             .prepare_query(
-                &Query::from("venues")
-                    .filter(gte(col("lat"), lit(35.5_f64)))
-                    .filter(lte(col("lat"), lit(36.0_f64)))
-                    .order_by("name", OrderDirection::Asc)
-                    .limit(100),
+                &Query::from("stops")
+                    .filter(eq(col("status"), lit("confirmed")))
+                    .filter(gte(col("date"), lit(WINDOW_START)))
+                    .filter(lte(
+                        col("date"),
+                        lit(WINDOW_START + WINDOW_DAYS * DAY_SECONDS),
+                    ))
+                    .include("venueId")
+                    .order_by("date", OrderDirection::Asc)
+                    .limit(WINDOW_LIMIT),
             )
-            .expect("prepare map viewport");
+            .expect("prepare public calendar window");
         Self {
             db,
             stops_table,
             venues_table,
-            calendar_window,
-            map_viewport,
+            member_calendar_window,
+            public_calendar_window,
         }
     }
 
-    /// Ordered, bounded time-window query used by the itinerary calendar.
-    pub fn calendar_window_count(&self) -> usize {
-        self.db
-            .read(&self.calendar_window)
-            .expect("read calendar window")
-            .len()
+    /// Ordered, bounded itinerary query used by band members.
+    pub fn member_calendar_window_count(&self) -> usize {
+        self.read_count(&self.member_calendar_window)
     }
 
-    /// Ordered start times returned by the Vue app's three-week itinerary query.
-    pub fn calendar_window_start_times(&self) -> Vec<u64> {
+    /// Ordered, bounded itinerary query used by public visitors.
+    pub fn public_calendar_window_count(&self) -> usize {
+        self.read_count(&self.public_calendar_window)
+    }
+
+    /// Ordered start times returned by the member itinerary query.
+    pub fn member_calendar_window_start_times(&self) -> Vec<u64> {
+        self.calendar_window_start_times(&self.member_calendar_window)
+    }
+
+    /// Ordered start times returned by the public, confirmed-only itinerary query.
+    pub fn public_calendar_window_start_times(&self) -> Vec<u64> {
+        self.calendar_window_start_times(&self.public_calendar_window)
+    }
+
+    /// Included venue names in the member root-row order.
+    pub fn member_calendar_window_venue_names(&self) -> Vec<String> {
+        self.calendar_window_venue_names(&self.member_calendar_window)
+    }
+
+    /// Included venue names in the public root-row order.
+    pub fn public_calendar_window_venue_names(&self) -> Vec<String> {
+        self.calendar_window_venue_names(&self.public_calendar_window)
+    }
+
+    fn read_count(&self, query: &PreparedQuery) -> usize {
+        self.db.read(query).expect("read calendar window").len()
+    }
+
+    fn calendar_window_start_times(&self, query: &PreparedQuery) -> Vec<u64> {
         self.db
-            .read(&self.calendar_window)
+            .read(query)
             .expect("read calendar window")
             .into_iter()
             .map(|row| match row.cell(&self.stops_table, "date") {
@@ -152,10 +182,9 @@ impl Fixture {
             .collect()
     }
 
-    /// Included venue names in the root-row order used by the app result.
-    pub fn calendar_window_venue_names(&self) -> Vec<String> {
+    fn calendar_window_venue_names(&self, query: &PreparedQuery) -> Vec<String> {
         assert_eq!(
-            self.calendar_window
+            query
                 .shape()
                 .query()
                 .includes
@@ -163,10 +192,10 @@ impl Fixture {
                 .map(|include| include.path.as_str())
                 .collect::<Vec<_>>(),
             ["venueId"],
-            "calendar workload must retain the app's venue include"
+            "calendar workload must retain the app's venue include",
         );
         self.db
-            .read(&self.calendar_window)
+            .read(query)
             .expect("read calendar window with included venues")
             .into_iter()
             .map(|stop| {
@@ -191,30 +220,6 @@ impl Fixture {
             })
             .collect()
     }
-
-    /// Latitude-bounded map viewport query.
-    pub fn map_viewport_count(&self) -> usize {
-        self.db
-            .read(&self.map_viewport)
-            .expect("read map viewport")
-            .len()
-    }
-
-    /// Venue names in the ordered, bounded viewport result. Keeping this
-    /// explicit makes the workload receipt sensitive to both the spatial
-    /// predicate and the result ordering rather than merely observing a
-    /// non-empty map.
-    pub fn map_viewport_venue_names(&self) -> Vec<String> {
-        self.db
-            .read(&self.map_viewport)
-            .expect("read map viewport")
-            .into_iter()
-            .map(|venue| match venue.cell(&self.venues_table, "name") {
-                Some(Value::String(name)) => name,
-                other => panic!("unexpected viewport venue name: {other:?}"),
-            })
-            .collect()
-    }
 }
 
 fn schema() -> JazzSchema {
@@ -227,8 +232,7 @@ fn schema() -> JazzSchema {
                     .column("city", ColumnType::Text)
                     .column("country", ColumnType::Text)
                     .column("lat", ColumnType::Double)
-                    .column("lng", ColumnType::Double)
-                    .index_only(["lat", "lng", "name"]),
+                    .column("lng", ColumnType::Double),
             )
             .table(
                 TableSchemaBuilder::new("stops")
@@ -236,8 +240,7 @@ fn schema() -> JazzSchema {
                     .fk_column("venueId", "venues")
                     .column("date", ColumnType::Timestamp)
                     .column("status", ColumnType::Text)
-                    .column("publicDescription", ColumnType::Text)
-                    .index_only(["bandId", "date", "status"]),
+                    .column("publicDescription", ColumnType::Text),
             )
             .build(),
     )
@@ -267,7 +270,21 @@ fn row_id(kind: u8, index: usize) -> RowUuid {
 fn stop_date(stop: usize) -> u64 {
     match stop {
         0 => WINDOW_START - DAY_SECONDS,
-        1..=11 => WINDOW_START + (stop as u64 - 1) * DAY_SECONDS,
+        // The app window contains more than the twelve returned rows, so a
+        // removed `.limit(12)` is observable in the workload receipt.
+        1..=22 => WINDOW_START + (stop as u64 - 1) * DAY_SECONDS,
         _ => WINDOW_START + (stop as u64 + 9) * DAY_SECONDS,
+    }
+}
+
+fn stop_status(stop: usize) -> &'static str {
+    // The public query must skip both non-confirmed states and still have more
+    // than twelve candidates, making its predicate, order, and limit visible.
+    if stop.is_multiple_of(5) {
+        "tentative"
+    } else if stop.is_multiple_of(7) {
+        "cancelled"
+    } else {
+        "confirmed"
     }
 }

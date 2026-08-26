@@ -14,7 +14,8 @@ pnpm dev
 
 `benchmarks/` is a self-contained native workload variant. It duplicates the
 public schedule and venue shapes needed to measure the app's two browse paths:
-the ordered, bounded calendar window and the latitude-bounded map viewport.
+the member calendar and the confirmed-only public calendar. Both are ordered,
+bounded three-week itinerary reads with their venue relation included.
 It does not import frontend code or claim to cover the app's unresolved
 membership/venue-ownership policy decisions.
 
