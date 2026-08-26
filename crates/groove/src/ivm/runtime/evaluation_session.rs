@@ -176,13 +176,35 @@ impl EvaluationInputs {
 }
 
 type PendingRequest<'a> =
-    StorageFuture<'a, Result<EvaluationRequestOutput, super::IvmRuntimeError>>;
+    StorageFuture<'a, Result<EvaluationRequestOutput, EvaluationRequestFailure>>;
+
+#[derive(Debug)]
+pub(super) struct EvaluationRequestFailure {
+    pub(super) error: super::IvmRuntimeError,
+    pub(super) publication_metadata_durability: bool,
+}
+
+impl From<super::IvmRuntimeError> for EvaluationRequestFailure {
+    fn from(error: super::IvmRuntimeError) -> Self {
+        Self {
+            error,
+            publication_metadata_durability: false,
+        }
+    }
+}
+
+impl From<crate::storage::Error> for EvaluationRequestFailure {
+    fn from(error: crate::storage::Error) -> Self {
+        super::IvmRuntimeError::from(error).into()
+    }
+}
 
 /// One request registry is shared by every work entry in an evaluation
 /// session. Equal semantic requests therefore have one future and one result.
 pub(super) struct EvaluationRequests<'a> {
     pending: BTreeMap<EvaluationRequestKey, PendingRequest<'a>>,
-    ready: BTreeMap<EvaluationRequestKey, Result<EvaluationRequestOutput, super::IvmRuntimeError>>,
+    ready:
+        BTreeMap<EvaluationRequestKey, Result<EvaluationRequestOutput, EvaluationRequestFailure>>,
 }
 
 impl<'a> EvaluationRequests<'a> {
@@ -279,6 +301,7 @@ impl<'a> EvaluationRequests<'a> {
                     load_indexed_rows(storage, table_schema, index_schema, index, entries)
                         .await
                         .map(EvaluationRequestOutput::Storage)
+                        .map_err(Into::into)
                 })
             }
             EvaluationRequestKey::Storage(StorageRequestKey::IndexedRowsPrefixLimit {
@@ -308,6 +331,7 @@ impl<'a> EvaluationRequests<'a> {
                     load_indexed_rows(storage, table_schema, index_schema, index, entries)
                         .await
                         .map(EvaluationRequestOutput::Storage)
+                        .map_err(Into::into)
                 })
             }
             EvaluationRequestKey::Storage(StorageRequestKey::IndexedRowsRange {
@@ -338,27 +362,33 @@ impl<'a> EvaluationRequests<'a> {
                     load_indexed_rows(storage, table_schema, index_schema, index, entries)
                         .await
                         .map(EvaluationRequestOutput::Storage)
+                        .map_err(Into::into)
                 })
             }
             EvaluationRequestKey::Chunk(request) => {
                 let request = request.clone();
                 match chunks {
                     Some(chunks) => {
-                        let future = chunks.get(request.clone());
+                        let future = chunks.get_tracked(request.clone());
                         Box::pin(async move {
-                            future
-                                .await
-                                .map(|bytes| {
-                                    EvaluationRequestOutput::Chunk(LoadedChunk {
-                                        bytes: LoadedChunkBytes::Leased(bytes),
+                            match future.await {
+                                Ok(bytes) => Ok(EvaluationRequestOutput::Chunk(LoadedChunk {
+                                    bytes: LoadedChunkBytes::Leased(bytes),
+                                })),
+                                Err(error) => {
+                                    let (error, publication_metadata_durability) =
+                                        error.into_parts();
+                                    Err(EvaluationRequestFailure {
+                                        error: super::IvmRuntimeError::Chunk(error),
+                                        publication_metadata_durability,
                                     })
-                                })
-                                .map_err(super::IvmRuntimeError::Chunk)
+                                }
+                            }
                         }) as PendingRequest<'a>
                     }
                     None => Box::pin(async {
-                        Err(super::IvmRuntimeError::Chunk(
-                            crate::chunks::ChunkError::Unavailable,
+                        Err(EvaluationRequestFailure::from(
+                            super::IvmRuntimeError::Chunk(crate::chunks::ChunkError::Unavailable),
                         ))
                     }) as PendingRequest<'a>,
                 }
@@ -389,7 +419,7 @@ impl<'a> EvaluationRequests<'a> {
     pub(super) fn take(
         &mut self,
         key: &EvaluationRequestKey,
-    ) -> Option<Result<EvaluationRequestOutput, super::IvmRuntimeError>> {
+    ) -> Option<Result<EvaluationRequestOutput, EvaluationRequestFailure>> {
         self.ready.remove(key)
     }
 
@@ -401,7 +431,7 @@ impl<'a> EvaluationRequests<'a> {
         &mut self,
     ) -> Result<
         BTreeMap<EvaluationRequestKey, EvaluationRequestOutput>,
-        Box<(EvaluationRequestKey, super::IvmRuntimeError)>,
+        Box<(EvaluationRequestKey, EvaluationRequestFailure)>,
     > {
         let ready = std::mem::take(&mut self.ready);
         ready

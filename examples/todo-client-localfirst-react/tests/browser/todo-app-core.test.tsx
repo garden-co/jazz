@@ -19,8 +19,6 @@ type TestWindow = Window & {
   __jazz?: { shutdown(namespace?: string): Promise<void> };
 };
 
-const EDGE_READINESS_PROJECT_NAME = "__edge-readiness-sentinel__";
-
 function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -79,16 +77,15 @@ async function addTodoAndWaitForLocalDurability(el: HTMLDivElement, title: strin
   });
 }
 
-function EdgeReadinessProbe({ onSettled }: { onSettled: (error: Error | null) => void }) {
+function TodosEdgeReadinessProbe({ onSettled }: { onSettled: (error: Error | null) => void }) {
   const db = useDb();
   useEffect(() => {
-    // This disjoint, empty projects query establishes the edge carrier without
-    // requesting the todos relation whose reconnect path this canary measures.
-    void db.all(app.projects.where({ name: EDGE_READINESS_PROJECT_NAME }), { tier: "edge" }).then(
-      (projects) => {
-        if (projects.length === 0) onSettled(null);
-        else onSettled(new Error("edge readiness sentinel unexpectedly exists"));
-      },
+    // An edge read of the same relation establishes the causal frontier that
+    // this browser canary is about. A disjoint sentinel only proved that a
+    // websocket existed; it could resolve before the todo subscription had
+    // been attached or replayed after a persistent-worker restart.
+    void db.all(app.todos, { tier: "edge" }).then(
+      () => onSettled(null),
       (error: unknown) => onSettled(error instanceof Error ? error : new Error(String(error))),
     );
   }, [db, onSettled]);
@@ -115,7 +112,7 @@ describe("React Todo App core browser canary", () => {
     await act(async () => {
       r.render(
         <App config={{ appId: dbConfig.appId ?? "test-app", ...dbConfig }}>
-          {onEdgeSettled && <EdgeReadinessProbe onSettled={onEdgeSettled} />}
+          {onEdgeSettled && <TodosEdgeReadinessProbe onSettled={onEdgeSettled} />}
         </App>,
       );
     });
@@ -267,6 +264,8 @@ describe("React Todo App core browser canary", () => {
     const readerSecret = "Hw5MHsjqxaP82KsnDXOB9V_7bRWGip1wDRY70fVr8Z8";
     const onlineTitle = "Core reconnect online todo";
     const offlineTitle = "Core reconnect offline todo";
+    let writerEdgeResult: Error | null | undefined;
+    let readerEdgeResult: Error | null | undefined;
 
     const writer = await mountApp({
       appId: APP_ID,
@@ -274,6 +273,9 @@ describe("React Todo App core browser canary", () => {
       serverUrl: SERVER_URL,
       adminSecret: ADMIN_SECRET,
       secret: writerSecret,
+      onEdgeSettled: (error) => {
+        writerEdgeResult = error;
+      },
     });
     const reader = await mountApp({
       appId: APP_ID,
@@ -281,11 +283,18 @@ describe("React Todo App core browser canary", () => {
       serverUrl: SERVER_URL,
       adminSecret: ADMIN_SECRET,
       secret: readerSecret,
+      onEdgeSettled: (error) => {
+        readerEdgeResult = error;
+      },
     });
 
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 750));
-    });
+    await waitFor(
+      () => writerEdgeResult !== undefined && readerEdgeResult !== undefined,
+      15000,
+      "both todo subscriptions should establish edge coverage before the online write",
+    );
+    if (writerEdgeResult) throw writerEdgeResult;
+    if (readerEdgeResult) throw readerEdgeResult;
 
     await addTodo(writer, onlineTitle);
     await waitFor(
@@ -317,7 +326,7 @@ describe("React Todo App core browser canary", () => {
     await waitFor(
       () => edgeResult !== undefined,
       15000,
-      "reopened reader should establish edge-readiness before catch-up",
+      "reopened reader should establish todo edge coverage before catch-up",
     );
     if (edgeResult) throw edgeResult;
 

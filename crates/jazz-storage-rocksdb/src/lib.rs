@@ -7,6 +7,8 @@
 //! storage for tests lives in [`super`], and all schema-aware behavior lives
 //! above this adapter.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -106,6 +108,8 @@ pub struct RocksDbStorage {
     db: DB,
     write_options: WriteOptions,
     write_flush_cadence: RefCell<Option<WriteFlushCadence>>,
+    #[cfg(test)]
+    last_wal_flush_sync: Cell<Option<bool>>,
 }
 
 /// Opens a native persistent store at the exact shell-provided path.
@@ -352,6 +356,8 @@ impl RocksDbStorage {
             db,
             write_options,
             write_flush_cadence: RefCell::new(None),
+            #[cfg(test)]
+            last_wal_flush_sync: Cell::new(None),
         })
     }
 
@@ -362,6 +368,12 @@ impl RocksDbStorage {
         self.db
             .cf_handle(cf)
             .ok_or_else(|| Error::ColumnFamilyNotFound(cf.to_owned()))
+    }
+
+    fn flush_wal(&self, sync: bool) -> Result<(), Error> {
+        #[cfg(test)]
+        self.last_wal_flush_sync.set(Some(sync));
+        self.db.flush_wal(sync).storage()
     }
 
     /// Snapshot RocksDB's per-column-family size and background-work
@@ -699,6 +711,10 @@ impl OrderedKvStorage for RocksDbStorage {
         })
     }
 
+    fn close(&self) -> StorageFuture<'_, Result<(), Error>> {
+        self.flush_write_boundary()
+    }
+
     fn set_write_flush_cadence(&self, every: usize) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
             assert!(every > 0, "write flush cadence must be non-zero");
@@ -709,7 +725,7 @@ impl OrderedKvStorage for RocksDbStorage {
 
     fn flush_write_boundary(&self) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
-            self.db.flush_wal(true).storage()?;
+            self.flush_wal(true)?;
             if let Some(cadence) = self.write_flush_cadence.borrow_mut().as_mut() {
                 cadence.pending = 0;
             }
@@ -839,7 +855,7 @@ impl OrderedKvStorage for RocksDbStorage {
             write_options.disable_wal(false);
             self.db.write_opt(&batch, &write_options).storage()?;
             if should_flush {
-                self.db.flush_wal(true).storage()?;
+                self.flush_wal(true)?;
             }
             Ok(())
         })
@@ -968,6 +984,46 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
         assert!(storage.write_flush_cadence.borrow().is_none());
+    }
+
+    #[test]
+    fn close_flushes_a_partial_write_cadence() {
+        use groove::storage::{OrderedKvStorage, OwnedWriteOperation};
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        ready(storage.set_write_flush_cadence(8)).unwrap();
+        ready(storage.write_many(vec![OwnedWriteOperation::Set {
+            cf: "records".to_owned(),
+            key: b"pending".to_vec(),
+            value: b"value".to_vec(),
+        }]))
+        .unwrap();
+        assert_eq!(
+            storage
+                .write_flush_cadence
+                .borrow()
+                .as_ref()
+                .map(|cadence| cadence.pending),
+            Some(1)
+        );
+
+        ready(storage.close()).unwrap();
+
+        assert_eq!(
+            storage.last_wal_flush_sync.get(),
+            Some(true),
+            "close must synchronously flush the RocksDB WAL"
+        );
+
+        assert_eq!(
+            storage
+                .write_flush_cadence
+                .borrow()
+                .as_ref()
+                .map(|cadence| cadence.pending),
+            Some(0)
+        );
     }
 
     #[test]

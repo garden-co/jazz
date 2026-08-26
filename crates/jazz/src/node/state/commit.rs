@@ -1349,9 +1349,15 @@ where
         &mut self,
         mut commit: MergeableCommit,
         schema_version: SchemaVersionId,
+        allow_inherited_descriptors: bool,
     ) -> Result<MergeableCommit, Error> {
         if !commit.cells.values().any(value_contains_indirect_descriptor) {
             return Ok(commit);
+        }
+        if !allow_inherited_descriptors {
+            return Err(Error::InvalidMergeableCommit(
+                "complete row replacement contains an unverified large-value descriptor",
+            ));
         }
         let inherited = self
             .current_physical_cells_in_branch_schema(

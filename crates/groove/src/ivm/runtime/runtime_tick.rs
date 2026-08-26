@@ -7,7 +7,9 @@ use std::rc::Rc;
 use std::sync::Mutex;
 use std::task::{Context, Poll};
 
-use super::evaluation_session::{EvaluationInputs, EvaluationRequestKey, EvaluationRequests};
+use super::evaluation_session::{
+    EvaluationInputs, EvaluationRequestFailure, EvaluationRequestKey, EvaluationRequests,
+};
 use super::*;
 use crate::storage::OwnedStorage;
 
@@ -58,6 +60,21 @@ pub(super) struct IncrementalEvaluation<'a> {
     root_ordering_windows: HashMap<NodeId, RootOrderingWindows>,
     notification_publication: Option<PublicationId>,
     defer_notifications_until_durable: bool,
+    pending_resident_publication: Option<PendingResidentPublication>,
+}
+
+#[derive(Clone)]
+struct PendingResidentPublication {
+    publication: Rc<Cell<Option<PublicationId>>>,
+    notifications: Rc<RefCell<Vec<(SubscriptionId, QueuedMultisinkDeltas)>>>,
+    completed: Rc<Cell<bool>>,
+    defer_notifications_until_durable: bool,
+    chunk_provider: Option<crate::chunks::OwnedChunkProvider>,
+}
+
+pub(crate) struct ResidentTick {
+    pub(crate) metrics: TickMetrics,
+    publication: PendingResidentPublication,
 }
 
 struct EvaluationFailure {
@@ -389,10 +406,15 @@ impl EvaluationWorkQueue {
     fn failure_for_request(
         &self,
         request: &EvaluationRequestKey,
-        error: IvmRuntimeError,
+        failure: EvaluationRequestFailure,
     ) -> EvaluationFailure {
+        let kind = if failure.publication_metadata_durability {
+            EvaluationFailureKind::Fatal
+        } else {
+            EvaluationFailureKind::Scoped
+        };
         EvaluationFailure {
-            kind: EvaluationFailureKind::Scoped,
+            kind,
             affected_nodes: self.downstream_closure(
                 self.request_dependents
                     .get(request)
@@ -400,7 +422,7 @@ impl EvaluationWorkQueue {
                     .flatten()
                     .copied(),
             ),
-            error: Arc::new(error),
+            error: Arc::new(failure.error),
         }
     }
 
@@ -546,7 +568,12 @@ impl IncrementalEvaluation<'_> {
                         registered_requests |= self.requests.request(
                             request,
                             &self.storage,
-                            Some(&runtime.chunk_provider),
+                            Some(
+                                self.pending_resident_publication
+                                    .as_ref()
+                                    .and_then(|pending| pending.chunk_provider.as_ref())
+                                    .unwrap_or(&runtime.chunk_provider),
+                            ),
                             &runtime.schema,
                         );
                     }
@@ -665,7 +692,12 @@ impl IncrementalEvaluation<'_> {
                             self.requests.request(
                                 request,
                                 &self.storage,
-                                Some(&runtime.chunk_provider),
+                                Some(
+                                    self.pending_resident_publication
+                                        .as_ref()
+                                        .and_then(|pending| pending.chunk_provider.as_ref())
+                                        .unwrap_or(&runtime.chunk_provider),
+                                ),
                                 &runtime.schema,
                             );
                         }
@@ -753,10 +785,22 @@ impl IncrementalEvaluation<'_> {
                     multisink_deltas_encoded_bytes(&records);
             }
             let mut queued = QueuedMultisinkDeltas::new(records);
-            queued.publication = self.notification_publication;
+            let notification_publication = self
+                .pending_resident_publication
+                .as_ref()
+                .and_then(|pending| pending.publication.get())
+                .or(self.notification_publication);
+            queued.publication = notification_publication;
             if !queued.deltas.is_empty() {
-                if self.defer_notifications_until_durable
-                    && self.notification_publication.is_some_and(|publication| {
+                if let Some(pending) = &self.pending_resident_publication
+                    && notification_publication.is_none()
+                {
+                    pending
+                        .notifications
+                        .borrow_mut()
+                        .push((*subscription_id, queued));
+                } else if self.defer_notifications_until_durable
+                    && notification_publication.is_some_and(|publication| {
                         !runtime
                             .durable_notification_publications
                             .contains(&publication)
@@ -764,7 +808,7 @@ impl IncrementalEvaluation<'_> {
                 {
                     runtime
                         .deferred_notifications
-                        .entry(self.notification_publication.expect("checked publication"))
+                        .entry(notification_publication.expect("checked publication"))
                         .or_default()
                         .push((*subscription_id, queued));
                 } else if subscription.sender.send(queued).is_err() {
@@ -791,8 +835,16 @@ impl IncrementalEvaluation<'_> {
             runtime.affected_recursive_nodes_are_current(&self.affected_nodes, self.current_tick)
         );
         runtime.evict_eval_memo();
-        if self.defer_notifications_until_durable
-            && let Some(publication) = self.notification_publication
+        if let Some(pending) = &self.pending_resident_publication
+            && pending.publication.get().is_none()
+        {
+            pending.completed.set(true);
+        } else if self.defer_notifications_until_durable
+            && let Some(publication) = self
+                .pending_resident_publication
+                .as_ref()
+                .and_then(|pending| pending.publication.get())
+                .or(self.notification_publication)
             && !runtime
                 .durable_notification_publications
                 .remove(&publication)
@@ -964,7 +1016,7 @@ impl<'a> EvaluationSession<'a> {
         self.requests.poll(cx);
         let ready = match self.requests.drain_ready() {
             Ok(ready) => ready,
-            Err(error) => return Poll::Ready(Err(error.1)),
+            Err(error) => return Poll::Ready(Err(error.1.error)),
         };
         self.work_queue.requests_ready(ready.keys().cloned());
         self.evaluation_inputs.install(ready);
@@ -1238,6 +1290,18 @@ impl IvmRuntime {
         }
     }
 
+    fn fail_all_subscriptions(&mut self, error: Arc<IvmRuntimeError>) {
+        for subscription in self.multisink_subscriptions.values_mut() {
+            if subscription.failed {
+                continue;
+            }
+            subscription.failed = true;
+            subscription
+                .sender
+                .fail(SubscriptionError::new(Arc::clone(&error)));
+        }
+    }
+
     pub async fn tick<S>(
         &mut self,
         table_deltas: Vec<TableDelta>,
@@ -1283,9 +1347,22 @@ impl IvmRuntime {
         &mut self,
         table_deltas: Vec<TableDelta>,
         storage: OwnedStorage<'static>,
-        publication: PublicationId,
         defer_notifications_until_durable: bool,
-    ) -> Result<TickMetrics, IvmRuntimeError> {
+        publication_install: Option<(
+            Rc<dyn crate::chunks::ChunkInstallObserver>,
+            crate::chunks::PublicationInstallFailures,
+        )>,
+    ) -> Result<ResidentTick, IvmRuntimeError> {
+        let publication = PendingResidentPublication {
+            publication: Rc::new(Cell::new(None)),
+            notifications: Rc::new(RefCell::new(Vec::new())),
+            completed: Rc::new(Cell::new(false)),
+            defer_notifications_until_durable,
+            chunk_provider: publication_install.map(|(observer, failures)| {
+                self.chunk_provider
+                    .with_install_observer(observer, failures)
+            }),
+        };
         let temporal_blockers = {
             let pending = self.pending_incremental.0.borrow();
             pending
@@ -1299,8 +1376,9 @@ impl IvmRuntime {
                 table_deltas,
                 Vec::new(),
                 storage,
-                Some(publication),
+                None,
                 defer_notifications_until_durable,
+                Some(publication.clone()),
             )
             .await?;
         evaluation
@@ -1331,8 +1409,8 @@ impl IvmRuntime {
         .await;
         let metrics = evaluation.metrics.clone();
         match progress {
-            Poll::Ready(Ok(())) => Ok(metrics),
-            Poll::Ready(Err(failure)) => Err(failure.into_error()),
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(failure)) => return Err(failure.into_error()),
             Poll::Pending => {
                 evaluation.work_queue.drain_completed_events();
                 let mut pending = self.pending_incremental.0.borrow_mut();
@@ -1349,9 +1427,39 @@ impl IvmRuntime {
                     .evaluations
                     .insert(evaluation_id, PendingEvaluation::Incremental(evaluation));
                 pending.order.push_back(evaluation_id);
-                Ok(metrics)
             }
+        };
+        Ok(ResidentTick {
+            metrics,
+            publication,
+        })
+    }
+
+    pub(crate) fn assign_resident_publication(
+        &mut self,
+        tick: ResidentTick,
+        publication: PublicationId,
+    ) -> TickMetrics {
+        assert_eq!(
+            tick.publication.publication.replace(Some(publication)),
+            None
+        );
+        let mut notifications = std::mem::take(&mut *tick.publication.notifications.borrow_mut());
+        for (_, queued) in &mut notifications {
+            queued.publication = Some(publication);
         }
+        if tick.publication.defer_notifications_until_durable {
+            self.deferred_notifications
+                .entry(publication)
+                .or_default()
+                .extend(notifications);
+            if tick.publication.completed.get() {
+                self.completed_deferred_publications.insert(publication);
+            }
+        } else {
+            self.send_deferred_notifications(notifications);
+        }
+        tick.metrics
     }
 
     pub(crate) fn settle_deferred_notifications(&mut self, publication: PublicationId) {
@@ -1485,6 +1593,12 @@ impl IvmRuntime {
                         self.unsubscribe(hydration.subscription_id);
                     }
                     if failure.kind == EvaluationFailureKind::Fatal {
+                        let IvmRuntimeError::Chunk(error) = failure.error.as_ref() else {
+                            unreachable!("trusted install failures originate from chunk requests")
+                        };
+                        self.fail_all_subscriptions(Arc::new(IvmRuntimeError::Chunk(
+                            error.clone(),
+                        )));
                         state.order = retained_order;
                         *slot.borrow_mut() = state;
                         return Poll::Ready(Err(failure.into_error()));
@@ -1621,6 +1735,7 @@ impl IvmRuntime {
             storage,
             notification_publication,
             false,
+            None,
         )
         .await
     }
@@ -1632,6 +1747,7 @@ impl IvmRuntime {
         storage: OwnedStorage<'a>,
         notification_publication: Option<PublicationId>,
         defer_notifications_until_durable: bool,
+        pending_resident_publication: Option<PendingResidentPublication>,
     ) -> Result<IncrementalEvaluation<'a>, IvmRuntimeError> {
         let pending_binding_retractions = self.pending_binding_retractions.len();
         if pending_binding_retractions != 0 {
@@ -1737,6 +1853,7 @@ impl IvmRuntime {
             root_ordering_windows: HashMap::default(),
             notification_publication,
             defer_notifications_until_durable,
+            pending_resident_publication,
         })
     }
 
