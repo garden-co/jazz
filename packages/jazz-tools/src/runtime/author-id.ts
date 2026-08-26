@@ -5,6 +5,22 @@ const STORED_SCALAR_INLINE_TAG = 2;
 const CANONICAL_AUTHOR_OPEN_BRACKET = 0x5b;
 const publicSessions = new WeakMap<Session, PublicSession>();
 
+function cloneAndFreezeClaim(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return Object.freeze(value.map(cloneAndFreezeClaim));
+  }
+  if (value !== null && typeof value === "object") {
+    const cloned = Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, nested]) => [
+        key,
+        cloneAndFreezeClaim(nested),
+      ]),
+    );
+    return Object.freeze(cloned);
+  }
+  return value;
+}
+
 export type CanonicalAuthorSubject = {
   issuer: string;
   user_id: string;
@@ -60,15 +76,17 @@ export function withCanonicalUser(session: Session): PublicSession {
   const existing = publicSessions.get(session);
   if (existing) return existing;
   const user = canonicalAuthorSubject(session.issuer, session.user_id);
-  const published: PublicSession = {
-    issuer: session.issuer,
-    user_id: session.user_id,
-    claims: session.claims,
-    authMode: session.authMode,
+  const claims = cloneAndFreezeClaim({
+    ...session.claims,
+    iss: session.issuer,
+    sub: session.user_id,
+  }) as Readonly<Record<string, unknown>>;
+  const published: PublicSession = Object.freeze({
     user,
-  };
+    claims,
+    authMode: session.authMode,
+  });
   publicSessions.set(session, published);
-  publicSessions.set(published, published);
   return published;
 }
 

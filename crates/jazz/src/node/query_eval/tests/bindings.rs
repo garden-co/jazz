@@ -236,10 +236,10 @@ fn nested_read_policies_reuse_an_outer_equivalent_claim_slot() {
     );
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xf4; 16]), schema.clone());
     let identity = author(0xf5);
-    node.set_session_claims(
+    node.set_test_provider_claims(
         identity,
         BTreeMap::from([(
-            "user_id".to_owned(),
+            crate::query::provider_claim_key("user_id"),
             Value::String(identity.test_uuid().to_string()),
         )]),
     );
@@ -364,14 +364,20 @@ fn lowered_groove_graph_differs_for_distinct_session_claim_values() {
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xa2; 16]), schema.clone());
     let identity = author(0xa3);
     let shape = Query::from("issues")
-        .filter(eq(col("requiresAdmin"), claim("isAdmin")))
+        .filter(eq(
+            col("requiresAdmin"),
+            claim(crate::query::provider_claim_key("isAdmin")),
+        ))
         .validate(&schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
-    node.set_session_claims(
+    node.set_test_provider_claims(
         identity,
-        BTreeMap::from([("isAdmin".to_owned(), Value::Bool(true))]),
+        BTreeMap::from([(
+            crate::query::provider_claim_key("isAdmin"),
+            Value::Bool(true),
+        )]),
     );
     let admin_graph = lowered_current_app_rows_graph(
         &mut node,
@@ -381,9 +387,12 @@ fn lowered_groove_graph_differs_for_distinct_session_claim_values() {
         &ReadViewSpec::default(),
     );
 
-    node.set_session_claims(
+    node.set_test_provider_claims(
         identity,
-        BTreeMap::from([("isAdmin".to_owned(), Value::Bool(false))]),
+        BTreeMap::from([(
+            crate::query::provider_claim_key("isAdmin"),
+            Value::Bool(false),
+        )]),
     );
     let non_admin_graph = lowered_current_app_rows_graph(
         &mut node,
@@ -396,6 +405,22 @@ fn lowered_groove_graph_differs_for_distinct_session_claim_values() {
     assert_ne!(
         admin_graph, non_admin_graph,
         "session claim values must be encoded in the lowered Groove descriptor graph"
+    );
+
+    node.set_session_claims(
+        identity,
+        BTreeMap::from([("isAdmin".to_owned(), Value::Bool(true))]),
+    );
+    let legacy_flat_graph = lowered_current_app_rows_graph(
+        &mut node,
+        &shape,
+        &binding,
+        identity,
+        &ReadViewSpec::default(),
+    );
+    assert_ne!(
+        legacy_flat_graph, admin_graph,
+        "an unprefixed provider claim must not satisfy a nested session.claims binding"
     );
 }
 

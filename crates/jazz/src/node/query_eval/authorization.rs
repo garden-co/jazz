@@ -1510,9 +1510,12 @@ mod authorization_scope_compiler_tests {
             RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
         let mut node = NodeState::new(NodeUuid::from_bytes([7; 16]), schema, storage).unwrap();
         let identity = AuthorSubject::for_test_bytes([8; 16]);
-        node.set_session_claims(
+        node.set_test_provider_claims(
             identity,
-            BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
+            BTreeMap::from([(
+                crate::query::provider_claim_key("role"),
+                Value::String("editor".to_owned()),
+            )]),
         );
         let first_action = PermissionAdviceAction::Read {
             table: "document_access_edges".to_owned(),
@@ -1555,9 +1558,12 @@ mod authorization_scope_compiler_tests {
             first.operation, second.operation,
             "row remains an ephemeral evaluation key"
         );
-        node.set_session_claims(
+        node.set_test_provider_claims(
             identity,
-            BTreeMap::from([("role".to_owned(), Value::String("viewer".to_owned()))]),
+            BTreeMap::from([(
+                crate::query::provider_claim_key("role"),
+                Value::String("viewer".to_owned()),
+            )]),
         );
         let changed_claims = node
             .authorization_support_scope(identity, &first_action)
@@ -1598,9 +1604,12 @@ mod authorization_scope_compiler_tests {
             RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
         let mut node = NodeState::new(NodeUuid::from_bytes([9; 16]), schema, storage).unwrap();
         let identity = AuthorSubject::for_test_bytes([3; 16]);
-        node.set_session_claims(
+        node.set_test_provider_claims(
             identity,
-            BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
+            BTreeMap::from([(
+                crate::query::provider_claim_key("role"),
+                Value::String("editor".to_owned()),
+            )]),
         );
         let cells = BTreeMap::from([("value".to_owned(), Value::String("next".to_owned()))]);
         let insert = node
@@ -1678,14 +1687,17 @@ mod authorization_scope_compiler_tests {
         let identity =
             AuthorSubject::authenticated("https://issuer.example", "opaque-subject").unwrap();
         let user_id = uuid::Uuid::from_bytes([0x52; 16]);
-        node.set_session_claims(
+        node.set_test_provider_claims(
             identity,
             BTreeMap::from([
                 (
-                    "sub".to_owned(),
+                    crate::query::provider_claim_key("sub"),
                     Value::String("provider-subject".to_owned()),
                 ),
-                ("user_id".to_owned(), Value::Uuid(user_id)),
+                (
+                    crate::query::provider_claim_key("user_id"),
+                    Value::Uuid(user_id),
+                ),
             ]),
         );
 
@@ -1707,7 +1719,8 @@ mod authorization_scope_compiler_tests {
                 .any(|value| value == &Value::Uuid(user_id))
         );
         assert_eq!(
-            permission_scope_claim_values(identity, node.session_claims.get(&identity)).get("sub"),
+            permission_scope_claim_values(identity, node.session_claims.get(&identity))
+                .get(&crate::query::provider_claim_key("sub")),
             Some(&Value::String("provider-subject".to_owned()))
         );
         assert_eq!(

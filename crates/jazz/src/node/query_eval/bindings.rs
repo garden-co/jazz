@@ -286,15 +286,7 @@ fn bind_scope_claim_operand(
         return;
     };
     let storage_name = crate::query::operand_claim_storage_key(name);
-    let Some(value) = claim_values
-        .get(&storage_name)
-        .or_else(|| {
-            storage_name
-                .strip_prefix(crate::query::PROVIDER_CLAIM_PREFIX)
-                .and_then(|raw| claim_values.get(raw))
-        })
-        .cloned()
-    else {
+    let Some(value) = claim_values.get(&storage_name).cloned() else {
         return;
     };
     let param = claim_param_field(&ClaimPath(crate::query::operand_claim_path(name)));
@@ -499,7 +491,7 @@ fn operand_contains_unbound_claim(
 ) -> bool {
     matches!(operand, Operand::Claim(name) if !is_builtin_policy_claim(name) && !claims.is_some_and(|claims| {
         let storage = crate::query::operand_claim_storage_key(name);
-        claims.contains_key(&storage) || storage.strip_prefix(crate::query::PROVIDER_CLAIM_PREFIX).is_some_and(|raw| claims.contains_key(raw))
+        claims.contains_key(&storage)
     }))
 }
 

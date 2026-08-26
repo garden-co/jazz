@@ -286,8 +286,8 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc4, reader, &schema);
     let invite_client = open_db(0xc5, reader, &schema);
-    client.set_identity_claims(reader, normal_claims.clone());
-    invite_client.set_identity_claims(reader, invite_claims.clone());
+    client.set_test_provider_claims(reader, normal_claims.clone());
+    invite_client.set_test_provider_claims(reader, invite_claims.clone());
     // The normal connection remains live while a separately scoped invite
     // connection writes its membership. This is the production handoff.
     let (client_transport, server_transport) = duplex();
@@ -1191,7 +1191,7 @@ fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
     let spy = AuthorSubject::for_test_bytes([0xc1; 16]);
     let db = open_db(0xc4, AuthorSubject::SYSTEM, &schema);
     for identity in [member, other, spy] {
-        db.set_identity_claims(
+        db.set_test_provider_claims(
             identity,
             BTreeMap::from([(
                 crate::query::provider_claim_key("sub"),

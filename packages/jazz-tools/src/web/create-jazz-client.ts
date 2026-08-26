@@ -1,5 +1,4 @@
 import type { PublicSession } from "../runtime/context.js";
-import { withCanonicalUser } from "../runtime/author-id.js";
 import { createClientConfigKey } from "../runtime/client-config-key.js";
 import { acquireClient, releaseClient } from "../runtime/client-registry.js";
 import type { Db, DbConfig } from "../runtime/db.js";
@@ -23,12 +22,12 @@ async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
   const manager = new SubscriptionsOrchestrator(
     { appId: config.appId },
     getDbSubscriptionSource(db),
-    session,
+    db.getInternalSession(),
   );
   await manager.init();
   const stopSessionSync = db.onAuthChanged(({ session: nextSession }) => {
     session = nextSession ?? null;
-    manager.setSession(nextSession ?? null);
+    manager.setSession(db.getInternalSession());
   });
   const unregisterWindowJazzStorageClient = registerWindowJazzStorageClient(db);
 
@@ -36,7 +35,7 @@ async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
     {
       db,
       get session() {
-        return session ? withCanonicalUser(session) : null;
+        return session;
       },
       async shutdown() {
         await runCleanupSteps([

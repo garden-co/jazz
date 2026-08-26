@@ -1764,7 +1764,7 @@ pub(super) fn open_core_with_claims(
         storage,
     )
     .unwrap();
-    node.set_session_claims(author, claims);
+    node.set_test_provider_claims(author, claims);
     CoreDb {
         server: Node::new(node),
         schema: schema.clone(),
@@ -2025,7 +2025,7 @@ impl CoreDb {
         claims: BTreeMap<String, Value>,
     ) -> Rc<LocalMutex<PeerConnection<RocksDbStorage>>> {
         self.server
-            .accept_subscriber_with_claims(transport, identity, claims)
+            .accept_test_subscriber_with_claims(transport, identity, claims)
     }
 
     pub(super) fn accept_subscriber_with_resume(

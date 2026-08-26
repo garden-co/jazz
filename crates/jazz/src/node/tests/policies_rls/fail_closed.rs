@@ -198,7 +198,7 @@ fn registered_team_claim_in_composed_read_policy_allows_matching_rows() {
         Some(DurabilityTier::Global),
     )
     .unwrap();
-    core.set_session_claims(
+    core.set_test_provider_claims(
         team_a,
         BTreeMap::from([("team".to_owned(), Value::Uuid(team_a.test_uuid()))]),
     );
@@ -261,7 +261,7 @@ fn nullable_claim_equality_policy_branch_allows_matching_row() {
         Some(DurabilityTier::Global),
     )
     .unwrap();
-    core.set_session_claims(
+    core.set_test_provider_claims(
         reader,
         BTreeMap::from([(
             "join_code".to_owned(),

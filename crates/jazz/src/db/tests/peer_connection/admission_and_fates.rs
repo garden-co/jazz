@@ -634,7 +634,7 @@ fn permission_advice_uses_authenticated_link_identity_without_mutating() {
         .unwrap()
         .row_uuid();
     let alice_client = open_db(0xa1, alice, &schema);
-    alice_client.set_identity_claims(alice, test_provider_claims(alice));
+    alice_client.set_test_provider_claims(alice, test_provider_claims(alice));
     let (alice_transport, alice_server_transport) = duplex_with_admitted_session_context(
         alice,
         NodeUuid::from_bytes([0xa1; 16]),
@@ -650,7 +650,7 @@ fn permission_advice_uses_authenticated_link_identity_without_mutating() {
     });
 
     let mallory_client = open_db(0xb2, mallory, &schema);
-    mallory_client.set_identity_claims(mallory, test_provider_claims(mallory));
+    mallory_client.set_test_provider_claims(mallory, test_provider_claims(mallory));
     let (mallory_transport, mallory_server_transport) = duplex_with_admitted_session_context(
         mallory,
         NodeUuid::from_bytes([0xb2; 16]),
@@ -693,7 +693,7 @@ fn distinct_advice_actions_with_one_compiled_scope_hydrate_once() {
         .unwrap()
         .row_uuid();
     let client = open_db(0xa1, alice, &schema);
-    client.set_identity_claims(alice, test_provider_claims(alice));
+    client.set_test_provider_claims(alice, test_provider_claims(alice));
     let (client_transport, server_transport) = duplex_with_admitted_session_context(
         alice,
         NodeUuid::from_bytes([0xa1; 16]),
@@ -745,7 +745,7 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
         .unwrap()
         .row_uuid();
     let client = open_db(0xa1, alice, &schema);
-    client.set_identity_claims(alice, test_provider_claims(alice));
+    client.set_test_provider_claims(alice, test_provider_claims(alice));
     let (client_transport, server_transport) = duplex_with_admitted_session_context(
         alice,
         NodeUuid::from_bytes([0xa1; 16]),
@@ -776,7 +776,7 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
     // authority-supplied support rows. The authority separately receives the
     // same refresh at its trusted connection-admission boundary; it must not
     // trust the client's queued SessionClaims frame.
-    client.set_identity_claims(alice, refreshed_claims.clone());
+    client.set_test_provider_claims(alice, refreshed_claims.clone());
     subscriber
         .borrow_mut()
         .update_authenticated_session_claims(refreshed_claims);
@@ -799,7 +799,7 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
         ),
         ("fresh".to_owned(), Value::Bool(false)),
     ]);
-    client.set_identity_claims(alice, advanced_claims.clone());
+    client.set_test_provider_claims(alice, advanced_claims.clone());
     subscriber
         .borrow_mut()
         .update_authenticated_session_claims(advanced_claims);

@@ -435,7 +435,9 @@ fn jwt_error(error: jsonwebtoken::errors::Error) -> AuthAdmissionError {
     AuthAdmissionError::InvalidJwt(error.to_string())
 }
 
-fn jwt_json_claims_to_policy_claims(
+/// Convert verified JWT JSON claims into scalar policy values. Registered
+/// identity fields are excluded because admission supplies verified values.
+pub fn jwt_json_claims_to_policy_claims(
     extra: BTreeMap<String, serde_json::Value>,
 ) -> Result<BTreeMap<String, Value>, AuthAdmissionError> {
     let mut claims = BTreeMap::new();

@@ -79,8 +79,10 @@ export interface Session {
  * themselves. Local interning is an implementation detail and is never
  * exposed here.
  */
-export interface PublicSession extends Session {
+export interface PublicSession {
   readonly user: string;
+  readonly claims: Readonly<Record<string, unknown>>;
+  readonly authMode: AuthMode;
 }
 
 /**

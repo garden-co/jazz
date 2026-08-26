@@ -187,7 +187,7 @@ fn maintained_view_capture_schema() -> JazzSchema {
 
 fn install_test_provider_claims(core: &mut NodeState<RocksDbStorage>, identity: AuthorSubject) {
     if matches!(identity, AuthorSubject::Authenticated(_)) {
-        core.set_session_claims(
+        core.set_test_provider_claims(
             identity,
             BTreeMap::from([(
                 crate::query::provider_claim_key("sub"),

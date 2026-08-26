@@ -331,8 +331,8 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
     assert_eq!(owner_payload.id, editor_head.version_id());
 
     let db = open_db(0xa0, AuthorSubject::SYSTEM, &structural);
-    db.set_identity_claims(alice, test_provider_claims(alice));
-    db.set_identity_claims(bob, test_provider_claims(bob));
+    db.set_test_provider_claims(alice, test_provider_claims(alice));
+    db.set_test_provider_claims(bob, test_provider_claims(bob));
     db.publish_schema_with_lens(
         1,
         SchemaLineagePublication::new(

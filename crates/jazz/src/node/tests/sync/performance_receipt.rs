@@ -249,7 +249,7 @@ fn policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt() {
         ("user_id".to_owned(), Value::Uuid(member.test_uuid())),
         ("isAdmin".to_owned(), Value::Bool(false)),
     ]);
-    core.set_session_claims(member, member_claims.clone());
+    core.set_test_provider_claims(member, member_claims.clone());
 
     seed_rows.push((
         "t1",
