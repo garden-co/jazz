@@ -10,17 +10,16 @@ a renderer-wide query. Cursors are ephemeral presence rows and are never part
 of history.
 
 The first slice only exposes settled authorization: admins bootstrap and manage
-membership, editors and admins add layers and shapes, and admins add immutable
+membership, editors and admins add layers and same-canvas shapes, and admins add immutable
 checkpoints. Asset mutation, layer/shape mutation and deletion, cursor creation,
 and checkpoint deletion remain default-deny until their ownership rules are
 specified in #1926. The UI keeps those surfaces read-only rather than offering
 an action with an undecided authorization contract.
 
-Shape insertion is additionally fail-closed for now. A correct rule must prove
-that the editor's membership, the shape canvas, and the referenced layer canvas
-are identical. The current core policy conversion cannot publish that correlated
-proof, so the app deliberately does not expose shape creation until that core
-receipt lands; it does not fall back to a membership-only check.
+Shape insertion requires two correlated proofs: the current user is an editor
+or admin of `shape.canvasId`, and `shape.layerId` resolves to a layer whose
+`canvasId` equals `shape.canvasId`. This explicitly denies attaching a shape to
+a layer from another canvas; it never falls back to membership alone.
 
 The follow-up topology receipt will run this ordinary application schema and
 policy set through browser → edge → core. Its deterministic timeout/fault

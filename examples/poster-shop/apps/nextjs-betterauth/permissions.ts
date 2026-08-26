@@ -60,11 +60,21 @@ export default definePermissions(app, ({ policy, session, anyOf, allOf, allowedT
   );
   policy.assets.allowRead.where(allowedTo.read("canvasId"));
   policy.shapes.allowRead.where(allowedTo.read("canvasId"));
-  // Do not admit a shape until the core policy converter can express the
-  // required correlated proof: editor/admin membership, `shape.canvasId`,
-  // and `shape.layerId -> layer.canvasId` must all agree. The prior direct
-  // membership rule missed the last check and was unsafe across canvases.
-  policy.shapes.allowInsert.never();
+  // Shape admission has two independently correlated proofs over the row
+  // being inserted: the selected layer belongs to this shape's canvas, and
+  // the current user is an editor or admin of that same canvas.  Keeping both
+  // predicates explicit prevents an editor on one canvas from attaching a
+  // shape to a layer on another.
+  policy.shapes.allowInsert.where((shape) =>
+    allOf([
+      policy.layers.exists.where({ id: shape.layerId, canvasId: shape.canvasId }),
+      policy.canvasMembers.exists.where({
+        canvasId: shape.canvasId,
+        userId: session.user_id,
+        role: { in: ["editor", "admin"] },
+      }),
+    ]),
+  );
   policy.cursors.allowRead.where(allowedTo.read("canvasId"));
   policy.checkpoints.allowRead.where(allowedTo.read("canvasId"));
   // Presence is replaceable ephemera: only its owner may update/delete it.

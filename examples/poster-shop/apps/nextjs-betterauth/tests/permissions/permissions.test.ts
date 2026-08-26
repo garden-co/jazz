@@ -9,7 +9,7 @@ beforeEach(async () => {
 });
 afterEach(async () => testApp.shutdown());
 
-it("allows an admin to bootstrap a canvas and an editor to add layers", async () => {
+it("allows an admin to bootstrap a canvas and an editor to add same-canvas shapes", async () => {
   const ownerId = "poster-owner",
     editorId = "poster-editor";
   const owner = testApp.as({
@@ -36,8 +36,8 @@ it("allows an admin to bootstrap a canvas and an editor to add layers", async ()
   const layer = await owner
     .insert(app.layers, { canvasId: canvas.id, name: "Art", zIndex: 0, visible: true })
     .wait({ tier: "edge" });
-  await editor.expectDenied((db) =>
-    db.insert(app.shapes, {
+  const shape = await editor
+    .insert(app.shapes, {
       canvasId: canvas.id,
       layerId: layer.id,
       kind: "rect",
@@ -48,8 +48,10 @@ it("allows an admin to bootstrap a canvas and an editor to add layers", async ()
       rotation: 0,
       zIndex: 0,
       fill: "#fff",
-    }),
-  );
+    })
+    .wait({ tier: "edge" });
+  expect(shape.layerId).toBe(layer.id);
+  expect(shape.canvasId).toBe(canvas.id);
   await owner.delete(app.canvasMembers, membership.id).wait({ tier: "edge" });
   await editor.expectDenied((db) =>
     db.insert(app.shapes, {
@@ -154,7 +156,7 @@ it("keeps canvas ordering and history markers behind the same membership boundar
   await owner.expectDenied((db) => db.delete(app.checkpoints, checkpoint.id));
 });
 
-it("fails closed for cross-canvas shapes pending correlated shape admission", async () => {
+it("denies cross-canvas shapes even for an admin of both canvases", async () => {
   const ownerId = "cross-canvas-owner";
   const owner = testApp.as({
     issuer: "https://poster-shop.test",
