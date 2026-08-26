@@ -41,7 +41,11 @@ impl<T> RocksResultExt<T> for Result<T, rocksdb::Error> {
 }
 
 const ROCKSDB_BLOCK_CACHE_BYTES: usize = 256 * 1024 * 1024;
-const ROCKSDB_WRITE_BUFFER_MANAGER_BYTES: usize = 256 * 1024 * 1024;
+// Keep desktop reopen recovery debt bounded by allowing RocksDB to flush
+// incrementally during sustained writes. A 256 MiB budget left realistic
+// local datasets entirely in the WAL until exit; 16 MiB is the measured knee
+// between reopen latency and foreground ingest cost (see #2104).
+const ROCKSDB_WRITE_BUFFER_MANAGER_BYTES: usize = 16 * 1024 * 1024;
 const ROCKSDB_DEFAULT_BLOCK_BYTES: usize = 16 * 1024;
 const ROCKSDB_LARGE_BLOCK_BYTES: usize = 64 * 1024;
 const ROCKSDB_APPEND_TARGET_FILE_BYTES: u64 = 128 * 1024 * 1024;
@@ -266,7 +270,7 @@ impl RocksDbStorage {
                 "RocksDB internal column family name is reserved".to_owned(),
             ));
         }
-        // Share one 256MB block cache and one 256MB write-buffer budget across
+        // Share one 256MB block cache and one bounded write-buffer budget across
         // all column families opened by this storage instance.
         let block_cache = Cache::new_lru_cache(ROCKSDB_BLOCK_CACHE_BYTES);
         let write_buffer_manager =
