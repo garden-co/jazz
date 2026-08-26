@@ -143,55 +143,69 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
       await Promise.resolve();
       yield `${prefix} second`;
     };
+    let bodyError: unknown;
 
-    const writes = await withWatchdog(
-      Promise.all([
-        runtime.streamingMutation!(
-          "insert",
-          "todos",
-          { done: { type: "Boolean", value: false } },
-          "title",
-          source("one"),
-          null,
-          "00000000-0000-4000-8000-000000000201",
-        ),
-        runtime.streamingMutation!(
-          "insert",
-          "todos",
-          { done: { type: "Boolean", value: true } },
-          "title",
-          source("two"),
-          null,
-          "00000000-0000-4000-8000-000000000202",
-        ),
-      ]),
-      "concurrent streamed WASM publication",
-    );
-    await withWatchdog(
-      Promise.all(writes.map((write) => runtime.waitForTransaction!(write.batchId, "local"))),
-      "concurrent streamed WASM local settlement",
-    );
+    try {
+      const writes = await withWatchdog(
+        Promise.all([
+          runtime.streamingMutation!(
+            "insert",
+            "todos",
+            { done: { type: "Boolean", value: false } },
+            "title",
+            source("one"),
+            null,
+            "00000000-0000-4000-8000-000000000201",
+          ),
+          runtime.streamingMutation!(
+            "insert",
+            "todos",
+            { done: { type: "Boolean", value: true } },
+            "title",
+            source("two"),
+            null,
+            "00000000-0000-4000-8000-000000000202",
+          ),
+        ]),
+        "concurrent streamed WASM publication",
+      );
+      await withWatchdog(
+        Promise.all(writes.map((write) => runtime.waitForTransaction!(write.batchId, "local"))),
+        "concurrent streamed WASM local settlement",
+      );
 
-    await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([
-      {
-        id: "00000000-0000-4000-8000-000000000201",
-        table: "todos",
-        values: [
-          { type: "Text", value: "one first one second" },
-          { type: "Boolean", value: false },
-          { type: "Null" },
-        ],
-      },
-      {
-        id: "00000000-0000-4000-8000-000000000202",
-        table: "todos",
-        values: [
-          { type: "Text", value: "two first two second" },
-          { type: "Boolean", value: true },
-          { type: "Null" },
-        ],
-      },
-    ]);
+      await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([
+        {
+          id: "00000000-0000-4000-8000-000000000201",
+          table: "todos",
+          values: [
+            { type: "Text", value: "one first one second" },
+            { type: "Boolean", value: false },
+            { type: "Null" },
+          ],
+        },
+        {
+          id: "00000000-0000-4000-8000-000000000202",
+          table: "todos",
+          values: [
+            { type: "Text", value: "two first two second" },
+            { type: "Boolean", value: true },
+            { type: "Null" },
+          ],
+        },
+      ]);
+    } catch (error) {
+      bodyError = error;
+    }
+    let cleanupError: unknown;
+    try {
+      await withWatchdog(runtime.close(), "concurrent streamed WASM runtime cleanup", 1_000);
+    } catch (error) {
+      cleanupError = error;
+    }
+    // The publication failure is the actionable signal when both phases fail.
+    if (bodyError) throw bodyError;
+    if (cleanupError) throw cleanupError;
   });
 
   it("rejects fragmented invalid JSON without publishing a row", async () => {
