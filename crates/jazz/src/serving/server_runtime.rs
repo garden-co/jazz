@@ -359,8 +359,14 @@ async fn drive_upstream_wire(
         let auxiliary_wake = io.pump.outbound_ready();
         futures::pin_mut!(external_wake, auxiliary_wake);
         match futures::future::select(external_wake, auxiliary_wake).await {
-            futures::future::Either::Left((Some(()), _))
-            | futures::future::Either::Right(((), _)) => {}
+            futures::future::Either::Left((Some(()), _)) => {}
+            futures::future::Either::Right(((), _)) => {
+                // Disconnect wakes `outbound_ready` to let the owner tear
+                // down cleanly; it is not another unit of socket work.
+                if io.pump.is_disconnected() {
+                    return;
+                }
+            }
             futures::future::Either::Left((None, _)) => {
                 io.pump.disconnect();
                 return;

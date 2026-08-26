@@ -1291,6 +1291,10 @@ where
                     (None, None, None, retired)
                 }
             };
+        // The auxiliary lane is independent of semantic ticks. Retire it for
+        // both upstream and subscriber links before releasing this connection
+        // so an in-flight local lookup cannot recreate relay state afterward.
+        connection_ref.auxiliary_pump.disconnect();
         drop(connection_ref);
         // A rejection can be queued by the upstream turn immediately before
         // this abrupt detach. Its downstream transport is gone, so retaining
