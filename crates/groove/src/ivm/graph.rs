@@ -2420,10 +2420,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_allows_terminal_route_filter_over_collect_by() {
-        // Prepared terminals use this narrow consumer to route one already
-        // assembled terminal value to its binding. It must not reopen nested
-        // assembly or feed arbitrary relational operators.
+    fn validation_rejects_ordinary_consumers_over_collect_by() {
         let mut graph = IvmGraph::new();
         let source = graph.dedup_node(
             NodeDescriptor::new(
@@ -2496,14 +2493,30 @@ mod tests {
             ),
             NodeDurability::Ephemeral,
         );
-        let consumer = NodeDescriptor::new(
-            OpType::Filter(FilterOp {
-                predicate: PredicateExpr::is_not_null("f0"),
-                comparison: ValueComparison::Exact,
-            }),
-            [collector],
-            collected_output,
-        );
-        assert_eq!(graph.validate_node(&consumer), Ok(()));
+        let consumers = [
+            NodeDescriptor::new(
+                OpType::Filter(FilterOp {
+                    predicate: PredicateExpr::is_not_null("f0"),
+                    comparison: ValueComparison::Exact,
+                }),
+                [collector],
+                collected_output,
+            ),
+            NodeDescriptor::new(
+                OpType::MapProject(MapProjectOp {
+                    expressions: Vec::new(),
+                    mapping: vec![(0, 0)],
+                }),
+                [collector],
+                output(),
+            ),
+        ];
+
+        for consumer in consumers {
+            assert_eq!(
+                graph.validate_node(&consumer),
+                Err(GraphValidationError::CollectByInputIsTerminal)
+            );
+        }
     }
 }
