@@ -9,7 +9,7 @@ export async function authSessionExamples(config: DbConfig) {
   // #endregion auth-session-ts-hook
 
   // #region auth-session-ts-user-id
-  const sessionUserId = session?.user_id ?? null;
+  const sessionUserId = session?.user ?? null;
   // #endregion auth-session-ts-user-id
 
   // #region auth-session-ts-query

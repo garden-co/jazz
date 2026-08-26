@@ -368,7 +368,7 @@ async fn select_policy_dependency_data_is_retrieved_as_part_of_query() {
 
 async fn select_policy_dependency_data_is_retrieved_as_part_of_query_inner() {
     let active_grant = pe::all_of([
-        pe::eq("principal_id", pe::session("user_id")),
+        pe::eq("principal_id", pe::session(vec!["claims", "sub"])),
         pe::eq("active", true),
     ]);
     let schema = SchemaBuilder::new()
@@ -2043,7 +2043,7 @@ async fn admin_secret_ws_client_bypasses_row_select_policies_inner() {
             permissions(|p| {
                 p.allow_insert().always();
                 p.allow_read()
-                    .where_(pe::eq("owner_id", pe::session("user_id")));
+                    .where_(pe::eq("owner_id", pe::session(vec!["claims", "sub"])));
             }),
         ))
         .build();

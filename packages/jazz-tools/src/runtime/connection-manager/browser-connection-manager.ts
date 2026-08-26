@@ -1,5 +1,5 @@
 import type { DurabilityTier } from "../client.js";
-import { resolveClientSessionSync } from "../client-session.js";
+import { resolveClientInternalSessionSync } from "../client-session.js";
 import type { Session } from "../context.js";
 import { getTrustedReservedSession, setTrustedReservedSession } from "../db-internal-session.js";
 import type { BrowserWorkerConnection } from "../runtime-source.js";
@@ -233,7 +233,7 @@ function runtimeAuth(config: DbForConnection["config"]): Record<string, unknown>
 
 function runtimeSessionClaims(config: DbForConnection["config"]): Record<string, unknown> {
   return (
-    resolveClientSessionSync({
+    resolveClientInternalSessionSync({
       ...config,
       trustedReservedSession: getTrustedReservedSession(config),
     })?.claims ?? {}

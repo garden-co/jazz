@@ -217,13 +217,13 @@ async fn rebac_declared_fk_inheritance_cycle_fails_closed() {
 async fn rebac_declared_fk_inheritance_cycle_fails_closed_inner() {
     let a_policies = permissions(|p| {
         p.allow_read().where_(pe::any_of([
-            pe::eq("owner_id", pe::session("user_id")),
+            pe::eq("owner_id", pe::session(vec!["claims", "sub"])),
             pe::allowed_to_read_referencing("table_b", "a_id"),
         ]));
     });
     let b_policies = permissions(|p| {
         p.allow_read().where_(pe::any_of([
-            pe::eq("owner_id", pe::session("user_id")),
+            pe::eq("owner_id", pe::session(vec!["claims", "sub"])),
             pe::allowed_to_read_referencing("table_a", "b_id"),
         ]));
     });

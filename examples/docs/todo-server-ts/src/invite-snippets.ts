@@ -1,4 +1,4 @@
-import { schema as s } from "jazz-tools";
+import { schema as s, userIdentity } from "jazz-tools";
 import type { JazzContext } from "jazz-tools/backend";
 
 // #region invite-schema
@@ -80,6 +80,7 @@ type AuthenticatedRequest = Request & {
 // #region invite-redeem-route
 export async function POST(req: AuthenticatedRequest): Promise<Response> {
   const { session } = req;
+  const user = userIdentity(session.issuer, session.user_id);
 
   const { chatId, code } = (await req.json()) as { chatId: string; code: string };
 
@@ -88,13 +89,13 @@ export async function POST(req: AuthenticatedRequest): Promise<Response> {
   const result = await backendDb.exclusiveTransaction(async (tx) => {
     // Checking membership first keeps re-opening a successfully redeemed link idempotent,
     // even after a single-use invite has been consumed.
-    const existing = await tx.one(app.chatMembers.where({ chatId, user_id: session.user_id }));
+    const existing = await tx.one(app.chatMembers.where({ chatId, user_id: user }));
     if (existing) return "already-member" as const;
 
     const invite = await tx.one(app.chatInvites.where({ chatId, code }));
     if (!invite) return "invalid" as const;
 
-    tx.insert(app.chatMembers, { chatId, user_id: session.user_id, inviteId: invite.id });
+    tx.insert(app.chatMembers, { chatId, user_id: user, inviteId: invite.id });
     if (invite.singleUse) tx.delete(app.chatInvites, invite.id);
     return "joined" as const;
   });

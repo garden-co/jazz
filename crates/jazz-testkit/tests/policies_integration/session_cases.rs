@@ -41,7 +41,7 @@ fn join_select_policy_schema() -> Schema {
                 .fk_column("team_id", "teams")
                 .policies(super::explicit_allow_all_policies(permissions(|p| {
                     p.allow_read()
-                        .where_(pe::eq("owner_id", pe::session("user_id")));
+                        .where_(pe::eq("owner_id", pe::session(vec!["claims", "sub"])));
                 }))),
         )
         .build()
@@ -50,7 +50,7 @@ fn join_select_policy_schema() -> Schema {
 /// Schema for documents owned by `owner_id` with INSERT/UPDATE/DELETE restricted
 /// to the row owner. SELECT is unrestricted (no policy) so observers can read.
 fn write_policy_schema() -> Schema {
-    let owner_policy = pe::eq("owner_id", pe::session("user_id"));
+    let owner_policy = pe::eq("owner_id", pe::session(vec!["claims", "sub"]));
 
     SchemaBuilder::new()
         .table(
@@ -72,7 +72,7 @@ fn write_policy_schema() -> Schema {
 /// and `with_check = owner_policy` (only the owner may commit the new value).
 /// This lets tests verify that the two clauses are evaluated independently.
 fn write_check_policy_schema() -> Schema {
-    let owner_policy = pe::eq("owner_id", pe::session("user_id"));
+    let owner_policy = pe::eq("owner_id", pe::session(vec!["claims", "sub"]));
 
     SchemaBuilder::new()
         .table(
@@ -111,7 +111,7 @@ fn authorized_pagination_schema() -> Schema {
                 .column("owner_id", ColumnType::Text)
                 .policies(super::explicit_allow_all_policies(permissions(|p| {
                     p.allow_read()
-                        .where_(pe::eq("owner_id", pe::session("user_id")));
+                        .where_(pe::eq("owner_id", pe::session(vec!["claims", "sub"])));
                 }))),
         )
         .build()
@@ -282,7 +282,7 @@ async fn select_policies_filter_subscription_results_per_client_session_inner() 
         .table(make_documents_schema(
             "documents",
             permissions(|p| {
-                let owner_policy = pe::eq("owner_id", pe::session("user_id"));
+                let owner_policy = pe::eq("owner_id", pe::session(vec!["claims", "sub"]));
                 p.allow_read().where_(owner_policy.clone());
                 p.allow_insert().where_(owner_policy);
             }),
@@ -460,7 +460,7 @@ async fn select_policy_pagination_offsets_over_visible_rows_only_inner() {
     server.shutdown().await;
 }
 
-/// Verifies that the `session.user` alias scopes subscription updates and
+/// Verifies that the `session.user` subject scopes subscription updates and
 /// query results identically to `session.user`.
 ///
 /// Alice and bob each insert an owned row into a table protected by
@@ -468,27 +468,27 @@ async fn select_policy_pagination_offsets_over_visible_rows_only_inner() {
 /// both in the live subscription stream and in EdgeServer query results.
 ///
 /// ```text
-/// alice ──insert "Alice Alias"──► server ──► alice stream (add ✓)
+/// alice ──insert "Alice Subject"──► server ──► alice stream (add ✓)
 ///                                     │
 ///                                     └── SELECT policy ──✗──► bob stream (silent)
 ///
-/// bob ──insert "Bob Alias"──────► server ──► bob stream (add ✓)
+/// bob ──insert "Bob Subject"──────► server ──► bob stream (add ✓)
 ///                                   │
 ///                                   └── SELECT policy ──✗──► alice stream (silent)
 /// ```
 #[tokio::test]
-async fn session_user_id_alias_resolves_identically_to_snake_case() {
+async fn session_claims_sub_scopes_each_provider_subject() {
     tokio::task::LocalSet::new()
-        .run_until(session_user_id_alias_resolves_identically_to_snake_case_inner())
+        .run_until(session_claims_sub_scopes_each_provider_subject_inner())
         .await;
 }
 
-async fn session_user_id_alias_resolves_identically_to_snake_case_inner() {
+async fn session_claims_sub_scopes_each_provider_subject_inner() {
     let schema = SchemaBuilder::new()
         .table(make_documents_schema(
             "documents",
             permissions(|p| {
-                let owner_policy = pe::eq("owner_id", pe::session("userId"));
+                let owner_policy = pe::eq("owner_id", pe::session(vec!["claims", "sub"]));
                 p.allow_read().where_(owner_policy.clone());
                 p.allow_insert().where_(owner_policy);
             }),
@@ -519,7 +519,8 @@ async fn session_user_id_alias_resolves_identically_to_snake_case_inner() {
     let mut alice_log = Vec::new();
     let mut bob_log = Vec::new();
 
-    let alice_doc = seed_document(&alice, "documents", super::ALICE_ID, "Alice Alias", false).await;
+    let alice_doc =
+        seed_document(&alice, "documents", super::ALICE_ID, "Alice Subject", false).await;
     wait_for_subscription_update(
         &mut alice_stream,
         &mut alice_log,
@@ -531,10 +532,10 @@ async fn session_user_id_alias_resolves_identically_to_snake_case_inner() {
     collect_stream_deltas(&mut bob_stream, &mut bob_log, NO_DELTA_WINDOW).await;
     assert!(
         !has_any_change(&bob_log, alice_doc),
-        "bob should not receive alice's alias-scoped document"
+        "bob should not receive alice's subject-scoped document"
     );
 
-    let bob_doc = seed_document(&bob, "documents", super::BOB_ID, "Bob Alias", false).await;
+    let bob_doc = seed_document(&bob, "documents", super::BOB_ID, "Bob Subject", false).await;
     wait_for_subscription_update(
         &mut bob_stream,
         &mut bob_log,
@@ -546,25 +547,28 @@ async fn session_user_id_alias_resolves_identically_to_snake_case_inner() {
     collect_stream_deltas(&mut alice_stream, &mut alice_log, NO_DELTA_WINDOW).await;
     assert!(
         !has_any_change(&alice_log, bob_doc),
-        "alice should not receive bob's alias-scoped document"
+        "alice should not receive bob's subject-scoped document"
     );
 
-    let alice_rows = wait_for_rows(&alice, query.clone(), "alice alias visible rows", |rows| {
-        (rows.len() == 1 && rows[0].0 == alice_doc).then_some(rows)
-    })
+    let alice_rows = wait_for_rows(
+        &alice,
+        query.clone(),
+        "alice subject visible rows",
+        |rows| (rows.len() == 1 && rows[0].0 == alice_doc).then_some(rows),
+    )
     .await;
     assert_eq!(
         alice_rows[0].1,
-        boolean_policy_document_values(super::ALICE_ID, "Alice Alias", false)
+        boolean_policy_document_values(super::ALICE_ID, "Alice Subject", false)
     );
 
-    let bob_rows = wait_for_rows(&bob, query, "bob alias visible rows", |rows| {
+    let bob_rows = wait_for_rows(&bob, query, "bob subject visible rows", |rows| {
         (rows.len() == 1 && rows[0].0 == bob_doc).then_some(rows)
     })
     .await;
     assert_eq!(
         bob_rows[0].1,
-        boolean_policy_document_values(super::BOB_ID, "Bob Alias", false)
+        boolean_policy_document_values(super::BOB_ID, "Bob Subject", false)
     );
 
     alice.shutdown().await.expect("shutdown alice");
@@ -591,7 +595,7 @@ async fn anonymous_client_cannot_see_owner_restricted_rows_inner() {
         .table(make_documents_schema(
             "documents",
             permissions(|p| {
-                let owner_policy = pe::eq("owner_id", pe::session("user_id"));
+                let owner_policy = pe::eq("owner_id", pe::session(vec!["claims", "sub"]));
                 p.allow_read().where_(owner_policy.clone());
                 p.allow_insert().where_(owner_policy);
             }),
@@ -677,14 +681,14 @@ async fn anonymous_client_cannot_see_owner_restricted_rows_inner() {
 /// bob ────delete own row──────────► server ──► removed
 /// ```
 #[tokio::test]
-async fn session_user_id_policies_scope_crud_to_owned_rows() {
+async fn session_claims_sub_policies_scope_crud_to_owned_rows() {
     tokio::task::LocalSet::new()
-        .run_until(session_user_id_policies_scope_crud_to_owned_rows_inner())
+        .run_until(session_claims_sub_policies_scope_crud_to_owned_rows_inner())
         .await;
 }
 
-async fn session_user_id_policies_scope_crud_to_owned_rows_inner() {
-    let owner_policy = pe::eq("owner_id", pe::session("user_id"));
+async fn session_claims_sub_policies_scope_crud_to_owned_rows_inner() {
+    let owner_policy = pe::eq("owner_id", pe::session(vec!["claims", "sub"]));
     let schema = SchemaBuilder::new()
         .table(make_documents_schema(
             "documents",
@@ -891,14 +895,14 @@ async fn ownership_transfer_allowed_only_for_unarchived_documents() {
 }
 
 async fn ownership_transfer_allowed_only_for_unarchived_documents_inner() {
-    let owner_policy = pe::eq("owner_id", pe::session("user_id"));
+    let owner_policy = pe::eq("owner_id", pe::session(vec!["claims", "sub"]));
     let unarchived_policy = pe::eq("archived", false);
     let schema = SchemaBuilder::new()
         .table(make_documents_schema(
             "documents",
             permissions(|p| {
                 p.allow_read()
-                    .where_(pe::eq("owner_id", pe::session("user_id")));
+                    .where_(pe::eq("owner_id", pe::session(vec!["claims", "sub"])));
                 p.allow_insert().where_(owner_policy.clone());
                 p.allow_update()
                     .where_old(pe::all_of([

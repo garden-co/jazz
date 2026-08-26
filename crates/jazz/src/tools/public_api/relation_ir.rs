@@ -188,7 +188,7 @@ mod tests {
                 PredicateExpr::Cmp {
                     left: ColumnRef::unscoped("owner_id"),
                     op: PredicateCmpOp::Eq,
-                    right: ValueRef::SessionRef(vec!["claims".to_string(), "user_id".to_string()]),
+                    right: ValueRef::SessionRef(vec!["claims".to_string(), "sub".to_string()]),
                 },
                 PredicateExpr::Or(vec![
                     PredicateExpr::IsNull {
