@@ -565,6 +565,16 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
     /shadow execution changed the checked-out source after the baseline/,
   );
   assert.match(rustShadowWorkflow, /Seal clean checked-out source baseline/);
+  assert.equal(
+    shard.env?.RUST_SHADOW_SOURCE_BASELINE,
+    undefined,
+    "runner context is not available in jobs.<job_id>.env before a runner is assigned",
+  );
+  assert.equal(
+    shard.steps[1].env.RUST_SHADOW_SOURCE_BASELINE,
+    "${{ runner.temp }}/rust-shadow-source.json",
+    "the source baseline must resolve runner.temp at step scope",
+  );
   assert.match(
     rustShadowWorkflow,
     /RUST_SHADOW_SOURCE_BASELINE: \$\{\{ runner\.temp \}\}\/rust-shadow-source\.json/,
