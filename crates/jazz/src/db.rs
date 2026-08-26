@@ -3625,7 +3625,7 @@ fn subscription_terminal_delta_event(
         .iter()
         .zip(&current_roots[..common_prefix])
         .zip(&current_occurrences[..common_prefix])
-        .filter(|((previous, current), _)| previous != current)
+        .filter(|((previous, current), _)| !previous.subscription_equivalent(current))
         .map(|((_, current), occurrence_id)| SubscriptionOutputRow {
             occurrence_id: occurrence_id.clone(),
             row: current.clone(),
@@ -3709,7 +3709,7 @@ fn subscription_delta_event_with_reset(
     for (key, row) in &current_by_id {
         match previous_by_id.get(key) {
             None => added.push(subscription_output_row((*row).clone())),
-            Some(previous_row) if *previous_row != *row => {
+            Some(previous_row) if !previous_row.subscription_equivalent(row) => {
                 updated.push(subscription_output_row((*row).clone()))
             }
             Some(_) => {}
@@ -3853,7 +3853,7 @@ fn apply_maintained_update_to_snapshot(
 
     for (key, row) in &update_added {
         if let Some(position) = snapshot_index.roots.get(&key).copied() {
-            if snapshot.rows[position] != *row {
+            if !snapshot.rows[position].subscription_equivalent(row) {
                 snapshot.rows[position] = row.clone();
                 updated.push(SubscriptionOutputRow {
                     occurrence_id: key.clone(),

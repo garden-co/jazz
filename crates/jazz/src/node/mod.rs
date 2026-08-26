@@ -1290,6 +1290,87 @@ impl CurrentRow {
         Some((TxTime(time), NodeAlias(alias)))
     }
 
+    /// Compare the row data visible to a subscription, independent of the
+    /// physical descriptor that happened to materialize it.
+    ///
+    /// A maintained view may carry an unchanged row first from its physical
+    /// current relation and then from a public policy/query projection. The
+    /// storage-only fields differ between those descriptors, but emitting an
+    /// update for that representation change would turn a policy no-op (such
+    /// as reordering an array used only as a reverse-inheritance grant) into a
+    /// spurious application-visible row update.
+    pub(crate) fn subscription_equivalent(&self, other: &Self) -> bool {
+        let provenance_matches = match (self.provenance(), other.provenance()) {
+            // Some physical current-row carriers retain no provenance fields.
+            // Their absence is representational rather than a statement that
+            // the public provenance changed, so compare it only when both
+            // sides can express it.
+            (Ok(Some(left)), Ok(Some(right))) => left == right,
+            (Ok(_), Ok(_)) => true,
+            _ => false,
+        };
+        let left_cells = self.subscription_cells();
+        let right_cells = other.subscription_cells();
+        self.table == other.table
+            && self.row_uuid() == other.row_uuid()
+            && self.deleted == other.deleted
+            && left_cells == right_cells
+            && provenance_matches
+    }
+
+    fn subscription_cells(&self) -> BTreeMap<String, Option<Value>> {
+        let descriptor = self.record.descriptor();
+        let physical_current = descriptor.field_index("schema_version").is_some()
+            && descriptor.field_index("created_by").is_some()
+            && descriptor.field_index("updated_by").is_some();
+        descriptor
+            .fields()
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, field)| {
+                let name = field.name.as_ref()?.as_str();
+                let name = if name.starts_with("user_") {
+                    let name = self::query_engine::logical_user_column(name);
+                    self::query_engine::aggregate_output_logical_name(name)
+                        .unwrap_or(name)
+                        .to_owned()
+                } else if let Some(name) = self::query_engine::aggregate_output_logical_name(name) {
+                    name.to_owned()
+                } else if matches!(
+                    name,
+                    "$createdBy"
+                        | "$createdAt"
+                        | "$updatedBy"
+                        | "$updatedAt"
+                        | "branch_key"
+                        | "row_uuid"
+                        | "tx_time"
+                        | "tx_node_id"
+                        | "schema_version"
+                        | "parents"
+                        | "authored_columns"
+                        | "global_time"
+                        | "settle_position"
+                ) || name.starts_with("__jazz_")
+                    || (physical_current
+                        && matches!(
+                            name,
+                            "created_by" | "created_at" | "updated_by" | "updated_at"
+                        ))
+                {
+                    return None;
+                } else {
+                    name.to_owned()
+                };
+                let value = match self.record.borrowed().get_idx(idx).ok()? {
+                    Value::Nullable(value) => value.map(|value| *value),
+                    value => Some(value),
+                };
+                Some((name, value))
+            })
+            .collect()
+    }
+
     #[cfg(test)]
     pub(crate) fn test_cells_by_descriptor(&self) -> BTreeMap<String, Value> {
         let user_cells = self
