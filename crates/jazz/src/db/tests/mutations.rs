@@ -947,6 +947,36 @@ fn db_sync_surface_uploads_client_exclusive_commit_for_global_fate() {
 }
 
 #[test]
+fn anonymous_authority_exclusive_write_is_rejected_before_policy_evaluation() {
+    let schema = schema();
+    let anonymous =
+        AuthorSubject::from_canonical(r#"["urn:jazz:anonymous","exclusive-anonymous"]"#).unwrap();
+    let core = open_core_with_claims(0x5e, anonymous, &schema, BTreeMap::new());
+    let row = row(0xe2);
+
+    // This authority-local path cannot use a remote session transport: it
+    // finalizes its own exclusive unit directly, which is why it separately
+    // proves the shared fate gate applies here as well.
+    let write = core.exclusive_tx().unwrap();
+    write
+        .insert_with_id(
+            "todos",
+            row,
+            cells(
+                "must be denied",
+                false,
+                AuthorSubject::for_test_bytes([0xa1; 16]),
+            ),
+        )
+        .unwrap();
+    let error = write.commit().unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::WriteRejected, "{error:?}");
+    assert!(error.message.contains("AuthorizationDenied"));
+    assert!(core.read(&Query::from("todos")).unwrap().is_empty());
+}
+
+#[test]
 fn db_sync_surface_returns_exclusive_conflict_fate_to_client() {
     let schema = schema();
     let author = AuthorSubject::for_test_bytes([0xc1; 16]);
@@ -1644,7 +1674,11 @@ fn session_delete_uses_current_row_for_owner_write_policy() {
 fn trusted_backend_upload_uses_backend_policy_and_stores_user_made_by() {
     let schema = owner_write_schema();
     let backend_author = AuthorSubject::for_test_bytes([0xb0; 16]);
-    let attributed_user = AuthorSubject::for_test_bytes([0xa1; 16]);
+    // Provenance may record an anonymous user while the trusted backend is the
+    // effective permission subject. The anonymous write gate must therefore
+    // inspect `permission_subject`, not `made_by`.
+    let attributed_user =
+        AuthorSubject::from_canonical(r#"["urn:jazz:anonymous","anonymous-user"]"#).unwrap();
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let backend = open_db(0xb0, backend_author, &schema);
 
@@ -1655,7 +1689,6 @@ fn trusted_backend_upload_uses_backend_policy_and_stores_user_made_by() {
         backend_author,
         CommitUnitTrust::TrustedBackend,
     );
-    backend.set_identity_claims(attributed_user, test_provider_claims(attributed_user));
     backend.tick().unwrap();
     server.tick().unwrap();
 

@@ -33,12 +33,12 @@
 		const serverUrl = overrides.serverUrl ?? readEnv('PUBLIC_JAZZ_SERVER_URL');
 		if (!appId)
 			throw new Error('Missing appId: add jazzSvelteKit() to vite.config.ts or set PUBLIC_JAZZ_APP_ID');
-		const secret = overrides.auth?.localFirstSecret ?? getOrCreateSecretSync(appId);
+		const secret = overrides.secret ?? getOrCreateSecretSync(appId);
 
 		return {
 			appId,
 			env: 'dev',
-			auth: { localFirstSecret: secret },
+			secret,
 			...(serverUrl ? { serverUrl } : {}),
 			...overrides,
 		};
