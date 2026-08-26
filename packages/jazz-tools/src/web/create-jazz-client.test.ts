@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { canonicalAuthorSubject } from "../runtime/author-id.js";
 import type { Session } from "../runtime/context.js";
 import type { DbConfig } from "../runtime/db.js";
 
@@ -127,7 +128,10 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
     expect(manager.init).toHaveBeenCalledTimes(1);
 
     expect(client.db).toBe(db);
-    expect(client.session).toEqual(session);
+    expect(client.session).toEqual({
+      ...session,
+      author: canonicalAuthorSubject(session.issuer, session.user_id),
+    });
     expect("manager" in client).toBe(false);
     expect(getSubscriptionStore(client)).toBe(manager);
 
