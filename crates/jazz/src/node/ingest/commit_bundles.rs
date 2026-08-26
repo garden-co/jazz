@@ -1109,12 +1109,17 @@ where
             applied_global_times.push(global_time);
             batch.insert(
                 "jazz_transactions",
-                transaction_values(
+                // A reset may bulk-load only the view-authorized rows of an
+                // exclusive transaction. Preserve that scope marker even when
+                // the redacted write count equals this fragment's length, so a
+                // later sibling view can extend the same local projection.
+                transaction_values_with_cardinality_scope(
                     tx_node_alias,
                     tx,
                     (*first.fate).clone(),
                     first.global_time,
                     first.durability,
+                    first.scope == crate::protocol::VersionBundleScope::ViewScoped,
                 ),
             );
 

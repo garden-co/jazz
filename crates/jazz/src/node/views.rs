@@ -1325,7 +1325,15 @@ where
         }
         if bundle.scope == crate::protocol::VersionBundleScope::ViewScoped {
             let tx_id = bundle.tx.tx_id;
-            let mut known_keys = if self.query_transaction(tx_id).await?.is_some() {
+            let stored_tx = self.query_transaction(tx_id).await?;
+            // A bulk reset installs its authorized fragment as locally current
+            // so a relay can serve it onward. Further authorized siblings from
+            // that same view-scoped transaction must extend that projection;
+            // fragments first learned outside such a reset remain history-only.
+            let extend_current_view = stored_tx
+                .as_ref()
+                .is_some_and(|stored| stored.view_scoped_cardinality);
+            let mut known_keys = if stored_tx.is_some() {
                 self.query_versions_for_tx(tx_id)
                     .await?
                     .iter()
@@ -1340,15 +1348,25 @@ where
                 .len()
                 .try_into()
                 .map_err(|_| Error::InvalidStoredValue("view payload is too large"))?;
-            return self
-                .ingest_transaction_fragment_without_current_indexes(
+            return if extend_current_view {
+                self.ingest_view_scoped_transaction_with_current_indexes(
                     redacted_tx,
                     bundle.versions,
                     bundle.fate,
                     bundle.global_time,
                     bundle.durability,
                 )
-                .await;
+                .await
+            } else {
+                self.ingest_transaction_fragment_without_current_indexes(
+                    redacted_tx,
+                    bundle.versions,
+                    bundle.fate,
+                    bundle.global_time,
+                    bundle.durability,
+                )
+                .await
+            };
         }
         let complete_len = usize::try_from(bundle.tx.n_total_writes).map_err(|_| {
             Error::InvalidStoredValue("exclusive transaction write count does not fit usize")
