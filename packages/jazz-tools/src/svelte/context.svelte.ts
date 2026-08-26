@@ -1,13 +1,13 @@
 import { getContext, setContext } from "svelte";
 import type { Db } from "../runtime/db.js";
-import type { Session } from "../runtime/context.js";
+import type { PublicSession } from "../runtime/context.js";
 import type { SubscriptionStore } from "../subscription-store-internal.js";
 
 const JAZZ_CTX_KEY = Symbol("jazz");
 
 export interface JazzContext {
   db: Db | null;
-  session: Session | null;
+  session: PublicSession | null;
   /** @internal Used by framework bindings; not part of the app-facing client API. */
   subscriptionStore: SubscriptionStore | null;
 }
@@ -51,7 +51,7 @@ export function getDb(): Db {
  * The returned handle's `.current` property always reflects the latest session,
  * updating automatically as the user logs in or out.
  */
-export function getSession(): { readonly current: Session | null } {
+export function getSession(): { readonly current: PublicSession | null } {
   const ctx = getJazzContext();
   return {
     get current() {

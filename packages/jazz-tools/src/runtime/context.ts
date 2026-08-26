@@ -66,6 +66,22 @@ export interface Session {
 }
 
 /**
+ * A session that Jazz has admitted for use by a client binding.
+ *
+ * `author` is the portable, canonical JSON `[issuer, sub]` identity that
+ * policies see as `session.author` and that Jazz records in `$createdBy` and
+ * `$updatedBy`. It is deliberately distinct from `user_id`: the latter is the
+ * provider-controlled raw JWT `sub`.
+ *
+ * Applications must obtain this value from an admitted session rather than
+ * constructing it themselves. Local interning is an implementation detail and
+ * is never exposed here.
+ */
+export interface PublicSession extends Session {
+  readonly author: string;
+}
+
+/**
  * Configuration for connecting to Jazz.
  */
 export interface AppContext {

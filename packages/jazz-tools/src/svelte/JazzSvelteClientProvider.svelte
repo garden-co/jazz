@@ -5,6 +5,7 @@ The caller remains responsible for shutting the client down.
 <script lang="ts">
 	import { startInspectorOnce } from '../dev-tools/auto-attach.js';
 	import type { Db } from '../runtime/db.js';
+	import { withCanonicalAuthor } from '../runtime/author-id.js';
 	import { getSubscriptionStore } from '../subscription-store-internal.js';
 	import { initJazzContext } from './context.svelte.js';
 	import type { JazzClient } from './create-jazz-client.js';
@@ -46,7 +47,7 @@ The caller remains responsible for shutting the client down.
 				ctx.subscriptionStore = getSubscriptionStore(resolvedClient);
 				stopSessionSync = resolvedClient.db.onAuthChanged(({ session }) => {
 					if (!cancelled) {
-						ctx.session = session ?? null;
+						ctx.session = session ? withCanonicalAuthor(session) : null;
 					}
 				});
 

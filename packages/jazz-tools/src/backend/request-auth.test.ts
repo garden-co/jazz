@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { canonicalAuthorSubject } from "../runtime/author-id.js";
 import { resolveRequestSession } from "./request-auth.js";
 
 const JWT_KID = "backend-request-test-kid";
@@ -171,6 +172,7 @@ describe("backend request auth", () => {
     ).resolves.toEqual({
       issuer: "urn:jazz:local-first",
       user_id: userId,
+      author: canonicalAuthorSubject("urn:jazz:local-first", userId),
       claims: {},
       authMode: "local-first",
     });
@@ -223,6 +225,7 @@ describe("backend request auth", () => {
     ).resolves.toEqual({
       issuer: "https://issuer.example",
       user_id: "user-subject",
+      author: canonicalAuthorSubject("https://issuer.example", "user-subject"),
       claims: { role: "editor" },
       authMode: "external",
     });
@@ -255,6 +258,7 @@ describe("backend request auth", () => {
     ).resolves.toEqual({
       issuer: "https://issuer.example",
       user_id: "user-subject",
+      author: canonicalAuthorSubject("https://issuer.example", "user-subject"),
       claims: { role: "editor" },
       authMode: "external",
     });
@@ -345,6 +349,7 @@ describe("backend request auth", () => {
     ).resolves.toEqual({
       issuer: " https://issuer.example ",
       user_id: " user-subject ",
+      author: canonicalAuthorSubject(" https://issuer.example ", " user-subject "),
       claims: { role: "editor" },
       authMode: "external",
     });
