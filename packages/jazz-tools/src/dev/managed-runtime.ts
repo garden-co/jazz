@@ -1,7 +1,17 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { mkdir } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import type { LocalJazzServerHandle } from "./dev-server.js";
 import type { JazzPluginOptions, JazzServerOptions } from "./vite.js";
 import { resolveTelemetryCollectorUrl, type TelemetryOptions } from "../runtime/sync-telemetry.js";
@@ -125,32 +135,151 @@ function normalizeServerOption(
     }, {});
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const lockWaiter = new Int32Array(new SharedArrayBuffer(4));
+const dotenvLine =
+  /(?:^|^)\s*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(\s*'(?:\\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\\`|[^`])*`|[^#\r\n]+)?\s*(?:#.*)?(?:$|$)/gm;
+
+// Keep this contract aligned with the dotenv parser used by Vite and Expo:
+// export syntax, whitespace, quotes, inline comments, and quoted newlines all
+// resolve exactly as they do when the framework later loads the same file.
+function parseDotenv(content: string): {
+  values: Record<string, string>;
+  assignmentLines: Map<string, number[]>;
+} {
+  const values: Record<string, string> = {};
+  const assignmentLines = new Map<string, number[]>();
+  const normalized = content.replace(/\r\n?/g, "\n");
+  dotenvLine.lastIndex = 0;
+  for (const match of normalized.matchAll(dotenvLine)) {
+    const key = match[1];
+    if (!key) continue;
+    const line = normalized.slice(0, match.index).split("\n").length;
+    const lines = assignmentLines.get(key) ?? [];
+    lines.push(line);
+    assignmentLines.set(key, lines);
+    let value = (match[2] ?? "").trim();
+    const quote = value[0];
+    value = value.replace(/^(['"`])([\s\S]*)\1$/gm, "$2");
+    if (quote === '"') {
+      value = value.replace(/\\n/g, "\n").replace(/\\r/g, "\r");
+    }
+    values[key] = value;
+  }
+  return { values, assignmentLines };
 }
 
-function readEnvAppId(envPath: string, envKey: string): string | null {
+function readEnvContent(envPath: string): string {
   try {
-    const content = readFileSync(envPath, "utf8");
-    const match = content.match(new RegExp(`^${escapeRegExp(envKey)}=(.+)$`, "m"));
-    return match?.[1]?.trim() ?? null;
-  } catch {
-    return null;
+    return readFileSync(envPath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
+    throw error;
   }
 }
 
-function persistAppIdToEnv(envPath: string, envKey: string, appId: string): void {
-  let content = "";
-  try {
-    content = readFileSync(envPath, "utf8");
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+function parsedEnvValue(content: string, envKey: string): string | null {
+  const parsed = parseDotenv(content);
+  const assignments = parsed.assignmentLines.get(envKey) ?? [];
+  if (assignments.length > 1) {
+    throw new Error(
+      `${LOG_PREFIX} ${envKey} is assigned more than once in .env (lines ${assignments.join(
+        ", ",
+      )}). Keep exactly one assignment.`,
+    );
   }
-  if (new RegExp(`^${escapeRegExp(envKey)}=`, "m").test(content)) return;
-  const separator = content && !content.endsWith("\n") ? "\n" : "";
-  const line = `${separator}${envKey}=${appId}\n`;
-  mkdirSync(join(envPath, ".."), { recursive: true });
-  writeFileSync(envPath, content + line);
+  if (assignments.length === 0) return null;
+  const value = parsed.values[envKey];
+  if (value === undefined) {
+    throw new Error(`${LOG_PREFIX} ${envKey} has an invalid .env assignment.`);
+  }
+  if (value.length === 0) {
+    throw new Error(
+      `${LOG_PREFIX} ${envKey} is empty in .env. Remove the assignment to generate an app ID, or provide a non-empty value.`,
+    );
+  }
+  return value;
+}
+
+function withEnvLock<T>(envPath: string, action: () => T): T {
+  const lockPath = `${envPath}.jazz-lock`;
+  const deadline = Date.now() + 10_000;
+  let descriptor: number | null = null;
+  while (descriptor === null) {
+    try {
+      descriptor = openSync(lockPath, "wx", 0o600);
+      writeFileSync(descriptor, `${process.pid}\n`);
+      fsyncSync(descriptor);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (Date.now() >= deadline) {
+        throw new Error(`${LOG_PREFIX} timed out waiting to update .env safely.`);
+      }
+      Atomics.wait(lockWaiter, 0, 0, 10);
+    }
+  }
+  try {
+    return action();
+  } finally {
+    closeSync(descriptor);
+    try {
+      unlinkSync(lockPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+}
+
+function atomicReplaceEnv(envPath: string, content: string, mode: number): void {
+  const tempPath = join(dirname(envPath), `.${randomUUID()}.jazz-env.tmp`);
+  let descriptor: number | null = null;
+  try {
+    descriptor = openSync(tempPath, "wx", mode);
+    writeFileSync(descriptor, content, "utf8");
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = null;
+    renameSync(tempPath, envPath);
+  } finally {
+    if (descriptor !== null) closeSync(descriptor);
+    try {
+      unlinkSync(tempPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+}
+
+export function ensureEnvAppId(
+  envPath: string,
+  envKey: string,
+  fallback: string,
+  preferred: string | undefined,
+): string {
+  mkdirSync(dirname(envPath), { recursive: true });
+  return withEnvLock(envPath, () => {
+    const content = readEnvContent(envPath);
+    const existing = parsedEnvValue(content, envKey);
+    if (existing !== null) return preferred ?? existing;
+
+    const newline = content.includes("\r\n") ? "\r\n" : "\n";
+    const separator = content && !content.endsWith("\n") ? newline : "";
+    const next = `${content}${separator}${envKey}=${fallback}${newline}`;
+    const mode = (() => {
+      try {
+        return statSync(envPath).mode & 0o7777;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0o600;
+        throw error;
+      }
+    })();
+    // Re-read under the interprocess lock immediately before replacement so
+    // every cooperating writer derives its update from the latest whole file.
+    if (readEnvContent(envPath) !== content) {
+      throw new Error(`${LOG_PREFIX} .env changed outside the Jazz writer; retry startup.`);
+    }
+    atomicReplaceEnv(envPath, next, mode);
+    return fallback;
+  });
 }
 
 export interface InitializeOptions extends JazzPluginOptions {
@@ -185,14 +314,12 @@ export class ManagedDevRuntime {
     const schemaDir = options.schemaDir ?? process.cwd();
     const envPath = join(options.envDir ?? schemaDir, ".env");
     const serverConfig = typeof serverOpt === "object" ? serverOpt : {};
-    const appId =
-      process.env[this.envKeys.appId] ??
-      readEnvAppId(envPath, this.envKeys.appId) ??
-      serverConfig.appId ??
-      options.appId ??
-      randomUUID();
-    persistAppIdToEnv(envPath, this.envKeys.appId, appId);
-    return appId;
+    return ensureEnvAppId(
+      envPath,
+      this.envKeys.appId,
+      process.env[this.envKeys.appId] ?? serverConfig.appId ?? options.appId ?? randomUUID(),
+      process.env[this.envKeys.appId],
+    );
   }
 
   private getManagedRuntimeConfig(options: JazzPluginOptions): ManagedRuntimeConfig {
@@ -369,7 +496,7 @@ export class ManagedDevRuntime {
           });
         }
 
-        persistAppIdToEnv(envPath, this.envKeys.appId, appId);
+        ensureEnvAppId(envPath, this.envKeys.appId, appId, appId);
         if (telemetryCollectorUrl) {
           console.log(`${LOG_PREFIX} telemetry collector: ${telemetryCollectorUrl}`);
         }

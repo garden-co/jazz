@@ -1,11 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { join } from "node:path";
+import { promisify } from "node:util";
+import { execFile as execFileCallback } from "node:child_process";
 import { createTempRootTracker, todoSchema } from "./test-helpers.js";
 import * as devServer from "./dev-server.js";
 import * as catalogueProject from "./catalogue-project.js";
 import * as schemaWatcher from "./schema-watcher.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
-import { readFile, writeFile } from "node:fs/promises";
+import { chmod, readFile, stat, writeFile } from "node:fs/promises";
+import { build } from "esbuild";
+
+const execFile = promisify(execFileCallback);
 
 const tempRoots = createTempRootTracker();
 
@@ -143,6 +148,90 @@ describe("ManagedDevRuntime", () => {
     await expect(readFile(join(schemaDir, ".env"), "utf8")).resolves.toBe(
       `# VITE_JAZZ_APP_ID=disabled\nMY_VITE_JAZZ_APP_ID=other\nVITE_JAZZ_APP_ID=${appId}\n`,
     );
+  });
+
+  it("uses dotenv quoting, comments, whitespace, and export syntax", async () => {
+    const schemaDir = await tempRoots.create("jazz-managed-dotenv-syntax-");
+    await writeFile(
+      join(schemaDir, ".env"),
+      'OTHER=value\n  export VITE_JAZZ_APP_ID = "quoted app id" # comment\n',
+    );
+
+    expect(makeRuntime().prepareEnv({ schemaDir })).toBe("quoted app id");
+  });
+
+  it("rejects duplicate and empty exact assignments without exposing values", async () => {
+    const duplicateDir = await tempRoots.create("jazz-managed-dotenv-duplicate-");
+    await writeFile(
+      join(duplicateDir, ".env"),
+      "VITE_JAZZ_APP_ID=first-secret\nexport VITE_JAZZ_APP_ID=second-secret\n",
+    );
+    expect(() => makeRuntime().prepareEnv({ schemaDir: duplicateDir })).toThrow(
+      "VITE_JAZZ_APP_ID is assigned more than once in .env (lines 1, 2)",
+    );
+    try {
+      makeRuntime().prepareEnv({ schemaDir: duplicateDir });
+    } catch (error) {
+      expect(String(error)).not.toContain("first-secret");
+      expect(String(error)).not.toContain("second-secret");
+    }
+
+    const emptyDir = await tempRoots.create("jazz-managed-dotenv-empty-");
+    await writeFile(join(emptyDir, ".env"), "VITE_JAZZ_APP_ID= # intentionally empty\n");
+    expect(() => makeRuntime().prepareEnv({ schemaDir: emptyDir })).toThrow(
+      "VITE_JAZZ_APP_ID is empty in .env",
+    );
+  });
+
+  it("preserves CRLF and file mode when appending atomically", async () => {
+    const schemaDir = await tempRoots.create("jazz-managed-dotenv-preserve-");
+    const envPath = join(schemaDir, ".env");
+    await writeFile(envPath, "FIRST=one\r\nSECOND=two");
+    await chmod(envPath, 0o640);
+    const appId = "00000000-0000-0000-0000-000000000127";
+
+    expect(makeRuntime().prepareEnv({ appId, schemaDir })).toBe(appId);
+    await expect(readFile(envPath, "utf8")).resolves.toBe(
+      `FIRST=one\r\nSECOND=two\r\nVITE_JAZZ_APP_ID=${appId}\r\n`,
+    );
+    expect((await stat(envPath)).mode & 0o777).toBe(0o640);
+  });
+
+  it("serializes concurrent process writers without lost updates", async () => {
+    const schemaDir = await tempRoots.create("jazz-managed-dotenv-process-race-");
+    const bundlePath = join(schemaDir, "managed-runtime.mjs");
+    await build({
+      entryPoints: [join(import.meta.dirname, "managed-runtime.ts")],
+      outfile: bundlePath,
+      bundle: true,
+      format: "esm",
+      platform: "node",
+    });
+    const envPath = join(schemaDir, ".env");
+    await writeFile(envPath, "EXISTING=preserved");
+    const prefixes = ["VITE", "NEXT_PUBLIC", "EXPO_PUBLIC"];
+    const candidates = Array.from({ length: 9 }, (_, index) => ({
+      key: `${prefixes[index % prefixes.length]}_JAZZ_APP_ID`,
+      value: `00000000-0000-0000-0000-${String(index + 1).padStart(12, "0")}`,
+    }));
+    const workers = candidates.map(({ key, value }) =>
+      execFile(process.execPath, [
+        "--input-type=module",
+        "--eval",
+        `import { ensureEnvAppId } from ${JSON.stringify(bundlePath)}; process.stdout.write(ensureEnvAppId(${JSON.stringify(envPath)}, ${JSON.stringify(key)}, ${JSON.stringify(value)}, undefined));`,
+      ]),
+    );
+    const results = (await Promise.all(workers)).map(({ stdout }) => stdout);
+    const content = await readFile(envPath, "utf8");
+    expect(content).toContain("EXISTING=preserved\n");
+    for (const prefix of prefixes) {
+      const key = `${prefix}_JAZZ_APP_ID`;
+      const matchingResults = results.filter((_, index) => candidates[index]?.key === key);
+      expect(new Set(matchingResults).size).toBe(1);
+      expect(content.match(new RegExp(`^${key}=`, "gm"))).toHaveLength(1);
+      expect(content).toContain(`${key}=${matchingResults[0]}\n`);
+    }
+    await expect(stat(`${envPath}.jazz-lock`)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("does not print the local server banner when stdout is not interactive", async () => {
