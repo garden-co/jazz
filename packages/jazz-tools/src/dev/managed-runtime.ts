@@ -198,6 +198,12 @@ interface EnvFileOperations {
   fsync(descriptor: number): void;
 }
 
+class EnvPathReplacedError extends Error {
+  constructor() {
+    super(`${LOG_PREFIX} .env changed while it was being updated; retry startup.`);
+  }
+}
+
 const defaultEnvFileOperations: EnvFileOperations = {
   waitForLock: waitForLockSync,
   unlock,
@@ -222,6 +228,40 @@ function assertRegularEnvPath(envPath: string): void {
   }
 }
 
+/**
+ * The advisory lock belongs to the inode, not the pathname. Revalidate after
+ * locking (and before returning) so an atomic rename cannot leave us appending
+ * to an unlinked file while reporting success for the replacement at envPath.
+ */
+function assertEnvPathMatchesDescriptor(envPath: string, descriptor: number): void {
+  let pathMetadata;
+  try {
+    pathMetadata = lstatSync(envPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new EnvPathReplacedError();
+    }
+    throw error;
+  }
+  if (pathMetadata.isSymbolicLink()) {
+    throw new Error(
+      `${LOG_PREFIX} refusing to update symlinked .env at ${envPath}; use a regular file instead.`,
+    );
+  }
+  if (!pathMetadata.isFile()) {
+    throw new Error(`${LOG_PREFIX} refusing to update non-file .env at ${envPath}.`);
+  }
+
+  const descriptorMetadata = fstatSync(descriptor);
+  if (
+    !descriptorMetadata.isFile() ||
+    pathMetadata.dev !== descriptorMetadata.dev ||
+    pathMetadata.ino !== descriptorMetadata.ino
+  ) {
+    throw new EnvPathReplacedError();
+  }
+}
+
 function openEnvForAppend(envPath: string): number {
   assertRegularEnvPath(envPath);
   const descriptor = openSync(
@@ -230,16 +270,7 @@ function openEnvForAppend(envPath: string): number {
     0o666,
   );
   try {
-    const pathMetadata = lstatSync(envPath);
-    const descriptorMetadata = fstatSync(descriptor);
-    if (
-      pathMetadata.isSymbolicLink() ||
-      !descriptorMetadata.isFile() ||
-      pathMetadata.dev !== descriptorMetadata.dev ||
-      pathMetadata.ino !== descriptorMetadata.ino
-    ) {
-      throw new Error(`${LOG_PREFIX} .env changed while it was being opened; retry startup.`);
-    }
+    assertEnvPathMatchesDescriptor(envPath, descriptor);
     return descriptor;
   } catch (error) {
     closeSync(descriptor);
@@ -266,47 +297,71 @@ export function ensureEnvAppId(
   operations: EnvFileOperations = defaultEnvFileOperations,
 ): string {
   mkdirSync(dirname(envPath), { recursive: true });
-  const descriptor = openEnvForAppend(envPath);
-  let result: string | undefined;
-  let actionError: unknown;
-  let locked = false;
-  try {
-    operations.waitForLock(descriptor);
-    locked = true;
-    // The lock is on the .env inode itself. Reparse only after acquisition so
-    // every cooperating process observes the previous writer's complete append.
-    const content = readFileSync(descriptor, "utf8");
-    const existing = parsedEnvValue(content, envKey);
-    if (existing !== null) {
-      result = preferred ?? existing;
-    } else {
-      const newline = content.includes("\r\n") ? "\r\n" : "\n";
-      const separator = content && !content.endsWith("\n") ? newline : "";
-      const addition = Buffer.from(`${separator}${envKey}=${fallback}${newline}`);
-      writeAll(descriptor, addition, operations);
-      operations.fsync(descriptor);
-      result = fallback;
+  // An external atomic writer can replace the pathname after we have locked
+  // its old inode. Retry a few times against the visible replacement; a path
+  // that keeps changing remains an explicit startup failure rather than a
+  // false success on an unlinked descriptor.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const descriptor = openEnvForAppend(envPath);
+    let result: string | undefined;
+    let actionError: unknown;
+    let locked = false;
+    try {
+      operations.waitForLock(descriptor);
+      locked = true;
+      // The lock is on the .env inode itself. Revalidate the pathname after
+      // acquisition, then reparse so every cooperating process observes the
+      // previous writer's complete append on the visible file.
+      assertEnvPathMatchesDescriptor(envPath, descriptor);
+      const content = readFileSync(descriptor, "utf8");
+      const existing = parsedEnvValue(content, envKey);
+      if (existing !== null) {
+        result = preferred ?? existing;
+      } else {
+        const newline = content.includes("\r\n") ? "\r\n" : "\n";
+        const separator = content && !content.endsWith("\n") ? newline : "";
+        const addition = Buffer.from(`${separator}${envKey}=${fallback}${newline}`);
+        writeAll(descriptor, addition, operations);
+        operations.fsync(descriptor);
+        result = fallback;
+      }
+      // A replacement after the append/fsync would otherwise make this call
+      // falsely report an ID that is absent from the visible .env.
+      assertEnvPathMatchesDescriptor(envPath, descriptor);
+    } catch (error) {
+      actionError = error;
     }
-  } catch (error) {
-    actionError = error;
+
+    let cleanupError: unknown;
+    if (locked) {
+      try {
+        operations.unlock(descriptor);
+      } catch (error) {
+        cleanupError = error;
+      }
+    }
+    try {
+      closeSync(descriptor);
+    } catch (error) {
+      cleanupError ??= error;
+    }
+    if (actionError !== undefined) {
+      if (
+        actionError instanceof EnvPathReplacedError &&
+        cleanupError === undefined &&
+        attempt < 2
+      ) {
+        continue;
+      }
+      throw actionError;
+    }
+    if (cleanupError !== undefined) throw cleanupError;
+    return result as string;
   }
 
-  let cleanupError: unknown;
-  if (locked) {
-    try {
-      operations.unlock(descriptor);
-    } catch (error) {
-      cleanupError = error;
-    }
-  }
-  try {
-    closeSync(descriptor);
-  } catch (error) {
-    cleanupError ??= error;
-  }
-  if (actionError !== undefined) throw actionError;
-  if (cleanupError !== undefined) throw cleanupError;
-  return result as string;
+  // The loop either returns or throws; this keeps TypeScript's control-flow
+  // analysis honest if its bounds change in the future.
+  throw new EnvPathReplacedError();
 }
 
 export interface InitializeOptions extends JazzPluginOptions {

@@ -10,7 +10,15 @@ import { ensureEnvAppId, ManagedDevRuntime } from "./managed-runtime.js";
 import { chmod, lstat, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { build } from "esbuild";
 import { unlock, waitForLockSync } from "fs-native-extensions";
-import { appendFileSync, closeSync, fsyncSync, openSync, writeSync } from "node:fs";
+import {
+  appendFileSync,
+  closeSync,
+  fsyncSync,
+  openSync,
+  renameSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 
 const execFile = promisify(execFileCallback);
 
@@ -356,6 +364,64 @@ describe("ManagedDevRuntime", () => {
     });
     await expect(readFile(envPath, "utf8")).resolves.toBe(
       "FIRST=one\nEXTERNAL=kept\nVITE_JAZZ_APP_ID=generated\n",
+    );
+  });
+
+  it("retries against an atomic replacement made after lock acquisition", async () => {
+    const schemaDir = await tempRoots.create("jazz-managed-dotenv-replaced-locked-");
+    const envPath = join(schemaDir, ".env");
+    const replacementPath = join(schemaDir, ".env.replacement");
+    await writeFile(envPath, "ORIGINAL=old\n");
+    let replaced = false;
+
+    expect(
+      ensureEnvAppId(envPath, "VITE_JAZZ_APP_ID", "generated", undefined, {
+        waitForLock(descriptor) {
+          waitForLockSync(descriptor);
+          if (!replaced) {
+            writeFileSync(replacementPath, "REPLACED=visible\n");
+            renameSync(replacementPath, envPath);
+            replaced = true;
+          }
+        },
+        unlock,
+        write: (descriptor, bytes, offset) =>
+          writeSync(descriptor, bytes, offset, bytes.byteLength - offset),
+        fsync: fsyncSync,
+      }),
+    ).toBe("generated");
+
+    await expect(readFile(envPath, "utf8")).resolves.toBe(
+      "REPLACED=visible\nVITE_JAZZ_APP_ID=generated\n",
+    );
+  });
+
+  it("retries when .env is atomically replaced after the append", async () => {
+    const schemaDir = await tempRoots.create("jazz-managed-dotenv-replaced-final-");
+    const envPath = join(schemaDir, ".env");
+    const replacementPath = join(schemaDir, ".env.replacement");
+    await writeFile(envPath, "ORIGINAL=old\n");
+    let replaced = false;
+
+    expect(
+      ensureEnvAppId(envPath, "VITE_JAZZ_APP_ID", "generated", undefined, {
+        waitForLock: waitForLockSync,
+        unlock,
+        write: (descriptor, bytes, offset) =>
+          writeSync(descriptor, bytes, offset, bytes.byteLength - offset),
+        fsync(descriptor) {
+          fsyncSync(descriptor);
+          if (!replaced) {
+            writeFileSync(replacementPath, "REPLACED=visible\n");
+            renameSync(replacementPath, envPath);
+            replaced = true;
+          }
+        },
+      }),
+    ).toBe("generated");
+
+    await expect(readFile(envPath, "utf8")).resolves.toBe(
+      "REPLACED=visible\nVITE_JAZZ_APP_ID=generated\n",
     );
   });
 
