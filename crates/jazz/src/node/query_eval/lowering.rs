@@ -413,7 +413,8 @@ where
         &mut self,
         request: QueryProgramRequest,
     ) -> Result<QueryProgram, Error> {
-        self.compile_query_program_request_with_access_paths(request, BTreeMap::new())
+        let access_paths = self.query_program_access_paths(&request)?;
+        self.compile_query_program_request_with_access_paths(request, access_paths)
             .await
     }
 

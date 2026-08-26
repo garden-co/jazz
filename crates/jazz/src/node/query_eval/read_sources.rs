@@ -31,6 +31,7 @@ pub(super) enum CurrentAccessPath {
         column: String,
         prefix: Vec<Value>,
         intersections: Vec<(String, Vec<Value>)>,
+        maintained: bool,
         /// A proved physical source cap for an ordinary one-shot read. This is
         /// never selected by policy compilation or subscriptions.
         source_limit: Option<usize>,
@@ -1375,6 +1376,7 @@ where
                 column,
                 prefix,
                 intersections,
+                maintained,
                 source_limit,
             } => {
                 if tier != DurabilityTier::Global {
@@ -1392,6 +1394,7 @@ where
                         &column,
                         &prefix,
                         &intersections,
+                        maintained,
                         source_limit,
                         &projection_target,
                     )
@@ -1682,6 +1685,7 @@ where
                     column,
                     prefix,
                     intersections,
+                    maintained,
                     source_limit,
                 }) => {
                     let source_limit = (!exclude_deleted).then_some(source_limit).flatten();
@@ -1694,6 +1698,7 @@ where
                             &column,
                             &prefix,
                             &intersections,
+                            maintained,
                             source_limit,
                             &projection_target,
                         )
@@ -1773,6 +1778,7 @@ where
                 column,
                 prefix,
                 intersections,
+                maintained,
                 source_limit,
             }) => {
                 // Select settled candidates before combining them with the
@@ -1787,6 +1793,7 @@ where
                         column,
                         prefix,
                         intersections,
+                        *maintained,
                         source_limit,
                         &projection_target,
                         raw_global_output.clone(),
@@ -1823,6 +1830,7 @@ where
                     column,
                     prefix,
                     intersections,
+                    maintained,
                     source_limit,
                 }) => self.node.physical_ahead_current_source_for_index_scan(
                     read_table,
@@ -1830,6 +1838,7 @@ where
                     column,
                     prefix,
                     intersections,
+                    *maintained,
                     (!exclude_deleted).then_some(*source_limit).flatten(),
                     &projection_target,
                 ),
@@ -2891,17 +2900,13 @@ where
             let Some(mut path) = select_current_access_path(&table, &equalities) else {
                 continue;
             };
-            // Multi-index intersection is an ephemeral one-shot source. Keep
-            // maintained programs and reusable policy graphs on their existing
-            // single-index path until the fused source has incremental-update
-            // semantics of its own.
-            if !allow_local && let CurrentAccessPath::Index { intersections, .. } = &mut path {
-                intersections.clear();
+            if !allow_local && let CurrentAccessPath::Index { maintained, .. } = &mut path {
+                *maintained = true;
             }
-            // Generic maintained programs remain Global-only. A one-shot Local
-            // caller opts in only after arranging equivalent index scans over
-            // both the settled and ahead physical sources.
-            if tier == DurabilityTier::Global || (allow_local && tier == DurabilityTier::Local) {
+            // Local sources arrange equivalent intersections over settled and
+            // ahead physical rows before winner selection; Edge still requires
+            // its host-owned coverage route.
+            if matches!(tier, DurabilityTier::Global | DurabilityTier::Local) {
                 paths.insert(source, path);
             }
         }
@@ -3066,6 +3071,7 @@ where
         column: &str,
         prefix: &[Value],
         intersections: &[(String, Vec<Value>)],
+        maintained: bool,
         source_limit: Option<usize>,
         projection_target: &str,
     ) -> Result<GraphBuilder, Error> {
@@ -3075,6 +3081,7 @@ where
             column,
             prefix,
             intersections,
+            maintained,
             source_limit,
             projection_target,
             table.global_current_storage_tables()[0].record_schema(),
@@ -3088,6 +3095,7 @@ where
         column: &str,
         prefix: &[Value],
         intersections: &[(String, Vec<Value>)],
+        maintained: bool,
         source_limit: Option<usize>,
         projection_target: &str,
         _output: RecordDescriptor,
@@ -3136,13 +3144,33 @@ where
                 ))
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        Ok(GraphBuilder::variant_index_intersection_scan(
-            storage_table,
-            physical_current_index_name(column_id),
-            scan,
-            intersections,
-            projection_target,
-        ))
+        let primary_index = physical_current_index_name(column_id);
+        if maintained {
+            let mut graph = GraphBuilder::variant_index_scan(
+                storage_table.clone(),
+                primary_index,
+                projection_target,
+                scan,
+            );
+            for (index, scan) in intersections {
+                let right = GraphBuilder::variant_index_scan(
+                    storage_table.clone(),
+                    index,
+                    projection_target,
+                    scan,
+                );
+                graph = GraphBuilder::semi_join(graph, right, ["row_uuid"], ["row_uuid"]);
+            }
+            Ok(graph)
+        } else {
+            Ok(GraphBuilder::variant_index_intersection_scan(
+                storage_table,
+                primary_index,
+                scan,
+                intersections,
+                projection_target,
+            ))
+        }
     }
 
     fn physical_ahead_current_source_for_index_scan(
@@ -3152,6 +3180,7 @@ where
         column: &str,
         prefix: &[Value],
         intersections: &[(String, Vec<Value>)],
+        maintained: bool,
         source_limit: Option<usize>,
         projection_target: &str,
     ) -> Result<GraphBuilder, Error> {
@@ -3198,13 +3227,34 @@ where
                 ))
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        Ok(GraphBuilder::variant_index_intersection_scan(
-            physical_ahead_current_table_name(mapping.table_id),
-            physical_current_index_name(column_id),
-            scan,
-            intersections,
-            projection_target,
-        ))
+        let storage_table = physical_ahead_current_table_name(mapping.table_id);
+        let primary_index = physical_current_index_name(column_id);
+        if maintained {
+            let mut graph = GraphBuilder::variant_index_scan(
+                storage_table.clone(),
+                primary_index,
+                projection_target,
+                scan,
+            );
+            for (index, scan) in intersections {
+                let right = GraphBuilder::variant_index_scan(
+                    storage_table.clone(),
+                    index,
+                    projection_target,
+                    scan,
+                );
+                graph = GraphBuilder::semi_join(graph, right, ["row_uuid"], ["row_uuid"]);
+            }
+            Ok(graph)
+        } else {
+            Ok(GraphBuilder::variant_index_intersection_scan(
+                storage_table,
+                primary_index,
+                scan,
+                intersections,
+                projection_target,
+            ))
+        }
     }
 }
 
