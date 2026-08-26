@@ -42,6 +42,7 @@ const schema: WasmSchema = {
 const modes = [
   "direct-napi-text",
   "streaming-napi-text",
+  "concurrent-streaming-napi-text",
   "direct-wasm-text",
   "streaming-wasm-text",
   "direct-wasm-bytes",
@@ -93,6 +94,22 @@ describe.runIf(modes.includes(fixture as (typeof modes)[number]))(
       });
       try {
         console.error(`phase:${fixture}:start`);
+        if (fixture === "concurrent-streaming-napi-text") {
+          const writes = await Promise.all(
+            ["first", "second"].map((title) =>
+              client.insertStreaming(
+                "todos",
+                { done: { type: "Boolean", value: false } },
+                "title",
+                oneChunk(title),
+              ),
+            ),
+          );
+          expect(writes).toHaveLength(2);
+          await Promise.all(writes.map((write) => write.wait({ tier: "local" })));
+          console.error(`phase:${fixture}:local`);
+          return;
+        }
         const largeText = "x".repeat(256 * 1024 + 1);
         const largeJson = JSON.stringify({ selected: { answer: 42 }, padding: largeText });
         const write = fixture?.startsWith("direct-")
@@ -193,7 +210,7 @@ async function createNapiRuntime(): Promise<NativeRuntimeAdapter> {
     { openMemory: (encodedSchema, config) => NapiDb.openMemory(encodedSchema, config) as never },
     schema,
     deterministicBytes(`large-value-${fixture}:node`),
-    deterministicBytes(`large-value-${fixture}:author`),
+    new TextEncoder().encode(JSON.stringify(["urn:jazz:test", `large-value-${fixture}:author`])),
     1,
     true,
     { readAuthorizationHost: "trusted-serving" },
