@@ -2,13 +2,25 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { stageNapiLoader } from "./stage-napi-loader.mjs";
 import { stageNativeFingerprints } from "./stage-native-fingerprints.mjs";
 
 const fingerprint = "a".repeat(64);
 const wasmFiles = ["jazz_wasm_bg.wasm", "jazz_wasm_bg.wasm.d.ts", "jazz_wasm.d.ts", "jazz_wasm.js"];
+const repositoryRoot = resolve(import.meta.dirname, "../..");
+
+test("release workflow uploads the sealed WASM provenance manifest", () => {
+  const workflow = readFileSync(
+    join(repositoryRoot, ".github/workflows/build-jazz-packages.yml"),
+    "utf8",
+  );
+  const wasmUpload = workflow.match(/name: jazz-wasm-pkg[\s\S]*?if-no-files-found: error/)?.[0];
+  assert.ok(wasmUpload, "missing jazz-wasm package artifact upload");
+  assert.match(wasmUpload, /path: crates\/jazz-wasm\/pkg/);
+  assert.match(wasmUpload, /include-hidden-files: true/);
+});
 
 function releaseFixture() {
   const root = mkdtempSync(join(tmpdir(), "jazz-release-staging-"));

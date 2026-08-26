@@ -4,8 +4,37 @@
 //! a served subscriber. It applies and emits sync messages, tracks coverage,
 //! performs bounded repair, and preserves authenticated reconnect state.
 
-use super::node_runtime::{refresh_subscriptions_in, route_upstream_subscription_rejection};
+use super::node_runtime::{
+    refresh_subscriptions_in, retire_relay_upstream_subscription,
+    route_upstream_subscription_rejection, take_relay_upstream_subscription_owner,
+};
 use super::*;
+
+/// Namespace for relay-owned usage-site subscription handles.
+///
+/// A relay may normalize multiple downstream coverage requests to the same
+/// upstream read view. The resulting subscriptions still need distinct wire
+/// handles: the upstream node deduplicates their work by [`CoverageKey`], while
+/// retaining the independent ownership needed for correct unsubscribe behavior.
+const RELAY_UPSTREAM_SUBSCRIPTION_NAMESPACE: uuid::Uuid =
+    uuid::uuid!("ae3eb9f7-65cc-528d-8f3e-a772fb6f68fe");
+
+fn relay_upstream_subscription_key(
+    connection_epoch: u64,
+    downstream: SubscriptionKey,
+    upstream_read_view: ReadViewKey,
+) -> SubscriptionKey {
+    let identity = postcard::to_allocvec(&(connection_epoch, downstream, upstream_read_view))
+        .expect("relay subscription identity is postcard encodable");
+    SubscriptionKey {
+        shape_id: downstream.shape_id,
+        binding_id: BindingId(uuid::Uuid::new_v5(
+            &RELAY_UPSTREAM_SUBSCRIPTION_NAMESPACE,
+            &identity,
+        )),
+        read_view: upstream_read_view,
+    }
+}
 
 async fn finish_peer_publication_outcome<S, T>(
     node: &SharedNodeState<S>,
@@ -267,6 +296,8 @@ where
     pub(super) node: SharedNodeState<S>,
     pub(super) subscriptions: SubscriptionList,
     pub(super) upstream_subscription_owners: UpstreamSubscriptionOwners,
+    pub(super) relay_upstream_subscription_owners: RelayUpstreamSubscriptionOwners,
+    pub(super) pending_relay_subscription_rejections: PendingRelaySubscriptionRejections,
     pub(super) latest_coverage_subscriptions: LatestCoverageSubscriptions,
     pub(super) awaiting_initial_authority_coverage: AwaitingInitialAuthorityCoverage,
     pub(super) active_authority_view_receipts: ActiveAuthorityViewReceipts,
@@ -892,6 +923,7 @@ where
                                 }
                                 return Err(transport_error(error));
                             }
+                            self.auxiliary_pump.acknowledge_outbound(&message);
                         }
                         pending.extend(upstream_subscriptions.borrow_mut().drain(..));
                         let claims = self.node.borrow().session_claims_with_revisions();
@@ -1172,16 +1204,36 @@ where
                                     }
                                     let mut chunks = Vec::with_capacity(requested.len());
                                     for node_ref in requested {
-                                        let encoded = self
-                                            .node
-                                            .lock()
-                                            .await
-                                            .local_chunk(
-                                                node_ref.locator,
-                                                node_ref.object_hash,
-                                            )
-                                            .await
-                                            .map_err(crate::node::Error::from)?;
+                                        let (replica_role, source_node, result) = {
+                                            let node = self.node.lock().await;
+                                            let replica_role = if node.authored_commit_durability()
+                                                == DurabilityTier::None
+                                            {
+                                                "non-durable-client"
+                                            } else {
+                                                "durable-relay"
+                                            };
+                                            let source_node = node.node_uuid();
+                                            let result = node
+                                                .local_chunk(
+                                                    node_ref.locator,
+                                                    node_ref.object_hash,
+                                                )
+                                                .await;
+                                            (replica_role, source_node, result)
+                                        };
+                                        let encoded = result.map_err(|source| {
+                                                crate::node::Error::LargeValueUploadChunkUnavailable {
+                                                    context: large_value_upload_chunk_context(
+                                                        tx_id,
+                                                        &upload.value_ref,
+                                                        &node_ref,
+                                                        replica_role,
+                                                        source_node,
+                                                    ),
+                                                    source,
+                                                }
+                                            })?;
                                         chunks.push(groove::large_values::StagedChunk {
                                             node_ref,
                                             encoded: encoded.to_vec(),
@@ -1494,12 +1546,40 @@ where
                                 subscription,
                                 reason,
                             } => {
-                                stats.subscription_events += route_upstream_subscription_rejection(
-                                    &self.subscriptions,
-                                    &self.upstream_subscription_owners,
+                                if let Some(owner) = take_relay_upstream_subscription_owner(
+                                    &self.relay_upstream_subscription_owners,
                                     subscription,
-                                    reason,
-                                );
+                                ) {
+                                    self.pending_relay_subscription_rejections
+                                        .borrow_mut()
+                                        .entry(owner.downstream_connection_epoch)
+                                        .or_default()
+                                        .push_back(RelaySubscriptionRejection {
+                                            coverage: owner.coverage,
+                                            downstream_subscriptions: owner
+                                                .downstream_subscriptions,
+                                            reason,
+                                        });
+                                    // The authority has already retired its
+                                    // own attempt, but sending an explicit
+                                    // unsubscribe makes reconnect/replay
+                                    // convergence deterministic on peers that
+                                    // retain rejected handles until told
+                                    // otherwise.
+                                    upstream_subscriptions.borrow_mut().push(
+                                        PendingUpstreamCommand::Unsubscribe(subscription),
+                                    );
+                                    let next = self.subscriber_dirty_epoch.get().wrapping_add(1);
+                                    self.subscriber_dirty_epoch.set(next);
+                                    schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                } else {
+                                    stats.subscription_events += route_upstream_subscription_rejection(
+                                        &self.subscriptions,
+                                        &self.upstream_subscription_owners,
+                                        subscription,
+                                        reason,
+                                    );
+                                }
                             }
                             SyncMessage::PermissionAdviceResponse { request_id, advice } => {
                                 // Direct answers were the pre-Phase-3 protocol.
@@ -2022,6 +2102,64 @@ where
                 let mut scheduled_immediate = false;
                 let mut sent_view_update = false;
                 let mut needs_subscription_refresh = false;
+                let relay_rejections = self
+                    .pending_relay_subscription_rejections
+                    .borrow_mut()
+                    .remove(&connection_epoch)
+                    .unwrap_or_default();
+                for rejection in relay_rejections {
+                    let active_subscriptions = coverage_groups
+                        .get(&rejection.coverage)
+                        .map(|group| {
+                            group
+                                .subscribers
+                                .intersection(&rejection.downstream_subscriptions)
+                                .copied()
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    // Forward the authority's reason to every active usage
+                    // site before retiring the group. One coverage evaluator
+                    // may have many downstream wire subscriptions.
+                    for subscription in active_subscriptions {
+                        self.transport
+                            .send(SyncMessage::SubscribeRejected {
+                                subscription,
+                                reason: rejection.reason.clone(),
+                            })
+                            .map_err(transport_error)?;
+                    }
+                    if let Some(group) = coverage_groups.remove(&rejection.coverage) {
+                        let group_subscription = SubscriptionKey {
+                            shape_id: rejection.coverage.shape_id,
+                            binding_id: rejection.coverage.binding_id,
+                            read_view: rejection.coverage.opts.read_view_key(),
+                        };
+                        let mut node = self.node.borrow_mut();
+                        // `group_subscription` owns the one shared maintained
+                        // evaluator. The individual subscribers are still
+                        // separately registered wire usage sites, including
+                        // the case where a peer deliberately used noncanonical
+                        // binding handles. Retire both layers: dropping only
+                        // the group leaves the individual registrations and
+                        // known-state declarations resident after rejection.
+                        peer.forget_subscription_with_node(&mut node, group_subscription);
+                        for subscription in group.subscribers {
+                            node.apply_unsubscribe(subscription);
+                            if subscription != group_subscription {
+                                peer.forget_subscription(subscription);
+                            }
+                            served.remove(&subscription);
+                            if let Some(purpose) = scope_purposes.remove(&subscription) {
+                                remove_scope_aggregate_member(
+                                    scope_aggregates,
+                                    &purpose.key,
+                                    subscription,
+                                );
+                            }
+                        }
+                    }
+                }
                 for fate in std::mem::take(&mut *self.downstream_fates.borrow_mut()) {
                     send_with_sync_context(&self.node, peer, self.transport.as_mut(), fate)?;
                 }
@@ -2030,6 +2168,7 @@ where
                         self.auxiliary_pump.restore_outbound(message);
                         return Err(transport_error(error));
                     }
+                    self.auxiliary_pump.acknowledge_outbound(&message);
                 }
                 while let Some(message) = self.transport.try_recv() {
                     // Authorization support is authority-owned in Phase 3.
@@ -2051,6 +2190,9 @@ where
                         SyncMessage::ChunkRequestBatch(batch) => {
                             let mut responses = Vec::new();
                             for request in batch.requests {
+                                if self.auxiliary_pump.is_disconnected() {
+                                    break;
+                                }
                                 let local = self
                                     .node
                                     .lock()
@@ -2060,6 +2202,9 @@ where
                                         groove::large_values::ContentHash(request.expected_hash),
                                     )
                                     .await;
+                                if self.auxiliary_pump.is_disconnected() {
+                                    break;
+                                }
                                 match local {
                                     Ok(bytes) => responses.push(ChunkResponseEntry {
                                         request_id: request.request_id,
@@ -2075,7 +2220,9 @@ where
                                     }),
                                 }
                             }
-                            if !responses.is_empty() {
+                            if !responses.is_empty()
+                                && !self.auxiliary_pump.is_disconnected()
+                            {
                                 self.transport
                                     .send(SyncMessage::ChunkResponseBatch(ChunkResponseBatch {
                                         responses,
@@ -2490,11 +2637,18 @@ where
                             } else {
                                 opts.clone()
                             };
-                            let upstream_subscription = SubscriptionKey {
-                                shape_id: coverage.shape_id,
-                                binding_id: coverage.binding_id,
-                                read_view: upstream_opts.read_view_key(),
-                            };
+                            // This is an upstream usage-site handle, not the
+                            // canonical binding id. Distinct downstream views
+                            // can normalize to identical Global coverage, but
+                            // each retains independent subscribe/unsubscribe
+                            // ownership. The upstream node's CoverageKey groups
+                            // them onto one evaluator without conflating their
+                            // wire lifecycles.
+                            let upstream_subscription = relay_upstream_subscription_key(
+                                connection_epoch,
+                                subscription,
+                                upstream_opts.read_view_key(),
+                            );
                             let first_subscriber = coverage_groups
                                 .get(&coverage)
                                 .is_none_or(|group| group.subscribers.is_empty());
@@ -2587,6 +2741,29 @@ where
                                 });
                             group.subscribers.insert(subscription);
                             group.pending_initial_subscribers.insert(subscription);
+                            if group.upstream_opts.propagate_upstream {
+                                let owner = RelayUpstreamSubscriptionOwner {
+                                    downstream_connection_epoch: connection_epoch,
+                                    coverage: coverage.clone(),
+                                    downstream_subscriptions: BTreeSet::from([subscription]),
+                                };
+                                self.relay_upstream_subscription_owners
+                                    .borrow_mut()
+                                    .entry(group.upstream_subscription)
+                                    .and_modify(|existing| {
+                                        debug_assert_eq!(
+                                            existing.downstream_connection_epoch,
+                                            connection_epoch,
+                                            "relay upstream handle changed downstream owner"
+                                        );
+                                        debug_assert_eq!(
+                                            existing.coverage, coverage,
+                                            "relay upstream handle changed coverage group"
+                                        );
+                                        existing.downstream_subscriptions.insert(subscription);
+                                    })
+                                    .or_insert(owner);
+                            }
                             served.insert(subscription, coverage);
                             if let Some(mut update) = opening_pending {
                                 stamp_view_update_authorization_progress_from(
@@ -2657,6 +2834,17 @@ where
                                 if let Some(group) = coverage_groups.get_mut(&coverage) {
                                     group.subscribers.remove(&subscription);
                                     group.pending_initial_subscribers.remove(&subscription);
+                                    if group.upstream_opts.propagate_upstream {
+                                        if let Some(owner) = self
+                                            .relay_upstream_subscription_owners
+                                            .borrow_mut()
+                                            .get_mut(&group.upstream_subscription)
+                                            && owner.downstream_connection_epoch == connection_epoch
+                                            && owner.coverage == coverage
+                                        {
+                                            owner.downstream_subscriptions.remove(&subscription);
+                                        }
+                                    }
                                     if group.subscribers.is_empty() {
                                         let upstream_subscription = group.upstream_subscription;
                                         let propagated_upstream =
@@ -2679,11 +2867,20 @@ where
                                         );
                                         coverage_groups.remove(&coverage);
                                         if propagated_upstream {
-                                            upstream_subscriptions.borrow_mut().push(
-                                                PendingUpstreamCommand::Unsubscribe(
-                                                    upstream_subscription,
-                                                ),
-                                            );
+                                            if retire_relay_upstream_subscription(
+                                                &self.relay_upstream_subscription_owners,
+                                                upstream_subscription,
+                                                connection_epoch,
+                                                &coverage,
+                                            )
+                                            .is_some()
+                                            {
+                                                upstream_subscriptions.borrow_mut().push(
+                                                    PendingUpstreamCommand::Unsubscribe(
+                                                        upstream_subscription,
+                                                    ),
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -4272,6 +4469,29 @@ fn binding_values_in_param_order(shape: &ValidatedQuery, binding: &Binding) -> V
                 .expect("binding is missing a shape parameter value")
         })
         .collect()
+}
+
+/// Describe an unavailable locally-owned upload chunk without disclosing its
+/// retrieval capability. A locator grants exact chunk retrieval, so the
+/// diagnostic carries a stable fingerprint rather than raw locator bytes.
+fn large_value_upload_chunk_context(
+    tx_id: TxId,
+    value_ref: &groove::large_values::LargeValueRef,
+    node_ref: &groove::large_values::NodeRef,
+    replica_role: &str,
+    source_node: NodeUuid,
+) -> String {
+    format!(
+        "role={replica_role} source_node={source_node:?} transaction={tx_id:?} root_hash={} root_locator={} chunk_hash={} chunk_locator={}",
+        hex::encode(value_ref.root.object_hash.0),
+        chunk_locator_fingerprint(value_ref.root.locator),
+        hex::encode(node_ref.object_hash.0),
+        chunk_locator_fingerprint(node_ref.locator),
+    )
+}
+
+fn chunk_locator_fingerprint(locator: groove::large_values::Locator) -> String {
+    blake3::hash(locator.as_bytes()).to_hex()[..16].to_owned()
 }
 
 /// A `ViewUpdate` that carries no version, result-set, or program-fact change —

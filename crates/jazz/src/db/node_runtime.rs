@@ -30,6 +30,8 @@ where
     pub(super) coverage_refresh_generations: CoverageRefreshGenerations,
     pub(super) query_coverage_registrations: QueryCoverageRegistrations,
     pub(super) upstream_subscription_owners: UpstreamSubscriptionOwners,
+    pub(super) relay_upstream_subscription_owners: RelayUpstreamSubscriptionOwners,
+    pub(super) pending_relay_subscription_rejections: PendingRelaySubscriptionRejections,
     pub(super) connections: RefCell<Vec<Rc<LocalMutex<PeerConnection<S>>>>>,
     pub(super) scheduler: SharedTickScheduler,
     pub(super) upload_retry_clock: SharedUploadRetryClock,
@@ -92,6 +94,8 @@ where
             coverage_refresh_generations: Rc::new(RefCell::new(BTreeMap::new())),
             query_coverage_registrations: Rc::new(RefCell::new(BTreeMap::new())),
             upstream_subscription_owners: Rc::new(RefCell::new(BTreeMap::new())),
+            relay_upstream_subscription_owners: Rc::new(RefCell::new(BTreeMap::new())),
+            pending_relay_subscription_rejections: Rc::new(RefCell::new(BTreeMap::new())),
             connections: RefCell::new(Vec::new()),
             scheduler: Rc::new(RefCell::new(None)),
             upload_retry_clock: Rc::new(RefCell::new(Rc::new(MonotonicUploadRetryClock::new()))),
@@ -503,6 +507,10 @@ where
             .clear();
         self.query_coverage_registrations.borrow_mut().clear();
         self.upstream_subscription_owners.borrow_mut().clear();
+        self.relay_upstream_subscription_owners.borrow_mut().clear();
+        self.pending_relay_subscription_rejections
+            .borrow_mut()
+            .clear();
     }
 
     pub(super) fn set_mutation_error_callback(&self, callback: Option<MutationErrorCallback>) {
@@ -861,12 +869,62 @@ where
                 }
             }
         }
+        // Relay-owned coverage is not represented by the public subscription
+        // list above: it is retained by the downstream connection that it
+        // serves. Replacing an upstream transport drops that transport's wire
+        // subscriptions, while the downstream browser is still connected and
+        // therefore will not send a fresh Subscribe. Replay every live relay
+        // owner onto the successor authority, using its stable usage-site key.
+        //
+        // The owner map is the lifecycle authority here. A rejected coverage
+        // group can briefly remain on its downstream link while its rejection
+        // waits to be delivered; replaying that orphan would resurrect a
+        // subscription that is already being retired.
+        let relay_subscriptions = {
+            let owners = self.relay_upstream_subscription_owners.borrow();
+            self.connections
+                .borrow()
+                .iter()
+                .flat_map(|connection| {
+                    let connection = connection.borrow();
+                    let ConnectionLink::Subscriber(subscriber) = &connection.link else {
+                        return Vec::new();
+                    };
+                    subscriber
+                        .coverage_groups
+                        .iter()
+                        .filter_map(|(coverage, group)| {
+                            let owner = owners.get(&group.upstream_subscription)?;
+                            (group.upstream_opts.propagate_upstream
+                                && owner.downstream_connection_epoch == connection.connection_epoch
+                                && owner.coverage == *coverage)
+                                .then(|| PendingUpstreamSubscription {
+                                    subscription: group.upstream_subscription,
+                                    shape: group.shape.clone(),
+                                    binding: group.binding.clone(),
+                                    opts: group.upstream_opts.clone(),
+                                    identity: subscriber.peer.link_identity(),
+                                })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        for subscription in relay_subscriptions {
+            if pending_subscriptions.insert(subscription.subscription) {
+                pending.push(PendingUpstreamCommand::Subscribe(subscription));
+            }
+        }
         let connection = Rc::new(LocalMutex::new(PeerConnection {
             transport,
             staged_inbound: VecDeque::new(),
             node: Rc::clone(&self.node),
             subscriptions: Rc::clone(&self.subscriptions),
             upstream_subscription_owners: Rc::clone(&self.upstream_subscription_owners),
+            relay_upstream_subscription_owners: Rc::clone(&self.relay_upstream_subscription_owners),
+            pending_relay_subscription_rejections: Rc::clone(
+                &self.pending_relay_subscription_rejections,
+            ),
             latest_coverage_subscriptions: Rc::clone(&self.latest_coverage_subscriptions),
             awaiting_initial_authority_coverage: Rc::clone(
                 &self.awaiting_initial_authority_coverage,
@@ -1094,6 +1152,10 @@ where
             node: Rc::clone(&self.node),
             subscriptions: Rc::clone(&self.subscriptions),
             upstream_subscription_owners: Rc::clone(&self.upstream_subscription_owners),
+            relay_upstream_subscription_owners: Rc::clone(&self.relay_upstream_subscription_owners),
+            pending_relay_subscription_rejections: Rc::clone(
+                &self.pending_relay_subscription_rejections,
+            ),
             latest_coverage_subscriptions: Rc::clone(&self.latest_coverage_subscriptions),
             awaiting_initial_authority_coverage: Rc::clone(
                 &self.awaiting_initial_authority_coverage,
@@ -1160,27 +1222,84 @@ where
         let mut connection_ref = connection.borrow_mut();
         let connection_epoch = connection_ref.connection_epoch;
         let upstream_upload_destination = connection_ref.upstream_upload_destination;
-        let (authority, upstream_epoch, transferable_uploads) = match &mut connection_ref.link {
-            ConnectionLink::Upstream(UpstreamConnectionState {
-                expected_scope_authority,
-                large_value_uploads,
-                awaiting_large_value_uploads,
-                ..
-            }) => (
-                *expected_scope_authority,
-                Some(connection_epoch),
-                Some(peer_connection::take_reconnectable_large_value_uploads(
+        let (authority, upstream_epoch, transferable_uploads, retired_relay_subscriptions) =
+            match &mut connection_ref.link {
+                ConnectionLink::Upstream(UpstreamConnectionState {
+                    expected_scope_authority,
                     large_value_uploads,
                     awaiting_large_value_uploads,
-                )),
-            ),
-            ConnectionLink::Subscriber(_) => (None, None, None),
-        };
+                    ..
+                }) => (
+                    *expected_scope_authority,
+                    Some(connection_epoch),
+                    Some(peer_connection::take_reconnectable_large_value_uploads(
+                        large_value_uploads,
+                        awaiting_large_value_uploads,
+                    )),
+                    Vec::new(),
+                ),
+                ConnectionLink::Subscriber(SubscriberConnectionState {
+                    peer,
+                    served,
+                    coverage_groups,
+                    scope_purposes,
+                    scope_aggregates,
+                    authority_scope_hydrations,
+                    ..
+                }) => {
+                    let retired = retire_relay_upstream_subscriptions_for_connection(
+                        &self.relay_upstream_subscription_owners,
+                        connection_epoch,
+                    );
+                    // A detached subscriber cannot later send a normal
+                    // Unsubscribe. Retire its concrete served usage sites and the
+                    // one maintained receiver per coverage group now; groups on
+                    // every other downstream connection remain untouched.
+                    let groups = std::mem::take(coverage_groups);
+                    let mut node = self.node.borrow_mut();
+                    for (coverage, group) in groups {
+                        for subscription in group.subscribers {
+                            node.apply_unsubscribe(subscription);
+                            served.remove(&subscription);
+                            scope_purposes.remove(&subscription);
+                        }
+                        peer.forget_subscription_with_node(
+                            &mut node,
+                            SubscriptionKey {
+                                shape_id: coverage.shape_id,
+                                binding_id: coverage.binding_id,
+                                read_view: coverage.opts.read_view_key(),
+                            },
+                        );
+                    }
+                    scope_aggregates.clear();
+                    authority_scope_hydrations.clear();
+                    (None, None, None, retired)
+                }
+            };
+        // The auxiliary lane is independent of semantic ticks. Retire it for
+        // both upstream and subscriber links before releasing this connection
+        // so an in-flight local lookup cannot recreate relay state afterward.
+        connection_ref.auxiliary_pump.disconnect();
         drop(connection_ref);
+        // A rejection can be queued by the upstream turn immediately before
+        // this abrupt detach. Its downstream transport is gone, so retaining
+        // that queue entry would be an unbounded stale-epoch leak.
+        self.pending_relay_subscription_rejections
+            .borrow_mut()
+            .remove(&connection_epoch);
         let mut connections = self.connections.borrow_mut();
         connections.retain(|candidate| !Rc::ptr_eq(candidate, connection));
         drop(connections);
         let detached = true;
+        if !retired_relay_subscriptions.is_empty() {
+            self.upstream_subscriptions.borrow_mut().extend(
+                retired_relay_subscriptions
+                    .into_iter()
+                    .map(|(subscription, _)| PendingUpstreamCommand::Unsubscribe(subscription)),
+            );
+            self.schedule_tick(TickUrgency::Immediate);
+        }
         if let (Some(destination), Some(uploads)) =
             (upstream_upload_destination, transferable_uploads)
             && !uploads.is_empty()
@@ -2657,6 +2776,62 @@ pub(super) fn unregister_upstream_subscription_owner(
     if entries.is_empty() {
         owners.remove(&subscription);
     }
+}
+
+/// Retire one relay-owned upstream usage site only when it still belongs to
+/// the expected downstream connection and coverage group. The exact match is
+/// what keeps a stale unsubscribe/rejection from removing a sibling relay
+/// connection that happens to request identical coverage.
+pub(super) fn retire_relay_upstream_subscription(
+    owners: &RelayUpstreamSubscriptionOwners,
+    subscription: SubscriptionKey,
+    downstream_connection_epoch: u64,
+    coverage: &CoverageKey,
+) -> Option<RelayUpstreamSubscriptionOwner> {
+    let mut owners = owners.borrow_mut();
+    let owner = owners.get(&subscription)?;
+    if owner.downstream_connection_epoch != downstream_connection_epoch
+        || owner.coverage != *coverage
+    {
+        return None;
+    }
+    owners.remove(&subscription)
+}
+
+/// Retire a relay owner after its authority has terminally rejected the wire
+/// subscription. Unlike an ordinary unsubscribe there is no downstream link
+/// assertion here: the opaque upstream handle itself is the unforgeable owner
+/// token, and the returned record tells us exactly where to route the result.
+pub(super) fn take_relay_upstream_subscription_owner(
+    owners: &RelayUpstreamSubscriptionOwners,
+    subscription: SubscriptionKey,
+) -> Option<RelayUpstreamSubscriptionOwner> {
+    owners.borrow_mut().remove(&subscription)
+}
+
+/// Take every propagated upstream owner for a disconnected downstream link.
+/// Taking the records before enqueuing wire retirement makes repeated detach
+/// calls and late rejections harmless no-ops.
+pub(super) fn retire_relay_upstream_subscriptions_for_connection(
+    owners: &RelayUpstreamSubscriptionOwners,
+    downstream_connection_epoch: u64,
+) -> Vec<(SubscriptionKey, RelayUpstreamSubscriptionOwner)> {
+    let mut owners = owners.borrow_mut();
+    let subscriptions = owners
+        .iter()
+        .filter_map(|(subscription, owner)| {
+            (owner.downstream_connection_epoch == downstream_connection_epoch)
+                .then_some(*subscription)
+        })
+        .collect::<Vec<_>>();
+    subscriptions
+        .into_iter()
+        .filter_map(|subscription| {
+            owners
+                .remove(&subscription)
+                .map(|owner| (subscription, owner))
+        })
+        .collect()
 }
 
 pub(super) fn register_shape_rejection_matches(

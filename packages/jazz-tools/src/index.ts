@@ -2,9 +2,7 @@
 
 import {
   col,
-  getCollectedMigration,
   getCollectedSchema,
-  migrate,
   resetCollectedState,
   table,
   allowExternalProvenanceName,
@@ -37,9 +35,7 @@ import type {
 export {
   table,
   col,
-  migrate,
   getCollectedSchema,
-  getCollectedMigration,
   resetCollectedState,
   allowExternalProvenanceName,
 } from "./dsl.js";
@@ -61,7 +57,6 @@ export type {
   LensOp,
   SqlType,
   LensOpType,
-  MigrationOp,
   AddOp,
   DropOp,
   RenameOp,

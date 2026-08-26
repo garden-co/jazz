@@ -1982,9 +1982,14 @@ describe("SharedWorker bridge with IndexedDB", () => {
       done: false,
     });
     await waitForCondition(
-      async () => (await queryRemoteBrowserDbRows(remoteDbId, 2)).some((row) => row.id === rowId),
+      async () => {
+        const tabSnapshots = await Promise.all(
+          [0, 1, 2].map((tabIndex) => queryRemoteBrowserDbRows(remoteDbId, tabIndex)),
+        );
+        return tabSnapshots.every((rows) => rows.some((row) => row.id === rowId));
+      },
       8_000,
-      "Seed row should reach every tab before conflicting updates",
+      "Seed row should be locally observed by every tab before conflicting updates",
     );
 
     await Promise.all([
