@@ -436,6 +436,7 @@ where
         identity: AuthorSubject,
         output: CurrentQueryProgramOutput,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<QueryProgram, Error> {
         let request = self.current_query_program_request_with_inline_binding_source(
             shape,
@@ -444,7 +445,7 @@ where
             identity,
             output,
             &ReadViewSpec::default(),
-            QueryAuthorizationMode::TrustedServing,
+            authorization_mode,
         )?;
         self.compile_query_program_request_with_access_paths(request, access_paths)
             .await
@@ -2262,13 +2263,52 @@ where
     /// Execute a serving query with its root constrained to a physical row
     /// UUID. This is for internal authorization probes: public `id` may be a
     /// declared user column and must not be used as the storage-row selector.
-    pub(in crate::node) async fn query_rows_for_link_physical_row(
+    pub(crate) async fn query_rows_for_link_physical_row(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
         identity: AuthorSubject,
         row_uuid: RowUuid,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.query_rows_for_physical_row_in_authorization_mode(
+            shape,
+            binding,
+            tier,
+            identity,
+            row_uuid,
+            QueryAuthorizationMode::TrustedServing,
+        )
+        .await
+    }
+
+    pub(crate) async fn query_rows_for_client_physical_row(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorSubject,
+        row_uuid: RowUuid,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.query_rows_for_physical_row_in_authorization_mode(
+            shape,
+            binding,
+            tier,
+            identity,
+            row_uuid,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .await
+    }
+
+    async fn query_rows_for_physical_row_in_authorization_mode(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorSubject,
+        row_uuid: RowUuid,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table = self
             .table_in_schema(&shape.query().table, shape.schema_version())?
@@ -2285,6 +2325,7 @@ where
                 identity,
                 CurrentQueryProgramOutput::AppRows,
                 access_paths,
+                authorization_mode,
             )
             .await?;
         // A policy can introduce claim parameters even though this physical
