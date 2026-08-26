@@ -7,7 +7,7 @@ use crate::groove::records::{
 use crate::groove::schema::ColumnType as GrooveColumnType;
 use crate::query::{
     InheritsOperation, JoinCorrelation, JoinSourceLookup, JoinTarget, JoinVia, Operand,
-    PolicyBranch, Predicate, Query,
+    PolicyBranch, Predicate, Query, provider_claim_key,
 };
 use crate::schema::{
     ColumnSchema as CoreColumnSchema, JazzSchema, MergeStrategy, RuntimeSchema,
@@ -25,9 +25,9 @@ use crate::tools::public_schema::{
     TableSchema, Value,
 };
 
-const DIRECT_USER_ID_CLAIM: &str = "user_id";
-const PUBLIC_USER_ID_SESSION_PATHS: &[&str] = &["user_id", "userId"];
 const DIRECT_USER_CLAIM: &str = "user";
+#[cfg(test)]
+const DIRECT_USER_ID_CLAIM: &str = "\0claims:sub";
 const PUBLIC_USER_SESSION_PATHS: &[&str] = &["user"];
 const DIRECT_AUTH_MODE_CLAIM: &str = "authMode";
 const PUBLIC_AUTH_MODE_SESSION_PATHS: &[&str] = &["authMode", "auth_mode"];
@@ -2560,10 +2560,6 @@ fn convert_session_path_operand(
     path: &str,
     path_segments: &[String],
 ) -> Result<Operand, SchemaConversionError> {
-    if path_segments.len() == 1 && PUBLIC_USER_ID_SESSION_PATHS.contains(&path_segments[0].as_str())
-    {
-        return Ok(Operand::Claim(DIRECT_USER_ID_CLAIM.to_owned()));
-    }
     if path_segments.len() == 1 && PUBLIC_USER_SESSION_PATHS.contains(&path_segments[0].as_str()) {
         return Ok(Operand::Claim(DIRECT_USER_CLAIM.to_owned()));
     }
@@ -2572,19 +2568,13 @@ fn convert_session_path_operand(
     {
         return Ok(Operand::Claim(DIRECT_AUTH_MODE_CLAIM.to_owned()));
     }
-    if matches!(path_segments, [claims, user] if claims == "claims" && user == "user") {
-        return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
-            "session.claims.user is reserved by Jazz; use session.user for the canonical identity",
-        ));
-    }
     if path_segments.len() == 2 && path_segments[0] == "claims" {
-        return Ok(Operand::Claim(path_segments[1].clone()));
+        return Ok(Operand::Claim(provider_claim_key(&path_segments[1])));
     }
     Err(err(
         format!("$.{}.{}", table.as_str(), path),
         format!(
-            "core schema policies only support session.user, session.user_id, session.authMode, and session.claims.* references, got session.{}",
+            "core schema policies only support session.user, session.authMode, and raw provider claims through session.claims[\"name\"]; got session.{}",
             path_segments.join(".")
         ),
     ))
@@ -3416,7 +3406,10 @@ mod tests {
                                 PolicyExpr::Cmp {
                                     column: "owner_id".to_owned(),
                                     op: CmpOp::Eq,
-                                    value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                                    value: PolicyValue::SessionRef(vec![
+                                        "claims".to_owned(),
+                                        "sub".to_owned(),
+                                    ]),
                                 },
                                 PolicyExpr::Not(Box::new(PolicyExpr::Cmp {
                                     column: "archived".to_owned(),
@@ -3475,7 +3468,7 @@ mod tests {
                     )))),
                     Predicate::Eq(
                         Operand::Column("owner_id".to_owned()),
-                        Operand::Claim("team_id".to_owned()),
+                        Operand::Claim(provider_claim_key("team_id")),
                     ),
                 ]),
             ]
@@ -3708,9 +3701,9 @@ mod tests {
         let user_id = rel_value_to_policy_operand(
             &table,
             path,
-            &RelValueRef::SessionRef(vec!["userId".to_owned()]),
+            &RelValueRef::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
         )
-        .expect("userId alias is supported");
+        .expect("raw provider sub is supported through session.claims");
         assert!(matches!(
             user_id,
             LoweredRelValue::Operand(Operand::Claim(claim)) if claim == DIRECT_USER_ID_CLAIM
@@ -3727,7 +3720,7 @@ mod tests {
             LoweredRelValue::Operand(Operand::Claim(claim)) if claim == DIRECT_USER_CLAIM
         ));
 
-        for path_segments in [["user"], ["user_id"], ["authMode"], ["auth_mode"]] {
+        for path_segments in [["user"], ["authMode"], ["auth_mode"]] {
             rel_value_to_policy_operand(
                 &table,
                 path,
@@ -3736,19 +3729,15 @@ mod tests {
             .expect("documented public session aliases are supported");
         }
 
-        let nested_user = match rel_value_to_policy_operand(
+        let nested_user = rel_value_to_policy_operand(
             &table,
             path,
             &RelValueRef::SessionRef(vec!["claims".to_owned(), "user".to_owned()]),
-        ) {
-            Ok(_) => panic!("provider claim `user` must not alias Jazz's reserved identity"),
-            Err(err) => err,
-        };
-        assert!(
-            nested_user
-                .message
-                .contains("session.claims.user is reserved")
-        );
+        )
+        .expect("provider claim `user` coexists under the claims namespace");
+        assert!(matches!(nested_user,
+            LoweredRelValue::Operand(Operand::Claim(claim)) if claim == provider_claim_key("user")
+        ));
 
         let claim = rel_value_to_policy_operand(
             &table,
@@ -3758,7 +3747,7 @@ mod tests {
         .expect("one-level session claims are supported");
         assert!(matches!(
             claim,
-            LoweredRelValue::Operand(Operand::Claim(name)) if name == "role"
+            LoweredRelValue::Operand(Operand::Claim(name)) if name == provider_claim_key("role")
         ));
     }
 
@@ -3789,7 +3778,10 @@ mod tests {
                             PolicyExpr::Cmp {
                                 column: "userId".to_owned(),
                                 op: CmpOp::Eq,
-                                value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                                value: PolicyValue::SessionRef(vec![
+                                    "claims".to_owned(),
+                                    "sub".to_owned(),
+                                ]),
                             },
                         ])),
                     })),
@@ -4016,7 +4008,10 @@ mod tests {
                                 PolicyExpr::Cmp {
                                     column: "userId".to_owned(),
                                     op: CmpOp::Eq,
-                                    value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                                    value: PolicyValue::SessionRef(vec![
+                                        "claims".to_owned(),
+                                        "sub".to_owned(),
+                                    ]),
                                 },
                             ])),
                         },
@@ -4069,7 +4064,10 @@ mod tests {
                                 PolicyExpr::Cmp {
                                     column: "user_id".to_owned(),
                                     op: CmpOp::Eq,
-                                    value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                                    value: PolicyValue::SessionRef(vec![
+                                        "claims".to_owned(),
+                                        "sub".to_owned(),
+                                    ]),
                                 },
                             ])),
                         },
@@ -4109,7 +4107,7 @@ mod tests {
             join.filters,
             vec![Predicate::Eq(
                 Operand::Column("user_id".to_owned()),
-                Operand::Claim("user_id".to_owned()),
+                Operand::Claim(provider_claim_key("sub")),
             )]
         );
     }
@@ -4148,7 +4146,7 @@ mod tests {
                     )
                     .policies(TablePolicies::new().with_select(PolicyExpr::Contains {
                         column: "owners".to_owned(),
-                        value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                        value: PolicyValue::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
                     })),
             )
             .table(
@@ -4328,7 +4326,7 @@ mod tests {
         assert_eq!(
             policy.filters,
             vec![Predicate::In(
-                Operand::Claim("role".to_owned()),
+                Operand::Claim(provider_claim_key("role")),
                 vec![
                     Operand::Literal(GrooveValue::String(legacy_role_id.uuid().to_string())),
                     Operand::Literal(GrooveValue::String("member".to_owned())),
@@ -4361,7 +4359,7 @@ mod tests {
         assert_eq!(
             policy.filters,
             vec![Predicate::Eq(
-                Operand::Claim("role".to_owned()),
+                Operand::Claim(provider_claim_key("role")),
                 Operand::Literal(GrooveValue::String("admin".to_owned())),
             )]
         );
@@ -4429,7 +4427,7 @@ mod tests {
                             column: "team_id".to_owned(),
                         },
                         op: RelPredicateCmpOp::Eq,
-                        right: RelValueRef::SessionRef(vec!["user_id".to_owned()]),
+                        right: RelValueRef::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
                     },
                 }),
                 right: Box::new(PublicRelExpr::TableScan {
@@ -4470,7 +4468,7 @@ mod tests {
         let owner_policy = PolicyExpr::Cmp {
             column: "owner_id".to_owned(),
             op: CmpOp::Eq,
-            value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+            value: PolicyValue::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
         };
         let schema = SchemaBuilder::new()
             .table(
@@ -4529,7 +4527,10 @@ mod tests {
                             PolicyExpr::Cmp {
                                 column: "owner_id".to_owned(),
                                 op: CmpOp::Eq,
-                                value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                                value: PolicyValue::SessionRef(vec![
+                                    "claims".to_owned(),
+                                    "sub".to_owned(),
+                                ]),
                             },
                             PolicyExpr::Exists {
                                 table: "parent_admins".to_owned(),
@@ -4545,7 +4546,10 @@ mod tests {
                                     PolicyExpr::Cmp {
                                         column: "user_id".to_owned(),
                                         op: CmpOp::Eq,
-                                        value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                                        value: PolicyValue::SessionRef(vec![
+                                            "claims".to_owned(),
+                                            "sub".to_owned(),
+                                        ]),
                                     },
                                 ])),
                             },
@@ -4623,7 +4627,7 @@ mod tests {
                         column: "identity_key".to_owned(),
                     },
                     op: RelPredicateCmpOp::Eq,
-                    right: RelValueRef::SessionRef(vec!["user_id".to_owned()]),
+                    right: RelValueRef::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
                 },
             }),
             columns: vec![crate::tools::public_api::relation_ir::ProjectColumn {
@@ -4759,7 +4763,10 @@ mod tests {
                             PolicyExpr::Cmp {
                                 column: "userId".to_owned(),
                                 op: CmpOp::Eq,
-                                value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                                value: PolicyValue::SessionRef(vec![
+                                    "claims".to_owned(),
+                                    "sub".to_owned(),
+                                ]),
                             },
                         ])),
                     })),
@@ -4815,7 +4822,10 @@ mod tests {
                             PolicyExpr::Cmp {
                                 column: "userId".to_owned(),
                                 op: CmpOp::Eq,
-                                value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                                value: PolicyValue::SessionRef(vec![
+                                    "claims".to_owned(),
+                                    "sub".to_owned(),
+                                ]),
                             },
                         ])),
                     })),
@@ -4855,7 +4865,7 @@ mod tests {
                     .policies(TablePolicies::new().with_select(PolicyExpr::Cmp {
                         column: "ownerId".to_owned(),
                         op: CmpOp::Eq,
-                        value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                        value: PolicyValue::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
                     })),
             )
             .table(
@@ -4904,7 +4914,7 @@ mod tests {
                     .policies(TablePolicies::new().with_select(PolicyExpr::Cmp {
                         column: "ownerId".to_owned(),
                         op: CmpOp::Eq,
-                        value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                        value: PolicyValue::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
                     })),
             )
             .table(
@@ -5018,7 +5028,8 @@ mod tests {
                                             },
                                             op: RelPredicateCmpOp::Eq,
                                             right: RelValueRef::SessionRef(vec![
-                                                "user_id".to_owned(),
+                                                "claims".to_owned(),
+                                                "sub".to_owned(),
                                             ]),
                                         },
                                     }),

@@ -2077,17 +2077,18 @@ fn session_claims_to_core_claims(session: &Session) -> Result<HashMap<String, Co
     };
     let mut core_claims = HashMap::new();
     for (name, value) in claims {
-        core_claims.insert(name, json_claim_to_core_value(value)?);
+        core_claims.insert(
+            crate::query::provider_claim_key(&name),
+            json_claim_to_core_value(value)?,
+        );
     }
-    core_claims.insert("sub".to_owned(), CoreValue::String(session.user_id.clone()));
-    core_claims.insert("iss".to_owned(), CoreValue::String(session.issuer.clone()));
     core_claims.insert(
-        "issuer".to_owned(),
-        CoreValue::String(session.issuer.clone()),
+        crate::query::provider_claim_key("sub"),
+        CoreValue::String(session.user_id.clone()),
     );
     core_claims.insert(
-        "user_id".to_owned(),
-        CoreValue::String(session.user_id.clone()),
+        crate::query::provider_claim_key("iss"),
+        CoreValue::String(session.issuer.clone()),
     );
     core_claims.insert(
         "authMode".to_owned(),
@@ -3606,17 +3607,22 @@ mod tests {
             .with_claims(json!({
                 "sub": "spoofed-subject",
                 "user_id": "spoofed-user",
+                "user": "provider-user",
                 "authMode": "external",
             }));
 
         let claims = session_claims_to_core_claims(&session).unwrap();
         assert_eq!(
-            claims.get("sub"),
+            claims.get(&crate::query::provider_claim_key("sub")),
             Some(&CoreValue::String("trusted-user".to_owned()))
         );
         assert_eq!(
-            claims.get("user_id"),
-            Some(&CoreValue::String("trusted-user".to_owned()))
+            claims.get(&crate::query::provider_claim_key("user_id")),
+            Some(&CoreValue::String("spoofed-user".to_owned()))
+        );
+        assert_eq!(
+            claims.get(&crate::query::provider_claim_key("user")),
+            Some(&CoreValue::String("provider-user".to_owned()))
         );
         assert_eq!(
             claims.get("authMode"),

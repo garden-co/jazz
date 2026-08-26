@@ -172,14 +172,14 @@ const app = {
 describe("permissions type inference", () => {
   it("infers row callback and where key types", () => {
     definePermissions(app, ({ policy, anyOf, allowedTo, session, isCreator }) => {
-      expectTypeOf(session.user_id.path).toEqualTypeOf<string[]>();
-      expectTypeOf(session.userId.path).toEqualTypeOf<string[]>();
+      expectTypeOf(session.claims["sub"].path).toEqualTypeOf<string[]>();
+      expectTypeOf(session.claims["sub"].path).toEqualTypeOf<string[]>();
       expectTypeOf(session.user.path).toEqualTypeOf<string[]>();
-      expectTypeOf(session["claims.role"]!.path).toEqualTypeOf<string[]>();
+      expectTypeOf(session.claims["role"]!.path).toEqualTypeOf<string[]>();
       expectTypeOf(isCreator).toMatchTypeOf<Parameters<typeof anyOf>[0][number]>();
 
       const reachableTeams = policy.teams.gather({
-        start: { kind: "individual", identity_key: session.userId },
+        start: { kind: "individual", identity_key: session.claims["sub"] },
         step: ({ current }) =>
           policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
       });
@@ -201,7 +201,7 @@ describe("permissions type inference", () => {
             session.where({ "claims.role": "manager" }),
             policy.projects.exists.where({
               id: todo.projectId,
-              ownerId: session.userId,
+              ownerId: session.claims["sub"],
             }),
             hasViewerGrant(todo.id),
           ]),
