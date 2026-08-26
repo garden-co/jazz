@@ -369,17 +369,17 @@ const creatorCondition = {
 };
 
 describe("permissions DSL", () => {
-  it("rejects ambiguous generated relation names before policy construction", () => {
-    const ambiguousApp = s.defineApp({
-      users: s.table({ name: s.string() }),
-      todos: s.table({
-        ownerId: s.ref("users"),
-        owner_id: s.ref("users"),
+  it("rejects duplicate generated relation names while compiling the schema", () => {
+    expect(() =>
+      s.defineApp({
+        users: s.table({ name: s.string() }),
+        todos: s.table({
+          ownerId: s.ref("users"),
+          owner_id: s.ref("users"),
+        }),
       }),
-    });
-
-    expect(() => definePermissions(ambiguousApp, () => {})).toThrow(
-      /Generated relation name "owner" is ambiguous on table "todos"/,
+    ).toThrow(
+      /Generated relation name "owner" is ambiguous on table "todos".*"todos.ownerId".*"todos.owner_id"/,
     );
   });
 

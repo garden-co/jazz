@@ -29,15 +29,40 @@ export interface Relation {
 
 export class AmbiguousRelationNameError extends Error {}
 
-function addRelation(relations: Map<string, Relation[]>, relation: Relation): void {
+function relationProvenance(relation: Relation): string {
+  const referenceColumn = relation.type === "forward" ? relation.fromColumn : relation.toColumn;
+  const referenceTable = relation.type === "forward" ? relation.fromTable : relation.toTable;
+  const referencedTable = relation.type === "forward" ? relation.toTable : relation.fromTable;
+
+  return `${relation.type} relation generated from reference column "${referenceTable}.${referenceColumn}" to "${referencedTable}.id"`;
+}
+
+function addRelation(
+  relations: Map<string, Relation[]>,
+  outputColumnsByTable: Map<string, Set<string>>,
+  relation: Relation,
+): void {
   const tableRelations = relations.get(relation.fromTable);
   if (!tableRelations) {
     throw new Error(`Unknown relation source table "${relation.fromTable}"`);
   }
+
+  // A scalar reference may intentionally use its own relation name (for
+  // example `team: ref("teams")`). The typed include API replaces that one
+  // reference value with the joined row. Every other output-column collision
+  // would instead make two independently-addressable public values share a
+  // key, so reject it.
+  const isOwnReferenceColumn = relation.type === "forward" && relation.fromColumn === relation.name;
+  if (!isOwnReferenceColumn && outputColumnsByTable.get(relation.fromTable)?.has(relation.name)) {
+    throw new AmbiguousRelationNameError(
+      `Generated relation name "${relation.name}" on table "${relation.fromTable}" (${relationProvenance(relation)}) collides with the stored/public output column "${relation.fromTable}.${relation.name}". Rename the reference column or the output column.`,
+    );
+  }
+
   const existing = tableRelations.find((candidate) => candidate.name === relation.name);
   if (existing) {
     throw new AmbiguousRelationNameError(
-      `Generated relation name "${relation.name}" is ambiguous on table "${relation.fromTable}" between columns "${existing.fromColumn}/${existing.toColumn}" and "${relation.fromColumn}/${relation.toColumn}". Rename one of the reference columns.`,
+      `Generated relation name "${relation.name}" is ambiguous on table "${relation.fromTable}" between ${relationProvenance(existing)} and ${relationProvenance(relation)}. Rename one of the reference columns.`,
     );
   }
   tableRelations.push(relation);
@@ -70,10 +95,15 @@ function forwardRefNameFromFK(columnName: string): string {
  */
 export function analyzeRelations(schema: WasmSchema): Map<string, Relation[]> {
   const relations = new Map<string, Relation[]>();
+  const outputColumnsByTable = new Map<string, Set<string>>();
 
   // Initialize empty arrays for all tables
-  for (const tableName of Object.keys(schema)) {
+  for (const [tableName, table] of Object.entries(schema)) {
     relations.set(tableName, []);
+    // `id` is implicit in every public row even though it is not a stored
+    // descriptor. Includes are materialized onto the same public row object,
+    // so relation names must not shadow either it or a stored column.
+    outputColumnsByTable.set(tableName, new Set(["id", ...table.columns.map((col) => col.name)]));
   }
 
   for (const [tableName, table] of Object.entries(schema)) {
@@ -101,7 +131,7 @@ export function analyzeRelations(schema: WasmSchema): Map<string, Relation[]> {
           isArray: isForwardArray,
           nullable: col.nullable,
         };
-        addRelation(relations, forwardRelation);
+        addRelation(relations, outputColumnsByTable, forwardRelation);
 
         // Verify the referenced table exists
         if (!relations.has(col.references)) {
@@ -122,7 +152,7 @@ export function analyzeRelations(schema: WasmSchema): Map<string, Relation[]> {
           isArray: true,
           nullable: false, // Arrays are not nullable, just empty
         };
-        addRelation(relations, reverseRelation);
+        addRelation(relations, outputColumnsByTable, reverseRelation);
       }
     }
   }

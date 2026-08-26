@@ -1322,18 +1322,13 @@ function resolveNamedRelation(
   table: string,
   relationName: string,
 ): Relation {
-  const matches = (relationsByTable.get(table) ?? []).filter(
+  const relation = (relationsByTable.get(table) ?? []).find(
     (candidate) => candidate.name === relationName,
   );
-  if (matches.length === 0) {
+  if (!relation) {
     throw new Error(`Unknown relation "${relationName}" on table "${table}".`);
   }
-  if (matches.length > 1) {
-    throw new AmbiguousRelationNameError(
-      `Relation "${relationName}" is ambiguous on table "${table}". Rename one of the reference columns.`,
-    );
-  }
-  return matches[0]!;
+  return relation;
 }
 
 function isRecursiveCurrentFilter(raw: unknown, token: RecursiveCurrentValue): boolean {
