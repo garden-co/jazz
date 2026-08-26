@@ -4,7 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 
 const auth = vi.hoisted(() => ({
   session: {
-    data: { session: { id: "better-auth-session" } },
+    data: { session: { id: "better-auth-session" }, user: { id: "better-auth-user" } },
     isPending: false,
   },
   token: vi.fn(async () => "jazz-jwt"),
@@ -60,14 +60,15 @@ describe("RecordPlayer Better Auth bridge", () => {
     container?.remove();
     root = undefined;
     container = undefined;
-    auth.session = { data: { session: { id: "better-auth-session" } }, isPending: false };
+    auth.session = {
+      data: { session: { id: "better-auth-session" }, user: { id: "better-auth-user" } },
+      isPending: false,
+    };
     auth.token.mockClear();
     vi.unstubAllGlobals();
   });
 
-  it("bootstraps an authenticated account before mounting the Jazz query surface", async () => {
-    const fetch = vi.fn(async () => new Response(null, { status: 200 }));
-    vi.stubGlobal("fetch", fetch);
+  it("mounts the Jazz query surface after Better Auth supplies a token", async () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -84,17 +85,12 @@ describe("RecordPlayer Better Auth bridge", () => {
       () => container?.querySelector("[data-jazz-jwt='jazz-jwt']") !== null,
       "expected the authenticated Jazz provider to mount",
     );
-    expect(fetch).toHaveBeenCalledWith("/api/bootstrap", {
-      method: "POST",
-      credentials: "same-origin",
-    });
     expect(container.querySelector("button")?.textContent).toBe("Create playlist");
   });
 
-  it("keeps Jazz and its query surface unmounted until trusted bootstrap succeeds", async () => {
-    const bootstrap = deferred<Response>();
-    const fetch = vi.fn(() => bootstrap.promise);
-    vi.stubGlobal("fetch", fetch);
+  it("keeps Jazz and its query surface unmounted until Better Auth supplies a token", async () => {
+    const token = deferred<string>();
+    auth.token.mockImplementationOnce(() => token.promise);
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -107,49 +103,21 @@ describe("RecordPlayer Better Auth bridge", () => {
       );
     });
 
-    await waitFor(() => fetch.mock.calls.length === 1, "expected trusted bootstrap to start");
+    await waitFor(() => auth.token.mock.calls.length === 1, "expected token request to start");
     expect(container.querySelector("[data-jazz-jwt]")).toBeNull();
     expect(container.querySelector("button")).toBeNull();
-    expect(container.textContent).toContain("Preparing your RecordPlayer");
+    expect(container.textContent).toContain("Connecting RecordPlayer");
 
     await act(async () => {
-      bootstrap.resolve(new Response(null, { status: 200 }));
-      await bootstrap.promise;
+      token.resolve("jazz-jwt");
+      await token.promise;
     });
 
     await waitFor(
       () => container?.querySelector("[data-jazz-jwt='jazz-jwt']") !== null,
-      "expected Jazz to mount after trusted bootstrap",
+      "expected Jazz to mount after token acquisition",
     );
     expect(container.querySelector("button")?.textContent).toBe("Create playlist");
-  });
-
-  it("shows a bootstrap error without mounting Jazz after trusted bootstrap rejects", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => {
-        throw new Error("trusted bootstrap rejected");
-      }),
-    );
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
-
-    await act(async () => {
-      root?.render(
-        <RecordPlayerProvider>
-          <RecordPlayerClient />
-        </RecordPlayerProvider>,
-      );
-    });
-
-    await waitFor(
-      () => container?.querySelector("[role='alert']") !== null,
-      "expected trusted bootstrap failure to be rendered",
-    );
-    expect(container.querySelector("[data-jazz-jwt]")).toBeNull();
-    expect(container.querySelector("button")).toBeNull();
-    expect(container.textContent).toContain("could not establish its trusted session");
   });
 
   it("does not mount the Jazz query surface before Better Auth has a session", async () => {
