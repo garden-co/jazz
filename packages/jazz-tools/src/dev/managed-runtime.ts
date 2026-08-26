@@ -1,17 +1,18 @@
 import { randomUUID } from "node:crypto";
 import {
   closeSync,
+  constants,
+  fstatSync,
   fsyncSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
-  renameSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
+  writeSync,
 } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
+import { unlock, waitForLockSync } from "fs-native-extensions";
 import type { LocalJazzServerHandle } from "./dev-server.js";
 import type { JazzPluginOptions, JazzServerOptions } from "./vite.js";
 import { resolveTelemetryCollectorUrl, type TelemetryOptions } from "../runtime/sync-telemetry.js";
@@ -135,7 +136,6 @@ function normalizeServerOption(
     }, {});
 }
 
-const lockWaiter = new Int32Array(new SharedArrayBuffer(4));
 const dotenvLine =
   /(?:^|^)\s*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(\s*'(?:\\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\\`|[^`])*`|[^#\r\n]+)?\s*(?:#.*)?(?:$|$)/gm;
 
@@ -168,15 +168,6 @@ function parseDotenv(content: string): {
   return { values, assignmentLines };
 }
 
-function readEnvContent(envPath: string): string {
-  try {
-    return readFileSync(envPath, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
-    throw error;
-  }
-}
-
 function parsedEnvValue(content: string, envKey: string): string | null {
   const parsed = parseDotenv(content);
   const assignments = parsed.assignmentLines.get(envKey) ?? [];
@@ -200,65 +191,71 @@ function parsedEnvValue(content: string, envKey: string): string | null {
   return value;
 }
 
-function withEnvLock<T>(envPath: string, action: () => T): T {
-  const lockPath = `${envPath}.jazz-lock`;
-  const deadline = Date.now() + 10_000;
-  let descriptor: number | null = null;
-  while (descriptor === null) {
-    try {
-      descriptor = openSync(lockPath, "wx", 0o600);
-      writeFileSync(descriptor, `${process.pid}\n`);
-      fsyncSync(descriptor);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      if (Date.now() >= deadline) {
-        throw new Error(`${LOG_PREFIX} timed out waiting to update .env safely.`);
-      }
-      Atomics.wait(lockWaiter, 0, 0, 10);
-    }
-  }
-  let result: T | undefined;
-  let actionError: unknown;
-  try {
-    result = action();
-  } catch (error) {
-    actionError = error;
-  }
-  try {
-    closeSync(descriptor);
-    unlinkSync(lockPath);
-  } catch (cleanupError) {
-    if (actionError === undefined && (cleanupError as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw cleanupError;
-    }
-  }
-  if (actionError !== undefined) throw actionError;
-  return result as T;
+interface EnvFileOperations {
+  waitForLock(descriptor: number): void;
+  unlock(descriptor: number): void;
+  write(descriptor: number, bytes: Uint8Array, offset: number): number;
+  fsync(descriptor: number): void;
 }
 
-function atomicReplaceEnv(envPath: string, content: string, mode: number): void {
-  const tempPath = join(dirname(envPath), `.${randomUUID()}.jazz-env.tmp`);
-  let descriptor: number | null = null;
-  let writeError: unknown;
+const defaultEnvFileOperations: EnvFileOperations = {
+  waitForLock: waitForLockSync,
+  unlock,
+  write: (descriptor, bytes, offset) =>
+    writeSync(descriptor, bytes, offset, bytes.byteLength - offset),
+  fsync: fsyncSync,
+};
+
+function assertRegularEnvPath(envPath: string): void {
   try {
-    descriptor = openSync(tempPath, "wx", mode);
-    writeFileSync(descriptor, content, "utf8");
-    fsyncSync(descriptor);
-    closeSync(descriptor);
-    descriptor = null;
-    renameSync(tempPath, envPath);
-  } catch (error) {
-    writeError = error;
-  }
-  try {
-    if (descriptor !== null) closeSync(descriptor);
-    unlinkSync(tempPath);
-  } catch (cleanupError) {
-    if (writeError === undefined && (cleanupError as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw cleanupError;
+    const metadata = lstatSync(envPath);
+    if (metadata.isSymbolicLink()) {
+      throw new Error(
+        `${LOG_PREFIX} refusing to update symlinked .env at ${envPath}; use a regular file instead.`,
+      );
     }
+    if (!metadata.isFile()) {
+      throw new Error(`${LOG_PREFIX} refusing to update non-file .env at ${envPath}.`);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  if (writeError !== undefined) throw writeError;
+}
+
+function openEnvForAppend(envPath: string): number {
+  assertRegularEnvPath(envPath);
+  const descriptor = openSync(
+    envPath,
+    constants.O_CREAT | constants.O_RDWR | constants.O_APPEND | constants.O_NOFOLLOW,
+    0o666,
+  );
+  try {
+    const pathMetadata = lstatSync(envPath);
+    const descriptorMetadata = fstatSync(descriptor);
+    if (
+      pathMetadata.isSymbolicLink() ||
+      !descriptorMetadata.isFile() ||
+      pathMetadata.dev !== descriptorMetadata.dev ||
+      pathMetadata.ino !== descriptorMetadata.ino
+    ) {
+      throw new Error(`${LOG_PREFIX} .env changed while it was being opened; retry startup.`);
+    }
+    return descriptor;
+  } catch (error) {
+    closeSync(descriptor);
+    throw error;
+  }
+}
+
+function writeAll(descriptor: number, bytes: Uint8Array, operations: EnvFileOperations): void {
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    const written = operations.write(descriptor, bytes, offset);
+    if (!Number.isSafeInteger(written) || written <= 0) {
+      throw new Error(`${LOG_PREFIX} failed to make progress while appending to .env.`);
+    }
+    offset += written;
+  }
 }
 
 export function ensureEnvAppId(
@@ -266,32 +263,50 @@ export function ensureEnvAppId(
   envKey: string,
   fallback: string,
   preferred: string | undefined,
+  operations: EnvFileOperations = defaultEnvFileOperations,
 ): string {
   mkdirSync(dirname(envPath), { recursive: true });
-  return withEnvLock(envPath, () => {
-    const content = readEnvContent(envPath);
+  const descriptor = openEnvForAppend(envPath);
+  let result: string | undefined;
+  let actionError: unknown;
+  let locked = false;
+  try {
+    operations.waitForLock(descriptor);
+    locked = true;
+    // The lock is on the .env inode itself. Reparse only after acquisition so
+    // every cooperating process observes the previous writer's complete append.
+    const content = readFileSync(descriptor, "utf8");
     const existing = parsedEnvValue(content, envKey);
-    if (existing !== null) return preferred ?? existing;
-
-    const newline = content.includes("\r\n") ? "\r\n" : "\n";
-    const separator = content && !content.endsWith("\n") ? newline : "";
-    const next = `${content}${separator}${envKey}=${fallback}${newline}`;
-    const mode = (() => {
-      try {
-        return statSync(envPath).mode & 0o7777;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0o600;
-        throw error;
-      }
-    })();
-    // Re-read under the interprocess lock immediately before replacement so
-    // every cooperating writer derives its update from the latest whole file.
-    if (readEnvContent(envPath) !== content) {
-      throw new Error(`${LOG_PREFIX} .env changed outside the Jazz writer; retry startup.`);
+    if (existing !== null) {
+      result = preferred ?? existing;
+    } else {
+      const newline = content.includes("\r\n") ? "\r\n" : "\n";
+      const separator = content && !content.endsWith("\n") ? newline : "";
+      const addition = Buffer.from(`${separator}${envKey}=${fallback}${newline}`);
+      writeAll(descriptor, addition, operations);
+      operations.fsync(descriptor);
+      result = fallback;
     }
-    atomicReplaceEnv(envPath, next, mode);
-    return fallback;
-  });
+  } catch (error) {
+    actionError = error;
+  }
+
+  let cleanupError: unknown;
+  if (locked) {
+    try {
+      operations.unlock(descriptor);
+    } catch (error) {
+      cleanupError = error;
+    }
+  }
+  try {
+    closeSync(descriptor);
+  } catch (error) {
+    cleanupError ??= error;
+  }
+  if (actionError !== undefined) throw actionError;
+  if (cleanupError !== undefined) throw cleanupError;
+  return result as string;
 }
 
 export interface InitializeOptions extends JazzPluginOptions {
