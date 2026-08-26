@@ -4234,36 +4234,41 @@ fn apply_maintained_update_to_snapshot(
         }
     }
 
-    let mut index = 0;
-    while index < snapshot.root_count {
-        let occurrence_id = snapshot_index
-            .roots
-            .iter()
-            .find_map(|(occurrence, position)| (*position == index).then(|| occurrence.clone()))
-            .expect("every maintained root row has an occurrence index");
-        if update_removed.contains(&occurrence_id)
-            && !update_added
+    let removes_visible_occurrence = update_removed
+        .iter()
+        .any(|removed| !update_added.iter().any(|(added, _)| added == removed));
+    if removes_visible_occurrence {
+        let mut index = 0;
+        while index < snapshot.root_count {
+            let occurrence_id = snapshot_index
+                .roots
                 .iter()
-                .any(|(added, _)| *added == occurrence_id)
-        {
-            let row = snapshot.rows.remove(index);
-            snapshot.root_count -= 1;
-            snapshot_index.roots.remove(&occurrence_id);
-            for position in snapshot_index.roots.values_mut() {
-                if *position > index {
+                .find_map(|(occurrence, position)| (*position == index).then(|| occurrence.clone()))
+                .expect("every maintained root row has an occurrence index");
+            if update_removed.contains(&occurrence_id)
+                && !update_added
+                    .iter()
+                    .any(|(added, _)| *added == occurrence_id)
+            {
+                let row = snapshot.rows.remove(index);
+                snapshot.root_count -= 1;
+                snapshot_index.roots.remove(&occurrence_id);
+                for position in snapshot_index.roots.values_mut() {
+                    if *position > index {
+                        *position -= 1;
+                    }
+                }
+                for position in snapshot_index.related.values_mut() {
                     *position -= 1;
                 }
+                removed.push(RemovedRow {
+                    table: row.table().to_owned(),
+                    row_uuid: row.row_uuid(),
+                    occurrence_id,
+                });
+            } else {
+                index += 1;
             }
-            for position in snapshot_index.related.values_mut() {
-                *position -= 1;
-            }
-            removed.push(RemovedRow {
-                table: row.table().to_owned(),
-                row_uuid: row.row_uuid(),
-                occurrence_id,
-            });
-        } else {
-            index += 1;
         }
     }
 
