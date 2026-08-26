@@ -1,3 +1,4 @@
+import type { WasmDb } from "jazz-wasm";
 import { loadWasmModule, type WasmModule } from "../runtime/client.js";
 import { IndexedDbPageStore } from "../runtime/indexeddb-page-store.js";
 import { installWasmTelemetry } from "../runtime/sync-telemetry.js";
@@ -26,6 +27,7 @@ import { deliverMutationErrorToAttachedPeers } from "./mutation-error-delivery.j
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
 type SharedWorkerGlobal = typeof globalThis & {
+  __JAZZ_WASM_LOG_LEVEL?: BrowserWorkerInitOptions["logLevel"];
   onconnect: ((event: MessageEvent & { ports: MessagePort[] }) => void) | null;
   close(): void;
 };
@@ -56,6 +58,7 @@ type RuntimeContext = {
   idleReleaseTimer: ReturnType<typeof setTimeout> | null;
   pageStore: IndexedDbPageStore | null;
   disposeTelemetry: (() => void) | null;
+  disposeAuxiliaryTrace: (() => void) | null;
   resetBarrier: { id: number; pending: Set<string>; resolve: () => void } | null;
   storageInvalidated: boolean;
   intentionalStorageReset: boolean;
@@ -65,8 +68,11 @@ type RuntimeContext = {
 };
 
 const workerGlobal = globalThis as SharedWorkerGlobal;
+const workerRealmId = crypto.randomUUID();
 const contexts = new Map<string, RuntimeContext>();
+const inspectorControlPorts = new Set<MessagePort>();
 let wasmModulePromise: Promise<WasmModule> | null = null;
+let wasmModuleSource: string | null = null;
 let contextInitializationTail: Promise<void> = Promise.resolve();
 let nextResetId = 1;
 
@@ -129,6 +135,7 @@ function createContext(
     runtime: null,
     pageStore: null,
     disposeTelemetry: null,
+    disposeAuxiliaryTrace: null,
     resetBarrier: null,
     storageInvalidated: false,
     intentionalStorageReset: false,
@@ -146,55 +153,153 @@ function createContext(
 }
 
 async function initialize(context: RuntimeContext): Promise<void> {
-  const { options } = context;
-  (globalThis as any).__JAZZ_WASM_LOG_LEVEL = options.logLevel ?? DEFAULT_WASM_LOG_LEVEL;
-  wasmModulePromise ??= loadWasmModule(options.runtimeSources);
-  const wasmModule = await wasmModulePromise;
-  context.disposeTelemetry = installWasmTelemetry({
-    wasmModule,
-    collectorUrl: options.telemetryCollectorUrl,
-    appId: options.appId,
-    runtimeThread: "worker",
-  });
-  context.pageStore = await IndexedDbPageStore.open(options.dbName, () =>
-    handleStorageInvalidation(context),
-  );
-  const schema = encodeSchema(options.schema);
-  const config = openConfig(options.node, options.author, 1, false, options.initialSyncFlushEvery);
-  const proof = options.selfSignedClientProof;
-  if (proof && typeof wasmModule.WasmDb.openBrowserWithSelfSignedProof !== "function") {
+  let unownedDb: WasmDb | null = null;
+  try {
+    const { options } = context;
+    workerGlobal.__JAZZ_WASM_LOG_LEVEL = options.logLevel ?? DEFAULT_WASM_LOG_LEVEL;
+    const wasmModule = await loadWorkerWasmModule(options.runtimeSources);
+    context.disposeTelemetry = installWasmTelemetry({
+      wasmModule,
+      collectorUrl: options.telemetryCollectorUrl,
+      appId: options.appId,
+      runtimeThread: "worker",
+    });
+    context.pageStore = await IndexedDbPageStore.open(options.dbName, () =>
+      handleStorageInvalidation(context),
+    );
+    const schema = encodeSchema(options.schema);
+    const config = openConfig(
+      options.node,
+      options.author,
+      1,
+      false,
+      options.initialSyncFlushEvery,
+    );
+    const proof = options.selfSignedClientProof;
+    if (proof && typeof wasmModule.WasmDb.openBrowserWithSelfSignedProof !== "function") {
+      throw new Error(
+        "WASM runtime does not support self-signed client opens; rebuild the matching Jazz WASM artifact",
+      );
+    }
+    unownedDb = proof
+      ? await wasmModule.WasmDb.openBrowserWithSelfSignedProof(
+          context.pageStore,
+          schema,
+          config,
+          proof.token,
+          proof.appId,
+          proof.claimedAuthor,
+        )
+      : await wasmModule.WasmDb.openBrowser(context.pageStore, schema, config);
+    const runtime = NativeRuntimeAdapter.fromDb(
+      unownedDb as never,
+      options.schema,
+      options.node,
+      options.author,
+      1,
+      false,
+    );
+    context.runtime = runtime;
+    unownedDb = null;
+    context.runtime.onAuthFailure((reason) => broadcast(context, { type: "auth-failure", reason }));
+    context.runtime.onMutationError((event) => {
+      // A mutation error is a notification for foreground runtimes that are
+      // attached now. Durable reconciliation belongs to the worker's database;
+      // persisting this event would instead surface an old application's toast
+      // to an unrelated future tab.
+      deliverMutationErrorToAttachedPeers(context.peers.values(), event, (peer, received) =>
+        post(peer.port, { type: "mutation-error", event: received }),
+      );
+    });
+    if (options.logLevel === "trace") {
+      context.disposeAuxiliaryTrace = context.runtime.onAuxiliaryTrace((entries) => {
+        broadcast(context, {
+          type: "relay-trace",
+          entries: entries.map((entry) => ({ ...entry, hop: "worker-server" })),
+        });
+      });
+    }
+  } catch (error) {
+    try {
+      await unownedDb?.close();
+    } catch {
+      // The initialisation error is the actionable failure.
+    }
+    try {
+      cleanupFailedContext(context);
+    } catch {
+      // Cleanup must not replace the initialisation error reported to the tab.
+    }
+    throw error;
+  }
+}
+
+async function loadWorkerWasmModule(
+  runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
+): Promise<WasmModule> {
+  const source = workerWasmSource(runtimeSources);
+  if (wasmModulePromise && (!source || wasmModuleSource !== source)) {
     throw new Error(
-      "WASM runtime does not support self-signed client opens; rebuild the matching Jazz WASM artifact",
+      "incompatible WASM asset source for this SharedWorker; start a worker scoped to the new asset URL",
     );
   }
-  const db = proof
-    ? await wasmModule.WasmDb.openBrowserWithSelfSignedProof(
-        context.pageStore,
-        schema,
-        config,
-        proof.token,
-        proof.appId,
-        proof.claimedAuthor,
-      )
-    : await wasmModule.WasmDb.openBrowser(context.pageStore, schema, config);
-  context.runtime = NativeRuntimeAdapter.fromDb(
-    db as never,
-    options.schema,
-    options.node,
-    options.author,
-    1,
-    false,
-  );
-  context.runtime.onAuthFailure((reason) => broadcast(context, { type: "auth-failure", reason }));
-  context.runtime.onMutationError((event) => {
-    // A mutation error is a notification for foreground runtimes that are
-    // attached now. Durable reconciliation belongs to the worker's database;
-    // persisting this event would instead surface an old application's toast
-    // to an unrelated future tab.
-    deliverMutationErrorToAttachedPeers(context.peers.values(), event, (peer, received) =>
-      post(peer.port, { type: "mutation-error", event: received }),
-    );
-  });
+  const load = wasmModulePromise ?? loadWasmModule(runtimeSources);
+  wasmModulePromise = load;
+  wasmModuleSource = source;
+  try {
+    return await load;
+  } catch (error) {
+    if (wasmModulePromise === load) {
+      wasmModulePromise = null;
+      wasmModuleSource = null;
+    }
+    throw error;
+  }
+}
+
+function workerWasmSource(
+  runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
+): string | null {
+  // The page assigns an opaque identity before structured-cloning an in-memory
+  // source into this worker. A raw worker caller without that identity is
+  // deliberately unshareable: treating every supplied byte array/module as
+  // the same source would silently reuse the first wasm-bindgen realm.
+  if (runtimeSources?.wasmModule) {
+    return runtimeSources.workerWasmAssetIdentity
+      ? `module:${runtimeSources.workerWasmAssetIdentity}`
+      : null;
+  }
+  if (runtimeSources?.wasmSource) {
+    return runtimeSources.workerWasmAssetIdentity
+      ? `source:${runtimeSources.workerWasmAssetIdentity}`
+      : null;
+  }
+  return runtimeSources?.wasmUrl ?? "worker-local";
+}
+
+function cleanupFailedContext(context: RuntimeContext): void {
+  const runtime = context.runtime;
+  const pageStore = context.pageStore;
+  const disposeTelemetry = context.disposeTelemetry;
+  const disposeAuxiliaryTrace = context.disposeAuxiliaryTrace;
+  context.runtime = null;
+  context.pageStore = null;
+  context.disposeTelemetry = null;
+  context.disposeAuxiliaryTrace = null;
+  if (contexts.get(context.key) === context) contexts.delete(context.key);
+  try {
+    runtime?.discard();
+  } finally {
+    try {
+      pageStore?.close();
+    } finally {
+      try {
+        disposeTelemetry?.();
+      } finally {
+        disposeAuxiliaryTrace?.();
+      }
+    }
+  }
 }
 
 async function configureServer(
@@ -380,6 +485,7 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
 }
 
 function attachInspectorControl(authSessionKey: string, port: MessagePort): void {
+  inspectorControlPorts.add(port);
   const onMessage = (event: MessageEvent<BrowserInspectorControlRequest>) => {
     const message = event.data;
     if (message.type === "close") {
@@ -395,6 +501,7 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
             context.runtime !== null,
         )
         .map((context) => ({
+          workerRealmId,
           key: context.key,
           appId: context.options.appId,
           dbName: context.options.dbName,
@@ -405,6 +512,22 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
         id: message.id,
         contexts: available,
       } satisfies BrowserInspectorControlEvent);
+      return;
+    }
+    if (message.type === "terminate-worker") {
+      if (contexts.size > 0) {
+        port.postMessage({
+          type: "result",
+          id: message.id,
+          error: "Worker still has live runtime contexts",
+        } satisfies BrowserInspectorControlEvent);
+        return;
+      }
+      port.postMessage({ type: "result", id: message.id } satisfies BrowserInspectorControlEvent);
+      // Termination happens in a later task so the acknowledgement crosses the
+      // MessagePort before this realm disappears. A subsequent connection's
+      // bootstrap retry advances to a distinct SharedWorker generation.
+      setTimeout(() => workerGlobal.close(), 0);
       return;
     }
     const context = contexts.get(message.contextKey);
@@ -427,7 +550,9 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
   const dispose = () => {
     port.removeEventListener("message", onMessage);
     port.removeEventListener("messageerror", dispose);
+    inspectorControlPorts.delete(port);
     port.close();
+    maybeCloseWorker();
   };
   port.addEventListener("message", onMessage);
   port.addEventListener("messageerror", dispose);
@@ -496,6 +621,8 @@ async function finalizeContextStorageReset(context: RuntimeContext): Promise<voi
   context.pageStore = null;
   context.disposeTelemetry?.();
   context.disposeTelemetry = null;
+  context.disposeAuxiliaryTrace?.();
+  context.disposeAuxiliaryTrace = null;
   contexts.delete(context.key);
 }
 
@@ -517,6 +644,8 @@ async function releaseIdleContext(context: RuntimeContext): Promise<void> {
       context.pageStore = null;
       context.disposeTelemetry?.();
       context.disposeTelemetry = null;
+      context.disposeAuxiliaryTrace?.();
+      context.disposeAuxiliaryTrace = null;
       if (contexts.get(context.key) === context) contexts.delete(context.key);
     })();
   }
@@ -529,9 +658,13 @@ function scheduleIdleContextRelease(context: RuntimeContext): void {
     context.idleReleaseTimer = null;
     if (context.peers.size !== 0) return;
     void releaseIdleContext(context).then(() => {
-      if (contexts.size === 0) workerGlobal.close();
+      maybeCloseWorker();
     });
   }, 50);
+}
+
+function maybeCloseWorker(): void {
+  if (contexts.size === 0 && inspectorControlPorts.size === 0) workerGlobal.close();
 }
 
 function closeContextPeers(context: RuntimeContext): void {
@@ -553,6 +686,8 @@ function handleStorageInvalidation(context: RuntimeContext): void {
   context.runtime = null;
   context.disposeTelemetry?.();
   context.disposeTelemetry = null;
+  context.disposeAuxiliaryTrace?.();
+  context.disposeAuxiliaryTrace = null;
   broadcast(context, { type: "storage-invalidated" });
   setTimeout(() => closeContextPeers(context), 0);
 }
@@ -596,6 +731,14 @@ function attachPeerTransport(
       );
     },
     (error) => failPeer(peer, asError(error)),
+    peer.context.options.logLevel === "trace"
+      ? (entries) => {
+          post(peer.port, {
+            type: "relay-trace",
+            entries: entries.map((entry) => ({ ...entry, hop: "worker-tab" })),
+          });
+        }
+      : undefined,
   );
   return peer.pump;
 }

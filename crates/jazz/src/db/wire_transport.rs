@@ -3,11 +3,14 @@
 //! This stays below the database facade: it converts authenticated byte frames
 //! into logical sync messages without changing peer dispatch semantics.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+
+use web_time::Instant;
 
 use super::{ConnectionSessionContext, Transport};
 use crate::protocol::SyncMessage;
 use crate::protocol_limits::{
+    MAX_FRAGMENT_REASSEMBLY_AGE_MS, MAX_FRAGMENT_REASSEMBLY_IDLE_MS,
     MAX_INFLIGHT_LOGICAL_MESSAGE_BYTES, MAX_INFLIGHT_LOGICAL_MESSAGES,
     validate_logical_message_len, validate_wire_frame_len,
 };
@@ -19,7 +22,7 @@ use crate::wire::{
 };
 
 const WIRE_FRAGMENT_PAYLOAD_BYTES: usize = 512 * 1024;
-const RECENT_COMPLETED_LOGICAL_MESSAGES: usize = 64;
+pub(super) const RECENT_COMPLETED_LOGICAL_MESSAGES: usize = 64;
 
 /// Adapter from postcard wire frames to the internal sync-message transport.
 pub(super) struct IncompleteLogicalMessage {
@@ -30,27 +33,72 @@ pub(super) struct IncompleteLogicalMessage {
     total_len: usize,
     received_len: usize,
     extents: BTreeMap<usize, Vec<u8>>,
+    absolute_deadline_ms: u64,
+    deadline_ms: u64,
 }
 
-#[derive(Default)]
 pub(super) struct LogicalMessageReassembler {
     pub(super) incomplete: HashMap<u64, IncompleteLogicalMessage>,
     pub(super) staged_bytes: usize,
+    deadlines: BTreeSet<(u64, u64)>,
+    staging_budget: usize,
     recently_completed: VecDeque<(u64, [u8; 32])>,
-    highest_completed_message_id: Option<u64>,
+}
+
+impl Default for LogicalMessageReassembler {
+    fn default() -> Self {
+        Self {
+            incomplete: HashMap::new(),
+            staged_bytes: 0,
+            deadlines: BTreeSet::new(),
+            staging_budget: MAX_INFLIGHT_LOGICAL_MESSAGE_BYTES,
+            recently_completed: VecDeque::new(),
+        }
+    }
 }
 
 impl LogicalMessageReassembler {
+    #[cfg(test)]
+    pub(super) fn with_staging_budget_for_test(staging_budget: usize) -> Self {
+        Self {
+            staging_budget,
+            ..Self::default()
+        }
+    }
+
     pub(super) fn discard(&mut self, message_id: u64) {
         if let Some(state) = self.incomplete.remove(&message_id) {
+            self.deadlines.remove(&(state.deadline_ms, message_id));
             self.staged_bytes = self.staged_bytes.saturating_sub(state.received_len);
+        }
+    }
+
+    pub(super) fn expire(&mut self, now_ms: u64) {
+        while let Some(&(deadline_ms, message_id)) = self.deadlines.first() {
+            if deadline_ms > now_ms {
+                break;
+            }
+            self.deadlines.pop_first();
+            if self
+                .incomplete
+                .get(&message_id)
+                .is_some_and(|state| state.deadline_ms == deadline_ms)
+            {
+                let state = self
+                    .incomplete
+                    .remove(&message_id)
+                    .expect("expired logical message state exists");
+                self.staged_bytes = self.staged_bytes.saturating_sub(state.received_len);
+            }
         }
     }
 
     pub(super) fn push(
         &mut self,
         fragment: WireMessageFragment,
+        now_ms: u64,
     ) -> Result<Option<WireEnvelope>, String> {
+        self.expire(now_ms);
         if let Some((_, digest)) = self
             .recently_completed
             .iter()
@@ -61,12 +109,6 @@ impl LogicalMessageReassembler {
             } else {
                 Err("completed logical message id was reused with another digest".to_owned())
             };
-        }
-        if self
-            .highest_completed_message_id
-            .is_some_and(|completed| fragment.message_id <= completed)
-        {
-            return Ok(None);
         }
         let total_len = usize::try_from(fragment.total_len)
             .map_err(|_| "logical message length does not fit this receiver".to_owned())?;
@@ -83,6 +125,9 @@ impl LogicalMessageReassembler {
             if self.incomplete.len() >= MAX_INFLIGHT_LOGICAL_MESSAGES {
                 return Err("too many incomplete logical messages for peer".to_owned());
             }
+            let absolute_deadline_ms = now_ms.saturating_add(MAX_FRAGMENT_REASSEMBLY_AGE_MS);
+            let deadline_ms =
+                absolute_deadline_ms.min(now_ms.saturating_add(MAX_FRAGMENT_REASSEMBLY_IDLE_MS));
             self.incomplete.insert(
                 fragment.message_id,
                 IncompleteLogicalMessage {
@@ -93,8 +138,11 @@ impl LogicalMessageReassembler {
                     total_len,
                     received_len: 0,
                     extents: BTreeMap::new(),
+                    absolute_deadline_ms,
+                    deadline_ms,
                 },
             );
+            self.deadlines.insert((deadline_ms, fragment.message_id));
         }
         let state = self
             .incomplete
@@ -132,13 +180,23 @@ impl LogicalMessageReassembler {
             .staged_bytes
             .checked_add(fragment.payload.len())
             .ok_or_else(|| "logical message staging byte count overflow".to_owned())?;
-        if next_staged > MAX_INFLIGHT_LOGICAL_MESSAGE_BYTES {
+        if next_staged > self.staging_budget {
             return Err("incomplete logical messages exceed peer staging budget".to_owned());
         }
         self.staged_bytes = next_staged;
         state.received_len += fragment.payload.len();
         state.extents.insert(offset, fragment.payload);
         if state.received_len != state.total_len {
+            let previous_deadline_ms = state.deadline_ms;
+            let deadline_ms = state
+                .absolute_deadline_ms
+                .min(now_ms.saturating_add(MAX_FRAGMENT_REASSEMBLY_IDLE_MS));
+            if deadline_ms != previous_deadline_ms {
+                state.deadline_ms = deadline_ms;
+                self.deadlines
+                    .remove(&(previous_deadline_ms, fragment.message_id));
+                self.deadlines.insert((deadline_ms, fragment.message_id));
+            }
             return Ok(None);
         }
 
@@ -146,6 +204,8 @@ impl LogicalMessageReassembler {
             .incomplete
             .remove(&fragment.message_id)
             .expect("completed logical message state exists");
+        self.deadlines
+            .remove(&(state.deadline_ms, fragment.message_id));
         self.staged_bytes -= state.received_len;
         let mut cursor = 0;
         let mut payload = Vec::with_capacity(state.total_len);
@@ -163,7 +223,6 @@ impl LogicalMessageReassembler {
         }
         self.recently_completed
             .push_back((fragment.message_id, state.message_digest));
-        self.highest_completed_message_id = Some(fragment.message_id);
         if self.recently_completed.len() > RECENT_COMPLETED_LOGICAL_MESSAGES {
             self.recently_completed.pop_front();
         }
@@ -186,6 +245,7 @@ pub struct WireTransportAdapter<T> {
     outbound_stream: WireStreamEncoder,
     inbound_stream: WireStreamDecoder,
     pub(super) reassembler: LogicalMessageReassembler,
+    reassembly_started: Instant,
     pending_outbound_frames: VecDeque<Vec<u8>>,
     next_outbound_message_id: u64,
 }
@@ -231,6 +291,7 @@ where
             outbound_stream,
             inbound_stream,
             reassembler: LogicalMessageReassembler::default(),
+            reassembly_started: Instant::now(),
             pending_outbound_frames: VecDeque::new(),
             next_outbound_message_id: 0,
         }
@@ -239,6 +300,19 @@ where
     /// Consume the adapter and return the wrapped byte transport.
     pub fn into_inner(self) -> T {
         self.inner
+    }
+
+    fn reassembly_now_ms(&self) -> u64 {
+        self.reassembly_started
+            .elapsed()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX)
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_reassembly_elapsed_for_test(&mut self, elapsed_ms: u64) {
+        self.reassembly_started = Instant::now() - std::time::Duration::from_millis(elapsed_ms);
     }
 
     fn send_wire_error(&mut self, error: WireError) {
@@ -378,6 +452,8 @@ where
     /// exchange such as native edge bootstrap.
     pub fn try_recv_strict(&mut self) -> Result<Option<SyncMessage>, WireError> {
         let _ = self.flush_pending_outbound();
+        let now_ms = self.reassembly_now_ms();
+        self.reassembler.expire(now_ms);
         while let Some(bytes) = self.inner.try_recv_frame() {
             validate_wire_frame_len(bytes.len()).map_err(|message| {
                 WireError::new(WireErrorCode::MalformedFrame, WireRetry::Never, message)
@@ -412,7 +488,8 @@ where
                             "fragment does not declare logical-message fragmentation",
                         ));
                     }
-                    match self.reassembler.push(fragment) {
+                    let now_ms = self.reassembly_now_ms();
+                    match self.reassembler.push(fragment, now_ms) {
                         Ok(Some(envelope)) => {
                             return self.decode_inbound_envelope(envelope).map(Some);
                         }
@@ -446,6 +523,8 @@ where
     T: WireTransport,
 {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        let now_ms = self.reassembly_now_ms();
+        self.reassembler.expire(now_ms);
         self.flush_pending_outbound()?;
         let payload = match encode_sync_message_for_features(&message, self.features) {
             Ok(payload) => payload,
@@ -531,6 +610,8 @@ where
 
     fn try_recv(&mut self) -> Option<SyncMessage> {
         let _ = self.flush_pending_outbound();
+        let now_ms = self.reassembly_now_ms();
+        self.reassembler.expire(now_ms);
         while let Some(bytes) = self.inner.try_recv_frame() {
             if let Err(message) = validate_wire_frame_len(bytes.len()) {
                 self.send_wire_error(WireError::new(
@@ -582,7 +663,8 @@ where
                         ));
                         continue;
                     }
-                    match self.reassembler.push(fragment) {
+                    let now_ms = self.reassembly_now_ms();
+                    match self.reassembler.push(fragment, now_ms) {
                         Ok(Some(envelope)) => match self.decode_inbound_envelope(envelope) {
                             Ok(message) => return Some(message),
                             Err(error) => self.send_wire_error(error),

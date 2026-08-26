@@ -1,6 +1,7 @@
 //! Record descriptors, projection, enum remapping, and operator shape validation.
 
 use super::*;
+use crate::records::collect_by_ordered_scalar;
 
 pub(super) fn extend_root_window_positions(
     descriptor: RecordDescriptor,
@@ -510,31 +511,13 @@ pub(super) fn validate_collect_by_key_types(
     input: &RecordDescriptor,
     indices: &[usize],
 ) -> Result<(), IvmRuntimeError> {
-    fn ordered_scalar(value_type: &ValueType) -> bool {
-        match value_type {
-            ValueType::Nullable(inner) => ordered_scalar(inner),
-            ValueType::U8
-            | ValueType::U16
-            | ValueType::U32
-            | ValueType::U64
-            | ValueType::I32
-            | ValueType::I64
-            | ValueType::F64
-            | ValueType::Bool
-            | ValueType::String
-            | ValueType::Bytes
-            | ValueType::Uuid
-            | ValueType::EnumTag(_) => true,
-            _ => false,
-        }
-    }
     for &index in indices {
         let value_type = &input
             .fields()
             .get(index)
             .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(index))?
             .value_type;
-        let scalar = ordered_scalar(value_type);
+        let scalar = collect_by_ordered_scalar(value_type);
         if value_type.contains_record() || !scalar {
             return Err(IvmRuntimeError::InvalidCollectBy(
                 "group, order, and tie fields must be scalar ordered values without records".into(),

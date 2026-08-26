@@ -226,6 +226,67 @@ fn local_authority_keeps_insert_and_update_policies_distinct() {
     ), "the predecessor remains independently pending");
 }
 
+/// This stays at the node boundary because admission evaluates policy-pinned
+/// inline rows before a public client receives a write outcome. It proves the
+/// provenance visible to that inline program matches the public milliseconds
+/// contract at both its persisted-old-row and incoming-version boundaries.
+#[test]
+fn write_policy_timestamp_provenance_uses_physical_milliseconds() {
+    let created_at_ms = 1_777_777_777_777;
+    let updated_at_ms = created_at_ms + 1;
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .policies(
+                PublicTablePolicies::new()
+                    .with_insert(PublicPolicyExpr::eq_literal(
+                        "$createdAt",
+                        PublicValue::Timestamp(created_at_ms),
+                    ))
+                    .with_update(
+                        Some(PublicPolicyExpr::eq_literal(
+                            "$createdAt",
+                            PublicValue::Timestamp(created_at_ms),
+                        )),
+                        PublicPolicyExpr::eq_literal(
+                            "$updatedAt",
+                            PublicValue::Timestamp(updated_at_ms),
+                        ),
+                    ),
+            ),
+    ));
+    let (_core_dir, mut core) = open_node_with_schema(node(0x9a), schema);
+    let author = user(0xa1);
+    let row_uuid = row(0x9a);
+
+    let insert = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, created_at_ms)
+                .made_by(author)
+                .cells(title_cells("created")),
+        )
+        .unwrap();
+    core.finalize_local_mergeable_commit_settled(insert).unwrap();
+    assert!(matches!(
+        core.transaction_state_settled(insert),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ));
+
+    let update = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, updated_at_ms)
+                .made_by(author)
+                .parents(vec![insert])
+                .cells(title_cells("updated")),
+        )
+        .unwrap();
+    core.finalize_local_mergeable_commit_settled(update).unwrap();
+    assert!(matches!(
+        core.transaction_state_settled(update),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ));
+}
+
 #[test]
 fn local_insert_policy_classification_survives_finalization_retry() {
     let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
@@ -924,6 +985,164 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     );
     // Closure-row policy revocation is still checked at emission; C2 composes
     // output-row policies into the subscription graph.
+}
+
+/// The authority accepts Alice's editor insert only when the candidate's
+/// canvas agrees with the referenced layer; changing only the candidate canvas
+/// must produce the ordinary authorization-denied fate.
+///
+/// This stays at the node boundary because only the authority's settled fate
+/// proves that the compiled policy joins constrain an incoming candidate.
+///
+/// ```text
+/// alice ──shape(layer A, canvas A)──► authority ──► Accepted
+/// alice ──shape(layer A, canvas B)──► authority ──► AuthorizationDenied
+/// ```
+#[test]
+fn nested_correlated_exists_insert_policy_rejects_cross_canvas_candidates() {
+    let alice = user(0xa3);
+    let canvas_a = row(0xa4);
+    let canvas_b = row(0xa5);
+    let layer_a = row(0xa6);
+    let editor_membership = row(0xa7);
+    let accepted_shape = row(0xa8);
+    let rejected_shape = row(0xa9);
+
+    let insert_policy = PublicPolicyExpr::Exists {
+        table: "layers".to_owned(),
+        condition: Box::new(PublicPolicyExpr::And(vec![
+            PublicPolicyExpr::Cmp {
+                column: "id".to_owned(),
+                op: PublicCmpOp::Eq,
+                value: PublicPolicyValue::SessionRef(vec![
+                    "__jazz_outer_row".to_owned(),
+                    "layer_id".to_owned(),
+                ]),
+            },
+            PublicPolicyExpr::Cmp {
+                column: "canvas_id".to_owned(),
+                op: PublicCmpOp::Eq,
+                value: PublicPolicyValue::SessionRef(vec![
+                    "__jazz_outer_row".to_owned(),
+                    "canvas_id".to_owned(),
+                ]),
+            },
+            PublicPolicyExpr::Exists {
+                table: "canvas_members".to_owned(),
+                condition: Box::new(PublicPolicyExpr::And(vec![
+                    PublicPolicyExpr::Cmp {
+                        column: "canvas_id".to_owned(),
+                        op: PublicCmpOp::Eq,
+                        value: PublicPolicyValue::SessionRef(vec![
+                            "__jazz_outer_row".to_owned(),
+                            "canvas_id".to_owned(),
+                        ]),
+                    },
+                    public_claim_eq("user_id", "sub"),
+                    public_literal_eq("role", PublicValue::Text("editor".to_owned())),
+                ])),
+            },
+        ])),
+    };
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("canvases")
+                    .column("title", PublicColumnType::Text),
+            )
+            .table(PublicTableSchemaBuilder::new("layers").fk_column("canvas_id", "canvases"))
+            .table(
+                PublicTableSchemaBuilder::new("canvas_members")
+                    .fk_column("canvas_id", "canvases")
+                    .column("user_id", PublicColumnType::Uuid)
+                    .column("role", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("shapes")
+                    .fk_column("layer_id", "layers")
+                    .fk_column("canvas_id", "canvases")
+                    .policies(PublicTablePolicies::new().with_insert(insert_policy)),
+            ),
+    );
+    let (_alice_dir, mut alice_node) = open_node_with_schema(node(3), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    install_test_uuid_sub_claim(&mut core, alice);
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("canvases", canvas_a, 10).cells(BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("canvas A".to_owned()),
+        )])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("canvases", canvas_b, 11).cells(BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("canvas B".to_owned()),
+        )])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("layers", layer_a, 12).cells(BTreeMap::from([(
+            "canvas_id".to_owned(),
+            Value::Uuid(canvas_a.0),
+        )])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("canvas_members", editor_membership, 13).cells(BTreeMap::from([
+            ("canvas_id".to_owned(), Value::Uuid(canvas_a.0)),
+            ("user_id".to_owned(), Value::Uuid(alice.test_uuid())),
+            ("role".to_owned(), Value::String("editor".to_owned())),
+        ])),
+    );
+
+    let accepted = alice_node
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("shapes", accepted_shape, 14)
+                .made_by(alice)
+                .cells(BTreeMap::from([
+                    ("layer_id".to_owned(), Value::Uuid(layer_a.0)),
+                    ("canvas_id".to_owned(), Value::Uuid(canvas_a.0)),
+                ])),
+        )
+        .unwrap();
+    let [accepted_fate] = core
+        .apply_sync_message_settled(accepted.1)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert!(matches!(
+        accepted_fate,
+        SyncMessage::FateUpdate {
+            fate: Fate::Accepted,
+            ..
+        }
+    ));
+
+    let rejected = alice_node
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("shapes", rejected_shape, 15)
+                .made_by(alice)
+                .cells(BTreeMap::from([
+                    ("layer_id".to_owned(), Value::Uuid(layer_a.0)),
+                    ("canvas_id".to_owned(), Value::Uuid(canvas_b.0)),
+                ])),
+        )
+        .unwrap();
+    let [rejected_fate] = core
+        .apply_sync_message_settled(rejected.1)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert!(matches!(
+        rejected_fate,
+        SyncMessage::FateUpdate {
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            ..
+        }
+    ));
 }
 
 /// `allowedTo.insert(release)` composes the release INSERT policy with the

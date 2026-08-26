@@ -220,6 +220,8 @@ where
         patch: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        self.require_mergeable_transaction_read_visibility(tx_id, table, row, "UPDATE")
+            .await?;
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         self.node
             .node
@@ -246,6 +248,17 @@ where
                 ErrorCode::Schema,
                 "branch-view update requires at least one authored column",
             ));
+        }
+        let permission_subject = self
+            .node
+            .node
+            .lock()
+            .await
+            .mergeable_transaction_permission_subject(tx_id)?;
+        if let Some(identity) = permission_subject {
+            self.visible_branch_view_cells_for_identity(table, &head, base.as_ref(), row, identity)
+                .await?
+                .ok_or_else(|| read_for_write_denied("UPDATE", table))?;
         }
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let head_cells = self
@@ -288,6 +301,65 @@ where
         inherited.extend(patch);
         self.stage_mergeable_insert_in_branch(tx_id, table, head, row, inherited, now_ms, false)
             .await
+    }
+
+    pub(super) async fn require_mergeable_transaction_upsert_visibility(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<(), Error> {
+        self.require_mergeable_transaction_read_visibility(tx_id, table, row, "UPSERT")
+            .await
+    }
+
+    async fn require_mergeable_transaction_read_visibility(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row: RowUuid,
+        operation: &str,
+    ) -> Result<(), Error> {
+        let permission_subject = self
+            .node
+            .node
+            .lock()
+            .await
+            .mergeable_transaction_permission_subject(tx_id)?;
+        let Some(identity) = permission_subject else {
+            return Ok(());
+        };
+        // Resolve against this transaction's fixed snapshot plus its staged
+        // overlay. A session may update/upsert a row it inserted earlier in
+        // the same transaction, while a hidden snapshot or overlay row still
+        // follows the same non-disclosing denial path.
+        let target = self.transaction_read(tx_id, table, row).await?;
+        let visible = match (&target, self.table_schema(table)?.read_policy.clone()) {
+            (Some(_), _) if identity == AuthorSubject::SYSTEM => true,
+            (Some(_), None) => true,
+            (Some(_), Some(policy)) => {
+                self.node
+                    .node
+                    .lock()
+                    .await
+                    .read_policy_query_allows_open_tx_row(
+                        tx_id,
+                        &policy,
+                        self.schema_version_id,
+                        row,
+                        identity,
+                    )
+                    .await?
+            }
+            (None, _) => false,
+        };
+        if target.is_some() && visible {
+            return Ok(());
+        }
+        if target.is_some() || operation == "UPDATE" {
+            return Err(read_for_write_denied(operation, table));
+        }
+        Ok(())
     }
 
     pub(super) async fn stage_mergeable_delete(
@@ -553,13 +625,31 @@ where
         table: &str,
         row: RowUuid,
     ) -> Result<Option<RowCells>, Error> {
-        let mut node = self.node.node.lock().await;
-        let mut cells = node
-            .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
-            .await?;
+        let mut cells = self.transaction_read_raw(tx_id, table, row).await?;
+        let node = self.node.node.lock().await;
         if let Some(cells) = &mut cells {
             node.hydrate_large_value_cells(cells).await?;
         }
+        Ok(cells)
+    }
+
+    /// Read the storage-form transaction row used as a mutation base.
+    ///
+    /// Mutation staging must preserve existing large-value locators; public
+    /// transaction reads hydrate those values separately above.
+    async fn transaction_read_raw(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<Option<RowCells>, Error> {
+        let cells = self
+            .node
+            .node
+            .lock()
+            .await
+            .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
+            .await?;
         Ok(cells)
     }
 
@@ -678,22 +768,25 @@ where
         updated_at_ms: Option<u64>,
     ) -> Result<(), Error> {
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
-        let mut node = self.node.node.lock().await;
-        let mut cells = node
-            .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
+        let mut cells = self
+            .exclusive_transaction_target_for_write(tx_id, table, row, "UPDATE", false)
             .await?
-            .unwrap_or_default();
+            .expect("exclusive UPDATE requires a visible target");
         cells.extend(patch);
-        node.tx_write_in_schema_at_ms(
-            tx_id,
-            self.schema_version_id,
-            table,
-            row,
-            cells,
-            None,
-            Some(now_ms),
-        )
-        .await?;
+        self.node
+            .node
+            .lock()
+            .await
+            .tx_write_in_schema_at_ms(
+                tx_id,
+                self.schema_version_id,
+                table,
+                row,
+                cells,
+                None,
+                Some(now_ms),
+            )
+            .await?;
         Ok(())
     }
 
@@ -706,24 +799,74 @@ where
         updated_at_ms: Option<u64>,
     ) -> Result<(), Error> {
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
-        let mut node = self.node.node.lock().await;
-        let mut cells = node
-            .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
+        let mut cells = self
+            .exclusive_transaction_target_for_write(tx_id, table, row, "UPSERT", true)
             .await?
             .unwrap_or_default();
         cells.extend(patch);
         let cells = self.apply_insert_defaults(table, cells)?;
-        node.tx_write_in_schema_at_ms(
-            tx_id,
-            self.schema_version_id,
-            table,
-            row,
-            cells,
-            None,
-            Some(now_ms),
-        )
-        .await?;
+        self.node
+            .node
+            .lock()
+            .await
+            .tx_write_in_schema_at_ms(
+                tx_id,
+                self.schema_version_id,
+                table,
+                row,
+                cells,
+                None,
+                Some(now_ms),
+            )
+            .await?;
         Ok(())
+    }
+
+    /// Resolve an exclusive mutation target through the identity fixed when
+    /// the transaction opened, then record the corresponding snapshot row or
+    /// absence read used by optimistic conflict validation.
+    async fn exclusive_transaction_target_for_write(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row: RowUuid,
+        operation: &str,
+        allow_absent: bool,
+    ) -> Result<Option<RowCells>, Error> {
+        let identity = self
+            .node
+            .node
+            .lock()
+            .await
+            .exclusive_transaction_bound_author(tx_id)?;
+        let read_policy = self.table_schema(table)?.read_policy.clone();
+        // This authoritative point read distinguishes a hidden target from a
+        // genuinely absent one and records the exact snapshot/absence read for
+        // conflict detection. Its result is never returned to the session.
+        let target = self.transaction_read_raw(tx_id, table, row).await?;
+        let visible = match (&target, read_policy) {
+            (Some(_), _) if identity == AuthorSubject::SYSTEM => true,
+            (Some(_), None) => true,
+            (Some(_), Some(policy)) => {
+                self.node
+                    .node
+                    .lock()
+                    .await
+                    .read_policy_query_allows_open_tx_row(
+                        tx_id,
+                        &policy,
+                        self.schema_version_id,
+                        row,
+                        identity,
+                    )
+                    .await?
+            }
+            (None, _) => false,
+        };
+        if target.is_some() && !visible || target.is_none() && !allow_absent {
+            return Err(read_for_write_denied(operation, table));
+        }
+        Ok(target)
     }
 
     pub(super) async fn stage_exclusive_delete(

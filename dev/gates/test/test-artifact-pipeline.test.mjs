@@ -230,7 +230,7 @@ test("signal during NAPI repair drains the parent scope before unlock", async ()
   const holder = childWithLock(
     lockPath,
     `await withArtifactBuildLock((scope) => buildTestArtifacts((command, args, label, { signal }) => {
-      if (label === 'load release NAPI') return Promise.reject(new Error('load failed'));
+      if (label === 'preflight release NAPI') return Promise.reject(new Error('load failed'));
       if (label === 'repair release NAPI') return new Promise((resolve) => {
         fs.writeFileSync(${JSON.stringify(repairing)}, 'repairing');
         const timer = setInterval(() => {}, 1000);
@@ -292,12 +292,18 @@ test("parallel build failure drains an aborting sibling before leaving the lock"
 
 test("test artifact pipeline overlaps independent bindings and repairs NAPI only after a failed load", async () => {
   const calls = [];
+  const snapshots = [];
   let releaseLoadAttempts = 0;
-  await buildTestArtifacts(async (command, args, label, options) => {
-    calls.push({ command, args, label, options });
-    if (label === "load release NAPI" && ++releaseLoadAttempts === 1)
-      throw new Error("simulated corrupt binding");
-  });
+  await buildTestArtifacts(
+    async (command, args, label, options) => {
+      calls.push({ command, args, label, options });
+      if (label === "preflight release NAPI" && ++releaseLoadAttempts === 1)
+        throw new Error("simulated corrupt binding");
+    },
+    undefined,
+    undefined,
+    () => snapshots.push(calls.at(-1)?.label),
+  );
 
   const labels = calls.map((call) => call.label);
   assert.deepEqual(labels.slice(0, 5), [
@@ -305,17 +311,23 @@ test("test artifact pipeline overlaps independent bindings and repairs NAPI only
     "CLI",
     "fast WASM",
     "derive local artifact expectations",
-    "jazz-tools",
+    "preflight release NAPI",
   ]);
   assert.equal(labels.filter((label) => label === "release NAPI").length, 1);
   assert.equal(labels.filter((label) => label === "repair release NAPI").length, 1);
   assert.ok(labels.indexOf("jazz-tools") > labels.indexOf("fast WASM"));
   assert.ok(labels.indexOf("derive local artifact expectations") < labels.indexOf("jazz-tools"));
   assert.ok(labels.indexOf("verify fast WASM provenance") < labels.indexOf("load release NAPI"));
-  assert.ok(labels.indexOf("load repaired release NAPI") > labels.indexOf("repair release NAPI"));
   assert.ok(
-    labels.indexOf("verify release NAPI provenance") > labels.indexOf("load repaired release NAPI"),
+    labels.indexOf("refresh repaired artifact expectations") >
+      labels.indexOf("repair release NAPI"),
   );
+  assert.ok(
+    labels.lastIndexOf("preflight release NAPI") >
+      labels.indexOf("refresh repaired artifact expectations"),
+  );
+  assert.deepEqual(snapshots, ["preflight release NAPI"]);
+  assert.ok(labels.indexOf("verify release NAPI provenance") > labels.indexOf("load release NAPI"));
   for (const call of calls.filter(({ label }) =>
     ["CLI", "fast WASM", "release NAPI", "repair release NAPI"].includes(label),
   ))

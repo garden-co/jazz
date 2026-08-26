@@ -30,7 +30,8 @@ export default defineConfig(async () => {
   process.env.NEXT_PUBLIC_ANNOUNCEMENTS_CHAT_ID = TEST_ANNOUNCEMENTS_CHAT_ID;
 
   const { publicJwk, mintJwt } = await createTestKeySet();
-  const userJwt = await mintJwt("test-user");
+  const adminJwt = await mintJwt("test-admin", "admin");
+  const memberJwt = await mintJwt("test-member", "member");
 
   const jwksPort = await findFreePort();
   const jazzPort = await findFreePort();
@@ -50,7 +51,8 @@ export default defineConfig(async () => {
     define: {
       __JAZZ_SERVER_URL__: JSON.stringify(`http://127.0.0.1:${jazzPort}`),
       __APP_ID__: JSON.stringify(TEST_APP_ID),
-      __USER_JWT__: JSON.stringify(userJwt),
+      __ADMIN_JWT__: JSON.stringify(adminJwt),
+      __MEMBER_JWT__: JSON.stringify(memberJwt),
       __CHAT_ID__: JSON.stringify(TEST_CHAT_ID),
       __ANNOUNCEMENTS_CHAT_ID__: JSON.stringify(TEST_ANNOUNCEMENTS_CHAT_ID),
       "process.env.NEXT_PUBLIC_CHAT_ID": JSON.stringify(TEST_CHAT_ID),

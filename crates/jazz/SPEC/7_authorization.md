@@ -28,7 +28,7 @@ Invariant digest:
 - `INV-RLS-12`: Exclusive transaction view shipping MUST be policy-atomic per recipient and maintained subscription view: a non-system recipient MUST NOT receive a result member or pr...
 - `INV-RLS-13`: Historical/as-of reads served for a link MUST evaluate read policy at the requested historical cut.
 - `INV-RLS-14`: Policy evaluation MUST deny when it cannot determine that a policy predicate is satisfied.
-- `INV-RLS-15`: A table with no declared policy clauses is public for every operation; once it declares any clause, every omitted operation is denied.
+- `INV-RLS-15`: A table with no declared policy clauses is public for reads and for writes by non-anonymous permission subjects; anonymous permission subjects are structurally read-only, and once a table declares any clause, every omitted operation is denied.
 - `INV-RLS-17`: A write whose Transaction.madeby differs from the authenticated permission subject MUST be accepted only via a trusted serving node (a core/edge Node accepting a Trust...
 - `INV-RLS-18`: An uploaded commit unit MUST be authorized under the authenticated link identity: a Session link's madeby MUST equal that identity or be rejected, while a TrustedBacke...
 - `INV-RLS-19`: A required include MUST be treated as resolvable for a non-system
@@ -36,8 +36,8 @@ Invariant digest:
   table's read policy for that reader; a parent whose required target is missing or
   unreadable MUST be dropped from the result set.
 - `INV-RLS-20`: Reads performed to execute a write MUST satisfy the target row's
-  read policy; partial updates and upserts therefore require read permission,
-  while full-row writes and row-id deletes do not.
+  read policy; every session-authored update and every upsert of an existing
+  target therefore require read permission, while row-id deletes do not.
 - `INV-RLS-21`: A policy subplan MUST read its dependency tables as raw policy
   evidence without recursively applying those tables' own read policies, while
   still enforcing the complete outer policy under authenticated claims.
@@ -64,15 +64,16 @@ authenticated claims for the peer being evaluated. The stored core shape is
 `insert_check`, `update_using`, `update_check`, and `delete_using` clauses.
 
 `TableSchema::new` defaults every clause to `None`. Such a **policy-free table**
-is public for read, insert, update, and delete so an app can use ordinary data
-before it introduces authorization. Declaring any one clause closes that table's
-policy set: the declared operation is evaluated normally and every other
-operation with no clause is denied. For update, either `update_using` or
-`update_check` declares the update operation; when both are supplied, both must
-pass. An absent subclause within an otherwise declared update contributes no
-additional check. This rule is enforced by the fate authority and upstream read
-emission under the policy-owning schema, including after schema migration or
-lens projection (`INV-RLS-15`).
+is public for reads and for writes by non-anonymous permission subjects so an
+app can use ordinary data before it introduces authorization. An anonymous
+permission subject remains structurally read-only regardless of table policy.
+Declaring any one clause closes that table's policy set: the declared operation
+is evaluated normally and every other operation with no clause is denied. For
+update, either `update_using` or `update_check` declares the update operation;
+when both are supplied, both must pass. An absent subclause within an otherwise
+declared update contributes no additional check. This rule is enforced by the
+fate authority and upstream read emission under the policy-owning schema,
+including after schema migration or lens projection (`INV-RLS-15`).
 
 An owner-only policy is the canonical single-subject policy: it selects rows
 whose ownership column equals the authenticated subject
@@ -145,12 +146,20 @@ rejected as
 `global_time`, makes no durability claim, is audit-only, contributes no accepted
 rows, and causes descendants to cascade as described in ch. 3 (`INV-RLS-1`).
 
+Before table-policy evaluation, the fate authority rejects a commit whose
+effective permission subject uses the reserved `urn:jazz:anonymous` issuer.
+This structural gate applies to inserts, updates, and deletes received directly
+from an anonymous session or relayed by a serving node. It does not change
+trusted-backend attribution: `made_by` may record anonymous provenance when the
+effective permission subject is the non-anonymous trusted backend.
+
 For an insert, `insert_check` is evaluated against the inserted row. For an
 update, `update_using` is evaluated against the previous content row and
 `update_check` is evaluated against the new content row; if both clauses are
 present both must pass. For a delete, `delete_using` is evaluated against the row
-being deleted. On a policy-free table, all of those operations are public. On a
-table with any declared clause, an omitted insert or delete clause denies; an
+being deleted. Subject to the structural anonymous-write gate, all of those
+operations are public on a policy-free table. On a table with any declared
+clause, an omitted insert or delete clause denies; an
 update with neither `update_using` nor `update_check` denies; and a missing read
 policy emits no rows. Missing clauses never fall back to another operation's
 policy.
@@ -163,12 +172,13 @@ permission implies read permission. The policy unit is the target **row**: jazz
 read policies are row-level rather than column-level, so it does not make a
 PostgreSQL-style per-column `SELECT` decision.
 
-An update is **partial** when its input omits any schema-declared column. A
-partial update reads the current target row to merge its omitted cells and MUST
-be rejected with an authorization error unless the writer may read that row. An
-update that specifies every schema-declared column is a full-row write: it reads
-no user data and therefore requires only the applicable write policy. It remains
-available to a write-only principal.
+Every session-authored update MUST be rejected with an authorization error unless
+the session may read the target row through its effective view, whether the input
+is a partial patch or a full-row replacement and whether it addresses the root
+or a branch view. A full replacement must not bypass this rule: identifying and
+versioning its target still depends on that target row. Trusted/internal paths
+may inspect the authoritative row as policy evidence, but that implementation
+privilege does not make a read-hidden row updateable by a session.
 
 An upsert asks whether its target row exists. If there is a current target row,
 that is a read and an upsert MUST be rejected unless the writer may read it. If
@@ -365,10 +375,12 @@ updates and history truncation. Public policy helpers such as `$createdBy`,
 after they can be lowered and validated through the same fail-closed policy
 machinery as ordinary columns.
 
-Auth-mode gating belongs in permissions rather than process-global flags. A
-policy should be able to distinguish anonymous/local/authenticated/backend/system
-admission modes through trusted session claims or first-class admission facts;
-client-supplied values must not widen those facts.
+Application-specific auth-mode gating belongs in permissions rather than
+process-global flags. The structural anonymous-write denial is the exception:
+anonymous permission subjects are always read-only, while policies may further
+distinguish anonymous/local/authenticated/backend/system admission modes through
+trusted session claims or first-class admission facts. Client-supplied values
+must not widen those facts.
 
 ## Open Questions
 

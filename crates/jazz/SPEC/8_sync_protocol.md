@@ -558,9 +558,10 @@ Protocol size limits are enforced at the layer that can recover correctly:
   ceiling. Generic fragmentation/reassembly carries an encoded `SyncMessage`
   of any ordinary database size atomically across bounded frames. Receivers
   enforce fixed advertised-length, decompressed-output, concurrent-assembly,
-  and aggregate staged-byte limits as adversarial resource
-  defenses; those budgets are transport policy, not query, catalogue, or
-  transaction semantics.
+  aggregate staged-byte, 30-second no-progress, and five-minute maximum-age
+  limits as adversarial resource defences. Exact duplicates and rejected
+  extents do not count as progress. Those budgets are transport policy, not
+  query, catalogue, or transaction semantics.
 - A `RegisterShape` AST is capped at 64 KiB encoded. This is a semantic
   admission limit for the shape-registration request; the connection may
   continue after the rejected request. Server shells may expose this as

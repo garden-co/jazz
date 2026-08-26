@@ -76,6 +76,49 @@ describe("installInspectorHost", () => {
     expect(posts).toHaveLength(2);
   });
 
+  it("pushes subscriptions to a registered detached inspector window", () => {
+    const iframePosts: any[] = [];
+    const popupPosts: any[] = [];
+    const iframeWindow = { postMessage: (m: any) => iframePosts.push(m) } as unknown as Window;
+    const popupWindow = { postMessage: (m: any) => popupPosts.push(m) } as unknown as Window;
+    const fake = makeFakeDb();
+
+    installInspectorHost(fake.db, iframeWindow, "http://localhost");
+    const handle = (window as any)[INSPECTOR_HOST_GLOBAL];
+    handle.registerInspectorWindow(popupWindow);
+    fake.fireChange();
+
+    expect(iframePosts).toHaveLength(2);
+    expect(popupPosts).toHaveLength(1);
+
+    handle.unregisterInspectorWindow(popupWindow);
+    fake.fireChange();
+    expect(popupPosts).toHaveLength(1);
+  });
+
+  it("keeps detached inspector windows across host rebinding", () => {
+    const inspectorWindows = new Set<Window>();
+    const iframeWindow = { postMessage: vi.fn() } as unknown as Window;
+    const popupWindow = { postMessage: vi.fn() } as unknown as Window;
+    const first = makeFakeDb();
+    const dispose = installInspectorHost(
+      first.db,
+      iframeWindow,
+      "http://localhost",
+      inspectorWindows,
+    );
+    const handle = (window as any)[INSPECTOR_HOST_GLOBAL];
+    handle.registerInspectorWindow(popupWindow);
+
+    dispose();
+    const second = makeFakeDb({
+      onActiveQuerySubscriptionsChange: () => vi.fn(),
+    });
+    installInspectorHost(second.db, iframeWindow, "http://localhost", inspectorWindows);
+
+    expect(popupWindow.postMessage).toHaveBeenCalledOnce();
+  });
+
   it("dispose() removes the listener and the global", () => {
     const iframeWindow = { postMessage: () => {} } as unknown as Window;
     const stop = vi.fn();

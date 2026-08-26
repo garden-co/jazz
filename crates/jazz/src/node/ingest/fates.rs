@@ -10,6 +10,18 @@ where
         global_time: Option<GlobalTime>,
         durability: Option<DurabilityTier>,
     ) -> Result<(), Error> {
+        self.apply_fate_update_with_cascade(tx_id, fate, global_time, durability, true)
+            .await
+    }
+
+    async fn apply_fate_update_with_cascade(
+        &mut self,
+        tx_id: TxId,
+        fate: Fate,
+        global_time: Option<GlobalTime>,
+        durability: Option<DurabilityTier>,
+        cascade_descendants: bool,
+    ) -> Result<(), Error> {
         self.require_catalogue_ready()?;
         debug_assert!(
             global_time.is_none() || durability == Some(DurabilityTier::Global),
@@ -22,6 +34,7 @@ where
             global_time,
             durability,
             &mut terminal_fate_persisted,
+            cascade_descendants,
         ).await;
         if terminal_fate_persisted {
             self.open_tx.local_permission_subjects.remove(&tx_id);
@@ -36,6 +49,7 @@ where
         global_time: Option<GlobalTime>,
         durability: Option<DurabilityTier>,
         terminal_fate_persisted: &mut bool,
+        cascade_descendants: bool,
     ) -> Result<(), Error> {
         let mut stored = self
             .query_transaction(tx_id).await?
@@ -62,6 +76,7 @@ where
         let mut global_current_updates = Vec::new();
         let cleanup_rejected_versions = matches!(stored.fate, Fate::Rejected(_));
         let tx_versions = self.query_versions_for_tx(tx_id).await?;
+        #[cfg(test)]
         let content_versions = tx_versions
             .iter()
             .filter(|version| version.layer() == VersionLayer::Content)
@@ -103,12 +118,15 @@ where
                 stored.view_scoped_cardinality,
             ),
         );
-        if !matches!(stored.fate, Fate::Rejected(_)) {
-            for version in &content_versions {
-                self.update_merge_heads_for_content_version(&mut batch, version, false)
-                    .await?;
-            }
-        }
+        // Pending and accepted content versions both participate in local
+        // merge-head state. Ingest already installed this transaction's
+        // versions while it was pending, so advancing the fate must not replay
+        // reachability maintenance over its history. Besides being redundant,
+        // fate updates can arrive newest-first and turn that replay into a
+        // quadratic walk of one row's causal chain.
+        //
+        // Rejections are handled by `remove_rejected_local_versions`, which
+        // rebuilds the affected derived state after removing the rows.
         if let Some(global_time) = stored.global_time {
             for version in &global_current_updates {
                 self.write_global_current_update(&mut batch, version, global_time)?;
@@ -181,6 +199,10 @@ where
             self.prune_child_edges(tx_id);
         } else if let Some(root) = rejected_root {
             self.prune_child_edges(tx_id);
+            if !cascade_descendants {
+                self.rejections.child_txs_by_parent.remove(&tx_id);
+                return Ok(());
+            }
             let cascades = self.local_cascade_descendants(tx_id, root).await?;
             for descendant in cascades {
                 // Authority-side parking resolves parents before children, so
@@ -194,11 +216,12 @@ where
                                 if *existing == root
                         )
                 );
-                Box::pin(self.apply_fate_update(
+                Box::pin(self.apply_fate_update_with_cascade(
                     descendant,
                     Fate::Rejected(RejectionReason::Cascade { root }),
                     None,
                     None,
+                    false,
                 ))
                 .await?;
             }
@@ -391,6 +414,11 @@ where
             }
             None => tx.permission_subject.unwrap_or(tx.made_by),
         };
+        // Gate the effective permission subject so relayed anonymous sessions
+        // stay read-only without changing trusted-backend attribution.
+        if permission_subject.is_anonymous() {
+            return Ok(false);
+        }
         for version in versions {
             if !self
                 .version_satisfies_write_policy(version, permission_subject, tx.tx_id)
@@ -692,7 +720,8 @@ where
         let mut updates = Vec::new();
         for descendant in descendants {
             let fate = Fate::Rejected(RejectionReason::Cascade { root });
-            self.apply_fate_update(descendant, fate.clone(), None, None).await?;
+            self.apply_fate_update_with_cascade(descendant, fate.clone(), None, None, false)
+                .await?;
             updates.push(SyncMessage::FateUpdate {
                 tx_id: descendant,
                 fate,
