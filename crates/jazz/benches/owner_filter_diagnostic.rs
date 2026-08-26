@@ -16,12 +16,16 @@ use jazz::groove::records::Value;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
-use jazz::tools::{ColumnType, SchemaBuilder, TablePolicies, TableSchemaBuilder};
+use jazz::tools::public_schema::{CmpOp, PolicyValue};
+use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 use jazz_storage_rocksdb::RocksDbStorage;
 use serde_json::{Map, json};
 
 const TABLE: &str = "documents";
+const SCOPE_TABLE: &str = "document_scopes";
+const SHARED_TABLE: &str = "shared_documents";
+const ACCESS_TABLE: &str = "document_access";
 const AUTHOR_UUID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-0000000000a1");
 const OTHER_AUTHOR_UUID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-0000000000b2");
 
@@ -72,6 +76,20 @@ fn run_rung(table_rows: usize, owned_rows: usize, result_rows: usize, batch_rows
         (
             "policy_point_local",
             point_query(row(0)),
+            1,
+            DurabilityTier::Local,
+            author(),
+        ),
+        (
+            "system_exists_point_local",
+            shared_point_query(),
+            1,
+            DurabilityTier::Local,
+            AuthorSubject::SYSTEM,
+        ),
+        (
+            "policy_exists_point_local",
+            shared_point_query(),
             1,
             DurabilityTier::Local,
             author(),
@@ -136,19 +154,48 @@ fn run_rung(table_rows: usize, owned_rows: usize, result_rows: usize, batch_rows
 }
 
 fn schema() -> JazzSchema {
+    let shared_access = PolicyExpr::Exists {
+        table: ACCESS_TABLE.to_owned(),
+        condition: Box::new(PolicyExpr::And(vec![
+            PolicyExpr::Cmp {
+                column: "scope".to_owned(),
+                op: CmpOp::Eq,
+                value: PolicyValue::SessionRef(vec![
+                    "__jazz_outer_row".to_owned(),
+                    "scope".to_owned(),
+                ]),
+            },
+            schema_fixture::session_user_id_column("user"),
+        ])),
+    };
     schema_fixture::compile(
-        SchemaBuilder::new().table(
-            TableSchemaBuilder::new(TABLE)
-                .column("owner", ColumnType::Uuid)
-                .column("active", ColumnType::Boolean)
-                .column("updated_at", ColumnType::Timestamp)
-                .column("title", ColumnType::Text)
-                .policies(
-                    TablePolicies::new()
-                        .with_select(schema_fixture::session_user_id_column("owner")),
-                )
-                .index_only(["owner", "updated_at", "title"]),
-        ),
+        SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new(TABLE)
+                    .column("owner", ColumnType::Uuid)
+                    .column("active", ColumnType::Boolean)
+                    .column("updated_at", ColumnType::Timestamp)
+                    .column("title", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(schema_fixture::session_user_id_column("owner")),
+                    )
+                    .index_only(["owner", "updated_at", "title"]),
+            )
+            .table(TableSchemaBuilder::new(SCOPE_TABLE).column("name", ColumnType::Text))
+            .table(
+                TableSchemaBuilder::new(SHARED_TABLE)
+                    .fk_column("scope", SCOPE_TABLE)
+                    .column("title", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(shared_access))
+                    .index_only(["scope", "title"]),
+            )
+            .table(
+                TableSchemaBuilder::new(ACCESS_TABLE)
+                    .fk_column("scope", SCOPE_TABLE)
+                    .column("user", ColumnType::Uuid)
+                    .index_only(["scope", "user"]),
+            ),
     )
 }
 
@@ -200,6 +247,44 @@ fn seed_rows(db: &Db<RocksDbStorage>, table_rows: usize, owned_rows: usize, batc
                     },
                 )
                 .await?;
+                tx.insert(
+                    SCOPE_TABLE,
+                    BTreeMap::from([("name".to_owned(), Value::String(format!("scope-{index}")))]),
+                    InsertOptions {
+                        row_id: Some(row(index)),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+                tx.insert(
+                    SHARED_TABLE,
+                    BTreeMap::from([
+                        ("scope".to_owned(), Value::Uuid(row(index).0)),
+                        (
+                            "title".to_owned(),
+                            Value::String(format!("shared-document-{index}")),
+                        ),
+                    ]),
+                    InsertOptions {
+                        row_id: Some(row(index)),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+                if index < owned_rows {
+                    tx.insert(
+                        ACCESS_TABLE,
+                        BTreeMap::from([
+                            ("scope".to_owned(), Value::Uuid(row(index).0)),
+                            ("user".to_owned(), Value::Uuid(AUTHOR_UUID)),
+                        ]),
+                        InsertOptions {
+                            row_id: Some(access_row(index)),
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                }
             }
             Ok(())
         }))
@@ -210,6 +295,13 @@ fn seed_rows(db: &Db<RocksDbStorage>, table_rows: usize, owned_rows: usize, batc
 fn row(index: usize) -> RowUuid {
     let mut bytes = [0_u8; 16];
     bytes[0] = 0x61;
+    bytes[8..].copy_from_slice(&(index as u64).to_be_bytes());
+    RowUuid::from_bytes(bytes)
+}
+
+fn access_row(index: usize) -> RowUuid {
+    let mut bytes = [0_u8; 16];
+    bytes[0] = 0x62;
     bytes[8..].copy_from_slice(&(index as u64).to_be_bytes());
     RowUuid::from_bytes(bytes)
 }
@@ -226,6 +318,10 @@ fn owner_predicate_query() -> Query {
 
 fn point_query(_row: RowUuid) -> Query {
     Query::from(TABLE).filter(eq(col("title"), lit("document-0")))
+}
+
+fn shared_point_query() -> Query {
+    Query::from(SHARED_TABLE).filter(eq(col("title"), lit("shared-document-0")))
 }
 
 fn read_opts(tier: DurabilityTier) -> ReadOpts {
