@@ -24,7 +24,15 @@ if ((preflight.status ?? 1) !== 0) process.exit(preflight.status ?? 1);
 
 const result = spawnSync(
   "pnpm",
-  ["exec", "vitest", "run", "--config", "vitest.config.browser.ts", file, ...args.filter((arg) => arg !== fileArg)],
+  [
+    "exec",
+    "vitest",
+    "run",
+    "--config",
+    "vitest.config.browser.ts",
+    file,
+    ...args.filter((arg) => arg !== fileArg),
+  ],
   { cwd: appRoot, stdio: "inherit" },
 );
 process.exitCode = result.status ?? 1;
