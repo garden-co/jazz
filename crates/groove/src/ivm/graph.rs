@@ -1292,12 +1292,7 @@ impl IvmGraph {
                 .get(input)
                 .is_some_and(|node| matches!(node.descriptor.operator, OpType::CollectBy(_)))
         });
-        if consumes_collect_by
-            && !matches!(
-                descriptor.operator,
-                OpType::Filter(_) | OpType::MapProject(_)
-            )
-        {
+        if consumes_collect_by {
             return Err(GraphValidationError::CollectByInputIsTerminal);
         }
         Ok(())
