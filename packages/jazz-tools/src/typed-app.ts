@@ -854,16 +854,17 @@ type SelectedFromMeta<
   TMeta extends AnyTableMeta,
   TSelection = DefaultTableSelection<TMeta>,
 > = Simplify<
-  TSelection extends Record<string, LargeValuePage>
-    ? Pick<TableRowFromMeta<TMeta>, Extract<keyof TSelection | "id", keyof TableRowFromMeta<TMeta>>>
-    : ("*" extends TSelection
-        ? TableRowFromMeta<TMeta>
-        : Pick<
-            TableRowFromMeta<TMeta>,
-            Extract<TSelection | "id", keyof TableRowFromMeta<TMeta>>
-          >) &
-        Pick<ProvenanceMagicColumns, Extract<TSelection, ProvenanceMagicColumn>>
+  ("*" extends SelectedColumnNames<TSelection>
+    ? TableRowFromMeta<TMeta>
+    : Pick<
+        TableRowFromMeta<TMeta>,
+        Extract<SelectedColumnNames<TSelection> | "id", keyof TableRowFromMeta<TMeta>>
+      >) &
+    Pick<ProvenanceMagicColumns, Extract<SelectedColumnNames<TSelection>, ProvenanceMagicColumn>>
 >;
+
+type SelectedColumnNames<TSelection> =
+  TSelection extends Record<string, LargeValuePage> ? keyof TSelection : TSelection;
 
 type IncludedRelationValueFromMeta<
   TMeta extends AnyTableMeta,
@@ -1024,12 +1025,13 @@ export class TypedTableQueryBuilder<
     return clone;
   }
 
-  select<NewSelection extends Record<string, LargeValuePage>>(
-    columns: NewSelection,
-  ): MetaQueryHandle<TMeta, TInclude, NewSelection, TRequired>;
-  select<NewSelection extends TableSelectableFromMeta<TMeta>>(
-    ...columns: [NewSelection, ...NewSelection[]]
-  ): MetaQueryHandle<TMeta, TInclude, NewSelection, TRequired>;
+  select<
+    FirstSelection extends TableSelectableFromMeta<TMeta> | Record<string, LargeValuePage>,
+    RestSelection extends readonly TableSelectableFromMeta<TMeta>[] = [],
+  >(
+    first: FirstSelection,
+    ...rest: FirstSelection extends Record<string, LargeValuePage> ? [] : RestSelection
+  ): MetaQueryHandle<TMeta, TInclude, FirstSelection | RestSelection[number], TRequired>;
   select<NewSelection extends TableSelectableFromMeta<TMeta> | Record<string, LargeValuePage>>(
     ...selection: [NewSelection] | [NewSelection, ...NewSelection[]]
   ): MetaQueryHandle<TMeta, TInclude, NewSelection, TRequired> {
@@ -1037,7 +1039,7 @@ export class TypedTableQueryBuilder<
     const first = selection[0];
     clone._select =
       typeof first === "object" && first !== null
-        ? { ...first }
+        ? ({ ...first } as Record<string, LargeValuePage>)
         : (selection as TableSelectableFromMeta<TMeta>[]).map((column) => String(column));
     return clone;
   }
@@ -1293,9 +1295,15 @@ export interface Query<
   where(
     conditions: TableWhereInput<TSchema, Extract<TTable, TableName<TSchema>>>,
   ): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
-  select<NewSelection extends TableSelectableFromMeta<SchemaMeta<TTable, TSchema>>>(
-    ...columns: [NewSelection, ...NewSelection[]]
-  ): Query<TTable, TInclude, NewSelection, TSchema, TRequired>;
+  select<
+    FirstSelection extends
+      | TableSelectableFromMeta<SchemaMeta<TTable, TSchema>>
+      | Record<string, LargeValuePage>,
+    RestSelection extends readonly TableSelectableFromMeta<SchemaMeta<TTable, TSchema>>[] = [],
+  >(
+    first: FirstSelection,
+    ...rest: FirstSelection extends Record<string, LargeValuePage> ? [] : RestSelection
+  ): Query<TTable, TInclude, FirstSelection | RestSelection[number], TSchema, TRequired>;
   include<NewInclude extends BuilderInclude<SchemaMeta<TTable, TSchema>>>(
     relations: NewInclude,
   ): Query<TTable, TInclude & NewInclude, TSelection, TSchema, TRequired>;
