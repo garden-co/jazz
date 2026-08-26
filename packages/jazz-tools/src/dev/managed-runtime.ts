@@ -217,21 +217,29 @@ function withEnvLock<T>(envPath: string, action: () => T): T {
       Atomics.wait(lockWaiter, 0, 0, 10);
     }
   }
+  let result: T | undefined;
+  let actionError: unknown;
   try {
-    return action();
-  } finally {
+    result = action();
+  } catch (error) {
+    actionError = error;
+  }
+  try {
     closeSync(descriptor);
-    try {
-      unlinkSync(lockPath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    unlinkSync(lockPath);
+  } catch (cleanupError) {
+    if (actionError === undefined && (cleanupError as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw cleanupError;
     }
   }
+  if (actionError !== undefined) throw actionError;
+  return result as T;
 }
 
 function atomicReplaceEnv(envPath: string, content: string, mode: number): void {
   const tempPath = join(dirname(envPath), `.${randomUUID()}.jazz-env.tmp`);
   let descriptor: number | null = null;
+  let writeError: unknown;
   try {
     descriptor = openSync(tempPath, "wx", mode);
     writeFileSync(descriptor, content, "utf8");
@@ -239,14 +247,18 @@ function atomicReplaceEnv(envPath: string, content: string, mode: number): void 
     closeSync(descriptor);
     descriptor = null;
     renameSync(tempPath, envPath);
-  } finally {
+  } catch (error) {
+    writeError = error;
+  }
+  try {
     if (descriptor !== null) closeSync(descriptor);
-    try {
-      unlinkSync(tempPath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    unlinkSync(tempPath);
+  } catch (cleanupError) {
+    if (writeError === undefined && (cleanupError as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw cleanupError;
     }
   }
+  if (writeError !== undefined) throw writeError;
 }
 
 export function ensureEnvAppId(
