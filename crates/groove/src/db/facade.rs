@@ -64,6 +64,7 @@ impl Database {
     where
         S: ReopenableStorage + 'static,
     {
+        validate_column_family_namespace(&schema, &storage_layout)?;
         validate_durable_key_schema(&schema)?;
         let mut ivm_runtime = IvmRuntime::new(schema)?;
         let storage = Rc::new(LayoutStorage::new(storage, storage_layout).await?);

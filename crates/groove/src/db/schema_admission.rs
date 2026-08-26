@@ -1,5 +1,137 @@
 use super::*;
 
+fn column_family_name_conflict(
+    name: &str,
+    existing_owner: &'static str,
+    requested_owner: &'static str,
+) -> Error {
+    Error::ColumnFamilyNameConflict {
+        name: name.to_owned(),
+        existing_owner: existing_owner.to_owned(),
+        requested_owner: requested_owner.to_owned(),
+    }
+}
+
+fn admit_application_column_family<'a>(
+    owners: &mut HashMap<&'a str, &'static str>,
+    storage_layout: &StorageLayout,
+    name: &'a str,
+    requested_owner: &'static str,
+) -> Result<(), Error> {
+    if let Some(existing_owner) = storage_layout.column_family_reservation_owner(name) {
+        return Err(column_family_name_conflict(
+            name,
+            existing_owner,
+            requested_owner,
+        ));
+    }
+    if let Some(existing_owner) = owners.insert(name, requested_owner) {
+        return Err(column_family_name_conflict(
+            name,
+            existing_owner,
+            requested_owner,
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_column_family_namespace(
+    schema: &DatabaseSchema,
+    storage_layout: &StorageLayout,
+) -> Result<(), Error> {
+    let mut owners =
+        HashMap::with_capacity(schema.tables.len() + schema.direct_record_stores.len() + 2);
+    owners.insert(LARGE_VALUE_METADATA_CF, "large-value metadata");
+    if schema.tables.iter().any(|table| !table.indices.is_empty()) {
+        owners.insert("indices", "indices");
+    }
+
+    for table in &schema.tables {
+        admit_application_column_family(&mut owners, storage_layout, &table.name, "table")?;
+    }
+    for store in &schema.direct_record_stores {
+        admit_application_column_family(
+            &mut owners,
+            storage_layout,
+            &store.name,
+            "direct record store",
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_indices_column_family_available(schema: &DatabaseSchema) -> Result<(), Error> {
+    let existing_owner = schema
+        .tables
+        .iter()
+        .any(|table| table.name == "indices")
+        .then_some("table")
+        .or_else(|| {
+            schema
+                .direct_record_stores
+                .iter()
+                .any(|store| store.name == "indices")
+                .then_some("direct record store")
+        });
+    if let Some(existing_owner) = existing_owner {
+        return Err(column_family_name_conflict(
+            "indices",
+            existing_owner,
+            "indices",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_table_column_family_registration(
+    schema: &DatabaseSchema,
+    storage_layout: &StorageLayout,
+    table: &TableSchema,
+) -> Result<(), Error> {
+    if let Some(existing_owner) =
+        storage_layout.column_family_reservation_owner(table.name.as_str())
+    {
+        return Err(column_family_name_conflict(
+            &table.name,
+            existing_owner,
+            "table",
+        ));
+    }
+    if table.name == LARGE_VALUE_METADATA_CF {
+        return Err(column_family_name_conflict(
+            &table.name,
+            "large-value metadata",
+            "table",
+        ));
+    }
+    if table.name == "indices"
+        && schema
+            .tables
+            .iter()
+            .any(|existing| !existing.indices.is_empty())
+    {
+        return Err(column_family_name_conflict(&table.name, "indices", "table"));
+    }
+    if schema
+        .direct_record_stores
+        .iter()
+        .any(|store| store.name == table.name)
+    {
+        return Err(column_family_name_conflict(
+            &table.name,
+            "direct record store",
+            "table",
+        ));
+    }
+    if !table.indices.is_empty() {
+        validate_indices_column_family_available(schema)?;
+        if table.name == "indices" {
+            return Err(column_family_name_conflict("indices", "table", "indices"));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn validate_durable_key_schema(schema: &DatabaseSchema) -> Result<(), Error> {
     for store in &schema.direct_record_stores {
         if store
@@ -110,6 +242,11 @@ impl Database {
         if self.ivm_runtime.table(&table.name).is_some() {
             return Err(Error::TableAlreadyExists(table.name));
         }
+        validate_table_column_family_registration(
+            self.ivm_runtime.schema(),
+            self.storage.layout(),
+            &table,
+        )?;
         let mut updated = self.ivm_runtime.schema().clone();
         updated.tables.push(table.clone());
         validate_durable_key_schema(&updated)?;
@@ -268,6 +405,7 @@ impl Database {
                 index: index.name,
             });
         }
+        validate_indices_column_family_available(self.ivm_runtime.schema())?;
         if let Err(error) = self
             .ivm_runtime
             .register_table_index(table, index, &self.storage)

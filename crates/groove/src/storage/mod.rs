@@ -493,6 +493,15 @@ const CLASS_AHEAD_CURRENT_CF: &str = "__groove_class_ahead_current";
 const CLASS_CHANGES_CF: &str = "__groove_class_changes";
 const CLASS_INDICES_CF: &str = "__groove_class_indices";
 const CLASS_META_CF: &str = "__groove_class_meta";
+const JAZZ_CLASS_V1_RESERVED_CFS: [&str; 7] = [
+    CLASS_HISTORY_CF,
+    CLASS_REGISTER_CF,
+    CLASS_GLOBAL_CURRENT_CF,
+    CLASS_AHEAD_CURRENT_CF,
+    CLASS_CHANGES_CF,
+    CLASS_INDICES_CF,
+    CLASS_META_CF,
+];
 const CLASS_LAYOUT_MARKER_KEY: &[u8] = b"groove-storage-layout";
 const CLASS_LAYOUT_MARKER_VALUE: &[u8] = b"class-cf-v1";
 
@@ -540,6 +549,11 @@ impl StorageLayout {
             names.insert(self.map_cf(logical).physical_cf.to_owned());
         }
         names.into_iter().collect()
+    }
+
+    pub(crate) fn column_family_reservation_owner(&self, name: &str) -> Option<&'static str> {
+        (matches!(self, Self::JazzClassV1 { .. }) && JAZZ_CLASS_V1_RESERVED_CFS.contains(&name))
+            .then_some("JazzClassV1 storage layout")
     }
 
     fn map_cf<'a>(&'a self, logical_cf: &'a str) -> PhysicalCf<'a> {
@@ -683,6 +697,10 @@ impl LayoutStorage {
         self.inner
     }
 
+    pub(crate) fn layout(&self) -> &StorageLayout {
+        &self.layout
+    }
+
     async fn ensure_layout_marker(&self) -> Result<(), Error> {
         if !self.layout.validates_marker() {
             return Ok(());
@@ -720,15 +738,7 @@ impl LayoutStorage {
         {
             return Ok(true);
         }
-        for cf in [
-            CLASS_HISTORY_CF,
-            CLASS_REGISTER_CF,
-            CLASS_GLOBAL_CURRENT_CF,
-            CLASS_AHEAD_CURRENT_CF,
-            CLASS_CHANGES_CF,
-            CLASS_INDICES_CF,
-            CLASS_META_CF,
-        ] {
+        for cf in JAZZ_CLASS_V1_RESERVED_CFS {
             match self.inner.last_with_prefix(cf.to_owned(), Vec::new()).await {
                 Ok(Some(_)) => return Ok(true),
                 Ok(None) | Err(Error::ColumnFamilyNotFound(_)) => {}

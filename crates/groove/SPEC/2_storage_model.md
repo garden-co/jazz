@@ -14,6 +14,7 @@ Invariant digest:
 - `INV-STORAGE-1`: `OrderedKvStorage::scan(ScanRequest)` MUST return range results in the requested lexicographic direction and include keys `>= start` while excluding keys `>= end`.
 - `INV-STORAGE-2`: A prefix `ScanRequest` MUST return exactly keys beginning with the supplied byte prefix in the requested lexicographic direction, including prefixes whose finite upper bound cannot be computed.
 - `INV-STORAGE-29`: An explicit ordered scan request's finite item bound MUST cap the complete cursor result in the requested direction; adapters MUST stop reading beyond that bound rather than treating it as a caller-side collection hint.
+- `INV-STORAGE-30`: Database admission MUST assign every logical or selected-layout physical column-family name to exactly one record owner before runtime initialization or storage/layout-marker I/O.
 - `INV-STORAGE-4`: `write_many` MUST apply all `Set`/`Delete` operations atomically at the storage-operation level, and a missing column family in the operation list MUST leave earlier valid operations unapplied.
 - `INV-STORAGE-5`: `ReopenableStorage::reopen` MUST preserve existing data while adding newly requested column families.
 - `INV-STORAGE-6`: Table records MUST be stored as values in the table column family named by `TableSchema::name`, keyed by the encoded primary key derived from the row record.
@@ -131,6 +132,27 @@ bound. `INV-STORAGE-29` — an explicit scan limit applies across all cursor
 batches and stops physical traversal rather than merely truncating a materialized
 result. `INV-STORAGE-5` (prov) — `ReopenableStorage::reopen` preserves existing
 data while adding newly requested families.
+
+Database admission owns the column-family namespace (`INV-STORAGE-30`). Table
+and directly-exposed store names MUST be unique across both kinds, and neither
+kind may claim Groove's `__groove_large_values` metadata family. The logical
+`indices` family is reserved only while at least one durable index is active;
+without an index, an application table or direct store named `indices` remains
+valid. `StorageLayout::JazzClassV1` additionally reserves the exact physical
+families `__groove_class_history`, `__groove_class_register`,
+`__groove_class_global_current`, `__groove_class_ahead_current`,
+`__groove_class_changes`, `__groove_class_indices`, and
+`__groove_class_meta`; the identity layout does not reserve those names, and
+there is no general `jazz_*` reservation.
+
+Initial validation MUST finish before IVM runtime construction and before
+layout-marker or backing-storage I/O. Dynamic table admission applies the same
+portable and selected-layout checks; dynamic index admission rejects when an
+application table or direct store already owns `indices`. An already-live table
+still reports `Error::TableAlreadyExists`. Namespace failures report
+`Error::ColumnFamilyNameConflict { name, existing_owner, requested_owner }`.
+`DatabaseSchema::column_families()` remains an infallible family derivation, not
+the admission seam.
 
 An ordered cursor is **not** a snapshot-isolation primitive. A backend may
 observe committed changes between batches; in particular, `MemoryStorage`

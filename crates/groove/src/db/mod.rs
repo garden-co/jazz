@@ -620,6 +620,14 @@ pub use storage_helpers::{
 pub enum Error {
     #[error("database instance is poisoned after a failed atomic commit")]
     DatabasePoisoned,
+    #[error(
+        "column family name conflict for {name}: existing owner {existing_owner}, requested owner {requested_owner}"
+    )]
+    ColumnFamilyNameConflict {
+        name: String,
+        existing_owner: String,
+        requested_owner: String,
+    },
     #[error("publication does not belong to this database: {0:?}")]
     PublicationNotFound(PublicationId),
     #[error("subscription ended")]
