@@ -91,7 +91,7 @@ function baseBuilderExpression(columnType: WasmColumnType, references?: string):
     case "Array":
       return `s.array(${baseBuilderExpression(columnType.element, references)})`;
     case "BigInt":
-      throw new Error("Migration stub generation does not yet support BIGINT columns.");
+      return "s.bigint()";
     case "Row":
       throw new Error("Migration stub generation does not yet support row-valued columns.");
   }
@@ -168,7 +168,7 @@ function renderAddOperationExpression(column: ColumnDescriptor, defaultExpressio
     case "Array":
       return `s.add.array({ of: ${renderArrayElementExpression(column.column_type.element, column.references)}, default: ${defaultExpression} })`;
     case "BigInt":
-      throw new Error("Migration stub generation does not yet support BIGINT columns.");
+      return `s.add.bigint({ default: ${defaultExpression} })`;
     case "Row":
       throw new Error("Migration stub generation does not yet support row-valued columns.");
   }
@@ -209,7 +209,7 @@ function renderDropOperationExpression(
     case "Array":
       return `s.drop.array({ of: ${renderArrayElementExpression(column.column_type.element, column.references)}, backwardsDefault: ${defaultExpression} })`;
     case "BigInt":
-      throw new Error("Migration stub generation does not yet support BIGINT columns.");
+      return `s.drop.bigint({ backwardsDefault: ${defaultExpression} })`;
     case "Row":
       throw new Error("Migration stub generation does not yet support row-valued columns.");
   }

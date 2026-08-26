@@ -138,7 +138,7 @@ to increment by one.
 
 #### Counters
 
-Use `.merge("counter")` on the column to keep deltas additive instead:
+Use `.merge("counter")` on an integer or bigint column to keep deltas additive instead:
 
 ```ts title="schema.ts"
 import { schema as s } from "jazz-tools";
@@ -147,6 +147,7 @@ const schema = {
   votes: s.table({
     proposal: s.string(),
     voteCount: s.int().merge("counter"),
+    totalVotingPower: s.bigint().merge("counter"),
   }),
 };
 ```
@@ -163,8 +164,9 @@ Counter merges are useful for things like:
   wrote last.
 
 <Callout type="warn">
-  `merge("counter")` is only valid on **non-nullable integer columns**. Calling it on a string, on a
-  nullable integer (`s.int().optional()`), or on any other type throws at schema construction time.
+  `merge("counter")` is only valid on **non-nullable integer or bigint columns**. Calling it on a
+  string, a nullable integer (`s.int().optional()`), a nullable bigint (`s.bigint().optional()`), or
+  any other type throws at schema construction time.
 </Callout>
 
 #### Grow-only sets

@@ -886,17 +886,16 @@ fn convert_merge_strategy(
     column: &ColumnDescriptor,
     strategy: ColumnMergeStrategy,
 ) -> Result<MergeStrategy, SchemaConversionError> {
+    column.validate_merge_strategy().map_err(|message| {
+        err(
+            format!("$.{}.{}", table.as_str(), column.name.as_str()),
+            message,
+        )
+    })?;
+
     match strategy {
         ColumnMergeStrategy::Counter => Ok(MergeStrategy::Counter),
-        ColumnMergeStrategy::GSet
-            if !column.nullable && matches!(column.column_type, ColumnType::Array { .. }) =>
-        {
-            Ok(MergeStrategy::GSet)
-        }
-        ColumnMergeStrategy::GSet => Err(err(
-            format!("$.{}.{}", table.as_str(), column.name.as_str()),
-            "GSet merge strategy requires a non-nullable ARRAY column",
-        )),
+        ColumnMergeStrategy::GSet => Ok(MergeStrategy::GSet),
     }
 }
 
@@ -2661,6 +2660,99 @@ mod tests {
     };
     use std::path::PathBuf;
     use uuid::Uuid;
+
+    fn schema_with_counter_column(column: ColumnDescriptor) -> Schema {
+        Schema::from([(
+            TableName::new("counters"),
+            TableSchema::new(RowDescriptor::new(vec![
+                column.merge_strategy(ColumnMergeStrategy::Counter),
+            ])),
+        )])
+    }
+
+    #[test]
+    fn converts_counter_merge_strategy_on_integer_columns() {
+        let schema =
+            schema_with_counter_column(ColumnDescriptor::new("integer_value", ColumnType::Integer));
+
+        let converted =
+            convert_public_schema(&schema).expect("integer counter column must convert");
+
+        assert_eq!(
+            converted.tables[0].merge_strategy("integer_value"),
+            MergeStrategy::Counter
+        );
+    }
+
+    #[test]
+    fn converts_counter_merge_strategy_on_bigint_columns() {
+        let schema =
+            schema_with_counter_column(ColumnDescriptor::new("bigint_value", ColumnType::BigInt));
+
+        let converted = convert_public_schema(&schema).expect("bigint counter column must convert");
+
+        assert_eq!(
+            converted.tables[0].merge_strategy("bigint_value"),
+            MergeStrategy::Counter
+        );
+    }
+
+    #[test]
+    fn rejects_counter_merge_strategy_on_nullable_integer_columns_with_exact_path() {
+        let cases = [
+            (
+                ColumnDescriptor::new("nullable_integer", ColumnType::Integer).nullable(),
+                "$.counters.nullable_integer: Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns",
+            ),
+            (
+                ColumnDescriptor::new("nullable_bigint", ColumnType::BigInt).nullable(),
+                "$.counters.nullable_bigint: Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns",
+            ),
+        ];
+
+        for (column, expected_error) in cases {
+            let schema = schema_with_counter_column(column);
+            let error = convert_public_schema(&schema)
+                .expect_err("nullable counter column must fail conversion");
+
+            assert_eq!(error.to_string(), expected_error);
+        }
+    }
+
+    #[test]
+    fn rejects_counter_merge_strategy_on_non_integer_columns_with_exact_path() {
+        let cases = [
+            (
+                ColumnDescriptor::new("timestamp_value", ColumnType::Timestamp),
+                "$.counters.timestamp_value: Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns",
+            ),
+            (
+                ColumnDescriptor::new("text_value", ColumnType::Text),
+                "$.counters.text_value: Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns",
+            ),
+            (
+                ColumnDescriptor::new("double_value", ColumnType::Double),
+                "$.counters.double_value: Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns",
+            ),
+            (
+                ColumnDescriptor::new(
+                    "array_value",
+                    ColumnType::Array {
+                        element: Box::new(ColumnType::Text),
+                    },
+                ),
+                "$.counters.array_value: Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns",
+            ),
+        ];
+
+        for (column, expected_error) in cases {
+            let schema = schema_with_counter_column(column);
+            let error = convert_public_schema(&schema)
+                .expect_err("non-integer counter column must fail conversion");
+
+            assert_eq!(error.to_string(), expected_error);
+        }
+    }
 
     #[test]
     fn compiles_branch_columns_with_the_same_name_and_type_across_tables() {
