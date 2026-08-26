@@ -985,6 +985,7 @@ where
     pub(super) async fn ingest_reset_view_bundle_refs_in_bulk(
         &mut self,
         bundles: &[VersionBundleRef<'_>],
+        preflight_persisted_tx_ids: Option<&BTreeSet<TxId>>,
     ) -> Result<BTreeSet<TxId>, Error> {
         let mut bundles_by_tx = BTreeMap::<TxId, Vec<VersionBundleRef<'_>>>::new();
         for bundle in bundles {
@@ -1048,7 +1049,10 @@ where
             {
                 continue;
             }
-            if self.query_transaction(tx_id).await?.is_some() {
+            if preflight_persisted_tx_ids.is_some_and(|known| known.contains(&tx_id))
+                || preflight_persisted_tx_ids.is_none()
+                    && self.query_transaction(tx_id).await?.is_some()
+            {
                 continue;
             }
             let mut missing_refs = false;

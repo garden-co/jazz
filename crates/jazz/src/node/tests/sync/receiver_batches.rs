@@ -320,9 +320,13 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
             .iter()
             .any(|version| version.table() == "todos" && version.row_uuid() == row(2))
     );
-    assert_eq!(reader.sync_metrics().receiver_bulk_ingest_commits, 0);
-    assert_eq!(reader.sync_metrics().receiver_bulk_bundle_ingests, 0);
-    assert_eq!(reader.sync_metrics().receiver_per_bundle_ingests, 2);
+    // The coalesced view-scoped transaction now shares the receiver's atomic
+    // batch commit instead of being written ahead of the rest of the update.
+    assert_eq!(reader.sync_metrics().receiver_bulk_ingest_commits, 1);
+    assert_eq!(reader.sync_metrics().receiver_bulk_bundle_ingests, 1);
+    // Scope-aware preflight proves and coalesces both view fragments before the
+    // receiver mutates storage, so no sequential per-bundle ingestion remains.
+    assert_eq!(reader.sync_metrics().receiver_per_bundle_ingests, 0);
 }
 
 // This stays internal because it directly exercises the protocol receiver's
@@ -627,6 +631,313 @@ fn reset_accepts_identical_annotated_duplicates() {
                 .authored_columns(),
             Some(&BTreeSet::from(["title".to_owned()]))
         );
+    }
+}
+
+// These are intentionally receiver-level tests: complete versus view-scoped
+// bundle cardinality is protocol state that is not observable through the
+// public client API, while accepting it incorrectly can corrupt later replay.
+#[test]
+fn reset_scope_merge_is_order_independent_and_complete_dominates() {
+    for (path, complete_first) in [ResetConflictPath::Batch, ResetConflictPath::Single]
+        .into_iter()
+        .flat_map(|path| [false, true].into_iter().map(move |order| (path, order)))
+    {
+        let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+        let subscription = reader.whole_table_subscription_key("todos").unwrap();
+        let tx_id = TxId::new(TxTime::from(10), node(1));
+        let complete_tx = reset_scope_tx(tx_id, 2);
+        let mut view_tx = complete_tx.clone();
+        view_tx.n_total_writes = 1;
+        let first = version_record(row(1), Vec::new(), title_cells("one"), None);
+        let second = version_record(row(2), Vec::new(), title_cells("two"), None);
+        let complete = reset_scope_bundle(
+            complete_tx,
+            crate::protocol::VersionBundleScope::CompleteTransaction,
+            vec![first.clone(), second],
+        );
+        let view = reset_scope_bundle(
+            view_tx,
+            crate::protocol::VersionBundleScope::ViewScoped,
+            vec![first],
+        );
+        let bundles = if complete_first {
+            vec![complete, view]
+        } else {
+            vec![view, complete]
+        };
+        let update = reset_scope_update(subscription, tx_id, bundles, true);
+        match path {
+            ResetConflictPath::Batch => {
+                reader.apply_view_updates_in_batch(vec![update]).unwrap()
+            }
+            ResetConflictPath::Single => reader.apply_view_update(update).unwrap(),
+        }
+        let stored = reader.query_transaction(tx_id).unwrap().unwrap();
+        assert!(!stored.view_scoped_cardinality);
+        assert_eq!(stored.tx.n_total_writes, 2);
+        assert_eq!(reader.query_versions_for_tx(tx_id).unwrap().len(), 2);
+    }
+}
+
+#[test]
+fn reset_view_scoped_fragments_union_and_recompute_visible_cardinality() {
+    for path in [ResetConflictPath::Batch, ResetConflictPath::Single] {
+        let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+        let subscription = reader.whole_table_subscription_key("todos").unwrap();
+        let tx_id = TxId::new(TxTime::from(10), node(1));
+        let view_tx = reset_scope_tx(tx_id, 1);
+        let bundles = [
+            version_record(row(1), Vec::new(), title_cells("one"), None),
+            version_record(row(2), Vec::new(), title_cells("two"), None),
+        ]
+        .into_iter()
+        .map(|version| {
+            reset_scope_bundle(
+                view_tx.clone(),
+                crate::protocol::VersionBundleScope::ViewScoped,
+                vec![version],
+            )
+        })
+        .collect();
+        let update = reset_scope_update(subscription, tx_id, bundles, true);
+        match path {
+            ResetConflictPath::Batch => {
+                reader.apply_view_updates_in_batch(vec![update]).unwrap()
+            }
+            ResetConflictPath::Single => reader.apply_view_update(update).unwrap(),
+        }
+        let stored = reader.query_transaction(tx_id).unwrap().unwrap();
+        assert!(stored.view_scoped_cardinality);
+        assert_eq!(stored.tx.n_total_writes, 2);
+        assert_eq!(reader.query_versions_for_tx(tx_id).unwrap().len(), 2);
+    }
+}
+
+#[test]
+fn reset_rejects_divergent_complete_sets_and_bad_counts_atomically() {
+    for bad_count in [false, true] {
+        let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+        let subscription = reader.whole_table_subscription_key("todos").unwrap();
+        let tx_id = TxId::new(TxTime::from(10), node(1));
+        let tx = reset_scope_tx(tx_id, 2);
+        let first = version_record(row(1), Vec::new(), title_cells("one"), None);
+        let bundles = if bad_count {
+            vec![reset_scope_bundle(
+                tx,
+                crate::protocol::VersionBundleScope::CompleteTransaction,
+                vec![first],
+            )]
+        } else {
+            vec![
+                reset_scope_bundle(
+                    tx.clone(),
+                    crate::protocol::VersionBundleScope::CompleteTransaction,
+                    vec![
+                        first.clone(),
+                        version_record(row(2), Vec::new(), title_cells("two"), None),
+                    ],
+                ),
+                reset_scope_bundle(
+                    tx,
+                    crate::protocol::VersionBundleScope::CompleteTransaction,
+                    vec![
+                        first,
+                        version_record(row(3), Vec::new(), title_cells("three"), None),
+                    ],
+                ),
+            ]
+        };
+        let binding_view_key = reader
+            .binding_view_key_for_subscription(subscription)
+            .unwrap();
+        let state_before = reader.query.initial_hydration_binding_views.clone();
+        let result = reader
+            .apply_view_updates_in_batch(vec![reset_scope_update(
+            subscription,
+            tx_id,
+            bundles,
+            true,
+        )])
+            .resolve();
+        assert!(matches!(
+            result,
+            Err(Error::ConflictingCommitUnit(conflicting)) if conflicting == tx_id
+        ));
+        assert!(reader.query_transaction(tx_id).unwrap().is_none());
+        assert!(reader.query_versions_for_tx(tx_id).unwrap().is_empty());
+        assert_eq!(reader.query.initial_hydration_binding_views, state_before);
+        assert!(!reader
+            .query
+            .initial_hydration_binding_views
+            .contains(&binding_view_key));
+    }
+}
+
+#[test]
+fn reset_rejects_view_payload_outside_complete_set_in_both_orders() {
+    for (path, complete_first) in [ResetConflictPath::Batch, ResetConflictPath::Single]
+        .into_iter()
+        .flat_map(|path| [false, true].into_iter().map(move |order| (path, order)))
+    {
+        let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+        let subscription = reader.whole_table_subscription_key("todos").unwrap();
+        let tx_id = TxId::new(TxTime::from(10), node(1));
+        let complete = reset_scope_bundle(
+            reset_scope_tx(tx_id, 2),
+            crate::protocol::VersionBundleScope::CompleteTransaction,
+            vec![
+                version_record(row(1), Vec::new(), title_cells("one"), None),
+                version_record(row(2), Vec::new(), title_cells("two"), None),
+            ],
+        );
+        let view = reset_scope_bundle(
+            reset_scope_tx(tx_id, 1),
+            crate::protocol::VersionBundleScope::ViewScoped,
+            vec![version_record(
+                row(3),
+                Vec::new(),
+                title_cells("outside"),
+                None,
+            )],
+        );
+        let bundles = if complete_first {
+            vec![complete, view]
+        } else {
+            vec![view, complete]
+        };
+        let update = reset_scope_update(subscription, tx_id, bundles, true);
+        let result = match path {
+            ResetConflictPath::Batch => {
+                reader.apply_view_updates_in_batch(vec![update]).resolve()
+            }
+            ResetConflictPath::Single => reader.apply_view_update(update).resolve(),
+        };
+        assert!(matches!(
+            result,
+            Err(Error::ConflictingCommitUnit(conflicting)) if conflicting == tx_id
+        ));
+        assert!(reader.query_transaction(tx_id).unwrap().is_none());
+        assert!(reader.query_versions_for_tx(tx_id).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn reopened_scope_conflicts_preserve_persisted_transaction() {
+    for stored_complete in [false, true] {
+        let (reader_dir, mut reader) = open_node_with_uuid(node(3));
+        let subscription = reader.whole_table_subscription_key("todos").unwrap();
+        let tx_id = TxId::new(TxTime::from(10), node(1));
+        let first = version_record(row(1), Vec::new(), title_cells("one"), None);
+        let stored_scope = if stored_complete {
+            crate::protocol::VersionBundleScope::CompleteTransaction
+        } else {
+            crate::protocol::VersionBundleScope::ViewScoped
+        };
+        reader
+            .apply_view_update(reset_scope_update(
+                subscription,
+                tx_id,
+                vec![reset_scope_bundle(
+                    reset_scope_tx(tx_id, 1),
+                    stored_scope,
+                    vec![first.clone()],
+                )],
+                true,
+            ))
+            .unwrap();
+        drop(reader);
+
+        let mut reader = reopen_node_at(&reader_dir, node(3), schema());
+        let conflicting_scope = if stored_complete {
+            crate::protocol::VersionBundleScope::ViewScoped
+        } else {
+            crate::protocol::VersionBundleScope::CompleteTransaction
+        };
+        let result = reader
+            .apply_view_update(reset_scope_update(
+                subscription,
+                tx_id,
+                vec![reset_scope_bundle(
+                    reset_scope_tx(tx_id, 1),
+                    conflicting_scope,
+                    vec![version_record(
+                        row(2),
+                        Vec::new(),
+                        title_cells("conflicting"),
+                        None,
+                    )],
+                )],
+                true,
+            ))
+            .resolve();
+        assert!(matches!(
+            result,
+            Err(Error::ConflictingCommitUnit(conflicting)) if conflicting == tx_id
+        ));
+        let stored = reader.query_transaction(tx_id).unwrap().unwrap();
+        assert_eq!(stored.view_scoped_cardinality, !stored_complete);
+        let versions = reader.query_versions_for_tx(tx_id).unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(reader.version_record_from_row(&versions[0]).unwrap(), first);
+    }
+}
+
+fn reset_scope_tx(tx_id: TxId, n_total_writes: u32) -> Transaction {
+    Transaction {
+        tx_id,
+        kind: TxKind::Mergeable,
+        n_total_writes,
+        made_by: AuthorSubject::SYSTEM,
+        permission_subject: None,
+        base_snapshot: None,
+        row_read_set: None,
+        absent_read_set: None,
+        predicate_read_set: None,
+        user_metadata_json: None,
+        contribution_merge: None,
+    }
+}
+
+fn reset_scope_bundle(
+    tx: Transaction,
+    scope: crate::protocol::VersionBundleScope,
+    versions: Vec<VersionRecord>,
+) -> VersionBundle {
+    VersionBundle {
+        scope,
+        tx,
+        versions,
+        fate: Fate::Accepted,
+        global_time: Some(GlobalTime(1)),
+        durability: DurabilityTier::Global,
+    }
+}
+
+fn reset_scope_update(
+    subscription: SubscriptionKey,
+    tx_id: TxId,
+    bundles: Vec<VersionBundle>,
+    with_removal: bool,
+) -> ViewUpdateParts {
+    ViewUpdateParts {
+        subscription,
+        settled_through: GlobalTime(1),
+        defer_settlement: true,
+        reset_result_set: true,
+        version_carriers: crate::protocol::build_version_carriers_from_singletons(bundles).unwrap(),
+        version_bundles: Vec::new(),
+        peer_complete_tx_payload_refs: Vec::new(),
+        authorization_progress: None,
+        opening_pending: false,
+        result_member_adds: Vec::new(),
+        result_member_removes: with_removal
+            .then(|| ResultMemberEntry::row(("todos".to_owned().into(), row(9), tx_id)))
+            .into_iter()
+            .collect(),
+        terminal_operations: Vec::new(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
     }
 }
 
