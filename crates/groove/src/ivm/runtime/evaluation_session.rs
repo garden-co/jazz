@@ -1,6 +1,6 @@
 //! Owned work and request state for interruptible evaluation.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -40,6 +40,12 @@ pub(super) enum StorageRequestKey {
         index: String,
         prefix: Vec<u8>,
         max_items: usize,
+    },
+    IndexedRowsIntersection {
+        table: String,
+        index: String,
+        prefix: Vec<u8>,
+        intersections: Vec<(String, Vec<u8>)>,
     },
     IndexedRowsRange {
         table: String,
@@ -334,6 +340,66 @@ impl<'a> EvaluationRequests<'a> {
                         .map_err(Into::into)
                 })
             }
+            EvaluationRequestKey::Storage(StorageRequestKey::IndexedRowsIntersection {
+                table,
+                index,
+                prefix,
+                intersections,
+            }) => {
+                let table_schema = schema
+                    .table(table)
+                    .expect("compiled intersected index source table exists")
+                    .clone();
+                let primary_index_schema = table_schema
+                    .indices
+                    .iter()
+                    .find(|candidate| candidate.name == *index)
+                    .expect("compiled intersected index source exists")
+                    .clone();
+                let index = index.clone();
+                let prefix = prefix.clone();
+                let intersections = intersections.clone();
+                let storage = storage.clone();
+                Box::pin(async move {
+                    let mut entries = storage
+                        .scan(ScanRequest::prefix("indices".to_owned(), prefix))
+                        .await?;
+                    let primary_keys = indexed_primary_keys(
+                        &table_schema,
+                        &index,
+                        &primary_index_schema,
+                        &entries,
+                    )?;
+                    let mut retained = primary_keys.iter().cloned().collect::<HashSet<_>>();
+                    for (other_index, other_prefix) in intersections {
+                        let other_schema = table_schema
+                            .indices
+                            .iter()
+                            .find(|candidate| candidate.name == other_index)
+                            .expect("compiled intersected index exists");
+                        let other_entries = storage
+                            .scan(ScanRequest::prefix("indices".to_owned(), other_prefix))
+                            .await?;
+                        let other_keys = indexed_primary_keys(
+                            &table_schema,
+                            &other_index,
+                            other_schema,
+                            &other_entries,
+                        )?
+                        .into_iter()
+                        .collect::<HashSet<_>>();
+                        retained.retain(|key| other_keys.contains(key));
+                    }
+                    entries = entries
+                        .into_iter()
+                        .zip(primary_keys)
+                        .filter_map(|(entry, key)| retained.contains(&key).then_some(entry))
+                        .collect();
+                    load_indexed_rows(storage, table_schema, primary_index_schema, index, entries)
+                        .await
+                        .map(EvaluationRequestOutput::Storage)
+                })
+            }
             EvaluationRequestKey::Storage(StorageRequestKey::IndexedRowsRange {
                 table,
                 index,
@@ -456,23 +522,7 @@ async fn load_indexed_rows(
     index_name: String,
     entries: Vec<KeyValue>,
 ) -> Result<StorageRequestOutput, super::IvmRuntimeError> {
-    let index_descriptor = crate::db::index_record_descriptor();
-    let mut primary_keys = Vec::with_capacity(entries.len());
-    for (storage_key, persisted_record) in entries {
-        let index_record = index_descriptor.bind(&persisted_record);
-        let stored_value = index_record
-            .get("value")
-            .map_err(super::IvmRuntimeError::RecordEncoding)?;
-        let primary_key = crate::db::persisted_index_primary_key(
-            &table,
-            &index_name,
-            &index_schema,
-            &storage_key,
-            &stored_value,
-        )
-        .map_err(|_| super::IvmRuntimeError::InvalidPersistedIndex(index_name.clone()))?;
-        primary_keys.push(primary_key);
-    }
+    let primary_keys = indexed_primary_keys(&table, &index_name, &index_schema, &entries)?;
     let mut reads = primary_keys
         .into_iter()
         .map(|primary_key| {
@@ -514,6 +564,31 @@ async fn load_indexed_rows(
     Ok(StorageRequestOutput::Rows(rows))
 }
 
+fn indexed_primary_keys(
+    table: &crate::schema::TableSchema,
+    index_name: &str,
+    index_schema: &crate::schema::IndexSchema,
+    entries: &[KeyValue],
+) -> Result<Vec<Vec<u8>>, super::IvmRuntimeError> {
+    let index_descriptor = crate::db::index_record_descriptor();
+    let mut primary_keys = Vec::with_capacity(entries.len());
+    for (storage_key, persisted_record) in entries {
+        let index_record = index_descriptor.bind(persisted_record);
+        let stored_value = index_record
+            .get("value")
+            .map_err(super::IvmRuntimeError::RecordEncoding)?;
+        let primary_key = crate::db::persisted_index_primary_key(
+            table,
+            index_name,
+            index_schema,
+            storage_key,
+            &stored_value,
+        )
+        .map_err(|_| super::IvmRuntimeError::InvalidPersistedIndex(index_name.to_owned()))?;
+        primary_keys.push(primary_key);
+    }
+    Ok(primary_keys)
+}
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;

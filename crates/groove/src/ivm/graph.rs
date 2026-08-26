@@ -154,6 +154,10 @@ pub enum GraphBuilder {
         table: String,
         index: String,
         scan: Option<StaticScanSpec>,
+        /// Additional index prefixes whose primary keys must also match.
+        /// Row projection sources intersect these encoded index entries before
+        /// fetching table records, so surviving rows are decoded only once.
+        intersections: Vec<(String, StaticScanSpec)>,
         /// When present, fetch indexed table rows and project their variants
         /// instead of exposing the index's encoded key/value records.
         row_projection: Option<String>,
@@ -453,6 +457,7 @@ impl GraphBuilder {
             table: table.into(),
             index: index.into(),
             scan: None,
+            intersections: Vec::new(),
             row_projection: None,
         }
     }
@@ -466,6 +471,7 @@ impl GraphBuilder {
             table: table.into(),
             index: index.into(),
             scan: Some(scan),
+            intersections: Vec::new(),
             row_projection: None,
         }
     }
@@ -482,6 +488,25 @@ impl GraphBuilder {
             table: table.into(),
             index: index.into(),
             scan: Some(scan),
+            intersections: Vec::new(),
+            row_projection: Some(projection_target.into()),
+        }
+    }
+
+    /// Read projected table rows selected by the intersection of durable
+    /// secondary-index scans.
+    pub fn variant_index_intersection_scan(
+        table: impl Into<String>,
+        index: impl Into<String>,
+        scan: StaticScanSpec,
+        intersections: impl IntoIterator<Item = (String, StaticScanSpec)>,
+        projection_target: impl Into<String>,
+    ) -> Self {
+        Self::Index {
+            table: table.into(),
+            index: index.into(),
+            scan: Some(scan),
+            intersections: intersections.into_iter().collect(),
             row_projection: Some(projection_target.into()),
         }
     }

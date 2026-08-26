@@ -10,6 +10,16 @@ fn access_path_schema() -> JazzSchema {
     ))
 }
 
+fn multi_index_access_path_schema() -> JazzSchema {
+    build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("docs")
+            .column("owner", PublicColumnType::Uuid)
+            .column("status", PublicColumnType::Text)
+            .column("body", PublicColumnType::Text)
+            .index_only(["owner", "status"]),
+    ))
+}
+
 fn policy_indexed_access_path_schema(policy: PublicPolicyExpr) -> JazzSchema {
     build_public_test_schema(PublicSchemaBuilder::new().table(
         PublicTableSchemaBuilder::new("docs")
@@ -856,7 +866,7 @@ fn physical_index_backfills_existing_rows_and_read_cost_ignores_schema_variant_c
 
 #[test]
 fn one_shot_filtered_read_keeps_residual_filters_after_pushdown() {
-    let schema = access_path_schema();
+    let schema = multi_index_access_path_schema();
     let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let (first, _second, owner) = seed_access_path_docs(&mut writer, &mut core);
@@ -870,9 +880,9 @@ fn one_shot_filtered_read_keeps_residual_filters_after_pushdown() {
 
     assert_eq!(selected, local);
     assert_eq!(selected, vec![first]);
-    assert_eq!(selected_metrics.source_index_probes, 1);
+    assert_eq!(selected_metrics.source_index_probes, 2);
     assert_eq!(selected_metrics.source_full_scans, 0);
-    assert_eq!(local_metrics.source_index_probes, 1);
+    assert_eq!(local_metrics.source_index_probes, 2);
     assert_eq!(local_metrics.source_full_scans, 0);
 }
 
