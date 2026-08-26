@@ -11,8 +11,10 @@ use jazz::ids::{NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::peer::PeerState;
 use jazz::protocol::{
-    KnownStateDeclaration, RowVersionRef, SubscriptionKey, SyncMessage, expand_version_carriers,
+    KnownStateCompleteness, KnownStateDeclaration, RegisterShapeOptions, RowVersionRef,
+    SubscriptionKey, SyncMessage, expand_version_carriers,
 };
+use jazz::query::Query;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::{Fate, TxId};
@@ -39,6 +41,7 @@ fn main() {
     let seed_us = seed_started.elapsed().as_micros();
     let subscription = fixture.subscription_key();
     let mut expected_digest = None;
+    let mut latest_settled_through = None;
 
     for coverage_percent in coverage_percentages {
         let known_count = rows * coverage_percent / 100;
@@ -67,6 +70,7 @@ fn main() {
         let metrics = fixture.core.storage_read_metrics();
 
         let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
+            settled_through,
             version_carriers,
             version_bundles,
             peer_payload_inventory,
@@ -79,6 +83,7 @@ fn main() {
         else {
             panic!("expected one view update");
         };
+        latest_settled_through = Some(*settled_through);
         let mut expanded_bundles = version_bundles.clone();
         expanded_bundles.extend(
             expand_version_carriers(version_carriers).expect("expand benchmark version carriers"),
@@ -113,6 +118,7 @@ fn main() {
 
         let mut fields = phase_fields("known_state_rehydrate", serve_us);
         fields.insert("rows".to_owned(), json!(rows));
+        fields.insert("declaration_kind".to_owned(), json!("exact_version_set"));
         fields.insert("known_rows".to_owned(), json!(known_count));
         fields.insert("known_percent".to_owned(), json!(coverage_percent));
         fields.insert("seed_us".to_owned(), json!(seed_us));
@@ -137,6 +143,82 @@ fn main() {
         fields.insert("storage_ranges".to_owned(), json!(metrics.total.ranges));
         emit_json_line("known_state_scaling", fields);
     }
+
+    let position = latest_settled_through.expect("exact rehydrate reports settlement position");
+    let declaration = Some(KnownStateDeclaration::Fast {
+        completeness: KnownStateCompleteness::FastCurrentMembership,
+        position,
+    });
+    let declaration_bytes = postcard::to_allocvec(&declaration)
+        .expect("encode fast known-state declaration")
+        .len();
+    let mut peer = PeerState::relay();
+    peer.declare_known_state(subscription, declaration);
+    let shape = Query::from(TABLE)
+        .validate(&schema())
+        .expect("validate whole-table resume query");
+    let binding = shape
+        .bind(BTreeMap::new())
+        .expect("bind whole-table resume query");
+    fixture.core.reset_storage_read_metrics();
+    let serve_started = Instant::now();
+    let update = peer
+        .rehydrate_query_for_subscription_with_opts(
+            &mut fixture.core,
+            subscription,
+            &shape,
+            &binding,
+            RegisterShapeOptions::default(),
+        )
+        .expect("serve current rows under fast known-state declaration")
+        .expect("initial fast rehydrate emits an update");
+    let serve_us = serve_started.elapsed().as_micros();
+    let encoded_bytes = encode_sync_message(&update)
+        .expect("encode fast known-state view update")
+        .len();
+    let metrics = fixture.core.storage_read_metrics();
+    let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
+        settled_through: fast_settled_through,
+        reset_result_set,
+        version_carriers,
+        version_bundles,
+        result_member_adds,
+        result_member_removes,
+        ..
+    }) = &update
+    else {
+        panic!("expected one fast known-state view update");
+    };
+    assert!(version_carriers.is_empty());
+    assert!(version_bundles.is_empty());
+    assert!(
+        result_member_adds.is_empty(),
+        "fast cursor at {position:?}, settled through {fast_settled_through:?}, reset={reset_result_set} retained {} members; first={:?}",
+        result_member_adds.len(),
+        result_member_adds.first()
+    );
+    assert!(result_member_removes.is_empty());
+    let mut fields = phase_fields("fast_known_state_rehydrate", serve_us);
+    fields.insert("rows".to_owned(), json!(rows));
+    fields.insert(
+        "declaration_kind".to_owned(),
+        json!("fast_current_membership"),
+    );
+    fields.insert("known_rows".to_owned(), json!(rows));
+    fields.insert("known_percent".to_owned(), json!(100));
+    fields.insert("seed_us".to_owned(), json!(seed_us));
+    fields.insert("encoded_bytes".to_owned(), json!(encoded_bytes));
+    fields.insert("declaration_bytes".to_owned(), json!(declaration_bytes));
+    fields.insert(
+        "variable_exchange_bytes".to_owned(),
+        json!(encoded_bytes + declaration_bytes),
+    );
+    fields.insert("version_bundles".to_owned(), json!(0));
+    fields.insert("result_adds".to_owned(), json!(0));
+    fields.insert("result_removes".to_owned(), json!(0));
+    fields.insert("storage_reads".to_owned(), json!(metrics.total.reads));
+    fields.insert("storage_ranges".to_owned(), json!(metrics.total.ranges));
+    emit_json_line("known_state_scaling", fields);
 }
 
 struct Fixture {
