@@ -103,7 +103,13 @@ describe("RecordPlayer scenario receipt", () => {
     const runtimeQuery = JSON.parse(translateQuery(capturedQuery!._build(), app.wasmSchema));
     expect(runtimeQuery.table).toBe("playlist_entries");
     expect(runtimeQuery.conditions).toEqual([
-      { column: "playlist_id", op: "eq", value: "playlist-1" },
+      {
+        Cmp: {
+          left: { column: "playlist_id" },
+          op: "Eq",
+          right: { Literal: { type: "Uuid", value: "playlist-1" } },
+        },
+      },
     ]);
     expect(runtimeQuery.order_by).toEqual([{ column: "position", direction: "Asc" }]);
     expect(runtimeQuery.offset).toBe(PLAYLIST_WINDOW_OFFSET);

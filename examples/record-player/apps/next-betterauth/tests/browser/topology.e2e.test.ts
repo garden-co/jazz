@@ -16,7 +16,7 @@ import {
   getJazzServerInfo,
   getJazzServerJwtForUser,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server.js";
-import { betterAuthSchema } from "../../auth-schema.js";
+import { betterAuthPermissions, betterAuthSchema } from "../../auth-schema.js";
 import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
 import {
@@ -39,13 +39,13 @@ const acknowledgementPermissions = s.definePermissions(acknowledgementApp, ({ po
 
 // Keep this intentionally separate from RecordPlayer's relational policies:
 // it is the smallest external-JWT receipt for a row routed to a recipient by
-// an application-owned scalar subject rather than by `$createdBy`.
+// an application-owned canonical author rather than by `$createdBy`.
 const recipientApp = s.defineApp({
   invitations: s.table({ subject: s.string(), label: s.string() }),
 });
 const recipientPermissions = s.definePermissions(recipientApp, ({ policy, session, anyOf }) => {
   policy.invitations.allowRead.where(
-    anyOf([{ subject: session.user_id }, { label: "unmatched control branch" }]),
+    anyOf([{ subject: session.author }, { label: "unmatched control branch" }]),
   );
   policy.invitations.allowInsert.always();
 });
@@ -84,7 +84,9 @@ const relationalRecipientApp = s.defineApp({
     position_ms: s.int(),
   }),
 });
-const relationalRecipientPermissions = s.definePermissions(
+const relationalRecipientPermissions = {
+  ...betterAuthPermissions,
+  ...s.definePermissions(
   relationalRecipientApp,
   ({ policy, session, anyOf, allowedTo }) => {
     policy.albums.allowRead.where({});
@@ -96,7 +98,7 @@ const relationalRecipientPermissions = s.definePermissions(
         { $createdBy: session.author },
         policy.invitations.exists.where({
           playlist_id: playlistId,
-          subject: session.user_id,
+          subject: session.author,
           role: "editor",
           status: "accepted",
         }),
@@ -106,7 +108,7 @@ const relationalRecipientPermissions = s.definePermissions(
         { $createdBy: session.author },
         policy.invitations.exists.where({
           playlist_id: playlistId,
-          subject: session.user_id,
+          subject: session.author,
           status: "accepted",
         }),
       ]);
@@ -119,7 +121,7 @@ const relationalRecipientPermissions = s.definePermissions(
     policy.playlist_entries.allowDelete.where((entry) => canEditPlaylist(entry.playlist_id));
     policy.invitations.allowRead.where((invite) =>
       anyOf([
-        { subject: session.user_id },
+        { subject: session.author },
         policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.author }),
       ]),
     );
@@ -130,7 +132,7 @@ const relationalRecipientPermissions = s.definePermissions(
       policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.author }),
     );
     policy.invitations.allowUpdate
-      .whereOld({ subject: session.user_id, status: "pending" })
+      .whereOld({ subject: session.author, status: "pending" })
       .whereNew((invite) =>
         policy.invitations.exists.where({
           id: invite.id,
@@ -140,14 +142,19 @@ const relationalRecipientPermissions = s.definePermissions(
           status: "pending",
         }),
       )
-      .whereNew({ subject: session.user_id, status: "accepted" });
+      .whereNew({ subject: session.author, status: "accepted" });
     policy.invitations.allowDelete.where((invite) =>
       policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.author }),
     );
     policy.playback_positions.allowRead.where({ $createdBy: session.author });
     policy.playback_positions.allowInsert.always();
+    policy.playback_positions.allowUpdate
+      .whereOld({ $createdBy: session.author })
+      .whereNew({ $createdBy: session.author });
+    policy.playback_positions.allowDelete.where({ $createdBy: session.author });
   },
-);
+  ),
+};
 
 describe("RecordPlayer authenticated playlist topology", () => {
   it("compiles the phased recipient control identically to RecordPlayer", () => {
@@ -169,6 +176,8 @@ describe("RecordPlayer authenticated playlist topology", () => {
       getJazzServerJwtForUser("record-player-recipient-editor", undefined, server.appId),
       getJazzServerJwtForUser("record-player-recipient-listener", undefined, server.appId),
     ]);
+    const recipientAuthor = canonicalAuthor(recipientToken);
+    const secondRecipientAuthor = canonicalAuthor(secondRecipientToken);
     const owner = await openClient(server, "recipient-owner", ownerToken);
     const recipient = await openClient(
       server,
@@ -185,7 +194,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
     const invitation = await owner
       .insert(app.invitations, {
         playlist_id: playlist.id,
-        subject: "record-player-recipient-editor",
+        subject: recipientAuthor,
         role: "editor",
         status: "pending",
       })
@@ -193,7 +202,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
     const secondInvitation = await owner
       .insert(app.invitations, {
         playlist_id: playlist.id,
-        subject: "record-player-recipient-listener",
+        subject: secondRecipientAuthor,
         role: "listener",
         status: "pending",
       })
@@ -201,7 +210,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
     await Promise.all([
       waitForQuery(
         recipient,
-        app.invitations.where({ subject: "record-player-recipient-editor" }),
+        app.invitations.where({ subject: recipientAuthor }),
         (rows) => rows[0]?.id === invitation.id && rows[0]?.status === "pending",
         "RecordPlayer recipient observes pending invitation",
         15_000,
@@ -209,7 +218,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
       ),
       waitForQuery(
         secondRecipient,
-        app.invitations.where({ subject: "record-player-recipient-listener" }),
+        app.invitations.where({ subject: secondRecipientAuthor }),
         (rows) => rows[0]?.id === secondInvitation.id && rows[0]?.status === "pending",
         "second RecordPlayer recipient observes pending invitation",
         15_000,
@@ -231,6 +240,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
       getJazzServerJwtForUser("record-player-acceptance-owner", undefined, server.appId),
       getJazzServerJwtForUser("record-player-acceptance-recipient", undefined, server.appId),
     ]);
+    const recipientAuthor = canonicalAuthor(recipientToken);
     const owner = await openClient(server, "acceptance-owner", ownerToken);
     const recipient = await openClient(server, "acceptance-recipient", recipientToken);
     const playlist = await owner
@@ -241,14 +251,14 @@ describe("RecordPlayer authenticated playlist topology", () => {
     const invitation = await owner
       .insert(app.invitations, {
         playlist_id: playlist.id,
-        subject: "record-player-acceptance-recipient",
+        subject: recipientAuthor,
         role: "editor",
         status: "pending",
       })
       .wait({ tier: "edge" });
     await waitForQuery(
       recipient,
-      app.invitations.where({ subject: "record-player-acceptance-recipient" }),
+      app.invitations.where({ subject: recipientAuthor }),
       (rows) => rows[0]?.id === invitation.id && rows[0]?.status === "pending",
       "recipient observes pending invitation before accepting it",
       15_000,
@@ -343,11 +353,12 @@ describe("RecordPlayer authenticated playlist topology", () => {
       getJazzServerJwtForUser("record-player-scalar-owner", undefined, server.appId),
       getJazzServerJwtForUser("record-player-scalar-recipient", undefined, server.appId),
     ]);
+    const recipientAuthor = canonicalAuthor(recipientToken);
     const owner = await openClient(server, "scalar-owner", ownerToken);
     const recipient = await openClient(server, "scalar-recipient", recipientToken);
     const invite = await owner
       .insert(recipientApp.invitations, {
-        subject: "record-player-scalar-recipient",
+        subject: recipientAuthor,
         label: "recipient routing receipt",
       })
       .wait({ tier: "edge" });
@@ -355,7 +366,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
     await expect(
       waitForQuery(
         recipient,
-        recipientApp.invitations.where({ subject: "record-player-scalar-recipient" }),
+        recipientApp.invitations.where({ subject: recipientAuthor }),
         (rows) => rows.length === 1 && rows[0]?.id === invite.id,
         "external-JWT scalar recipient receives invitation",
         15_000,
@@ -364,7 +375,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
     ).resolves.toEqual([
       {
         id: invite.id,
-        subject: "record-player-scalar-recipient",
+        subject: recipientAuthor,
         label: "recipient routing receipt",
       },
     ]);
@@ -384,6 +395,8 @@ describe("RecordPlayer authenticated playlist topology", () => {
       getJazzServerJwtForUser("record-player-relation-recipient", undefined, server.appId),
       getJazzServerJwtForUser("record-player-relation-listener", undefined, server.appId),
     ]);
+    const recipientAuthor = canonicalAuthor(recipientToken);
+    const secondRecipientAuthor = canonicalAuthor(secondRecipientToken);
     const owner = await openClient(server, "relation-owner", ownerToken);
     const recipient = await openClient(server, "relation-recipient", recipientToken);
     const secondRecipient = await openClient(server, "relation-listener", secondRecipientToken);
@@ -395,7 +408,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
     const invite = await owner
       .insert(relationalRecipientApp.invitations, {
         playlist_id: playlist.id,
-        subject: "record-player-relation-recipient",
+        subject: recipientAuthor,
         role: "listener",
         status: "pending",
       })
@@ -403,7 +416,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
     const secondInvite = await owner
       .insert(relationalRecipientApp.invitations, {
         playlist_id: playlist.id,
-        subject: "record-player-relation-listener",
+        subject: secondRecipientAuthor,
         role: "listener",
         status: "pending",
       })
@@ -427,7 +440,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   waitForQuery(
                     recipient,
                     relationalRecipientApp.invitations.where({
-                      subject: "record-player-relation-recipient",
+                      subject: recipientAuthor,
                     }),
                     (rows) => rows.length === 1 && rows[0]?.id === invite.id,
                     "external-JWT recipient receives scalar grant with correlated owner branch",
@@ -437,7 +450,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   waitForQuery(
                     secondRecipient,
                     relationalRecipientApp.invitations.where({
-                      subject: "record-player-relation-listener",
+                      subject: secondRecipientAuthor,
                     }),
                     (rows) => rows.length === 1 && rows[0]?.id === secondInvite.id,
                     "second external-JWT recipient receives scalar grant with correlated owner branch",
@@ -484,6 +497,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 getJazzServerJwtForUser("record-player-phase-recipient", undefined, server.appId),
                 getJazzServerJwtForUser("record-player-phase-listener", undefined, server.appId),
               ]);
+              const recipientAuthor = canonicalAuthor(recipientToken);
               const owner = await openClient(server, "phase-owner", ownerToken);
               const recipient = await openClient(
                 server,
@@ -518,7 +532,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
               const invite = await owner
                 .insert(relationalRecipientApp.invitations, {
                   playlist_id: playlist.id,
-                  subject: "record-player-phase-recipient",
+                  subject: recipientAuthor,
                   role: "listener",
                   status: "pending",
                 })
@@ -526,7 +540,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
               await waitForQuery(
                 recipient,
                 relationalRecipientApp.invitations.where({
-                  subject: "record-player-phase-recipient",
+                  subject: recipientAuthor,
                 }),
                 (rows) => rows.length === 1 && rows[0]?.id === invite.id,
                 "full-phase external-JWT recipient receives scalar grant",
@@ -551,6 +565,8 @@ describe("RecordPlayer authenticated playlist topology", () => {
     let editorInvite: { id: string };
     let listenerInvite: { id: string };
     let editorToken: string;
+    let editorAuthor: string;
+    let listenerAuthor: string;
     let editorDbName: string;
     let streamedTrackId: string;
     let streamedTrackAlbumId: string;
@@ -606,6 +622,8 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 getJazzServerJwtForUser("record-player-listener", undefined, server.appId),
               ]);
               editorToken = issuedEditorToken;
+              editorAuthor = canonicalAuthor(issuedEditorToken);
+              listenerAuthor = canonicalAuthor(listenerToken);
               editorDbName = uniqueDbName("record-player-editor-persistent");
               console.info("[record-player-topology] open owner edge");
               owner = await openClient(server, "owner", ownerToken);
@@ -667,7 +685,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
               console.info("[record-player-topology] create editor invitation");
               const editorInviteWrite = owner.insert(app.invitations, {
                 playlist_id: playlist.id,
-                subject: "record-player-editor",
+                subject: editorAuthor,
                 role: "editor",
                 status: "pending",
               });
@@ -679,7 +697,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
               console.info("[record-player-topology] create listener invitation");
               const listenerInviteWrite = owner.insert(app.invitations, {
                 playlist_id: playlist.id,
-                subject: "record-player-listener",
+                subject: listenerAuthor,
                 role: "listener",
                 status: "pending",
               });
@@ -696,7 +714,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
               await Promise.all([
                 waitForQuery(
                   editor,
-                  app.invitations.where({ subject: "record-player-editor" }),
+                  app.invitations.where({ subject: editorAuthor }),
                   (rows) => rows[0]?.id === editorInvite.id && rows[0]?.status === "pending",
                   "editor observes pending invitation",
                   15_000,
@@ -704,7 +722,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 ),
                 waitForQuery(
                   listener,
-                  app.invitations.where({ subject: "record-player-listener" }),
+                  app.invitations.where({ subject: listenerAuthor }),
                   (rows) => rows[0]?.id === listenerInvite.id && rows[0]?.status === "pending",
                   "listener observes pending invitation",
                   15_000,
@@ -1304,6 +1322,17 @@ async function openClient(
       driver: { type: "persistent", dbName },
     }),
   );
+}
+
+/**
+ * External authentication retains its own raw `sub`; Jazz authorization uses
+ * the canonical issuer-scoped author derived from that JWT. Invitations store
+ * precisely that value, so a same-`sub` token from another issuer cannot read
+ * or accept a grant.
+ */
+function canonicalAuthor(token: string): string {
+  const claims = JSON.parse(atob(token.split(".")[1]!)) as { iss: string; sub: string };
+  return JSON.stringify([claims.iss, claims.sub]);
 }
 
 function audioStream(chunks: readonly Uint8Array[]): ReadableStream<Uint8Array> {
