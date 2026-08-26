@@ -12,7 +12,8 @@ const packageRoot = path.resolve(import.meta.dirname, "..");
 const NPM_PACK_TIMEOUT_MS = 30_000;
 const TEST_CLEANUP_MARGIN_MS = 5_000;
 const TERMINATION_GRACE_MS = 1_000;
-const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+const npmPackArgs = ["pack", "--json", "--dry-run", "--ignore-scripts"];
+const windowsNpmPackCommand = "npm.cmd pack --json --dry-run --ignore-scripts";
 const bundledSkillFiles = [
   "skills/jazz/SKILL.md",
   "skills/jazz/references/application-data.md",
@@ -73,7 +74,30 @@ function runBoundedChild(
   });
 }
 
+function npmPackInvocation(
+  platform = process.platform,
+  comSpec = process.env.ComSpec,
+): { command: string; args: string[] } {
+  if (platform === "win32") {
+    // Node requires .cmd files to run through cmd.exe. The command string is
+    // deliberately fixed (rather than formed from values) before it reaches
+    // cmd.exe, while ComSpec stays a direct executable argument to spawn.
+    return {
+      command: comSpec || "cmd.exe",
+      args: ["/d", "/s", "/c", windowsNpmPackCommand],
+    };
+  }
+  return { command: "npm", args: npmPackArgs };
+}
+
 describe("create-jazz package contents", () => {
+  it("constructs the Windows npm invocation through cmd.exe without interpolation", () => {
+    expect(npmPackInvocation("win32", "C:\\Windows\\System32\\cmd.exe")).toEqual({
+      command: "C:\\Windows\\System32\\cmd.exe",
+      args: ["/d", "/s", "/c", "npm.cmd pack --json --dry-run --ignore-scripts"],
+    });
+  });
+
   it(
     "prevents a timed-out child from performing a delayed side effect",
     { timeout: 2_000 },
@@ -107,9 +131,10 @@ describe("create-jazz package contents", () => {
     "ships the bundled agent skills in npm pack output",
     { timeout: NPM_PACK_TIMEOUT_MS + TEST_CLEANUP_MARGIN_MS },
     async () => {
+      const npm = npmPackInvocation();
       const output = await runBoundedChild(
-        npmCommand,
-        ["pack", "--json", "--dry-run", "--ignore-scripts"],
+        npm.command,
+        npm.args,
         packageRoot,
         NPM_PACK_TIMEOUT_MS,
         "npm pack --dry-run",
