@@ -2771,6 +2771,84 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
+  it("does not reuse worker-confirmed coverage after trusted-serving claims change", async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              allForIdentity: () => new Uint8Array([0]),
+              connectUpstream: () => new FakeTransport([]),
+              prepareQuery: () => ({}),
+              attachQuery: () => {
+                throw new Error("trusted-serving coverage must use identity attachment");
+              },
+              attachQueryForIdentity: () => ({}),
+              queryAttachmentIsCovered: () => true,
+              detachQuery: () => undefined,
+              setIdentityClaims: () => undefined,
+              setNonDurableClient: () => undefined,
+              tick: () => undefined,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+        { readAuthorizationHost: "trusted-serving" },
+      );
+      runtime.setNonDurableClient();
+      runtime.connectUpstreamPeer();
+      const reader = JSON.stringify({
+        issuer: "https://issuer.example",
+        user_id: "alice",
+        claims: { role: "reader" },
+        authMode: "external",
+      });
+      const revoked = JSON.stringify({
+        issuer: "https://issuer.example",
+        user_id: "alice",
+        claims: { role: "revoked" },
+        authMode: "external",
+      });
+
+      let readerSettled = false;
+      const firstReader = runtime
+        .query(JSON.stringify({ table: "todos" }), reader, "edge")
+        .then(() => (readerSettled = true));
+      await vi.advanceTimersByTimeAsync(10);
+      expect(readerSettled).toBe(false);
+      runtime.notifyPeerTransportActivity();
+      await vi.advanceTimersByTimeAsync(10);
+      await firstReader;
+
+      let revokedSettled = false;
+      const firstRevoked = runtime
+        .query(JSON.stringify({ table: "todos" }), revoked, "edge")
+        .then(() => (revokedSettled = true));
+      await vi.advanceTimersByTimeAsync(10);
+      expect(revokedSettled).toBe(false);
+      runtime.notifyPeerTransportActivity();
+      await vi.advanceTimersByTimeAsync(10);
+      await firstRevoked;
+
+      let secondRevokedSettled = false;
+      const secondRevoked = runtime
+        .query(JSON.stringify({ table: "todos" }), revoked, "edge")
+        .then(() => (secondRevokedSettled = true));
+      await vi.advanceTimersByTimeAsync(1);
+      expect(secondRevokedSettled).toBe(true);
+      await secondRevoked;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("accepts query coverage after consuming worker activity that arrived before attachment", async () => {
     vi.useFakeTimers();
     try {

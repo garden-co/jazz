@@ -616,9 +616,9 @@ export class NativeRuntimeAdapter implements Runtime {
   // coverage. Once that response covered a prepared query, reattaching the
   // same query may already be covered and legitimately emit no new frame.
   // The response epoch that confirmed each prepared query for an effective
-  // serving identity. This lets a reattachment reuse its own confirmation,
-  // but never lets it skip worker activity that arrived after that confirmation
-  // or borrow coverage confirmed for another policy subject.
+  // serving authorization context. This lets a reattachment reuse its own
+  // confirmation, but never lets it skip worker activity that arrived after
+  // that confirmation or borrow coverage confirmed for another subject/claim set.
   private readonly peerCoveredQueries = new Map<PreparedQuery, Map<string, number>>();
   private coreTickScheduled = false;
   private coreTickRunning = false;
@@ -2178,8 +2178,8 @@ export class NativeRuntimeAdapter implements Runtime {
       attachment = this.db.attachQuery(query, opts);
     }
     if (!this.db.queryAttachmentIsCovered) return attachment;
-    const coverageIdentity = this.coverageIdentity(session);
-    const confirmedPeerActivityEpoch = this.peerCoveredQueries.get(query)?.get(coverageIdentity);
+    const coverageKey = this.coverageKey(session);
+    const confirmedPeerActivityEpoch = this.peerCoveredQueries.get(query)?.get(coverageKey);
     // A prior confirmation can recover a reattachment only if no newer worker
     // frame has arrived. Otherwise the old coverage state could be exposed to
     // a query whose authorization (for example, an authorship-scoped policy)
@@ -2210,7 +2210,7 @@ export class NativeRuntimeAdapter implements Runtime {
     );
     if (this.nonDurableClient && this.db.queryAttachmentIsCovered(attachment)) {
       const confirmations = this.peerCoveredQueries.get(query) ?? new Map<string, number>();
-      confirmations.set(coverageIdentity, this.peerTransportActivityEpoch);
+      confirmations.set(coverageKey, this.peerTransportActivityEpoch);
       this.peerCoveredQueries.set(query, confirmations);
     }
     return attachment;
@@ -2243,10 +2243,13 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
-  /** Coverage is subject-specific only on the trusted-serving boundary. */
-  private coverageIdentity(session: RuntimeSession | null): string {
+  /** Coverage is authorization-context-specific only on trusted-serving hosts. */
+  private coverageKey(session: RuntimeSession | null): string {
     if (this.readAuthorizationHost !== "trusted-serving") return "client-local";
-    return bytesKey(session?.identity ?? this.peerIdentity);
+    return JSON.stringify([
+      bytesKey(session?.identity ?? this.peerIdentity),
+      canonicalJson(session?.claims ?? {}),
+    ]);
   }
 
   private applySessionClaims(session: RuntimeSession | null | undefined): void {
@@ -6112,6 +6115,22 @@ function readU32Le(bytes: Uint8Array, offset: number): number {
 
 function bytesKey(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => String.fromCharCode(byte)).join("");
+}
+
+/** Deterministic cache-key encoding for JSON-derived session claims. */
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value === "boolean" || typeof value === "string") {
+    return JSON.stringify(value);
+  }
+  if (typeof value === "number") return Number.isFinite(value) ? JSON.stringify(value) : "null";
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return "null";
 }
 
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
