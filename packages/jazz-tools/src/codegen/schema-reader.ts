@@ -261,9 +261,12 @@ export function schemaToWasm(schema: Schema): WasmSchema {
   for (const table of schema.tables) {
     const columns: ColumnDescriptor[] = table.columns.map((col) => {
       const columnType = sqlTypeToWasm(col.sqlType);
-      if (col.mergeStrategy === "counter" && (col.sqlType !== "INTEGER" || col.nullable)) {
+      if (
+        col.mergeStrategy === "counter" &&
+        ((col.sqlType !== "INTEGER" && col.sqlType !== "BIGINT") || col.nullable)
+      ) {
         throw new Error(
-          "Counter merge strategy is only supported on non-nullable INTEGER columns.",
+          "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
         );
       }
       if (

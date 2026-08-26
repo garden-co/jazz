@@ -886,17 +886,16 @@ fn convert_merge_strategy(
     column: &ColumnDescriptor,
     strategy: ColumnMergeStrategy,
 ) -> Result<MergeStrategy, SchemaConversionError> {
+    column.validate_merge_strategy().map_err(|message| {
+        err(
+            format!("$.{}.{}", table.as_str(), column.name.as_str()),
+            message,
+        )
+    })?;
+
     match strategy {
         ColumnMergeStrategy::Counter => Ok(MergeStrategy::Counter),
-        ColumnMergeStrategy::GSet
-            if !column.nullable && matches!(column.column_type, ColumnType::Array { .. }) =>
-        {
-            Ok(MergeStrategy::GSet)
-        }
-        ColumnMergeStrategy::GSet => Err(err(
-            format!("$.{}.{}", table.as_str(), column.name.as_str()),
-            "GSet merge strategy requires a non-nullable ARRAY column",
-        )),
+        ColumnMergeStrategy::GSet => Ok(MergeStrategy::GSet),
     }
 }
 
@@ -2642,10 +2641,8 @@ mod tests {
 
     #[test]
     fn converts_counter_merge_strategy_on_integer_columns() {
-        let schema = schema_with_counter_column(ColumnDescriptor::new(
-            "integer_value",
-            ColumnType::Integer,
-        ));
+        let schema =
+            schema_with_counter_column(ColumnDescriptor::new("integer_value", ColumnType::Integer));
 
         let converted =
             convert_public_schema(&schema).expect("integer counter column must convert");
@@ -2658,13 +2655,10 @@ mod tests {
 
     #[test]
     fn converts_counter_merge_strategy_on_bigint_columns() {
-        let schema = schema_with_counter_column(ColumnDescriptor::new(
-            "bigint_value",
-            ColumnType::BigInt,
-        ));
+        let schema =
+            schema_with_counter_column(ColumnDescriptor::new("bigint_value", ColumnType::BigInt));
 
-        let converted =
-            convert_public_schema(&schema).expect("bigint counter column must convert");
+        let converted = convert_public_schema(&schema).expect("bigint counter column must convert");
 
         assert_eq!(
             converted.tables[0].merge_strategy("bigint_value"),
