@@ -34,7 +34,7 @@ Invariant digest:
 - `INV-SYNC-26`: A receiver detecting a referenced version without its body MUST be able to request exactly those `(table, row_uuid, tx_time, tx_node_id)` payloads, and the server MUST serve them subject to ordinary read policy. The repair vocabulary and server/client repair helpers are implemented and activated for declared known-state subscriptions.
 - `INV-SYNC-27`: A fast known-state declaration MUST only be made for contiguously applied, unevicted served streams; any local eviction touching stored row-version bodies invalidates persisted fast declarations before another declaration can be made.
 - `INV-SYNC-29`: A fast known-state declaration carrying authorization progress may suppress a reset for a pre-cursor membership difference only when its server-stamped authorization-progress token matches the serving peer's current token for that reader and canonical binding view. `crates/jazz/src/peer.rs::tests::fast_authorization_progress_bounds_membership_resets` enforces both bounds.
-- `INV-SYNC-30`: `settled_through` is a durable canonical-view history cursor for known-state payload dedup and repair, not a subscription or one-shot coverage receipt. Edge/Global settlement and coverage additionally require a fresh confirming `ViewUpdate` from the selected continuously active upstream connection; disconnect, restart, edge switch, or any update from a nonselected upstream invalidates all selected-authority receipts immediately unless an exact recomputation closure is proven.
+- `INV-SYNC-30`: `settled_through` is a durable canonical-view history cursor for known-state payload dedup and repair, not a subscription or one-shot coverage receipt. Edge/Global settlement and coverage additionally require a fresh confirming `ViewUpdate` from the selected continuously active upstream connection. A new settled one-shot requires confirmation for its exact current usage-site `SubscriptionKey`; an update for a detached predecessor cannot satisfy it even when shape, binding, and options are equal. Disconnect, restart, edge switch, or any update from a nonselected upstream invalidates all selected-authority receipts immediately unless an exact recomputation closure is proven.
 - `INV-SYNC-28`: Before the reconstruction cut, structured-output wire v6 carries terminal resets and typed root/path edits atomically. At the cut it is retired; reconstruction and post-cut local publication are governed by target `INV-SYNC-31..35`.
 - `INV-SYNC-31`: A downstream subscription MUST synchronize canonical authored facts and their identity-preserving witness closure under an exact manifest/epoch/digest, never an application-projected row as replicated truth.
 - `INV-SYNC-32`: A receiver MUST select branch-key-qualified authored-history winners before projection, decode each synchronized fact in its authored schema, project it through the ordered catalogue lineage into the subscription read schema, and derive terminal output with its local IVM without supplementing unrelated local history.
@@ -736,8 +736,12 @@ or edges serving the same authoritative database lineage for known-state payload
 dedup and repair. It is not an active-connection receipt: a subscription is
 settled, and a usage-site one-shot attachment is remotely covered, only after
 the selected continuously live upstream connection has sent a fresh confirming
-`ViewUpdate`. Disconnect, client restart, edge switch, or applying any view
-update from a nonselected upstream immediately retires all selected-authority receipts and
+`ViewUpdate`. A fresh `Edge`/`Global` one-shot requires that confirmation for
+its exact current usage-site `SubscriptionKey`; a late update for a detached
+predecessor cannot satisfy the new attachment even when shape, binding, and
+options are equal. Disconnect, client restart, edge switch, or applying any
+view update from a nonselected upstream immediately retires all
+selected-authority receipts and
 makes cached rows unsettled/local until the selected authority reconfirms. A stale cursor can
 under-claim knowledge and cause extra bodies to ship;
 it cannot over-claim because rows entering the view after `p` have membership

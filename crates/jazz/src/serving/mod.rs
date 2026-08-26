@@ -595,18 +595,23 @@ impl ShellDb {
         }
     }
 
-    fn accept_edge_authority_subscriber_with_claims(
+    fn accept_edge_authority_subscriber_with_claims_and_trust(
         &self,
         transport: Box<dyn crate::db::Transport>,
         identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
+        trust: CommitUnitTrust,
     ) -> ShellPeerConnection {
         match self {
             Self::Memory(db) => ShellPeerConnection::Memory(
-                db.accept_edge_authority_subscriber_with_claims(transport, identity, claims),
+                db.accept_edge_authority_subscriber_with_claims_and_trust(
+                    transport, identity, claims, trust,
+                ),
             ),
             Self::Durable(db) => ShellPeerConnection::Durable(
-                db.accept_edge_authority_subscriber_with_claims(transport, identity, claims),
+                db.accept_edge_authority_subscriber_with_claims_and_trust(
+                    transport, identity, claims, trust,
+                ),
             ),
         }
     }
@@ -1146,12 +1151,14 @@ impl InMemoryServerShell {
             None,
             session_context,
         ));
-        let connection = if self.role == NodeRole::Edge && trust == CommitUnitTrust::Session {
-            self.db.accept_edge_authority_subscriber_with_claims(
-                transport_adapter,
-                identity,
-                claims,
-            )
+        let connection = if self.role == NodeRole::Edge {
+            self.db
+                .accept_edge_authority_subscriber_with_claims_and_trust(
+                    transport_adapter,
+                    identity,
+                    claims,
+                    trust,
+                )
         } else {
             self.db.accept_subscriber_with_claims_and_trust(
                 transport_adapter,

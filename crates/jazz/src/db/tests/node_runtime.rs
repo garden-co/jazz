@@ -742,6 +742,132 @@ fn edge_later_client_upload_flushes_earlier_upstream_in_same_tick() {
 }
 
 #[test]
+fn pending_global_state_does_not_complete_remote_wait_or_prune_upload() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let client = open_db(0xc1, author, &schema);
+    let write = client
+        .insert(
+            "todos",
+            cells("pending global", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let tx_id = write.mergeable_tx_id();
+
+    client
+        .node
+        .node
+        .borrow_mut()
+        .apply_sync_message_settled(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Pending,
+            global_time: None,
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    let state = client.write_state(tx_id).unwrap();
+    assert_eq!(state.fate, Fate::Pending);
+    assert_eq!(state.durability, DurabilityTier::Global);
+    assert!(
+        client
+            .node
+            .transaction_wait_outcome(tx_id, DurabilityTier::Global)
+            .is_none(),
+        "a hydration-only durability claim must not complete a remote transaction wait"
+    );
+    assert_eq!(
+        client
+            .node
+            .transaction_wait_outcome(tx_id, DurabilityTier::Local)
+            .expect("local persistence completes independently of authority fate")
+            .unwrap(),
+        tx_id
+    );
+
+    client.tick().unwrap();
+    assert!(
+        client
+            .node
+            .outbox
+            .borrow()
+            .iter()
+            .any(|pending| pending.tx_id == tx_id),
+        "Pending+Global must retain the canonical upload until an Accepted fate"
+    );
+}
+
+#[test]
+fn global_wait_requires_authority_timestamp_after_accepted_global_durability() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let client = open_db(0xc1, author, &schema);
+    let write = client
+        .insert(
+            "todos",
+            cells("authority timestamp", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let tx_id = write.mergeable_tx_id();
+
+    client
+        .node
+        .node
+        .borrow_mut()
+        .apply_sync_message_settled(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_time: None,
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    let state = client.write_state(tx_id).unwrap();
+    assert_eq!(state.fate, Fate::Accepted);
+    assert_eq!(state.global_time, None);
+    assert_eq!(state.durability, DurabilityTier::Global);
+    assert!(
+        client
+            .node
+            .transaction_wait_outcome(tx_id, DurabilityTier::Global)
+            .is_none(),
+        "Accepted+Global without an authority timestamp cannot complete Global wait"
+    );
+    assert_eq!(
+        client
+            .node
+            .transaction_wait_outcome(tx_id, DurabilityTier::Edge)
+            .expect("Accepted Edge durability does not require a Global timestamp")
+            .unwrap(),
+        tx_id
+    );
+
+    client
+        .node
+        .node
+        .borrow_mut()
+        .apply_sync_message_settled(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(7)),
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    assert_eq!(
+        client.write_state(tx_id).unwrap().global_time,
+        Some(GlobalTime(7))
+    );
+    assert_eq!(
+        client
+            .node
+            .transaction_wait_outcome(tx_id, DurabilityTier::Global)
+            .expect("authority timestamp completes Global wait")
+            .unwrap(),
+        tx_id
+    );
+}
+
+#[test]
 fn write_state_waiter_resolves_on_remote_fate_update() {
     let schema = schema();
     let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
