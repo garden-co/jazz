@@ -1,6 +1,6 @@
 "use client";
 import { useAll } from "jazz-tools/react";
-import { app } from "../../schema.js";
+import { app } from "@/schema";
 /** Metadata-only: browsing a canvas must not hydrate a future blob/large value. */
 export function AssetShelf({ canvasId }: { canvasId: string }) {
   const { data: assets = [] } = useAll(app.assets.where({ canvasId }).orderBy("name", "asc"));

@@ -1,6 +1,6 @@
 "use client";
 import { useAll, useDb } from "jazz-tools/react";
-import { app } from "../../schema.js";
+import { app } from "@/schema";
 export function CheckpointShelf({ canvasId }: { canvasId: string }) {
   const db = useDb();
   const { data: checkpoints = [] } = useAll(

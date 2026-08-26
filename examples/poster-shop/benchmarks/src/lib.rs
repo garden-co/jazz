@@ -22,6 +22,7 @@ type BenchDb = Db<MemoryStorage>;
 pub struct Fixture {
     db: BenchDb,
     shapes: TableSchema,
+    layers: PreparedQuery,
     ordered_shapes: PreparedQuery,
     cursor_fanout: PreparedQuery,
     layer_shapes: PreparedQuery,
@@ -111,6 +112,13 @@ impl Fixture {
                     .order_by("z_index", OrderDirection::Asc),
             )
             .expect("prepare ordered shapes");
+        let layers = db
+            .prepare_query(
+                &Query::from("layers")
+                    .filter(eq(col("canvas"), lit(row_id(1, 0).0)))
+                    .order_by("z_index", OrderDirection::Asc),
+            )
+            .expect("prepare ordered layers");
         let cursor_fanout = db
             .prepare_query(
                 &Query::from("cursors")
@@ -142,6 +150,7 @@ impl Fixture {
         Self {
             db,
             shapes,
+            layers,
             ordered_shapes,
             cursor_fanout,
             layer_shapes,
@@ -152,6 +161,9 @@ impl Fixture {
 
     pub fn ordered_shape_count(&self) -> usize {
         self.read(&self.ordered_shapes).len()
+    }
+    pub fn ordered_layer_count(&self) -> usize {
+        self.read(&self.layers).len()
     }
     pub fn cursor_fanout_count(&self) -> usize {
         self.read(&self.cursor_fanout).len()
@@ -173,6 +185,12 @@ impl Fixture {
     }
     pub fn checkpoint_count(&self) -> usize {
         self.read(&self.checkpoints).len()
+    }
+    /// The app has two ordered shape paths: canvas/z-index and layer/z-index.
+    /// Jazz's native schema declares indexable columns rather than composite
+    /// tuple index objects, so this receipt protects the exact required union.
+    pub fn shape_indexed_columns(&self) -> Vec<String> {
+        self.shapes.indexed_columns.iter().cloned().collect()
     }
     fn read(&self, query: &PreparedQuery) -> Vec<CurrentRow> {
         self.db.read(query).expect("PosterShop benchmark read")
@@ -197,6 +215,9 @@ fn schema() -> JazzSchema {
                     .column("x", ColumnType::Integer)
                     .column("y", ColumnType::Integer)
                     .column("kind", ColumnType::Text)
+                    // Mirrors the app's `indexOnly([canvasId, zIndex])` and
+                    // `indexOnly([layerId, zIndex])` paths. Do not collapse
+                    // this to an imagined triple-key workload.
                     .index_only(["canvas", "layer", "z_index"]),
             )
             .table(

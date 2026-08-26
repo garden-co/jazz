@@ -1,6 +1,6 @@
 "use client";
 import { useAll } from "jazz-tools/react";
-import { app } from "../../schema.js";
+import { app } from "@/schema";
 export function CollaboratorCursors({ canvasId, userId }: { canvasId: string; userId: string }) {
   const { data: cursors = [] } = useAll(app.cursors.where({ canvasId }).orderBy("userId", "asc"));
   return (

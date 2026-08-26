@@ -1,6 +1,8 @@
 import { schema as s } from "jazz-tools";
+import { schema as betterAuthSchema } from "./schema-better-auth/schema";
 
 const schema = {
+  ...betterAuthSchema,
   canvases: s.table({ title: s.string(), width: s.int(), height: s.int() }),
   canvasMembers: s
     .table({

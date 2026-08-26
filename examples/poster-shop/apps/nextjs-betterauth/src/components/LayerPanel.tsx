@@ -1,6 +1,6 @@
 "use client";
 import { useAll, useDb } from "jazz-tools/react";
-import { app } from "../../schema.js";
+import { app } from "@/schema";
 export function LayerPanel({ canvasId }: { canvasId: string }) {
   const db = useDb();
   const { data: layers = [] } = useAll(app.layers.where({ canvasId }).orderBy("zIndex", "asc"));

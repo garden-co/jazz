@@ -1,9 +1,21 @@
 import { definePermissions, type RowContext } from "jazz-tools/permissions";
-import { app, type Canvas } from "./schema.js";
+import { app, type Canvas } from "./schema";
 
 type Role = "viewer" | "editor" | "admin";
 
 export default definePermissions(app, ({ policy, session, anyOf, allOf, allowedTo }) => {
+  for (const table of [
+    policy.better_auth_user,
+    policy.better_auth_session,
+    policy.better_auth_account,
+    policy.better_auth_verification,
+    policy.better_auth_jwks,
+  ]) {
+    table.allowRead.never();
+    table.allowInsert.never();
+    table.allowUpdate.never();
+    table.allowDelete.never();
+  }
   const hasRole = (canvas: RowContext<Canvas>, role: Role) =>
     policy.canvasMembers.exists.where({ canvasId: canvas.id, userId: session.user_id, role });
   const canRead = (canvas: RowContext<Canvas>) =>
@@ -48,20 +60,11 @@ export default definePermissions(app, ({ policy, session, anyOf, allOf, allowedT
   );
   policy.assets.allowRead.where(allowedTo.read("canvasId"));
   policy.shapes.allowRead.where(allowedTo.read("canvasId"));
-  policy.shapes.allowInsert.where((shape) =>
-    anyOf([
-      policy.canvasMembers.exists.where({
-        canvasId: shape.canvasId,
-        userId: session.user_id,
-        role: "editor",
-      }),
-      policy.canvasMembers.exists.where({
-        canvasId: shape.canvasId,
-        userId: session.user_id,
-        role: "admin",
-      }),
-    ]),
-  );
+  // Do not admit a shape until the core policy converter can express the
+  // required correlated proof: editor/admin membership, `shape.canvasId`,
+  // and `shape.layerId -> layer.canvasId` must all agree. The prior direct
+  // membership rule missed the last check and was unsafe across canvases.
+  policy.shapes.allowInsert.never();
   policy.cursors.allowRead.where(allowedTo.read("canvasId"));
   policy.checkpoints.allowRead.where(allowedTo.read("canvasId"));
   // Presence is replaceable ephemera: only its owner may update/delete it.

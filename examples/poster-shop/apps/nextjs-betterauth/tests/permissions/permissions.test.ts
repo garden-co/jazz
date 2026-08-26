@@ -9,7 +9,7 @@ beforeEach(async () => {
 });
 afterEach(async () => testApp.shutdown());
 
-it("allows an admin to bootstrap a canvas, invite an editor, then revokes edits", async () => {
+it("allows an admin to bootstrap a canvas and an editor to add layers", async () => {
   const ownerId = "poster-owner",
     editorId = "poster-editor";
   const owner = testApp.as({
@@ -36,8 +36,8 @@ it("allows an admin to bootstrap a canvas, invite an editor, then revokes edits"
   const layer = await owner
     .insert(app.layers, { canvasId: canvas.id, name: "Art", zIndex: 0, visible: true })
     .wait({ tier: "edge" });
-  await editor
-    .insert(app.shapes, {
+  await editor.expectDenied((db) =>
+    db.insert(app.shapes, {
       canvasId: canvas.id,
       layerId: layer.id,
       kind: "rect",
@@ -48,8 +48,8 @@ it("allows an admin to bootstrap a canvas, invite an editor, then revokes edits"
       rotation: 0,
       zIndex: 0,
       fill: "#fff",
-    })
-    .wait({ tier: "edge" });
+    }),
+  );
   await owner.delete(app.canvasMembers, membership.id).wait({ tier: "edge" });
   await editor.expectDenied((db) =>
     db.insert(app.shapes, {
@@ -152,6 +152,43 @@ it("keeps canvas ordering and history markers behind the same membership boundar
     }),
   );
   await owner.expectDenied((db) => db.delete(app.checkpoints, checkpoint.id));
+});
+
+it("fails closed for cross-canvas shapes pending correlated shape admission", async () => {
+  const ownerId = "cross-canvas-owner";
+  const owner = testApp.as({
+    issuer: "https://poster-shop.test",
+    user_id: ownerId,
+    claims: {},
+    authMode: "external",
+  });
+  const createCanvas = async (title: string) => {
+    const canvas = await owner
+      .insert(app.canvases, { title, width: 1080, height: 1350 })
+      .wait({ tier: "edge" });
+    await owner
+      .insert(app.canvasMembers, { canvasId: canvas.id, userId: ownerId, role: "admin" })
+      .wait({ tier: "edge" });
+    return canvas;
+  };
+  const [left, right] = await Promise.all([createCanvas("Left"), createCanvas("Right")]);
+  const foreignLayer = await owner
+    .insert(app.layers, { canvasId: right.id, name: "Foreign", zIndex: 0, visible: true })
+    .wait({ tier: "edge" });
+  await owner.expectDenied((db) =>
+    db.insert(app.shapes, {
+      canvasId: left.id,
+      layerId: foreignLayer.id,
+      kind: "rect",
+      x: 0,
+      y: 0,
+      width: 1,
+      height: 1,
+      rotation: 0,
+      zIndex: 0,
+      fill: "#000",
+    }),
+  );
 });
 
 it("keeps cursor creation default-deny until its ownership semantics are specified", async () => {

@@ -1,21 +1,16 @@
 "use client";
 
-import { JazzProvider, useAll, useDb, useSession } from "jazz-tools/react";
-import type { DbConfig } from "jazz-tools";
+import { useAll, useDb, useSession } from "jazz-tools/react";
 import { useState } from "react";
-import { app } from "../schema.js";
-import { AssetShelf } from "./components/AssetShelf.js";
-import { CanvasSurface } from "./components/CanvasSurface.js";
-import { CheckpointShelf } from "./components/CheckpointShelf.js";
-import { CollaboratorCursors } from "./components/CollaboratorCursors.js";
-import { LayerPanel } from "./components/LayerPanel.js";
+import { app } from "@/schema";
+import { AssetShelf } from "@/src/components/AssetShelf";
+import { CanvasSurface } from "@/src/components/CanvasSurface";
+import { CheckpointShelf } from "@/src/components/CheckpointShelf";
+import { CollaboratorCursors } from "@/src/components/CollaboratorCursors";
+import { LayerPanel } from "@/src/components/LayerPanel";
 
-export function PosterShopApp({ config }: { config: DbConfig }) {
-  return (
-    <JazzProvider config={config} fallback={<p>Opening poster studio…</p>}>
-      <PosterStudio />
-    </JazzProvider>
-  );
+export function PosterShopApp() {
+  return <PosterStudio />;
 }
 
 /** The shell only reads canvas metadata. Child surfaces keep independent Jazz

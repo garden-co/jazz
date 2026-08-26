@@ -16,6 +16,12 @@ and checkpoint deletion remain default-deny until their ownership rules are
 specified in #1926. The UI keeps those surfaces read-only rather than offering
 an action with an undecided authorization contract.
 
+Shape insertion is additionally fail-closed for now. A correct rule must prove
+that the editor's membership, the shape canvas, and the referenced layer canvas
+are identical. The current core policy conversion cannot publish that correlated
+proof, so the app deliberately does not expose shape creation until that core
+receipt lands; it does not fall back to a membership-only check.
+
 The follow-up topology receipt will run this ordinary application schema and
 policy set through browser → edge → core. Its deterministic timeout/fault
 plumbing comes from the shared example topology harness; it does not replace
