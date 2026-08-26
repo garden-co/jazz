@@ -14,6 +14,7 @@ use jazz::db::{
 use jazz::groove::db::StorageReadMetrics;
 use jazz::groove::records::Value;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+use jazz::node::QueryEngineReadMetrics;
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{CmpOp, PolicyValue};
@@ -121,6 +122,7 @@ fn run_rung(table_rows: usize, owned_rows: usize, result_rows: usize, batch_rows
 
     for (case, query, expected_rows, tier, identity) in cases {
         let open_metrics = db.take_storage_read_metrics_for_test();
+        let _ = db.take_query_engine_read_metrics_for_test();
         db.reset_storage_read_metrics_for_test();
         let prepare_started = Instant::now();
         let prepared = db
@@ -128,6 +130,7 @@ fn run_rung(table_rows: usize, owned_rows: usize, result_rows: usize, batch_rows
             .expect("prepare owner-filter query");
         let prepare_us = prepare_started.elapsed().as_micros();
         let prepare_metrics = db.take_storage_read_metrics_for_test();
+        let prepare_query_metrics = db.take_query_engine_read_metrics_for_test();
 
         db.reset_storage_read_metrics_for_test();
         let query_started = Instant::now();
@@ -135,6 +138,7 @@ fn run_rung(table_rows: usize, owned_rows: usize, result_rows: usize, batch_rows
             .expect("run owner-filter query");
         let query_us = query_started.elapsed().as_micros();
         let query_metrics = db.take_storage_read_metrics_for_test();
+        let query_engine_metrics = db.take_query_engine_read_metrics_for_test();
 
         assert_eq!(rows.len(), expected_rows, "{case} row count changed");
         emit_case(
@@ -148,6 +152,8 @@ fn run_rung(table_rows: usize, owned_rows: usize, result_rows: usize, batch_rows
             &open_metrics,
             &prepare_metrics,
             &query_metrics,
+            &prepare_query_metrics,
+            &query_engine_metrics,
         );
     }
     db.close().expect("close owner-filter db");
@@ -346,6 +352,8 @@ fn emit_case(
     open_metrics: &StorageReadMetrics,
     prepare_metrics: &StorageReadMetrics,
     query_metrics: &StorageReadMetrics,
+    prepare_query_metrics: &QueryEngineReadMetrics,
+    query_engine_metrics: &QueryEngineReadMetrics,
 ) {
     let mut fields = Map::new();
     fields.insert("phase".to_owned(), json!("owner_filter_diagnostic"));
@@ -359,7 +367,36 @@ fn emit_case(
     insert_metrics(&mut fields, "open", open_metrics);
     insert_metrics(&mut fields, "prepare", prepare_metrics);
     insert_metrics(&mut fields, "query", query_metrics);
+    insert_query_metrics(&mut fields, "prepare", prepare_query_metrics);
+    insert_query_metrics(&mut fields, "query", query_engine_metrics);
     support::emit_json_line("owner_filter_diagnostic", fields);
+}
+
+fn insert_query_metrics(
+    fields: &mut Map<String, serde_json::Value>,
+    prefix: &str,
+    metrics: &QueryEngineReadMetrics,
+) {
+    fields.insert(
+        format!("{prefix}_policy_graphs"),
+        json!(metrics.policy_authorization_graphs),
+    );
+    fields.insert(
+        format!("{prefix}_policy_joins"),
+        json!(metrics.policy_authorized_source_joins),
+    );
+    fields.insert(
+        format!("{prefix}_primary_key_scans"),
+        json!(metrics.source_primary_key_scans),
+    );
+    fields.insert(
+        format!("{prefix}_index_probes"),
+        json!(metrics.source_index_probes),
+    );
+    fields.insert(
+        format!("{prefix}_full_scans"),
+        json!(metrics.source_full_scans),
+    );
 }
 
 fn insert_metrics(

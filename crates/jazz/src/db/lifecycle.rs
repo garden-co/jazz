@@ -779,6 +779,15 @@ where
     }
 
     #[cfg(feature = "testing")]
+    /// Test/bench-only drain for query planner/source attribution.
+    pub fn take_query_engine_read_metrics_for_test(&self) -> crate::node::QueryEngineReadMetrics {
+        let mut node = self.node.node.borrow_mut();
+        let metrics = node.query_engine_read_metrics().clone();
+        node.reset_query_engine_read_metrics();
+        metrics
+    }
+
+    #[cfg(feature = "testing")]
     /// Test/bench-only snapshot of sync-path counters.
     pub fn sync_metrics_for_test(&self) -> crate::node::SyncMetrics {
         self.node.node.borrow().sync_metrics().clone()
