@@ -36,6 +36,7 @@ pub struct Fixture<S: OrderedKvStorage> {
     activity: PreparedQuery,
     bounded_activity_page: PreparedQuery,
     maintained_activity: PreparedQuery,
+    point_activity: PreparedQuery,
     activity_transition_row: RowUuid,
     activity_transition_matching: bool,
     activity_update_identity: WriteIdentity,
@@ -249,6 +250,13 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
                     .filter(eq(col("kind"), lit("updated"))),
             )
             .expect("prepare W1 maintained two-equality activity query");
+        let point_activity = db
+            .prepare_query(
+                &Query::from("activity")
+                    .filter(eq(col("id"), lit(row_id(4, 0).0)))
+                    .limit(1),
+            )
+            .expect("prepare W1 point activity query");
         let fixture = Self {
             db,
             board,
@@ -256,6 +264,7 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
             activity: activity_query,
             bounded_activity_page,
             maintained_activity,
+            point_activity,
             activity_transition_row: row_id(4, PROJECTS),
             activity_transition_matching: false,
             activity_update_identity,
@@ -310,6 +319,24 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
         };
         while fixture.subscription.try_next_event().is_some() {}
         fixture
+    }
+
+    pub fn subscribe_point_activity_once(self) -> usize {
+        let mut subscription = block_on(self.db.subscribe(
+            &self.point_activity,
+            ReadOpts {
+                tier: DurabilityTier::Local,
+                local_updates: LocalUpdates::Deferred,
+                propagation: Propagation::LocalOnly,
+                ..ReadOpts::default()
+            },
+        ))
+        .expect("install W1 maintained point subscription");
+        let mut rows = 0;
+        while let Some(event) = subscription.try_next_event() {
+            rows += event_row_count(event);
+        }
+        rows
     }
 
     fn read_count(&self, query: &PreparedQuery) -> usize {
