@@ -371,6 +371,19 @@ export async function buildTestArtifacts(
         throw error;
       });
 
+  const preflightNapi = () =>
+    scope.track(
+      run(
+        "node",
+        [
+          "-e",
+          "const {nativeBinding,expectedNativeArtifactFingerprint:expected}=require('./crates/jazz-napi/native-binding.pointer.cjs'); const actual=nativeBinding.nativeArtifactFingerprint?.(); if(actual!==expected) { console.error(`Jazz NAPI artifact ABI mismatch: expected ${expected}, got ${String(actual)}`); process.exit(23); }",
+        ],
+        "preflight release NAPI",
+        { signal: scope.signal },
+      ),
+    );
+
   // Keep every Cargo invocation in the default target directory restored by
   // Swatinem/rust-cache. On the 4-vCPU CI runner, separate target directories
   // discarded that cache and made three cold compilers contend for the same
@@ -403,6 +416,25 @@ export async function buildTestArtifacts(
     ["dev/artifacts/stage-native-fingerprints.mjs", "--local"],
     "derive local artifact expectations",
   );
+  try {
+    // Validate the mutable producer generation before it can enter the
+    // immutable correctness store. A bad generation must never poison the
+    // fingerprint-addressed destination that its repair needs to publish.
+    await preflightNapi();
+  } catch (error) {
+    console.warn(`test-artifacts: release NAPI failed preflight; repairing (${error.message})`);
+    await guardedRun(
+      "pnpm",
+      ["exec", "turbo", "run", "build", "--filter=jazz-napi", "--only", "--force"],
+      "repair release NAPI",
+    );
+    await guardedRun(
+      "node",
+      ["dev/artifacts/stage-native-fingerprints.mjs", "--local"],
+      "refresh repaired artifact expectations",
+    );
+    await preflightNapi();
+  }
   // Seal the exact pair before jazz-tools bundles its broker worker. The
   // mutable package publication paths are still useful to package builds, but
   // correctness bundles must never follow a later replacement generation.
@@ -428,25 +460,7 @@ export async function buildTestArtifacts(
     "seal release NAPI provenance",
   );
 
-  try {
-    // A load failure is expected to enter the bounded repair path, so unlike a
-    // build failure it must not abort the parent scope before repair starts.
-    await scope.track(
-      run("node", ["-e", "require('./crates/jazz-napi')"], "load release NAPI", {
-        signal: scope.signal,
-      }),
-    );
-  } catch (error) {
-    // A damaged native artifact must not make every run pay a second build.
-    // Repair only after the first load proves it necessary, then prove repair.
-    console.warn(`test-artifacts: release NAPI did not load; repairing (${error.message})`);
-    await guardedRun(
-      "pnpm",
-      ["exec", "turbo", "run", "build", "--filter=jazz-napi", "--only", "--force"],
-      "repair release NAPI",
-    );
-    await guardedRun("node", ["-e", "require('./crates/jazz-napi')"], "load repaired release NAPI");
-  }
+  await guardedRun("node", ["-e", "require('./crates/jazz-napi')"], "load release NAPI");
   await guardedRun(
     "node",
     ["dev/artifacts/provenance.mjs", "verify", "napi", "release"],

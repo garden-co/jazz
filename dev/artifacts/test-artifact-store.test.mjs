@@ -66,7 +66,10 @@ function fixture(label, wasmFingerprint, napiFingerprint) {
     ],
     [
       join(root, "crates", "jazz-napi", "native-artifact-fingerprint.cjs"),
-      `module.exports = { expectedNativeArtifactFingerprint: ${JSON.stringify(napiFingerprint)} };`,
+      // Model an older package-staging expectation. Correctness snapshots must
+      // bind their expectation to the immutable generation, not this mutable
+      // compatibility loader input.
+      `module.exports = { expectedNativeArtifactFingerprint: ${JSON.stringify("0".repeat(64))} };`,
     ],
   ]) {
     mkdirSync(path.substring(0, path.lastIndexOf("/")), { recursive: true });
@@ -108,11 +111,11 @@ test("two worktrees retain independently runnable fingerprint-addressed correctn
     assert.equal(readCorrectnessArtifactSnapshot(first).fingerprint, firstSnapshot.fingerprint);
     assert.equal(readCorrectnessArtifactSnapshot(second).fingerprint, secondSnapshot.fingerprint);
     assert.equal(existsSync(correctnessArtifactPointer(first)), true);
-    assert.equal(
-      require(join(first, "crates", "jazz-napi", "correctness-native-binding.pointer.cjs"))
-        .nativeBinding.label,
-      "first",
+    const firstNapi = require(
+      join(first, "crates", "jazz-napi", "correctness-native-binding.pointer.cjs"),
     );
+    assert.equal(firstNapi.nativeBinding.label, "first");
+    assert.equal(firstNapi.expectedNativeArtifactFingerprint, "b".repeat(64));
   } finally {
     rmSync(first, { recursive: true, force: true });
     rmSync(second, { recursive: true, force: true });
