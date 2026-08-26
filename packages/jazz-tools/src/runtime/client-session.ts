@@ -1,5 +1,5 @@
 import type { PublicSession, Session } from "./context.js";
-import { isUsableSubject, withCanonicalAuthor } from "./author-id.js";
+import { isUsableSubject, withCanonicalUser } from "./author-id.js";
 
 export interface ClientSessionInput {
   appId: string;
@@ -177,7 +177,7 @@ export function sessionFromJwtPayload(payload: JwtPayload): PublicSession | null
   const claimsSource = payload.claims;
   const claims: Record<string, unknown> = isRecord(claimsSource) ? { ...claimsSource } : {};
 
-  return withCanonicalAuthor({
+  return withCanonicalUser({
     issuer,
     user_id: subject,
     claims,
@@ -197,7 +197,7 @@ export function sessionFromVerifiedReservedJwtPayload(
   const claimsSource = payload.claims;
   const claims: Record<string, unknown> = isRecord(claimsSource) ? { ...claimsSource } : {};
   return markTrustedReservedSession(
-    withCanonicalAuthor(
+    withCanonicalUser(
       markTrustedReservedSession({
         issuer,
         user_id: subject,
@@ -230,7 +230,7 @@ export function resolveClientSessionStateSync(config: ClientSessionInput): Clien
   ) {
     return {
       transport: "bearer",
-      session: withCanonicalAuthor(config.trustedReservedSession),
+      session: withCanonicalUser(config.trustedReservedSession),
     };
   }
 
@@ -250,7 +250,7 @@ export function resolveClientSessionStateSync(config: ClientSessionInput): Clien
   ) {
     return {
       transport: "cookie",
-      session: withCanonicalAuthor(config.cookieSession),
+      session: withCanonicalUser(config.cookieSession),
     };
   }
 

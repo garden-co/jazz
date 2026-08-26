@@ -22,8 +22,8 @@ export {
   ExclusiveWriteResult,
 } from "./client.js";
 export type { AppContext, PublicSession, RuntimeSourcesConfig, Session } from "./context.js";
-/** Return the canonical logical author exposed as `session.author` by bindings. */
-export { canonicalAuthorSubject as sessionAuthor } from "./author-id.js";
+/** Encode the opaque logical identity exposed as `session.user` by bindings. */
+export { canonicalAuthorSubject as userIdentity } from "./author-id.js";
 export {
   createDb,
   Db,

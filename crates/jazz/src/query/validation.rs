@@ -1398,7 +1398,7 @@ fn operand_type(
 
 fn claim_type(name: &str) -> Result<Option<ColumnType>, QueryError> {
     match name {
-        "author" => Ok(Some(ColumnType::String)),
+        "user" => Ok(Some(ColumnType::String)),
         "team" => Ok(Some(ColumnType::Uuid)),
         "isAdmin" => Ok(Some(ColumnType::Bool)),
         _ => Ok(None),

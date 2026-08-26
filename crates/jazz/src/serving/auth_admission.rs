@@ -370,7 +370,7 @@ pub fn admit_local_first_jwt(
 }
 
 /// Inject the trusted session vocabulary once after provider claims are
-/// admitted. Provider `sub` maps to the documented raw `user_id`; `author` is
+/// admitted. Provider `sub` maps to the documented raw `user_id`; `user` is
 /// the distinct reserved canonical `[iss,sub]` logical identity.
 pub fn admitted_session_claims(
     issuer: &str,
@@ -384,7 +384,7 @@ pub fn admitted_session_claims(
     claims.insert("sub".to_owned(), Value::String(subject.to_owned()));
     claims.insert("user_id".to_owned(), Value::String(subject.to_owned()));
     claims.insert(
-        "author".to_owned(),
+        "user".to_owned(),
         Value::String(author.canonical().to_owned()),
     );
     claims

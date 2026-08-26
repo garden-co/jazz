@@ -33,7 +33,7 @@ describe("auth-state", () => {
       session: {
         issuer: "https://issuer.example",
         user_id: "alice",
-        author: canonicalAuthorSubject("https://issuer.example", "alice"),
+        user: canonicalAuthorSubject("https://issuer.example", "alice"),
         claims: { role: "reader" },
         authMode: "external",
       },

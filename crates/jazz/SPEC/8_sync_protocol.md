@@ -611,7 +611,7 @@ stores the unit as pending relay history and defers (`INV-SYNC-18`).
 A permission-scope subscription is an _upstream_ subscription opened by the edge
 against core for the policy data required by its acceptance gate. It is keyed by
 `(policy_shape, writer_claim)` (ch. 9 §9.5): the write policy's query shape bound
-to the writer's `claim("author")`. This hydrates only the policy rows that writer's
+to the writer's `claim("user")`. This hydrates only the policy rows that writer's
 writes can depend on, never a whole table.
 
 Permission scopes are shared at the sync level whenever one settled subscription

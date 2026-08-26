@@ -8,6 +8,10 @@ import type {
   DbConfig as RuntimeDbConfig,
   InsertOptions as RuntimeInsertOptions,
 } from "./index.js";
+import { userIdentity } from "../index.js";
+
+// @ts-expect-error sessionAuthor was replaced by userIdentity without a compatibility alias.
+import { sessionAuthor } from "../index.js";
 
 // @ts-expect-error CreateOptions was renamed to InsertOptions.
 import type { CreateOptions as PackageCreateOptions } from "../index.js";
@@ -23,7 +27,8 @@ const session: Session = {
   authMode: "external",
 };
 declare const publicSession: PublicSession;
-publicSession.author satisfies string;
+publicSession.user satisfies string;
+userIdentity("https://issuer.example", "user") satisfies string;
 
 const unauthenticated: PackageDbConfig = { appId: "app" };
 const localFirst: PackageDbConfig = { appId: "app", secret: "secret" };

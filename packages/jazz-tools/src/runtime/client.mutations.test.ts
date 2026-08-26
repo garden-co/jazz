@@ -150,7 +150,7 @@ describe("JazzClient write attribution", () => {
       { iss: LOCAL_FIRST_JWT_ISSUER, sub: "alice", claims: { role: "owner" } },
       "local-first",
     );
-    expect(session?.author).toBe('["urn:jazz:local-first","alice"]');
+    expect(session?.user).toBe('["urn:jazz:local-first","alice"]');
 
     client.insert(
       "todos",

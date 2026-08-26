@@ -336,7 +336,7 @@ where
                 claims.extend(session_claims.clone());
             }
             claims.insert(
-                "author".to_owned(),
+                "user".to_owned(),
                 Value::String(identity.canonical().to_owned()),
             );
             PolicyContext::Identity {
@@ -1342,11 +1342,11 @@ pub(super) fn permission_scope_claim_values(
     claims: Option<&BTreeMap<String, Value>>,
 ) -> BTreeMap<String, Value> {
     let mut claim_values = claims.cloned().unwrap_or_default();
-    // `author` is Jazz's reserved, issuer-scoped logical identity. Provider
+    // `user` is Jazz's reserved, issuer-scoped logical identity. Provider
     // claims such as `sub` and `user_id` retain their admitted values, while
     // other Jazz defaults remain fallbacks.
     for (name, value) in default_permission_scope_claim_values(writer) {
-        if name == "author" {
+        if name == "user" {
             claim_values.insert(name, value);
         } else {
             claim_values.entry(name).or_insert(value);
@@ -1668,8 +1668,7 @@ mod authorization_scope_compiler_tests {
             Some(&Value::String("provider-subject".to_owned()))
         );
         assert_eq!(
-            permission_scope_claim_values(identity, node.session_claims.get(&identity))
-                .get("author"),
+            permission_scope_claim_values(identity, node.session_claims.get(&identity)).get("user"),
             Some(&Value::String(identity.canonical().to_owned()))
         );
     }

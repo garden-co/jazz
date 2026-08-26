@@ -174,7 +174,7 @@ describe("permissions type inference", () => {
     definePermissions(app, ({ policy, anyOf, allowedTo, session, isCreator }) => {
       expectTypeOf(session.user_id.path).toEqualTypeOf<string[]>();
       expectTypeOf(session.userId.path).toEqualTypeOf<string[]>();
-      expectTypeOf(session.author.path).toEqualTypeOf<string[]>();
+      expectTypeOf(session.user.path).toEqualTypeOf<string[]>();
       expectTypeOf(session["claims.role"]!.path).toEqualTypeOf<string[]>();
       expectTypeOf(isCreator).toMatchTypeOf<Parameters<typeof anyOf>[0][number]>();
 

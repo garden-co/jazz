@@ -1056,12 +1056,12 @@ pub(super) fn owner_read_schema() -> JazzSchema {
 }
 
 pub(super) fn created_by_read_schema() -> JazzSchema {
-    created_by_read_schema_for_claim("author")
+    created_by_read_schema_for_claim("user")
 }
 
 pub(super) fn created_by_read_schema_for_claim(claim_name: &str) -> JazzSchema {
-    let session_path = if claim_name == "author" {
-        vec!["author"]
+    let session_path = if claim_name == "user" {
+        vec!["user"]
     } else {
         vec!["claims", claim_name]
     };

@@ -1840,7 +1840,7 @@ fn session_claims_to_core_claims(session: &Session) -> Result<HashMap<String, Co
         CoreValue::String(auth_mode_claim_value(session.auth_mode).to_owned()),
     );
     core_claims.insert(
-        "author".to_owned(),
+        "user".to_owned(),
         CoreValue::String(session.author_subject()?.canonical().to_owned()),
     );
     Ok(core_claims)
@@ -3627,7 +3627,7 @@ mod tests {
     }
 
     #[test]
-    fn client_session_preserves_provider_subject_and_adds_logical_author() {
+    fn client_session_preserves_provider_subject_and_adds_logical_user_identity() {
         let session = Session::new(CoreAuthorSubject::LOCAL_FIRST_ISSUER, "trusted-user")
             .with_auth_mode(crate::tools::public_api::session::AuthMode::LocalFirst)
             .with_claims(json!({
@@ -3650,7 +3650,7 @@ mod tests {
             Some(&CoreValue::String("local-first".to_owned()))
         );
         assert_eq!(
-            claims.get("author"),
+            claims.get("user"),
             Some(&CoreValue::String(
                 CoreAuthorSubject::reserved(CoreAuthorSubject::LOCAL_FIRST_ISSUER, "trusted-user")
                     .unwrap()

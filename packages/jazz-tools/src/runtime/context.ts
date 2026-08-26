@@ -68,17 +68,19 @@ export interface Session {
 /**
  * A session that Jazz has admitted for use by a client binding.
  *
- * `author` is the portable, canonical JSON `[issuer, sub]` identity that
- * policies see as `session.author` and that Jazz records in `$createdBy` and
+ * `user` is the opaque, canonical JSON encoding of the admitted JWT's exact
+ * `[iss, sub]` pair. Policies see it as `session.user`, and Jazz records the
+ * same identity in `$createdBy` and
  * `$updatedBy`. It is deliberately distinct from `user_id`: the latter is the
  * provider-controlled raw JWT `sub`.
  *
- * Applications must obtain this value from an admitted session rather than
- * constructing it themselves. Local interning is an implementation detail and
- * is never exposed here.
+ * This is not a user-row reference, display name, or raw `sub`. Applications
+ * must obtain it from an admitted session rather than constructing it
+ * themselves. Local interning is an implementation detail and is never
+ * exposed here.
  */
 export interface PublicSession extends Session {
-  readonly author: string;
+  readonly user: string;
 }
 
 /**

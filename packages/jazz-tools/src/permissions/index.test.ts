@@ -363,7 +363,7 @@ const creatorCondition = {
   op: "Eq",
   value: {
     type: "SessionRef",
-    path: ["author"],
+    path: ["user"],
   },
 };
 
@@ -433,10 +433,10 @@ describe("permissions DSL", () => {
 
   it("compiles provenance magic column policies", () => {
     const compiled = definePermissions(app, ({ policy, session }) => [
-      policy.todos.allowRead.where({ $createdBy: session.author }),
+      policy.todos.allowRead.where({ $createdBy: session.user }),
       policy.todos.allowUpdate
-        .whereOld({ $createdBy: session.author })
-        .whereNew({ $updatedBy: session.author }),
+        .whereOld({ $createdBy: session.user })
+        .whereNew({ $updatedBy: session.user }),
     ]);
 
     expect(compiled.todos!.select?.using).toEqual({
@@ -445,7 +445,7 @@ describe("permissions DSL", () => {
       op: "Eq",
       value: {
         type: "SessionRef",
-        path: ["author"],
+        path: ["user"],
       },
     });
     expect(compiled.todos!.update?.using).toEqual({
@@ -454,7 +454,7 @@ describe("permissions DSL", () => {
       op: "Eq",
       value: {
         type: "SessionRef",
-        path: ["author"],
+        path: ["user"],
       },
     });
     expect(compiled.todos!.update?.with_check).toEqual({
@@ -463,7 +463,7 @@ describe("permissions DSL", () => {
       op: "Eq",
       value: {
         type: "SessionRef",
-        path: ["author"],
+        path: ["user"],
       },
     });
   });
@@ -487,7 +487,7 @@ describe("permissions DSL", () => {
       type: "Cmp",
       column: "$createdBy",
       op: "Eq",
-      value: { type: "SessionRef", path: ["author"] },
+      value: { type: "SessionRef", path: ["user"] },
     });
 
     const matching = canonicalAuthorSubject("https://issuer-a.example", "same-sub");

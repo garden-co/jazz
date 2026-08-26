@@ -36,7 +36,7 @@ describe("selfSignedClientProofFromConfig", () => {
     const staticBearer = markTrustedReservedSession({
       issuer: STATIC_BEARER_SESSION_ISSUER,
       user_id: "server",
-      author: canonicalAuthorSubject(STATIC_BEARER_SESSION_ISSUER, "server"),
+      user: canonicalAuthorSubject(STATIC_BEARER_SESSION_ISSUER, "server"),
       claims: {},
       authMode: "external",
     });
@@ -52,7 +52,7 @@ describe("selfSignedClientProofFromConfig", () => {
         {
           issuer: "https://issuer.example",
           user_id: "alice",
-          author: canonicalAuthorSubject("https://issuer.example", "alice"),
+          user: canonicalAuthorSubject("https://issuer.example", "alice"),
           claims: {},
           authMode: "external",
         },

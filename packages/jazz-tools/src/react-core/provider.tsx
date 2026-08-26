@@ -13,7 +13,7 @@ import {
   releaseClient as registryReleaseClient,
 } from "../runtime/client-registry.js";
 import type { PublicSession, Session } from "../runtime/context.js";
-import { withCanonicalAuthor } from "../runtime/author-id.js";
+import { withCanonicalUser } from "../runtime/author-id.js";
 import type { DbConfig } from "../runtime/db.js";
 import { trackPromise } from "../subscriptions-orchestrator.js";
 
@@ -285,5 +285,5 @@ export function useDb<TDb = unknown>(): TDb {
  */
 export function useSession(): PublicSession | null {
   const session = useJazzClient().session;
-  return session ? withCanonicalAuthor(session) : null;
+  return session ? withCanonicalUser(session) : null;
 }
