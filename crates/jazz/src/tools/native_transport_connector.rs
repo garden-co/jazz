@@ -50,12 +50,15 @@ impl std::fmt::Debug for NativeTransportRequest {
 ///
 /// `session_context` is authenticated during the adapter handshake. Keeping it
 /// with the transport prevents an adapter from asserting identity in semantic
-/// messages or requiring server-private admission APIs.
+/// messages or requiring server-private admission APIs. `terminal` observes
+/// the adapter's actual socket pump rather than semantic queue activity.
 pub struct ConnectedNativeTransport {
     pub transport: Box<dyn WireTransport + Send>,
     pub protocol_version: u16,
     pub features: u64,
     pub session_context: Option<ConnectionSessionContext>,
+    /// Resolves exactly once when the established adapter pump stops.
+    pub terminal: NativeTransportTerminalFuture,
 }
 
 /// Future returned by a target-specific native connector.
@@ -68,6 +71,19 @@ pub type NativeTransportFuture = Pin<
 >;
 pub type NativeCatalogueBootstrapFuture =
     Pin<Box<dyn Future<Output = Result<CatalogueSnapshot, NativeTransportError>> + Send + 'static>>;
+
+/// Future that resolves exactly once when an established adapter pump stops.
+pub type NativeTransportTerminalFuture =
+    Pin<Box<dyn Future<Output = NativeTransportTerminal> + Send + 'static>>;
+
+/// Terminal outcome of an established native transport.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NativeTransportTerminal {
+    /// The peer or local socket stack closed the established connection.
+    Closed(String),
+    /// The adapter stopped because transport input was invalid or I/O failed.
+    Failed(NativeTransportError),
+}
 
 /// Error at the target/socket boundary, before a core peer has been attached.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -134,6 +150,7 @@ mod tests {
                     protocol_version: 1,
                     features: 0,
                     session_context: None,
+                    terminal: Box::pin(std::future::pending()),
                 })
             })
         }
