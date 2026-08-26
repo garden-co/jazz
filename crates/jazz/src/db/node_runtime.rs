@@ -1497,7 +1497,13 @@ where
                 .enforce_edge_cache_budget(&pins, budget)
                 .await?;
         }
-        self.prune_settled_outbox_uploads();
+        // Outbox fates can only advance during this host tick when remote
+        // sync input was applied. A connected-but-silent upstream otherwise
+        // made every local write rescan every older pending upload, producing
+        // quadratic ingest while offline-but-connected.
+        if remote_sync_applied {
+            self.prune_settled_outbox_uploads();
+        }
         Ok(stats)
     }
 

@@ -2,16 +2,18 @@
 
 use std::collections::BTreeMap;
 
-use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, WriteIdentity, block_on};
+use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, Transport, WriteIdentity, block_on};
 use jazz::groove::records::Value;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+use jazz::protocol::SyncMessage;
 use jazz::schema::JazzSchema;
 use jazz::tools::{
     CmpOp, ColumnType, PolicyExpr, PolicyValue, Schema, SchemaBuilder, TablePolicies,
     TableSchemaBuilder,
 };
 use jazz::tx::DurabilityTier;
+use jazz::wire::TransportError;
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use tempfile::TempDir;
 
@@ -66,6 +68,13 @@ impl IngestFixture<MemoryStorage> {
         )
     }
 
+    pub fn memory_with_stalled_upstream(existing_jobs: usize) -> Self {
+        let mut fixture = Self::memory_with_attribution(existing_jobs, false);
+        let _connection = block_on(fixture.db.connect_upstream(Box::new(StalledTransport)));
+        fixture.tick_after_write = true;
+        fixture
+    }
+
     fn memory_with_attribution(existing_jobs: usize, attributed: bool) -> Self {
         let schema = schema(false);
         let families = schema.column_families();
@@ -78,6 +87,18 @@ impl IngestFixture<MemoryStorage> {
             false,
             false,
         )
+    }
+}
+
+struct StalledTransport;
+
+impl Transport for StalledTransport {
+    fn send(&mut self, _message: SyncMessage) -> Result<(), TransportError> {
+        Ok(())
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        None
     }
 }
 
