@@ -2296,6 +2296,8 @@ export class NativeRuntimeAdapter implements Runtime {
         const peerHasResponded =
           minimumPeerActivityEpoch == null ||
           this.peerTransportActivityEpoch > minimumPeerActivityEpoch ||
+          (minimumPeerActivityEpoch > 0 &&
+            this.peerTransportProcessedActivityEpoch >= minimumPeerActivityEpoch) ||
           (pendingPeerActivityEpoch != null &&
             this.peerTransportProcessedActivityEpoch >= pendingPeerActivityEpoch);
         if (peerHasResponded && this.db.queryAttachmentIsCovered(attachment)) return;

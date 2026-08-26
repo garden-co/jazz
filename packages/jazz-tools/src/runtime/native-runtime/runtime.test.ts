@@ -2694,6 +2694,59 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
+  it("accepts newer worker activity that was processed before reattachment", async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              all: () => new Uint8Array([0]),
+              connectUpstream: () => new FakeTransport([]),
+              prepareQuery: () => ({}),
+              attachQuery: () => ({}),
+              queryAttachmentIsCovered: () => true,
+              detachQuery: () => undefined,
+              setNonDurableClient: () => undefined,
+              tick: () => undefined,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      runtime.setNonDurableClient();
+      runtime.connectUpstreamPeer();
+
+      const first = runtime.query(JSON.stringify({ table: "todos" }), null, "edge");
+      await vi.advanceTimersByTimeAsync(10);
+      runtime.notifyPeerTransportActivity();
+      await vi.advanceTimersByTimeAsync(10);
+      await first;
+
+      // A policy-changing worker frame can be fully applied before React (or
+      // another caller) reattaches its query. The new attachment already
+      // reports covered state, so requiring a second frame would deadlock.
+      runtime.notifyPeerTransportActivity();
+      await runtime.progressPeerTransport();
+
+      let settled = false;
+      const second = runtime
+        .query(JSON.stringify({ table: "todos" }), null, "edge")
+        .then(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBe(true);
+      await second;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not reuse worker-confirmed coverage across trusted-serving identities", async () => {
     vi.useFakeTimers();
     try {
