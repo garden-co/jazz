@@ -71,6 +71,10 @@ impl IngestFixture<MemoryStorage> {
     pub fn memory_with_stalled_upstream(existing_jobs: usize) -> Self {
         let mut fixture = Self::memory_with_attribution(existing_jobs, false);
         let _connection = block_on(fixture.db.connect_upstream(Box::new(StalledTransport)));
+        // Ship the pre-existing backlog outside the measured closure. The
+        // transport remains silent, so every row stays pending in the shared
+        // outbox while the benchmark isolates steady host-tick maintenance.
+        block_on(fixture.db.tick()).expect("prime stalled upstream backlog");
         fixture.tick_after_write = true;
         fixture
     }

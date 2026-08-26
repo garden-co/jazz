@@ -44,8 +44,8 @@ fn next_1k_jobs_memory_with_write_state_check(
         .bench_local_values(IngestFixture::insert_next_1k);
 }
 
-/// Connected-but-stalled differential: each host tick currently rechecks the
-/// fate of every pending upload in the outbox.
+/// Connected-but-stalled differential after the existing backlog has been
+/// shipped once: each measured host tick should do work only for the new row.
 #[divan::bench(args = [0, 1_000, 3_000, 5_000], sample_count = 1)]
 fn next_1k_jobs_memory_with_stalled_upstream(
     bencher: divan::Bencher<'_, '_>,
