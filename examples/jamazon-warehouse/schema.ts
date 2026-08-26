@@ -11,7 +11,16 @@ const schema = {
       next_order_number: s.int(),
     })
     .indexOnly(["warehouse_id", "name"]),
-  items: s.table({ sku: s.string(), name: s.string(), unit_price_cents: s.int() }),
+  items: s
+    .table({
+      sku: s.string(),
+      name: s.string(),
+      unit_price_cents: s.int(),
+      // The global catalogue remains readable to warehouse operators, but its
+      // mutable source is still attributable to one operator.
+      operator_id: s.string(),
+    })
+    .indexOnly(["operator_id"]),
   stock: s
     .table({
       warehouse_id: s.ref("warehouses"),
@@ -41,20 +50,22 @@ const schema = {
     .indexOnly(["warehouse_id", "district_id", "status", "order_number", "idempotency_key"]),
   order_lines: s
     .table({
+      warehouse_id: s.ref("warehouses"),
       order_id: s.ref("orders"),
       item_id: s.ref("items"),
       quantity: s.int(),
       amount_cents: s.int(),
     })
-    .indexOnly(["order_id"]),
+    .indexOnly(["warehouse_id", "order_id"]),
   payments: s
     .table({
+      warehouse_id: s.ref("warehouses"),
       customer_id: s.ref("customers"),
       order_id: s.ref("orders").optional(),
       amount_cents: s.int(),
       idempotency_key: s.string(),
     })
-    .indexOnly(["order_id"]),
+    .indexOnly(["warehouse_id", "order_id"]),
   deliveries: s.table({
     warehouse_id: s.ref("warehouses"),
     district_id: s.ref("districts"),

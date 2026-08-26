@@ -76,6 +76,7 @@ impl Fixture {
                 ("sku", Value::String("JAM-002".into())),
                 ("name", Value::String("Cable".into())),
                 ("unit_price_cents", Value::I32(1_000)),
+                ("operator_id", Value::String("operator".into())),
             ],
         );
         insert(
@@ -97,6 +98,7 @@ impl Fixture {
                 ("sku", Value::String("JAM-003".into())),
                 ("name", Value::String("Picks".into())),
                 ("unit_price_cents", Value::I32(500)),
+                ("operator_id", Value::String("operator".into())),
             ],
         );
         insert(
@@ -149,6 +151,7 @@ impl Fixture {
                 ("sku", Value::String("JAM-001".into())),
                 ("name", Value::String("Jazzmaster strings".into())),
                 ("unit_price_cents", Value::I32(2_500)),
+                ("operator_id", Value::String("operator".into())),
             ],
         );
         insert(
@@ -448,6 +451,7 @@ impl Fixture {
             tx.insert(
                 "order_lines",
                 BTreeMap::from([
+                    ("warehouse_id".to_owned(), Value::Uuid(self.warehouse.0)),
                     ("order_id".to_owned(), Value::Uuid(order.0)),
                     ("item_id".to_owned(), Value::Uuid(self.item.0)),
                     ("quantity".to_owned(), Value::I32(quantity)),
@@ -463,6 +467,7 @@ impl Fixture {
             tx.insert(
                 "payments",
                 BTreeMap::from([
+                    ("warehouse_id".to_owned(), Value::Uuid(self.warehouse.0)),
                     ("customer_id".to_owned(), Value::Uuid(self.customer.0)),
                     (
                         "order_id".to_owned(),
@@ -525,26 +530,26 @@ impl Fixture {
             .expect("payments")
             .pop()
             .expect("payment exists");
-        let order_id = match line.cell_at(0) {
+        let order_id = match line.cell_at(1) {
             Some(Value::Uuid(id)) => id,
             other => panic!("invalid order-line relation: {other:?}"),
         };
         PurchaseArtifacts {
-            line_quantity: match line.cell_at(2) {
+            line_quantity: match line.cell_at(3) {
                 Some(Value::I32(value)) => value,
                 other => panic!("invalid line quantity: {other:?}"),
             },
-            line_amount_cents: match line.cell_at(3) {
+            line_amount_cents: match line.cell_at(4) {
                 Some(Value::I32(value)) => value,
                 other => panic!("invalid line amount: {other:?}"),
             },
-            payment_amount_cents: match payment.cell_at(2) {
+            payment_amount_cents: match payment.cell_at(3) {
                 Some(Value::I32(value)) => value,
                 other => panic!("invalid payment amount: {other:?}"),
             },
-            line_references_item: line.cell_at(1) == Some(Value::Uuid(self.item.0)),
-            payment_references_customer: payment.cell_at(0) == Some(Value::Uuid(self.customer.0)),
-            payment_references_order: matches!(payment.cell_at(1), Some(Value::Nullable(Some(value))) if *value == Value::Uuid(order_id)),
+            line_references_item: line.cell_at(2) == Some(Value::Uuid(self.item.0)),
+            payment_references_customer: payment.cell_at(1) == Some(Value::Uuid(self.customer.0)),
+            payment_references_order: matches!(payment.cell_at(2), Some(Value::Nullable(Some(value))) if *value == Value::Uuid(order_id)),
         }
     }
     pub fn customer_balance(&self) -> i32 {
@@ -622,7 +627,9 @@ fn schema() -> JazzSchema {
                 TableSchemaBuilder::new("items")
                     .column("sku", ColumnType::Text)
                     .column("name", ColumnType::Text)
-                    .column("unit_price_cents", ColumnType::Integer),
+                    .column("unit_price_cents", ColumnType::Integer)
+                    .column("operator_id", ColumnType::Text)
+                    .index_only(["operator_id"]),
             )
             .table(
                 TableSchemaBuilder::new("stock")
@@ -659,19 +666,21 @@ fn schema() -> JazzSchema {
             )
             .table(
                 TableSchemaBuilder::new("order_lines")
+                    .fk_column("warehouse_id", "warehouses")
                     .fk_column("order_id", "orders")
                     .fk_column("item_id", "items")
                     .column("quantity", ColumnType::Integer)
                     .column("amount_cents", ColumnType::Integer)
-                    .index_only(["order_id"]),
+                    .index_only(["warehouse_id", "order_id"]),
             )
             .table(
                 TableSchemaBuilder::new("payments")
+                    .fk_column("warehouse_id", "warehouses")
                     .fk_column("customer_id", "customers")
                     .nullable_fk_column("order_id", "orders")
                     .column("amount_cents", ColumnType::Integer)
                     .column("idempotency_key", ColumnType::Text)
-                    .index_only(["order_id"]),
+                    .index_only(["warehouse_id", "order_id"]),
             )
             .table(
                 TableSchemaBuilder::new("deliveries")
@@ -731,8 +740,8 @@ mod tests {
                     "idempotency_key",
                 ][..],
             ),
-            ("order_lines", &["order_id"][..]),
-            ("payments", &["order_id"][..]),
+            ("order_lines", &["warehouse_id", "order_id"][..]),
+            ("payments", &["warehouse_id", "order_id"][..]),
         ] {
             let table = warehouse_schema
                 .tables()

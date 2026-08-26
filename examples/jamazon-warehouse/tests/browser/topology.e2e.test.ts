@@ -75,6 +75,16 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                   })
                   .wait({ tier: "edge" }),
               ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
+              await expect(
+                outsider
+                  .insert(app.stock, {
+                    warehouse_id: warehouse.id,
+                    item_id: item.id,
+                    on_hand: 99,
+                    reorder_level: 1,
+                  })
+                  .wait({ tier: "edge" }),
+              ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
             },
           },
         },
@@ -130,6 +140,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                   sku: "JAM-001",
                   name: "Jazzmaster strings",
                   unit_price_cents: 2_500,
+                  operator_id: "jamazon-owner",
                 })
                 .wait({ tier: "edge" });
               stock = await owner
@@ -198,8 +209,8 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
               );
               expect(duplicateCheckouts).toHaveLength(2);
               const receipts = await Promise.all(
-                (await Promise.all(duplicateCheckouts)).map((checkout) =>
-                  withTimeout(checkout.wait(), 15_000, "exclusive checkout did not settle"),
+                duplicateCheckouts.map((checkout) =>
+                  withTimeout(checkout, 15_000, "exclusive checkout did not settle"),
                 ),
               );
               expect(receipts).toHaveLength(2);
@@ -267,7 +278,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                 { from: "edge", to: "core", label: "checkout-authority-handoff" },
                 undefined,
                 async () => {
-                  const checkout = await purchase(publicDb(owner), {
+                  const checkout = purchase(publicDb(owner), {
                     warehouseId: warehouse.id,
                     districtId: district.id,
                     customerId: customer.id,
@@ -276,7 +287,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                     idempotencyKey: "checkout-edge-core-loss",
                   });
                   recoveredReceipt = await withTimeout(
-                    checkout.wait(),
+                    checkout,
                     15_000,
                     "retried edge-to-core checkout did not settle",
                   );
@@ -605,8 +616,8 @@ async function checkoutSnapshot(
 ) {
   const [orders, orderLines, payments, stockRows, districtRows, customerRows] = await Promise.all([
     db.all(app.orders.where({ warehouse_id: warehouseId }), { tier: "edge" }),
-    db.all(app.order_lines.where({}), { tier: "edge" }),
-    db.all(app.payments.where({}), { tier: "edge" }),
+    db.all(app.order_lines.where({ warehouse_id: warehouseId }), { tier: "edge" }),
+    db.all(app.payments.where({ warehouse_id: warehouseId }), { tier: "edge" }),
     db.all(app.stock.where({ id: stockId }).limit(1), { tier: "edge" }),
     db.all(app.districts.where({ id: districtId }).limit(1), { tier: "edge" }),
     db.all(app.customers.where({ id: customerId }).limit(1), { tier: "edge" }),
