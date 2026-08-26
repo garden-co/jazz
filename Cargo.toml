@@ -28,6 +28,7 @@ members = [
   "examples/band-chat/benchmarks",
   "examples/music-agent/benchmarks",
   "examples/poster-shop/benchmarks",
+  "examples/jamazon-warehouse/benchmarks",
   "examples/benchmarks/smoke",
   "dev/benchmarks/storage/bench-core",
 ]

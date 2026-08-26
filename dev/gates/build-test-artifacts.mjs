@@ -13,6 +13,7 @@ import { linkSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
+import { snapshotCorrectnessArtifacts } from "../artifacts/test-artifact-store.mjs";
 
 const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 
@@ -356,6 +357,7 @@ export async function buildTestArtifacts(
   run = command,
   scope = createBuildScope(),
   lease = undefined,
+  snapshot = () => {},
 ) {
   let firstBuildError;
   const guardedRun = (command, args, label, env) =>
@@ -368,6 +370,19 @@ export async function buildTestArtifacts(
         }
         throw error;
       });
+
+  const preflightNapi = () =>
+    scope.track(
+      run(
+        "node",
+        [
+          "-e",
+          "const {nativeBinding,expectedNativeArtifactFingerprint:expected}=require('./crates/jazz-napi/native-binding.pointer.cjs'); const actual=nativeBinding.nativeArtifactFingerprint?.(); if(actual!==expected) { console.error(`Jazz NAPI artifact ABI mismatch: expected ${expected}, got ${String(actual)}`); process.exit(23); }",
+        ],
+        "preflight release NAPI",
+        { signal: scope.signal },
+      ),
+    );
 
   // Keep every Cargo invocation in the default target directory restored by
   // Swatinem/rust-cache. On the 4-vCPU CI runner, separate target directories
@@ -401,6 +416,29 @@ export async function buildTestArtifacts(
     ["dev/artifacts/stage-native-fingerprints.mjs", "--local"],
     "derive local artifact expectations",
   );
+  try {
+    // Validate the mutable producer generation before it can enter the
+    // immutable correctness store. A bad generation must never poison the
+    // fingerprint-addressed destination that its repair needs to publish.
+    await preflightNapi();
+  } catch (error) {
+    console.warn(`test-artifacts: release NAPI failed preflight; repairing (${error.message})`);
+    await guardedRun(
+      "pnpm",
+      ["exec", "turbo", "run", "build", "--filter=jazz-napi", "--only", "--force"],
+      "repair release NAPI",
+    );
+    await guardedRun(
+      "node",
+      ["dev/artifacts/stage-native-fingerprints.mjs", "--local"],
+      "refresh repaired artifact expectations",
+    );
+    await preflightNapi();
+  }
+  // Seal the exact pair before jazz-tools bundles its broker worker. The
+  // mutable package publication paths are still useful to package builds, but
+  // correctness bundles must never follow a later replacement generation.
+  snapshot(root);
   // The atomic WASM producer seals its matching manifest before publication.
   await guardedRun(
     "pnpm",
@@ -422,25 +460,7 @@ export async function buildTestArtifacts(
     "seal release NAPI provenance",
   );
 
-  try {
-    // A load failure is expected to enter the bounded repair path, so unlike a
-    // build failure it must not abort the parent scope before repair starts.
-    await scope.track(
-      run("node", ["-e", "require('./crates/jazz-napi')"], "load release NAPI", {
-        signal: scope.signal,
-      }),
-    );
-  } catch (error) {
-    // A damaged native artifact must not make every run pay a second build.
-    // Repair only after the first load proves it necessary, then prove repair.
-    console.warn(`test-artifacts: release NAPI did not load; repairing (${error.message})`);
-    await guardedRun(
-      "pnpm",
-      ["exec", "turbo", "run", "build", "--filter=jazz-napi", "--only", "--force"],
-      "repair release NAPI",
-    );
-    await guardedRun("node", ["-e", "require('./crates/jazz-napi')"], "load repaired release NAPI");
-  }
+  await guardedRun("node", ["-e", "require('./crates/jazz-napi')"], "load release NAPI");
   await guardedRun(
     "node",
     ["dev/artifacts/provenance.mjs", "verify", "napi", "release"],
@@ -460,10 +480,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.error("test-artifacts: expected no argument or `unlock`");
     process.exitCode = 1;
   } else
-    withArtifactBuildLock((scope, lease) => buildTestArtifacts(command, scope, lease)).catch(
-      (error) => {
-        console.error(`test-artifacts: ${error.message}`);
-        process.exitCode = 1;
-      },
-    );
+    withArtifactBuildLock((scope, lease) =>
+      buildTestArtifacts(command, scope, lease, snapshotCorrectnessArtifacts),
+    ).catch((error) => {
+      console.error(`test-artifacts: ${error.message}`);
+      process.exitCode = 1;
+    });
 }

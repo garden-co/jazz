@@ -65,6 +65,14 @@ must never call a focused, crate-only, or partial-artifact receipt
 CI-equivalent. Use `--ci-partition <name>` only when reproducing one named CI
 job during diagnosis; it is likewise not a full CI-equivalent result.
 
+**Generated correctness bindings.** `pnpm build:test-artifacts` seals the
+fast-WASM/release-NAPI pair into a fingerprint-addressed store under the
+current worktree's ignored `target/` directory. Browser and native correctness
+tests consume that immutable pair, not the mutable package output directories. Do not copy
+or share generated `pkg/` or NAPI generations between lanes; rebuild in the
+checkout whose tests you are running. The explicit ABI/provenance preflight is
+intentional and must remain fail-closed.
+
 - `cargo test -p jazz`
 - `cargo test -p groove`
 - `cargo test -p jazz --no-default-features --features testing,transport-compression-zstd` (matches `crates/jazz/TESTING_GUIDELINES.md`).

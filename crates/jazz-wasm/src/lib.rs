@@ -1179,6 +1179,8 @@ impl WasmDb {
         let db = open_db(schema, storage, config)
             .await
             .map_err(to_js_error)?;
+        db.restore_browser_relay_pending_uploads()
+            .map_err(to_js_error)?;
         db.set_deferred_local_persistence(true);
         Ok(Self {
             inner: WasmDbInner::Browser(Rc::new(db)),
@@ -1207,6 +1209,8 @@ impl WasmDb {
             .map_err(to_js_error)?;
         let db = open_db(schema, storage, config)
             .await
+            .map_err(to_js_error)?;
+        db.restore_browser_relay_pending_uploads()
             .map_err(to_js_error)?;
         db.set_deferred_local_persistence(true);
         Ok(Self {

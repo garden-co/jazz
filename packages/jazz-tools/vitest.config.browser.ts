@@ -5,6 +5,7 @@ import topLevelAwait from "vite-plugin-top-level-await";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import { resolve } from "node:path";
 import { playwright } from "@vitest/browser-playwright";
+import { readCorrectnessArtifactSnapshot } from "../../dev/artifacts/test-artifact-store.mjs";
 import {
   blockJazzServerNetwork,
   jazzServerInfo,
@@ -37,6 +38,10 @@ if (!(["chromium", "firefox", "webkit"] as const).includes(browserName as never)
 }
 const excludeRealisticBrowserBench = shouldExcludeRealisticBrowserBench();
 const realisticBrowserBenchReportDir = resolve(__dirname, ".vitest-browser-bench");
+const correctnessSnapshot = readCorrectnessArtifactSnapshot(resolve(__dirname, "../.."));
+const jazzWasmTestEntry = correctnessSnapshot
+  ? resolve(correctnessSnapshot.wasmPackage, "jazz_wasm.js")
+  : resolve(__dirname, "../../crates/jazz-wasm");
 
 export default defineConfig({
   define: {
@@ -66,7 +71,7 @@ export default defineConfig({
       // Point Vite at the workspace package, rather than its generated
       // directory. The package manifest selects pkg/jazz_wasm.js; wasm-pack's
       // web target intentionally does not emit a second manifest in pkg/.
-      "jazz-wasm": resolve(__dirname, "../../crates/jazz-wasm"),
+      "jazz-wasm": jazzWasmTestEntry,
     },
   },
   worker: {
