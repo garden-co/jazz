@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, it } from "vitest";
 import { schema as s } from "../../src/index.js";
 import { createDb, type Db } from "../../src/runtime/db.js";
-import { applySubscriptionDelta } from "../../src/runtime/subscription-manager.js";
 
 const schema = {
   orgs: s.table({
@@ -64,10 +63,9 @@ describe("deep-include reactivity", () => {
       value: { id: todoId },
     } = db.insert(app.todos, { title: "ship it", org_id: orgId });
 
-    const current: Todo[] = [];
     const snapshots: Todo[][] = [];
-    const unsubscribe = db.subscribeAll(app.todos.include({ user_checksViaTodo: true }), (delta) =>
-      snapshots.push([...applySubscriptionDelta(current, delta)]),
+    const unsubscribe = db.subscribe(app.todos.include({ user_checksViaTodo: true }), (rows) =>
+      snapshots.push([...rows]),
     );
 
     await waitForCondition(
@@ -108,11 +106,10 @@ describe("deep-include reactivity", () => {
       value: { id: todoId },
     } = db.insert(app.todos, { title: "ship it", org_id: orgId });
 
-    const current: Org[] = [];
     const snapshots: Org[][] = [];
-    const unsubscribe = db.subscribeAll(
+    const unsubscribe = db.subscribe(
       app.orgs.include({ todosViaOrg: { user_checksViaTodo: true } }),
-      (delta) => snapshots.push([...applySubscriptionDelta(current, delta)]),
+      (rows) => snapshots.push([...rows]),
     );
 
     await waitForCondition(
@@ -158,13 +155,12 @@ describe("deep-include reactivity", () => {
       value: { id: userCheckId },
     } = db.insert(app.user_checks, { todo_id: todoId });
 
-    const current: Org[] = [];
     const snapshots: Org[][] = [];
-    const unsubscribe = db.subscribeAll(
+    const unsubscribe = db.subscribe(
       app.orgs.include({
         todosViaOrg: { user_checksViaTodo: { check_notesViaUser_check: true } },
       }),
-      (delta) => snapshots.push([...applySubscriptionDelta(current, delta)]),
+      (rows) => snapshots.push([...rows]),
     );
 
     await waitForCondition(

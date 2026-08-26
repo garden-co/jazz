@@ -89,12 +89,11 @@ describe("Db disconnect/reconnect", () => {
         let edgeSettled = false;
         let reconnectRequested = false;
         const unsubscribe = ctx.trackSubscription(
-          db.subscribeAll(
+          db.subscribe(
             app.todos,
-            (delta) => {
-              if (delta.all === undefined) return;
+            (rows) => {
               snapshots.push({
-                rows: [...delta.all],
+                rows: [...rows],
                 edgeSettled,
                 afterReconnect: reconnectRequested,
               });
@@ -168,12 +167,11 @@ describe("Db disconnect/reconnect", () => {
       let edgeSettled = false;
       let reconnectRequested = false;
       const unsubscribe = ctx.trackSubscription(
-        db.subscribeAll(
+        db.subscribe(
           todoByTitle(title),
-          (delta) => {
-            if (delta.all === undefined) return;
+          (rows) => {
             snapshots.push({
-              rows: [...delta.all],
+              rows: [...rows],
               edgeSettled,
               afterReconnect: reconnectRequested,
             });
@@ -265,12 +263,11 @@ describe("Db disconnect/reconnect", () => {
         edgeSettled = true;
       });
       const unsubscribe = ctx.trackSubscription(
-        db.subscribeAll(
+        db.subscribe(
           todoByTitle(title),
-          (delta) => {
-            if (delta.all === undefined) return;
+          (rows) => {
             snapshots.push({
-              rows: [...delta.all],
+              rows: [...rows],
               edgeSettled,
               afterReconnect: reconnectRequested,
             });
@@ -314,11 +311,10 @@ describe("Db disconnect/reconnect", () => {
       );
       const snapshots: Todo[][] = [];
       const unsubscribe = ctx.trackSubscription(
-        db.subscribeAll(
+        db.subscribe(
           todoByTitle(deletedTitle),
-          (delta) => {
-            if (delta.all === undefined) return;
-            snapshots.push([...delta.all]);
+          (rows) => {
+            snapshots.push([...rows]);
           },
           { tier: "edge", localUpdates: "immediate" },
         ),
@@ -637,7 +633,7 @@ describe("Db disconnect/reconnect", () => {
       await db.disconnect();
 
       let callbacks = 0;
-      const unsubscribe = db.subscribeAll(
+      const unsubscribe = db.subscribe(
         app.todos,
         () => {
           callbacks += 1;

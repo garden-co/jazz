@@ -56,10 +56,8 @@ import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import {
   normalizeBuiltQuery,
   type BuiltRelation,
-  type NormalizedIncludeSpec,
   type NormalizedBuiltQuery,
 } from "./query-builder-shape.js";
-import { resolveSelectedColumns } from "./select-projection.js";
 import {
   BrowserConnectionManager,
   DirectConnectionManager,
@@ -192,6 +190,30 @@ export type QueryOptions = Omit<InternalQueryExecutionOptions, "branch"> & {
   base?: BranchBase;
 };
 
+/** Package-internal subscription surface used by Jazz's UI bindings. */
+export interface DbSubscriptionSource {
+  all?<T extends { id: string }>(
+    query: QueryBuilder<T>,
+    options?: QueryOptions,
+    session?: Session,
+  ): Promise<T[]> | T[];
+  subscribeDelta<T extends { id: string }>(
+    query: QueryBuilder<T>,
+    callback: (delta: SubscriptionDelta<T>) => void,
+    options?: QueryOptions,
+    session?: Session,
+  ): () => void;
+}
+
+const dbSubscriptionSources = new WeakMap<Db, DbSubscriptionSource>();
+
+/** @internal Retrieve the incremental source associated with a public Db. */
+export function getDbSubscriptionSource(db: Db): DbSubscriptionSource {
+  const source = dbSubscriptionSources.get(db);
+  if (!source) throw new Error("Jazz Db is missing its internal subscription source.");
+  return source;
+}
+
 interface TimestampOverrideOptions {
   updatedAt?: number;
 }
@@ -308,7 +330,10 @@ function nativeDbQueryOptions(
     if (base !== undefined) throw new Error("A branch base requires a branch head.");
     return rest;
   }
-  return { ...rest, branch: normalizeBranchView(schema, tableName, branch, base) };
+  return {
+    ...rest,
+    branch: normalizeBranchView(schema, tableName, branch, base),
+  };
 }
 
 function normalizeInsertOptions(
@@ -320,7 +345,10 @@ function normalizeInsertOptions(
   const { branch, ...rest } = options;
   return branch === undefined
     ? rest
-    : { ...rest, branch: normalizeBranchSelector(schema, tableName, branch, "table") };
+    : {
+        ...rest,
+        branch: normalizeBranchSelector(schema, tableName, branch, "table"),
+      };
 }
 
 function normalizeRestoreOptions(
@@ -332,7 +360,10 @@ function normalizeRestoreOptions(
   const { branch, ...rest } = options;
   return branch === undefined
     ? rest
-    : { ...rest, branch: normalizeBranchSelector(schema, tableName, branch, "table") };
+    : {
+        ...rest,
+        branch: normalizeBranchSelector(schema, tableName, branch, "table"),
+      };
 }
 
 function normalizeUpdateOptions(
@@ -346,7 +377,10 @@ function normalizeUpdateOptions(
     if (base !== undefined) throw new Error("A branch base requires a branch head.");
     return rest;
   }
-  return { ...rest, branch: normalizeBranchView(schema, tableName, branch, base) };
+  return {
+    ...rest,
+    branch: normalizeBranchView(schema, tableName, branch, base),
+  };
 }
 
 export function limitQueryToOne<T>(query: QueryBuilder<T>): QueryBuilder<T> {
@@ -420,7 +454,7 @@ function trimSubscriptionTraceStack(stack: string | undefined): string | undefin
   const isInternalFrame = (line: string): boolean => {
     return (
       line.includes("Db.registerActiveQuerySubscriptionTrace") ||
-      line.includes("Db.subscribeAll") ||
+      line.includes("Db.subscribe") ||
       line.includes("SubscriptionsOrchestrator.ensureEntryForKey") ||
       line.includes("SubscriptionsOrchestrator.getCacheEntry") ||
       line.includes("/node_modules/") ||
@@ -1087,9 +1121,8 @@ export type TransactionScope<TKind extends TransactionKind = TransactionKind> = 
  * const todo = await db.one(app.todos.where({ id: inserted.id }));
  *
  * // Subscriptions
- * const unsubscribe = db.subscribeAll(app.todos, (delta) => {
- *   console.log("All todos:", delta.all);
- *   console.log("Changes:", delta.delta);
+ * const unsubscribe = db.subscribe(app.todos, (todos) => {
+ *   console.log("All todos:", todos);
  * });
  * ```
  */
@@ -1125,6 +1158,11 @@ export class Db {
     this.runtimeSource = runtimeSource;
     this.authStateStore = createAuthStateStore(config, authStateOptions);
     this.connection = new DirectConnectionManager(this.dbForConnection());
+    dbSubscriptionSources.set(this, {
+      all: (query, options) => this.all(query, options),
+      subscribeDelta: (query, callback, options, session) =>
+        this.subscribeDelta(query, callback, options, session),
+    });
   }
 
   private dbForConnection(): DbForConnection {
@@ -1876,6 +1914,26 @@ export class Db {
     return results[0] ?? null;
   }
 
+  /** Subscribe to a query and receive its complete current result whenever it changes. */
+  subscribe<T extends { id: string }>(
+    query: QueryBuilder<T>,
+    callback: (rows: T[]) => void,
+    options?: QueryOptions,
+    session?: Session,
+  ): () => void {
+    return this.subscribeDelta(
+      query,
+      (update) => {
+        if (update.all === undefined) {
+          throw new Error("Jazz subscription update is missing its materialized result.");
+        }
+        callback(update.all);
+      },
+      options,
+      session,
+    );
+  }
+
   /**
    * Subscribe to a query and receive updates when results change.
    *
@@ -1895,7 +1953,7 @@ export class Db {
    * ```typescript
    * import { RowChangeKind } from "jazz-tools";
    *
-   * const unsubscribe = db.subscribeAll(app.todos, (delta) => {
+   * const unsubscribe = db.subscribeDelta(app.todos, (delta) => {
    *   setTodos(delta.all);
    *   for (const change of delta.delta) {
    *     if (change.kind === RowChangeKind.Added) {
@@ -1908,7 +1966,7 @@ export class Db {
    * unsubscribe();
    * ```
    */
-  subscribeAll<T extends { id: string }>(
+  private subscribeDelta<T extends { id: string }>(
     query: QueryBuilder<T>,
     callback: (delta: SubscriptionDelta<T>) => void,
     options?: QueryOptions,
@@ -2061,7 +2119,11 @@ export class Db {
       !queryUsesRelationTraversal(builtQuery)
     ) {
       const seedQuery = () =>
-        this.all(query, { ...options, tier: "local", propagation: "local-only" });
+        this.all(query, {
+          ...options,
+          tier: "local",
+          propagation: "local-only",
+        });
       const seedRows =
         session == null
           ? seedQuery()
@@ -2175,7 +2237,10 @@ export class Db {
 
   private parseRuntimeQueryTracePayload(queryJson: string): RuntimeQueryTracePayload {
     try {
-      const parsed = JSON.parse(queryJson) as { table?: unknown; branches?: unknown };
+      const parsed = JSON.parse(queryJson) as {
+        table?: unknown;
+        branches?: unknown;
+      };
       const table = typeof parsed.table === "string" ? parsed.table : "unknown";
       const branches = Array.isArray(parsed.branches)
         ? parsed.branches.filter((branch): branch is string => typeof branch === "string")
@@ -2278,7 +2343,11 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
         parseJwtPayload(jwtToken) ?? {},
         "local-first",
       );
-      resolvedConfig = { ...configWithoutAuth, jwtToken, trustedReservedSession };
+      resolvedConfig = {
+        ...configWithoutAuth,
+        jwtToken,
+        trustedReservedSession,
+      };
     }
   } else if (!config.jwtToken && !config.cookieSession && !config.adminSecret) {
     // Anonymous: mint an ephemeral keypair + anonymous JWT.

@@ -50,6 +50,7 @@ const mocks = vi.hoisted(() => {
 vi.mock("../runtime/db.js", () => ({
   Db: class {},
   createDb: mocks.createDb,
+  getDbSubscriptionSource: (db: unknown) => db,
   resolveDefaultPersistentDbName: (config: DbConfig) => {
     const driver = config.driver;
     if (driver?.type === "persistent" && driver.dbName?.trim()) {

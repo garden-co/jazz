@@ -36,7 +36,7 @@ function makeHarness(appId: string, options?: { throwOnSubscribe?: Error }) {
     getAuthState: () => ({ authMode: "local-first" as const, session: null }),
     onAuthChanged: () => () => {},
     updateAuthToken: () => {},
-    subscribeAll: (_query: any, callback: (d: SubscriptionDelta<any>) => void) => {
+    subscribeDelta: (_query: any, callback: (d: SubscriptionDelta<any>) => void) => {
       if (options?.throwOnSubscribe) {
         throw options.throwOnSubscribe;
       }

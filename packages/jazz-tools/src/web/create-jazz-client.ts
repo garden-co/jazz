@@ -2,7 +2,7 @@ import type { Session } from "../runtime/context.js";
 import { createClientConfigKey } from "../runtime/client-config-key.js";
 import { acquireClient, releaseClient } from "../runtime/client-registry.js";
 import type { Db, DbConfig } from "../runtime/db.js";
-import { createDb } from "../runtime/db.js";
+import { createDb, getDbSubscriptionSource } from "../runtime/db.js";
 import { runCleanupSteps } from "../runtime/run-cleanup-steps.js";
 import { SubscriptionsOrchestrator, trackPromise } from "../subscriptions-orchestrator.js";
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
@@ -19,7 +19,11 @@ export interface JazzClient {
 async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
   const db = await createDb(config);
   let session = db.getAuthState().session;
-  const manager = new SubscriptionsOrchestrator({ appId: config.appId }, db, session);
+  const manager = new SubscriptionsOrchestrator(
+    { appId: config.appId },
+    getDbSubscriptionSource(db),
+    session,
+  );
   await manager.init();
   const stopSessionSync = db.onAuthChanged(({ session: nextSession }) => {
     session = nextSession ?? null;

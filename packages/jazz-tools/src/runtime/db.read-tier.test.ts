@@ -87,9 +87,8 @@ function added(id: string, title: string): RuntimeSubscriptionDelta {
   };
 }
 
-function publicationTitles(delta: { all?: Array<{ title: string }> }): string[] {
-  if (!delta.all) throw new Error("expected subscription publication to include complete results");
-  return delta.all.map((row) => row.title);
+function publicationTitles(rows: Array<{ title: string }>): string[] {
+  return rows.map((row) => row.title);
 }
 
 const dbs: Db[] = [];
@@ -158,7 +157,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     dbs.push(db);
     const callback = vi.fn();
 
-    const unsubscribe = db.subscribeAll(query(), callback, {
+    const unsubscribe = db.subscribe(query(), callback, {
       tier: ReadTier.RemoteIfPossible,
     });
     await settle();
@@ -306,7 +305,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     dbs.push(db);
     await db.disconnect();
 
-    const unsubscribe = db.subscribeAll(query(), () => undefined, {
+    const unsubscribe = db.subscribe(query(), () => undefined, {
       tier: ReadTier.RemoteIfPossible,
     });
     const reconnect = db.reconnect();
@@ -340,7 +339,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     dbs.push(db);
 
     await db.disconnect();
-    const unsubscribe = db.subscribeAll(query(), () => undefined, {
+    const unsubscribe = db.subscribe(query(), () => undefined, {
       tier: ReadTier.RemoteIfPossible,
     });
 
@@ -371,7 +370,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     await db.disconnect();
 
     const publications: string[][] = [];
-    const unsubscribe = db.subscribeAll(
+    const unsubscribe = db.subscribe(
       query(),
       (delta) => publications.push(publicationTitles(delta)),
       { tier: ReadTier.RemoteIfPossible },
@@ -420,7 +419,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     dbs.push(db);
     await db.disconnect();
     const publications: string[][] = [];
-    const unsubscribe = db.subscribeAll(
+    const unsubscribe = db.subscribe(
       query(),
       (delta) => publications.push(publicationTitles(delta)),
       { tier: ReadTier.RemoteIfPossible },
@@ -451,7 +450,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     dbs.push(db);
     await db.disconnect();
     const publications: string[][] = [];
-    const unsubscribe = db.subscribeAll(
+    const unsubscribe = db.subscribe(
       query(),
       (delta) => publications.push(publicationTitles(delta)),
       { tier: ReadTier.RemoteIfPossible },
@@ -497,10 +496,10 @@ describe("Db ReadTier.RemoteIfPossible", () => {
 
     for (let cycle = 0; cycle < 3; cycle++) {
       await db.disconnect();
-      const first = db.subscribeAll(query(), () => undefined, {
+      const first = db.subscribe(query(), () => undefined, {
         tier: ReadTier.RemoteIfPossible,
       });
-      const second = db.subscribeAll(query(), () => undefined, {
+      const second = db.subscribe(query(), () => undefined, {
         tier: ReadTier.RemoteIfPossible,
       });
       const firstLocal = cycle * 4 + 1;
@@ -530,7 +529,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     );
     dbs.push(db);
     await db.disconnect();
-    const unsubscribe = db.subscribeAll(query(), () => undefined, {
+    const unsubscribe = db.subscribe(query(), () => undefined, {
       tier: ReadTier.RemoteIfPossible,
     });
 

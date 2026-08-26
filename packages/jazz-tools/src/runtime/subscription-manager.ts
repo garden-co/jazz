@@ -374,13 +374,10 @@ export class SubscriptionManager<T extends { id: string }> {
     incoming: RuntimeTerminalOperation[],
     removedRoots: ReadonlySet<string>,
   ): RuntimeTerminalOperation[] {
-    const operations = [
-      ...this.deferredTerminalOperations.map((operation) => ({ operation, deferred: true })),
-      ...incoming.map((operation) => ({ operation, deferred: false })),
-    ];
+    const operations = [...this.deferredTerminalOperations, ...incoming];
     this.deferredTerminalOperations = [];
     const ready: RuntimeTerminalOperation[] = [];
-    for (const { operation, deferred } of operations) {
+    for (const operation of operations) {
       if (operation.path.length === 0) {
         throw new Error("native producer emitted a root terminal operation");
       }

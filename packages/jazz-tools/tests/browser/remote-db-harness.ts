@@ -179,10 +179,10 @@ export async function waitForRemoteBrowserDbTitle(
         ),
       );
     }, input.timeoutMs);
-    unsubscribe = state.db.subscribeAll(
+    unsubscribe = state.db.subscribe(
       state.query,
-      (delta) => {
-        lastRows = [...delta.all];
+      (rows) => {
+        lastRows = [...rows];
         if (lastRows.some((row) => row.title === input.title)) {
           clearTimeout(timeout);
           unsubscribe();

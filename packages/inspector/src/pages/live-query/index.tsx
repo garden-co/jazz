@@ -251,7 +251,7 @@ function OverlayLiveQuery() {
         <div>
           <h1 className={styles.title}>Subscriptions</h1>
           <p className={styles.subtitle}>
-            Active `Db.subscribeAll(...)` subscriptions captured from the inspected page runtime.
+            Active `Db.subscribe(...)` subscriptions captured from the inspected page runtime.
           </p>
         </div>
         <LiveQueryFilters
