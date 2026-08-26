@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import packageJson from "../package.json" with { type: "json" };
 
 const cwd = fileURLToPath(new URL("..", import.meta.url));
 
@@ -20,4 +21,14 @@ test("browser and provider gates select disjoint receipts", () => {
   assert.doesNotMatch(topology, /tests\/browser\/provider\.e2e\.test\.tsx/);
   assert.match(provider, /tests\/browser\/provider\.e2e\.test\.tsx/);
   assert.doesNotMatch(provider, /tests\/browser\/topology\.e2e\.test\.ts/);
+});
+
+test("the maintained package gate includes every non-topology receipt", () => {
+  assert.match(packageJson.scripts.test, /test:unit/);
+  assert.match(packageJson.scripts.test, /test:provider/);
+  assert.match(packageJson.scripts.test, /test:selection/);
+  assert.equal(
+    packageJson.scripts["test:topology"],
+    "vitest run --config vitest.config.browser.ts",
+  );
 });
