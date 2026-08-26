@@ -1,5 +1,7 @@
 import { describe, expect, test } from "vitest";
+import { sessionAuthor } from "jazz-tools";
 import { translateQuery } from "../../../../../packages/jazz-tools/src/runtime/query-adapter.js";
+import accessPaths from "../../../access-paths.json";
 import { app } from "../schema.js";
 import {
   ALBUM_TRACK_LIMIT,
@@ -9,6 +11,21 @@ import {
 } from "../src/record-player.js";
 
 describe("RecordPlayer scenario receipt", () => {
+  test("keeps the same provider subject isolated across issuers", () => {
+    expect(sessionAuthor("https://one.example", "listener")).not.toBe(
+      sessionAuthor("https://two.example", "listener"),
+    );
+  });
+
+  test("uses the same indexed access paths as the native benchmark", () => {
+    const actual = Object.fromEntries(
+      Object.entries(app.wasmSchema)
+        .filter(([name]) => name in accessPaths)
+        .map(([name, table]) => [name, table.indexed_columns]),
+    );
+    expect(actual).toEqual(accessPaths);
+  });
+
   test("creates an audio-bearing track with the public streaming mutation", async () => {
     let captured: unknown;
     const db = {

@@ -54,30 +54,38 @@ const recipientPermissions = s.definePermissions(recipientApp, ({ policy, sessio
 // scalar control: a correlated owner path through a referenced playlist.
 const relationalRecipientApp = s.defineApp({
   ...betterAuthSchema,
-  albums: s.table({
-    title: s.string(),
-    artist: s.string(),
-    cover_locator: s.string().optional(),
-  }),
-  tracks: s.table({
-    album_id: s.ref("albums"),
-    title: s.string(),
-    ordinal: s.int(),
-    duration_ms: s.int(),
-    audio_bytes: s.bytes().optional(),
-  }),
+  albums: s
+    .table({
+      title: s.string(),
+      artist: s.string(),
+      cover_locator: s.string().optional(),
+    })
+    .indexOnly(["title"]),
+  tracks: s
+    .table({
+      album_id: s.ref("albums"),
+      title: s.string(),
+      ordinal: s.int(),
+      duration_ms: s.int(),
+      audio_bytes: s.bytes().optional(),
+    })
+    .indexOnly(["album_id", "ordinal"]),
   playlists: s.table({ name: s.string() }),
-  playlist_entries: s.table({
-    playlist_id: s.ref("playlists"),
-    track_id: s.ref("tracks"),
-    position: s.float(),
-  }),
-  invitations: s.table({
-    playlist_id: s.ref("playlists"),
-    subject: s.string(),
-    role: s.enum("listener", "editor"),
-    status: s.enum("pending", "accepted", "revoked"),
-  }),
+  playlist_entries: s
+    .table({
+      playlist_id: s.ref("playlists"),
+      track_id: s.ref("tracks"),
+      position: s.float(),
+    })
+    .indexOnly(["playlist_id", "position"]),
+  invitations: s
+    .table({
+      playlist_id: s.ref("playlists"),
+      subject: s.string(),
+      role: s.enum("listener", "editor"),
+      status: s.enum("pending", "accepted", "revoked"),
+    })
+    .indexOnly(["playlist_id", "subject", "role", "status"]),
   playback_positions: s.table({
     playlist_id: s.ref("playlists"),
     track_id: s.ref("tracks"),
@@ -86,9 +94,7 @@ const relationalRecipientApp = s.defineApp({
 });
 const relationalRecipientPermissions = {
   ...betterAuthPermissions,
-  ...s.definePermissions(
-  relationalRecipientApp,
-  ({ policy, session, anyOf, allowedTo }) => {
+  ...s.definePermissions(relationalRecipientApp, ({ policy, session, anyOf, allowedTo }) => {
     policy.albums.allowRead.where({});
     policy.albums.allowInsert.always();
     policy.tracks.allowRead.where({});
@@ -152,8 +158,7 @@ const relationalRecipientPermissions = {
       .whereOld({ $createdBy: session.author })
       .whereNew({ $createdBy: session.author });
     policy.playback_positions.allowDelete.where({ $createdBy: session.author });
-  },
-  ),
+  }),
 };
 
 describe("RecordPlayer authenticated playlist topology", () => {
@@ -176,8 +181,6 @@ describe("RecordPlayer authenticated playlist topology", () => {
       getJazzServerJwtForUser("record-player-recipient-editor", undefined, server.appId),
       getJazzServerJwtForUser("record-player-recipient-listener", undefined, server.appId),
     ]);
-    const recipientAuthor = canonicalAuthor(recipientToken);
-    const secondRecipientAuthor = canonicalAuthor(secondRecipientToken);
     const owner = await openClient(server, "recipient-owner", ownerToken);
     const recipient = await openClient(
       server,
@@ -186,6 +189,8 @@ describe("RecordPlayer authenticated playlist topology", () => {
       uniqueDbName("record-player-recipient-editor-persistent"),
     );
     const secondRecipient = await openClient(server, "recipient-listener", secondRecipientToken);
+    const recipientAuthor = sessionAuthorOf(recipient);
+    const secondRecipientAuthor = sessionAuthorOf(secondRecipient);
     const playlist = await owner
       .insert(app.playlists, {
         name: "recipient settlement receipt",
@@ -240,9 +245,9 @@ describe("RecordPlayer authenticated playlist topology", () => {
       getJazzServerJwtForUser("record-player-acceptance-owner", undefined, server.appId),
       getJazzServerJwtForUser("record-player-acceptance-recipient", undefined, server.appId),
     ]);
-    const recipientAuthor = canonicalAuthor(recipientToken);
     const owner = await openClient(server, "acceptance-owner", ownerToken);
     const recipient = await openClient(server, "acceptance-recipient", recipientToken);
+    const recipientAuthor = sessionAuthorOf(recipient);
     const playlist = await owner
       .insert(app.playlists, {
         name: "acceptance settlement receipt",
@@ -353,9 +358,9 @@ describe("RecordPlayer authenticated playlist topology", () => {
       getJazzServerJwtForUser("record-player-scalar-owner", undefined, server.appId),
       getJazzServerJwtForUser("record-player-scalar-recipient", undefined, server.appId),
     ]);
-    const recipientAuthor = canonicalAuthor(recipientToken);
     const owner = await openClient(server, "scalar-owner", ownerToken);
     const recipient = await openClient(server, "scalar-recipient", recipientToken);
+    const recipientAuthor = sessionAuthorOf(recipient);
     const invite = await owner
       .insert(recipientApp.invitations, {
         subject: recipientAuthor,
@@ -395,11 +400,11 @@ describe("RecordPlayer authenticated playlist topology", () => {
       getJazzServerJwtForUser("record-player-relation-recipient", undefined, server.appId),
       getJazzServerJwtForUser("record-player-relation-listener", undefined, server.appId),
     ]);
-    const recipientAuthor = canonicalAuthor(recipientToken);
-    const secondRecipientAuthor = canonicalAuthor(secondRecipientToken);
     const owner = await openClient(server, "relation-owner", ownerToken);
     const recipient = await openClient(server, "relation-recipient", recipientToken);
     const secondRecipient = await openClient(server, "relation-listener", secondRecipientToken);
+    const recipientAuthor = sessionAuthorOf(recipient);
+    const secondRecipientAuthor = sessionAuthorOf(secondRecipient);
     const playlist = await owner
       .insert(relationalRecipientApp.playlists, {
         name: "recipient relation receipt",
@@ -497,7 +502,6 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 getJazzServerJwtForUser("record-player-phase-recipient", undefined, server.appId),
                 getJazzServerJwtForUser("record-player-phase-listener", undefined, server.appId),
               ]);
-              const recipientAuthor = canonicalAuthor(recipientToken);
               const owner = await openClient(server, "phase-owner", ownerToken);
               const recipient = await openClient(
                 server,
@@ -506,6 +510,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 uniqueDbName("record-player-phase-recipient-persistent"),
               );
               await openClient(server, "phase-listener", listenerToken);
+              const recipientAuthor = sessionAuthorOf(recipient);
               const mutationErrors: unknown[] = [];
               const stopMutationErrors = owner.onMutationError((event) =>
                 mutationErrors.push(event),
@@ -622,8 +627,6 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 getJazzServerJwtForUser("record-player-listener", undefined, server.appId),
               ]);
               editorToken = issuedEditorToken;
-              editorAuthor = canonicalAuthor(issuedEditorToken);
-              listenerAuthor = canonicalAuthor(listenerToken);
               editorDbName = uniqueDbName("record-player-editor-persistent");
               console.info("[record-player-topology] open owner edge");
               owner = await openClient(server, "owner", ownerToken);
@@ -631,6 +634,8 @@ describe("RecordPlayer authenticated playlist topology", () => {
               editor = await openClient(server, "editor", editorToken, editorDbName);
               console.info("[record-player-topology] open listener edge");
               listener = await openClient(server, "listener", listenerToken);
+              editorAuthor = sessionAuthorOf(editor);
+              listenerAuthor = sessionAuthorOf(listener);
               console.info("[record-player-topology] create playlist");
               const mutationErrors: unknown[] = [];
               const stopMutationErrors = owner.onMutationError((event) => {
@@ -1330,9 +1335,10 @@ async function openClient(
  * precisely that value, so a same-`sub` token from another issuer cannot read
  * or accept a grant.
  */
-function canonicalAuthor(token: string): string {
-  const claims = JSON.parse(atob(token.split(".")[1]!)) as { iss: string; sub: string };
-  return JSON.stringify([claims.iss, claims.sub]);
+function sessionAuthorOf(db: Db): string {
+  const author = db.getAuthState().session?.author;
+  if (!author) throw new Error("authenticated RecordPlayer client has no canonical author");
+  return author;
 }
 
 function audioStream(chunks: readonly Uint8Array[]): ReadableStream<Uint8Array> {

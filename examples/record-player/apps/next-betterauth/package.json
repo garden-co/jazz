@@ -7,8 +7,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "vitest run tests/*.test.ts",
-    "test:browser": "vitest run --config vitest.config.browser.ts",
+    "test": "pnpm test:unit && pnpm test:provider && pnpm test:selection",
+    "test:unit": "vitest run tests/*.test.ts",
+    "test:topology": "vitest run --config vitest.config.browser.ts",
+    "test:browser": "pnpm test:topology",
     "test:provider": "vitest run --config vitest.config.provider.ts",
     "test:selection": "node --test tests/test-selection.test.mjs"
   },

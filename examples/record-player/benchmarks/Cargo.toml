@@ -9,6 +9,7 @@ jazz = { workspace = true }
 
 [dev-dependencies]
 divan = { workspace = true }
+serde_json = "1.0"
 
 [[bench]]
 name = "queries"

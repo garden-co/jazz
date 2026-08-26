@@ -12,3 +12,9 @@ fn ordered_playlist_window(bencher: divan::Bencher<'_, '_>, tracks: usize) {
     let fixture = Fixture::new(tracks);
     bencher.bench_local(|| divan::black_box(fixture.playlist_window_count()));
 }
+
+#[divan::bench(args = [128, 4096])]
+fn metadata_only_tracks(bencher: divan::Bencher<'_, '_>, tracks: usize) {
+    let fixture = Fixture::new(tracks);
+    bencher.bench_local(|| divan::black_box(fixture.track_metadata_count()));
+}

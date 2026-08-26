@@ -9,7 +9,8 @@
 - Concurrent playlist additions converge by entry identity and position. A
   concurrent move of the _same_ entry is deliberately not given a product-level
   winner here; the UI must reconcile it after a specific move contract exists.
-- `tests/record-player.test.ts` is a bounded scenario receipt for metadata-first
-  reads, streaming creation, invitation roles, two-client edits, and an offline
-  reconnect flush. It is not a substitute for the pending browser/relay
-  topology E2E that can exercise those APIs end-to-end.
+- The maintained package `test` gate covers unit/query lowering, the Better
+  Auth provider lifecycle, permission denial, and test selection. The explicit
+  `test:topology` gate covers invitation roles, two-client edits, streamed audio,
+  and offline reconnect across browser/edge/core; it remains outside the
+  aggregate gate only while #2091 tracks isolated browser artifact execution.

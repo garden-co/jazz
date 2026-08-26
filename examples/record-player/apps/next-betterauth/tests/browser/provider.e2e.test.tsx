@@ -51,6 +51,10 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function click(element: Element): void {
+  element.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+}
+
 describe("RecordPlayer Better Auth bridge", () => {
   let root: Root | undefined;
   let container: HTMLDivElement | undefined;
@@ -136,5 +140,50 @@ describe("RecordPlayer Better Auth bridge", () => {
 
     expect(container.querySelector("[data-jazz-jwt]")).toBeNull();
     expect(container.textContent).toContain("Sign in to RecordPlayer");
+  });
+
+  it("surfaces token failures and retries without mounting Jazz", async () => {
+    auth.token
+      .mockRejectedValueOnce(new Error("token endpoint unavailable"))
+      .mockResolvedValueOnce("retried-jazz-jwt");
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <RecordPlayerProvider>
+          <RecordPlayerClient />
+        </RecordPlayerProvider>,
+      );
+    });
+    await waitFor(
+      () => container?.querySelector("[role='alert']") !== null,
+      "expected token error",
+    );
+    expect(container.querySelector("[data-jazz-jwt]")).toBeNull();
+    expect(container.textContent).toContain("token endpoint unavailable");
+
+    await act(async () => click(container!.querySelector("button")!));
+    await waitFor(
+      () => container?.querySelector("[data-jazz-jwt='retried-jazz-jwt']") !== null,
+      "expected retry to mount Jazz",
+    );
+    expect(auth.token).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not spin forever when Better Auth returns no token", async () => {
+    auth.token.mockResolvedValueOnce(null);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(<RecordPlayerProvider>ready</RecordPlayerProvider>);
+    });
+    await waitFor(
+      () => container?.querySelector("[role='alert']") !== null,
+      "expected null-token error",
+    );
+    expect(container.textContent).toContain("did not provide a Jazz session token");
   });
 });
