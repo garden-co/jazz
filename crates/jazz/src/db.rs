@@ -2484,6 +2484,9 @@ where
         ensure_transaction_identity(options.identity)?;
         match options.target {
             ExactWriteTarget::Root => {
+                self.db()
+                    .require_mergeable_transaction_upsert_visibility(self.tx_id(), table, row)
+                    .await?;
                 if self.read(table, row).await?.is_some() {
                     self.db()
                         .stage_mergeable_update(

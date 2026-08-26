@@ -611,6 +611,15 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverInboundProcessed = false;
   private readonly peerTransportWorkListeners = new Set<() => void>();
   private peerTransportActivityEpoch = 0;
+  private peerTransportProcessedActivityEpoch = 0;
+  // A non-durable follower needs one worker response before trusting native
+  // coverage. Once that response covered a prepared query, reattaching the
+  // same query may already be covered and legitimately emit no new frame.
+  // The response epoch that confirmed each prepared query for an effective
+  // serving authorization context. This lets a reattachment reuse its own
+  // confirmation, but never lets it skip worker activity that arrived after
+  // that confirmation or borrow coverage confirmed for another subject/claim set.
+  private readonly peerCoveredQueries = new Map<PreparedQuery, Map<string, number>>();
   private coreTickScheduled = false;
   private coreTickRunning = false;
   private coreTickAgain = false;
@@ -747,7 +756,12 @@ export class NativeRuntimeAdapter implements Runtime {
 
   async progressPeerTransport(): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.progressPeerTransport();
+    const activityReadyForProcessing = this.peerTransportActivityEpoch;
     await this.runCoreTick();
+    this.peerTransportProcessedActivityEpoch = Math.max(
+      this.peerTransportProcessedActivityEpoch,
+      activityReadyForProcessing,
+    );
   }
 
   retirePeerTransport(transport: Transport): Promise<void> {
@@ -2164,16 +2178,42 @@ export class NativeRuntimeAdapter implements Runtime {
       attachment = this.db.attachQuery(query, opts);
     }
     if (!this.db.queryAttachmentIsCovered) return attachment;
+    const coverageKey = this.coverageKey(session);
+    const confirmedPeerActivityEpoch = this.peerCoveredQueries.get(query)?.get(coverageKey);
+    // A prior confirmation can recover a reattachment only if no newer worker
+    // frame has arrived. Otherwise the old coverage state could be exposed to
+    // a query whose authorization (for example, an authorship-scoped policy)
+    // is about to change.
+    if (
+      this.nonDurableClient &&
+      confirmedPeerActivityEpoch != null &&
+      this.peerTransportActivityEpoch <= confirmedPeerActivityEpoch &&
+      this.db.queryAttachmentIsCovered(attachment)
+    ) {
+      return attachment;
+    }
     const minimumPeerActivityEpoch = this.nonDurableClient
       ? this.peerTransportActivityEpoch
       : undefined;
+    const pendingPeerActivityEpoch =
+      this.nonDurableClient &&
+      this.peerTransportActivityEpoch > this.peerTransportProcessedActivityEpoch
+        ? this.peerTransportActivityEpoch
+        : undefined;
     await this.waitForQueryCoverage(
       attachment,
       query,
       readOptions(tier, false, optionsJson),
       session?.identity,
       minimumPeerActivityEpoch,
+      pendingPeerActivityEpoch,
+      confirmedPeerActivityEpoch != null,
     );
+    if (this.nonDurableClient && this.db.queryAttachmentIsCovered(attachment)) {
+      const confirmations = this.peerCoveredQueries.get(query) ?? new Map<string, number>();
+      confirmations.set(coverageKey, this.peerTransportActivityEpoch);
+      this.peerCoveredQueries.set(query, confirmations);
+    }
     return attachment;
   }
 
@@ -2204,6 +2244,15 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
+  /** Coverage is authorization-context-specific only on trusted-serving hosts. */
+  private coverageKey(session: RuntimeSession | null): string {
+    if (this.readAuthorizationHost !== "trusted-serving") return "client-local";
+    return JSON.stringify([
+      bytesKey(session?.identity ?? this.peerIdentity),
+      canonicalJson(session?.claims ?? {}),
+    ]);
+  }
+
   private applySessionClaims(session: RuntimeSession | null | undefined): void {
     // Client runtimes only evaluate their already-settled local replica. They
     // never select the policy-enforcing native entry points, so there is no
@@ -2229,6 +2278,8 @@ export class NativeRuntimeAdapter implements Runtime {
     opts: unknown,
     identity?: Uint8Array,
     minimumPeerActivityEpoch?: number,
+    pendingPeerActivityEpoch?: number,
+    exactContextWasConfirmed = false,
   ): Promise<void> {
     const deadline = Date.now() + 15_000;
     const tier = (opts as { tier?: string }).tier ?? "";
@@ -2246,7 +2297,12 @@ export class NativeRuntimeAdapter implements Runtime {
       if (this.db.queryAttachmentIsCovered) {
         const peerHasResponded =
           minimumPeerActivityEpoch == null ||
-          this.peerTransportActivityEpoch > minimumPeerActivityEpoch;
+          this.peerTransportActivityEpoch > minimumPeerActivityEpoch ||
+          (exactContextWasConfirmed &&
+            minimumPeerActivityEpoch > 0 &&
+            this.peerTransportProcessedActivityEpoch >= minimumPeerActivityEpoch) ||
+          (pendingPeerActivityEpoch != null &&
+            this.peerTransportProcessedActivityEpoch >= pendingPeerActivityEpoch);
         if (peerHasResponded && this.db.queryAttachmentIsCovered(attachment)) return;
       }
       try {
@@ -6064,6 +6120,22 @@ function readU32Le(bytes: Uint8Array, offset: number): number {
 
 function bytesKey(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => String.fromCharCode(byte)).join("");
+}
+
+/** Deterministic cache-key encoding for JSON-derived session claims. */
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value === "boolean" || typeof value === "string") {
+    return JSON.stringify(value);
+  }
+  if (typeof value === "number") return Number.isFinite(value) ? JSON.stringify(value) : "null";
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return "null";
 }
 
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean {

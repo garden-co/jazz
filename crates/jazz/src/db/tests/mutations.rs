@@ -59,6 +59,26 @@ fn branch_column_reference_policy_schema() -> JazzSchema {
     )
 }
 
+fn branch_update_read_policy_schema() -> JazzSchema {
+    let owner_write = public_session_eq("owner", &["user_id"]);
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("branch", PublicColumnType::Text)
+                .column("owner", PublicColumnType::Uuid)
+                .column("published", PublicColumnType::Boolean)
+                .column("secret", PublicColumnType::Text)
+                .branch_by("branch")
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_literal_eq("published", PublicValue::Boolean(true)))
+                        .with_insert(owner_write.clone())
+                        .with_update(Some(owner_write.clone()), owner_write),
+                ),
+        ),
+    )
+}
+
 #[test]
 fn admitted_server_authorizes_branch_write_through_referenced_application_row() {
     let schema = branch_column_reference_policy_schema();
@@ -119,6 +139,134 @@ fn admitted_server_authorizes_branch_write_through_referenced_application_row() 
         )
         .unwrap();
     assert_authority_rejects_staged_write(&outsider_client, &server, &denied);
+}
+
+/// A session that can satisfy `UPDATE` policy but cannot select a branch row
+/// cannot update it through either the facade or a mergeable transaction.
+///
+/// mallory ──update branch row──► read-hidden source ──► denied
+#[test]
+fn session_branch_updates_require_read_visibility_before_staging() {
+    let schema = branch_update_read_policy_schema();
+    let writer = AuthorSubject::for_test_bytes([0x7b; 16]);
+    let branch = BranchSelector::new([("branch", Value::String("draft".to_owned()))]);
+    let row_id = row(0x7c);
+    let db = block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(&schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0x7a; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0x7a))),
+    }))
+    .expect("open history-complete authority");
+    db.set_identity_claims(writer, test_provider_claims(writer));
+
+    let seed = block_on(db.insert(
+        "todos",
+        BTreeMap::from([
+            ("owner".to_owned(), Value::Uuid(writer.test_uuid())),
+            ("published".to_owned(), Value::Bool(false)),
+            (
+                "secret".to_owned(),
+                Value::String("read-hidden source".to_owned()),
+            ),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(row_id),
+            target: crate::db::ExactWriteTarget::Branch(branch.clone()),
+            ..Default::default()
+        },
+    ))
+    .expect("seed hidden branch row");
+    db.finalize_local_mergeable_commit_for_test(seed.mergeable_tx_id())
+        .expect("settle seed row");
+
+    let prepared = db.prepare_query(&db.table("todos")).expect("prepare query");
+    let read_opts = ReadOpts {
+        propagation: Propagation::LocalOnly,
+        ..ReadOpts::default()
+    }
+    .branch_view(branch.clone(), None);
+    assert!(
+        block_on(db.all_for_identity(&prepared, read_opts.clone(), writer))
+            .expect("writer's branch read")
+            .is_empty()
+    );
+
+    let facade_error = match block_on(db.update(
+        "todos",
+        row_id,
+        BTreeMap::from([
+            ("branch".to_owned(), Value::String("draft".to_owned())),
+            ("owner".to_owned(), Value::Uuid(writer.test_uuid())),
+            ("published".to_owned(), Value::Bool(true)),
+            ("secret".to_owned(), Value::String("replacement".to_owned())),
+        ]),
+        crate::db::UpdateOptions {
+            identity: crate::db::WriteIdentity::Session(writer),
+            target: crate::db::WriteTarget::BranchView {
+                head: branch.clone(),
+                base: None,
+            },
+            ..Default::default()
+        },
+    )) {
+        Ok(_) => panic!("facade branch update must require read visibility"),
+        Err(error) => error,
+    };
+    assert_eq!(facade_error.code, crate::db::ErrorCode::WriteRejected);
+    assert!(facade_error.message.contains("UPDATE"));
+
+    let upsert_error = match block_on(db.upsert(
+        "todos",
+        row_id,
+        BTreeMap::from([("published".to_owned(), Value::Bool(true))]),
+        crate::db::UpsertOptions {
+            identity: crate::db::WriteIdentity::Session(writer),
+            target: crate::db::ExactWriteTarget::Branch(branch.clone()),
+            ..Default::default()
+        },
+    )) {
+        Ok(_) => panic!("branch upsert must not infer a hidden target is absent"),
+        Err(error) => error,
+    };
+    assert_eq!(upsert_error.code, crate::db::ErrorCode::WriteRejected);
+    assert!(upsert_error.message.contains("UPSERT"));
+
+    let transaction_error = block_on(db.transaction_for_identity(writer, async |tx| {
+        tx.update(
+            "todos",
+            row_id,
+            BTreeMap::from([("published".to_owned(), Value::Bool(true))]),
+            crate::db::UpdateOptions {
+                target: crate::db::WriteTarget::BranchView {
+                    head: branch.clone(),
+                    base: None,
+                },
+                ..Default::default()
+            },
+        )
+        .await
+    }))
+    .expect_err("transaction branch update must require read visibility");
+    assert_eq!(transaction_error.code, crate::db::ErrorCode::WriteRejected);
+    assert!(transaction_error.message.contains("UPDATE"));
+
+    assert!(
+        block_on(db.all_for_identity(&prepared, read_opts.clone(), writer))
+            .expect("denial does not disclose a branch row")
+            .is_empty()
+    );
+    let authority_rows = block_on(db.all_for_identity(&prepared, read_opts, AuthorSubject::SYSTEM))
+        .expect("authority can inspect the unchanged source");
+    let table = &schema.tables[0];
+    assert_eq!(authority_rows.len(), 1);
+    assert_eq!(
+        authority_rows[0].cell(table, "secret"),
+        Some(Value::String("read-hidden source".to_owned()))
+    );
 }
 
 #[test]
@@ -184,6 +332,54 @@ fn db_facade_mutation_lifecycle_writes_reads_deletes_and_restores() {
         Some(Value::String("restored todo".to_owned()))
     );
     assert_eq!(rows[0].cell(table, "done"), Some(Value::Bool(true)));
+}
+
+#[test]
+fn full_row_replacement_cannot_bless_an_inherited_large_value_descriptor() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let chunks = std::rc::Rc::new(groove::chunks::MemoryChunkStorage::new());
+    block_on(async {
+        db.node.node.lock().await.set_chunk_storage(chunks);
+    });
+    let title = "x".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 1);
+    let write = db
+        .insert(
+            "todos",
+            doctest_support::todo_cells(&title, false),
+            Default::default(),
+        )
+        .unwrap();
+    let row = write.row_uuid();
+    block_on(write.wait(DurabilityTier::Local)).unwrap();
+    let descriptor = block_on(async {
+        let mut node = db.node.node.lock().await;
+        match node
+            .current_physical_cell_in_schema(db.schema_version_id, "todos", row, "title")
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Value::Large(value_ref) => value_ref,
+            other => panic!("oversized title stayed inline: {other:?}"),
+        }
+    });
+
+    let error = match block_on(db.update(
+        "todos",
+        row,
+        BTreeMap::from([
+            ("title".to_owned(), Value::Large(descriptor)),
+            ("done".to_owned(), Value::Bool(true)),
+        ]),
+        Default::default(),
+    )) {
+        Ok(_) => panic!("raw full-row input must not bless an inherited descriptor"),
+        Err(error) => error,
+    };
+    assert!(
+        error.message.contains("unverified large-value descriptor"),
+        "unexpected descriptor rejection: {error:?}"
+    );
 }
 
 #[test]
