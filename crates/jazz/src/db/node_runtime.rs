@@ -259,6 +259,20 @@ where
         Ok(())
     }
 
+    pub(super) fn restore_browser_relay_pending_uploads(
+        &self,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        let mut node = self.node.borrow_mut();
+        let pending = node.pending_transaction_ids_for_author(author);
+        let pending = crate::db::block_on(pending)?;
+        drop(node);
+        for tx_id in pending {
+            self.queue_pending_upload(tx_id, None);
+        }
+        Ok(())
+    }
+
     fn restore_local_subscriber(
         &self,
         author: AuthorSubject,

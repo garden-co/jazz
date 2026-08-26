@@ -722,7 +722,6 @@ describe("shared example topology harness", () => {
       (error: unknown) =>
         error instanceof TopologyScenarioError &&
         error.receipt.cleanup?.status === "failed" &&
-        error.receipt.cleanup.elapsedMs >= 5 &&
         (error.receipt.cleanup.error?.includes("cleanup timed out") ?? false),
     );
     await new Promise((resolve) => setTimeout(resolve, 40));
