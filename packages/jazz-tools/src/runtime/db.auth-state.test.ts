@@ -304,9 +304,11 @@ describe("Db auth state", () => {
     const { db, runtimeClient } = makeDbWithJwt(makeJwt({ sub: "alice" }));
     const refreshed = makeJwt({ sub: "alice", claims: { role: "writer" } });
     const states: AuthState[] = [];
+    const listenerInternalRoles: unknown[] = [];
 
     const stop = db.onAuthChanged((state) => {
       states.push(state);
+      listenerInternalRoles.push(getDbInternalSession(db)?.claims.role);
     });
     db.touchClient();
 
@@ -326,6 +328,7 @@ describe("Db auth state", () => {
       authMode: "external",
     });
     expect(states.at(-1)?.error).toBeUndefined();
+    expect(listenerInternalRoles.at(-1)).toBe("writer");
   });
 
   it("ignores redundant auth updates when the token is unchanged", () => {
@@ -353,11 +356,13 @@ describe("Db auth state", () => {
 
   it("rejects logout principal changes on a live db", () => {
     const { db, runtimeClient } = makeDbWithJwt(makeJwt({ sub: "alice" }));
+    const before = getDbInternalSession(db);
 
     expect(() => db.updateAuthToken(null)).toThrow(
       "Changing auth principal on a live client is not supported. Recreate the Db.",
     );
     expect(runtimeClient.updateAuthToken).not.toHaveBeenCalled();
+    expect(getDbInternalSession(db)).toBe(before);
     expect(db.getAuthState()).toMatchObject({
       authMode: "external",
       session: {
@@ -391,9 +396,11 @@ describe("Db auth state", () => {
       authMode: "external",
     };
     const states: AuthState[] = [];
+    const listenerInternalRoles: unknown[] = [];
 
     const stop = db.onAuthChanged((state) => {
       states.push(state);
+      listenerInternalRoles.push(getDbInternalSession(db)?.claims.role);
     });
     db.touchClient();
 
@@ -411,5 +418,16 @@ describe("Db auth state", () => {
     expect(states.at(-1)).toMatchObject({
       authMode: "external",
     });
+    expect(listenerInternalRoles.at(-1)).toBe("writer");
+
+    const accepted = getDbInternalSession(db);
+    expect(() =>
+      db.updateCookieSession({
+        ...refreshed,
+        user_id: "bob",
+      }),
+    ).toThrow("Changing auth principal on a live client is not supported. Recreate the Db.");
+    expect(getDbInternalSession(db)).toBe(accepted);
+    expect(runtimeClient.updateCookieSession).toHaveBeenCalledTimes(1);
   });
 });
