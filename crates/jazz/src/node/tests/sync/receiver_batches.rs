@@ -498,6 +498,159 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
     ));
 }
 
+#[derive(Clone, Copy, Debug)]
+enum ResetConflictPath {
+    Batch,
+    Single,
+}
+
+#[test]
+fn reset_batch_rejects_conflicting_authored_columns_in_both_orders() {
+    assert_reset_authored_columns_conflict(ResetConflictPath::Batch, false);
+    assert_reset_authored_columns_conflict(ResetConflictPath::Batch, true);
+}
+
+#[test]
+fn reset_single_rejects_conflicting_authored_columns_in_both_orders() {
+    assert_reset_authored_columns_conflict(ResetConflictPath::Single, false);
+    assert_reset_authored_columns_conflict(ResetConflictPath::Single, true);
+}
+
+fn assert_reset_authored_columns_conflict(path: ResetConflictPath, reversed: bool) {
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let binding_view_key = reader
+        .binding_view_key_for_subscription(subscription)
+        .unwrap();
+    let tx_id = TxId::new(TxTime::from(10), node(1));
+    let tx = Transaction {
+        tx_id,
+        kind: TxKind::Mergeable,
+        n_total_writes: 1,
+        made_by: AuthorSubject::SYSTEM,
+        permission_subject: None,
+        base_snapshot: None,
+        row_read_set: None,
+        absent_read_set: None,
+        predicate_read_set: None,
+        user_metadata_json: None,
+        contribution_merge: None,
+    };
+    let unannotated = version_record(row(1), Vec::new(), title_cells("one"), None);
+    let authored = unannotated
+        .clone()
+        .with_authored_columns(Some(BTreeSet::from(["title".to_owned()])));
+    assert_eq!(unannotated.record().raw(), authored.record().raw());
+    assert_ne!(unannotated, authored);
+
+    let mut versions = vec![unannotated, authored];
+    if reversed {
+        versions.reverse();
+    }
+    let version_bundles = versions
+        .into_iter()
+        .map(|version| VersionBundle {
+            scope: crate::protocol::VersionBundleScope::CompleteTransaction,
+            tx: tx.clone(),
+            versions: vec![version],
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(1)),
+            durability: DurabilityTier::Global,
+        })
+        .collect();
+
+    reader.set_initial_sync_flush_cadence(2).unwrap();
+    reader
+        .query
+        .pending_terminal_operations_by_binding_view
+        .insert(
+            binding_view_key,
+            vec![reset_conflict_terminal_operation(1)],
+        );
+    let cadence_before = (
+        reader.initial_sync_flush_active,
+        reader.initial_sync_flush_completed,
+    );
+    let hydration_before = reader.query.initial_hydration_binding_views.clone();
+    let pending_terminal_before = reader
+        .query
+        .pending_terminal_operations_by_binding_view
+        .clone();
+    let deferred_before = reader.query.deferred_publication_binding_views.clone();
+
+    let update = ViewUpdateParts {
+        subscription,
+        settled_through: GlobalTime(1),
+        defer_settlement: true,
+        reset_result_set: true,
+        version_carriers: Vec::new(),
+        version_bundles,
+        peer_complete_tx_payload_refs: Vec::new(),
+        authorization_progress: None,
+        opening_pending: false,
+        result_member_adds: vec![ResultMemberEntry::row((
+            "todos".to_owned().into(),
+            row(1),
+            tx_id,
+        ))],
+        result_member_removes: Vec::new(),
+        terminal_operations: vec![reset_conflict_terminal_operation(2)],
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    };
+    let result = match path {
+        ResetConflictPath::Batch => reader.apply_view_updates_in_batch(vec![update]).resolve(),
+        ResetConflictPath::Single => reader.apply_view_update(update).resolve(),
+    };
+
+    assert!(
+        matches!(
+            result,
+            Err(Error::ConflictingCommitUnit(conflicting_tx)) if conflicting_tx == tx_id
+        ),
+        "{path:?} reset must reject conflicting authored columns (reversed: {reversed})"
+    );
+    assert!(reader.query_transaction(tx_id).unwrap().is_none());
+    assert!(reader.query_versions_for_tx(tx_id).unwrap().is_empty());
+    assert!(reader.query_all_versions().unwrap().is_empty());
+    assert!(
+        reader
+            .current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        (
+            reader.initial_sync_flush_active,
+            reader.initial_sync_flush_completed,
+        ),
+        cadence_before
+    );
+    assert_eq!(
+        reader.query.initial_hydration_binding_views,
+        hydration_before
+    );
+    assert_eq!(
+        reader.query.pending_terminal_operations_by_binding_view,
+        pending_terminal_before
+    );
+    assert_eq!(
+        reader.query.deferred_publication_binding_views,
+        deferred_before
+    );
+}
+
+fn reset_conflict_terminal_operation(marker: u8) -> groove::ivm::TerminalOperation {
+    groove::ivm::TerminalOperation {
+        root_descriptor: groove::records::RecordDescriptor::default(),
+        root_key: vec![marker],
+        path: Vec::new(),
+        edit: groove::ivm::TerminalEdit::Remove {
+            key: vec![marker],
+        },
+    }
+}
+
 // This stays internal because it directly exercises the protocol receiver's
 // single-message fragment assembly boundary.
 #[test]
