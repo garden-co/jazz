@@ -169,8 +169,9 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
         ]),
         "concurrent streamed WASM publication",
       );
+      const batchIds = await Promise.all(writes.map(committedBatchId));
       await withWatchdog(
-        Promise.all(writes.map((write) => runtime.waitForTransaction!(write.batchId, "local"))),
+        Promise.all(batchIds.map((batchId) => runtime.waitForTransaction!(batchId, "local"))),
         "concurrent streamed WASM local settlement",
       );
 
@@ -199,7 +200,13 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
     }
     let cleanupError: unknown;
     try {
-      await withWatchdog(runtime.close(), "concurrent streamed WASM runtime cleanup", 1_000);
+      const closeRuntime = runtime.close;
+      if (!closeRuntime) throw new Error("WASM runtime does not expose close()");
+      await withWatchdog(
+        Promise.resolve().then(() => closeRuntime.call(runtime)),
+        "concurrent streamed WASM runtime cleanup",
+        1_000,
+      );
     } catch (error) {
       cleanupError = error;
     }
