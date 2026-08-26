@@ -22,7 +22,7 @@ or admin of `shape.canvasId`, and `shape.layerId` resolves to a layer whose
 a layer from another canvas; it never falls back to membership alone.
 
 The browser topology receipt runs this ordinary application schema and policy
-set through browser → edge → core. It verifies concurrent ordered edits, an
+set through browser → serving core. It verifies concurrent ordered edits, an
 offline local shape across persistent reopen, replay to a peer after reconnect,
 the same bounded shape-window query used by a viewport, and a post-revocation
 write denial. Its deterministic timeout/fault plumbing comes from the shared
