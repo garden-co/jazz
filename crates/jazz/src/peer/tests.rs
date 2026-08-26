@@ -7,7 +7,10 @@ use std::collections::BTreeMap;
 
 use crate::ids::{NodeUuid, RowUuid};
 use crate::node::MergeableCommit;
-use crate::protocol::{ProgramFactEntry, RealRowMemberEntry, SyncMessage, VersionRecord};
+use crate::protocol::{
+    BranchSelector, BranchViewBase, ProgramFactEntry, RealRowMemberEntry, SyncMessage,
+    VersionRecord,
+};
 use crate::query::{
     Aggregate, ArraySubquery, OrderDirection, Query, col, eq, gt, is_null, lit, ne, not, param,
 };
@@ -1335,6 +1338,163 @@ fn maintained_subscription_view_default_rehydrate_installs_subscription() {
     peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
 
     assert!(maintained_subscription_id(&peer, subscription).is_some());
+}
+
+#[test]
+fn maintained_branch_view_reconcile_retains_undeleted_base_members() {
+    let schema = public_peer_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("branch_id", PublicColumnType::Uuid)
+            .column("title", PublicColumnType::Text)
+            .branch_by("branch_id"),
+    ));
+    let (_dir, mut core) = open_node_with_schema(node(0x98), schema.clone());
+    let base = BranchSelector::new([(
+        "branch_id",
+        Value::Uuid(uuid::Uuid::from_bytes([0x99; 16])),
+    )]);
+    let head = BranchSelector::new([(
+        "branch_id",
+        Value::Uuid(uuid::Uuid::from_bytes([0x9a; 16])),
+    )]);
+    let deleted_row = row(0x9b);
+    let retained_row = row(0x9c);
+    for (sequence, row_uuid, title) in [
+        (1, deleted_row, "deleted"),
+        (2, retained_row, "retained"),
+    ] {
+        let tx_id = core
+            .commit_mergeable_settled(
+                MergeableCommit::new("todos", row_uuid, 1_000 + sequence)
+                    .branch(base.clone())
+                    .cells(title_cells(title)),
+            )
+            .unwrap();
+        accept_global(&mut core, tx_id, sequence);
+    }
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let read_view =
+        ReadViewSpec::branch_view(head.clone(), Some(BranchViewBase::Current(base.clone())));
+    let opts = RegisterShapeOptions {
+        read_view: read_view.clone(),
+        ..RegisterShapeOptions::default()
+    };
+    let subscription = subscription_key_with_opts(&shape, &binding, &opts);
+    let branch_rows = core
+        .query_relation_snapshot_for_serving_in_read_view(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            AuthorSubject::SYSTEM,
+            &read_view,
+        )
+        .unwrap()
+        .rows;
+    assert_eq!(
+        branch_rows
+            .iter()
+            .map(crate::node::CurrentRow::row_uuid)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([deleted_row, retained_row])
+    );
+    assert!(
+        core.query_relation_snapshot_for_serving_in_read_view(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            AuthorSubject::SYSTEM,
+            &ReadViewSpec::default(),
+        )
+        .unwrap()
+        .rows
+        .is_empty(),
+        "default/current reads address the empty shared branch key"
+    );
+
+    let mut peer = PeerState::new();
+    let initial = peer
+        .rehydrate_query_with_opts(&mut core, &shape, &binding, opts.clone())
+        .unwrap();
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        reset_result_set,
+        result_member_adds,
+        ..
+    }) = initial
+    else {
+        panic!("expected initial BranchView update");
+    };
+    assert!(reset_result_set);
+    assert_eq!(
+        result_member_adds
+            .iter()
+            .filter_map(ResultMemberEntry::as_row)
+            .map(|(_, row_uuid, _)| row_uuid)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([deleted_row, retained_row])
+    );
+
+    let deletion_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", deleted_row, 2_000)
+                .branch(head)
+                .authored_columns(BTreeSet::from(["branch_id".to_owned()]))
+                .deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    accept_global(&mut core, deletion_tx, 3);
+    let update = peer
+        .await_query_update_for_subscription_with_opts(
+            &mut core,
+            subscription,
+            &shape,
+            &binding,
+            opts,
+        )
+        .unwrap();
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        reset_result_set,
+        result_member_adds,
+        result_member_removes,
+        ..
+    }) = update
+    else {
+        panic!("expected deletion-witness reconcile update");
+    };
+    assert!(!reset_result_set);
+    assert!(result_member_adds.is_empty());
+    assert_eq!(
+        result_member_removes
+            .iter()
+            .filter_map(ResultMemberEntry::as_row)
+            .map(|(_, row_uuid, _)| row_uuid)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([deleted_row]),
+        "authoritative reconcile must not remove the retained BranchView base member"
+    );
+
+    let fresh_rows = core
+        .query_relation_snapshot_for_serving_in_read_view(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            AuthorSubject::SYSTEM,
+            &read_view,
+        )
+        .unwrap()
+        .rows
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(fresh_rows, BTreeSet::from([retained_row]));
+    assert_eq!(
+        row_result_set(&peer, subscription)
+            .unwrap()
+            .into_iter()
+            .map(|(_, row_uuid, _)| row_uuid)
+            .collect::<BTreeSet<_>>(),
+        fresh_rows
+    );
 }
 
 #[test]
