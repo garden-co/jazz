@@ -8,40 +8,22 @@ import { authClient, getJwtFromBetterAuth } from "../src/lib/auth-client";
 const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
 const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!;
 
-async function bootstrapAccount(): Promise<void> {
-  const response = await fetch("/api/bootstrap", { method: "POST", credentials: "same-origin" });
-  if (!response.ok) throw new Error(`trusted bootstrap failed (${response.status})`);
-}
-
 export function RecordPlayerProvider({ children }: { children: React.ReactNode }) {
   const { data: session, isPending } = authClient.useSession();
-  const sessionId = session?.session.id;
+  const principal = session?.user.id;
   const [jwt, setJwt] = useState<string | null>(null);
-  const [bootstrapState, setBootstrapState] = useState<"idle" | "ready" | "error">("idle");
 
   useEffect(() => {
     let cancelled = false;
     setJwt(null);
-    setBootstrapState("idle");
-    if (!sessionId) return;
-    void Promise.all([getJwtFromBetterAuth(), bootstrapAccount()]).then(
-      ([token]) => {
-        if (cancelled) return;
-        if (!token) {
-          setBootstrapState("error");
-          return;
-        }
-        setJwt(token);
-        setBootstrapState("ready");
-      },
-      () => {
-        if (!cancelled) setBootstrapState("error");
-      },
-    );
+    if (!principal) return;
+    void getJwtFromBetterAuth().then((token) => {
+      if (!cancelled) setJwt(token ?? null);
+    });
     return () => {
       cancelled = true;
     };
-  }, [sessionId]);
+  }, [principal]);
 
   const config = useMemo<DbConfig | null>(
     () => (jwt ? { appId, env: "dev", serverUrl, jwtToken: jwt } : null),
@@ -49,11 +31,8 @@ export function RecordPlayerProvider({ children }: { children: React.ReactNode }
   );
 
   if (isPending) return <p>Preparing your RecordPlayer…</p>;
-  if (!sessionId) return <SignIn />;
-  if (bootstrapState === "error") {
-    return <p role="alert">RecordPlayer could not establish its trusted session.</p>;
-  }
-  if (!config || bootstrapState === "idle") return <p>Preparing your RecordPlayer…</p>;
+  if (!principal) return <SignIn />;
+  if (!config) return <p>Connecting RecordPlayer…</p>;
 
   return (
     <JazzProvider
