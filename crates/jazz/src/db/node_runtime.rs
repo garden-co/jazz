@@ -81,7 +81,7 @@ where
             node: Rc::new(futures::lock::Mutex::new(node)),
             receives_commits_as_local,
             subscriptions: Rc::new(RefCell::new(Vec::new())),
-            outbox: Rc::new(RefCell::new(Vec::new())),
+            outbox: Rc::new(RefCell::new(UploadOutbox::default())),
             pending_local_publications: Rc::new(RefCell::new(VecDeque::new())),
             local_publication_settler: Rc::new(futures::lock::Mutex::new(())),
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
@@ -193,10 +193,9 @@ where
 
     pub(super) fn queue_pending_upload(&self, tx_id: TxId, unit: Option<SyncMessage>) {
         let mut outbox = self.outbox.borrow_mut();
-        if outbox.iter().any(|pending| pending.tx_id == tx_id) {
+        if !outbox.push(PendingUpload { tx_id, unit }) {
             return;
         }
-        outbox.push(PendingUpload { tx_id, unit });
         drop(outbox);
         self.mark_subscriber_connections_dirty();
         self.schedule_tick(TickUrgency::Deferred);
@@ -805,15 +804,11 @@ where
                 drop(routes);
                 let mut outbox = self.outbox.borrow_mut();
                 for tx_id in routed_txs {
-                    if !outbox.iter().any(|pending| pending.tx_id == tx_id) {
-                        outbox.push(PendingUpload {
-                            tx_id,
-                            unit: crate::db::block_on(
-                                self.node.borrow_mut().commit_unit_for(tx_id),
-                            )
+                    outbox.push(PendingUpload {
+                        tx_id,
+                        unit: crate::db::block_on(self.node.borrow_mut().commit_unit_for(tx_id))
                             .ok(),
-                        });
-                    }
+                    });
                 }
             }
         }
@@ -1407,15 +1402,13 @@ where
                         for tx_id in &routed_txs {
                             uploaded.remove(tx_id);
                             let mut outbox = outbox.borrow_mut();
-                            if !outbox.iter().any(|pending| pending.tx_id == *tx_id) {
-                                outbox.push(PendingUpload {
-                                    tx_id: *tx_id,
-                                    unit: crate::db::block_on(
-                                        self.node.borrow_mut().commit_unit_for(*tx_id),
-                                    )
-                                    .ok(),
-                                });
-                            }
+                            outbox.push(PendingUpload {
+                                tx_id: *tx_id,
+                                unit: crate::db::block_on(
+                                    self.node.borrow_mut().commit_unit_for(*tx_id),
+                                )
+                                .ok(),
+                            });
                         }
                     }
                     self.schedule_tick(TickUrgency::Immediate);
