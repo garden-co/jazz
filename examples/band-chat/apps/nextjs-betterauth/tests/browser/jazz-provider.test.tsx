@@ -1,4 +1,5 @@
 import { act } from "react";
+import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { afterEach, expect, it, vi } from "vitest";
 
@@ -59,8 +60,13 @@ it("never renders A for B or applies A's delayed refresh after a principal swap"
   await act(async () => controls.authChanged?.({ error: "expired" }));
   const resolveLateARefresh = controls.tokenRequests.shift()!;
   controls.session = { user: { id: "principal-b" } };
-  await act(async () => root.render(<JazzProvider>rooms</JazzProvider>));
-  expect(element.querySelector("[data-token]")).toBeNull();
+  act(() => {
+    flushSync(() => root.render(<JazzProvider>rooms</JazzProvider>));
+    // Assert during the B render's synchronous commit, before its effect can
+    // clear A or begin fetching B's token. This specifically proves the render
+    // gate rather than relying on effect cleanup to hide the stale provider.
+    expect(element.querySelector("[data-token]")).toBeNull();
+  });
 
   const resolveBConnection = controls.tokenRequests.shift()!;
   await act(async () => resolveLateARefresh("token-b-returned-to-a-refresh"));
