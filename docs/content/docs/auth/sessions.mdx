@@ -143,14 +143,15 @@ field really has one of those names, mark that one field explicitly with
 See [Queries](/docs/reading/queries#edit-metadata-columns) for how to select and filter on these
 columns.
 
-Provider session fields and claims, including `iss`, `sub`, and `user_id`, retain their admitted
-values. Jazz separately derives the reserved logical `session.user` from the exact `[iss, sub]`
-pair. Its portable value is an opaque canonical JSON encoding and is used for transaction authorship, `$createdBy`,
-`$updatedBy`, and provenance policies; it is interned only inside a running core. On backends,
+Jazz exposes admitted provider claims under `session.claims`; verified `iss` and `sub` override any
+same-named values supplied inside a provider claims payload. Jazz separately derives the reserved
+logical `session.user` from that exact `[iss, sub]` pair. Its portable value is an opaque canonical
+JSON encoding and is used for transaction authorship, `$createdBy`, `$updatedBy`, and provenance
+policies; it is interned only inside a running core. On backends,
 `await context.forRequest(...)` and `context.forSession(...)` both run as that user for permissions and
 also stamp authorship as that user. Client bindings expose the same derived value as
-`session.user`; use it when an application needs to store or compare an author, rather than
-reconstructing the encoding from `issuer` and `user_id`.
+`session.user`; use it when an application needs to store or compare an author. Raw transport
+fields such as `issuer` and `user_id` are intentionally not exposed on public session objects.
 
 `session.user` is not a user-row reference, a display name, or the JWT `sub` alone. An application
 may store it in an ordinary string column to associate its own user/profile row with Jazz

@@ -4,9 +4,8 @@ import {
   LOCAL_FIRST_JWT_ISSUER,
   STATIC_BEARER_SESSION_ISSUER,
   markTrustedReservedSession,
-  sessionFromVerifiedReservedJwtPayload,
+  internalSessionFromVerifiedReservedJwtPayload,
 } from "./client-session.js";
-import { canonicalAuthorSubject } from "./author-id.js";
 import { selfSignedClientProofFromConfig } from "./default-runtime-source.js";
 
 describe("selfSignedClientProofFromConfig", () => {
@@ -15,7 +14,7 @@ describe("selfSignedClientProofFromConfig", () => {
       [LOCAL_FIRST_JWT_ISSUER, "local-first"],
       [ANONYMOUS_JWT_ISSUER, "anonymous"],
     ] as const) {
-      const session = sessionFromVerifiedReservedJwtPayload(
+      const session = internalSessionFromVerifiedReservedJwtPayload(
         { iss: issuer, sub: "alice" },
         authMode,
       )!;
@@ -36,7 +35,6 @@ describe("selfSignedClientProofFromConfig", () => {
     const staticBearer = markTrustedReservedSession({
       issuer: STATIC_BEARER_SESSION_ISSUER,
       user_id: "server",
-      user: canonicalAuthorSubject(STATIC_BEARER_SESSION_ISSUER, "server"),
       claims: {},
       authMode: "external",
     });
@@ -52,7 +50,6 @@ describe("selfSignedClientProofFromConfig", () => {
         {
           issuer: "https://issuer.example",
           user_id: "alice",
-          user: canonicalAuthorSubject("https://issuer.example", "alice"),
           claims: {},
           authMode: "external",
         },

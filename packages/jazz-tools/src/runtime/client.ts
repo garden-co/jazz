@@ -14,6 +14,7 @@ import {
   resolveClientSessionStateSync,
   trustedReservedSessionToken,
 } from "./client-session.js";
+import { getTrustedReservedSession, setTrustedReservedSession } from "./db-internal-session.js";
 import { mapAuthReason } from "./auth-state.js";
 import {
   resolveRuntimeConfigSyncInitInput,
@@ -818,7 +819,7 @@ export class JazzClient {
       appId: this.context.appId,
       jwtToken: this.context.jwtToken,
       cookieSession: this.context.cookieSession,
-      trustedReservedSession: this.context.trustedReservedSession,
+      trustedReservedSession: getTrustedReservedSession(this.context),
     }).internalSession;
   }
 
@@ -993,7 +994,7 @@ export class JazzClient {
 
   updateAuthToken(jwtToken?: string): void {
     this.context.jwtToken = jwtToken;
-    this.context.trustedReservedSession = undefined;
+    setTrustedReservedSession(this.context, undefined);
     this.resolvedSession = this.resolveSessionFromContext();
     // Push the refreshed credentials into the Rust transport.
     // Carry forward admin/backend secrets from context — omitting them here
@@ -1005,7 +1006,7 @@ export class JazzClient {
   /** @internal Update a token minted by a dedicated first-party reserved auth flow. */
   updateTrustedAuthToken(jwtToken: string, session: Session): void {
     this.context.jwtToken = jwtToken;
-    this.context.trustedReservedSession = session;
+    setTrustedReservedSession(this.context, session);
     this.resolvedSession = this.resolveSessionFromContext();
     this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
   }

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { isRef, shallowRef, triggerRef } from "vue";
-import type { Session } from "../runtime/context.js";
+import type { PublicSession } from "../runtime/context.js";
 
 // Override inject so tests can control what the provider key resolves to without
 // mounting a real Vue component tree.  computed/shallowRef/triggerRef are kept real.
@@ -17,8 +17,8 @@ vi.mock("vue", async (importOriginal) => {
 
 import { useSession } from "./provider.js";
 
-function makeSession(userId: string): Session {
-  return { issuer: "urn:jazz:local-first", user_id: userId, claims: {}, authMode: "local-first" };
+function makeSession(user: string): PublicSession {
+  return { user, claims: {}, authMode: "local-first" };
 }
 
 describe("vue/useSession", () => {
@@ -60,7 +60,7 @@ describe("vue/useSession", () => {
   it(".value updates when triggerRef is called after the session getter changes", () => {
     // Model the real JazzClient: session is exposed via a getter over a mutable local variable.
     // onAuthChanged updates the variable and calls triggerRef(clientRef).
-    let currentSession: Session | null = makeSession("alice");
+    let currentSession: PublicSession | null = makeSession("alice");
     const client = {
       get session() {
         return currentSession;
@@ -78,7 +78,7 @@ describe("vue/useSession", () => {
   });
 
   it(".value goes null when session is cleared and triggerRef fires", () => {
-    let currentSession: Session | null = makeSession("alice");
+    let currentSession: PublicSession | null = makeSession("alice");
     const client = {
       get session() {
         return currentSession;

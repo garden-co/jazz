@@ -58,6 +58,11 @@ import {
   type ClientSessionInput,
 } from "./client-session.js";
 import { canonicalAuthorSubject } from "./author-id.js";
+import {
+  getTrustedReservedSession,
+  setDbInternalSession,
+  setTrustedReservedSession,
+} from "./db-internal-session.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { isPermissionIntrospectionColumn, magicColumnType } from "../magic-columns.js";
 import {
@@ -110,8 +115,6 @@ export type DbConfig = {
   telemetryCollectorUrl?: string;
   /** Enable runtime tracing for DevTools-only diagnostics. */
   devMode?: boolean;
-  /** @internal Session produced by a first-party reserved-issuer auth flow. */
-  trustedReservedSession?: ClientSessionInput["trustedReservedSession"];
 } & (
   | {
       /** Local-first auth via a local seed. */
@@ -160,7 +163,7 @@ export function resolveDefaultPersistentDbName(config: DbConfig): string {
     appId: config.appId,
     jwtToken: config.jwtToken,
     cookieSession: config.cookieSession,
-    trustedReservedSession: config.trustedReservedSession,
+    trustedReservedSession: getTrustedReservedSession(config),
   });
 
   if (!session?.user_id || session.authMode === "anonymous") {
@@ -1210,8 +1213,13 @@ export class Db {
   ) {
     this.config = config;
     this.runtimeSource = runtimeSource;
-    this.internalSession = resolveClientInternalSessionSync(config);
-    this.authStateStore = createAuthStateStore(config, authStateOptions);
+    const sessionInput = {
+      ...config,
+      trustedReservedSession: getTrustedReservedSession(config),
+    };
+    this.internalSession = resolveClientInternalSessionSync(sessionInput);
+    setDbInternalSession(this, this.internalSession);
+    this.authStateStore = createAuthStateStore(sessionInput, authStateOptions);
     this.connection = new DirectConnectionManager(this.dbForConnection());
   }
 
@@ -1305,6 +1313,7 @@ export class Db {
       nextState = this.authStateStore.applyJwtToken(jwtToken, trustedReservedSession);
     } catch (error) {
       this.internalSession = previousInternalSession;
+      setDbInternalSession(this, previousInternalSession);
       throw error;
     }
     const tokenChanged = previousToken !== jwtToken;
@@ -1314,7 +1323,8 @@ export class Db {
     }
 
     this.config.jwtToken = jwtToken;
-    this.config.trustedReservedSession = trustedReservedSession;
+    setTrustedReservedSession(this.config, trustedReservedSession);
+    setDbInternalSession(this, this.internalSession);
 
     this.connection.updateAuth({ jwtToken, trustedReservedSession });
 
@@ -1335,6 +1345,7 @@ export class Db {
       nextState = this.authStateStore.applyCookieSession(cookieSession);
     } catch (error) {
       this.internalSession = previousInternalSession;
+      setDbInternalSession(this, previousInternalSession);
       throw error;
     }
     const sessionChanged = JSON.stringify(previousSession) !== JSON.stringify(cookieSession);
@@ -1344,6 +1355,7 @@ export class Db {
     }
 
     this.config.cookieSession = cookieSession;
+    setDbInternalSession(this, this.internalSession);
 
     this.connection.updateAuth({ cookieSession });
 
@@ -1434,11 +1446,6 @@ export class Db {
 
   getAuthState(): AuthState {
     return this.authStateStore.getState();
-  }
-
-  /** @internal Private transport identity for framework adapters. */
-  getInternalSession(): Session | null {
-    return this.internalSession;
   }
 
   /**
@@ -2400,7 +2407,8 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
         parseJwtPayload(jwtToken) ?? {},
         "local-first",
       );
-      resolvedConfig = { ...configWithoutAuth, jwtToken, trustedReservedSession };
+      resolvedConfig = { ...configWithoutAuth, jwtToken };
+      setTrustedReservedSession(resolvedConfig, trustedReservedSession);
     }
   } else if (!config.jwtToken && !config.cookieSession && !config.adminSecret) {
     // Anonymous: mint an ephemeral keypair + anonymous JWT.
@@ -2414,7 +2422,8 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
       parseJwtPayload(jwtToken) ?? {},
       "anonymous",
     );
-    resolvedConfig = { ...configWithoutAuth, jwtToken, trustedReservedSession };
+    resolvedConfig = { ...configWithoutAuth, jwtToken };
+    setTrustedReservedSession(resolvedConfig, trustedReservedSession);
   }
 
   const driver = resolveStorageDriver(resolvedConfig.driver);

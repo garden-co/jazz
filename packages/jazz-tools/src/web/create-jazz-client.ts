@@ -7,6 +7,7 @@ import { runCleanupSteps } from "../runtime/run-cleanup-steps.js";
 import { SubscriptionsOrchestrator, trackPromise } from "../subscriptions-orchestrator.js";
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import { registerWindowJazzStorageClient } from "../window-client-storage.js";
+import { getDbInternalSession } from "../runtime/db-internal-session.js";
 
 export type JazzClientConfig = DbConfig;
 
@@ -22,12 +23,12 @@ async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
   const manager = new SubscriptionsOrchestrator(
     { appId: config.appId },
     db,
-    db.getInternalSession(),
+    getDbInternalSession(db),
   );
   await manager.init();
   const stopSessionSync = db.onAuthChanged(({ session: nextSession }) => {
     session = nextSession ?? null;
-    manager.setSession(db.getInternalSession());
+    manager.setSession(getDbInternalSession(db));
   });
   const unregisterWindowJazzStorageClient = registerWindowJazzStorageClient(db);
 

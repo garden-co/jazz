@@ -37,7 +37,7 @@ import {
   STATIC_BEARER_SESSION_ISSUER,
   SYSTEM_SESSION_ISSUER,
   TRUSTED_RESERVED_SESSION_TOKEN_FIELD,
-  sessionFromVerifiedReservedJwtPayload,
+  internalSessionFromVerifiedReservedJwtPayload,
   trustedReservedSessionToken,
 } from "../client-session.js";
 import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
@@ -1072,13 +1072,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           role: "reader",
           subject: "application-owned-subject",
           iss: externalIssuer,
-          issuer: externalIssuer,
           sub: externalUserId,
-          user_id: externalUserId,
-          userId: externalUserId,
-          author: `["${externalIssuer}","${externalUserId}"]`,
-          authMode: "external",
-          auth_mode: "external",
         },
       },
     ]);
@@ -1153,7 +1147,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
   it("admits verified reserved sessions carrying the in-process runtime capability", async () => {
     const authors: string[] = [];
-    const trustedSession = sessionFromVerifiedReservedJwtPayload(
+    const trustedSession = internalSessionFromVerifiedReservedJwtPayload(
       { iss: LOCAL_FIRST_JWT_ISSUER, sub: "verified-user" },
       "local-first",
     )!;
@@ -1241,7 +1235,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       [LOCAL_FIRST_JWT_ISSUER, "local-first"],
       [ANONYMOUS_JWT_ISSUER, "anonymous"],
     ] as const) {
-      const trustedSession = sessionFromVerifiedReservedJwtPayload(
+      const trustedSession = internalSessionFromVerifiedReservedJwtPayload(
         { iss: issuer, sub: `${authMode}-browser-user` },
         authMode,
       )!;
@@ -5694,7 +5688,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
         abort: vi.fn(),
       }),
     );
-    const trustedSession = sessionFromVerifiedReservedJwtPayload(
+    const trustedSession = internalSessionFromVerifiedReservedJwtPayload(
       { iss: LOCAL_FIRST_JWT_ISSUER, sub: "verified-writer" },
       "local-first",
     )!;

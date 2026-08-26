@@ -177,7 +177,7 @@ the current token as expired, serialized so concurrent failed writes trigger a s
 Read auth state from any component with `useAuthState()`:
 
 ```ts
-const { authMode, userId, claims, error } = useAuthState();
+const { authMode, user, claims, error } = useAuthState();
 ```
 
 #### TypeScript: `db.onAuthChanged`
