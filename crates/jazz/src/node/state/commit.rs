@@ -1028,8 +1028,6 @@ where
         #[cfg(feature = "testing")] mut receipt: Option<&mut NodeOpenReceipt>,
     ) -> Result<(), Error> {
         self.ahead_current_keys.clear();
-        self.ahead_current_rows.clear();
-        self.ahead_current_latest.clear();
         let physical_table_ids = self
             .catalogue
             .physical_mappings
@@ -1129,16 +1127,7 @@ where
         tx_node_alias: NodeAlias,
     ) {
         self.ahead_current_keys
-            .insert((table.clone(), branch_key, layer, row_uuid, tx_time, tx_node_alias));
-        self.ahead_current_rows.insert((table.clone(), row_uuid));
-        self.ahead_current_latest
-            .entry((table, layer, row_uuid))
-            .and_modify(|latest| {
-                if (tx_time, tx_node_alias) > *latest {
-                    *latest = (tx_time, tx_node_alias);
-                }
-            })
-            .or_insert((tx_time, tx_node_alias));
+            .insert((table, branch_key, layer, row_uuid, tx_time, tx_node_alias));
     }
 
     fn remove_ahead_current_key(
@@ -1150,45 +1139,14 @@ where
         tx_time: TxTime,
         tx_node_alias: NodeAlias,
     ) {
-        let table_key = table.to_owned();
         self.ahead_current_keys.remove(&(
-            table_key.clone(),
+            table.to_owned(),
             branch_key.clone(),
             layer,
             row_uuid,
             tx_time,
             tx_node_alias,
         ));
-        let latest_key = (table_key.clone(), layer, row_uuid);
-        if self.ahead_current_latest.get(&latest_key) == Some(&(tx_time, tx_node_alias)) {
-            if let Some((_, _, _, _, next_time, next_alias)) = self
-                .ahead_current_keys
-                .iter()
-                .filter(|(candidate_table, _, candidate_layer, candidate_row, _, _)| {
-                    candidate_table == &table_key
-                        && *candidate_layer == layer
-                        && *candidate_row == row_uuid
-                })
-                .max_by_key(|(_, _, _, _, time, alias)| (*time, *alias))
-                .cloned()
-            {
-                self.ahead_current_latest
-                    .insert(latest_key, (next_time, next_alias));
-            } else {
-                self.ahead_current_latest.remove(&latest_key);
-            }
-        }
-        if !self.ahead_current_latest.contains_key(&(
-            table_key.clone(),
-            VersionLayer::Content,
-            row_uuid,
-        )) && !self.ahead_current_latest.contains_key(&(
-            table_key.clone(),
-            VersionLayer::Deletion,
-            row_uuid,
-        )) {
-            self.ahead_current_rows.remove(&(table_key, row_uuid));
-        }
     }
 
     pub(super) fn cached_tx_version_tables(&self, tx_id: TxId) -> Option<BTreeSet<String>> {
