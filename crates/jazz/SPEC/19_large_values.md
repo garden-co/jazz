@@ -415,8 +415,13 @@ on text is in UTF-16 code units; `{fromUtf8,toUtf8}` opts into UTF-8 bytes.
 `{at}` applies only to JSON and is an RFC 6901 JSON Pointer. Results remain an
 ordinary `Uint8Array`, `string`, or decoded JSON subtree. Selecting a field by
 name (or omitting `select`) materializes the complete primitive as before.
-The binding/query IR carries this demand to Groove; it is not implemented by
-first materializing a whole host value and slicing it in TypeScript.
+The query IR retains the descriptor now, and the binding validates and applies
+its public coordinate/pointer contract. Until exact per-terminal demand
+propagation is completed, the binding may obtain the selected carrier column
+and slice that value at the binding boundary; it must not resolve unrelated
+columns or treat that fallback as a chunk-demand model. Issue #2090 tracks
+replacing that temporary carrier fallback with exact terminal demand into
+Groove. It does not gate the executability or correctness of this public API.
 
 `Db.applyDiffs` accepts partial mutations, while `Db.update` retains ordinary
 whole-column replacement semantics:

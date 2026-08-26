@@ -1085,8 +1085,41 @@ fn partial_value_update_publishes_text_splice_and_ordinary_patch_atomically() {
     title.replace_range(title.len() - 4.., "done");
     let rows = prepared_read(&db, &db.table("todos"));
     let table = &doctest_support::schema().tables[0];
-    assert_eq!(rows[0].cell(table, "title"), Some(Value::String(title)));
+    assert_eq!(
+        rows[0].cell(table, "title"),
+        Some(Value::String(title.clone()))
+    );
     assert_eq!(rows[0].cell(table, "done"), Some(Value::Bool(true)));
+
+    let error = match block_on(db.update_with_large_value_mutations(
+        "todos",
+        row,
+        BTreeMap::from([("done".to_owned(), Value::Bool(false))]),
+        vec![LargeValueUpdate::JsonSet {
+            column: "title".to_owned(),
+            edits: vec![JsonSetEdit {
+                at: "/not-a-text-edit".to_owned(),
+                value: serde_json::json!("malformed raw descriptor"),
+            }],
+        }],
+    )) {
+        Ok(_) => panic!("a JSON descriptor for a text column must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, ErrorCode::Schema);
+    assert_eq!(error.message, "JSON set requires a JSON column");
+
+    let rows = prepared_read(&db, &db.table("todos"));
+    assert_eq!(
+        rows[0].cell(table, "title"),
+        Some(Value::String(title)),
+        "a schema-rejected raw descriptor must not publish a partial row version"
+    );
+    assert_eq!(
+        rows[0].cell(table, "done"),
+        Some(Value::Bool(true)),
+        "ordinary cells staged with a rejected descriptor must roll back too"
+    );
 }
 
 #[test]

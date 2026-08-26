@@ -944,6 +944,84 @@ async fn utf16_ranges_use_tree_metrics_and_tail_coordinates_without_prefix_hydra
 }
 
 #[futures_test::test]
+async fn utf16_offsets_use_tree_metrics_and_reject_surrogate_interiors() {
+    let prefix = "a".repeat(1_200_000);
+    let source = format!("{prefix}😀tail");
+    let prepared = prepare(LargeValueKind::String, source.as_bytes()).unwrap();
+    let chunks = prepared
+        .staged_chunks
+        .iter()
+        .map(|chunk| {
+            (
+                ChunkRequest {
+                    object_hash: chunk.node_ref.object_hash.0,
+                    locator: chunk.node_ref.locator,
+                },
+                Bytes::copy_from_slice(&chunk.encoded),
+            )
+        })
+        .collect::<Vec<_>>();
+    let total_chunks = chunks.len();
+    let (provider, control) = TestChunkProvider::controlled(chunks);
+    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
+        .await
+        .unwrap();
+    database.set_chunk_provider(Rc::new(provider));
+
+    let prefix_utf16 = prefix.encode_utf16().count() as u64;
+    let prefix_bytes = prefix.len() as u64;
+    assert_eq!(
+        database
+            .large_text_utf16_offset_to_byte(&prepared.value_ref, prefix_utf16)
+            .await
+            .unwrap(),
+        prefix_bytes,
+    );
+    assert_eq!(
+        database
+            .large_text_utf16_offset_to_byte(&prepared.value_ref, prefix_utf16 + 2)
+            .await
+            .unwrap(),
+        prefix_bytes + 4,
+    );
+    assert!(
+        database
+            .large_text_utf16_offset_to_byte(&prepared.value_ref, prefix_utf16 + 1)
+            .await
+            .is_err(),
+        "a UTF-16 coordinate inside an astral code point must be rejected"
+    );
+    assert!(
+        control.observed().len() < total_chunks,
+        "metric-guided offset lookup fetched {} of {total_chunks} chunks",
+        control.observed().len()
+    );
+
+    let TailAppendOutcome::Updated(with_tail) =
+        append_tail(&prepared.value_ref, "x😀".as_bytes().to_vec()).unwrap()
+    else {
+        panic!("small append must remain in the tail")
+    };
+    let source_utf16 = source.encode_utf16().count() as u64;
+    let source_bytes = source.len() as u64;
+    assert_eq!(
+        database
+            .large_text_utf16_offset_to_byte(&with_tail, source_utf16 + 1)
+            .await
+            .unwrap(),
+        source_bytes + 1,
+        "tail coordinates must be resolved in the final logical value"
+    );
+    assert!(
+        database
+            .large_text_utf16_offset_to_byte(&with_tail, source_utf16 + 2)
+            .await
+            .is_err(),
+        "tail surrogate interiors must be rejected too"
+    );
+}
+
+#[futures_test::test]
 async fn sequential_cursor_reads_post_edit_logical_value_in_atomic_bounded_windows() {
     let base = (0..1_500_000)
         .map(|index| (index * 17) as u8)

@@ -1559,8 +1559,27 @@ impl Database {
         value: &crate::large_values::LargeValueRef,
         offset: u64,
     ) -> Result<u64, Error> {
-        let prefix = self.read_large_text_utf16_range(value, 0..offset).await?;
-        Ok(prefix.len() as u64)
+        let mut inputs = crate::ivm::runtime::evaluation_session::EvaluationInputs::default();
+        let provider = self.ivm_runtime.chunk_provider();
+        loop {
+            match crate::large_values::utf16_offset_to_byte_attempt(value, offset, &mut inputs) {
+                Ok(byte_offset) => return Ok(byte_offset),
+                Err(crate::ivm::runtime::IvmRuntimeError::EvaluationBlocked) => {
+                    let requests = inputs.take_missing_chunks();
+                    if requests.is_empty() {
+                        return Err(crate::ivm::runtime::IvmRuntimeError::EvaluationBlocked.into());
+                    }
+                    for request in requests {
+                        let bytes = provider
+                            .get(request.clone())
+                            .await
+                            .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
+                        inputs.install_chunk_from_provider(request, bytes);
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 
     /// Resolve a JSON Pointer against literal validated JSON source. The

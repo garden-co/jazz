@@ -1407,6 +1407,41 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.finishMutation(write);
   }
 
+  updateLargeValues(
+    table: string,
+    objectId: string,
+    values: Record<string, Value>,
+    descriptors: readonly unknown[],
+    writeContext?: string | null,
+  ): MutationResult {
+    const rowId = parseUuid(objectId);
+    const updatedAtMs = effectiveUpdatedAtMs(writeContext);
+    const branchView = branchViewFromWriteContext(writeContext);
+    const tx = this.currentTx(writeContext, "Update");
+
+    // The first partial-value API is intentionally root-context only (#2087).
+    // Do not silently substitute the adapter's root author for a session or
+    // attributed write, nor read/stage through a transaction or branch view.
+    if (branchView) {
+      throw new Error("Typed large-value updates are not supported in branch views.");
+    }
+    if (tx) {
+      throw writeError("Update", "typed partial-value updates are not supported in transactions");
+    }
+    if (largeValueWriteHasAttributedIdentity(writeContext)) {
+      throw new Error("Typed large-value updates do not yet support an attributed identity.");
+    }
+    const updateLargeValues = this.db.updateLargeValuesEncoded;
+    if (!updateLargeValues) {
+      throw new Error("Native runtime does not support typed partial-value updates.");
+    }
+    const patch = encodeCellsForPatch(this.table(table), values);
+    const write = writeOrNormalizeRejection("Update", () =>
+      updateLargeValues.call(this.db, table, rowId, patch, descriptors, updatedAtMs ?? undefined),
+    );
+    return this.finishMutation(write);
+  }
+
   upsert(
     table: string,
     objectId: string,
@@ -3428,6 +3463,26 @@ function branchViewFromWriteContext(writeContext?: string | null): EncodedBranch
   }
 }
 
+function largeValueWriteHasAttributedIdentity(writeContext?: string | null): boolean {
+  if (!writeContext) return false;
+  try {
+    const parsed = JSON.parse(writeContext) as {
+      issuer?: unknown;
+      user_id?: unknown;
+      session?: unknown;
+      attribution?: unknown;
+    };
+    return (
+      parsed.issuer !== undefined ||
+      parsed.user_id !== undefined ||
+      parsed.session !== undefined ||
+      parsed.attribution !== undefined
+    );
+  } catch {
+    return false;
+  }
+}
+
 function rejectAttributedBranchWrite(
   attribution: Uint8Array | undefined,
   branchView: EncodedBranchView | undefined,
@@ -4069,7 +4124,7 @@ function addNestedOuterColumnsToSubqueries(subqueries: unknown): void {
         const outerColumn = (nested as { outer_column?: unknown }).outer_column;
         if (typeof outerColumn !== "string") continue;
         const column = outerColumn.split(".").at(-1) ?? outerColumn;
-        if (!record.select_columns.includes(column)) {
+        if (!(readSelectColumns(record.select_columns) ?? []).includes(column)) {
           record.select_columns.push(column);
         }
       }
@@ -4513,10 +4568,32 @@ function isQueryPredicateCmp(
 function readSelectColumns(value: unknown): string[] | undefined {
   if (value == null) return undefined;
   if (!Array.isArray(value)) throw unsupportedQueryEncodingError();
-  if (!value.every((column): column is string => typeof column === "string")) {
-    throw unsupportedQueryEncodingError();
+  const columns: string[] = [];
+  for (const entry of value) {
+    if (typeof entry === "string") {
+      columns.push(entry);
+      continue;
+    }
+    if (
+      !entry ||
+      typeof entry !== "object" ||
+      typeof (entry as { column?: unknown }).column !== "string"
+    ) {
+      throw unsupportedQueryEncodingError();
+    }
+    const projection = entry as { kind?: unknown; column: string };
+    if (
+      projection.kind !== "full" &&
+      projection.kind !== "bytes" &&
+      projection.kind !== "text_utf16" &&
+      projection.kind !== "text_utf8" &&
+      projection.kind !== "json_pointer"
+    ) {
+      throw unsupportedQueryEncodingError();
+    }
+    columns.push(projection.column);
   }
-  return value;
+  return columns;
 }
 
 function readRootOrderBy(value: unknown): QueryOrder[] {
