@@ -130,7 +130,11 @@ export declare class PendingNativeRead {
  * waiting for chunk I/O. Call `readAll` again after transport progress.
  */
 export declare class PendingNativeSubscriptionBatch {
-
+  /**
+   * The host should wait this bounded delay before asking the subscription
+   * to retry a retained chunk-hydration batch.
+   */
+  retryAfterMs(): number | null
 }
 
 /**

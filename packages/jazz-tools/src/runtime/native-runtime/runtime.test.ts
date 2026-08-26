@@ -6798,6 +6798,55 @@ function writeTeamGatherBatches(
   );
 }
 
+it("awaits pending native large-value hydration while checking edge coverage", async () => {
+  let polls = 0;
+  let runtime!: NativeRuntimeAdapter;
+  const pending = {
+    poll: () => {
+      if (polls++ === 0) {
+        (runtime as unknown as { peerTransportActivityEpoch: number }).peerTransportActivityEpoch =
+          2;
+        return null;
+      }
+      return new Uint8Array();
+    },
+  };
+  runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          all: () => pending,
+          prepareQuery: () => ({}),
+          queryAttachmentIsCovered: () => true,
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+
+  const waitForCoverage = (
+    runtime as unknown as {
+      waitForQueryCoverage(
+        attachment: unknown,
+        query: object,
+        opts: object,
+        identity?: Uint8Array,
+        minimumPeerActivityEpoch?: number,
+      ): Promise<void>;
+    }
+  ).waitForQueryCoverage.bind(runtime);
+
+  await expect(waitForCoverage({}, {}, { tier: "edge" }, undefined, 1)).resolves.toBeUndefined();
+  expect(polls).toBe(2);
+});
+
 function typedOccurrenceKey(label: string): Uint8Array {
   const labelBytes = inlineScalar(label);
   const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length);

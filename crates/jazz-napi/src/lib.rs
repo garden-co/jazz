@@ -322,46 +322,107 @@ struct PendingSubscriptionBatchCompletion {
     layouts: HashSet<String>,
 }
 
+/// A retryable chunk miss is not a subscription failure: retain the exact raw
+/// batch so the next host turn can re-run hydration after the peer pump has
+/// supplied the requested content.
+enum PendingSubscriptionBatchOutcome {
+    Complete(PendingSubscriptionBatchCompletion),
+    Retryable {
+        events: Vec<CoreSubscriptionEvent>,
+        retry_after_ms: u32,
+    },
+}
+
+enum PendingSubscriptionBatchState {
+    Future(LocalBoxFuture<'static, napi::Result<PendingSubscriptionBatchOutcome>>),
+    /// The raw events have been returned to the subscription queue. Keep this
+    /// marker visible to JavaScript for one turn so it can honor the retry
+    /// delay rather than tight-polling an immediately retryable resolver.
+    Retryable {
+        retry_after_ms: u32,
+    },
+}
+
+enum PendingSubscriptionBatchPoll {
+    Pending,
+    Complete(PendingSubscriptionBatchCompletion),
+    /// `Some` is the first observation of the retryable future completion and
+    /// owns events which must be restored to the front of the queue. `None`
+    /// is the following host turn, which clears the marker and retries them.
+    Retryable {
+        events: Option<Vec<CoreSubscriptionEvent>>,
+    },
+}
+
 /// Opaque marker returned while the next bounded native subscription batch is
 /// waiting for chunk I/O. Call `readAll` again after transport progress.
 #[napi]
 pub struct PendingNativeSubscriptionBatch {
-    future: Rc<
-        RefCell<Option<LocalBoxFuture<'static, napi::Result<PendingSubscriptionBatchCompletion>>>>,
-    >,
+    state: Rc<RefCell<Option<PendingSubscriptionBatchState>>>,
 }
 
 impl Clone for PendingNativeSubscriptionBatch {
     fn clone(&self) -> Self {
         Self {
-            future: Rc::clone(&self.future),
+            state: Rc::clone(&self.state),
         }
     }
 }
 
 impl PendingNativeSubscriptionBatch {
-    fn new(
-        future: LocalBoxFuture<'static, napi::Result<PendingSubscriptionBatchCompletion>>,
-    ) -> Self {
+    fn new(future: LocalBoxFuture<'static, napi::Result<PendingSubscriptionBatchOutcome>>) -> Self {
         Self {
-            future: Rc::new(RefCell::new(Some(future))),
+            state: Rc::new(RefCell::new(Some(PendingSubscriptionBatchState::Future(
+                future,
+            )))),
         }
     }
 
-    fn poll_once(&self) -> napi::Result<Option<PendingSubscriptionBatchCompletion>> {
-        let Some(mut future) = self.future.borrow_mut().take() else {
+    fn poll_once(&self) -> napi::Result<PendingSubscriptionBatchPoll> {
+        let Some(state) = self.state.borrow_mut().take() else {
             return Err(napi::Error::from_reason(
                 "native pending subscription batch is already complete",
             ));
         };
+        let PendingSubscriptionBatchState::Future(mut future) = state else {
+            let PendingSubscriptionBatchState::Retryable { retry_after_ms } = state else {
+                unreachable!("subscription batch state is exhaustive");
+            };
+            *self.state.borrow_mut() =
+                Some(PendingSubscriptionBatchState::Retryable { retry_after_ms });
+            return Ok(PendingSubscriptionBatchPoll::Retryable { events: None });
+        };
         let waker = Waker::noop();
         let mut context = Context::from_waker(waker);
         match Pin::new(&mut future).poll(&mut context) {
-            Poll::Ready(result) => result.map(Some),
+            Poll::Ready(result) => result.map(|outcome| match outcome {
+                PendingSubscriptionBatchOutcome::Complete(completion) => {
+                    PendingSubscriptionBatchPoll::Complete(completion)
+                }
+                PendingSubscriptionBatchOutcome::Retryable {
+                    events,
+                    retry_after_ms,
+                } => {
+                    *self.state.borrow_mut() =
+                        Some(PendingSubscriptionBatchState::Retryable { retry_after_ms });
+                    PendingSubscriptionBatchPoll::Retryable {
+                        events: Some(events),
+                    }
+                }
+            }),
             Poll::Pending => {
-                *self.future.borrow_mut() = Some(future);
-                Ok(None)
+                *self.state.borrow_mut() = Some(PendingSubscriptionBatchState::Future(future));
+                Ok(PendingSubscriptionBatchPoll::Pending)
             }
+        }
+    }
+
+    fn retry_after_ms(&self) -> Option<u32> {
+        match self.state.borrow().as_ref() {
+            Some(PendingSubscriptionBatchState::Retryable { retry_after_ms }) => {
+                Some(*retry_after_ms)
+            }
+            _ => None,
         }
     }
 }
@@ -388,6 +449,16 @@ impl PendingNativeRead {
                 Ok(None)
             }
         }
+    }
+}
+
+#[napi]
+impl PendingNativeSubscriptionBatch {
+    /// The host should wait this bounded delay before asking the subscription
+    /// to retry a retained chunk-hydration batch.
+    #[napi(js_name = "retryAfterMs")]
+    pub fn retry_after_ms_for_js(&self) -> Option<u32> {
+        self.retry_after_ms()
     }
 }
 
@@ -954,6 +1025,15 @@ impl Subscription {
 
 const MAX_RETAINED_SUBSCRIPTION_BATCH_EVENTS: usize = 256;
 
+fn requeue_retryable_subscription_batch(
+    pending_events: &mut VecDeque<CoreSubscriptionEvent>,
+    events: Vec<CoreSubscriptionEvent>,
+) {
+    for event in events.into_iter().rev() {
+        pending_events.push_front(event);
+    }
+}
+
 fn read_or_start_subscription_batch<S>(
     db: &Rc<CoreDb<S>>,
     stream: &mut SubscriptionStream,
@@ -966,12 +1046,22 @@ where
 {
     if let Some(batch) = pending_batch.as_ref() {
         match batch.poll_once()? {
-            Some(completion) => {
+            PendingSubscriptionBatchPoll::Complete(completion) => {
                 *pending_batch = None;
                 *published_terminal_layouts = completion.layouts;
                 return Ok(Some(completion.events));
             }
-            None => return Ok(None),
+            PendingSubscriptionBatchPoll::Pending => return Ok(None),
+            PendingSubscriptionBatchPoll::Retryable {
+                events: Some(events),
+                ..
+            } => {
+                requeue_retryable_subscription_batch(pending_events, events);
+                return Ok(None);
+            }
+            PendingSubscriptionBatchPoll::Retryable { events: None, .. } => {
+                *pending_batch = None;
+            }
         }
     }
     let mut raw_events = Vec::with_capacity(MAX_RETAINED_SUBSCRIPTION_BATCH_EVENTS);
@@ -992,30 +1082,49 @@ where
     let batch = PendingNativeSubscriptionBatch::new(Box::pin(async move {
         let mut raw_events = raw_events;
         for event in &mut raw_events {
-            db.hydrate_subscription_event_for_binding_outcome(event)
+            match db
+                .hydrate_subscription_event_for_binding_outcome(event)
                 .await
-                .map_err(|error| match error {
-                    jazz::db::BindingHydrationError::RetryableChunkUnavailable { .. } => {
-                        napi::Error::from_reason(
-                            "large-value chunk remains temporarily unavailable",
-                        )
-                    }
-                    jazz::db::BindingHydrationError::Error(error) => napi_error(error),
-                })?;
+            {
+                Ok(()) => {}
+                Err(jazz::db::BindingHydrationError::RetryableChunkUnavailable {
+                    retry_after_ms,
+                }) => {
+                    // Preserve the whole batch below rather than making a
+                    // retryable absence terminal at the NAPI boundary.
+                    return Ok(PendingSubscriptionBatchOutcome::Retryable {
+                        events: raw_events,
+                        retry_after_ms,
+                    });
+                }
+                Err(jazz::db::BindingHydrationError::Error(error)) => {
+                    return Err(napi_error(error));
+                }
+            }
         }
         let mut layouts = layouts;
         let events = raw_events
             .iter()
             .map(|event| core_subscription_event_to_napi(event, &mut layouts))
             .collect::<napi::Result<Vec<_>>>()?;
-        Ok(PendingSubscriptionBatchCompletion { events, layouts })
+        Ok(PendingSubscriptionBatchOutcome::Complete(
+            PendingSubscriptionBatchCompletion { events, layouts },
+        ))
     }));
     match batch.poll_once()? {
-        Some(completion) => {
+        PendingSubscriptionBatchPoll::Complete(completion) => {
             *published_terminal_layouts = completion.layouts;
             Ok(Some(completion.events))
         }
-        None => {
+        PendingSubscriptionBatchPoll::Pending
+        | PendingSubscriptionBatchPoll::Retryable { events: None } => {
+            *pending_batch = Some(batch);
+            Ok(None)
+        }
+        PendingSubscriptionBatchPoll::Retryable {
+            events: Some(events),
+        } => {
+            requeue_retryable_subscription_batch(pending_events, events);
             *pending_batch = Some(batch);
             Ok(None)
         }
@@ -4673,19 +4782,21 @@ pub fn verify_local_first_identity_proof_napi(
 mod tests {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use std::collections::{BTreeMap, HashSet};
+    use std::collections::{BTreeMap, HashSet, VecDeque};
     use std::rc::Rc;
 
     use futures::channel::oneshot;
 
     use crate::{
         CoreOpenDbConfig, CoreSelfSignedClientProof, InsertOptions, NapiDb, NapiDbInnerStorage,
-        NapiTxKind, PreparedQuery, RestoreOptions, Tx, UpdateOptions, UpsertOptions,
-        authority_epoch_from_bigint, core_author_id_from_bytes, core_block_on,
-        core_claim_value_from_json, core_insert_options, core_open_backend_identity,
-        core_open_identity, core_read_opts_from_json, core_read_tier_from_str,
-        core_restore_options, core_subscription_event_to_napi, core_update_options,
-        core_upsert_options, encode_core_subscription_delta, terminal_bytes_to_numbers,
+        NapiTxKind, PendingNativeRead, PendingNativeSubscriptionBatch,
+        PendingSubscriptionBatchOutcome, PendingSubscriptionBatchPoll, PreparedQuery,
+        RestoreOptions, Tx, UpdateOptions, UpsertOptions, authority_epoch_from_bigint,
+        core_author_id_from_bytes, core_block_on, core_claim_value_from_json, core_insert_options,
+        core_open_backend_identity, core_open_identity, core_read_opts_from_json,
+        core_read_tier_from_str, core_restore_options, core_subscription_event_to_napi,
+        core_update_options, core_upsert_options, encode_core_subscription_delta,
+        requeue_retryable_subscription_batch, terminal_bytes_to_numbers,
         unknown_transaction_kind_message,
     };
 
@@ -4702,14 +4813,68 @@ mod tests {
             pending.poll_once().unwrap().is_none(),
             "planted suspension is retained"
         );
-        sender
-            .send(Uint8Array::new(vec![7, 11]))
-            .expect("complete the retained future");
+        assert!(
+            sender.send(Uint8Array::new(vec![7, 11])).is_ok(),
+            "complete the retained future"
+        );
         assert_eq!(pending.poll_once().unwrap().unwrap().to_vec(), vec![7, 11]);
         assert!(
             pending.poll_once().is_err(),
             "completed reads cannot be replayed or double-encoded"
         );
+    }
+
+    // Internal because this asserts the NAPI object's one-turn retry marker;
+    // public transport topology tests separately prove that routed chunks are
+    // eventually delivered. The marker is what prevents the binding from
+    // dropping an otherwise retryable subscription batch between those turns.
+    #[test]
+    fn pending_subscription_batch_retains_retryable_marker_for_the_next_js_turn() {
+        let batch = PendingNativeSubscriptionBatch::new(Box::pin(async {
+            Ok(PendingSubscriptionBatchOutcome::Retryable {
+                events: Vec::new(),
+                retry_after_ms: 37,
+            })
+        }));
+
+        assert!(matches!(
+            batch.poll_once().unwrap(),
+            PendingSubscriptionBatchPoll::Retryable {
+                events: Some(events),
+            } if events.is_empty()
+        ));
+        assert_eq!(batch.retry_after_ms(), Some(37));
+        assert!(matches!(
+            batch.poll_once().unwrap(),
+            PendingSubscriptionBatchPoll::Retryable { events: None }
+        ));
+    }
+
+    #[test]
+    fn retryable_subscription_batch_returns_raw_events_to_the_front_in_fifo_order() {
+        let mut queued = VecDeque::from([CoreSubscriptionEvent::Rejected {
+            reason: SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission,
+        }]);
+        requeue_retryable_subscription_batch(
+            &mut queued,
+            vec![CoreSubscriptionEvent::Closed, CoreSubscriptionEvent::Closed],
+        );
+
+        assert!(matches!(
+            queued.pop_front(),
+            Some(CoreSubscriptionEvent::Closed)
+        ));
+        assert!(matches!(
+            queued.pop_front(),
+            Some(CoreSubscriptionEvent::Closed)
+        ));
+        assert!(matches!(
+            queued.pop_front(),
+            Some(CoreSubscriptionEvent::Rejected {
+                reason: SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission,
+            })
+        ));
+        assert!(queued.is_empty());
     }
 
     /// Binding read choices lower without widening the write durability parser.
@@ -4748,7 +4913,7 @@ mod tests {
     use jazz::ids::{
         AuthorSubject as CoreAuthorSubject, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid,
     };
-    use jazz::protocol::ReadViewSpec as CoreReadViewSpec;
+    use jazz::protocol::{ReadViewSpec as CoreReadViewSpec, SubscribeRejectReason};
     use jazz::tools::OpenTransactionId as CoreOpenBatchId;
     use jazz::tools::{
         ColumnType, PolicyExpr, Schema, SchemaBuilder, TableName, TablePolicies, TableSchema, Value,

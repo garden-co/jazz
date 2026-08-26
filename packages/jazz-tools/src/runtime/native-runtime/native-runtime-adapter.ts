@@ -125,7 +125,7 @@ type NativeWriteOptions = {
 
 type PendingNativeRead = { poll(): Uint8Array | null };
 type NativeReadResult = Uint8Array | PendingNativeRead;
-type PendingNativeSubscriptionBatch = object;
+type PendingNativeSubscriptionBatch = { retryAfterMs?(): number | null };
 type PendingNativeWrite = { poll(): Write | null };
 
 function isPendingNativeRead(value: unknown): value is PendingNativeRead {
@@ -2256,7 +2256,7 @@ export class NativeRuntimeAdapter implements Runtime {
         attachment = await this.attachQueryIfNeeded("edge", null, query, session);
         if (this.closed) return;
         const opts = readOptions("edge", false, null);
-        this.readRowsForHost(query, opts, session?.identity);
+        await this.readRowsForHostAsync(query, opts, session?.identity);
       } finally {
         if (attachment !== undefined && !this.closed) this.db.detachQuery?.(attachment);
       }
@@ -2437,7 +2437,7 @@ export class NativeRuntimeAdapter implements Runtime {
         if (peerHasResponded && this.db.queryAttachmentIsCovered(attachment)) return;
       }
       try {
-        this.readRowsForHost(query, opts, identity);
+        await this.readRowsForHostAsync(query, opts, identity);
         if (!this.db.queryAttachmentIsCovered) return;
       } catch (error) {
         if (!isPendingCoverageError(error)) throw error;
@@ -2704,7 +2704,8 @@ export class NativeRuntimeAdapter implements Runtime {
         const batch = source.source.readAll();
         if (!Array.isArray(batch)) {
           await this.pumpServerTransport();
-          await sleep(0);
+          const retryAfterMs = batch.retryAfterMs?.() ?? 0;
+          await sleep(Math.max(0, retryAfterMs));
           continue;
         }
         for (const event of batch) {
