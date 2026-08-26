@@ -923,6 +923,7 @@ where
                                 }
                                 return Err(transport_error(error));
                             }
+                            self.auxiliary_pump.acknowledge_outbound(&message);
                         }
                         pending.extend(upstream_subscriptions.borrow_mut().drain(..));
                         let claims = self.node.borrow().session_claims_with_revisions();
@@ -2167,6 +2168,7 @@ where
                         self.auxiliary_pump.restore_outbound(message);
                         return Err(transport_error(error));
                     }
+                    self.auxiliary_pump.acknowledge_outbound(&message);
                 }
                 while let Some(message) = self.transport.try_recv() {
                     // Authorization support is authority-owned in Phase 3.
