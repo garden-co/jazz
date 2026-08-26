@@ -36,8 +36,9 @@ Invariant digest:
 - `INV-EDGE-17`: An edge permission-scope subscription MUST be keyed by `(policy_shape, writer_claim)` — the write policy's query shape bound to the writer's `claim("user")` — and MUST NOT hydrate a whole-table scope. A public-write table (no write policy) opens no scope and settles immediately.
 - `INV-EDGE-18`: An edge MUST share a settled permission-scope subscription among all dependent acceptance gates it can satisfy.
 - `INV-EDGE-19`: A dynamically catalogued serving authority MUST NOT accept an uploaded commit unit until an authority has published a permissions head selecting its write schema and table policies. If no head is published, it MUST reject the unit with `permissions_head_missing`, rather than silently accepting it.
+- `INV-EDGE-21`: On an admin-authenticated `AuthorSubject::SYSTEM` WebSocket, admission MUST preserve the `Admin` credential classification, assign ordinary non-bootstrap relay/data traffic `TrustedBackend`, and assign `TrustedAdmin` only when the explicit catalogue-bootstrap flag is set; successful credential authentication alone MUST NOT select the application-policy trust level.
 - `INV-LOWER-20`: RLS policy declarations MUST be valid Jazz query shapes; read policy MUST lower through the query engine as part of the policy-composed read graph, while write-time ac...
-- `INV-RLS-18`: An uploaded commit unit MUST be authorized under the authenticated link identity: a Session link's madeby MUST equal that identity or be rejected, while a TrustedBacke...
+- `INV-RLS-18`: An uploaded commit unit MUST be authorized from its admitted ingest context: a `Session` link's `made_by` MUST equal the link identity or be rejected; a `TrustedBackend` link MUST evaluate write policy against the transaction's attested `permission_subject`, falling back to `made_by` when absent, while `made_by` remains provenance and an `AuthorSubject::SYSTEM` transport identity MUST NOT become the policy subject. Only `TrustedAdmin` MAY bypass application write policy.
 - `INV-TX-23`: Fate authority MUST be structurally wired by the host. Applying a bare unfated commit unit on a non-authority sync path MUST stage or park it pending remote fate; it M...
 
 ## Details
@@ -120,6 +121,15 @@ both mergeable and exclusive commit units without deciding their outcome: stored
 units remain `Fate::Pending` / `DurabilityTier::Local`, and the relay assigns no
 fate (`INV-EDGE-2`).
 
+WebSocket admission keeps credential classification separate from commit-unit
+trust. An edge-to-core socket authenticated with the admin credential under
+`AuthorSubject::SYSTEM` remains credential-classified as `Admin` for later route
+gates. Ordinary non-bootstrap relay/data admission assigns `TrustedBackend`;
+only an explicit catalogue-bootstrap request on that SYSTEM connection assigns
+`TrustedAdmin`. The bootstrap route then also requires the `Admin` credential,
+SYSTEM identity, and core topology. Successful admin authentication alone does
+not grant the application-policy bypass (`INV-EDGE-21`).
+
 A relay may cache encrypted read-side data at rest, but it never enforces
 permissions and never accepts or rejects a transaction. The default browser
 architecture is a shared-worker relay, where one worker relays for all tabs in
@@ -134,10 +144,12 @@ that link are policy-composed for that identity (`INV-EDGE-3`, ch. 7).
 
 Upstream commit-unit uploads on a normal session link are authorized under the
 same terminated identity: `made_by` must match the terminated identity unless the
-serving link is explicitly trusted as a backend. For a backend link, policy is
-evaluated under the backend link identity and `made_by` is stored only as
-attribution (`INV-RLS-18`, ch. 7). This is where per-user read narrowing happens:
-the last hop to the client.
+serving link is admitted as `TrustedBackend`. For trusted-backend ingest, core
+evaluates policy against the transaction's attested `permission_subject`,
+falling back to `made_by` when absent; the SYSTEM relay identity does not become
+the policy subject, and `made_by` remains provenance. Only `TrustedAdmin`
+bypasses application write policy (`INV-RLS-18`, ch. 7). This is also where
+per-user read narrowing happens: the last hop to the client.
 
 ### 9.5 Mergeable fate authority
 

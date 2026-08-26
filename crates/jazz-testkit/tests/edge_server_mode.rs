@@ -13,13 +13,13 @@ use jazz::tools::public_schema::{
 };
 use jazz::tools::{
     AppId, ColumnType, DurabilityTier, JazzClient, ObjectId, PolicyExpr, Schema, SchemaBuilder,
-    SubscriptionStreamItem, TableSchema, Value,
+    SubscriptionStreamItem, TableName, TableSchema, Value, permissions,
 };
 use jazz_server::JazzServer;
 use serde_json::json;
 use support::{
-    TestingClient, has_added_id, has_removed, publish_permissions, wait_for_edge_query_ready,
-    wait_for_query, wait_for_subscription_update,
+    TestingClient, has_added_id, has_removed, publish_permissions, push_catalogue_in_memory,
+    wait_for_edge_query_ready, wait_for_query, wait_for_subscription_update,
 };
 use tempfile::TempDir;
 
@@ -31,6 +31,19 @@ fn todo_schema() -> Schema {
                 .column("done", ColumnType::Boolean),
         )
         .build()
+}
+
+fn rejected_todo_permissions(schema: &Schema) -> Vec<(TableName, TablePolicies)> {
+    schema
+        .keys()
+        .map(|table| {
+            let policies = permissions(|permissions| {
+                permissions.allow_read();
+                permissions.allow_insert().never();
+            });
+            (*table, policies)
+        })
+        .collect()
 }
 
 fn ranked_todo_schema() -> Schema {
@@ -1118,22 +1131,26 @@ async fn fixed_schema_data_dir_reopen_bootstraps_policy_graph_policy_serving_sta
         .await;
 }
 
-/// An established Edge connector observes the exact Core link closing, enters
-/// reconnecting health, and attaches a replacement Core on the same endpoint.
-/// Relay write authorisation is deliberately outside this lifecycle receipt.
+/// End-to-end receipt for the ordinary native edge relay. A write propagates
+/// and settles globally through the initially bootstrapped link. After that
+/// established link drops, a second edge-local write is retained, replayed
+/// through the replacement link, materialized by Core, and settled globally.
 #[tokio::test(flavor = "current_thread")]
-async fn edge_reconnects_after_established_core_drop() {
+async fn edge_to_core_relay_propagates_settles_and_reconnects_after_established_drop() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = todo_schema();
             let app_id = AppId::random();
             let core_port = reserve_local_port();
+            let core_data_dir = TempDir::new().expect("Core data dir");
             let core = tokio::time::timeout(
                 Duration::from_secs(10),
                 JazzServer::builder()
                     .with_app_id(app_id)
                     .with_port(core_port)
                     .with_schema(schema.clone())
+                    .with_data_dir(core_data_dir.path())
+                    .with_storage_factory(jazz_testkit::persistent_storage_factory())
                     .start(),
             )
             .await
@@ -1160,6 +1177,54 @@ async fn edge_reconnects_after_established_core_drop() {
             .await
             .expect("edge initially bootstraps and attaches its ordinary upstream");
 
+            let alice = tokio::time::timeout(
+                Duration::from_secs(15),
+                connect_user(&edge, schema.clone(), "alice-edge-server-mode"),
+            )
+            .await
+            .expect("Alice-to-Edge connection/readiness timed out");
+            let first_core_observer = tokio::time::timeout(
+                Duration::from_secs(15),
+                connect_user(&core, schema.clone(), "first-direct-core-observer"),
+            )
+            .await
+            .expect("first direct Core observer connection/readiness timed out");
+            let (first_todo, first_expected, first_tx) = alice
+                .insert(
+                    "todos",
+                    row_input!("title" => "edge through initial link", "done" => false),
+                )
+                .expect("alice writes through the initially bootstrapped edge");
+            let first_tx = first_tx.expect("ordinary mutation commits immediately");
+
+            support::wait_for_edge_txs(&alice, &[first_tx]).await;
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                alice.wait_for_transaction(first_tx, DurabilityTier::GlobalServer),
+            )
+            .await
+            .expect("initial edge-to-core Global waiter timed out")
+            .expect("edge write settles globally through the initial link");
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                wait_for_row(
+                    &first_core_observer,
+                    DurabilityTier::GlobalServer,
+                    first_todo,
+                    first_expected,
+                    "direct core observer receives the edge-origin write",
+                ),
+            )
+            .await
+            .expect("initial direct-Core visibility wait timed out");
+
+            // Reconnect is a separate responsibility from initial bootstrap:
+            // first prove the ordinary link, then stop that exact Core and wait
+            // until the Edge has observed the established connection's drop.
+            tokio::time::timeout(Duration::from_secs(5), first_core_observer.shutdown())
+                .await
+                .expect("first direct Core observer shutdown timed out")
+                .expect("shutdown first direct core observer");
             tokio::time::timeout(Duration::from_secs(15), core.shutdown())
                 .await
                 .expect("established Core shutdown timed out while dropping the upstream link");
@@ -1174,12 +1239,27 @@ async fn edge_reconnects_after_established_core_drop() {
             .await
             .expect("edge observes established upstream drop");
 
+            let (second_todo, second_expected, second_tx) = alice
+                .insert(
+                    "todos",
+                    row_input!("title" => "edge during reconnect", "done" => true),
+                )
+                .expect("alice inserts while the established upstream is down");
+            let second_tx = second_tx.expect("ordinary mutation commits immediately");
+            assert_ne!(
+                first_tx, second_tx,
+                "the reconnect receipt must wait on a distinct post-drop transaction"
+            );
+            support::wait_for_edge_txs(&alice, &[second_tx]).await;
+
             let restarted_core = tokio::time::timeout(
                 Duration::from_secs(10),
                 JazzServer::builder()
                     .with_app_id(app_id)
                     .with_port(core_port)
-                    .with_schema(schema)
+                    .with_schema(schema.clone())
+                    .with_data_dir(core_data_dir.path())
+                    .with_storage_factory(jazz_testkit::persistent_storage_factory())
                     .start(),
             )
             .await
@@ -1193,7 +1273,41 @@ async fn edge_reconnects_after_established_core_drop() {
             })
             .await
             .expect("edge attaches a replacement upstream after the established drop");
+            let replacement_core_observer = tokio::time::timeout(
+                Duration::from_secs(15),
+                connect_user(&restarted_core, schema, "replacement-direct-core-observer"),
+            )
+            .await
+            .expect("replacement direct Core observer connection/readiness timed out");
 
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                alice.wait_for_transaction(second_tx, DurabilityTier::GlobalServer),
+            )
+            .await
+            .expect("replacement-link Global waiter timed out")
+            .expect("write retained during the drop settles through the replacement link");
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                wait_for_row(
+                    &replacement_core_observer,
+                    DurabilityTier::GlobalServer,
+                    second_todo,
+                    second_expected,
+                    "replacement core materializes the replayed edge write",
+                ),
+            )
+            .await
+            .expect("replacement direct-Core visibility wait timed out");
+
+            tokio::time::timeout(Duration::from_secs(5), replacement_core_observer.shutdown())
+                .await
+                .expect("replacement Core observer shutdown timed out")
+                .expect("shutdown replacement Core observer");
+            tokio::time::timeout(Duration::from_secs(5), alice.shutdown())
+                .await
+                .expect("Alice shutdown timed out")
+                .expect("shutdown alice");
             tokio::time::timeout(Duration::from_secs(15), edge.shutdown())
                 .await
                 .expect("Edge cleanup timed out");
@@ -1204,57 +1318,74 @@ async fn edge_reconnects_after_established_core_drop() {
         .await;
 }
 
-/// A fixed-schema Edge remains usable while its Core is unavailable. Its
-/// connector reports retry health, the local route accepts and parks a write at
-/// Edge durability, and the connector attaches once Core appears. Relaying that
-/// write into Core requires the upper-layer trusted-relay authorisation policy.
+/// A connected Edge must turn a denied optimistic write into a terminal Global
+/// rejection, and the rejected row must never appear to a client observing
+/// Core directly.
 #[tokio::test(flavor = "current_thread")]
-async fn edge_to_core_relay_retains_write_while_upstream_is_unavailable() {
+async fn edge_to_core_relay_returns_global_rejection() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = todo_schema();
-            let app_id = AppId::random();
-            let core_port = reserve_local_port();
+            let core = tokio::time::timeout(Duration::from_secs(10), JazzServer::start())
+                .await
+                .expect("denial Core start timed out");
+            let app_id = core.app_id();
+            push_catalogue_in_memory(
+                core.server_state(),
+                app_id,
+                "dev",
+                std::slice::from_ref(&schema),
+                &[],
+            )
+            .await
+            .expect("publish denial schema catalogue");
+            publish_permissions(
+                &core.base_url(),
+                app_id,
+                core.admin_secret(),
+                &schema,
+                rejected_todo_permissions(&schema),
+                None,
+            )
+            .await;
+            let direct_denied = tokio::time::timeout(
+                Duration::from_secs(15),
+                TestingClient::builder()
+                    .with_server(&core)
+                    .with_schema(schema.clone())
+                    .with_user_id("direct-core-denial-precondition")
+                    .as_user()
+                    .connect(),
+            )
+            .await
+            .expect("direct Core denial client connection timed out");
+            let (_, _, direct_tx) = direct_denied
+                .insert(
+                    "todos",
+                    row_input!("title" => "direct denial precondition", "done" => false),
+                )
+                .expect("direct Core client stages denial precondition");
+            let direct_tx = direct_tx.expect("direct denial precondition commits locally");
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                direct_denied.wait_for_transaction(direct_tx, DurabilityTier::GlobalServer),
+            )
+            .await
+            .expect("direct Core denial precondition waiter timed out")
+            .expect_err("published Core permissions must deny a direct user insert");
+            tokio::time::timeout(Duration::from_secs(5), direct_denied.shutdown())
+                .await
+                .expect("direct Core denial client shutdown timed out")
+                .expect("shutdown direct Core denial client");
+
             let edge = JazzServer::builder()
                 .with_app_id(app_id)
                 .with_schema(schema.clone())
                 .with_native_transport_connector(jazz_testkit::native_connector())
-                .with_upstream_url(format!("http://127.0.0.1:{core_port}"))
+                .with_upstream_url(core.base_url())
                 .start()
                 .await;
             let edge_state = edge.server_state();
-            tokio::time::timeout(Duration::from_secs(5), async {
-                while !matches!(
-                    edge_state.edge_upstream_health(),
-                    jazz_server::EdgeUpstreamHealth::Reconnecting { .. }
-                ) {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("edge reports unavailable upstream before Core starts");
-
-            let alice = connect_user(&edge, schema.clone(), "alice-upstream-unavailable").await;
-            let (_, _, tx) = alice
-                .insert(
-                    "todos",
-                    row_input!("title" => "retained without core", "done" => false),
-                )
-                .expect("edge accepts while its upstream is unavailable");
-            let tx = tx.expect("ordinary mutation commits immediately");
-            support::wait_for_edge_txs(&alice, &[tx]).await;
-            assert_ne!(
-                edge_state.edge_upstream_health(),
-                jazz_server::EdgeUpstreamHealth::Connected,
-                "the edge-tier receipt precedes any upstream connection"
-            );
-
-            let core = JazzServer::builder()
-                .with_app_id(app_id)
-                .with_port(core_port)
-                .with_schema(schema)
-                .start()
-                .await;
             tokio::time::timeout(Duration::from_secs(5), async {
                 while edge_state.edge_upstream_health()
                     != jazz_server::EdgeUpstreamHealth::Connected
@@ -1263,11 +1394,172 @@ async fn edge_to_core_relay_retains_write_while_upstream_is_unavailable() {
                 }
             })
             .await
-            .expect("edge attaches when the initially unavailable Core starts");
+            .expect("edge establishes its ordinary upstream before the rejection receipt");
 
+            let alice = TestingClient::builder()
+                .with_server(&edge)
+                .with_schema(schema.clone())
+                .with_user_id("alice-rejected-at-core")
+                .as_user()
+                .connect()
+                .await;
+            let core_observer = TestingClient::builder()
+                .with_server(&core)
+                .with_schema(schema)
+                .with_user_id("direct-core-rejection-observer")
+                .as_user()
+                .connect()
+                .await;
+            let (rejected_todo, _, rejected_tx) = alice
+                .insert(
+                    "todos",
+                    row_input!("title" => "must be rejected", "done" => false),
+                )
+                .expect("the client stages the optimistic write");
+            let rejected_tx = rejected_tx.expect("optimistic mutation commits locally");
+
+            let rejection = tokio::time::timeout(
+                Duration::from_secs(15),
+                alice.wait_for_transaction(rejected_tx, DurabilityTier::GlobalServer),
+            )
+            .await
+            .expect("denied write's Global waiter timed out");
+            rejection.expect_err("the denied write resolves the global waiter with rejection");
+            let core_rows = core_observer
+                .query(todo_query(), Some(DurabilityTier::GlobalServer))
+                .await
+                .expect("query Core after the global rejection");
+            assert!(
+                core_rows.iter().all(|(id, _)| *id != rejected_todo),
+                "authority-rejected row must not appear at Core"
+            );
+
+            core_observer
+                .shutdown()
+                .await
+                .expect("shutdown direct core observer");
             alice.shutdown().await.expect("shutdown alice");
             edge.shutdown().await;
             core.shutdown().await;
+        })
+        .await;
+}
+
+/// An unavailable Core does not prevent a fixed-schema Edge from accepting at
+/// its own durability tier. Once Core appears, the retained write propagates,
+/// materializes at Core, and resolves its exact Global waiter.
+#[tokio::test(flavor = "current_thread")]
+async fn edge_to_core_relay_retains_write_while_upstream_is_unavailable() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = todo_schema();
+            let app_id = AppId::random();
+            let core_port = reserve_local_port();
+            let edge = tokio::time::timeout(
+                Duration::from_secs(10),
+                JazzServer::builder()
+                    .with_app_id(app_id)
+                    .with_schema(schema.clone())
+                    .with_native_transport_connector(jazz_testkit::native_connector())
+                    .with_upstream_url(format!("http://127.0.0.1:{core_port}"))
+                    .start(),
+            )
+            .await
+            .expect("offline-ready Edge start timed out");
+            // `connect_user` waits for a settled remote query, which is
+            // intentionally unavailable in this scenario. The fixed-schema
+            // client can connect and exercise write durability without that
+            // unrelated read precondition.
+            let alice = tokio::time::timeout(
+                Duration::from_secs(15),
+                jazz_testkit::connect(
+                    edge.make_client_context_for_user(schema.clone(), "alice-upstream-unavailable"),
+                ),
+            )
+            .await
+            .expect("offline-ready Alice connection timed out")
+            .expect("connect Alice to offline-ready Edge");
+            let (todo_id, expected, tx) = alice
+                .insert(
+                    "todos",
+                    row_input!("title" => "retained without core", "done" => false),
+                )
+                .expect("edge accepts while its upstream is unavailable");
+            let tx = tx.expect("ordinary mutation commits immediately");
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                support::wait_for_edge_txs(&alice, &[tx]),
+            )
+            .await
+            .expect("offline-ready Edge durability wait timed out");
+            assert_ne!(
+                edge.server_state().edge_upstream_health(),
+                jazz_server::EdgeUpstreamHealth::Connected,
+                "the edge-tier receipt precedes any upstream connection"
+            );
+
+            let core = tokio::time::timeout(
+                Duration::from_secs(10),
+                JazzServer::builder()
+                    .with_app_id(app_id)
+                    .with_port(core_port)
+                    .with_schema(schema.clone())
+                    .start(),
+            )
+            .await
+            .expect("newly available Core start timed out");
+
+            let edge_state = edge.server_state();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while edge_state.edge_upstream_health()
+                    != jazz_server::EdgeUpstreamHealth::Connected
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("offline-ready Edge did not attach the newly available Core");
+            let core_observer = tokio::time::timeout(
+                Duration::from_secs(15),
+                connect_user(&core, schema, "direct-unavailable-core-observer"),
+            )
+            .await
+            .expect("newly available Core observer connection/readiness timed out");
+
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                alice.wait_for_transaction(tx, DurabilityTier::GlobalServer),
+            )
+            .await
+            .expect("unavailable-upstream Global waiter timed out")
+            .expect("retained edge write settles when core becomes available");
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                wait_for_row(
+                    &core_observer,
+                    DurabilityTier::GlobalServer,
+                    todo_id,
+                    expected,
+                    "newly available core materializes the retained edge write",
+                ),
+            )
+            .await
+            .expect("newly available direct-Core visibility wait timed out");
+
+            tokio::time::timeout(Duration::from_secs(5), core_observer.shutdown())
+                .await
+                .expect("newly available Core observer shutdown timed out")
+                .expect("shutdown direct core observer");
+            tokio::time::timeout(Duration::from_secs(5), alice.shutdown())
+                .await
+                .expect("offline-ready Alice shutdown timed out")
+                .expect("shutdown alice");
+            tokio::time::timeout(Duration::from_secs(15), edge.shutdown())
+                .await
+                .expect("offline-ready Edge shutdown timed out");
+            tokio::time::timeout(Duration::from_secs(15), core.shutdown())
+                .await
+                .expect("newly available Core shutdown timed out");
         })
         .await;
 }
@@ -1505,7 +1797,7 @@ fn topology_matrix_conformance_smoke_inventory() {
         Cell {
             topology: Topology::ClientEdgeCore,
             scenario: Scenario::MergeableWrite,
-            coverage: "edge_server_mode::edge_to_core_relay_retains_write_while_upstream_is_unavailable",
+            coverage: "edge_server_mode::edge_to_core_relay_propagates_settles_and_reconnects_after_established_drop",
         },
         Cell {
             topology: Topology::ClientEdgeCore,

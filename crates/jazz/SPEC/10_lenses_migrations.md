@@ -68,6 +68,14 @@ mutations travel as admin-gated
 messages with `CatalogueAck` replies; a non-admin author is rejected
 (`INV-LENS-3`). `AuthorSubject::SYSTEM` is the catalogue admin.
 
+The same SYSTEM/admin pair authenticates the snapshot-only edge catalogue
+bootstrap, but the transport grants `TrustedAdmin` only when the WebSocket
+prelude explicitly requests catalogue bootstrap. An ordinary relay/data
+connection using that credential remains `TrustedBackend`; admin authentication
+alone does not grant an application-policy bypass. This narrow bootstrap
+classification does not broaden or redefine catalogue mutation authority under
+`INV-LENS-3` (`INV-EDGE-21`, ch. 9).
+
 Exactly one database-wide catalogue sequencer assigns a dense monotone
 `CatalogueSeq`. An arbitrary core or replica never assigns catalogue sequence;
 edges forward authenticated, prevalidated requests to that sequencer. Catalogue

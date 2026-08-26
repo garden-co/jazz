@@ -204,10 +204,18 @@ async fn ws_admission(
     if let Some(admin_secret) = auth.admin_secret.as_deref() {
         crate::middleware::auth::validate_admin_secret(Some(admin_secret), &state.auth_config)
             .map_err(|(_, message)| message.to_owned())?;
+        let trust = if !prelude.bootstrap_catalogue && peer_identity == AuthorSubject::SYSTEM {
+            // Edge relays use the admin credential to authenticate their
+            // control plane, but application commits must still be checked
+            // against the original transaction permission subject.
+            CommitUnitTrust::TrustedBackend
+        } else {
+            CommitUnitTrust::TrustedAdmin
+        };
         return Ok(WebSocketAdmission {
             identity: peer_identity,
             claims: BTreeMap::new(),
-            trust: CommitUnitTrust::TrustedAdmin,
+            trust,
             credential: WebSocketCredential::Admin,
         });
     }
@@ -1290,6 +1298,43 @@ mod tests {
             .await
             .expect("build websocket convergence test state")
             .state
+    }
+
+    #[tokio::test]
+    async fn ws_system_admin_data_link_preserves_relay_write_authorization() {
+        let state = make_ws_test_state().await;
+        let admission = ws_admission(
+            WebSocketPrelude {
+                peer_identity: AuthorSubject::SYSTEM.canonical().to_owned(),
+                bootstrap_catalogue: false,
+                auth: jazz::tools::websocket_prelude_auth::AuthConfig {
+                    admin_secret: Some("admin-secret".to_owned()),
+                    ..Default::default()
+                },
+            },
+            &HeaderMap::new(),
+            &state,
+        )
+        .await
+        .expect("admit authenticated edge relay");
+        assert_eq!(admission.credential, WebSocketCredential::Admin);
+        assert_eq!(admission.trust, CommitUnitTrust::TrustedBackend);
+
+        let bootstrap = ws_admission(
+            WebSocketPrelude {
+                peer_identity: AuthorSubject::SYSTEM.canonical().to_owned(),
+                bootstrap_catalogue: true,
+                auth: jazz::tools::websocket_prelude_auth::AuthConfig {
+                    admin_secret: Some("admin-secret".to_owned()),
+                    ..Default::default()
+                },
+            },
+            &HeaderMap::new(),
+            &state,
+        )
+        .await
+        .expect("admit authenticated catalogue bootstrap");
+        assert_eq!(bootstrap.trust, CommitUnitTrust::TrustedAdmin);
     }
 
     #[tokio::test]

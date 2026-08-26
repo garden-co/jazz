@@ -30,7 +30,7 @@ Invariant digest:
 - `INV-RLS-14`: Policy evaluation MUST deny when it cannot determine that a policy predicate is satisfied.
 - `INV-RLS-15`: A table with no declared policy clauses is public for reads and for writes by non-anonymous permission subjects; anonymous permission subjects are structurally read-only, and once a table declares any clause, every omitted operation is denied.
 - `INV-RLS-17`: A write whose Transaction.madeby differs from the authenticated permission subject MUST be accepted only via a trusted serving node (a core/edge Node accepting a Trust...
-- `INV-RLS-18`: An uploaded commit unit MUST be authorized under the authenticated link identity: a Session link's madeby MUST equal that identity or be rejected, while a TrustedBacke...
+- `INV-RLS-18`: An uploaded commit unit MUST be authorized from its admitted ingest context: a `Session` link's `made_by` MUST equal the link identity or be rejected; a `TrustedBackend` link MUST evaluate write policy against the transaction's attested `permission_subject`, falling back to `made_by` when absent, while `made_by` remains provenance and an `AuthorSubject::SYSTEM` transport identity MUST NOT become the policy subject. Only `TrustedAdmin` MAY bypass application write policy.
 - `INV-RLS-19`: A required include MUST be treated as resolvable for a non-system
   reader only when its target row exists as a current row AND satisfies the target
   table's read policy for that reader; a parent whose required target is missing or
@@ -196,13 +196,15 @@ integrity checks such as `ensure_row_not_deleted` may inspect storage under
 system authority. Merging omitted user cells and deciding whether an upsert
 target exists are user reads and MUST be evaluated as the writer.
 
-Uploaded commit units are authorized under the **authenticated link identity**,
-not under the self-declared `Transaction.made_by`. A normal `Session` link must
-upload units whose `made_by` equals that authenticated link identity; otherwise,
-the unit is rejected as `AuthorizationDenied`. A `TrustedBackend` link may
-upload a unit with `made_by != identity`, but write policy is still evaluated
-against the link/backend identity while `made_by` remains provenance
-(`INV-RLS-18`; compare the local facade attribution rule, `INV-RLS-17`). A
+Uploaded commit units are authorized from their **admitted ingest context**, not
+from `Transaction.made_by` alone. A normal `Session` link must upload units whose
+`made_by` equals the authenticated link identity; otherwise, the unit is rejected
+as `AuthorizationDenied`. For `TrustedBackend` ingest, core evaluates write policy
+against the transaction's attested `permission_subject`, falling back to
+`made_by` when that field is absent. `made_by` remains provenance. In particular,
+an `AuthorSubject::SYSTEM` relay transport identity does not become the policy
+subject. Only `TrustedAdmin` bypasses application write policy (`INV-RLS-18`;
+compare the local facade attribution rule, `INV-RLS-17`). A
 deletion-register version is authorized against the **current global content
 winner** for that row, not against the deletion record; a delete with no current
 global content is denied (`INV-RLS-7`).
@@ -213,19 +215,17 @@ the bound branch columns or traverse them to application-owned lifecycle and
 membership rows. Missing traversal evidence fails closed, and policy is
 evaluated in the operation's effective branch view (ch. 11, `INV-BVIEW-18`).
 
-Authorization deliberately separates authorship from permission identity.
-`made_by` is the _author_ attribution and is not necessarily the _permission_
-identity: a trusted backend (ch. 9, ch. 13) may authenticate as itself while
-attributing a mutation to a user. That **attribution-only** case stores user
-authorship while evaluating policy against the backend identity. Four identities
-are worth keeping distinct:
+Authorization deliberately separates transport identity, permission identity,
+and authorship. A trusted serving backend (ch. 9, ch. 13) may attest the
+application permission subject while preserving a different user as `made_by`.
+Four values and roles are worth keeping distinct:
 
-| identity                                 | what it is                                                   | used for                                                            |
-| ---------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------- |
-| `made_by` (author)                       | who a mutation is _attributed_ to (`Transaction.made_by`)    | provenance (`$createdBy`); _not_ necessarily the permission subject |
-| authenticated identity (`AuthorSubject`) | who a connection authenticated as                            | the subject read/write policies are evaluated against               |
-| attribution-only                         | a trusted backend authed as itself but attributing to a user | author ≠ permission identity (ch. 9, ch. 13)                        |
-| `AuthorSubject::SYSTEM`                  | the system identity                                          | bypasses all policies; relay links carry it (§7.3)                  |
+| identity                    | what it is                                                        | used for                                                                            |
+| --------------------------- | ----------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `made_by` (author)          | who a mutation is _attributed_ to (`Transaction.made_by`)         | provenance (`$createdBy`); _not_ necessarily the permission subject                 |
+| authenticated link identity | the session or machine subject admitted on the transport          | authenticating the link; the policy subject for `Session` ingest                    |
+| `permission_subject`        | the application subject attested in a trusted-backend transaction | `TrustedBackend` write policy; falls back to `made_by` when absent                  |
+| `AuthorSubject::SYSTEM`     | the reserved machine identity carried by relay links              | relay transport and un-narrowed read serving; not the trusted-backend write subject |
 
 At the facade boundary, attributed writes are core-only unless `made_by ==
 authenticated identity`. This prevents a client from forging another user's

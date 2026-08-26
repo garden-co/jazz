@@ -1,7 +1,29 @@
 import { access } from "node:fs/promises";
+import { WebSocket } from "undici";
 import { afterEach, describe, expect, it } from "vitest";
-import { startLocalJazzServer, type LocalJazzServerHandle } from "./dev-server.js";
+import { createJazzContext, type JazzContext } from "../backend/index.js";
+import { schema as s } from "../index.js";
+import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
+import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
+import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "./dev-server.js";
 import { getAvailablePort } from "./test-helpers.js";
+
+const relayReceiptApp = s.defineApp({
+  receipts: s.table({
+    message: s.string(),
+  }),
+});
+
+const relayReceiptPermissions = s.definePermissions(relayReceiptApp, ({ policy }) => [
+  policy.receipts.allowRead.always(),
+  policy.receipts.allowInsert.always(),
+  policy.receipts.allowUpdate.never(),
+  policy.receipts.allowDelete.never(),
+]);
+
+const relayReceiptServerSchema = encodeSchema(
+  mergePermissionsIntoWasmSchema(relayReceiptApp.wasmSchema, relayReceiptPermissions),
+);
 
 describe("dev-server re-export compatibility", () => {
   it("exports startLocalJazzServer and deploy from jazz-tools/testing path", async () => {
@@ -75,6 +97,126 @@ describe("startLocalJazzServer via JazzServer", () => {
     expect(healthResponse.ok).toBe(true);
   }, 30_000);
 
+  it("makes a backend write through Edge globally visible from Core", async () => {
+    const previousWebSocket = globalThis.WebSocket;
+    globalThis.WebSocket = WebSocket as unknown as typeof globalThis.WebSocket;
+
+    const appId = "00000000-0000-0000-0000-00000000d004";
+    const adminSecret = "dev-server-relay-receipt-admin";
+    let core: LocalJazzServerHandle | null = null;
+    let edge: LocalJazzServerHandle | null = null;
+    let edgeContext: JazzContext | null = null;
+    let coreContext: JazzContext | null = null;
+
+    try {
+      const corePort = await getAvailablePort();
+      edge = await startLocalJazzServer({
+        appId,
+        port: await getAvailablePort(),
+        inMemory: true,
+        adminSecret,
+        backendSecret: "dev-server-relay-receipt-edge-backend",
+        upstreamUrl: `http://127.0.0.1:${corePort}`,
+        schema: relayReceiptServerSchema,
+      });
+
+      edgeContext = createJazzContext({
+        appId,
+        app: relayReceiptApp,
+        permissions: relayReceiptPermissions,
+        driver: { type: "memory" },
+        serverUrl: edge.url,
+        backendSecret: edge.backendSecret,
+        env: "dev-server-relay-receipt-edge",
+        tier: "edge",
+      });
+      await withTimeout(
+        edgeContext.asBackend().all(relayReceiptApp.receipts, { tier: "edge" }),
+        15_000,
+        "Fixed-schema Edge did not become ready for its public NAPI client",
+      );
+
+      core = await startLocalJazzServer({
+        appId,
+        port: corePort,
+        inMemory: true,
+        adminSecret,
+        backendSecret: "dev-server-relay-receipt-core-backend",
+      });
+      await deploy({
+        serverUrl: core.url,
+        appId,
+        adminSecret,
+        schema: relayReceiptApp,
+        permissions: relayReceiptPermissions,
+      });
+
+      coreContext = createJazzContext({
+        appId,
+        app: relayReceiptApp,
+        permissions: relayReceiptPermissions,
+        driver: { type: "memory" },
+        serverUrl: core.url,
+        backendSecret: core.backendSecret,
+        env: "dev-server-relay-receipt-core",
+        tier: "global",
+      });
+
+      const coreReader = coreContext.asBackend();
+      const initialCoreRows = await withTimeout(
+        coreReader.all(relayReceiptApp.receipts, {
+          tier: "global",
+          propagation: "full",
+        }),
+        15_000,
+        "Core initial settled read did not complete",
+      );
+      expect(initialCoreRows).toEqual([]);
+
+      const edgeWriter = edgeContext.withAttribution(
+        "https://dev-server-relay-receipt.example",
+        "writer",
+      );
+      const write = edgeWriter.insert(relayReceiptApp.receipts, {
+        message: "globally relayed",
+      });
+      const globallySettled = await withTimeout(
+        write.wait({ tier: "global" }),
+        15_000,
+        "Edge write did not settle globally",
+      );
+
+      const coreRows = await withTimeout(
+        coreReader.all(relayReceiptApp.receipts, {
+          tier: "global",
+          propagation: "full",
+        }),
+        15_000,
+        "Core settled read did not complete",
+      );
+
+      expect(globallySettled).toMatchObject({
+        id: write.value.id,
+        message: "globally relayed",
+      });
+      expect(coreRows).toContainEqual(
+        expect.objectContaining({
+          id: write.value.id,
+          message: "globally relayed",
+        }),
+      );
+    } finally {
+      await Promise.allSettled([edgeContext?.shutdown(), coreContext?.shutdown()]);
+      if (edge) {
+        await edge.stop().catch(() => undefined);
+      }
+      if (core) {
+        await core.stop().catch(() => undefined);
+      }
+      globalThis.WebSocket = previousWebSocket;
+    }
+  }, 60_000);
+
   it("uses an isolated temp data dir by default and cleans it up on stop", async () => {
     let first: LocalJazzServerHandle | null = null;
     let second: LocalJazzServerHandle | null = null;
@@ -104,3 +246,17 @@ describe("startLocalJazzServer via JazzServer", () => {
     }
   }, 30_000);
 });
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
