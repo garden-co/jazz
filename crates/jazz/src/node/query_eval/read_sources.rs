@@ -2807,6 +2807,23 @@ where
         &self,
         request: &QueryProgramRequest,
     ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
+        // A policy proof may contain both an owner arm and a correlated
+        // membership arm for the same protected source. Walking its nested
+        // nodes independently would see the owner's claim equality and apply
+        // that index path to the entire union, incorrectly excluding rows
+        // that only the membership arm authorizes. The small planner does not
+        // prove per-arm coverage, so any alternative or relational proof
+        // retains full source scans.
+        if request.input.shape.nodes.values().any(|node| {
+            matches!(
+                node,
+                RowSetExpr::Union { .. }
+                    | RowSetExpr::Join { .. }
+                    | RowSetExpr::RecursiveRelation { .. }
+            )
+        }) {
+            return Ok(BTreeMap::new());
+        }
         self.normalized_program_access_paths(
             &request.input,
             &request.reads.primary,
