@@ -11,7 +11,7 @@ use std::hash::{BuildHasher, Hash, Hasher};
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use crate::records::{RecordDescriptor, Value, ValueType};
+use crate::records::{RecordDescriptor, Value, ValueType, collect_by_ordered_scalar};
 use thiserror::Error;
 
 use super::op_types::*;
@@ -2011,25 +2011,6 @@ fn expect_arrangement_inputs(inputs: &[NodeOutput]) -> Result<(), GraphValidatio
         Ok(())
     } else {
         Err(GraphValidationError::InvalidNodeOutput)
-    }
-}
-
-fn collect_by_ordered_scalar(value_type: &ValueType) -> bool {
-    match value_type {
-        ValueType::Nullable(inner) => collect_by_ordered_scalar(inner),
-        ValueType::U8
-        | ValueType::U16
-        | ValueType::U32
-        | ValueType::U64
-        | ValueType::I32
-        | ValueType::I64
-        | ValueType::F64
-        | ValueType::Bool
-        | ValueType::String
-        | ValueType::Bytes
-        | ValueType::Uuid
-        | ValueType::EnumTag(_) => true,
-        _ => false,
     }
 }
 

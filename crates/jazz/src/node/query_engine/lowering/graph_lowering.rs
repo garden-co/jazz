@@ -1018,6 +1018,11 @@ fn lower_linear_plan_steps_cached(
     // subsequent join. Keep their source-qualified field addresses so the
     // final flat-join projection can still name every contributing source.
     let mut accumulated_join_fields = BTreeMap::<(SourceId, String), (String, usize)>::new();
+    // UNION inputs have an occurrence identity which is not source-qualified:
+    // it is the complete `(arm, row)` pair. Keep its public terminal names
+    // while flattening a consecutive inner join so the final projection can
+    // retain the pair for result-membership.
+    let mut accumulated_union_occurrence_fields = BTreeSet::<String>::new();
     let mut available_route_fields = if matches!(plan.root, LinearRoot::Source { .. }) {
         root_source.routing_fields.clone()
     } else {
@@ -1205,6 +1210,17 @@ fn lower_linear_plan_steps_cached(
                                 .to_owned(),
                         )
                     })?;
+                    let mut union_occurrence_outputs = BTreeMap::new();
+                    if !policy_subplan && matches!(right.as_ref(), RelationInputPlan::Union(_)) {
+                        if let Some((arm_field, row_field)) =
+                            &lowered_right.union_occurrence_carrier
+                        {
+                            union_occurrence_outputs
+                                .insert(arm_field.clone(), format!("__root_join_arm_{step_index}"));
+                            union_occurrence_outputs
+                                .insert(row_field.clone(), format!("__root_join_row_{step_index}"));
+                        }
+                    }
                     let mut projection = fields
                         .iter()
                         .map(|field| ProjectField::renamed(left_field(field), field.clone()))
@@ -1213,12 +1229,20 @@ fn lower_linear_plan_steps_cached(
                     let mut next_nullable = nullable_fields.clone();
                     let mut next_depths = nullable_field_depths.clone();
                     for field in right_fields {
-                        let output = if policy_subplan {
-                            format!("__policy_join_source_{step_index}_{field}")
-                        } else {
-                            format!("__flat_join_source_{step_index}_{field}")
-                        };
+                        let output = union_occurrence_outputs
+                            .get(&field)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                if policy_subplan {
+                                    format!("__policy_join_source_{step_index}_{field}")
+                                } else {
+                                    format!("__flat_join_source_{step_index}_{field}")
+                                }
+                            });
                         projection.push(ProjectField::renamed(right_field(&field), output.clone()));
+                        if union_occurrence_outputs.contains_key(&field) {
+                            accumulated_union_occurrence_fields.insert(output.clone());
+                        }
                         let nullable_depth = right_depths.get(&field).copied().unwrap_or(0);
                         accumulated_join_fields.insert(
                             (right_source.clone(), field.clone()),
@@ -1252,6 +1276,15 @@ fn lower_linear_plan_steps_cached(
                     );
                     let mut occurrence_fields = BTreeSet::new();
                     if !omits_public_occurrence_carriers(request) {
+                        // Earlier consecutive UNION joins already flattened
+                        // their complete occurrence pair into the left input.
+                        // Retain both fields under their terminal names; row
+                        // identity without its union arm is ambiguous.
+                        for output in &accumulated_union_occurrence_fields {
+                            projection
+                                .push(ProjectField::renamed(left_field(output), output.clone()));
+                            occurrence_fields.insert(output.clone());
+                        }
                         // A trailing semi-join filters the complete public
                         // tuple but contributes no occurrence of its own.
                         // Preserve the earlier inner-join row IDs from the
@@ -1271,7 +1304,29 @@ fn lower_linear_plan_steps_cached(
                         }
                     }
                     if *mode == JoinMode::Inner && !omits_public_occurrence_carriers(request) {
-                        if let Some(right_source_id) = right.root_source() {
+                        // A union's root source is one of its arms, but its
+                        // public occurrence is the `(arm, row)` pair. Check
+                        // the relation shape before inspecting that source so
+                        // an aliased common arm cannot make us drop the union
+                        // carrier that result-membership terminals require.
+                        if matches!(right.as_ref(), RelationInputPlan::Union(_)) {
+                            if let Some((arm_field, row_field)) =
+                                &lowered_right.union_occurrence_carrier
+                            {
+                                let arm_output = format!("__root_join_arm_{step_index}");
+                                let row_output = format!("__root_join_row_{step_index}");
+                                projection.push(ProjectField::renamed(
+                                    right_field(arm_field),
+                                    arm_output.clone(),
+                                ));
+                                projection.push(ProjectField::renamed(
+                                    right_field(row_field),
+                                    row_output.clone(),
+                                ));
+                                occurrence_fields.insert(arm_output);
+                                occurrence_fields.insert(row_output);
+                            }
+                        } else if let Some(right_source_id) = right.root_source() {
                             let right_source = resolved_sources.get(right_source_id).ok_or_else(|| {
                                 UnsupportedReason::Operator(format!(
                                     "inner join occurrence source {right_source_id:?} was not resolved"
@@ -1294,21 +1349,6 @@ fn lower_linear_plan_steps_cached(
                                 ));
                                 occurrence_fields.insert(output);
                             }
-                        } else if let Some((arm_field, row_field)) =
-                            &lowered_right.union_occurrence_carrier
-                        {
-                            let arm_output = format!("__root_join_arm_{step_index}");
-                            let row_output = format!("__root_join_row_{step_index}");
-                            projection.push(ProjectField::renamed(
-                                right_field(arm_field),
-                                arm_output.clone(),
-                            ));
-                            projection.push(ProjectField::renamed(
-                                right_field(row_field),
-                                row_output.clone(),
-                            ));
-                            occurrence_fields.insert(arm_output);
-                            occurrence_fields.insert(row_output);
                         }
                     }
                     graph = graph.project_fields(projection);

@@ -1059,6 +1059,13 @@ type QueryCoverageRegistrations = Rc<RefCell<BTreeMap<SubscriptionKey, QueryCove
 type ActiveAuthorityViewReceipts = Rc<RefCell<Option<AuthorityViewReceipts>>>;
 type UpstreamSubscriptionOwners =
     Rc<RefCell<BTreeMap<SubscriptionKey, Vec<Weak<RefCell<SubscriptionState>>>>>>;
+/// Relay-owned upstream usage sites are distinct from public `SubscriptionStream`
+/// owners. A served connection can disappear without dropping a public stream,
+/// so relay lifecycle has to retain its own connection-scoped ownership record.
+type RelayUpstreamSubscriptionOwners =
+    Rc<RefCell<BTreeMap<SubscriptionKey, RelayUpstreamSubscriptionOwner>>>;
+type PendingRelaySubscriptionRejections =
+    Rc<RefCell<BTreeMap<u64, VecDeque<RelaySubscriptionRejection>>>>;
 type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
 
 /// Authenticated logical destination for an upstream upload retry.
@@ -1509,6 +1516,26 @@ struct CoverageGroup {
     upstream_subscription: SubscriptionKey,
     upstream_opts: RegisterShapeOptions,
     awaiting_upstream_settlement: bool,
+}
+
+/// One propagated coverage group owned by one downstream relay connection.
+///
+/// `upstream_subscription` is a usage-site wire handle, while `coverage`
+/// identifies the local shared evaluator that must be retired with it. Keeping
+/// both prevents a dropped connection from removing an unrelated sibling's
+/// logically identical coverage.
+struct RelayUpstreamSubscriptionOwner {
+    downstream_connection_epoch: u64,
+    coverage: CoverageKey,
+    downstream_subscriptions: BTreeSet<SubscriptionKey>,
+}
+
+/// An authority rejection that must be delivered on the originating downstream
+/// connection before that connection's served coverage is retired.
+struct RelaySubscriptionRejection {
+    coverage: CoverageKey,
+    downstream_subscriptions: BTreeSet<SubscriptionKey>,
+    reason: SubscribeRejectReason,
 }
 
 /// Authority-derived scope identity retained for a support subscription.
