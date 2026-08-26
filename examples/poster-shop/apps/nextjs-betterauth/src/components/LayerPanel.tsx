@@ -22,14 +22,7 @@ export function LayerPanel({ canvasId }: { canvasId: string }) {
       <ol>
         {layers.map((layer) => (
           <li key={layer.id}>
-            <label>
-              <input
-                type="checkbox"
-                checked={layer.visible}
-                onChange={() => db.update(app.layers, layer.id, { visible: !layer.visible })}
-              />
-              {layer.name}
-            </label>
+            {layer.visible ? "Visible" : "Hidden"}: {layer.name}
           </li>
         ))}
       </ol>

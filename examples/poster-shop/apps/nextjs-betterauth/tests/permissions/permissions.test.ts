@@ -142,9 +142,19 @@ it("keeps canvas ordering and history markers behind the same membership boundar
       fill: "#000",
     }),
   );
+  await editor.expectDenied((db) => db.update(app.layers, back.id, { visible: false }));
+  await owner.expectDenied((db) =>
+    db.insert(app.assets, {
+      canvasId: canvas.id,
+      name: "unowned.png",
+      mimeType: "image/png",
+      byteLength: 1,
+    }),
+  );
+  await owner.expectDenied((db) => db.delete(app.checkpoints, checkpoint.id));
 });
 
-it("permits replaceable cursor presence only to its author", async () => {
+it("keeps cursor creation default-deny until its ownership semantics are specified", async () => {
   const ownerId = "cursor-owner";
   const editorId = "cursor-editor";
   const owner = testApp.as({
@@ -170,11 +180,9 @@ it("permits replaceable cursor presence only to its author", async () => {
       .insert(app.canvasMembers, { canvasId: canvas.id, userId, role })
       .wait({ tier: "edge" });
   }
-  const cursor = await editor
-    .insert(app.cursors, { canvasId: canvas.id, userId: editorId, x: 3, y: 4, color: "#f00" })
-    .wait({ tier: "edge" });
-  await editor.update(app.cursors, cursor.id, { x: 5, y: 6 }).wait({ tier: "edge" });
-  await owner.expectDenied((db) => db.update(app.cursors, cursor.id, { x: 99 }));
+  await editor.expectDenied((db) =>
+    db.insert(app.cursors, { canvasId: canvas.id, userId: editorId, x: 3, y: 4, color: "#f00" }),
+  );
   await owner.expectDenied((db) =>
     db.insert(app.cursors, { canvasId: canvas.id, userId: editorId, x: 1, y: 1, color: "#000" }),
   );

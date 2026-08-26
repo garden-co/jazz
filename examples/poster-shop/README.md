@@ -9,10 +9,15 @@ high-rate presence write does not require reading an asset shelf or re-running
 a renderer-wide query. Cursors are ephemeral presence rows and are never part
 of history.
 
-The browser topology receipt runs the ordinary application schema and policies
-through two JWT clients over browser → edge → core. It proves an editor's
-ordered shape inserts, admin checkpoint, cursor delivery, one offline local
-write replay, and post-revocation rejection. Its deterministic timeout/fault
+The first slice only exposes settled authorization: admins bootstrap and manage
+membership, editors and admins add layers and shapes, and admins add immutable
+checkpoints. Asset mutation, layer/shape mutation and deletion, cursor creation,
+and checkpoint deletion remain default-deny until their ownership rules are
+specified in #1926. The UI keeps those surfaces read-only rather than offering
+an action with an undecided authorization contract.
+
+The follow-up topology receipt will run this ordinary application schema and
+policy set through browser → edge → core. Its deterministic timeout/fault
 plumbing comes from the shared example topology harness; it does not replace
 the application's queries or policy evaluator.
 
