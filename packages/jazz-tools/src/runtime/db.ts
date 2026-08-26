@@ -1296,13 +1296,17 @@ export class Db {
     this.authStateStore.markUnauthenticated(reason);
   }
 
-  private publishAuthStateWithInternalSession<T>(nextSession: Session | null, publish: () => T): T {
+  private publishAuthStateWithInternalSession<T>(
+    nextSession: Session | null,
+    publish: () => T,
+  ): { value: T; rollback: () => void } {
     const previousSession = getDbInternalSession(this);
     setDbInternalSession(this, nextSession);
+    const rollback = () => setDbInternalSession(this, previousSession);
     try {
-      return publish();
+      return { value: publish(), rollback };
     } catch (error) {
-      setDbInternalSession(this, previousSession);
+      rollback();
       throw error;
     }
   }
@@ -1316,12 +1320,13 @@ export class Db {
       jwtToken,
       trustedReservedSession,
     });
-    const nextState = this.publishAuthStateWithInternalSession(nextInternalSession, () =>
+    const published = this.publishAuthStateWithInternalSession(nextInternalSession, () =>
       this.authStateStore.applyJwtToken(jwtToken, trustedReservedSession),
     );
     const tokenChanged = previousToken !== jwtToken;
 
-    if (!tokenChanged && nextState === previousState) {
+    if (!tokenChanged && published.value === previousState) {
+      published.rollback();
       return false;
     }
 
@@ -1341,12 +1346,13 @@ export class Db {
       ...this.config,
       cookieSession,
     });
-    const nextState = this.publishAuthStateWithInternalSession(nextInternalSession, () =>
+    const published = this.publishAuthStateWithInternalSession(nextInternalSession, () =>
       this.authStateStore.applyCookieSession(cookieSession),
     );
     const sessionChanged = JSON.stringify(previousSession) !== JSON.stringify(cookieSession);
 
-    if (!sessionChanged && nextState === previousState) {
+    if (!sessionChanged && published.value === previousState) {
+      published.rollback();
       return false;
     }
 

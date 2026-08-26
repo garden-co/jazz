@@ -335,6 +335,7 @@ describe("Db auth state", () => {
     const jwt = makeJwt({ sub: "alice", claims: { role: "reader" } });
     const { db, runtimeClient } = makeDbWithJwt(jwt);
     const states: AuthState[] = [];
+    const before = getDbInternalSession(db);
 
     const stop = db.onAuthChanged((state) => {
       states.push(state);
@@ -344,6 +345,7 @@ describe("Db auth state", () => {
     stop();
 
     expect(runtimeClient.updateAuthToken).not.toHaveBeenCalled();
+    expect(getDbInternalSession(db)).toBe(before);
     expect(states).toHaveLength(1);
     expect(states[0]).toMatchObject({
       authMode: "external",
@@ -419,6 +421,11 @@ describe("Db auth state", () => {
       authMode: "external",
     });
     expect(listenerInternalRoles.at(-1)).toBe("writer");
+
+    const beforeNoOp = getDbInternalSession(db);
+    db.updateCookieSession({ ...refreshed, claims: { ...refreshed.claims } });
+    expect(getDbInternalSession(db)).toBe(beforeNoOp);
+    expect(runtimeClient.updateCookieSession).toHaveBeenCalledTimes(1);
 
     const accepted = getDbInternalSession(db);
     expect(() =>
