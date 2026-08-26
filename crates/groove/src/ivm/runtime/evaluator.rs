@@ -1716,6 +1716,16 @@ impl TickEvaluator<'_> {
                 .push(delta.clone());
         }
 
+        if unbounded_top_by_preserves_ordered_membership(output_desc, &input.deltas, top_by)? {
+            self.insert_arrangement(arrangement_key, arrangement);
+            let mut deltas = input.deltas.clone();
+            deltas.sort_by_key(|delta| delta.weight.is_positive());
+            return Ok(RecordDeltas {
+                descriptor: output_desc,
+                deltas,
+            });
+        }
+
         let mut output = Vec::new();
         for (group_prefix, group_deltas) in touched_groups {
             let after_records = arrangement.value().records_for_key(&group_prefix);

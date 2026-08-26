@@ -977,6 +977,23 @@ fn top_by_sort_key(
     )
 }
 
+pub(super) fn unbounded_top_by_preserves_ordered_membership(
+    descriptor: RecordDescriptor,
+    deltas: &[RecordDelta],
+    top_by: &TopByOp,
+) -> Result<bool, IvmRuntimeError> {
+    if top_by.limit != TopByLimit::Unbounded || deltas.is_empty() {
+        return Ok(false);
+    }
+    let mut weights = BTreeMap::<(Vec<u8>, Vec<TopBySortPart>), i64>::new();
+    for delta in deltas {
+        let group = encoded_record_key_part(descriptor, delta.raw(), &top_by.group_field_indices)?;
+        let sort = top_by_sort_key(descriptor, delta.raw(), top_by)?;
+        *weights.entry((group, sort)).or_default() += delta.weight;
+    }
+    Ok(weights.values().all(|weight| *weight == 0))
+}
+
 pub(super) fn diff_record_windows(
     before: Vec<WindowedRecord>,
     after: Vec<WindowedRecord>,
