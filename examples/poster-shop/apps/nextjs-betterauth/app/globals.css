@@ -1,4 +1,21 @@
-:root { color: #201826; background: #fff8f2; font-family: ui-sans-serif, system-ui, sans-serif; }
-body { max-width: 900px; margin: 0 auto; padding: 3rem 1.5rem; }
-button { background: #201826; border: 0; border-radius: .5rem; color: white; cursor: pointer; padding: .7rem 1rem; }
-li { margin: .4rem 0; }
+:root {
+  color: #201826;
+  background: #fff8f2;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+body {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 3rem 1.5rem;
+}
+button {
+  background: #201826;
+  border: 0;
+  border-radius: 0.5rem;
+  color: white;
+  cursor: pointer;
+  padding: 0.7rem 1rem;
+}
+li {
+  margin: 0.4rem 0;
+}
