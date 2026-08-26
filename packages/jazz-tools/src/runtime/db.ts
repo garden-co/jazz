@@ -1256,12 +1256,7 @@ export class Db {
       jwtToken,
       trustedReservedSession,
     });
-    let nextState: AuthState;
-    try {
-      nextState = this.authStateStore.applyJwtToken(jwtToken, trustedReservedSession);
-    } catch (error) {
-      throw error;
-    }
+    const nextState = this.authStateStore.applyJwtToken(jwtToken, trustedReservedSession);
     const tokenChanged = previousToken !== jwtToken;
 
     if (!tokenChanged && nextState === previousState) {
@@ -1285,12 +1280,7 @@ export class Db {
       ...this.config,
       cookieSession,
     });
-    let nextState: AuthState;
-    try {
-      nextState = this.authStateStore.applyCookieSession(cookieSession);
-    } catch (error) {
-      throw error;
-    }
+    const nextState = this.authStateStore.applyCookieSession(cookieSession);
     const sessionChanged = JSON.stringify(previousSession) !== JSON.stringify(cookieSession);
 
     if (!sessionChanged && nextState === previousState) {
