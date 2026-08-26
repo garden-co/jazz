@@ -1309,3 +1309,185 @@ async fn live_index_registration_rejects_while_a_publication_is_resident() {
         [vec![Value::U64(7), Value::String("Blue Train".to_owned())]]
     );
 }
+
+fn column_family_test_table(name: &str) -> TableSchema {
+    TableSchema::new(
+        name,
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("title", ColumnType::String),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
+}
+
+fn column_family_test_direct_store(name: &str) -> DirectRecordStoreSchema {
+    DirectRecordStoreSchema::new(
+        name,
+        RecordDescriptor::new([("id", ValueType::U64)]),
+        RecordDescriptor::new([("payload", ValueType::Bytes)]),
+    )
+}
+
+fn assert_index_column_family_name_conflict<T>(
+    result: Result<T, Error>,
+    name: &str,
+    existing_owner: &'static str,
+    requested_owner: &'static str,
+) {
+    let error = match result {
+        Ok(_) => panic!("conflicting column family {name} was admitted"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "column family name conflict for {name}: existing owner {existing_owner}, requested owner {requested_owner}"
+        )
+    );
+}
+
+async fn assert_initial_indices_family_conflict(
+    schema: DatabaseSchema,
+    requested_owner: &'static str,
+) {
+    let (storage, control) = TestStorage::controlled(&schema.column_families());
+    let result = Database::new(schema, storage).await;
+
+    assert_index_column_family_name_conflict(result, "indices", "indices", requested_owner);
+    assert!(
+        control.observed().is_empty(),
+        "schema rejection touched storage: {:?}",
+        control.observed()
+    );
+}
+
+#[futures_test::test]
+async fn initial_indices_family_is_reserved_only_when_an_index_is_active() {
+    let table_schema = DatabaseSchema::new([
+        column_family_test_table("indices"),
+        column_family_test_table("albums")
+            .with_index(IndexSchema::new("albums_by_title", ["title"])),
+    ]);
+    assert_initial_indices_family_conflict(table_schema, "table").await;
+
+    let direct_store_schema = DatabaseSchema::new([column_family_test_table("albums")
+        .with_index(IndexSchema::new("albums_by_title", ["title"]))])
+    .with_direct_record_store(column_family_test_direct_store("indices"));
+    assert_initial_indices_family_conflict(direct_store_schema, "direct record store").await;
+
+    for schema in [
+        DatabaseSchema::new([column_family_test_table("indices")]),
+        DatabaseSchema::new([])
+            .with_direct_record_store(column_family_test_direct_store("indices")),
+    ] {
+        let storage = MemoryStorage::new(&schema.column_families());
+        Database::new(schema, storage).await.unwrap();
+    }
+}
+
+#[futures_test::test]
+async fn live_table_registration_reserves_indices_only_after_an_index_is_active() {
+    let indexed_schema = DatabaseSchema::new([column_family_test_table("albums")
+        .with_index(IndexSchema::new("albums_by_title", ["title"]))]);
+    let (storage, control) = TestStorage::controlled(&indexed_schema.column_families());
+    let mut indexed_database = Database::new(indexed_schema, storage).await.unwrap();
+    control.take_observed();
+
+    let result = indexed_database.register_table(column_family_test_table("indices"));
+    assert_index_column_family_name_conflict(result, "indices", "indices", "table");
+    assert!(
+        control.observed().is_empty(),
+        "live schema rejection touched storage: {:?}",
+        control.observed()
+    );
+
+    let schema = DatabaseSchema::new([column_family_test_table("albums")]);
+    let mut database = Database::new(
+        schema,
+        MemoryStorage::new(&["albums", "indices", LARGE_VALUE_METADATA_CF]),
+    )
+    .await
+    .unwrap();
+    database
+        .register_table(column_family_test_table("indices"))
+        .unwrap();
+}
+
+#[futures_test::test]
+async fn live_index_registration_rejects_application_owned_indices_before_storage_io() {
+    for (schema, existing_owner) in [
+        (
+            DatabaseSchema::new([
+                column_family_test_table("albums"),
+                column_family_test_table("indices"),
+            ]),
+            "table",
+        ),
+        (
+            DatabaseSchema::new([column_family_test_table("albums")])
+                .with_direct_record_store(column_family_test_direct_store("indices")),
+            "direct record store",
+        ),
+    ] {
+        let (storage, control) = TestStorage::controlled(&schema.column_families());
+        let mut database = Database::new(schema, storage).await.unwrap();
+        control.take_observed();
+
+        let result = database
+            .register_table_index("albums", IndexSchema::new("albums_by_title", ["title"]))
+            .await;
+        assert_index_column_family_name_conflict(result, "indices", existing_owner, "indices");
+        assert!(
+            control.observed().is_empty(),
+            "index rejection touched storage: {:?}",
+            control.observed()
+        );
+    }
+}
+
+#[futures_test::test]
+async fn the_same_index_name_remains_valid_for_different_tables() {
+    let initial_schema = DatabaseSchema::new([
+        column_family_test_table("albums").with_index(IndexSchema::new("by_title", ["title"])),
+        column_family_test_table("books").with_index(IndexSchema::new("by_title", ["title"])),
+    ]);
+    let initial_storage = MemoryStorage::new(&initial_schema.column_families());
+    Database::new(initial_schema, initial_storage)
+        .await
+        .unwrap();
+
+    let dynamic_schema = DatabaseSchema::new([
+        column_family_test_table("albums"),
+        column_family_test_table("books"),
+    ]);
+    let mut database = Database::new(
+        dynamic_schema,
+        MemoryStorage::new(&["albums", "books", "indices", LARGE_VALUE_METADATA_CF]),
+    )
+    .await
+    .unwrap();
+    for table in ["albums", "books"] {
+        database
+            .register_table_index(table, IndexSchema::new("by_title", ["title"]))
+            .await
+            .unwrap();
+    }
+
+    assert!(
+        database
+            .table_schema("albums")
+            .unwrap()
+            .indices
+            .iter()
+            .any(|index| index.name == "by_title")
+    );
+    assert!(
+        database
+            .table_schema("books")
+            .unwrap()
+            .indices
+            .iter()
+            .any(|index| index.name == "by_title")
+    );
+}

@@ -2290,6 +2290,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn jazz_class_layout_physical_column_family_names_are_stable() {
+        assert_eq!(
+            StorageLayout::jazz_class_v1().physical_column_families([
+                "jazz_albums_history",
+                "jazz_albums_register",
+                "jazz_albums_global_current",
+                "jazz_albums_ahead_current",
+                "jazz_global_changes",
+                "indices",
+                "jazz_nodes",
+            ]),
+            [
+                "__groove_class_ahead_current",
+                "__groove_class_changes",
+                "__groove_class_global_current",
+                "__groove_class_history",
+                "__groove_class_indices",
+                "__groove_class_meta",
+                "__groove_class_register",
+            ]
+        );
+    }
+
     #[futures_test::test]
     async fn class_layout_isolates_every_jazz_physical_class() {
         let logical_cfs = [

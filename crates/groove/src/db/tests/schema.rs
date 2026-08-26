@@ -251,3 +251,220 @@ fn ordinary_enum_registry_ids_cannot_claim_the_reserved_system_marker() {
     assert_eq!(ids.len(), 2);
     assert!(ids.iter().all(|id| id & (1 << 63) == 0));
 }
+
+const JAZZ_CLASS_V1_PHYSICAL_NAMES: [&str; 7] = [
+    "__groove_class_history",
+    "__groove_class_register",
+    "__groove_class_global_current",
+    "__groove_class_ahead_current",
+    "__groove_class_changes",
+    "__groove_class_indices",
+    "__groove_class_meta",
+];
+
+fn named_table(name: &str) -> TableSchema {
+    TableSchema::new(name, [ColumnSchema::new("id", ColumnType::U64)])
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
+}
+
+fn named_direct_store(name: &str) -> DirectRecordStoreSchema {
+    DirectRecordStoreSchema::new(
+        name,
+        RecordDescriptor::new([("id", ValueType::U64)]),
+        RecordDescriptor::new([("payload", ValueType::Bytes)]),
+    )
+}
+
+fn assert_column_family_name_conflict<T>(
+    result: Result<T, Error>,
+    name: &str,
+    existing_owner: &'static str,
+    requested_owner: &'static str,
+) {
+    let error = match result {
+        Ok(_) => panic!("conflicting column family {name} was admitted"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "column family name conflict for {name}: existing owner {existing_owner}, requested owner {requested_owner}"
+        )
+    );
+}
+
+fn controlled_storage_for(
+    schema: &DatabaseSchema,
+    layout: &StorageLayout,
+) -> (TestStorage, crate::storage::TestStorageControl) {
+    let logical_families = schema.column_families();
+    let physical_families = layout.physical_column_families(logical_families.iter().copied());
+    let physical_family_refs = physical_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    TestStorage::controlled(&physical_family_refs)
+}
+
+async fn assert_initial_column_family_conflict(
+    schema: DatabaseSchema,
+    layout: StorageLayout,
+    name: &str,
+    existing_owner: &'static str,
+    requested_owner: &'static str,
+) {
+    let (storage, control) = controlled_storage_for(&schema, &layout);
+    let result = Database::new_with_storage_layout(schema, storage, layout).await;
+
+    assert_column_family_name_conflict(result, name, existing_owner, requested_owner);
+    assert!(
+        control.observed().is_empty(),
+        "schema rejection touched storage: {:?}",
+        control.observed()
+    );
+}
+
+#[futures_test::test]
+async fn schema_admission_rejects_duplicate_application_column_families_before_storage_io() {
+    let duplicate_tables = DatabaseSchema::new([named_table("shared"), named_table("shared")]);
+    assert_initial_column_family_conflict(
+        duplicate_tables,
+        StorageLayout::Identity,
+        "shared",
+        "table",
+        "table",
+    )
+    .await;
+
+    let duplicate_direct_stores = DatabaseSchema::new([])
+        .with_direct_record_store(named_direct_store("shared"))
+        .with_direct_record_store(named_direct_store("shared"));
+    assert_initial_column_family_conflict(
+        duplicate_direct_stores,
+        StorageLayout::Identity,
+        "shared",
+        "direct record store",
+        "direct record store",
+    )
+    .await;
+
+    let table_and_direct_store = DatabaseSchema::new([named_table("shared")])
+        .with_direct_record_store(named_direct_store("shared"));
+    assert_initial_column_family_conflict(
+        table_and_direct_store,
+        StorageLayout::Identity,
+        "shared",
+        "table",
+        "direct record store",
+    )
+    .await;
+}
+
+#[futures_test::test]
+async fn schema_admission_reserves_large_value_metadata_before_storage_io() {
+    for (schema, requested_owner) in [
+        (
+            DatabaseSchema::new([named_table(LARGE_VALUE_METADATA_CF)]),
+            "table",
+        ),
+        (
+            DatabaseSchema::new([])
+                .with_direct_record_store(named_direct_store(LARGE_VALUE_METADATA_CF)),
+            "direct record store",
+        ),
+    ] {
+        assert_initial_column_family_conflict(
+            schema,
+            StorageLayout::Identity,
+            LARGE_VALUE_METADATA_CF,
+            "large-value metadata",
+            requested_owner,
+        )
+        .await;
+    }
+}
+
+#[futures_test::test]
+async fn jazz_class_layout_reserves_every_exact_physical_family_before_marker_io() {
+    for name in JAZZ_CLASS_V1_PHYSICAL_NAMES {
+        assert_initial_column_family_conflict(
+            DatabaseSchema::new([named_table(name)]),
+            StorageLayout::jazz_class_v1(),
+            name,
+            "JazzClassV1 storage layout",
+            "table",
+        )
+        .await;
+    }
+}
+
+#[futures_test::test]
+async fn live_table_registration_reserves_every_exact_jazz_class_physical_family() {
+    let schema = DatabaseSchema::new([named_table("application")]);
+    let layout = StorageLayout::jazz_class_v1();
+    let (storage, control) = controlled_storage_for(&schema, &layout);
+    let mut database = Database::new_with_storage_layout(schema, storage, layout)
+        .await
+        .unwrap();
+    control.take_observed();
+
+    for name in JAZZ_CLASS_V1_PHYSICAL_NAMES {
+        let result = database.register_table(named_table(name));
+        assert_column_family_name_conflict(result, name, "JazzClassV1 storage layout", "table");
+        assert!(
+            control.observed().is_empty(),
+            "live schema rejection touched storage for {name}: {:?}",
+            control.take_observed()
+        );
+    }
+}
+
+#[futures_test::test]
+async fn identity_layout_permits_jazz_class_physical_names_at_open_and_registration() {
+    let initial_schema = DatabaseSchema::new(JAZZ_CLASS_V1_PHYSICAL_NAMES.map(named_table));
+    let initial_storage = MemoryStorage::new(&initial_schema.column_families());
+    Database::new(initial_schema, initial_storage)
+        .await
+        .unwrap();
+
+    let mut dynamic_families = JAZZ_CLASS_V1_PHYSICAL_NAMES.to_vec();
+    dynamic_families.push(LARGE_VALUE_METADATA_CF);
+    let mut database = Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&dynamic_families),
+    )
+    .await
+    .unwrap();
+    for name in JAZZ_CLASS_V1_PHYSICAL_NAMES {
+        database.register_table(named_table(name)).unwrap();
+    }
+}
+
+#[futures_test::test]
+async fn distinct_table_and_direct_store_families_remain_valid() {
+    let schema = DatabaseSchema::new([named_table("albums")])
+        .with_direct_record_store(named_direct_store("artwork"));
+    let storage = MemoryStorage::new(&schema.column_families());
+    let database = Database::new(schema, storage).await.unwrap();
+
+    assert_eq!(database.table_schema("albums").unwrap().name, "albums");
+    assert!(database.direct_record_store("artwork").is_ok());
+}
+
+#[futures_test::test]
+async fn live_duplicate_table_keeps_the_existing_table_already_exists_error() {
+    let schema = DatabaseSchema::new([named_table("albums")]);
+    let (storage, control) = controlled_storage_for(&schema, &StorageLayout::Identity);
+    let mut database = Database::new(schema, storage).await.unwrap();
+    control.take_observed();
+
+    assert!(matches!(
+        database.register_table(named_table("albums")),
+        Err(Error::TableAlreadyExists(name)) if name == "albums"
+    ));
+    assert!(
+        control.observed().is_empty(),
+        "duplicate live-table rejection touched storage: {:?}",
+        control.observed()
+    );
+}
