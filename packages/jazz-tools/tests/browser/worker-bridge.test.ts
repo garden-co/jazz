@@ -39,8 +39,36 @@ import {
 } from "./remote-browser-db.js";
 import { CompiledPermissions, schema as s } from "../../src/";
 import { deploy } from "../../src/dev/catalogue.js";
+import type {
+  BrowserInspectorContext,
+  BrowserInspectorControlEvent,
+  BrowserInspectorControlRequest,
+} from "../../src/runtime/native-runtime/browser-worker-protocol.js";
 
 declare const __JAZZ_BROWSER_SOAK__: string;
+
+let nextInspectorRequestId = 1;
+
+async function listWorkerContexts(port: MessagePort): Promise<BrowserInspectorContext[]> {
+  const id = nextInspectorRequestId++;
+  return new Promise((resolve) => {
+    const onMessage = (event: MessageEvent<BrowserInspectorControlEvent>) => {
+      if (event.data.type !== "contexts" || event.data.id !== id) return;
+      port.removeEventListener("message", onMessage);
+      resolve(event.data.contexts);
+    };
+    port.addEventListener("message", onMessage);
+    port.postMessage({ type: "list-contexts", id } satisfies BrowserInspectorControlRequest);
+  });
+}
+
+async function waitForWorkerContextRelease(port: MessagePort, dbName: string): Promise<void> {
+  await waitForCondition(
+    async () => !(await listWorkerContexts(port)).some((context) => context.dbName === dbName),
+    5000,
+    `SharedWorker context ${dbName} should be destroyed before restart`,
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Test schema — a simple "todos" table
@@ -1172,20 +1200,26 @@ describe("SharedWorker bridge with IndexedDB", () => {
   it("does not send a live rejection to a runtime attached after its originating peer closes", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions(
       "sync-on-mutation-error-restart",
-      readOnlyPermissions,
     );
 
     const sharedLocalAuthToken = generateAuthSecret();
     const dbName = uniqueDbName("sync-on-mutation-error-restart");
-    const createPersistentDb = () =>
+    const createPersistentDb = (serverUrl?: string) =>
       createDb({
         appId: syncServer.appId,
         driver: { type: "persistent" as const, dbName },
-        serverUrl: syncServer.serverUrl,
+        serverUrl,
         secret: sharedLocalAuthToken,
       });
 
-    const dbBeforeRestart = track(await createPersistentDb());
+    const dbBeforeRestart = track(await createPersistentDb(syncServer.serverUrl));
+    const durableControl = dbBeforeRestart.insert(todos, {
+      title: "Durable control across rejection restart",
+      done: false,
+    });
+    await durableControl.wait({ tier: "edge" });
+    await publishPermissionsForServer(syncServer, readOnlyPermissions);
+
     const mutationErrorSpy = vi.fn();
     dbBeforeRestart.onMutationError(mutationErrorSpy);
 
@@ -1216,18 +1250,26 @@ describe("SharedWorker bridge with IndexedDB", () => {
       },
     });
 
-    await dbBeforeRestart.shutdown();
-    untrack(dbBeforeRestart);
+    const inspectorControl = await dbBeforeRestart.openInspectorControlPort();
+    inspectorControl.start();
+    try {
+      await dbBeforeRestart.shutdown();
+      untrack(dbBeforeRestart);
+      await waitForWorkerContextRelease(inspectorControl, dbName);
 
-    const dbAfterAcknowledgement = track(await createPersistentDb());
-    const replayAfterAckSpy = vi.fn();
-    dbAfterAcknowledgement.onMutationError(replayAfterAckSpy);
-    await dbAfterAcknowledgement.all(allTodos, { tier: "local" });
-    // The durable worker can outlive its tabs. Reconciliation remains durable,
-    // but the original tab's application notification is not a worker backlog
-    // for a later tab (or a reconnecting replacement runtime).
-    await sleep(500);
-    expect(replayAfterAckSpy).not.toHaveBeenCalled();
+      const dbAfterAcknowledgement = track(await createPersistentDb(undefined));
+      const replayAfterAckSpy = vi.fn();
+      dbAfterAcknowledgement.onMutationError(replayAfterAckSpy);
+      expect(await dbAfterAcknowledgement.all(allTodos, { tier: "local" })).toEqual([
+        durableControl.value,
+      ]);
+      // The destroyed worker context rehydrated the settled local view, but the
+      // original tab's application notification is not a backlog for a later tab.
+      await sleep(500);
+      expect(replayAfterAckSpy).not.toHaveBeenCalled();
+    } finally {
+      inspectorControl.postMessage({ type: "close" } satisfies BrowserInspectorControlRequest);
+    }
   });
 
   it("rehydrates rejected worker batches without replaying an absent runtime's notification", async () => {

@@ -68,6 +68,7 @@ type RuntimeContext = {
 
 const workerGlobal = globalThis as SharedWorkerGlobal;
 const contexts = new Map<string, RuntimeContext>();
+const inspectorControlPorts = new Set<MessagePort>();
 let wasmModulePromise: Promise<WasmModule> | null = null;
 let contextInitializationTail: Promise<void> = Promise.resolve();
 let nextResetId = 1;
@@ -436,6 +437,7 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
 }
 
 function attachInspectorControl(authSessionKey: string, port: MessagePort): void {
+  inspectorControlPorts.add(port);
   const onMessage = (event: MessageEvent<BrowserInspectorControlRequest>) => {
     const message = event.data;
     if (message.type === "close") {
@@ -483,7 +485,9 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
   const dispose = () => {
     port.removeEventListener("message", onMessage);
     port.removeEventListener("messageerror", dispose);
+    inspectorControlPorts.delete(port);
     port.close();
+    maybeCloseWorker();
   };
   port.addEventListener("message", onMessage);
   port.addEventListener("messageerror", dispose);
@@ -585,9 +589,13 @@ function scheduleIdleContextRelease(context: RuntimeContext): void {
     context.idleReleaseTimer = null;
     if (context.peers.size !== 0) return;
     void releaseIdleContext(context).then(() => {
-      if (contexts.size === 0) workerGlobal.close();
+      maybeCloseWorker();
     });
   }, 50);
+}
+
+function maybeCloseWorker(): void {
+  if (contexts.size === 0 && inspectorControlPorts.size === 0) workerGlobal.close();
 }
 
 function closeContextPeers(context: RuntimeContext): void {
