@@ -93,6 +93,7 @@ function IdentityProbe({
   return (
     <output
       data-testid={`identity-${appId ?? "default"}`}
+      data-session-author={session?.author ?? ""}
       data-db-user={db.getAuthState().session?.user_id}
       data-scoped-secret={scopedSecret ?? ""}
       data-secret={secret ?? ""}
@@ -154,6 +155,7 @@ describe("JazzProvider local-first auth", () => {
       expect(identity.dataset.secret).toBe(SECRET);
       expect(identity.dataset.scopedSecret).toBe(SECRET);
       expect(identity.dataset.dbUser).toBe(SESSION.user_id);
+      expect(identity.dataset.sessionAuthor).toBe('["urn:jazz:local-first","local-user"]');
     });
 
     expect(mock.createJazzClient).toHaveBeenCalledWith(expect.objectContaining({ secret: SECRET }));

@@ -46,7 +46,7 @@ describe("client session resolution", () => {
       }),
     ).toEqual({
       transport: "cookie",
-      session,
+      session: { ...session, author: '["https://issuer.example","cookie-user"]' },
     });
   });
 
@@ -83,6 +83,7 @@ describe("client session resolution", () => {
       user_id: "user-subject",
       claims: { role: "editor" },
       authMode: "external",
+      author: '["https://issuer.example","user-subject"]',
     });
   });
 
@@ -271,6 +272,7 @@ describe("resolveJwtSession — reserved issuer admission", () => {
       user_id: "u1",
       claims: { role: "writer" },
       authMode: "local-first",
+      author: '["urn:jazz:local-first","u1"]',
     });
     expect(
       resolveClientSessionSync({
@@ -294,5 +296,34 @@ describe("resolveJwtSession — reserved issuer admission", () => {
     const session = resolveJwtSession(jwt({ sub: "u1", iss: "https://auth.example.com" }))!;
     expect(session.authMode).toBe("external");
     expect(session.claims.auth_mode).toBeUndefined();
+  });
+
+  it("publishes the exact issuer-scoped author instead of a caller-provided alias", () => {
+    const sameSubject = "provider-user";
+    const issuerA = resolveClientSessionSync({
+      appId: "author-a",
+      cookieSession: {
+        issuer: "https://issuer-a.example",
+        user_id: sameSubject,
+        claims: {},
+        authMode: "external",
+        // This is untyped hostile input at a public boundary. It must not be
+        // preserved as the public author.
+        author: "forged",
+      } as Session,
+    });
+    const issuerB = resolveClientSessionSync({
+      appId: "author-b",
+      cookieSession: {
+        issuer: "https://issuer-b.example",
+        user_id: sameSubject,
+        claims: {},
+        authMode: "external",
+      },
+    });
+
+    expect(issuerA?.author).toBe('["https://issuer-a.example","provider-user"]');
+    expect(issuerB?.author).toBe('["https://issuer-b.example","provider-user"]');
+    expect(issuerA?.author).not.toBe(issuerB?.author);
   });
 });

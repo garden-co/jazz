@@ -148,7 +148,23 @@ values. Jazz separately derives the reserved logical `session.author` from the e
 pair. Its portable value is canonical JSON and is used for transaction authorship, `$createdBy`,
 `$updatedBy`, and provenance policies; it is interned only inside a running core. On backends,
 `await context.forRequest(...)` and `context.forSession(...)` both run as that user for permissions and
-also stamp authorship as that user.
+also stamp authorship as that user. Client bindings expose the same derived value as
+`session.author`; use it when an application needs to store or compare an author, rather than
+reconstructing the encoding from `issuer` and `user_id`.
+
+For trusted invite or membership input where you have an issuer and subject but no active Jazz
+session, use the shared constructor:
+
+```ts
+import { sessionAuthor } from "jazz-tools";
+
+const invitedAuthor = sessionAuthor(trustedIssuer, trustedSubject);
+await db.insert(app.members, { roomId, author: invitedAuthor });
+```
+
+`sessionAuthor(...)` only validates and canonically encodes the two components. It does not verify a
+JWT, authenticate the subject, or admit that identity to Jazz; only use identity components obtained
+from a trusted authentication boundary.
 
 ### Attribution without impersonation
 

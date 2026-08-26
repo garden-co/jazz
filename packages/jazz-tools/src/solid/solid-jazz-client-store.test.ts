@@ -1,6 +1,7 @@
 import { createRoot, createSignal, type Accessor } from "solid-js";
 import { describe, expect, it } from "vitest";
 import type { AuthState } from "../runtime/auth-state.js";
+import { canonicalAuthorSubject } from "../runtime/author-id.js";
 import type { JazzClient } from "../web/create-jazz-client.js";
 import { createSolidJazzClientStore } from "./solid-jazz-client-store.js";
 
@@ -51,6 +52,7 @@ function makeStateA(): AuthState {
   return {
     authMode: "external",
     session: {
+      issuer: "https://issuer.example",
       user_id: "u-a",
       claims: { role: "reader" },
       authMode: "external",
@@ -62,6 +64,7 @@ function makeStateB(): AuthState {
   return {
     authMode: "local-first",
     session: {
+      issuer: "urn:jazz:local-first",
       user_id: "u-b",
       claims: { role: "writer" },
       authMode: "local-first",
@@ -82,10 +85,12 @@ describe("solid/createJazzClientStateStore", () => {
 
         expect(store.authState?.authMode).toBe("external");
         expect(store.session?.user_id).toBe("u-a");
+        expect(store.session?.author).toBe(canonicalAuthorSubject("https://issuer.example", "u-a"));
 
         a.emit({
           authMode: "external",
           session: {
+            issuer: "https://issuer.example",
             user_id: "u-a2",
             claims: { role: "reader" },
             authMode: "external",
@@ -96,6 +101,7 @@ describe("solid/createJazzClientStateStore", () => {
 
       await flushMicrotasks();
       expect(store.session?.user_id).toBe("u-a2");
+      expect(store.session?.author).toBe(canonicalAuthorSubject("https://issuer.example", "u-a2"));
     } finally {
       dispose?.();
     }
@@ -129,12 +135,14 @@ describe("solid/createJazzClientStateStore", () => {
       await flushMicrotasks();
 
       expect(store.session?.user_id).toBe("u-b");
+      expect(store.session?.author).toBe(canonicalAuthorSubject("urn:jazz:local-first", "u-b"));
       expect(a.listenerCount()).toBe(0);
       expect(b.listenerCount()).toBe(1);
 
       a.emit({
         authMode: "external",
         session: {
+          issuer: "https://issuer.example",
           user_id: "u-a-stale",
           claims: {},
           authMode: "external",
@@ -145,6 +153,7 @@ describe("solid/createJazzClientStateStore", () => {
       b.emit({
         authMode: "local-first",
         session: {
+          issuer: "urn:jazz:local-first",
           user_id: "u-b2",
           claims: {},
           authMode: "local-first",
@@ -153,6 +162,7 @@ describe("solid/createJazzClientStateStore", () => {
       await flushMicrotasks();
 
       expect(store.session?.user_id).toBe("u-b2");
+      expect(store.session?.author).toBe(canonicalAuthorSubject("urn:jazz:local-first", "u-b2"));
     } finally {
       dispose?.();
     }
