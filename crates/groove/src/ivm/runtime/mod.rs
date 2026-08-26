@@ -10,7 +10,7 @@
 //! [`crate::ivm::graph`], and storage mechanics in [`crate::storage`].
 
 use bytes::{Bytes, BytesMut};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::hash::{Hash, Hasher};
