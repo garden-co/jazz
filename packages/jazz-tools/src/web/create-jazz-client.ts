@@ -1,4 +1,5 @@
-import type { Session } from "../runtime/context.js";
+import type { PublicSession } from "../runtime/context.js";
+import { withCanonicalAuthor } from "../runtime/author-id.js";
 import { createClientConfigKey } from "../runtime/client-config-key.js";
 import { acquireClient, releaseClient } from "../runtime/client-registry.js";
 import type { Db, DbConfig } from "../runtime/db.js";
@@ -12,7 +13,7 @@ export type JazzClientConfig = DbConfig;
 
 export interface JazzClient {
   db: Db;
-  session: Session | null;
+  session: PublicSession | null;
   shutdown(): Promise<void>;
 }
 
@@ -35,7 +36,7 @@ async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
     {
       db,
       get session() {
-        return session;
+        return session ? withCanonicalAuthor(session) : null;
       },
       async shutdown() {
         await runCleanupSteps([

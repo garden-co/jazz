@@ -1,8 +1,9 @@
-import type { Session } from "./context.js";
+import type { PublicSession, Session } from "./context.js";
 
 const canonicalAuthorDecoder = new TextDecoder("utf-8", { fatal: true });
 const STORED_SCALAR_INLINE_TAG = 2;
 const CANONICAL_AUTHOR_OPEN_BRACKET = 0x5b;
+const publicSessions = new WeakMap<Session, PublicSession>();
 
 export type CanonicalAuthorSubject = {
   issuer: string;
@@ -45,6 +46,30 @@ export function canonicalAuthorSubject(issuer: string, subject: string): string 
     throw new Error("Author issuer and subject must be portable and nonempty");
   }
   return JSON.stringify([issuer, subject]);
+}
+
+/**
+ * Attach the canonical logical author to a session crossing a public binding
+ * boundary. Never preserve a caller-provided `author`: credentials control
+ * `iss`/`sub`, and the author is derived from those exact values.
+ *
+ * @internal Public bindings expose the resulting `PublicSession`; applications
+ * should read `session.author` instead of reproducing this encoding.
+ */
+export function withCanonicalAuthor(session: Session): PublicSession {
+  const existing = publicSessions.get(session);
+  if (existing) return existing;
+  const author = canonicalAuthorSubject(session.issuer, session.user_id);
+  const published: PublicSession = {
+    issuer: session.issuer,
+    user_id: session.user_id,
+    claims: session.claims,
+    authMode: session.authMode,
+    author,
+  };
+  publicSessions.set(session, published);
+  publicSessions.set(published, published);
+  return published;
 }
 
 export function parseCanonicalAuthorSubject(value: string): CanonicalAuthorSubject | null {

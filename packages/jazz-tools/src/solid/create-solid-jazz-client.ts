@@ -1,6 +1,6 @@
 import { type Accessor } from "solid-js";
 import type { AuthState } from "../runtime/auth-state.js";
-import type { Session } from "../runtime/context.js";
+import type { PublicSession } from "../runtime/context.js";
 import type { Db, DbConfig } from "../runtime/db.js";
 import { createJazzClient } from "../web/create-jazz-client.js";
 import { createSolidJazzClientInternal } from "./create-solid-jazz-client-internal.js";
@@ -54,7 +54,7 @@ type Prettify<T> = {
 
 export type PendingSolidJazzClient = {
   readonly db: Db | undefined;
-  readonly session: Session | null;
+  readonly session: PublicSession | null;
   readonly authState: AuthState | null;
   shutdown(): Promise<void>;
   readonly loading: boolean;

@@ -1,6 +1,7 @@
 import type {
   DbConfig as PackageDbConfig,
   InsertOptions as PackageInsertOptions,
+  PublicSession,
   Session,
 } from "../index.js";
 import type {
@@ -21,6 +22,8 @@ const session: Session = {
   claims: {},
   authMode: "external",
 };
+declare const publicSession: PublicSession;
+publicSession.author satisfies string;
 
 const unauthenticated: PackageDbConfig = { appId: "app" };
 const localFirst: PackageDbConfig = { appId: "app", secret: "secret" };
