@@ -45,13 +45,13 @@ jobs:
         run: cargo install cargo-codspeed --version 5.0.1 --locked
 
       - name: Build example benchmark suites
-        run: cargo codspeed build --package jazz-example-benchmark-smoke --package jazz-example-big-label-benchmark --package jazz-example-band-chat-benchmark --bench fixture --bench loads
+        run: cargo codspeed build --package jazz-example-benchmark-smoke --package jazz-example-big-label-benchmark --package jazz-example-band-chat-benchmark --package jazz-example-world-tour-benchmark --bench fixture --bench loads --bench queries
 
       - name: Run example benchmark suites
         uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3
         with:
           mode: simulation
-          run: cargo codspeed run --package jazz-example-benchmark-smoke --package jazz-example-big-label-benchmark --package jazz-example-band-chat-benchmark
+          run: cargo codspeed run --package jazz-example-benchmark-smoke --package jazz-example-big-label-benchmark --package jazz-example-band-chat-benchmark --package jazz-example-world-tour-benchmark
 
   ingest-walltime:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')

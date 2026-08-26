@@ -27,6 +27,7 @@ members = [
   "examples/big-label/benchmarks",
   "examples/band-chat/benchmarks",
   "examples/music-agent/benchmarks",
+  "examples/world-tour/benchmarks",
   "examples/benchmarks/smoke",
   "dev/benchmarks/storage/bench-core",
 ]

@@ -9,3 +9,16 @@ pnpm dev
 ```
 
 `pnpm dev` starts the Jazz dev server and the Vite dev server together via the Jazz Vite plugin.
+
+## Benchmark variant
+
+`benchmarks/` is a self-contained native workload variant. It duplicates the
+public schedule and venue shapes needed to measure the app's two browse paths:
+the ordered, bounded calendar window and the latitude-bounded map viewport.
+It does not import frontend code or claim to cover the app's unresolved
+membership/venue-ownership policy decisions.
+
+```bash
+cargo test -p jazz-example-world-tour-benchmark
+cargo bench -p jazz-example-world-tour-benchmark --bench queries
+```
