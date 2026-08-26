@@ -17,6 +17,7 @@ import {
 } from "../../src/subscriptions-orchestrator.js";
 import { attachSubscriptionStore } from "../../src/subscription-store-internal.js";
 import type { AuthState } from "../../src/runtime/auth-state.js";
+import { canonicalAuthorSubject } from "../../src/runtime/author-id.js";
 import type { Session } from "../../src/runtime/context.js";
 import type { QueryBuilder, QueryOptions } from "../../src/runtime/db.js";
 import type { SubscriptionDelta } from "../../src/runtime/subscription-manager.js";
@@ -205,6 +206,7 @@ describe("react-core provider/hooks browser coverage", () => {
 
   it("RCB-B04: useSession returns session when present", async () => {
     const session: Session = {
+      issuer: "https://issuer.example",
       user_id: "user-123",
       claims: { role: "writer" },
       authMode: "external",
@@ -218,10 +220,14 @@ describe("react-core provider/hooks browser coverage", () => {
     );
 
     await expectText("session", "user-123");
+    expect(container?.querySelector('[data-testid="session"]')?.getAttribute("data-author")).toBe(
+      canonicalAuthorSubject("https://issuer.example", "user-123"),
+    );
   });
 
   it("RCB-B04A: useSession reacts to db auth-state changes", async () => {
     const db = createAuthAwareDb({
+      issuer: "https://issuer.example",
       user_id: "alice",
       claims: { role: "reader" },
       authMode: "external",
@@ -235,6 +241,9 @@ describe("react-core provider/hooks browser coverage", () => {
     );
 
     await expectText("session", "alice");
+    expect(container?.querySelector('[data-testid="session"]')?.getAttribute("data-author")).toBe(
+      canonicalAuthorSubject("https://issuer.example", "alice"),
+    );
 
     db.emitAuthChange(null);
 
@@ -243,6 +252,7 @@ describe("react-core provider/hooks browser coverage", () => {
 
   it("RCB-B04B: provider subscribes once for multiple session consumers", async () => {
     const db = createAuthAwareDb({
+      issuer: "https://issuer.example",
       user_id: "alice",
       claims: { role: "reader" },
       authMode: "external",
@@ -257,6 +267,12 @@ describe("react-core provider/hooks browser coverage", () => {
 
     await expectText("session-a", "alice");
     await expectText("session-b", "alice");
+    expect(container?.querySelector('[data-testid="session-a"]')?.getAttribute("data-author")).toBe(
+      canonicalAuthorSubject("https://issuer.example", "alice"),
+    );
+    expect(container?.querySelector('[data-testid="session-b"]')?.getAttribute("data-author")).toBe(
+      canonicalAuthorSubject("https://issuer.example", "alice"),
+    );
     expect(db.onAuthChanged).toHaveBeenCalledTimes(2);
 
     db.emitAuthChange(null);
@@ -268,6 +284,7 @@ describe("react-core provider/hooks browser coverage", () => {
 
   it("RCB-B04C: useDb consumers rerender when auth state changes", async () => {
     const db = createAuthAwareDb({
+      issuer: "https://issuer.example",
       user_id: "alice",
       claims: { role: "reader" },
       authMode: "external",
@@ -282,7 +299,12 @@ describe("react-core provider/hooks browser coverage", () => {
 
     await expectText("db-session", "alice");
 
-    db.emitAuthChange({ user_id: "bob", claims: { role: "writer" }, authMode: "external" });
+    db.emitAuthChange({
+      issuer: "https://issuer.example",
+      user_id: "bob",
+      claims: { role: "writer" },
+      authMode: "external",
+    });
 
     await expectText("db-session", "bob");
   });
@@ -499,11 +521,13 @@ describe("react-core provider/hooks browser coverage", () => {
 
   it("RCB-B12B: stale empty-refresh snapshots do not publish across session resubscribe", async () => {
     const sessionA = {
+      issuer: "https://issuer.example",
       user_id: "alice",
       claims: { role: "reader" },
       authMode: "external",
     } as Session;
     const sessionB = {
+      issuer: "https://issuer.example",
       user_id: "bob",
       claims: { role: "reader" },
       authMode: "external",
@@ -667,7 +691,11 @@ function DbIdentityView({ expected }: { expected: unknown }) {
 
 function SessionView() {
   const session = useSession();
-  return <div data-testid="session">{session ? session.user_id : "null"}</div>;
+  return (
+    <div data-testid="session" data-author={session?.author}>
+      {session ? session.user_id : "null"}
+    </div>
+  );
 }
 
 function SessionPairView() {
@@ -675,8 +703,12 @@ function SessionPairView() {
   const sessionB = useSession();
   return (
     <>
-      <div data-testid="session-a">{sessionA ? sessionA.user_id : "null"}</div>
-      <div data-testid="session-b">{sessionB ? sessionB.user_id : "null"}</div>
+      <div data-testid="session-a" data-author={sessionA?.author}>
+        {sessionA ? sessionA.user_id : "null"}
+      </div>
+      <div data-testid="session-b" data-author={sessionB?.author}>
+        {sessionB ? sessionB.user_id : "null"}
+      </div>
     </>
   );
 }
