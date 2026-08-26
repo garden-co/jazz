@@ -104,6 +104,7 @@ function files(root, paths) {
       if (
         repoPath.endsWith(".node") ||
         repoPath.endsWith(".jazz-artifact-manifest.json") ||
+        repoPath === "crates/jazz-wasm/.jazz-correctness-test-artifacts.json" ||
         // These tracked files are generated from packageInputs below. Including
         // them would make the artifact fingerprint self-referential.
         isNapiGeneratedOutput(repoPath) ||
