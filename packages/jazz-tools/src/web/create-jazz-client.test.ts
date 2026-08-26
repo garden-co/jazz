@@ -68,6 +68,7 @@ vi.mock("../subscriptions-orchestrator.js", () => ({
 
 import { createJazzClient, type JazzClientConfig } from "./create-jazz-client.js";
 import { getSubscriptionStore } from "../subscription-store-internal.js";
+import { setDbInternalSession } from "../runtime/db-internal-session.js";
 
 const originalWindow = (globalThis as { window?: unknown }).window;
 
@@ -76,7 +77,7 @@ function createMockDb(
   session: Session | null = null,
   config: DbConfig = { appId },
 ) {
-  return {
+  const db = {
     getAuthState: vi.fn(() => ({
       status: session ? "authenticated" : "unauthenticated",
       session: session
@@ -87,12 +88,13 @@ function createMockDb(
           }
         : null,
     })),
-    getInternalSession: vi.fn(() => session),
     onAuthChanged: vi.fn(() => () => {}),
     deleteClientStorage: vi.fn(async () => undefined),
     shutdown: vi.fn(async () => undefined),
     getConfig: vi.fn(() => config),
   };
+  setDbInternalSession(db, session);
+  return db;
 }
 
 describe("framework-agnostic/createAgnosticJazzClient", () => {

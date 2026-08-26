@@ -124,9 +124,6 @@ export interface AppContext {
    */
   cookieSession?: Session;
 
-  /** @internal Session produced by a first-party reserved-issuer auth flow. */
-  trustedReservedSession?: Session;
-
   /**
    * Backend secret for session impersonation.
    * Enables backend session-scoped operations as any user.

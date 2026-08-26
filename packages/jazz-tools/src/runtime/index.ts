@@ -21,7 +21,7 @@ export {
   ExclusiveWriteHandle,
   ExclusiveWriteResult,
 } from "./client.js";
-export type { AppContext, PublicSession, RuntimeSourcesConfig, Session } from "./context.js";
+export type { AppContext, PublicSession, RuntimeSourcesConfig } from "./context.js";
 /** Encode the opaque logical identity exposed as `session.user` by bindings. */
 export { canonicalAuthorSubject as userIdentity } from "./author-id.js";
 export {

@@ -4,7 +4,9 @@ import {
   type ConnectRuntimeOptions,
   type WasmModule,
 } from "./client.js";
+import type { AppContext } from "./context.js";
 import { resolveDefaultPersistentDbName, type DbConfig } from "./db.js";
+import { getTrustedReservedSession, setTrustedReservedSession } from "./db-internal-session.js";
 import {
   RuntimeSource,
   type BrowserWorkerConnection,
@@ -66,7 +68,10 @@ function randomBytes(): Uint8Array {
 }
 
 function sessionFromConfig(config: DbConfig) {
-  return resolveClientInternalSessionSync(config);
+  return resolveClientInternalSessionSync({
+    ...config,
+    trustedReservedSession: getTrustedReservedSession(config),
+  });
 }
 
 function runtimeAuthorFromConfig(config: DbConfig) {
@@ -181,23 +186,20 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       mainThreadPeerRuntime.setNonDurableClient();
     }
 
-    return JazzClient.connectWithRuntime(
-      mainThreadPeerRuntime,
-      {
-        appId: config.appId,
-        schema,
-        driver: config.driver,
-        serverUrl: config.serverUrl,
-        env: config.env,
-        jwtToken: config.jwtToken,
-        cookieSession: config.cookieSession,
-        trustedReservedSession: config.trustedReservedSession,
-        backendSecret: config.backendSecret,
-        adminSecret: config.adminSecret,
-        tier: "local",
-      },
-      runtimeOptions,
-    );
+    const context: AppContext = {
+      appId: config.appId,
+      schema,
+      driver: config.driver,
+      serverUrl: config.serverUrl,
+      env: config.env,
+      jwtToken: config.jwtToken,
+      cookieSession: config.cookieSession,
+      backendSecret: config.backendSecret,
+      adminSecret: config.adminSecret,
+      tier: "local",
+    };
+    setTrustedReservedSession(context, getTrustedReservedSession(config));
+    return JazzClient.connectWithRuntime(mainThreadPeerRuntime, context, runtimeOptions);
   }
 
   override createBrowserWorkerConnection({
@@ -223,7 +225,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       return new AttachedBrowserWorkerConnection(
         runtime,
         config.runtimeSources.browserWorkerPort,
-        resolveClientInternalSessionSync(config)?.claims ?? {},
+        sessionFromConfig(config)?.claims ?? {},
         dbName,
         { onAuthFailure, onAuthRestored, onFailure, onStorageReset, onStorageInvalidated },
       );
@@ -242,7 +244,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         authSessionKey: createBrowserAuthSessionKey(config),
         serverUrl: config.serverUrl ? httpUrlToWs(config.serverUrl, config.appId) : undefined,
         authJson: JSON.stringify(runtimeAuth(config)),
-        sessionClaims: resolveClientInternalSessionSync(config)?.claims ?? {},
+        sessionClaims: sessionFromConfig(config)?.claims ?? {},
         logLevel: config.logLevel,
         telemetryCollectorUrl: config.telemetryCollectorUrl,
       },
@@ -263,7 +265,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     if (!(runtime instanceof NativeRuntimeAdapter)) {
       throw new Error("Browser follower connections require the native runtime adapter");
     }
-    const sessionClaims = resolveClientInternalSessionSync(config)?.claims ?? {};
+    const sessionClaims = sessionFromConfig(config)?.claims ?? {};
     const connection = new MessagePortBrowserFollowerConnection(
       runtime,
       port,

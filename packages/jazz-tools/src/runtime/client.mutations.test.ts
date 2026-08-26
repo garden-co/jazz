@@ -11,7 +11,7 @@ import type { AppContext, Session } from "./context.js";
 import {
   LOCAL_FIRST_JWT_ISSUER,
   TRUSTED_RESERVED_SESSION_TOKEN_FIELD,
-  sessionFromVerifiedReservedJwtPayload,
+  internalSessionFromVerifiedReservedJwtPayload,
 } from "./client-session.js";
 
 function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
@@ -146,11 +146,11 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
 describe("JazzClient write attribution", () => {
   it("keeps public author out of serialized writes while retaining the trusted token", () => {
     const { client, insertCalls } = makeClient();
-    const session = sessionFromVerifiedReservedJwtPayload(
+    const session = internalSessionFromVerifiedReservedJwtPayload(
       { iss: LOCAL_FIRST_JWT_ISSUER, sub: "alice", claims: { role: "owner" } },
       "local-first",
     );
-    expect(session?.user).toBe('["urn:jazz:local-first","alice"]');
+    expect(session).toMatchObject({ issuer: LOCAL_FIRST_JWT_ISSUER, user_id: "alice" });
 
     client.insert(
       "todos",

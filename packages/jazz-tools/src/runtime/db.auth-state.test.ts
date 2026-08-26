@@ -4,7 +4,17 @@ import type { AuthState } from "./auth-state.js";
 import type { Session } from "./context.js";
 import type { JazzClient } from "./client.js";
 import { RuntimeSource, type RuntimeClientContext } from "./runtime-source.js";
-import { LOCAL_FIRST_JWT_ISSUER, sessionFromVerifiedReservedJwtPayload } from "./client-session.js";
+import {
+  internalSessionFromVerifiedReservedJwtPayload,
+  LOCAL_FIRST_JWT_ISSUER,
+} from "./client-session.js";
+import { setTrustedReservedSession } from "./db-internal-session.js";
+import { canonicalAuthorSubject } from "./author-id.js";
+
+function withTrustedSession(config: DbConfig, session: Session): DbConfig {
+  setTrustedReservedSession(config, session);
+  return config;
+}
 
 class TestRuntimeSource extends RuntimeSource<DbConfig> {
   constructor(private readonly client: JazzClient) {
@@ -87,7 +97,7 @@ function makeDbWithCookieSession(cookieSession: Session) {
 describe("Db auth state", () => {
   it("refreshes a dedicated local-first session without entering generic JWT admission", () => {
     const initialToken = makeJwt({ iss: LOCAL_FIRST_JWT_ISSUER, sub: "alice", version: 1 });
-    const initialSession = sessionFromVerifiedReservedJwtPayload(
+    const initialSession = internalSessionFromVerifiedReservedJwtPayload(
       { iss: LOCAL_FIRST_JWT_ISSUER, sub: "alice" },
       "local-first",
     )!;
@@ -106,11 +116,13 @@ describe("Db auth state", () => {
     const db = new (class extends Db {
       constructor() {
         super(
-          {
-            appId: "test-app",
-            jwtToken: initialToken,
-            trustedReservedSession: initialSession,
-          },
+          withTrustedSession(
+            {
+              appId: "test-app",
+              jwtToken: initialToken,
+            },
+            initialSession,
+          ),
           runtimeSource,
         );
       }
@@ -130,7 +142,7 @@ describe("Db auth state", () => {
 
     expect(db.getAuthState()).toMatchObject({
       authMode: "local-first",
-      session: { issuer: LOCAL_FIRST_JWT_ISSUER, user_id: "alice" },
+      session: { user: canonicalAuthorSubject(LOCAL_FIRST_JWT_ISSUER, "alice") },
     });
     expect(runtimeClient.updateTrustedAuthToken).toHaveBeenCalledWith(
       refreshedToken,
@@ -154,7 +166,7 @@ describe("Db auth state", () => {
     expect(db.getAuthState()).toMatchObject({
       authMode: "external",
       session: {
-        user_id: "alice",
+        user: canonicalAuthorSubject("https://issuer.example", "alice"),
         claims: expect.objectContaining({ role: "reader" }),
       },
     });
@@ -162,9 +174,8 @@ describe("Db auth state", () => {
 
   it("reports backend-scoped auth state for session-backed dbs", () => {
     const session = {
-      issuer: "https://issuer.example",
-      user_id: "alice",
-      claims: { role: "writer" },
+      user: canonicalAuthorSubject("https://issuer.example", "alice"),
+      claims: { role: "writer", iss: "https://issuer.example", sub: "alice" },
       authMode: "external" as const,
     };
     const runtimeClient = {
@@ -217,9 +228,8 @@ describe("Db auth state", () => {
       {
         authMode: "external",
         session: {
-          issuer: "https://issuer.example",
-          user_id: "bob",
-          claims: { role: "writer" },
+          user: canonicalAuthorSubject("https://issuer.example", "bob"),
+          claims: { role: "writer", iss: "https://issuer.example", sub: "bob" },
           authMode: "external",
         },
       },
@@ -231,13 +241,13 @@ describe("Db auth state", () => {
     expect(sharedDb.getAuthState()).toMatchObject({
       authMode: "external",
       session: {
-        user_id: "alice",
+        user: canonicalAuthorSubject("https://issuer.example", "alice"),
       },
     });
     expect(scopedDb.getAuthState()).toMatchObject({
       authMode: "external",
       session: {
-        user_id: "bob",
+        user: canonicalAuthorSubject("https://issuer.example", "bob"),
       },
     });
   });
@@ -248,7 +258,7 @@ describe("Db auth state", () => {
     expect(db.getAuthState()).toMatchObject({
       authMode: "external",
       session: {
-        user_id: "alice",
+        user: canonicalAuthorSubject("https://issuer.example", "alice"),
         claims: expect.objectContaining({ role: "reader" }),
       },
     });
@@ -272,7 +282,7 @@ describe("Db auth state", () => {
     expect(db.getAuthState()).toMatchObject({
       authMode: "external",
       session: {
-        user_id: "alice",
+        user: canonicalAuthorSubject("https://issuer.example", "alice"),
         claims: expect.objectContaining({ role: "writer" }),
       },
     });
@@ -300,7 +310,7 @@ describe("Db auth state", () => {
     expect(states[0]).toMatchObject({
       authMode: "external",
       session: {
-        user_id: "alice",
+        user: canonicalAuthorSubject("https://issuer.example", "alice"),
       },
     });
     expect(states[0]?.error).toBeUndefined();
@@ -316,7 +326,7 @@ describe("Db auth state", () => {
     expect(db.getAuthState()).toMatchObject({
       authMode: "external",
       session: {
-        user_id: "alice",
+        user: canonicalAuthorSubject("https://issuer.example", "alice"),
       },
     });
     expect(db.getAuthState().error).toBeUndefined();
@@ -359,7 +369,7 @@ describe("Db auth state", () => {
     expect(db.getAuthState()).toMatchObject({
       authMode: "external",
       session: {
-        user_id: "alice",
+        user: canonicalAuthorSubject("https://issuer.example", "alice"),
         claims: expect.objectContaining({ role: "writer" }),
       },
     });
