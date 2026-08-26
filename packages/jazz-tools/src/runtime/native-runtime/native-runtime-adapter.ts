@@ -167,7 +167,7 @@ type NativeDb = {
   attachExclusiveTx?(openBatchId: string): Tx;
   all(query: PreparedQuery, opts: unknown): NativeReadResult;
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): NativeReadResult;
-  allAsync?(query: PreparedQuery, opts: unknown): Uint8Array | Promise<Uint8Array>;
+  allAsync?(query: PreparedQuery, opts: unknown): NativeReadResult | Promise<NativeReadResult>;
   allForIdentityAsync?(
     query: PreparedQuery,
     author: Uint8Array,

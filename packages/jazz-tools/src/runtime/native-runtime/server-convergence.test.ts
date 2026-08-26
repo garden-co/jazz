@@ -314,7 +314,13 @@ describe("NativeRuntimeAdapter server convergence", () => {
         const rows = await reader.query(JSON.stringify({ table: "values" }), { tier: "edge" });
         return rows.length === 2 ? rows : undefined;
       }, 15_000);
-      const values = new Map(received.map((row) => [row.values[0]?.value, row.values]));
+      const values = new Map(
+        received.map((row) => {
+          const kind = row.values[0];
+          if (kind?.type !== "Text") throw new Error("expected a Text kind discriminator");
+          return [kind.value, row.values] as const;
+        }),
+      );
       expect(values.get("text")?.[1]).toEqual({ type: "Text", value: text });
       expect(values.get("bytes")?.[2]).toEqual({ type: "Bytea", value: bytes });
 
@@ -324,7 +330,13 @@ describe("NativeRuntimeAdapter server convergence", () => {
           JSON.stringify({ table: "values" }),
           (delta) => {
             const rows = normalizeTestDelta(delta, largeValueSchema);
-            if (rows.some((change) => "row" in change && change.row?.values[0]?.value === "bytes"))
+            if (
+              rows.some((change) => {
+                if (!("row" in change) || !change.row) return false;
+                const kind = change.row.values[0];
+                return kind?.type === "Text" && kind.value === "bytes";
+              })
+            )
               resolve();
           },
           { tier: "edge" },
