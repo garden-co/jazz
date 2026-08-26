@@ -70,8 +70,11 @@ describe("BandChat room admission and authorship", () => {
     const membership = await owner
       .insert(app.roomMembers, { roomId: room.id, memberAuthor: guestAuthor })
       .wait({ tier: "edge" });
-    await guest
+    const guestMessage = await guest
       .insert(app.messages, { roomId: room.id, senderId: guestProfile.id, text: "legitimate" })
+      .wait({ tier: "edge" });
+    await guest
+      .insert(app.reactions, { messageId: guestMessage.id, author: guestAuthor, emoji: "🎸" })
       .wait({ tier: "edge" });
     await guest.expectDenied((db) =>
       db.insert(app.messages, { roomId: room.id, senderId: ownerProfile.id, text: "forged" }),

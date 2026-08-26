@@ -44,6 +44,13 @@ const bandChatPermissions = definePermissions(
     policy.messages.allowDelete.where((message) =>
       policy.profiles.exists.where({ id: message.senderId, author: session.author }),
     );
+
+    policy.reactions.allowRead.where(allowedTo.read("messageId"));
+    // A reaction is attributed to the currently authenticated canonical author.
+    // Read delivery remains constrained through its referenced message.
+    policy.reactions.allowInsert.where({ author: session.author });
+    policy.reactions.allowUpdate.never();
+    policy.reactions.allowDelete.where({ author: session.author });
   },
 );
 

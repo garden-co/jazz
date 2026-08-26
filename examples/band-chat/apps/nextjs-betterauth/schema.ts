@@ -13,6 +13,11 @@ const schema = {
     attachment: s.bytes().optional(),
     attachmentName: s.string().optional(),
   }),
+  reactions: s.table({
+    messageId: s.ref("messages"),
+    author: s.string(),
+    emoji: s.string(),
+  }),
 };
 
 type AppSchema = s.Schema<typeof schema>;

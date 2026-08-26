@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test:permissions": "vitest run tests/permissions.test.ts",
     "test:browser": "vitest run --config vitest.config.browser.ts",
+    "test:browser:focused": "node scripts/test-browser-focused.mjs",
     "test": "pnpm test:permissions && pnpm test:browser"
   },
   "dependencies": {
