@@ -6800,6 +6800,9 @@ function writeTeamGatherBatches(
 
 it("awaits pending native large-value hydration while checking edge coverage", async () => {
   let polls = 0;
+  let peerPumps = 0;
+  let asyncReads = 0;
+  let syncReads = 0;
   let runtime!: NativeRuntimeAdapter;
   const pending = {
     poll: () => {
@@ -6815,7 +6818,14 @@ it("awaits pending native large-value hydration while checking edge coverage", a
     {
       openMemory: () =>
         fakeDb({
-          all: () => pending,
+          all: () => {
+            syncReads += 1;
+            throw new Error("coverage bypassed the async native read boundary");
+          },
+          allAsync: async () => {
+            asyncReads += 1;
+            return pending;
+          },
           prepareQuery: () => ({}),
           queryAttachmentIsCovered: () => true,
           tick: () => undefined,
@@ -6830,6 +6840,13 @@ it("awaits pending native large-value hydration while checking edge coverage", a
     1,
     true,
   );
+  (
+    runtime as unknown as {
+      pumpServerTransport(): Promise<void>;
+    }
+  ).pumpServerTransport = async () => {
+    peerPumps += 1;
+  };
 
   const waitForCoverage = (
     runtime as unknown as {
@@ -6845,6 +6862,84 @@ it("awaits pending native large-value hydration while checking edge coverage", a
 
   await expect(waitForCoverage({}, {}, { tier: "edge" }, undefined, 1)).resolves.toBeUndefined();
   expect(polls).toBe(2);
+  expect(asyncReads).toBe(1);
+  expect(syncReads).toBe(0);
+  expect(peerPumps).toBeGreaterThanOrEqual(2);
+});
+
+it("cancels a suspended native read before polling it again after close", async () => {
+  let polls = 0;
+  let runtime!: NativeRuntimeAdapter;
+  runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          readValueRange: () => ({
+            poll: () => {
+              polls += 1;
+              if (polls > 1) throw new Error("native read was polled after close");
+              queueMicrotask(() => void runtime.close());
+              return null;
+            },
+          }),
+          close: () => undefined,
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+
+  await expect(
+    runtime.readValueRange("todos", "00000000-0000-0000-0000-000000000001", "title", 0, 1),
+  ).rejects.toThrow("large-value hydration was cancelled by runtime shutdown");
+  expect(polls).toBe(1);
+});
+
+it("cancels a suspended native write before polling it again after close", async () => {
+  let polls = 0;
+  let runtime!: NativeRuntimeAdapter;
+  runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          appendValue: async () => ({
+            poll: () => {
+              polls += 1;
+              if (polls > 1) throw new Error("native write was polled after close");
+              queueMicrotask(() => void runtime.close());
+              return null;
+            },
+          }),
+          close: () => undefined,
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+
+  await expect(
+    runtime.appendValue(
+      "todos",
+      "00000000-0000-0000-0000-000000000001",
+      "title",
+      new Uint8Array([1]),
+    ),
+  ).rejects.toThrow("large-value mutation was cancelled by runtime shutdown");
+  expect(polls).toBe(1);
 });
 
 function typedOccurrenceKey(label: string): Uint8Array {

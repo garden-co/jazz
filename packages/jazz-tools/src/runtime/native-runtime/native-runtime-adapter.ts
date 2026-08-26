@@ -2164,9 +2164,9 @@ export class NativeRuntimeAdapter implements Runtime {
     const result = await started;
     if (!isPendingNativeRead(result)) return result;
     for (;;) {
+      if (this.closed) throw new Error("large-value hydration was cancelled by runtime shutdown");
       const bytes = result.poll();
       if (bytes !== null) return bytes;
-      if (this.closed) throw new Error("large-value hydration was cancelled by runtime shutdown");
       await this.pumpServerTransport();
       await sleep(0);
     }
@@ -2174,9 +2174,9 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private async awaitNativeWrite(pending: PendingNativeWrite): Promise<Write> {
     for (;;) {
+      if (this.closed) throw new Error("large-value mutation was cancelled by runtime shutdown");
       const write = pending.poll();
       if (write !== null) return write;
-      if (this.closed) throw new Error("large-value mutation was cancelled by runtime shutdown");
       await this.pumpServerTransport();
       await sleep(0);
     }
