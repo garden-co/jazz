@@ -12,7 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { sameTrackedSource, sourceIdentity } from "./source-identity.mjs";
+import { checkedOutCommit, sameTrackedSource, sourceIdentity } from "./source-identity.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const testArgs = [
@@ -146,7 +146,7 @@ function cleanSourceBaseline(argv) {
   if (!receipt || !/^[0-9a-f]{40}$/.test(expectedCommit))
     fail("usage: clean-source-baseline RECEIPT EXPECTED_COMMIT");
   const source = {
-    commit: run("git", ["rev-parse", "HEAD"]).stdout.trim(),
+    commit: checkedOutCommit(root),
     ...sourceIdentity(root),
   };
   if (!validSourceIdentity(source))
@@ -162,7 +162,7 @@ function shadowSourceBaseline() {
   const source = JSON.parse(fs.readFileSync(baselinePath, "utf8"));
   if (!validSourceIdentity(source)) fail("shadow source baseline is not a clean checkout");
   const observed = {
-    commit: run("git", ["rev-parse", "HEAD"]).stdout.trim(),
+    commit: checkedOutCommit(root),
     ...sourceIdentity(root),
   };
   if (!sameTrackedSource(source, observed))
@@ -195,7 +195,7 @@ function shard(argv) {
     phases,
     status: "failed",
     source: baseline ?? {
-      commit: run("git", ["rev-parse", "HEAD"]).stdout.trim(),
+      commit: checkedOutCommit(root),
       ...sourceIdentity(root),
     },
     environment: {
@@ -240,7 +240,7 @@ function shard(argv) {
     if (
       baseline &&
       !sameTrackedSource(baseline, {
-        commit: run("git", ["rev-parse", "HEAD"]).stdout.trim(),
+        commit: checkedOutCommit(root),
         ...sourceIdentity(root),
       })
     )

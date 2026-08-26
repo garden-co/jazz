@@ -2110,11 +2110,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-example-jamazon-warehouse-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+]
+
+[[package]]
 name = "jazz-example-music-agent-benchmark"
 version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
  "groove",
+ "jazz",
+]
+
+[[package]]
+name = "jazz-example-poster-shop-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
  "jazz",
 ]
 

@@ -7,8 +7,8 @@ use std::rc::Rc;
 mod common;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, Propagation, ReadOpts, SubscriptionEvent, TickScheduler, TickUrgency,
-    Transport, block_on,
+    Db, DbConfig, DbIdentity, ExclusiveTxOps, Propagation, ReadOpts, SubscriptionEvent,
+    TickScheduler, TickUrgency, Transport, block_on,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
@@ -1398,6 +1398,198 @@ fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
         )),
         "expected settled authority row, got {settled:?}"
     );
+}
+
+#[test]
+fn view_scoped_exclusive_sibling_edge_reads_extend_relay_projection() {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("orgs").column("name", ColumnType::Text))
+            .table(TableSchemaBuilder::new("todos").fk_column("org_id", "orgs"))
+            .table(
+                TableSchemaBuilder::new("checks")
+                    .fk_column("org_id", "orgs")
+                    .fk_column("todo_id", "todos"),
+            )
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .fk_column("org_id", "orgs")
+                    .fk_column("check_id", "checks"),
+            )
+            .build(),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xd1; 16]);
+    let main_thread = open_db(0x41, alice, &schema);
+    let worker = open_db(0x42, alice, &schema);
+    let core = open_core(0x43, &schema);
+    let seeder = open_db(0x44, alice, &schema);
+    main_thread.set_non_durable_client();
+
+    let (main_transport, worker_subscriber_transport) = duplex();
+    let _main_connection = block_on(main_thread.connect_upstream(main_transport));
+    let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
+    let (worker_upstream_transport, core_transport) = duplex();
+    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
+    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let (seed_transport, core_seed_transport) = duplex();
+    let _seed_upstream = block_on(seeder.connect_upstream(seed_transport));
+    let _core_seed = core.accept_subscriber(core_seed_transport, alice);
+
+    let tx = seeder
+        .exclusive_tx()
+        .expect("open exclusive seed transaction");
+    let org = tx
+        .insert(
+            "orgs",
+            BTreeMap::from([("name".to_owned(), Value::String("north".to_owned()))]),
+            Default::default(),
+        )
+        .expect("seed org");
+    let todo = tx
+        .insert(
+            "todos",
+            BTreeMap::from([("org_id".to_owned(), Value::Uuid(org.0))]),
+            Default::default(),
+        )
+        .expect("seed todo");
+    let check = tx
+        .insert(
+            "checks",
+            BTreeMap::from([
+                ("org_id".to_owned(), Value::Uuid(org.0)),
+                ("todo_id".to_owned(), Value::Uuid(todo.0)),
+            ]),
+            Default::default(),
+        )
+        .expect("seed check");
+    let note = tx
+        .insert(
+            "notes",
+            BTreeMap::from([
+                ("org_id".to_owned(), Value::Uuid(org.0)),
+                ("check_id".to_owned(), Value::Uuid(check.0)),
+            ]),
+            Default::default(),
+        )
+        .expect("seed note");
+    tx.commit().expect("commit exclusive sibling rows");
+    for _ in 0..4 {
+        seeder.tick().expect("upload sibling rows");
+        core.tick().expect("accept sibling rows");
+        seeder.tick().expect("apply sibling fates");
+    }
+
+    let opts = ReadOpts {
+        tier: DurabilityTier::Edge,
+        ..ReadOpts::default()
+    };
+    for (table, expected_row) in [("todos", todo), ("checks", check), ("notes", note)] {
+        let query = main_thread
+            .prepare_query(&Query::from(table).filter(eq(col("org_id"), lit(org.0))))
+            .expect("prepare sibling query");
+        let attachment = main_thread
+            .attach_query_with_opts(&query, opts.clone())
+            .expect("attach sibling query");
+        for _ in 0..12 {
+            main_thread.tick().expect("register sibling query");
+            worker.tick().expect("forward sibling query");
+            core.tick().expect("serve sibling query");
+            worker.tick().expect("relay sibling result");
+            main_thread.tick().expect("apply sibling result");
+            if main_thread.query_attachment_is_covered(&attachment) {
+                break;
+            }
+        }
+        assert!(main_thread.query_attachment_is_covered(&attachment));
+        let rows = block_on(main_thread.all(&query, opts.clone())).unwrap();
+        assert_eq!(rows.len(), 1, "covered {table} query returned false-empty");
+        assert_eq!(rows[0].row_uuid(), expected_row);
+        main_thread.detach_query(attachment);
+        main_thread.tick().expect("send sibling unsubscribe");
+        worker.tick().expect("retire sibling relay coverage");
+        core.tick().expect("retire sibling authority coverage");
+        worker.tick().expect("apply sibling retirement");
+        main_thread
+            .tick()
+            .expect("apply sibling retirement locally");
+    }
+
+    // Control: the same relay lifecycle already works when every row has its
+    // own mergeable transaction identity. Keep it beside the exclusive case
+    // so the receipt specifically protects fragment extension, rather than a
+    // broader change to strict-Edge attachment semantics.
+    let merge_org = seeder
+        .insert(
+            "orgs",
+            BTreeMap::from([("name".to_owned(), Value::String("south".to_owned()))]),
+            Default::default(),
+        )
+        .expect("seed mergeable org");
+    let merge_org_id = merge_org.row_uuid();
+    let merge_todo = seeder
+        .insert(
+            "todos",
+            BTreeMap::from([("org_id".to_owned(), Value::Uuid(merge_org_id.0))]),
+            Default::default(),
+        )
+        .expect("seed mergeable todo");
+    let merge_todo_id = merge_todo.row_uuid();
+    let merge_check = seeder
+        .insert(
+            "checks",
+            BTreeMap::from([
+                ("org_id".to_owned(), Value::Uuid(merge_org_id.0)),
+                ("todo_id".to_owned(), Value::Uuid(merge_todo_id.0)),
+            ]),
+            Default::default(),
+        )
+        .expect("seed mergeable check");
+    let merge_check_id = merge_check.row_uuid();
+    let merge_note = seeder
+        .insert(
+            "notes",
+            BTreeMap::from([
+                ("org_id".to_owned(), Value::Uuid(merge_org_id.0)),
+                ("check_id".to_owned(), Value::Uuid(merge_check_id.0)),
+            ]),
+            Default::default(),
+        )
+        .expect("seed mergeable note");
+    let merge_note_id = merge_note.row_uuid();
+    for _ in 0..8 {
+        seeder.tick().expect("upload mergeable sibling rows");
+        core.tick().expect("accept mergeable sibling rows");
+        seeder.tick().expect("apply mergeable sibling fates");
+    }
+    for (table, expected_row) in [
+        ("todos", merge_todo_id),
+        ("checks", merge_check_id),
+        ("notes", merge_note_id),
+    ] {
+        let query = main_thread
+            .prepare_query(&Query::from(table).filter(eq(col("org_id"), lit(merge_org_id.0))))
+            .expect("prepare mergeable control query");
+        let attachment = main_thread
+            .attach_query_with_opts(&query, opts.clone())
+            .expect("attach mergeable control query");
+        for _ in 0..12 {
+            main_thread
+                .tick()
+                .expect("register mergeable control query");
+            worker.tick().expect("forward mergeable control query");
+            core.tick().expect("serve mergeable control query");
+            worker.tick().expect("relay mergeable control result");
+            main_thread.tick().expect("apply mergeable control result");
+            if main_thread.query_attachment_is_covered(&attachment) {
+                break;
+            }
+        }
+        assert!(main_thread.query_attachment_is_covered(&attachment));
+        let rows = block_on(main_thread.all(&query, opts.clone())).unwrap();
+        assert_eq!(rows.len(), 1, "covered mergeable {table} query was empty");
+        assert_eq!(rows[0].row_uuid(), expected_row);
+        main_thread.detach_query(attachment);
+    }
 }
 
 /// A fresh browser main thread receives the worker's authority-owned reset as
