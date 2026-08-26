@@ -615,7 +615,10 @@ export class NativeRuntimeAdapter implements Runtime {
   // A non-durable follower needs one worker response before trusting native
   // coverage. Once that response covered a prepared query, reattaching the
   // same query may already be covered and legitimately emit no new frame.
-  private readonly peerCoveredQueries = new Set<PreparedQuery>();
+  // The response epoch that confirmed each prepared query. This lets a
+  // reattachment reuse a confirmation, but never lets it skip worker activity
+  // that arrived after that confirmation.
+  private readonly peerCoveredQueries = new Map<PreparedQuery, number>();
   private coreTickScheduled = false;
   private coreTickRunning = false;
   private coreTickAgain = false;
@@ -2174,9 +2177,15 @@ export class NativeRuntimeAdapter implements Runtime {
       attachment = this.db.attachQuery(query, opts);
     }
     if (!this.db.queryAttachmentIsCovered) return attachment;
+    const confirmedPeerActivityEpoch = this.peerCoveredQueries.get(query);
+    // A prior confirmation can recover a reattachment only if no newer worker
+    // frame has arrived. Otherwise the old coverage state could be exposed to
+    // a query whose authorization (for example, an authorship-scoped policy)
+    // is about to change.
     if (
       this.nonDurableClient &&
-      this.peerCoveredQueries.has(query) &&
+      confirmedPeerActivityEpoch != null &&
+      this.peerTransportActivityEpoch <= confirmedPeerActivityEpoch &&
       this.db.queryAttachmentIsCovered(attachment)
     ) {
       return attachment;
@@ -2197,7 +2206,9 @@ export class NativeRuntimeAdapter implements Runtime {
       minimumPeerActivityEpoch,
       pendingPeerActivityEpoch,
     );
-    if (this.nonDurableClient) this.peerCoveredQueries.add(query);
+    if (this.nonDurableClient && this.db.queryAttachmentIsCovered(attachment)) {
+      this.peerCoveredQueries.set(query, this.peerTransportActivityEpoch);
+    }
     return attachment;
   }
 
