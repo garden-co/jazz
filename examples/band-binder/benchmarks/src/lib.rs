@@ -295,9 +295,9 @@ fn schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new("members")
                     .fk_column("workspaceId", "workspaces")
-                    .column("subject", ColumnType::Text)
+                    .column("author", ColumnType::Text)
                     .column("role", ColumnType::Text)
-                    .index_only(["workspaceId", "subject", "role"]),
+                    .index_only(["workspaceId", "author", "role"]),
             )
             .table(
                 TableSchemaBuilder::new("pages")
