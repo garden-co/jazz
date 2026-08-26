@@ -1691,7 +1691,7 @@ fn normalize_reachable_seed(
         );
         let mut seed_current = seed_source_node;
         let claim_route_field = seed.user_claim.as_ref().map(|user_claim| {
-            let claim_path = ClaimPath(user_claim.split('.').map(str::to_owned).collect());
+            let claim_path = ClaimPath(crate::query::operand_claim_path(user_claim));
             (claim_path.clone(), claim_param_field(&claim_path))
         });
         if let (Some(user_column), Some((_, claim_field))) = (&seed.user_column, &claim_route_field)
@@ -1829,7 +1829,7 @@ fn reachable_seed_frontier_columns(
             ));
         };
         let user_column_ty = schema_column_type(schema, &seed.table, user_column)?;
-        let path = ClaimPath(user_claim.split('.').map(str::to_owned).collect());
+        let path = ClaimPath(crate::query::operand_claim_path(user_claim));
         columns.push(ValueSourceColumn {
             name: claim_param_field(&path),
             value: NormalizedValueRef::Claim(path),
@@ -1874,7 +1874,7 @@ fn reachable_frontier_columns(
         });
     }
     if let Operand::Claim(claim) = seed {
-        let path = ClaimPath(claim.split('.').map(str::to_owned).collect());
+        let path = ClaimPath(crate::query::operand_claim_path(claim));
         columns.push(ValueSourceColumn {
             name: claim_param_field(&path),
             value: NormalizedValueRef::Claim(path),

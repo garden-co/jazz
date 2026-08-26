@@ -179,7 +179,7 @@ fn maintained_view_capture_schema() -> JazzSchema {
             .policies(
                 PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
                     "owner",
-                    vec!["user_id".to_owned()],
+                    vec!["claims".to_owned(), "user_id".to_owned()],
                 )),
             ),
     ))
@@ -819,7 +819,7 @@ fn maintained_view_multitable_capture_schema() -> JazzSchema {
     let owner_read = || {
         PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
             "owner",
-            vec!["user_id".to_owned()],
+            vec!["claims".to_owned(), "user_id".to_owned()],
         ))
     };
     build_public_test_schema(

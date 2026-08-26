@@ -389,7 +389,10 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         )
         .expect("compile invite policy topology");
     let typed_join_code = typed_claim_param_alias(
-        &claim_param_field(&ClaimPath(vec!["join_code".to_owned()])),
+        &claim_param_field(&ClaimPath(vec![
+            "claims".to_owned(),
+            "join_code".to_owned(),
+        ])),
         &ColumnType::String.nullable(),
     );
     assert!(

@@ -868,7 +868,7 @@ fn relation_value_to_operand(value: &RelationValueRef) -> Result<Operand, QueryE
             match path.as_slice() {
                 [name] => Ok(Operand::Claim(name.clone())),
                 [claims, name] if claims == "claims" => {
-                    Ok(Operand::Claim(provider_claim_key(name)))
+                    Ok(Operand::Claim(provider_claim_operand_key(name)))
                 }
                 _ => Err(relation_unification_error(
                     "session refs support session.user and session.claims[\"name\"]",

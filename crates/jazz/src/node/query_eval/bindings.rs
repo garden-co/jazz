@@ -285,10 +285,19 @@ fn bind_scope_claim_operand(
     let Operand::Claim(name) = operand else {
         return;
     };
-    let Some(value) = claim_values.get(name).cloned() else {
+    let storage_name = crate::query::operand_claim_storage_key(name);
+    let Some(value) = claim_values
+        .get(&storage_name)
+        .or_else(|| {
+            storage_name
+                .strip_prefix(crate::query::PROVIDER_CLAIM_PREFIX)
+                .and_then(|raw| claim_values.get(raw))
+        })
+        .cloned()
+    else {
         return;
     };
-    let param = claim_param_field(&ClaimPath(vec![name.clone()]));
+    let param = claim_param_field(&ClaimPath(crate::query::operand_claim_path(name)));
     binding_values.insert(param.clone(), value);
     *operand = Operand::Param(param);
 }
@@ -488,7 +497,10 @@ fn operand_contains_unbound_claim(
     operand: &Operand,
     claims: Option<&BTreeMap<String, Value>>,
 ) -> bool {
-    matches!(operand, Operand::Claim(name) if !is_builtin_policy_claim(name) && !claims.is_some_and(|claims| claims.contains_key(name)))
+    matches!(operand, Operand::Claim(name) if !is_builtin_policy_claim(name) && !claims.is_some_and(|claims| {
+        let storage = crate::query::operand_claim_storage_key(name);
+        claims.contains_key(&storage) || storage.strip_prefix(crate::query::PROVIDER_CLAIM_PREFIX).is_some_and(|raw| claims.contains_key(raw))
+    }))
 }
 
 #[derive(Clone, Copy)]
@@ -839,7 +851,7 @@ pub(super) fn collect_reachable_seed_claim_params(
             .ok_or(Error::InvalidStoredValue(
                 "reachable seed column is missing from schema",
             ))?;
-        let path = ClaimPath(user_claim.split('.').map(str::to_owned).collect());
+        let path = ClaimPath(crate::query::operand_claim_path(user_claim));
         params.insert(
             claim_param_field(&path),
             ProgramClaimParam {

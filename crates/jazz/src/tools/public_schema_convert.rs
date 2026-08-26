@@ -7,7 +7,7 @@ use crate::groove::records::{
 use crate::groove::schema::ColumnType as GrooveColumnType;
 use crate::query::{
     InheritsOperation, JoinCorrelation, JoinSourceLookup, JoinTarget, JoinVia, Operand,
-    PolicyBranch, Predicate, Query, provider_claim_key,
+    PolicyBranch, Predicate, Query, provider_claim_operand_key,
 };
 use crate::schema::{
     ColumnSchema as CoreColumnSchema, JazzSchema, MergeStrategy, RuntimeSchema,
@@ -2569,7 +2569,9 @@ fn convert_session_path_operand(
         return Ok(Operand::Claim(DIRECT_AUTH_MODE_CLAIM.to_owned()));
     }
     if path_segments.len() == 2 && path_segments[0] == "claims" {
-        return Ok(Operand::Claim(provider_claim_key(&path_segments[1])));
+        return Ok(Operand::Claim(provider_claim_operand_key(
+            &path_segments[1],
+        )));
     }
     Err(err(
         format!("$.{}.{}", table.as_str(), path),
@@ -3468,7 +3470,7 @@ mod tests {
                     )))),
                     Predicate::Eq(
                         Operand::Column("owner_id".to_owned()),
-                        Operand::Claim(provider_claim_key("team_id")),
+                        Operand::Claim(provider_claim_operand_key("team_id")),
                     ),
                 ]),
             ]
@@ -3736,7 +3738,7 @@ mod tests {
         )
         .expect("provider claim `user` coexists under the claims namespace");
         assert!(matches!(nested_user,
-            LoweredRelValue::Operand(Operand::Claim(claim)) if claim == provider_claim_key("user")
+            LoweredRelValue::Operand(Operand::Claim(claim)) if claim == provider_claim_operand_key("user")
         ));
 
         let claim = rel_value_to_policy_operand(
@@ -3747,7 +3749,7 @@ mod tests {
         .expect("one-level session claims are supported");
         assert!(matches!(
             claim,
-            LoweredRelValue::Operand(Operand::Claim(name)) if name == provider_claim_key("role")
+            LoweredRelValue::Operand(Operand::Claim(name)) if name == provider_claim_operand_key("role")
         ));
     }
 
@@ -4107,7 +4109,7 @@ mod tests {
             join.filters,
             vec![Predicate::Eq(
                 Operand::Column("user_id".to_owned()),
-                Operand::Claim(provider_claim_key("sub")),
+                Operand::Claim(provider_claim_operand_key("sub")),
             )]
         );
     }
@@ -4326,7 +4328,7 @@ mod tests {
         assert_eq!(
             policy.filters,
             vec![Predicate::In(
-                Operand::Claim(provider_claim_key("role")),
+                Operand::Claim(provider_claim_operand_key("role")),
                 vec![
                     Operand::Literal(GrooveValue::String(legacy_role_id.uuid().to_string())),
                     Operand::Literal(GrooveValue::String("member".to_owned())),
@@ -4359,7 +4361,7 @@ mod tests {
         assert_eq!(
             policy.filters,
             vec![Predicate::Eq(
-                Operand::Claim(provider_claim_key("role")),
+                Operand::Claim(provider_claim_operand_key("role")),
                 Operand::Literal(GrooveValue::String("admin".to_owned())),
             )]
         );

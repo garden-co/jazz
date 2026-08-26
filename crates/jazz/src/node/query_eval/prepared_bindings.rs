@@ -178,7 +178,10 @@ pub(super) fn prepared_claim_value(
         [claims, name] if claims == "claims" => crate::query::provider_claim_key(name),
         _ => return Err(Error::InvalidStoredValue("unsupported session claim path")),
     };
-    if let Some(value) = claims.get(&name) {
+    if let Some(value) = claims.get(&name).or_else(|| match path.0.as_slice() {
+        [claims_path, raw] if claims_path == "claims" => claims.get(raw),
+        _ => None,
+    }) {
         return Ok(Some(value.clone()));
     }
     if let Some(value) = default_policy_claim_values(*permission_subject).get(&name) {

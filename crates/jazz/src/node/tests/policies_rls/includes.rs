@@ -15,7 +15,7 @@ fn required_include_rls_schema() -> JazzSchema {
                     .policies(
                         PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
                             "owner",
-                            vec!["user_id".to_owned()],
+                            vec!["claims".to_owned(), "user_id".to_owned()],
                         )),
                     ),
             ),
@@ -364,7 +364,7 @@ fn multi_segment_required_include_rls_schema() -> JazzSchema {
                     .policies(
                         PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
                             "owner",
-                            vec!["user_id".to_owned()],
+                            vec!["claims".to_owned(), "user_id".to_owned()],
                         )),
                     ),
             ),

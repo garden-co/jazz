@@ -1491,7 +1491,10 @@ mod authorization_scope_compiler_tests {
                     PublicTableSchemaBuilder::new("resources")
                         .column("owner", PublicColumnType::Uuid)
                         .policies(PublicTablePolicies::new().with_select(
-                            PublicPolicyExpr::eq_session("owner", vec!["user_id".to_owned()]),
+                            PublicPolicyExpr::eq_session(
+                                "owner",
+                                vec!["claims".to_owned(), "user_id".to_owned()],
+                            ),
                         )),
                 )
                 .table(
@@ -1564,8 +1567,9 @@ mod authorization_scope_compiler_tests {
 
     #[test]
     fn actual_compiler_selects_write_clauses_and_skips_public_read_support() {
-        let claim_policy =
-            |column: &str| PublicPolicyExpr::eq_session(column, vec!["user_id".to_owned()]);
+        let claim_policy = |column: &str| {
+            PublicPolicyExpr::eq_session(column, vec!["claims".to_owned(), "user_id".to_owned()])
+        };
         let schema = public_schema(
             PublicSchemaBuilder::new()
                 .table(PublicTableSchemaBuilder::new("public"))
@@ -1658,7 +1662,10 @@ mod authorization_scope_compiler_tests {
                 PublicTableSchemaBuilder::new("resources")
                     .column("owner", PublicColumnType::Uuid)
                     .policies(PublicTablePolicies::new().with_select(
-                        PublicPolicyExpr::eq_session("owner", vec!["user_id".to_owned()]),
+                        PublicPolicyExpr::eq_session(
+                            "owner",
+                            vec!["claims".to_owned(), "user_id".to_owned()],
+                        ),
                     )),
             ),
         );
@@ -1716,7 +1723,8 @@ mod authorization_scope_compiler_tests {
         // A structural v2 schema gains a restrictive read policy without any
         // write policy. Read advice must compile v2's support query and an
         // older v1 insert must not bypass v2's now-closed policy set.
-        let owner_policy = PublicPolicyExpr::eq_session("owner", vec!["user_id".to_owned()]);
+        let owner_policy =
+            PublicPolicyExpr::eq_session("owner", vec!["claims".to_owned(), "user_id".to_owned()]);
         let base = public_schema(
             PublicSchemaBuilder::new().table(
                 PublicTableSchemaBuilder::new("notes")

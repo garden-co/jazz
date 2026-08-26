@@ -244,11 +244,11 @@ fn nested_read_policies_reuse_an_outer_equivalent_claim_slot() {
         )]),
     );
 
-    let claim_name = claim_param_field(&ClaimPath(vec!["user_id".to_owned()]));
+    let claim_name = claim_param_field(&ClaimPath(vec!["claims".to_owned(), "user_id".to_owned()]));
     let outer_claims = BTreeMap::from([(
         claim_name.clone(),
         ProgramClaimParam {
-            path: ClaimPath(vec!["user_id".to_owned()]),
+            path: ClaimPath(vec!["claims".to_owned(), "user_id".to_owned()]),
             ty: ColumnType::String,
         },
     )]);

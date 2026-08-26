@@ -604,9 +604,13 @@ fn priority_cells(title: impl Into<String>, priority: u64) -> BTreeMap<String, V
 }
 
 fn public_session_eq(column: &str, path: &[&str]) -> PublicPolicyExpr {
+    let path = match path {
+        ["user_id"] | ["userId"] => vec!["claims".to_owned(), "user_id".to_owned()],
+        _ => path.iter().map(|segment| (*segment).to_owned()).collect(),
+    };
     PublicPolicyExpr::eq_session(
         column,
-        path.iter().map(|segment| (*segment).to_owned()).collect(),
+        path,
     )
 }
 

@@ -601,7 +601,9 @@ mod tests {
             r#"[" https://issuer.example "," user "]"#
         );
         assert_eq!(
-            admitted.claims.get("iss"),
+            admitted
+                .claims
+                .get(&crate::query::provider_claim_key("iss")),
             Some(&Value::String(" https://issuer.example ".to_owned()))
         );
     }

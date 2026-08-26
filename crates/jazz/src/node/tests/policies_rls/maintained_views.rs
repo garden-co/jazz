@@ -373,7 +373,7 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
                         PublicTablePolicies::new()
                             .with_select(PublicPolicyExpr::eq_session(
                                 "userID",
-                                vec!["user_id".to_owned()],
+                                vec!["claims".to_owned(), "user_id".to_owned()],
                             )),
                     ),
             ),

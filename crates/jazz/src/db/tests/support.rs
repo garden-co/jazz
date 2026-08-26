@@ -790,10 +790,11 @@ pub(super) fn build_public_db_test_schema(builder: PublicSchemaBuilder) -> JazzS
 }
 
 pub(super) fn public_session_eq(column: &str, path: &[&str]) -> PublicPolicyExpr {
-    PublicPolicyExpr::eq_session(
-        column,
-        path.iter().map(|segment| (*segment).to_owned()).collect(),
-    )
+    let path = match path {
+        ["user_id"] | ["userId"] => vec!["claims".to_owned(), "user_id".to_owned()],
+        _ => path.iter().map(|segment| (*segment).to_owned()).collect(),
+    };
+    PublicPolicyExpr::eq_session(column, path)
 }
 
 pub(super) fn public_outer_eq(column: &str, outer_column: &str) -> PublicPolicyExpr {
@@ -863,12 +864,15 @@ pub(super) fn public_recursive_access_policy(
             predicate: public_rel_eq(
                 seed_alias,
                 seed_user_column,
-                PublicRelValueRef::SessionRef(
-                    seed_claim_path
+                PublicRelValueRef::SessionRef(match seed_claim_path {
+                    ["user_id"] | ["userId"] => {
+                        vec!["claims".to_owned(), "user_id".to_owned()]
+                    }
+                    _ => seed_claim_path
                         .iter()
                         .map(|segment| (*segment).to_owned())
                         .collect(),
-                ),
+                }),
             ),
         }),
         columns: vec![PublicRelProjectColumn {
