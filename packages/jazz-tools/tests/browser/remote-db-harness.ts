@@ -182,7 +182,7 @@ export async function waitForRemoteBrowserDbTitle(
     unsubscribe = state.db.subscribe(
       state.query,
       (rows) => {
-        lastRows = [...rows];
+        lastRows = rows;
         if (lastRows.some((row) => row.title === input.title)) {
           clearTimeout(timeout);
           unsubscribe();

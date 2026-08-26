@@ -1207,7 +1207,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
         project: {
           id: string;
           name: string;
-        };
+        } | null;
       };
 
       let unsubscribe = () => {};
@@ -1223,7 +1223,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
             return;
           }
 
-          resolve([...rows] as SubscribedTodo[]);
+          resolve(rows);
         });
       });
 
@@ -1280,8 +1280,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
           if (rows.length !== 1) {
             return;
           }
-
-          resolve([...rows] as SubscribedTodo[]);
+          resolve(rows);
         });
       });
 

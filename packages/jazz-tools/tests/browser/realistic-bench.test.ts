@@ -2273,7 +2273,7 @@ describe("realistic browser benchmark harness", () => {
       const unsubscribe = db.subscribe(
         query<TaskRow>("tasks", [{ column: "id", op: "eq", value: targetTaskId }], [], 1),
         (rows) => {
-          received.push([...rows]);
+          received.push(rows);
         },
       );
 
@@ -2320,7 +2320,7 @@ describe("realistic browser benchmark harness", () => {
       const unsubscribe = db.subscribe(
         query<TaskRow>("tasks", [{ column: "id", op: "eq", value: targetTaskId }], [], 1),
         (rows) => {
-          received.push([...rows]);
+          received.push(rows);
         },
       );
 

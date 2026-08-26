@@ -65,7 +65,7 @@ describe("deep-include reactivity", () => {
 
     const snapshots: Todo[][] = [];
     const unsubscribe = db.subscribe(app.todos.include({ user_checksViaTodo: true }), (rows) =>
-      snapshots.push([...rows]),
+      snapshots.push(rows),
     );
 
     await waitForCondition(
@@ -109,7 +109,7 @@ describe("deep-include reactivity", () => {
     const snapshots: Org[][] = [];
     const unsubscribe = db.subscribe(
       app.orgs.include({ todosViaOrg: { user_checksViaTodo: true } }),
-      (rows) => snapshots.push([...rows]),
+      (rows) => snapshots.push(rows),
     );
 
     await waitForCondition(
@@ -160,7 +160,7 @@ describe("deep-include reactivity", () => {
       app.orgs.include({
         todosViaOrg: { user_checksViaTodo: { check_notesViaUser_check: true } },
       }),
-      (rows) => snapshots.push([...rows]),
+      (rows) => snapshots.push(rows),
     );
 
     await waitForCondition(

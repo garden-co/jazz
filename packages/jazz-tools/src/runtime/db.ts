@@ -1914,7 +1914,10 @@ export class Db {
     return results[0] ?? null;
   }
 
-  /** Subscribe to a query and receive its complete current result whenever it changes. */
+  /**
+   * Subscribe to a query and receive its complete current result whenever it changes.
+   * Each callback receives a fresh result array.
+   */
   subscribe<T extends { id: string }>(
     query: QueryBuilder<T>,
     callback: (rows: T[]) => void,

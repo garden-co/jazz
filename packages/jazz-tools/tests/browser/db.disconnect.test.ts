@@ -93,7 +93,7 @@ describe("Db disconnect/reconnect", () => {
             app.todos,
             (rows) => {
               snapshots.push({
-                rows: [...rows],
+                rows,
                 edgeSettled,
                 afterReconnect: reconnectRequested,
               });
@@ -171,7 +171,7 @@ describe("Db disconnect/reconnect", () => {
           todoByTitle(title),
           (rows) => {
             snapshots.push({
-              rows: [...rows],
+              rows,
               edgeSettled,
               afterReconnect: reconnectRequested,
             });
@@ -267,7 +267,7 @@ describe("Db disconnect/reconnect", () => {
           todoByTitle(title),
           (rows) => {
             snapshots.push({
-              rows: [...rows],
+              rows,
               edgeSettled,
               afterReconnect: reconnectRequested,
             });
@@ -314,7 +314,7 @@ describe("Db disconnect/reconnect", () => {
         db.subscribe(
           todoByTitle(deletedTitle),
           (rows) => {
-            snapshots.push([...rows]);
+            snapshots.push(rows);
           },
           { tier: "edge", localUpdates: "immediate" },
         ),

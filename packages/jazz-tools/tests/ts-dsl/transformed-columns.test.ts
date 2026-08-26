@@ -86,7 +86,7 @@ describe("TS transformed columns", () => {
       priorityAppWithPermissions.priorities.where({}),
       (rows) => {
         if (rows.some((row) => row.id === inserted.id && row.score === "medium")) {
-          resolveUpdate([...rows]);
+          resolveUpdate(rows);
         }
       },
     );

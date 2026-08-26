@@ -951,7 +951,7 @@ describe("raw websocket private read gate", () => {
       bob.subscribe(
         app.chats,
         (rows) => {
-          chatSnapshots.push([...rows]);
+          chatSnapshots.push(rows);
         },
         { tier: "edge" },
       ),
@@ -960,7 +960,7 @@ describe("raw websocket private read gate", () => {
       bob.subscribe(
         app.messages,
         (rows) => {
-          messageSnapshots.push([...rows]);
+          messageSnapshots.push(rows);
         },
         { tier: "edge" },
       ),

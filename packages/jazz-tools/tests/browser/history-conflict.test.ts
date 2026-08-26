@@ -288,7 +288,7 @@ describe("History & Conflict Management", () => {
     const snapshots: Todo[][] = [];
     const unsub = ctx.trackSubscription(
       dbAlice.subscribe(allTodos, (rows) => {
-        snapshots.push([...rows]);
+        snapshots.push(rows);
       }),
     );
 

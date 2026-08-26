@@ -800,7 +800,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     const unsub = trackSubscription(
       db.subscribe(allTodos, (rows) => {
-        received.push([...rows]);
+        received.push(rows);
       }),
     );
 
@@ -835,7 +835,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     } = db.insert(projects, { name: "Observed Project" });
     const unsub = trackSubscription(
       db.subscribe(todosByProject(projectId), (rows) => {
-        received.push([...rows]);
+        received.push(rows);
       }),
     );
 
@@ -908,7 +908,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       fresh.subscribe(
         todosByProject(projectId),
         (rows) => {
-          snapshots.push([...rows]);
+          snapshots.push(rows);
         },
         { tier: "global" },
       ),
@@ -949,7 +949,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const received: Todo[][] = [];
     const unsub = trackSubscription(
       db.subscribe(todos.where({ id: targetId }), (rows) => {
-        received.push([...rows]);
+        received.push(rows);
       }),
     );
 
@@ -996,7 +996,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const received: Todo[][] = [];
     const unsub = trackSubscription(
       db.subscribe(todos.where({ id: targetId }), (rows) => {
-        received.push([...rows]);
+        received.push(rows);
       }),
     );
 
@@ -1861,7 +1861,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       dbA.subscribe(
         allTodos,
         (rows) => {
-          snapshots.push([...rows]);
+          snapshots.push(rows);
         },
         { propagation: "local-only" },
       ),
@@ -1914,7 +1914,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       dbB.subscribe(
         allTodos,
         (rows) => {
-          snapshots.push([...rows]);
+          snapshots.push(rows);
         },
         { propagation: "local-only" },
       ),
@@ -2391,7 +2391,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const snapshots: Todo[][] = [];
     const unsubscribe = trackSubscription(
       second.subscribe(allTodos, (rows) => {
-        snapshots.push([...rows]);
+        snapshots.push(rows);
       }),
     );
 

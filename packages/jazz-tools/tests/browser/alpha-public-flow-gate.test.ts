@@ -121,7 +121,7 @@ describe("alpha public package flow", () => {
     const snapshots: Todo[][] = [];
     const unsubscribe = ctx.trackSubscription(
       db.subscribe(app.todos.orderBy("title"), (rows) => {
-        snapshots.push([...rows]);
+        snapshots.push(rows);
       }),
     );
 
@@ -206,7 +206,7 @@ describe("alpha public package flow", () => {
     const snapshots: Todo[][] = [];
     const unsubscribe = ctx.trackSubscription(
       db.subscribe(openTodos, (rows) => {
-        snapshots.push([...rows]);
+        snapshots.push(rows);
       }),
     );
 
@@ -268,7 +268,7 @@ describe("alpha public package flow", () => {
       .limit(1);
     const unsubscribe = ctx.trackSubscription(
       db.subscribe(richQuery, (rows) => {
-        snapshots.push([...rows]);
+        snapshots.push(rows);
       }),
     );
 
@@ -327,7 +327,7 @@ describe("alpha public package flow", () => {
     const snapshots: Todo[][] = [];
     const unsubscribe = ctx.trackSubscription(
       dbB.subscribe(app.todos.orderBy("title"), (rows) => {
-        snapshots.push([...rows]);
+        snapshots.push(rows);
       }),
     );
 
@@ -403,7 +403,7 @@ describe("alpha public package flow", () => {
     const snapshots: RichTodo[][] = [];
     const unsubscribe = ctx.trackSubscription(
       dbB.subscribe(richQuery, (rows) => {
-        snapshots.push([...rows]);
+        snapshots.push(rows);
       }),
     );
 
@@ -506,7 +506,7 @@ describe("alpha public package flow", () => {
       const snapshots: RichTodo[][] = [];
       const unsubscribe = ctx.trackSubscription(
         reader.subscribe(richQuery, (rows) => {
-          snapshots.push([...rows]);
+          snapshots.push(rows);
         }),
       );
 
@@ -655,7 +655,7 @@ describe("alpha public package flow", () => {
     const snapshots: Todo[][] = [];
     const unsubscribe = ctx.trackSubscription(
       db.subscribe(app.todos.orderBy("title"), (rows) => {
-        snapshots.push([...rows]);
+        snapshots.push(rows);
       }),
     );
 
@@ -993,7 +993,7 @@ async function waitForSubscribedTodoSummaries(
     }, 45_000);
     unsubscribe = ctx.trackSubscription(
       db.subscribe(query, (rows) => {
-        lastRows = [...rows];
+        lastRows = rows;
         if (summariesEqual([...lastRows].sort(byTitle), summaries)) {
           clearTimeout(timeout);
           unsubscribe();
