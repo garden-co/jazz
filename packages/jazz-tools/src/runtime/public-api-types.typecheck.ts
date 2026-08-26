@@ -12,6 +12,7 @@ import { userIdentity } from "../index.js";
 
 // @ts-expect-error sessionAuthor was replaced by userIdentity without a compatibility alias.
 import { sessionAuthor } from "../index.js";
+void sessionAuthor;
 
 // @ts-expect-error CreateOptions was renamed to InsertOptions.
 import type { CreateOptions as PackageCreateOptions } from "../index.js";
