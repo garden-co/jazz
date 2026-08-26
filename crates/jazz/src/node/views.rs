@@ -1640,6 +1640,28 @@ where
                 "version bundle count does not match its declared scope payload",
             ));
         }
+        if bundle.scope == crate::protocol::VersionBundleScope::ViewScoped {
+            // A view-scoped exclusive fragment may extend a projection already
+            // installed by an earlier reset. Its redacted cardinality is
+            // deliberately not a whole-transaction completeness claim, so do
+            // not take the complete-exclusive fast path below merely because
+            // the transaction itself is already known.
+            if !staged_tx_ids.insert(bundle.tx.tx_id) {
+                return Ok(true);
+            }
+            self.stage_view_scoped_transaction_with_current_indexes(
+                batch,
+                bundle.tx.clone(),
+                bundle.versions.clone(),
+                bundle.fate.clone(),
+                bundle.global_time,
+                bundle.durability,
+                staged_global_times,
+                staged_content_versions,
+            )
+            .await?;
+            return Ok(true);
+        }
         if bundle.tx.kind == TxKind::Exclusive {
             let complete_len = usize::try_from(bundle.tx.n_total_writes).map_err(|_| {
                 Error::InvalidStoredValue("exclusive transaction write count does not fit usize")
@@ -1652,20 +1674,6 @@ where
             }
         }
         if !staged_tx_ids.insert(bundle.tx.tx_id) {
-            return Ok(true);
-        }
-        if bundle.scope == crate::protocol::VersionBundleScope::ViewScoped {
-            self.stage_view_scoped_transaction_with_current_indexes(
-                batch,
-                bundle.tx.clone(),
-                bundle.versions.clone(),
-                bundle.fate.clone(),
-                bundle.global_time,
-                bundle.durability,
-                staged_global_times,
-                staged_content_versions,
-            )
-            .await?;
             return Ok(true);
         }
         self.stage_known_transaction(
