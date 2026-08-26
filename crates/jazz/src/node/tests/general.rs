@@ -129,6 +129,55 @@ fn subscription_equivalence_canonicalizes_wide_rows_without_repeated_decoding() 
 }
 
 #[test]
+fn subscription_equivalence_canonicalizes_duplicate_logical_names_by_value() {
+    fn query_row(fields: Vec<(String, records::ValueType)>, values: Vec<Value>) -> CurrentRow {
+        let descriptor = records::RecordDescriptor::new(
+            [("row_uuid".to_owned(), records::ValueType::Uuid)]
+                .into_iter()
+                .chain(fields)
+                .chain([
+                    ("$createdBy".to_owned(), records::ValueType::String),
+                    ("$createdAt".to_owned(), records::ValueType::U64),
+                    ("$updatedBy".to_owned(), records::ValueType::String),
+                    ("$updatedAt".to_owned(), records::ValueType::U64),
+                ]),
+        );
+        let values = [Value::Uuid(row(0x6c).0)]
+            .into_iter()
+            .chain(values)
+            .chain([
+                Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+                Value::U64(10),
+                Value::String(AuthorSubject::SYSTEM.canonical().to_owned()),
+                Value::U64(20),
+            ])
+            .collect::<Vec<_>>();
+        let raw = descriptor.create(&values).unwrap();
+        CurrentRow::new("scores", OwnedRecord::new(raw, descriptor))
+    }
+
+    let aggregate_layout = query_row(
+        vec![
+            ("foo".to_owned(), records::ValueType::U64),
+            ("__jazz_aggregate_foo".to_owned(), records::ValueType::U64),
+        ],
+        vec![Value::U64(1), Value::U64(2)],
+    );
+    let public_layout = query_row(
+        vec![
+            (
+                "user___jazz_aggregate_foo".to_owned(),
+                records::ValueType::U64,
+            ),
+            ("user_foo".to_owned(), records::ValueType::U64),
+        ],
+        vec![Value::U64(2), Value::U64(1)],
+    );
+
+    assert!(aggregate_layout.subscription_equivalent(&public_layout));
+}
+
+#[test]
 fn ordinary_oversized_scalar_write_is_staged_indirect_and_reads_logically_inline() {
     let schema = two_column_schema();
     let node_uuid = node(0x71);

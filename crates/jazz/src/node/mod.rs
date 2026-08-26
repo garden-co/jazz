@@ -1332,11 +1332,25 @@ impl CurrentRow {
         // Decode each cell exactly once. Descriptor order differs between a
         // physical current row and its public projection, so canonicalize the
         // borrowed logical names instead of repeatedly rescanning either row.
-        let mut left = self.subscription_cells().collect::<Vec<_>>();
-        let mut right = other.subscription_cells().collect::<Vec<_>>();
-        left.sort_unstable_by_key(|(name, _)| *name);
-        right.sort_unstable_by_key(|(name, _)| *name);
-        left == right
+        match (
+            self.canonical_subscription_cells(),
+            other.canonical_subscription_cells(),
+        ) {
+            (Some(left), Some(right)) => left == right,
+            _ => false,
+        }
+    }
+
+    fn canonical_subscription_cells(&self) -> Option<Vec<(&str, Vec<u8>)>> {
+        let mut cells = self
+            .subscription_cells()
+            .map(|(name, value)| Some((name, postcard::to_allocvec(&value).ok()?)))
+            .collect::<Option<Vec<_>>>()?;
+        // Logical names may legally collide (for example a group column and
+        // an aggregate alias). The canonical Value bytes preserve multiset
+        // semantics without making equality depend on descriptor order.
+        cells.sort_unstable();
+        Some(cells)
     }
 
     fn subscription_cells(&self) -> impl Iterator<Item = (&str, Option<Value>)> + '_ {
