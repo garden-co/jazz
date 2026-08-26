@@ -18,6 +18,98 @@ fn indexed_documents_schema() -> JazzSchema {
     )
 }
 
+fn multi_index_documents_schema() -> JazzSchema {
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("documents")
+                .column("team", PublicColumnType::Uuid)
+                .column("active", PublicColumnType::Boolean)
+                .column("title", PublicColumnType::Text)
+                .index_only(["team", "active"]),
+        ),
+    )
+}
+
+#[test]
+fn maintained_multi_index_query_tracks_either_index_transition() {
+    let schema = multi_index_documents_schema();
+    let author = AuthorSubject::for_test_bytes([0xd1; 16]);
+    let db = open_db(0xd1, author, &schema);
+    let team = row(0xa0);
+    let matching = row(1);
+    let inactive = row(2);
+    let other_team = row(3);
+    let cells = |team: RowUuid, active: bool, title: &str| {
+        BTreeMap::from([
+            ("team".to_owned(), Value::Uuid(team.0)),
+            ("active".to_owned(), Value::Bool(active)),
+            ("title".to_owned(), Value::String(title.to_owned())),
+        ])
+    };
+    for (id, values) in [
+        (matching, cells(team, true, "matching")),
+        (inactive, cells(team, false, "inactive")),
+        (other_team, cells(row(0xb0), true, "other team")),
+    ] {
+        db.insert(
+            "documents",
+            values,
+            crate::db::InsertOptions {
+                row_id: Some(id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    let query = Query::from("documents")
+        .filter(eq(col("team"), lit(Value::Uuid(team.0))))
+        .filter(eq(col("active"), lit(true)));
+    db.node.node.borrow_mut().reset_query_engine_read_metrics();
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
+    let initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&initial.rows), vec![matching]);
+    assert!(
+        db.node
+            .node
+            .borrow()
+            .query_engine_read_metrics()
+            .source_index_probes
+            >= 2,
+        "the maintained Local source must use both equality indices"
+    );
+
+    db.update(
+        "documents",
+        inactive,
+        BTreeMap::from([("active".to_owned(), Value::Bool(true))]),
+        Default::default(),
+    )
+    .unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&added), vec![inactive]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+
+    db.update(
+        "documents",
+        inactive,
+        BTreeMap::from([("team".to_owned(), Value::Uuid(row(0xb0).0))]),
+        Default::default(),
+    )
+    .unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert_eq!(
+        removed
+            .into_iter()
+            .map(|row| row.row_uuid)
+            .collect::<Vec<_>>(),
+        vec![inactive]
+    );
+}
+
 #[test]
 fn negated_membership_uses_two_valued_null_semantics() {
     let schema = build_public_db_test_schema(
