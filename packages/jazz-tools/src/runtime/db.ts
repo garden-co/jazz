@@ -1185,7 +1185,6 @@ export class Db {
   private config: DbConfig;
   private readonly runtimeSource: AnyRuntimeSource;
   private readonly authStateStore;
-  private internalSession: Session | null;
   private connection: ConnectionManager;
   private _localFirstSecret: string | null = null;
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1216,8 +1215,7 @@ export class Db {
       ...config,
       trustedReservedSession: getTrustedReservedSession(config),
     };
-    this.internalSession = resolveClientInternalSessionSync(sessionInput);
-    setDbInternalSession(this, this.internalSession);
+    setDbInternalSession(this, resolveClientInternalSessionSync(sessionInput));
     this.authStateStore = createAuthStateStore(sessionInput, authStateOptions);
     this.connection = new DirectConnectionManager(this.dbForConnection());
   }
@@ -1301,8 +1299,7 @@ export class Db {
     const jwtToken = token ?? undefined;
     const previousToken = this.config.jwtToken;
     const previousState = this.authStateStore.getState();
-    const previousInternalSession = this.internalSession;
-    this.internalSession = resolveClientInternalSessionSync({
+    const nextInternalSession = resolveClientInternalSessionSync({
       ...this.config,
       jwtToken,
       trustedReservedSession,
@@ -1311,8 +1308,6 @@ export class Db {
     try {
       nextState = this.authStateStore.applyJwtToken(jwtToken, trustedReservedSession);
     } catch (error) {
-      this.internalSession = previousInternalSession;
-      setDbInternalSession(this, previousInternalSession);
       throw error;
     }
     const tokenChanged = previousToken !== jwtToken;
@@ -1323,7 +1318,7 @@ export class Db {
 
     this.config.jwtToken = jwtToken;
     setTrustedReservedSession(this.config, trustedReservedSession);
-    setDbInternalSession(this, this.internalSession);
+    setDbInternalSession(this, nextInternalSession);
 
     this.connection.updateAuth({ jwtToken, trustedReservedSession });
 
@@ -1334,8 +1329,7 @@ export class Db {
     const cookieSession = session ?? undefined;
     const previousSession = this.config.cookieSession;
     const previousState = this.authStateStore.getState();
-    const previousInternalSession = this.internalSession;
-    this.internalSession = resolveClientInternalSessionSync({
+    const nextInternalSession = resolveClientInternalSessionSync({
       ...this.config,
       cookieSession,
     });
@@ -1343,8 +1337,6 @@ export class Db {
     try {
       nextState = this.authStateStore.applyCookieSession(cookieSession);
     } catch (error) {
-      this.internalSession = previousInternalSession;
-      setDbInternalSession(this, previousInternalSession);
       throw error;
     }
     const sessionChanged = JSON.stringify(previousSession) !== JSON.stringify(cookieSession);
@@ -1354,7 +1346,7 @@ export class Db {
     }
 
     this.config.cookieSession = cookieSession;
-    setDbInternalSession(this, this.internalSession);
+    setDbInternalSession(this, nextInternalSession);
 
     this.connection.updateAuth({ cookieSession });
 

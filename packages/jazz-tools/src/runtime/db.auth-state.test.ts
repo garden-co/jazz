@@ -8,7 +8,7 @@ import {
   internalSessionFromVerifiedReservedJwtPayload,
   LOCAL_FIRST_JWT_ISSUER,
 } from "./client-session.js";
-import { setTrustedReservedSession } from "./db-internal-session.js";
+import { getDbInternalSession, setTrustedReservedSession } from "./db-internal-session.js";
 import { canonicalAuthorSubject } from "./author-id.js";
 
 function withTrustedSession(config: DbConfig, session: Session): DbConfig {
@@ -95,6 +95,41 @@ function makeDbWithCookieSession(cookieSession: Session) {
 }
 
 describe("Db auth state", () => {
+  it("keeps transport identity out of Db properties and ignores planted aliases", () => {
+    const { db } = makeDbWithJwt(makeJwt({ sub: "alice", claims: { role: "reader" } }));
+    const forbidden = new Set(["issuer", "user_id", "internalSession", "trustedReservedSession"]);
+
+    expect(
+      Reflect.ownKeys(db).filter((key) => typeof key === "string" && forbidden.has(key)),
+    ).toEqual([]);
+    expect(getDbInternalSession(db)).toMatchObject({
+      issuer: "https://issuer.example",
+      user_id: "alice",
+    });
+
+    Object.assign(db as object, {
+      issuer: "https://attacker.example",
+      user_id: "mallory",
+      internalSession: {
+        issuer: "https://attacker.example",
+        user_id: "mallory",
+        claims: { role: "admin" },
+        authMode: "external",
+      },
+      trustedReservedSession: null,
+    });
+
+    expect(getDbInternalSession(db)).toMatchObject({
+      issuer: "https://issuer.example",
+      user_id: "alice",
+      claims: { role: "reader" },
+    });
+    expect(db.getAuthState().session).toMatchObject({
+      user: canonicalAuthorSubject("https://issuer.example", "alice"),
+      claims: expect.objectContaining({ role: "reader" }),
+    });
+  });
+
   it("refreshes a dedicated local-first session without entering generic JWT admission", () => {
     const initialToken = makeJwt({ iss: LOCAL_FIRST_JWT_ISSUER, sub: "alice", version: 1 });
     const initialSession = internalSessionFromVerifiedReservedJwtPayload(
