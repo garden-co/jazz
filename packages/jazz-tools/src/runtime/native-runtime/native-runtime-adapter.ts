@@ -433,6 +433,14 @@ type ServerTransportWorkWaiter = {
   resolve: () => void;
 };
 
+type ServerConnectionAttempt = {
+  generation: number;
+  carrier: WebSocketCarrier;
+  terminal: Promise<Error>;
+  terminate: (error: Error) => boolean;
+  transport: Transport | null;
+};
+
 type RuntimeSession = {
   issuer: string;
   user_id: string;
@@ -599,6 +607,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private nonDurableClient = false;
   private serverCarrier: WebSocketCarrier | null = null;
   private serverCarrierPromise: Promise<WebSocketCarrier> | null = null;
+  private serverConnectionAttempt: ServerConnectionAttempt | null = null;
   private serverTransportError: Error | null = null;
   private serverTransportErrorWaiters: ServerTransportErrorWaiter[] = [];
   private serverTransportWorkEpoch = 0;
@@ -974,6 +983,11 @@ export class NativeRuntimeAdapter implements Runtime {
     this.pendingTxs.clear();
     this.completedTxs.clear();
     this.writes.clear();
+    this.serverConnectionGeneration += 1;
+    const connectionAttempt = this.serverConnectionAttempt;
+    this.serverConnectionAttempt = null;
+    connectionAttempt?.terminate(new Error("runtime closed"));
+    this.serverCarrierPromise = null;
     this.clearServerTransportErrorWaiters();
     this.resolveServerTransportWorkWaiters();
     this.peerTransportWorkListeners.clear();
@@ -1767,6 +1781,12 @@ export class NativeRuntimeAdapter implements Runtime {
     const transportIdentity = peerIdentityForWebSocketAuth(authJson, this.peerIdentity);
     this.serverTransportError = null;
     this.serverEndpointUrl = url;
+    let resolveTerminal!: (error: Error) => void;
+    let terminalError: Error | null = null;
+    const terminal = new Promise<Error>((resolve) => {
+      resolveTerminal = resolve;
+    });
+    let attempt: ServerConnectionAttempt | null = null;
     const carrier = new WebSocketCarrier({
       endpointUrl: url,
       peerIdentity: transportIdentity,
@@ -1793,28 +1813,60 @@ export class NativeRuntimeAdapter implements Runtime {
         const reason = wireAuthFailureReason(error);
         if (reason) this.authFailureCallback?.(reason);
       },
+      onTerminal: (error) => {
+        if (!attempt) return;
+        this.handleServerCarrierTerminal(attempt, new Error(error.message));
+      },
     });
+    attempt = {
+      generation,
+      carrier,
+      terminal,
+      terminate: (error) => {
+        if (terminalError) return false;
+        terminalError = error;
+        resolveTerminal(error);
+        return true;
+      },
+      transport: null,
+    };
+    this.serverConnectionAttempt = attempt;
     this.serverCarrier = carrier;
     this.serverCarrierPromise = carrier.ready().then(async (negotiation) => {
-      if (generation !== this.serverConnectionGeneration || carrier !== this.serverCarrier) {
+      if (
+        generation !== this.serverConnectionGeneration ||
+        carrier !== this.serverCarrier ||
+        attempt !== this.serverConnectionAttempt
+      ) {
         carrier.close();
         return carrier;
       }
-      let transport: Transport;
-      try {
-        transport = await this.connectNegotiatedUpstream(negotiation);
-      } catch (error) {
+      const admission = this.connectNegotiatedUpstream(negotiation).catch((error) => {
         throw contextualError("connecting the negotiated upstream transport", error);
+      });
+      const outcome = await Promise.race([
+        admission.then((transport) => ({ type: "admitted" as const, transport })),
+        attempt.terminal.then((error) => ({ type: "terminal" as const, error })),
+      ]);
+      if (outcome.type === "terminal") {
+        void admission.then(
+          (transport) => this.retirePeerTransport(transport).catch(reportAsyncRuntimeError),
+          () => undefined,
+        );
+        throw outcome.error;
       }
+      const transport = outcome.transport;
       if (
         this.closed ||
         generation !== this.serverConnectionGeneration ||
-        carrier !== this.serverCarrier
+        carrier !== this.serverCarrier ||
+        attempt !== this.serverConnectionAttempt
       ) {
         carrier.close();
         await this.retirePeerTransport(transport);
         return carrier;
       }
+      attempt.transport = transport;
       this.serverTransport = transport;
       void this.watchAuxiliaryOutbound(transport, carrier, generation);
       this.flushQueuedServerFrames(carrier);
@@ -1846,6 +1898,9 @@ export class NativeRuntimeAdapter implements Runtime {
   async disconnect(options: { rejectWaiters?: boolean } = {}): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.disconnect(options);
     this.serverConnectionGeneration += 1;
+    const attempt = this.serverConnectionAttempt;
+    this.serverConnectionAttempt = null;
+    attempt?.terminate(new Error("server transport disconnected"));
     this.serverCarrier?.close();
     this.serverCarrier = null;
     this.serverCarrierPromise = null;
@@ -2965,6 +3020,27 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverTransportError = error instanceof Error ? error : new Error(message);
     this.failActiveSubscriptions(this.serverTransportError);
     this.resolveServerTransportErrorWaiters(this.serverTransportError);
+  }
+
+  private handleServerCarrierTerminal(attempt: ServerConnectionAttempt, error: Error): void {
+    if (!attempt.terminate(error) || attempt !== this.serverConnectionAttempt) return;
+    if (
+      attempt.generation !== this.serverConnectionGeneration ||
+      attempt.carrier !== this.serverCarrier
+    ) {
+      return;
+    }
+    this.serverConnectionGeneration += 1;
+    this.serverConnectionAttempt = null;
+    this.serverCarrier = null;
+    this.serverCarrierPromise = null;
+    const transport = attempt.transport;
+    attempt.transport = null;
+    if (transport && transport === this.serverTransport) {
+      this.serverTransport = null;
+      void this.retirePeerTransport(transport).catch(reportAsyncRuntimeError);
+    }
+    this.resolveServerTransportWorkWaiters();
   }
 
   private failActiveSubscriptions(error: Error): void {
