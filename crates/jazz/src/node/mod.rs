@@ -1329,15 +1329,14 @@ impl CurrentRow {
     }
 
     fn subscription_cells_equivalent(&self, other: &Self) -> bool {
-        let right_count = other.subscription_cells().count();
-        let mut left_count = 0_usize;
-        let all_left_match = self.subscription_cells().all(|(left_name, left_value)| {
-            left_count += 1;
-            other.subscription_cells().any(|(right_name, right_value)| {
-                left_name == right_name && left_value == right_value
-            })
-        });
-        all_left_match && left_count == right_count
+        // Decode each cell exactly once. Descriptor order differs between a
+        // physical current row and its public projection, so canonicalize the
+        // borrowed logical names instead of repeatedly rescanning either row.
+        let mut left = self.subscription_cells().collect::<Vec<_>>();
+        let mut right = other.subscription_cells().collect::<Vec<_>>();
+        left.sort_unstable_by_key(|(name, _)| *name);
+        right.sort_unstable_by_key(|(name, _)| *name);
+        left == right
     }
 
     fn subscription_cells(&self) -> impl Iterator<Item = (&str, Option<Value>)> + '_ {
