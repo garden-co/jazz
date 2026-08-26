@@ -353,6 +353,19 @@ fn frozen_base_subscription_does_not_capture_pending_head_content() {
         durability: None,
     })
     .unwrap();
+    let fresh = node
+        .query_relation_snapshot_for_serving_in_read_view(
+            &shape,
+            &binding,
+            DurabilityTier::Local,
+            AuthorSubject::SYSTEM,
+            &read_view,
+        )
+        .unwrap();
+    assert_eq!(
+        fresh.root_count, 1,
+        "fresh rejection evaluation must restore the frozen base"
+    );
     let update = node
         .drain_local_maintained_view_subscription(&mut maintained, None)
         .unwrap()

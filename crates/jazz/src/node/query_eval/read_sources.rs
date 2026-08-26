@@ -564,21 +564,7 @@ where
                         branch_witness_field.map(|field| (field, frozen_base_key)),
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                let (frozen_base_deletions, deletion_descriptor, deletion_metadata) =
-                    inline_current_graph_with_source_metadata_and_branch_witness(
-                        &table,
-                        frozen_base_deleted_rows,
-                        schema_version_alias,
-                        "frozen-branch-base-deletions",
-                        &request.requirements,
-                        branch_witness_field.map(|field| (field, frozen_base_key)),
-                    )
-                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                if descriptor != opening_descriptor
-                    || metadata != opening_metadata
-                    || descriptor != deletion_descriptor
-                    || metadata != deletion_metadata
-                {
+                if descriptor != opening_descriptor || metadata != opening_metadata {
                     return Err(source_resolution_error(
                         request,
                         SourceGap::SchemaProjection,
@@ -590,27 +576,58 @@ where
                     ["row_uuid"],
                     ["row_uuid"],
                 );
-                let inherited_without_frozen_deletions = GraphBuilder::anti_join(
-                    inherited.clone(),
-                    frozen_base_deletions.project(["row_uuid"]),
-                    ["row_uuid"],
-                    ["row_uuid"],
-                );
                 // A deletion-register winner is explicit for both states. Use
                 // its positive Restored row as a positive maintained input;
                 // relying only on retraction from a filtered Deleted relation
                 // would not publish a deletion-only restore transition.
-                let inherited = GraphBuilder::union([
-                    GraphBuilder::anti_join(
-                        inherited_without_frozen_deletions,
-                        head_deletion_presence,
+                let inherited = if frozen_base_deleted_rows.is_empty() {
+                    // Do not add an empty static anti-join to the maintained
+                    // path: its static witness cannot publish the inherited
+                    // row when a pending head content winner retracts.
+                    GraphBuilder::union([
+                        GraphBuilder::anti_join(
+                            inherited.clone(),
+                            head_deletion_presence,
+                            ["row_uuid"],
+                            ["row_uuid"],
+                        ),
+                        GraphBuilder::semi_join(inherited, restored, ["row_uuid"], ["row_uuid"]),
+                    ])
+                } else {
+                    let (frozen_base_deletions, deletion_descriptor, deletion_metadata) =
+                        inline_current_graph_with_source_metadata_and_branch_witness(
+                            &table,
+                            frozen_base_deleted_rows,
+                            schema_version_alias,
+                            "frozen-branch-base-deletions",
+                            &request.requirements,
+                            branch_witness_field.map(|field| (field, frozen_base_key)),
+                        )
+                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                    if descriptor != deletion_descriptor || metadata != deletion_metadata {
+                        return Err(source_resolution_error(
+                            request,
+                            SourceGap::SchemaProjection,
+                        ));
+                    }
+                    let inherited_without_frozen_deletions = GraphBuilder::anti_join(
+                        inherited.clone(),
+                        frozen_base_deletions.project(["row_uuid"]),
                         ["row_uuid"],
                         ["row_uuid"],
-                    ),
-                    // A head Restored winner deliberately also reveals a
-                    // base row whose frozen deletion winner was Deleted.
-                    GraphBuilder::semi_join(inherited, restored, ["row_uuid"], ["row_uuid"]),
-                ]);
+                    );
+                    GraphBuilder::union([
+                        GraphBuilder::anti_join(
+                            inherited_without_frozen_deletions,
+                            head_deletion_presence,
+                            ["row_uuid"],
+                            ["row_uuid"],
+                        ),
+                        // A head Restored winner deliberately also reveals a
+                        // base row whose frozen deletion winner was Deleted.
+                        GraphBuilder::semi_join(inherited, restored, ["row_uuid"], ["row_uuid"]),
+                    ])
+                };
                 let unfiltered = GraphBuilder::union([live_head, inherited]);
                 let graph = match &authorization {
                     SourceAuthorizationRequest::System => unfiltered,
