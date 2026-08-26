@@ -204,39 +204,6 @@ pub(super) fn physical_history_storage_table(
     Ok(physical_history_table_name(mapping.table_id))
 }
 
-pub(super) fn physical_current_binding(
-    catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
-    physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
-    schema_version: SchemaVersionId,
-    logical_table: &str,
-    class: PhysicalCurrentClass,
-) -> Result<PhysicalHistoryBinding, Error> {
-    let schema = catalogue_schemas
-        .get(&schema_version)
-        .ok_or(Error::InvalidStoredValue("physical current schema missing"))?;
-    let table = schema
-        .schema
-        .tables
-        .iter()
-        .find(|table| table.name == logical_table)
-        .ok_or_else(|| Error::TableNotFound(logical_table.to_owned()))?;
-    let mapping = physical_mappings
-        .get(&schema_version)
-        .and_then(|mapping| mapping.tables.get(logical_table))
-        .ok_or(Error::InvalidStoredValue(
-            "physical current table mapping missing",
-        ))?;
-    Ok(PhysicalHistoryBinding {
-        storage_table: physical_current_storage_table(
-            physical_mappings,
-            schema_version,
-            logical_table,
-            class,
-        )?,
-        descriptor: physical_current_descriptor(table, mapping)?,
-    })
-}
-
 pub(super) fn physical_current_storage_table(
     physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
     schema_version: SchemaVersionId,

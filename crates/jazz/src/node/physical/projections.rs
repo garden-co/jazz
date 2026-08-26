@@ -75,15 +75,14 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "physical current source schema alias missing",
             ))?;
-        let binding = physical_current_binding(
-            &self.catalogue.catalogue_schemas,
+        let storage_table = physical_current_storage_table(
             &self.catalogue.physical_mappings,
             schema_version,
             logical_table,
             class,
         )?;
         Ok(GraphBuilder::variant_source_scan(
-            binding.storage_table,
+            storage_table,
             physical_current_projection_target(alias, logical_table),
             shared_branch_scan(None),
         ))
@@ -96,15 +95,14 @@ where
         class: PhysicalCurrentClass,
         projection_target: impl Into<String>,
     ) -> Result<GraphBuilder, Error> {
-        let binding = physical_current_binding(
-            &self.catalogue.catalogue_schemas,
+        let storage_table = physical_current_storage_table(
             &self.catalogue.physical_mappings,
             schema_version,
             logical_table,
             class,
         )?;
         Ok(GraphBuilder::variant_source_scan(
-            binding.storage_table,
+            storage_table,
             projection_target,
             shared_branch_scan(None),
         ))
@@ -118,15 +116,14 @@ where
         projection_target: impl Into<String>,
         branch_key: &BranchKey,
     ) -> Result<GraphBuilder, Error> {
-        let binding = physical_current_binding(
-            &self.catalogue.catalogue_schemas,
+        let storage_table = physical_current_storage_table(
             &self.catalogue.physical_mappings,
             schema_version,
             logical_table,
             class,
         )?;
         Ok(GraphBuilder::variant_source_scan(
-            binding.storage_table,
+            storage_table,
             projection_target,
             branch_scan(branch_key, None),
         ))
@@ -147,15 +144,14 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "physical current source schema alias missing",
             ))?;
-        let binding = physical_current_binding(
-            &self.catalogue.catalogue_schemas,
+        let storage_table = physical_current_storage_table(
             &self.catalogue.physical_mappings,
             schema_version,
             logical_table,
             class,
         )?;
         Ok(GraphBuilder::variant_source_scan(
-            binding.storage_table,
+            storage_table,
             physical_current_projection_target(alias, logical_table),
             shared_branch_scan(Some(scan)),
         ))
@@ -169,15 +165,14 @@ where
         projection_target: impl Into<String>,
         scan: groove::ivm::StaticScanSpec,
     ) -> Result<GraphBuilder, Error> {
-        let binding = physical_current_binding(
-            &self.catalogue.catalogue_schemas,
+        let storage_table = physical_current_storage_table(
             &self.catalogue.physical_mappings,
             schema_version,
             logical_table,
             class,
         )?;
         Ok(GraphBuilder::variant_source_scan(
-            binding.storage_table,
+            storage_table,
             projection_target,
             shared_branch_scan(Some(scan)),
         ))
