@@ -1,6 +1,6 @@
 //! Neutral synthetic multi-table ingest fixture for thesis #2030.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, Transport, WriteIdentity, block_on};
 use jazz::groove::records::Value;
@@ -8,11 +8,12 @@ use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::SyncMessage;
 use jazz::schema::JazzSchema;
+use jazz::time::GlobalTime;
 use jazz::tools::{
     CmpOp, ColumnType, PolicyExpr, PolicyValue, Schema, SchemaBuilder, TablePolicies,
     TableSchemaBuilder,
 };
-use jazz::tx::DurabilityTier;
+use jazz::tx::{DurabilityTier, Fate};
 use jazz::wire::TransportError;
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use tempfile::TempDir;
@@ -79,6 +80,18 @@ impl IngestFixture<MemoryStorage> {
         fixture
     }
 
+    pub fn memory_with_trickling_fates(existing_jobs: usize) -> Self {
+        let mut fixture = Self::memory_with_attribution(existing_jobs, false);
+        let _connection = block_on(
+            fixture
+                .db
+                .connect_upstream(Box::new(TrickleFateTransport::default())),
+        );
+        block_on(fixture.db.tick()).expect("prime trickle-fate upstream backlog");
+        fixture.tick_after_write = true;
+        fixture
+    }
+
     fn memory_with_attribution(existing_jobs: usize, attributed: bool) -> Self {
         let schema = schema(false);
         let families = schema.column_families();
@@ -103,6 +116,37 @@ impl Transport for StalledTransport {
 
     fn try_recv(&mut self) -> Option<SyncMessage> {
         None
+    }
+}
+
+#[derive(Default)]
+struct TrickleFateTransport {
+    inbound: VecDeque<SyncMessage>,
+    receive_one: bool,
+    next_global_time: u64,
+}
+
+impl Transport for TrickleFateTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        if let SyncMessage::CommitUnit { tx, .. } = message {
+            self.next_global_time += 1;
+            self.inbound.push_back(SyncMessage::FateUpdate {
+                tx_id: tx.tx_id,
+                fate: Fate::Accepted,
+                global_time: Some(GlobalTime(self.next_global_time)),
+                durability: Some(DurabilityTier::Global),
+            });
+            self.receive_one = true;
+        }
+        Ok(())
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        if !self.receive_one {
+            return None;
+        }
+        self.receive_one = false;
+        self.inbound.pop_front()
     }
 }
 

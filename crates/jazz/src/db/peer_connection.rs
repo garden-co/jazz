@@ -318,6 +318,8 @@ where
     /// Fresh non-resumable epoch binding authorization receipts to this link.
     pub(super) connection_epoch: u64,
     pub(super) startup_error: Option<Error>,
+    /// Exact uploads whose applied fate made them globally settled or rejected.
+    pub(super) released_outbox_tx_ids: Vec<TxId>,
     pub(super) link: ConnectionLink,
     pub(super) last_resume_bytes: Option<usize>,
     pub(super) auxiliary_pump: PeerIoPump,
@@ -504,6 +506,20 @@ impl<S> PeerConnection<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    pub(super) fn take_released_outbox_tx_ids(&mut self) -> Vec<TxId> {
+        std::mem::take(&mut self.released_outbox_tx_ids)
+    }
+
+    pub(super) fn forget_released_outbox_tx_ids(&mut self, released: &HashSet<TxId>) {
+        let ConnectionLink::Upstream(UpstreamConnectionState { uploaded, .. }) = &mut self.link
+        else {
+            return;
+        };
+        for tx_id in released {
+            uploaded.remove(tx_id);
+        }
+    }
+
     /// Clone the binding-driven auxiliary I/O endpoint for this peer link.
     pub fn io_pump(&self) -> PeerIoPump {
         self.auxiliary_pump.clone()
@@ -1945,6 +1961,20 @@ where
                                     }
                                     _ => None,
                                 };
+                                let released_outbox_tx_id = match &message {
+                                    SyncMessage::FateUpdate {
+                                        tx_id,
+                                        fate,
+                                        durability,
+                                        ..
+                                    } if matches!(fate, Fate::Rejected(_))
+                                        || durability
+                                            .is_some_and(|tier| tier >= DurabilityTier::Global) =>
+                                    {
+                                        Some(*tx_id)
+                                    }
+                                    _ => None,
+                                };
                                 if !pending_view_updates.is_empty() {
                                     apply_pending_authority_view_updates(
                                         &self.node,
@@ -2014,6 +2044,9 @@ where
                                     }
                                     drop(routes);
                                     route_local_fate(&self.local_fate_routes, tx_id, &fate);
+                                }
+                                if let Some(tx_id) = released_outbox_tx_id {
+                                    self.released_outbox_tx_ids.push(tx_id);
                                 }
                             }
                         }

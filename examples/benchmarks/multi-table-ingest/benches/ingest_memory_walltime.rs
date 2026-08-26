@@ -56,6 +56,15 @@ fn next_1k_jobs_memory_with_stalled_upstream(
         .bench_local_values(IngestFixture::insert_next_1k);
 }
 
+/// Active-but-slow authority differential: one previously uploaded transaction
+/// receives Global fate per measured host tick.
+#[divan::bench(args = [0, 1_000, 3_000, 5_000], sample_count = 1)]
+fn next_1k_jobs_memory_with_trickling_fates(bencher: divan::Bencher<'_, '_>, existing_jobs: usize) {
+    bencher
+        .with_inputs(|| IngestFixture::<MemoryStorage>::memory_with_trickling_fates(existing_jobs))
+        .bench_local_values(IngestFixture::insert_next_1k);
+}
+
 /// Exact public Rust client execution-model differential.
 #[divan::bench(args = [0, 1_000, 3_000, 5_000], sample_count = 1)]
 fn next_1k_jobs_public_client_memory(bencher: divan::Bencher<'_, '_>, existing_jobs: usize) {
