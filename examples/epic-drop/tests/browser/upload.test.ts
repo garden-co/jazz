@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createDb, type Db } from "jazz-tools";
 import { app } from "../../schema.js";
 import { fileListQuery } from "../../src/file-list-query.js";
-import { APP_ID } from "./test-constants.js";
+import { APP_ID, TEST_PORT } from "./test-constants.js";
 
 const dbs: Db[] = [];
 
@@ -17,6 +17,23 @@ async function openDb(label: string): Promise<Db> {
   });
   dbs.push(db);
   return db;
+}
+
+async function openRemoteDb(label: string, secret: string): Promise<Db> {
+  const db = await createDb({
+    appId: APP_ID,
+    serverUrl: `http://127.0.0.1:${TEST_PORT}`,
+    secret,
+    driver: { type: "persistent", dbName: `epic-drop-${label}-${crypto.randomUUID()}` },
+  });
+  dbs.push(db);
+  return db;
+}
+
+function userId(db: Db): string {
+  const id = db.getAuthState().session?.user_id;
+  if (!id) throw new Error("expected local-first user session");
+  return id;
 }
 
 describe("EpicDrop streamed upload foundation", () => {
@@ -86,6 +103,62 @@ describe("EpicDrop streamed upload foundation", () => {
         name: "retry.wav",
         content_type: "audio/wav",
         size_bytes: 64 * 1024,
+      },
+    ]);
+  });
+
+  it("requires both file ownership and folder authority for attach and moves", async () => {
+    const alice = await openRemoteDb("alice", "epic-drop-alice");
+    const bob = await openRemoteDb("bob", "epic-drop-bob");
+    const aliceId = userId(alice);
+    const bobId = userId(bob);
+    const aliceFolder = await alice
+      .insert(app.folders, { name: "Alice", owner_id: aliceId })
+      .wait({ tier: "edge" });
+    const bobFolder = await bob
+      .insert(app.folders, { name: "Bob", owner_id: bobId })
+      .wait({ tier: "edge" });
+
+    const aliceFile = await alice
+      .insertStreaming(app.files, {
+        folder_id: aliceFolder.value.id,
+        name: "owned.wav",
+        content_type: "audio/wav",
+        size_bytes: 3,
+        owner_id: aliceId,
+        contents: (async function* () {
+          yield new Uint8Array([1, 2, 3]);
+        })(),
+      })
+      .then((write) => write.wait({ tier: "edge" }));
+
+    await expect(
+      alice
+        .insertStreaming(app.files, {
+          folder_id: bobFolder.value.id,
+          name: "forged-attach.wav",
+          content_type: "audio/wav",
+          size_bytes: 1,
+          owner_id: aliceId,
+          contents: (async function* () {
+            yield new Uint8Array([9]);
+          })(),
+        })
+        .then((write) => write.wait({ tier: "edge" })),
+    ).rejects.toThrow();
+    await expect(
+      alice
+        .update(app.files, aliceFile.value.id, { folder_id: bobFolder.value.id })
+        .wait({ tier: "edge" }),
+    ).rejects.toThrow();
+    await expect(
+      alice.all(fileListQuery(aliceFolder.value.id)!, { tier: "edge" }),
+    ).resolves.toEqual([
+      {
+        id: aliceFile.value.id,
+        name: "owned.wav",
+        content_type: "audio/wav",
+        size_bytes: 3,
       },
     ]);
   });
