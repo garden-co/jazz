@@ -923,6 +923,7 @@ where
                                 }
                                 return Err(transport_error(error));
                             }
+                            self.auxiliary_pump.acknowledge_outbound(&message);
                         }
                         pending.extend(upstream_subscriptions.borrow_mut().drain(..));
                         let claims = self.node.borrow().session_claims_with_revisions();
@@ -1203,16 +1204,36 @@ where
                                     }
                                     let mut chunks = Vec::with_capacity(requested.len());
                                     for node_ref in requested {
-                                        let encoded = self
-                                            .node
-                                            .lock()
-                                            .await
-                                            .local_chunk(
-                                                node_ref.locator,
-                                                node_ref.object_hash,
-                                            )
-                                            .await
-                                            .map_err(crate::node::Error::from)?;
+                                        let (replica_role, source_node, result) = {
+                                            let node = self.node.lock().await;
+                                            let replica_role = if node.authored_commit_durability()
+                                                == DurabilityTier::None
+                                            {
+                                                "non-durable-client"
+                                            } else {
+                                                "durable-relay"
+                                            };
+                                            let source_node = node.node_uuid();
+                                            let result = node
+                                                .local_chunk(
+                                                    node_ref.locator,
+                                                    node_ref.object_hash,
+                                                )
+                                                .await;
+                                            (replica_role, source_node, result)
+                                        };
+                                        let encoded = result.map_err(|source| {
+                                                crate::node::Error::LargeValueUploadChunkUnavailable {
+                                                    context: large_value_upload_chunk_context(
+                                                        tx_id,
+                                                        &upload.value_ref,
+                                                        &node_ref,
+                                                        replica_role,
+                                                        source_node,
+                                                    ),
+                                                    source,
+                                                }
+                                            })?;
                                         chunks.push(groove::large_values::StagedChunk {
                                             node_ref,
                                             encoded: encoded.to_vec(),
@@ -2147,6 +2168,7 @@ where
                         self.auxiliary_pump.restore_outbound(message);
                         return Err(transport_error(error));
                     }
+                    self.auxiliary_pump.acknowledge_outbound(&message);
                 }
                 while let Some(message) = self.transport.try_recv() {
                     // Authorization support is authority-owned in Phase 3.
@@ -2168,6 +2190,9 @@ where
                         SyncMessage::ChunkRequestBatch(batch) => {
                             let mut responses = Vec::new();
                             for request in batch.requests {
+                                if self.auxiliary_pump.is_disconnected() {
+                                    break;
+                                }
                                 let local = self
                                     .node
                                     .lock()
@@ -2177,6 +2202,9 @@ where
                                         groove::large_values::ContentHash(request.expected_hash),
                                     )
                                     .await;
+                                if self.auxiliary_pump.is_disconnected() {
+                                    break;
+                                }
                                 match local {
                                     Ok(bytes) => responses.push(ChunkResponseEntry {
                                         request_id: request.request_id,
@@ -2192,7 +2220,9 @@ where
                                     }),
                                 }
                             }
-                            if !responses.is_empty() {
+                            if !responses.is_empty()
+                                && !self.auxiliary_pump.is_disconnected()
+                            {
                                 self.transport
                                     .send(SyncMessage::ChunkResponseBatch(ChunkResponseBatch {
                                         responses,
@@ -4439,6 +4469,29 @@ fn binding_values_in_param_order(shape: &ValidatedQuery, binding: &Binding) -> V
                 .expect("binding is missing a shape parameter value")
         })
         .collect()
+}
+
+/// Describe an unavailable locally-owned upload chunk without disclosing its
+/// retrieval capability. A locator grants exact chunk retrieval, so the
+/// diagnostic carries a stable fingerprint rather than raw locator bytes.
+fn large_value_upload_chunk_context(
+    tx_id: TxId,
+    value_ref: &groove::large_values::LargeValueRef,
+    node_ref: &groove::large_values::NodeRef,
+    replica_role: &str,
+    source_node: NodeUuid,
+) -> String {
+    format!(
+        "role={replica_role} source_node={source_node:?} transaction={tx_id:?} root_hash={} root_locator={} chunk_hash={} chunk_locator={}",
+        hex::encode(value_ref.root.object_hash.0),
+        chunk_locator_fingerprint(value_ref.root.locator),
+        hex::encode(node_ref.object_hash.0),
+        chunk_locator_fingerprint(node_ref.locator),
+    )
+}
+
+fn chunk_locator_fingerprint(locator: groove::large_values::Locator) -> String {
+    blake3::hash(locator.as_bytes()).to_hex()[..16].to_owned()
 }
 
 /// A `ViewUpdate` that carries no version, result-set, or program-fact change —

@@ -154,6 +154,12 @@ type NativeDb = {
   attachExclusiveTx?(openBatchId: string): Tx;
   all(query: PreparedQuery, opts: unknown): Uint8Array;
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
+  allAsync?(query: PreparedQuery, opts: unknown): Uint8Array | Promise<Uint8Array>;
+  allForIdentityAsync?(
+    query: PreparedQuery,
+    author: Uint8Array,
+    opts: unknown,
+  ): Uint8Array | Promise<Uint8Array>;
   allRelationQuery?(queryJson: string, opts: unknown): Uint8Array | Promise<Uint8Array>;
   allRelationQueryForIdentity?(
     queryJson: string,
@@ -390,6 +396,9 @@ export type Transport = {
   routeAuxiliaryWireFrame?(frame: Uint8Array): unknown | Promise<unknown>;
   recvAuxiliaryWireFrames?(maxFrames?: number, maxBytes?: number): unknown[];
   auxiliaryOutboundReady?(): boolean | Promise<void>;
+  /** Bounded redacted diagnostics emitted by the auxiliary chunk relay. */
+  takeAuxiliaryTrace?(): unknown[];
+  setAuxiliaryTraceEnabled?(enabled: boolean): void;
   tick(): number | Promise<number>;
   updateAuthenticatedClaims?(claims: Record<string, unknown>): void | Promise<void>;
   free?(): void;
@@ -431,6 +440,18 @@ type ServerTransportErrorWaiter = {
 type ServerTransportWorkWaiter = {
   active: boolean;
   resolve: () => void;
+};
+
+type AuxiliaryRelayTrace = {
+  event: string;
+  role: "upstream" | "subscriber";
+  connection: string;
+  requestId: string;
+  remainingHops: number;
+  objectHash: string;
+  locatorFingerprint: string;
+  response?: "found" | "unavailable" | "retryable";
+  storageError?: "unavailable" | "locator-conflict" | "integrity" | "backend";
 };
 
 type RuntimeSession = {
@@ -617,7 +638,17 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverInboundRouting: Promise<void> = Promise.resolve();
   private serverInboundProcessed = false;
   private readonly peerTransportWorkListeners = new Set<() => void>();
+  private readonly auxiliaryTraceListeners = new Set<(entries: AuxiliaryRelayTrace[]) => void>();
   private peerTransportActivityEpoch = 0;
+  private peerTransportProcessedActivityEpoch = 0;
+  // A non-durable follower needs one worker response before trusting native
+  // coverage. Once that response covered a prepared query, reattaching the
+  // same query may already be covered and legitimately emit no new frame.
+  // The response epoch that confirmed each prepared query for an effective
+  // serving authorization context. This lets a reattachment reuse its own
+  // confirmation, but never lets it skip worker activity that arrived after
+  // that confirmation or borrow coverage confirmed for another subject/claim set.
+  private readonly peerCoveredQueries = new Map<PreparedQuery, Map<string, number>>();
   private coreTickScheduled = false;
   private coreTickRunning = false;
   private coreTickAgain = false;
@@ -747,6 +778,19 @@ export class NativeRuntimeAdapter implements Runtime {
     };
   }
 
+  /** Subscribe to bounded, redacted auxiliary-relay diagnostics. */
+  onAuxiliaryTrace(listener: (entries: AuxiliaryRelayTrace[]) => void): () => void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.onAuxiliaryTrace(listener);
+    this.auxiliaryTraceListeners.add(listener);
+    this.serverTransport?.setAuxiliaryTraceEnabled?.(true);
+    return () => {
+      this.auxiliaryTraceListeners.delete(listener);
+      if (this.auxiliaryTraceListeners.size === 0) {
+        this.serverTransport?.setAuxiliaryTraceEnabled?.(false);
+      }
+    };
+  }
+
   notifyPeerTransportActivity(): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.notifyPeerTransportActivity();
     this.peerTransportActivityEpoch += 1;
@@ -754,7 +798,12 @@ export class NativeRuntimeAdapter implements Runtime {
 
   async progressPeerTransport(): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.progressPeerTransport();
+    const activityReadyForProcessing = this.peerTransportActivityEpoch;
     await this.runCoreTick();
+    this.peerTransportProcessedActivityEpoch = Math.max(
+      this.peerTransportProcessedActivityEpoch,
+      activityReadyForProcessing,
+    );
   }
 
   retirePeerTransport(transport: Transport): Promise<void> {
@@ -1644,12 +1693,12 @@ export class NativeRuntimeAdapter implements Runtime {
       }
       const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
       const projectedColumns = subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns;
-      let rows = this.readPlainRows(query, opts, session ?? undefined, pendingTx);
+      let rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx);
       let rowStates = rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
       if (!pendingTx && (tier === "edge" || tier === "global") && rowStates.length > 0) {
         await this.refreshRowsFromEdge(session, rowStates);
         if (this.closed) return [];
-        rows = this.readPlainRows(query, opts, session ?? undefined, pendingTx);
+        rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx);
         rowStates = rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
       }
       return rowStates;
@@ -1827,6 +1876,7 @@ export class NativeRuntimeAdapter implements Runtime {
         throw contextualError("connecting the negotiated upstream transport", error);
       }
       this.serverTransport = transport;
+      transport.setAuxiliaryTraceEnabled?.(this.auxiliaryTraceListeners.size > 0);
       void this.watchAuxiliaryOutbound(transport, carrier, generation);
       this.flushQueuedServerFrames(carrier);
       await this.pumpServerTransport();
@@ -2032,13 +2082,13 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.rowStateFromValues(table, rowId, merged);
   }
 
-  private readPlainRows(
+  private async readPlainRows(
     query: PreparedQuery,
     opts: unknown,
     session: RuntimeSession | undefined,
     pendingTx: PendingTx | undefined,
-  ): Uint8Array {
-    if (!pendingTx) return this.readRowsForHost(query, opts, session?.identity);
+  ): Promise<Uint8Array> {
+    if (!pendingTx) return this.readRowsForHostAsync(query, opts, session?.identity);
     if (!this.db.allInTransaction) {
       throw new Error("Native runtime does not support transaction reads");
     }
@@ -2055,6 +2105,22 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.readAuthorizationHost === "trusted-serving"
       ? this.db.allForIdentity(query, identity ?? this.peerIdentity, opts)
       : this.db.all(query, opts);
+  }
+
+  private async readRowsForHostAsync(
+    query: PreparedQuery,
+    opts: unknown,
+    identity?: Uint8Array,
+  ): Promise<Uint8Array> {
+    if (this.trustedBackend && identity === undefined) {
+      return await (this.db.allAsync?.(query, opts) ?? this.db.all(query, opts));
+    }
+    if (this.readAuthorizationHost === "trusted-serving") {
+      const author = identity ?? this.peerIdentity;
+      return await (this.db.allForIdentityAsync?.(query, author, opts) ??
+        this.db.allForIdentity(query, author, opts));
+    }
+    return await (this.db.allAsync?.(query, opts) ?? this.db.all(query, opts));
   }
 
   /**
@@ -2184,16 +2250,42 @@ export class NativeRuntimeAdapter implements Runtime {
       attachment = this.db.attachQuery(query, opts);
     }
     if (!this.db.queryAttachmentIsCovered) return attachment;
+    const coverageKey = this.coverageKey(session);
+    const confirmedPeerActivityEpoch = this.peerCoveredQueries.get(query)?.get(coverageKey);
+    // A prior confirmation can recover a reattachment only if no newer worker
+    // frame has arrived. Otherwise the old coverage state could be exposed to
+    // a query whose authorization (for example, an authorship-scoped policy)
+    // is about to change.
+    if (
+      this.nonDurableClient &&
+      confirmedPeerActivityEpoch != null &&
+      this.peerTransportActivityEpoch <= confirmedPeerActivityEpoch &&
+      this.db.queryAttachmentIsCovered(attachment)
+    ) {
+      return attachment;
+    }
     const minimumPeerActivityEpoch = this.nonDurableClient
       ? this.peerTransportActivityEpoch
       : undefined;
+    const pendingPeerActivityEpoch =
+      this.nonDurableClient &&
+      this.peerTransportActivityEpoch > this.peerTransportProcessedActivityEpoch
+        ? this.peerTransportActivityEpoch
+        : undefined;
     await this.waitForQueryCoverage(
       attachment,
       query,
       readOptions(tier, false, optionsJson),
       session?.identity,
       minimumPeerActivityEpoch,
+      pendingPeerActivityEpoch,
+      confirmedPeerActivityEpoch != null,
     );
+    if (this.nonDurableClient && this.db.queryAttachmentIsCovered(attachment)) {
+      const confirmations = this.peerCoveredQueries.get(query) ?? new Map<string, number>();
+      confirmations.set(coverageKey, this.peerTransportActivityEpoch);
+      this.peerCoveredQueries.set(query, confirmations);
+    }
     return attachment;
   }
 
@@ -2224,6 +2316,15 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
+  /** Coverage is authorization-context-specific only on trusted-serving hosts. */
+  private coverageKey(session: RuntimeSession | null): string {
+    if (this.readAuthorizationHost !== "trusted-serving") return "client-local";
+    return JSON.stringify([
+      bytesKey(session?.identity ?? this.peerIdentity),
+      canonicalJson(session?.claims ?? {}),
+    ]);
+  }
+
   private applySessionClaims(session: RuntimeSession | null | undefined): void {
     // Client runtimes only evaluate their already-settled local replica. They
     // never select the policy-enforcing native entry points, so there is no
@@ -2249,6 +2350,8 @@ export class NativeRuntimeAdapter implements Runtime {
     opts: unknown,
     identity?: Uint8Array,
     minimumPeerActivityEpoch?: number,
+    pendingPeerActivityEpoch?: number,
+    exactContextWasConfirmed = false,
   ): Promise<void> {
     const deadline = Date.now() + 15_000;
     const tier = (opts as { tier?: string }).tier ?? "";
@@ -2266,7 +2369,12 @@ export class NativeRuntimeAdapter implements Runtime {
       if (this.db.queryAttachmentIsCovered) {
         const peerHasResponded =
           minimumPeerActivityEpoch == null ||
-          this.peerTransportActivityEpoch > minimumPeerActivityEpoch;
+          this.peerTransportActivityEpoch > minimumPeerActivityEpoch ||
+          (exactContextWasConfirmed &&
+            minimumPeerActivityEpoch > 0 &&
+            this.peerTransportProcessedActivityEpoch >= minimumPeerActivityEpoch) ||
+          (pendingPeerActivityEpoch != null &&
+            this.peerTransportProcessedActivityEpoch >= pendingPeerActivityEpoch);
         if (peerHasResponded && this.db.queryAttachmentIsCovered(attachment)) return;
       }
       try {
@@ -2893,6 +3001,7 @@ export class NativeRuntimeAdapter implements Runtime {
           : frame;
         if (routed != null) canonical.push(normalizeTransportFrame(routed));
       }
+      this.publishAuxiliaryTrace(transport);
       if (canonical.length > 0) {
         if (transport.sendWireFrames) transport.sendWireFrames(canonical);
         else for (const frame of canonical) transport.sendWireFrame(frame);
@@ -2919,6 +3028,15 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!receive) return;
     const frames = normalizeTransportFrames(receive.call(transport));
     if (frames.length > 0) this.sendServerFrames(frames, carrier, generation);
+    this.publishAuxiliaryTrace(transport);
+  }
+
+  private publishAuxiliaryTrace(transport: Transport): void {
+    const entries = transport.takeAuxiliaryTrace?.();
+    if (!entries || entries.length === 0) return;
+    for (const listener of this.auxiliaryTraceListeners) {
+      listener(entries as AuxiliaryRelayTrace[]);
+    }
   }
 
   private async watchAuxiliaryOutbound(
@@ -6084,6 +6202,22 @@ function readU32Le(bytes: Uint8Array, offset: number): number {
 
 function bytesKey(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => String.fromCharCode(byte)).join("");
+}
+
+/** Deterministic cache-key encoding for JSON-derived session claims. */
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value === "boolean" || typeof value === "string") {
+    return JSON.stringify(value);
+  }
+  if (typeof value === "number") return Number.isFinite(value) ? JSON.stringify(value) : "null";
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return "null";
 }
 
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean {

@@ -1037,13 +1037,13 @@ mod tests {
     use futures::stream::FuturesUnordered;
     use jazz::db::{
         Db, DbConfig, DbIdentity, PreparedQuery, QueryAttachment, ReadOpts, RowCells,
-        SeededRowIdSource, WireTransportAdapter,
+        SeededRowIdSource, WireTransportAdapter, WriteHandle, WriteState,
     };
     use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
     use jazz::ids::NodeUuid;
     use jazz::protocol::SyncMessage;
     use jazz::schema::{JazzSchema, TableSchema};
-    use jazz::tx::{DurabilityTier, TxId};
+    use jazz::tx::{DurabilityTier, Fate, RejectionReason, TxId};
     use jazz::wire::{
         FEATURE_MESSAGE_FRAGMENTATION, FEATURE_STRUCTURED_ERRORS, TransportError,
         WireMessageFragment, WireTransport,
@@ -1651,6 +1651,32 @@ mod tests {
         .into_bytes()
     }
 
+    fn ws_anonymous_prelude(app_id: AppId, seed: [u8; 32]) -> (AuthorSubject, Vec<u8>) {
+        let audience = app_id.to_string();
+        let token = jazz::tools::identity::mint_jazz_self_signed_token(
+            &seed,
+            jazz::tools::identity::ANONYMOUS_ISSUER,
+            &audience,
+            3600,
+        )
+        .expect("mint anonymous test token");
+        let verified = jazz::tools::identity::verify_jazz_self_signed_proof(&token, &audience)
+            .expect("verify anonymous test token");
+        let canonical = serde_json::to_string(&(verified.issuer, verified.user_id.as_str()))
+            .expect("serialise anonymous author");
+        let identity =
+            AuthorSubject::from_canonical(&canonical).expect("parse anonymous author subject");
+        let prelude = serde_json::json!({
+            "peer_identity": identity.canonical(),
+            "auth": {
+                "jwt_token": token,
+            }
+        })
+        .to_string()
+        .into_bytes();
+        (identity, prelude)
+    }
+
     fn ws_client_hello_batch() -> Vec<u8> {
         ws_client_hello_batch_with_features(
             FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
@@ -1926,6 +1952,21 @@ mod tests {
 
     impl TestClient {
         async fn new(schema: JazzSchema, node_seed: u8, row_seed: u64) -> Self {
+            Self::new_with_identity(
+                schema,
+                node_seed,
+                row_seed,
+                AuthorSubject::for_test_bytes([node_seed; 16]),
+            )
+            .await
+        }
+
+        async fn new_with_identity(
+            schema: JazzSchema,
+            node_seed: u8,
+            row_seed: u64,
+            author: AuthorSubject,
+        ) -> Self {
             let column_families = schema.column_families();
             let refs = column_families
                 .iter()
@@ -1937,7 +1978,7 @@ mod tests {
                     CoreMemoryStorage::new(&refs),
                     DbIdentity {
                         node: NodeUuid::from_bytes([node_seed; 16]),
-                        author: AuthorSubject::for_test_bytes([node_seed; 16]),
+                        author,
                     },
                 )
                 .with_id_source(SeededRowIdSource::new(row_seed)),
@@ -1963,7 +2004,7 @@ mod tests {
             }
         }
 
-        fn insert_todo(&self, title: &str) -> jazz::ids::RowUuid {
+        fn write_todo(&self, title: &str) -> WriteHandle<CoreMemoryStorage> {
             jazz::db::block_on(self.db.insert(
                 "todos",
                 RowCells::from([
@@ -1973,20 +2014,36 @@ mod tests {
                 Default::default(),
             ))
             .expect("insert client row")
-            .row_uuid()
+        }
+
+        fn insert_todo(&self, title: &str) -> jazz::ids::RowUuid {
+            self.write_todo(title).row_uuid()
         }
 
         fn write_todo_tx_id(&self, title: &str) -> TxId {
-            jazz::db::block_on(self.db.insert(
+            self.write_todo(title).mergeable_tx_id()
+        }
+
+        fn update_todo(
+            &self,
+            row_uuid: jazz::ids::RowUuid,
+            title: &str,
+        ) -> WriteHandle<CoreMemoryStorage> {
+            jazz::db::block_on(self.db.update(
                 "todos",
+                row_uuid,
                 RowCells::from([
                     ("title".to_owned(), CoreValue::String(title.to_owned())),
                     ("done".to_owned(), CoreValue::Bool(false)),
                 ]),
                 Default::default(),
             ))
-            .expect("insert client row")
-            .mergeable_tx_id()
+            .expect("update client row")
+        }
+
+        fn delete_todo(&self, row_uuid: jazz::ids::RowUuid) -> WriteHandle<CoreMemoryStorage> {
+            jazz::db::block_on(self.db.delete("todos", row_uuid, Default::default()))
+                .expect("delete client row")
         }
 
         fn insert_private_doc(&self, title: &str, owner: AuthorSubject) -> jazz::ids::RowUuid {
@@ -2188,6 +2245,24 @@ mod tests {
         (sent, received)
     }
 
+    async fn settle_ws_write(
+        client: &TestClient,
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        write: &WriteHandle<CoreMemoryStorage>,
+    ) -> WriteState {
+        let start = tokio::time::Instant::now();
+        loop {
+            let _ = pump_core_websocket_transport_once(client, ws).await;
+            let state = write.write_state().await.expect("websocket write state");
+            if !matches!(state.fate, Fate::Pending) || start.elapsed() >= WS_SETTLE_DEADLINE {
+                return state;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     async fn receive_core_websocket_transport_push_once(
         client: &TestClient,
         ws: &mut tokio_tungstenite::WebSocketStream<
@@ -2328,6 +2403,83 @@ mod tests {
             titles, expected_titles,
             "the receiving client must materialize the row through the websocket route"
         );
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn anonymous_self_signed_session_is_read_only_over_raw_websocket_wire() {
+        let state = make_ws_convergence_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let schema = ws_public_schema_convert();
+
+        let authenticated_identity = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let authenticated = TestClient::new(schema.clone(), 0xa1, 0xa100).await;
+        let mut authenticated_ws =
+            open_negotiated_ws_session(addr, &state, authenticated_identity).await;
+
+        let (anonymous_identity, anonymous_prelude) =
+            ws_anonymous_prelude(state.app_id, [0xb2; 32]);
+        let anonymous =
+            TestClient::new_with_identity(schema, 0xb2, 0xb200, anonymous_identity).await;
+        let mut anonymous_ws =
+            open_negotiated_ws_with_prelude(addr, &state, anonymous_prelude).await;
+        let (anonymous_todos, anonymous_todos_attachment) =
+            settle_ws_todos_query(&anonymous, &mut anonymous_ws).await;
+
+        let permitted = authenticated.write_todo("permitted");
+        let permitted_row = permitted.row_uuid();
+        let permitted_state =
+            settle_ws_write(&authenticated, &mut authenticated_ws, &permitted).await;
+        assert_eq!(permitted_state.fate, Fate::Accepted);
+        assert_eq!(permitted_state.durability, DurabilityTier::Global);
+
+        let expected_titles = vec!["permitted".to_owned()];
+        let start = tokio::time::Instant::now();
+        let mut anonymous_titles = Vec::new();
+        while start.elapsed() < WS_SETTLE_DEADLINE {
+            let _ = pump_core_websocket_transport_once(&anonymous, &mut anonymous_ws).await;
+            anonymous_titles = anonymous.edge_todo_titles(&anonymous_todos).await;
+            if anonymous_titles == expected_titles {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            anonymous_titles, expected_titles,
+            "anonymous sessions must retain public read access"
+        );
+
+        let denied_insert = anonymous.write_todo("must be denied");
+        assert_eq!(
+            settle_ws_write(&anonymous, &mut anonymous_ws, &denied_insert)
+                .await
+                .fate,
+            Fate::Rejected(RejectionReason::AuthorizationDenied),
+            "the authority must reject anonymous inserts before permissive policy"
+        );
+
+        let denied_update = anonymous.update_todo(permitted_row, "must remain unchanged");
+        assert_eq!(
+            settle_ws_write(&anonymous, &mut anonymous_ws, &denied_update)
+                .await
+                .fate,
+            Fate::Rejected(RejectionReason::AuthorizationDenied),
+            "the authority must reject anonymous updates before permissive policy"
+        );
+
+        let denied_delete = anonymous.delete_todo(permitted_row);
+        assert_eq!(
+            settle_ws_write(&anonymous, &mut anonymous_ws, &denied_delete)
+                .await
+                .fate,
+            Fate::Rejected(RejectionReason::AuthorizationDenied),
+            "the authority must reject anonymous deletes before permissive policy"
+        );
+
+        assert_eq!(
+            anonymous.edge_todo_titles(&anonymous_todos).await,
+            expected_titles,
+            "rejected anonymous writes must not alter the public settled view"
+        );
+        anonymous.detach_query(anonymous_todos_attachment);
     }
 
     // Internal route-boundary guard: WebSocket message boundaries are not
