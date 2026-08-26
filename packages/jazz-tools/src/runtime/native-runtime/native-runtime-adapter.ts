@@ -1330,7 +1330,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (tx) {
       throw writeError("Update", "typed partial-value updates are not supported in transactions");
     }
-    if (largeValueWriteHasAttributedIdentity(writeContext)) {
+    if (largeValueWriteHasIncompatibleIdentity(writeContext, this.peerIdentity)) {
       throw new Error("Typed large-value updates do not yet support an attributed identity.");
     }
     const updateLargeValues = this.db.updateLargeValuesEncoded;
@@ -3290,23 +3290,36 @@ function branchViewFromWriteContext(writeContext?: string | null): EncodedBranch
   }
 }
 
-function largeValueWriteHasAttributedIdentity(writeContext?: string | null): boolean {
+function largeValueWriteHasIncompatibleIdentity(
+  writeContext: string | null | undefined,
+  runtimeAuthor: Uint8Array,
+): boolean {
   if (!writeContext) return false;
+  let parsed: {
+    issuer?: unknown;
+    user_id?: unknown;
+    session?: unknown;
+    attribution?: unknown;
+  };
   try {
-    const parsed = JSON.parse(writeContext) as {
+    parsed = JSON.parse(writeContext) as {
       issuer?: unknown;
       user_id?: unknown;
       session?: unknown;
       attribution?: unknown;
     };
-    return (
-      parsed.issuer !== undefined ||
-      parsed.user_id !== undefined ||
-      parsed.session !== undefined ||
-      parsed.attribution !== undefined
-    );
+    if (parsed.attribution !== undefined) return true;
+    const hasSessionIdentity =
+      parsed.issuer !== undefined || parsed.user_id !== undefined || parsed.session !== undefined;
+    if (!hasSessionIdentity) return false;
   } catch {
     return false;
+  }
+  try {
+    const session = sessionFromWriteContext(writeContext);
+    return session === null || !sameBytes(session.identity, runtimeAuthor);
+  } catch {
+    return true;
   }
 }
 

@@ -71,6 +71,9 @@ describe("createDb in-memory driver", () => {
     db = await createDb({
       appId: "in-memory-large-value-dsl-test",
       driver: { type: "memory" },
+      backendSecret: "test-backend-secret",
+      jwtToken:
+        "header.eyJpc3MiOiJodHRwczovL2lzc3Vlci5leGFtcGxlIiwic3ViIjoibGFyZ2UtdmFsdWUtdGVzdC11c2VyIn0.signature",
     });
 
     const payloadOffset = 70_000;
@@ -84,8 +87,6 @@ describe("createDb in-memory driver", () => {
       metadata: { padding: "p".repeat(70_000), nested: { answer: 42 } },
       done: false,
     });
-    await inserted.wait({ tier: "local" });
-
     const [page] = await db.all(
       largeValues.documents.where({ id: inserted.id }).select({
         payload: { from: payloadOffset + 1, to: payloadOffset + 5 },
