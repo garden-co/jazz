@@ -1,5 +1,5 @@
 import type { PublicSession } from "../runtime/context.js";
-import { withCanonicalAuthor } from "../runtime/author-id.js";
+import { withCanonicalUser } from "../runtime/author-id.js";
 import { createClientConfigKey } from "../runtime/client-config-key.js";
 import { acquireClient, releaseClient } from "../runtime/client-registry.js";
 import type { Db, DbConfig } from "../runtime/db.js";
@@ -36,7 +36,7 @@ async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
     {
       db,
       get session() {
-        return session ? withCanonicalAuthor(session) : null;
+        return session ? withCanonicalUser(session) : null;
       },
       async shutdown() {
         await runCleanupSteps([

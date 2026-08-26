@@ -11,7 +11,7 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
   policy.chats.allowRead.where((chat) =>
     anyOf([{ isPublic: true }, userIsChatMember(chat), { joinCode: session["claims.join_code"] }]),
   );
-  policy.chats.allowInsert.where({ $createdBy: session.author });
+  policy.chats.allowInsert.where({ $createdBy: session.user });
   policy.chats.allowUpdate.whereOld(userIsChatMember).whereNew((chat) =>
     allOf([
       userIsChatMember(chat),
@@ -59,5 +59,5 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
 
   policy.strokes.allowRead.where(allowedTo.read("canvasId"));
   policy.strokes.allowInsert.where(allowedTo.read("canvasId"));
-  policy.strokes.allowDelete.where({ $createdBy: session.author });
+  policy.strokes.allowDelete.where({ $createdBy: session.user });
 });

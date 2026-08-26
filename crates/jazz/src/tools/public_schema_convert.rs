@@ -27,8 +27,8 @@ use crate::tools::public_schema::{
 
 const DIRECT_USER_ID_CLAIM: &str = "user_id";
 const PUBLIC_USER_ID_SESSION_PATHS: &[&str] = &["user_id", "userId"];
-const DIRECT_AUTHOR_CLAIM: &str = "author";
-const PUBLIC_AUTHOR_SESSION_PATHS: &[&str] = &["author"];
+const DIRECT_USER_CLAIM: &str = "user";
+const PUBLIC_USER_SESSION_PATHS: &[&str] = &["user"];
 const DIRECT_AUTH_MODE_CLAIM: &str = "authMode";
 const PUBLIC_AUTH_MODE_SESSION_PATHS: &[&str] = &["authMode", "auth_mode"];
 const RESERVED_AGGREGATE_OUTPUT_PREFIX: &str = "__jazz_aggregate_";
@@ -2564,14 +2564,19 @@ fn convert_session_path_operand(
     {
         return Ok(Operand::Claim(DIRECT_USER_ID_CLAIM.to_owned()));
     }
-    if path_segments.len() == 1 && PUBLIC_AUTHOR_SESSION_PATHS.contains(&path_segments[0].as_str())
-    {
-        return Ok(Operand::Claim(DIRECT_AUTHOR_CLAIM.to_owned()));
+    if path_segments.len() == 1 && PUBLIC_USER_SESSION_PATHS.contains(&path_segments[0].as_str()) {
+        return Ok(Operand::Claim(DIRECT_USER_CLAIM.to_owned()));
     }
     if path_segments.len() == 1
         && PUBLIC_AUTH_MODE_SESSION_PATHS.contains(&path_segments[0].as_str())
     {
         return Ok(Operand::Claim(DIRECT_AUTH_MODE_CLAIM.to_owned()));
+    }
+    if matches!(path_segments, [claims, user] if claims == "claims" && user == "user") {
+        return Err(err(
+            format!("$.{}.{}", table.as_str(), path),
+            "session.claims.user is reserved by Jazz; use session.user for the canonical identity",
+        ));
     }
     if path_segments.len() == 2 && path_segments[0] == "claims" {
         return Ok(Operand::Claim(path_segments[1].clone()));
@@ -2579,7 +2584,7 @@ fn convert_session_path_operand(
     Err(err(
         format!("$.{}.{}", table.as_str(), path),
         format!(
-            "core schema policies only support session.author, session.user_id, session.authMode, and session.claims.* references, got session.{}",
+            "core schema policies only support session.user, session.user_id, session.authMode, and session.claims.* references, got session.{}",
             path_segments.join(".")
         ),
     ))
@@ -3711,18 +3716,18 @@ mod tests {
             LoweredRelValue::Operand(Operand::Claim(claim)) if claim == DIRECT_USER_ID_CLAIM
         ));
 
-        let author = rel_value_to_policy_operand(
+        let user = rel_value_to_policy_operand(
             &table,
             path,
-            &RelValueRef::SessionRef(vec!["author".to_owned()]),
+            &RelValueRef::SessionRef(vec!["user".to_owned()]),
         )
-        .expect("author is a supported canonical provenance session field");
+        .expect("user is a supported canonical provenance session field");
         assert!(matches!(
-            author,
-            LoweredRelValue::Operand(Operand::Claim(claim)) if claim == DIRECT_AUTHOR_CLAIM
+            user,
+            LoweredRelValue::Operand(Operand::Claim(claim)) if claim == DIRECT_USER_CLAIM
         ));
 
-        for path_segments in [["author"], ["user_id"], ["authMode"], ["auth_mode"]] {
+        for path_segments in [["user"], ["user_id"], ["authMode"], ["auth_mode"]] {
             rel_value_to_policy_operand(
                 &table,
                 path,
@@ -3730,6 +3735,20 @@ mod tests {
             )
             .expect("documented public session aliases are supported");
         }
+
+        let nested_user = match rel_value_to_policy_operand(
+            &table,
+            path,
+            &RelValueRef::SessionRef(vec!["claims".to_owned(), "user".to_owned()]),
+        ) {
+            Ok(_) => panic!("provider claim `user` must not alias Jazz's reserved identity"),
+            Err(err) => err,
+        };
+        assert!(
+            nested_user
+                .message
+                .contains("session.claims.user is reserved")
+        );
 
         let claim = rel_value_to_policy_operand(
             &table,

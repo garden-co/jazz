@@ -15,7 +15,7 @@ import {
 } from "./client.js";
 import type { AppContext } from "./context.js";
 import type { WasmSchema } from "../drivers/types.js";
-import { withCanonicalAuthor } from "./author-id.js";
+import { withCanonicalUser } from "./author-id.js";
 
 function makeFakeRuntime() {
   let mutationErrorCallback: ((event: MutationErrorEvent) => void) | null = null;
@@ -171,14 +171,14 @@ describe("JazzClient native session boundary", () => {
     const runtime = makeFakeRuntime();
     runtime.query.mockResolvedValue([]);
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const session = withCanonicalAuthor({
+    const session = withCanonicalUser({
       issuer: "https://issuer.example",
       user_id: "alice",
       claims: { role: "reader" },
       authMode: "external",
     });
 
-    expect(session.author).toBe('["https://issuer.example","alice"]');
+    expect(session.user).toBe('["https://issuer.example","alice"]');
     await client.query('{"table":"todos"}', undefined, session);
 
     const serialized = JSON.parse(runtime.query.mock.calls[0][1] ?? "null");

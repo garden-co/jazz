@@ -220,7 +220,7 @@ describe("react-core provider/hooks browser coverage", () => {
     );
 
     await expectText("session", "user-123");
-    expect(container?.querySelector('[data-testid="session"]')?.getAttribute("data-author")).toBe(
+    expect(container?.querySelector('[data-testid="session"]')?.getAttribute("data-user")).toBe(
       canonicalAuthorSubject("https://issuer.example", "user-123"),
     );
   });
@@ -241,7 +241,7 @@ describe("react-core provider/hooks browser coverage", () => {
     );
 
     await expectText("session", "alice");
-    expect(container?.querySelector('[data-testid="session"]')?.getAttribute("data-author")).toBe(
+    expect(container?.querySelector('[data-testid="session"]')?.getAttribute("data-user")).toBe(
       canonicalAuthorSubject("https://issuer.example", "alice"),
     );
 
@@ -267,10 +267,10 @@ describe("react-core provider/hooks browser coverage", () => {
 
     await expectText("session-a", "alice");
     await expectText("session-b", "alice");
-    expect(container?.querySelector('[data-testid="session-a"]')?.getAttribute("data-author")).toBe(
+    expect(container?.querySelector('[data-testid="session-a"]')?.getAttribute("data-user")).toBe(
       canonicalAuthorSubject("https://issuer.example", "alice"),
     );
-    expect(container?.querySelector('[data-testid="session-b"]')?.getAttribute("data-author")).toBe(
+    expect(container?.querySelector('[data-testid="session-b"]')?.getAttribute("data-user")).toBe(
       canonicalAuthorSubject("https://issuer.example", "alice"),
     );
     expect(db.onAuthChanged).toHaveBeenCalledTimes(2);
@@ -692,7 +692,7 @@ function DbIdentityView({ expected }: { expected: unknown }) {
 function SessionView() {
   const session = useSession();
   return (
-    <div data-testid="session" data-author={session?.author}>
+    <div data-testid="session" data-user={session?.user}>
       {session ? session.user_id : "null"}
     </div>
   );
@@ -703,10 +703,10 @@ function SessionPairView() {
   const sessionB = useSession();
   return (
     <>
-      <div data-testid="session-a" data-author={sessionA?.author}>
+      <div data-testid="session-a" data-user={sessionA?.user}>
         {sessionA ? sessionA.user_id : "null"}
       </div>
-      <div data-testid="session-b" data-author={sessionB?.author}>
+      <div data-testid="session-b" data-user={sessionB?.user}>
         {sessionB ? sessionB.user_id : "null"}
       </div>
     </>

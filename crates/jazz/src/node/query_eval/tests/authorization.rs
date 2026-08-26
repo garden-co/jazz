@@ -4,7 +4,7 @@ use super::*;
 use crate::node::query_eval::authorization::permission_scope_claim_values;
 
 #[test]
-fn permission_advice_scope_preserves_provider_sub_and_injects_canonical_author() {
+fn permission_advice_scope_preserves_provider_sub_and_injects_canonical_user() {
     let author = AuthorSubject::authenticated("https://issuer.example", "opaque-subject").unwrap();
     let claims = BTreeMap::from([("sub".to_owned(), Value::String("spoofed".to_owned()))]);
 
@@ -15,7 +15,7 @@ fn permission_advice_scope_preserves_provider_sub_and_injects_canonical_author()
         Some(&Value::String("spoofed".to_owned()))
     );
     assert_eq!(
-        values.get("author"),
+        values.get("user"),
         Some(&Value::String(author.canonical().to_owned()))
     );
 }

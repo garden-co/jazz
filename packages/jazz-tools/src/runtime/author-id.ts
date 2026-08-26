@@ -49,23 +49,23 @@ export function canonicalAuthorSubject(issuer: string, subject: string): string 
 }
 
 /**
- * Attach the canonical logical author to a session crossing a public binding
- * boundary. Never preserve a caller-provided `author`: credentials control
- * `iss`/`sub`, and the author is derived from those exact values.
+ * Attach the canonical logical user identity to a session crossing a public
+ * binding boundary. Never preserve a caller-provided `user`: credentials
+ * control `iss`/`sub`, and the identity is derived from those exact values.
  *
  * @internal Public bindings expose the resulting `PublicSession`; applications
- * should read `session.author` instead of reproducing this encoding.
+ * should read `session.user` instead of reproducing this encoding.
  */
-export function withCanonicalAuthor(session: Session): PublicSession {
+export function withCanonicalUser(session: Session): PublicSession {
   const existing = publicSessions.get(session);
   if (existing) return existing;
-  const author = canonicalAuthorSubject(session.issuer, session.user_id);
+  const user = canonicalAuthorSubject(session.issuer, session.user_id);
   const published: PublicSession = {
     issuer: session.issuer,
     user_id: session.user_id,
     claims: session.claims,
     authMode: session.authMode,
-    author,
+    user,
   };
   publicSessions.set(session, published);
   publicSessions.set(published, published);

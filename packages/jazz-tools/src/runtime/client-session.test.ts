@@ -46,7 +46,7 @@ describe("client session resolution", () => {
       }),
     ).toEqual({
       transport: "cookie",
-      session: { ...session, author: '["https://issuer.example","cookie-user"]' },
+      session: { ...session, user: '["https://issuer.example","cookie-user"]' },
     });
   });
 
@@ -83,7 +83,7 @@ describe("client session resolution", () => {
       user_id: "user-subject",
       claims: { role: "editor" },
       authMode: "external",
-      author: '["https://issuer.example","user-subject"]',
+      user: '["https://issuer.example","user-subject"]',
     });
   });
 
@@ -272,7 +272,7 @@ describe("resolveJwtSession — reserved issuer admission", () => {
       user_id: "u1",
       claims: { role: "writer" },
       authMode: "local-first",
-      author: '["urn:jazz:local-first","u1"]',
+      user: '["urn:jazz:local-first","u1"]',
     });
     expect(
       resolveClientSessionSync({
@@ -298,7 +298,7 @@ describe("resolveJwtSession — reserved issuer admission", () => {
     expect(session.claims.auth_mode).toBeUndefined();
   });
 
-  it("publishes the exact issuer-scoped author instead of a caller-provided alias", () => {
+  it("publishes the exact issuer-scoped user identity instead of a caller-provided alias", () => {
     const sameSubject = "provider-user";
     const issuerA = resolveClientSessionSync({
       appId: "author-a",
@@ -308,8 +308,8 @@ describe("resolveJwtSession — reserved issuer admission", () => {
         claims: {},
         authMode: "external",
         // This is untyped hostile input at a public boundary. It must not be
-        // preserved as the public author.
-        author: "forged",
+        // preserved as the public user identity.
+        user: "forged",
       } as Session,
     });
     const issuerB = resolveClientSessionSync({
@@ -322,8 +322,8 @@ describe("resolveJwtSession — reserved issuer admission", () => {
       },
     });
 
-    expect(issuerA?.author).toBe('["https://issuer-a.example","provider-user"]');
-    expect(issuerB?.author).toBe('["https://issuer-b.example","provider-user"]');
-    expect(issuerA?.author).not.toBe(issuerB?.author);
+    expect(issuerA?.user).toBe('["https://issuer-a.example","provider-user"]');
+    expect(issuerB?.user).toBe('["https://issuer-b.example","provider-user"]');
+    expect(issuerA?.user).not.toBe(issuerB?.user);
   });
 });

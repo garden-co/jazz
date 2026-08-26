@@ -33,7 +33,7 @@ Invariant digest:
 - `INV-EDGE-14`: An edge cache MUST NOT evict fate-pending units, permission-scope results currently backing edge acceptance, parked commit families, or edge-accepted versions not yet globally durable.
 - `INV-EDGE-15`: After eviction, an edge MUST recover required payloads through resubscription without assuming complete local history.
 - `INV-EDGE-16`: Duplicate merges of the same concurrent mergeable frontier MUST be legal (identical cells); when independent edge merges diverge, an upstream tier MUST reconcile them by folding over the de-duplicated raw head set (not by re-merging merged values), so `Counter` never double-counts a shared ancestor.
-- `INV-EDGE-17`: An edge permission-scope subscription MUST be keyed by `(policy_shape, writer_claim)` — the write policy's query shape bound to the writer's `claim("author")` — and MUST NOT hydrate a whole-table scope. A public-write table (no write policy) opens no scope and settles immediately.
+- `INV-EDGE-17`: An edge permission-scope subscription MUST be keyed by `(policy_shape, writer_claim)` — the write policy's query shape bound to the writer's `claim("user")` — and MUST NOT hydrate a whole-table scope. A public-write table (no write policy) opens no scope and settles immediately.
 - `INV-EDGE-18`: An edge MUST share a settled permission-scope subscription among all dependent acceptance gates it can satisfy.
 - `INV-EDGE-19`: A dynamically catalogued serving authority MUST NOT accept an uploaded commit unit until an authority has published a permissions head selecting its write schema and table policies. If no head is published, it MUST reject the unit with `permissions_head_missing`, rather than silently accepting it.
 - `INV-LOWER-20`: RLS policy declarations MUST be valid Jazz query shapes; read policy MUST lower through the query engine as part of the policy-composed read graph, while write-time ac...
@@ -174,7 +174,7 @@ a later stale `Pending` update is ignored (`INV-EDGE-7`).
 keyed by `(policy_shape, writer_claim)` — the narrow slice of policy data that the
 write policy reads _for that writer_ — not a whole-table scope (`INV-EDGE-17`).
 Because a write policy is itself a jazz query shape (`INV-LOWER-20`), binding it
-to the writer's `claim("author")` narrows hydration to exactly the rows the policy
+to the writer's `claim("user")` narrows hydration to exactly the rows the policy
 would read for that writer. An edge therefore holds only the policy data for the
 identities it terminates, rather than every tenant's data.
 

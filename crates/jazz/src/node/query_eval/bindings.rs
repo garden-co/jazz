@@ -163,7 +163,7 @@ pub(super) fn default_policy_claim_values(writer: AuthorSubject) -> BTreeMap<Str
         .iter()
         .map(|name| {
             let value = match *name {
-                "author" => Value::String(writer.canonical().to_owned()),
+                "user" => Value::String(writer.canonical().to_owned()),
                 "isAdmin" => Value::Bool(false),
                 _ => unreachable!("unknown built-in policy claim"),
             };
@@ -172,7 +172,7 @@ pub(super) fn default_policy_claim_values(writer: AuthorSubject) -> BTreeMap<Str
         .collect()
 }
 
-const BUILTIN_POLICY_CLAIMS: &[&str] = &["author", "isAdmin"];
+const BUILTIN_POLICY_CLAIMS: &[&str] = &["user", "isAdmin"];
 
 fn is_builtin_policy_claim(name: &str) -> bool {
     BUILTIN_POLICY_CLAIMS.contains(&name)

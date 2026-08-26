@@ -71,8 +71,9 @@ For more details, the [Auth0 docs](https://auth0.com/docs/secure/tokens/json-web
 
 Jazz requires both JWT `iss` and `sub`. It exposes their admitted values as `session.issuer` and
 `session.user_id` (and keeps raw provider claims available), then derives a separate logical
-`session.author` from their canonical pair for every write. Two providers may issue the same
+`session.user` from their canonical pair for every write. Two providers may issue the same
 `sub` without becoming the same Jazz author; `$createdBy` distinguishes them by `iss`.
+Treat `session.user` as opaque: it is not a user-row reference, display name, or raw `sub`.
 
 - In most cases, use your provider's internal user ID, as this is generally fixed for the lifetime
   of the user account
@@ -83,7 +84,7 @@ If your provider doesn't provide a stable ID in `sub` by default, either configu
 or remint the token through your own JWT layer that rewrites `sub`.
 
 <Callout type="info">
-  Policies use `session.author` when comparing `$createdBy` or `$updatedBy`; `session.user_id` and
+  Policies use `session.user` when comparing `$createdBy` or `$updatedBy`; `session.user_id` and
   provider claims retain their raw admitted values. Authorship identity is the exact `[iss, sub]`
   pair. Changing either component creates a different author.
 </Callout>

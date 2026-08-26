@@ -16,7 +16,7 @@ Invariant digest:
 - `INV-BVIEW-18`: Read and write policy MUST use ordinary branch columns and the same effective branch view as the operation; missing reference/policy evidence fails closed, and Jazz MUST NOT impose a built-in branch-row existence or lifecycle gate.
 - `INV-RLS-1`: A non-system commit unit MUST be rejected with Fate::Rejected(RejectionReason::AuthorizationDenied) and MUST NOT ingest accepted version rows when any version in the u...
 - `INV-RLS-2`: AuthorSubject::SYSTEM MUST bypass both read and write policy checks.
-- `INV-RLS-3`: Policy::owneronly(table, column) MUST compare the named column to claim("author"), where claim("author") is bound from the authenticated AuthorSubject, not from caller-provided q...
+- `INV-RLS-3`: Policy::owneronly(table, column) MUST compare the named column to claim("user"), where claim("user") is bound from the authenticated AuthorSubject, not from caller-provided q...
 - `INV-RLS-4`: A table policy MUST validate as a query shape rooted at the table that carries the policy.
 - `INV-RLS-5`: Downstream view emission for a non-system peer MUST only add result members, program facts, and version bundles whose relevant content/deletion versions pass that peer...
 - `INV-RLS-6`: Read-policy revocation MUST remove rows from future settled subscription result sets and MUST NOT redact previously delivered local copies from the receiving node.
@@ -45,7 +45,7 @@ Invariant digest:
   MUST resolve its stable physical table lineage back to the logical
   table/schema at the relevant frontier; shared deletion storage MUST NOT widen
   authority across tables.
-- `INV-RLS-23`: Jazz derives the reserved logical `session.author` and user
+- `INV-RLS-23`: Jazz derives the reserved logical `session.user` and user
   authorship from the exact trusted JWT subject pair `(iss, sub)`, represented
   portably as canonical JSON `[iss,sub]`. Admitted provider claims including
   `session.iss`, `session.sub`, and `session.user_id` retain their raw values.
@@ -78,8 +78,8 @@ including after schema migration or lens projection (`INV-RLS-15`).
 An owner-only policy is the canonical single-subject policy: it selects rows
 whose ownership column equals the authenticated subject
 (`Policy::owner_only(table, column)` is exactly
-`Query::from(table).filter(eq(col(column), claim("author")))`). The
-`claim("author")` operand is the canonical authenticated `AuthorSubject`, not
+`Query::from(table).filter(eq(col(column), claim("user")))`). The
+`claim("user")` operand is the canonical authenticated `AuthorSubject`, not
 the provider's raw `sub` alone and not a caller-supplied parameter
 (`INV-RLS-3`). A policy must validate as a shape rooted at the table that carries
 it (`INV-RLS-4`), and `AuthorSubject::SYSTEM` bypasses both read and write checks
@@ -95,7 +95,7 @@ their key-derived subject. The portable `AuthorSubject` is the canonical JSON
 encoding of the two-string array `[iss,sub]`, with no whitespace or
 normalization. The same `sub` from two issuers therefore denotes two authors.
 
-That canonical string is the logical `session.author` value in transactions,
+That canonical string is the logical `session.user` value in transactions,
 provenance, policy claims, storage, and sync. It does not replace the admitted
 provider `sub` or `user_id` claims. Implementations may intern it in memory, but the
 intern handle is process-local and has no observable meaning. Provenance
@@ -121,7 +121,7 @@ which refuses an unresolved claim rather than binding it as an allowance. The
 compiler currently lowers equality and inequality, membership/containment,
 boolean composition, columns, literals, and authenticated,
 admission-controlled claims: `Eq`/`Ne`/`In`/`Contains`/`All`/`Any`/`Not` over
-column / literal / `claim(...)`. `claim("author")` resolves to the authenticated
+column / literal / `claim(...)`. `claim("user")` resolves to the authenticated
 `AuthorSubject`; `claim("sub")` remains the admitted provider subject. Additional claim names are session claims supplied by the trusted
 admission/session layer and must not be client-supplied query bindings. Predicate
 forms the compiler cannot authorize, such as range and null checks, deny until
@@ -396,7 +396,7 @@ must not widen those facts.
 ### Detailed issue context
 
 - **Session/auth model for bindings.** `AuthorSubject` is the runtime
-  permission subject and reserved `claim("author")` value, but the product boundary needs
+  permission subject and reserved `claim("user")` value, but the product boundary needs
   explicit account/user/session/default identity terminology. Define how
   anonymous/local sessions, authenticated users, trusted backends, system links,
   and attribution-only writes map to `AuthorSubject`, claims, and link roles.
@@ -404,7 +404,7 @@ must not widen those facts.
   connection credentials into a link identity, claims, role, expiry, and optional
   backend trust. This hook must be the only source for policy claim bindings;
   client-supplied query bindings must never widen claims (ch. 8, ch. 13).
-- **Admission-controlled claim vocabulary.** `claim("author")` is reserved, and
+- **Admission-controlled claim vocabulary.** `claim("user")` is reserved, and
   arbitrary runtime session claims are supported, but the product boundary still
   needs to define which claims are minted by first-party auth integrations,
   custom admission hooks, trusted backend assertions, and local-only sessions.

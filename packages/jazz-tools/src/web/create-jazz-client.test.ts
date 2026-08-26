@@ -130,7 +130,7 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
     expect(client.db).toBe(db);
     expect(client.session).toEqual({
       ...session,
-      author: canonicalAuthorSubject(session.issuer, session.user_id),
+      user: canonicalAuthorSubject(session.issuer, session.user_id),
     });
     expect("manager" in client).toBe(false);
     expect(getSubscriptionStore(client)).toBe(manager);
