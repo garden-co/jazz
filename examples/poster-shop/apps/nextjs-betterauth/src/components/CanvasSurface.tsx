@@ -4,7 +4,6 @@ import { app } from "@/schema";
 /** Shape ordering is a normal indexed relation; equal z indexes deliberately
  * have no invented canvas-specific merge rule. */
 export function CanvasSurface({ canvasId }: { canvasId: string }) {
-  const { data: layers = [] } = useAll(app.layers.where({ canvasId }).orderBy("zIndex", "asc"));
   const { data: shapes = [] } = useAll(app.shapes.where({ canvasId }).orderBy("zIndex", "asc"));
   return (
     <section aria-label="Canvas" data-shape-count={shapes.length}>
