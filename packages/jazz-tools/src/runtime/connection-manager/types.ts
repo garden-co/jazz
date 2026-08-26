@@ -6,6 +6,7 @@ import type { DbConfig } from "../db.js";
 import type { RuntimeSource } from "../runtime-source.js";
 import { resolveTelemetryCollectorUrlFromEnv } from "../sync-telemetry.js";
 import type { AuthFailureReason } from "../auth-state.js";
+import { getTrustedReservedSession, setTrustedReservedSession } from "../db-internal-session.js";
 
 function shouldBypassLocalPolicies(config: DbConfig): boolean {
   return !!config.adminSecret;
@@ -83,8 +84,16 @@ export abstract class ConnectionManager {
     }
 
     this.installRuntimeTelemetry();
+    const runtimeConfig = { ...config };
+    // Reserved local-first/anonymous sessions are carried by a package-private
+    // capability sidecar, not an enumerable config property. Preserve that
+    // capability when isolating the runtime's config object; otherwise the
+    // in-memory client opens as `runtime-host` while its persistent worker and
+    // WebSocket authenticate as the real session author, and the authority
+    // correctly rejects every uploaded transaction as forged provenance.
+    setTrustedReservedSession(runtimeConfig, getTrustedReservedSession(config));
     const client = runtimeSource.createClient({
-      config: { ...config },
+      config: runtimeConfig,
       schema: runtimeSchema,
       onAuthFailure: (reason) => this.host.markUnauthenticated(reason),
     });
