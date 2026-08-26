@@ -13,7 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { hostname } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { afterEach, assert, describe, expect, it, vi } from "vitest";
 import { structuralSchemaHash } from "./dev/schema-utils.js";
@@ -44,7 +44,7 @@ const bootstrapVerifierPath = fileURLToPath(
 );
 
 const packageRoot = dirname(fileURLToPath(import.meta.url));
-const tmpBase = join(packageRoot, ".test-tmp");
+const tmpBase = join(tmpdir(), "jazz-tools-cli-tests");
 const tempRoots: string[] = [];
 const APP_ID = "test-app";
 
