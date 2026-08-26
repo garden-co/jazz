@@ -2409,14 +2409,11 @@ where
             // Preserve indirect descriptors by reading the physical winner.
             let (mut cells, parent) = {
                 let mut node = self.node.node.lock().await;
-                let cells = node
-                    .current_physical_cells_in_schema(self.schema_version_id, table, row)
+                let (cells, parent) = node
+                    .current_physical_cells_and_winner_in_schema(self.schema_version_id, table, row)
                     .await?
                     .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
-                let parent = node
-                    .local_content_winner_tx_id_in_schema(self.schema_version_id, table, row)
-                    .await?;
-                (cells, parent)
+                (cells, Some(parent))
             };
             let authored_columns = patch.keys().cloned().collect();
             cells.extend(patch);
