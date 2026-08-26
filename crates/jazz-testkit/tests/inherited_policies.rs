@@ -34,10 +34,10 @@ fn inherited_update_schema() -> jazz::tools::Schema {
                         .with_select(PolicyExpr::True)
                         .with_insert(PolicyExpr::True)
                         .with_update(
-                            Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
-                            PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+                            Some(PolicyExpr::eq_session("owner_id", vec!["user".to_owned()])),
+                            PolicyExpr::eq_session("owner_id", vec!["user".to_owned()]),
                         )
-                        .with_delete(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+                        .with_delete(PolicyExpr::eq_session("owner_id", vec!["user".to_owned()])),
                 ),
         )
         .table(
@@ -51,15 +51,15 @@ fn inherited_update_schema() -> jazz::tools::Schema {
                         .with_insert(PolicyExpr::True)
                         .with_update(
                             Some(PolicyExpr::or(vec![
-                                PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+                                PolicyExpr::eq_session("owner_id", vec!["user".to_owned()]),
                                 PolicyExpr::inherits(Operation::Update, "organization_id"),
                             ])),
                             PolicyExpr::or(vec![
-                                PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+                                PolicyExpr::eq_session("owner_id", vec!["user".to_owned()]),
                                 PolicyExpr::inherits(Operation::Update, "organization_id"),
                             ]),
                         )
-                        .with_delete(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+                        .with_delete(PolicyExpr::eq_session("owner_id", vec!["user".to_owned()])),
                 ),
         )
         .table(
@@ -88,7 +88,7 @@ fn inherited_select_schema() -> jazz::tools::Schema {
                 .column("name", ColumnType::Text)
                 .policies(
                     TablePolicies::new()
-                        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
+                        .with_select(PolicyExpr::eq_session("owner_id", vec!["user".to_owned()]))
                         .with_insert(PolicyExpr::True)
                         .with_update(Some(PolicyExpr::True), PolicyExpr::True)
                         .with_delete(PolicyExpr::True),
@@ -102,7 +102,7 @@ fn inherited_select_schema() -> jazz::tools::Schema {
                 .policies(
                     TablePolicies::new()
                         .with_select(PolicyExpr::or(vec![
-                            PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+                            PolicyExpr::eq_session("owner_id", vec!["user".to_owned()]),
                             PolicyExpr::inherits(Operation::Select, "organization_id"),
                         ]))
                         .with_insert(PolicyExpr::True)
@@ -149,7 +149,7 @@ fn reverse_inherited_select_schema() -> jazz::tools::Schema {
                 .column("owner_id", ColumnType::Uuid)
                 .policies(
                     TablePolicies::new()
-                        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
+                        .with_select(PolicyExpr::eq_session("owner_id", vec!["user".to_owned()]))
                         .with_insert(PolicyExpr::True),
                 ),
         )

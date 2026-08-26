@@ -1376,7 +1376,7 @@ fn exclusive_read_for_write_schema() -> JazzSchema {
                 .column("owner", PublicColumnType::Uuid)
                 .policies(
                     PublicTablePolicies::new()
-                        .with_select(public_session_eq("owner", &["user_id"]))
+                        .with_select(public_session_eq("owner", &["claims", "sub"]))
                         .with_insert(PublicPolicyExpr::True)
                         .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True),
                 ),
@@ -1666,7 +1666,10 @@ fn mergeable_transaction_identity_reads_are_not_forced_to_begin_author() {
     let bob = AuthorSubject::for_test_bytes([0xb3; 16]);
     let open = OpenTransactionId::new();
     let prepared = db
-        .prepare_query(&db.table("todos").filter(eq(col("owner"), claim("user_id"))))
+        .prepare_query(&db.table("todos").filter(eq(
+            col("owner"),
+            claim(crate::query::provider_claim_key("sub")),
+        )))
         .unwrap();
     db.set_identity_claims(alice, test_provider_claims(alice));
     db.set_identity_claims(bob, test_provider_claims(bob));

@@ -348,7 +348,7 @@ fn current_join_provenance_permission_schema() -> jazz::tools::Schema {
                         .with_update(Some(PolicyExpr::True), PolicyExpr::True)
                         .with_select(PolicyExpr::eq_session(
                             "viewer_name",
-                            vec!["user_id".into()],
+                            vec!["user".to_owned()],
                         )),
                 ),
         )

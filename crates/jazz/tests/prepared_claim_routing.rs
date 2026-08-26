@@ -120,7 +120,7 @@ fn schema_with_membership_policy(membership_policy: Option<PublicPolicyExpr>) ->
         MEMBERSHIPS,
         vec![
             outer_eq("team", "team"),
-            session_eq("user", &["user_id"]),
+            session_eq("user", &["user"]),
             session_eq("region", &["claims", "region"]),
         ],
     );
@@ -171,7 +171,7 @@ fn two_hop_seeded_policy_schema() -> JazzSchema {
                     column: "user".to_owned(),
                 },
                 op: RelPredicateCmpOp::Eq,
-                right: RelValueRef::SessionRef(vec!["user_id".to_owned()]),
+                right: RelValueRef::SessionRef(vec!["user".to_owned()]),
             },
         }),
         columns: vec![RelProjectColumn {
@@ -639,7 +639,7 @@ fn prepared_policy_claims_route_per_identity_and_application_binding() {
 fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
     let policy = PublicPolicyExpr::Or(vec![
         text_eq("visibility", "public"),
-        session_eq("owner", &["user_id"]),
+        session_eq("owner", &["user"]),
         session_eq("region", &["claims", "region"]),
     ]);
     let schema = compile_schema(
@@ -803,7 +803,7 @@ fn prepared_nested_claim_routes_keep_two_bindings_isolated_through_live_membersh
         session_eq("joinCode", &["claims", "join_code"]),
         exists(
             CHAT_MEMBERS,
-            vec![outer_eq("chatId", "id"), session_eq("userId", &["user_id"])],
+            vec![outer_eq("chatId", "id"), session_eq("userId", &["user"])],
         ),
     ]);
     let schema = compile_schema(
@@ -818,10 +818,7 @@ fn prepared_nested_claim_routes_keep_two_bindings_isolated_through_live_membersh
                 TableSchemaBuilder::new(CHAT_MEMBERS)
                     .fk_column("chatId", CHATS)
                     .column("userId", PublicColumnType::Text)
-                    .policies(read_and_allow_all_writes(session_eq(
-                        "userId",
-                        &["user_id"],
-                    ))),
+                    .policies(read_and_allow_all_writes(session_eq("userId", &["user"]))),
             )
             .build(),
     );
@@ -1507,7 +1504,7 @@ fn prepared_binding_rejects_conflicting_claim_types_across_policies() {
         session_eq("team", &["claims", "shared_scope"]),
         exists(
             MEMBERSHIPS,
-            vec![outer_eq("team", "team"), session_eq("user", &["user_id"])],
+            vec![outer_eq("team", "team"), session_eq("user", &["user"])],
         ),
     ]);
     let membership_policy = session_eq("region", &["claims", "shared_scope"]);

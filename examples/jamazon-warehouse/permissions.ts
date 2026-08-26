@@ -2,12 +2,12 @@ import { schema as s } from "jazz-tools";
 import { app } from "./schema";
 
 export default s.definePermissions(app, ({ policy, session, allowedTo }) => {
-  policy.warehouses.allowRead.where({ operator_id: session.user_id });
-  policy.warehouses.allowInsert.where({ operator_id: session.user_id });
+  policy.warehouses.allowRead.where({ operator_id: session.user });
+  policy.warehouses.allowInsert.where({ operator_id: session.user });
   // Update authority belongs to the current operator. Using the old row is
   // deliberate: it permits an authenticated operator to transfer a warehouse,
   // after which the former operator is immediately revoked.
-  policy.warehouses.allowUpdate.whereOld({ operator_id: session.user_id });
+  policy.warehouses.allowUpdate.whereOld({ operator_id: session.user });
 
   // Operational data is public to the warehouse console, but every mutation
   // must be authorized by the warehouse whose state it changes. `allowedTo`
@@ -43,11 +43,11 @@ export default s.definePermissions(app, ({ policy, session, allowedTo }) => {
   policy.orders.allowDelete.where(allowedTo.update("warehouse_id"));
 
   policy.items.allowRead.always();
-  policy.items.allowInsert.where({ operator_id: session.user_id });
+  policy.items.allowInsert.where({ operator_id: session.user });
   policy.items.allowUpdate
-    .whereOld({ operator_id: session.user_id })
-    .whereNew({ operator_id: session.user_id });
-  policy.items.allowDelete.where({ operator_id: session.user_id });
+    .whereOld({ operator_id: session.user })
+    .whereNew({ operator_id: session.user });
+  policy.items.allowDelete.where({ operator_id: session.user });
 
   policy.order_lines.allowRead.always();
   policy.order_lines.allowInsert.where(allowedTo.update("warehouse_id"));

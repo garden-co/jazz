@@ -1374,7 +1374,7 @@ describe("NAPI integration", () => {
 
           export default s.definePermissions(app, ({ policy, allowedTo, session }) => {
             const directlyReachableTeams = policy.team_entry
-              .where({ team_id: session.user_id })
+              .where({ team_id: session.user })
               .hopTo("target");
             const memberReachableTeams = directlyReachableTeams.gather({
               step: ({ current }) =>

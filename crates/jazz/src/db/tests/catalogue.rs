@@ -316,7 +316,8 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
         };
         let table = if let Some(column) = read_column {
             table.policies(
-                PublicTablePolicies::new().with_select(public_session_eq(column, &["user_id"])),
+                PublicTablePolicies::new()
+                    .with_select(public_session_eq(column, &["claims", "sub"])),
             )
         } else {
             table

@@ -141,7 +141,7 @@ fn prepared_claim_descriptor_uses_validated_param_type_for_both_equality_orders(
             ),
     );
     let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([0xb4; 16]), schema.clone());
-    let claim_param = claim_param_field(&ClaimPath(vec!["user_id".to_owned()]));
+    let claim_param = claim_param_field(&ClaimPath(vec!["user".to_owned()]));
     let cases = [
         (
             Query::from("text_owners").filter(eq(col("owner"), param(&claim_param))),

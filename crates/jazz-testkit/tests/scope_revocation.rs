@@ -29,8 +29,8 @@ fn owned_docs_schema() -> jazz::tools::Schema {
             TablePolicies::new()
                 .with_insert(PolicyExpr::True)
                 .with_select(PolicyExpr::or(vec![
-                    PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
-                    PolicyExpr::eq_session("transfer_writer_id", vec!["user_id".into()]),
+                    PolicyExpr::eq_session("owner_id", vec!["user".to_owned()]),
+                    PolicyExpr::eq_session("transfer_writer_id", vec!["user".to_owned()]),
                 ]))
                 .with_update(Some(PolicyExpr::True), PolicyExpr::True)
                 .with_delete(PolicyExpr::True),

@@ -258,7 +258,7 @@ async fn update_document_title(client: &JazzClient, document_id: ObjectId, title
 /// to the requesting client's own session, preventing cross-user data leakage.
 ///
 /// Alice and bob each insert a document they own. The schema enforces
-/// `owner_id = session.user_id` on SELECT, so each client's subscription must
+/// `owner_id = session.user` on SELECT, so each client's subscription must
 /// only fire for their own row. Query results are checked independently too.
 ///
 /// ```text
@@ -460,11 +460,11 @@ async fn select_policy_pagination_offsets_over_visible_rows_only_inner() {
     server.shutdown().await;
 }
 
-/// Verifies that the `session.userId` alias scopes subscription updates and
-/// query results identically to `session.user_id`.
+/// Verifies that the `session.user` alias scopes subscription updates and
+/// query results identically to `session.user`.
 ///
 /// Alice and bob each insert an owned row into a table protected by
-/// `owner_id = session.userId`. Each client should only observe its own row,
+/// `owner_id = session.user`. Each client should only observe its own row,
 /// both in the live subscription stream and in EdgeServer query results.
 ///
 /// ```text
@@ -524,7 +524,7 @@ async fn session_user_id_alias_resolves_identically_to_snake_case_inner() {
         &mut alice_stream,
         &mut alice_log,
         QUERY_TIMEOUT,
-        "alice add delta via session.userId",
+        "alice add delta via session.user",
         |log| has_added_id(log, alice_doc),
     )
     .await;
@@ -539,7 +539,7 @@ async fn session_user_id_alias_resolves_identically_to_snake_case_inner() {
         &mut bob_stream,
         &mut bob_log,
         QUERY_TIMEOUT,
-        "bob add delta via session.userId",
+        "bob add delta via session.user",
         |log| has_added_id(log, bob_doc),
     )
     .await;
@@ -572,8 +572,8 @@ async fn session_user_id_alias_resolves_identically_to_snake_case_inner() {
     server.shutdown().await;
 }
 
-/// Verifies that an anonymous client with no `session.user_id` cannot see rows
-/// protected by `owner_id = session.user_id`.
+/// Verifies that an anonymous client with no `session.user` cannot see rows
+/// protected by `owner_id = session.user`.
 ///
 /// Alice and bob each insert an owned row. After both rows are confirmed
 /// server-side, an unauthenticated client queries the same table and must see
@@ -662,7 +662,7 @@ async fn anonymous_client_cannot_see_owner_restricted_rows_inner() {
     server.shutdown().await;
 }
 
-/// Verifies that `owner_id = session.user_id` consistently scopes CRUD access
+/// Verifies that `owner_id = session.user` consistently scopes CRUD access
 /// per client:
 /// - inserts are accepted only for the caller's own `owner_id`
 /// - updates require both the old and new row to stay owned by the caller
@@ -870,7 +870,7 @@ async fn session_user_id_policies_scope_crud_to_owned_rows_inner() {
 ///
 /// Alice owns two documents: one active and one archived. The update policy
 /// allows changing `owner_id` only when the old row satisfies both
-/// `owner_id = session.user_id` and `archived = false`, and when the new row
+/// `owner_id = session.user` and `archived = false`, and when the new row
 /// also keeps `archived = false`.
 ///
 /// ```text

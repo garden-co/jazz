@@ -1125,7 +1125,7 @@ fn prepared_server_read_binds_text_session_user_id_per_session() {
     // this exercises the disjunctive policy plan rather than only the
     // scalar-equality fast path.
     let read_policy = PublicPolicyExpr::or(vec![
-        public_session_eq("ownerId", &["user_id"]),
+        public_session_eq("ownerId", &["claims", "sub"]),
         PublicPolicyExpr::IsNull {
             column: "ownerId".to_owned(),
         },
@@ -1146,11 +1146,17 @@ fn prepared_server_read_binds_text_session_user_id_per_session() {
     let bob_subject = "bob-session-subject";
     server.set_identity_claims(
         alice,
-        BTreeMap::from([(String::from("user_id"), Value::String(alice_subject.into()))]),
+        BTreeMap::from([(
+            crate::query::provider_claim_key("sub"),
+            Value::String(alice_subject.into()),
+        )]),
     );
     server.set_identity_claims(
         bob,
-        BTreeMap::from([(String::from("user_id"), Value::String(bob_subject.into()))]),
+        BTreeMap::from([(
+            crate::query::provider_claim_key("sub"),
+            Value::String(bob_subject.into()),
+        )]),
     );
 
     let seeded = server
@@ -1233,7 +1239,7 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
         server_writer_transport,
         alice,
         BTreeMap::from([(
-            "user_id".to_owned(),
+            crate::query::provider_claim_key("sub"),
             Value::String(alice.test_uuid().to_string()),
         )]),
     );
@@ -1259,7 +1265,7 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
         server_alice_transport,
         alice,
         BTreeMap::from([(
-            "user_id".to_owned(),
+            crate::query::provider_claim_key("sub"),
             Value::String(alice.test_uuid().to_string()),
         )]),
     );
@@ -1289,7 +1295,7 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
         server_reader_transport,
         bob,
         BTreeMap::from([(
-            "user_id".to_owned(),
+            crate::query::provider_claim_key("sub"),
             Value::String(bob.test_uuid().to_string()),
         )]),
     );

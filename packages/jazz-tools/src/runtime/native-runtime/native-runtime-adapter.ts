@@ -3653,16 +3653,10 @@ function sessionClaims(
   rawClaims: unknown,
   session: { issuer: string; user_id: string; authMode?: string },
 ): Record<string, unknown> {
-  const canonical = canonicalAuthorSubject(session.issuer, session.user_id);
   return {
     ...(isRecord(rawClaims) ? rawClaims : {}),
     iss: session.issuer,
-    issuer: session.issuer,
     sub: session.user_id,
-    user_id: session.user_id,
-    userId: session.user_id,
-    author: canonical,
-    ...(session.authMode ? { authMode: session.authMode, auth_mode: session.authMode } : {}),
   };
 }
 

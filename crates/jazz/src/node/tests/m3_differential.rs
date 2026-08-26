@@ -848,7 +848,7 @@ fn m3_differential_schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         "teams",
         "identity_key",
-        &["user"],
+        &["claims", "sub"],
         "id",
     );
     let string_same_table_policy = crate::test_public_schema::seeded_recursive_access_policy(
@@ -864,7 +864,7 @@ fn m3_differential_schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         "teams",
         "identity_key_text",
-        &["user"],
+        &["claims", "sub"],
         "id",
     );
 

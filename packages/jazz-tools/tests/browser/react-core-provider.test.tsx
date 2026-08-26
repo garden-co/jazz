@@ -693,7 +693,7 @@ function SessionView() {
   const session = useSession();
   return (
     <div data-testid="session" data-user={session?.user}>
-      {session ? session.user_id : "null"}
+      {session ? session.user : "null"}
     </div>
   );
 }
@@ -718,7 +718,7 @@ function DbAuthStateView() {
     getAuthState(): { session: Session | null };
   }>();
   const session = db.getAuthState().session;
-  return <div data-testid="db-session">{session ? session.user_id : "null"}</div>;
+  return <div data-testid="db-session">{session ? session.user : "null"}</div>;
 }
 
 function UseAllView({ query, options }: { query: QueryBuilder<Todo>; options?: QueryOptions }) {

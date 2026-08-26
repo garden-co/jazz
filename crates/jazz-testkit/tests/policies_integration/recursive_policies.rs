@@ -111,7 +111,7 @@ fn reachable_teams_relation() -> RelExpr {
                 predicate: PredicateExpr::Cmp {
                     left: scoped_column("team_memberships", "user_id"),
                     op: PredicateCmpOp::Eq,
-                    right: ValueRef::SessionRef(vec!["user_id".into()]),
+                    right: ValueRef::SessionRef(vec!["user".to_owned()]),
                 },
             }),
             columns: vec![ProjectColumn {

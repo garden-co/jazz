@@ -270,16 +270,16 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
     let schema = membership_scoped_relation_schema();
     let reader = AuthorSubject::for_test_bytes([0xb2; 16]);
     let normal_claims = BTreeMap::from([(
-        "user_id".to_owned(),
+        crate::query::provider_claim_key("sub"),
         Value::String(reader.test_uuid().to_string()),
     )]);
     let invite_claims = BTreeMap::from([
         (
-            "user_id".to_owned(),
+            crate::query::provider_claim_key("sub"),
             Value::String(reader.test_uuid().to_string()),
         ),
         (
-            "join_code".to_owned(),
+            crate::query::provider_claim_key("join_code"),
             Value::String("invite-code".to_owned()),
         ),
     ]);
@@ -1193,7 +1193,10 @@ fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
     for identity in [member, other, spy] {
         db.set_identity_claims(
             identity,
-            BTreeMap::from([("user_id".to_owned(), Value::Uuid(identity.test_uuid()))]),
+            BTreeMap::from([(
+                crate::query::provider_claim_key("sub"),
+                Value::Uuid(identity.test_uuid()),
+            )]),
         );
     }
     db.insert(

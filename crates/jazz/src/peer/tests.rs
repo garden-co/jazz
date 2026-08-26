@@ -604,10 +604,7 @@ fn priority_cells(title: impl Into<String>, priority: u64) -> BTreeMap<String, V
 }
 
 fn public_session_eq(column: &str, path: &[&str]) -> PublicPolicyExpr {
-    let path = match path {
-        ["user_id"] | ["userId"] => vec!["claims".to_owned(), "user_id".to_owned()],
-        _ => path.iter().map(|segment| (*segment).to_owned()).collect(),
-    };
+    let path = path.iter().map(|segment| (*segment).to_owned()).collect();
     PublicPolicyExpr::eq_session(
         column,
         path,
@@ -626,7 +623,7 @@ fn access_policy_schema() -> JazzSchema {
         "docAccess",
         vec![
             public_session_eq("doc", &["__jazz_outer_row", "id"]),
-            public_session_eq("userID", &["user_id"]),
+            public_session_eq("userID", &["claims", "sub"]),
         ],
     );
     public_peer_schema(
@@ -664,7 +661,7 @@ fn aggregate_access_policy_schema() -> JazzSchema {
         "docAccess",
         vec![
             public_session_eq("doc", &["__jazz_outer_row", "id"]),
-            public_session_eq("userID", &["user_id"]),
+            public_session_eq("userID", &["claims", "sub"]),
         ],
     );
     public_peer_schema(
@@ -2610,7 +2607,10 @@ fn aggregate_policy_oracle_matches_visible_rows_per_identity() {
     {
         core.set_session_claims(
             identity,
-            BTreeMap::from([("user_id".to_owned(), Value::Uuid(identity.test_uuid()))]),
+            BTreeMap::from([(
+                crate::query::provider_claim_key("sub"),
+                Value::Uuid(identity.test_uuid()),
+            )]),
         );
         let rows = core
             .query_rows_with_prepared_plan_for_identity(
@@ -3445,7 +3445,10 @@ fn maintained_subscription_view_policy_view_exclusive_delta_ships_identity_scope
     let mut peer = PeerState::client_link(user_a);
     core.set_session_claims(
         user_a,
-        BTreeMap::from([("user_id".to_owned(), Value::Uuid(user_a.test_uuid()))]),
+        BTreeMap::from([(
+            crate::query::provider_claim_key("sub"),
+            Value::Uuid(user_a.test_uuid()),
+        )]),
     );
     peer.set_ship_complete_exclusive_payloads(true);
     core.reset_query_engine_read_metrics();
@@ -3678,7 +3681,10 @@ fn current_rows_update_installs_maintained_subscription_for_relay_and_edge_clien
     let mut edge_owner = PeerState::edge_client(owner);
     core.set_session_claims(
         owner,
-        BTreeMap::from([("user_id".to_owned(), Value::Uuid(owner.test_uuid()))]),
+        BTreeMap::from([(
+            crate::query::provider_claim_key("sub"),
+            Value::Uuid(owner.test_uuid()),
+        )]),
     );
     let edge_update = edge_owner.current_rows_update(&mut core, "docs").unwrap();
     assert!(maintained_subscription_id(&edge_owner, subscription).is_some());
@@ -3691,7 +3697,10 @@ fn current_rows_update_installs_maintained_subscription_for_relay_and_edge_clien
     let mut edge_other = PeerState::edge_client(other);
     core.set_session_claims(
         other,
-        BTreeMap::from([("user_id".to_owned(), Value::Uuid(other.test_uuid()))]),
+        BTreeMap::from([(
+            crate::query::provider_claim_key("sub"),
+            Value::Uuid(other.test_uuid()),
+        )]),
     );
     let other_update = edge_other.current_rows_update(&mut core, "docs").unwrap();
     assert!(maintained_subscription_id(&edge_other, subscription).is_some());
@@ -3741,7 +3750,10 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
     let mut peer = PeerState::client_link(user);
     core.set_session_claims(
         user,
-        BTreeMap::from([("user_id".to_owned(), Value::Uuid(user.test_uuid()))]),
+        BTreeMap::from([(
+            crate::query::provider_claim_key("sub"),
+            Value::Uuid(user.test_uuid()),
+        )]),
     );
     let first_update = peer.current_rows_update(&mut core, "docs").unwrap();
     let version_bundles = version_bundles_for_update(&first_update);

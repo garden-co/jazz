@@ -31,7 +31,7 @@ export const ReactionPicker = ({ onPick, messageId }: ReactionPickerProps) => {
     fireAndReport(
       db.insert(app.reactions, {
         messageId,
-        userId: session.user_id,
+        userId: session.user,
         emoji,
       }),
       "failed to add reaction",

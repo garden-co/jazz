@@ -23,7 +23,7 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
 // #region invite-permissions
 s.definePermissions(app, ({ policy, allOf, anyOf, session }) => {
   policy.chats.allowRead.where((chat) =>
-    policy.chatMembers.exists.where({ chatId: chat.id, user_id: session.user_id }),
+    policy.chatMembers.exists.where({ chatId: chat.id, user_id: session.user }),
   );
   policy.chats.allowInsert.always();
 
@@ -31,7 +31,7 @@ s.definePermissions(app, ({ policy, allOf, anyOf, session }) => {
   // member of their chats.
   policy.chatMembers.allowRead.where((member) =>
     anyOf([
-      { user_id: session.user_id },
+      { user_id: session.user },
       policy.chats.exists.where({ id: member.chatId, $createdBy: session.user }),
     ]),
   );
@@ -41,7 +41,7 @@ s.definePermissions(app, ({ policy, allOf, anyOf, session }) => {
   // privileges.
   policy.chatMembers.allowInsert.where((member) =>
     allOf([
-      { user_id: session.user_id },
+      { user_id: session.user },
       policy.chats.exists.where({ id: member.chatId, $createdBy: session.user }),
     ]),
   );
@@ -49,7 +49,7 @@ s.definePermissions(app, ({ policy, allOf, anyOf, session }) => {
   // Users can leave; chat creators can remove any member.
   policy.chatMembers.allowDelete.where((member) =>
     anyOf([
-      { user_id: session.user_id },
+      { user_id: session.user },
       policy.chats.exists.where({ id: member.chatId, $createdBy: session.user }),
     ]),
   );

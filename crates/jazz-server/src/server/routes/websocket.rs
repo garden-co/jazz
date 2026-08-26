@@ -1278,18 +1278,17 @@ mod tests {
     }
 
     fn ws_private_docs_schema_convert() -> JazzSchema {
-        let source =
-            SchemaBuilder::new()
-                .table(
-                    PublicTableSchema::builder("docs")
-                        .column("title", ColumnType::Text)
-                        .column("owner", ColumnType::Text)
-                        .policies(public_table_policies().with_select(PolicyExpr::eq_session(
-                            "owner",
-                            vec!["user_id".to_owned()],
-                        ))),
-                )
-                .build();
+        let source = SchemaBuilder::new()
+            .table(
+                PublicTableSchema::builder("docs")
+                    .column("title", ColumnType::Text)
+                    .column("owner", ColumnType::Text)
+                    .policies(
+                        public_table_policies()
+                            .with_select(PolicyExpr::eq_session("owner", vec!["user".to_owned()])),
+                    ),
+            )
+            .build();
         jazz::schema::JazzSchema::new(&source)
             .expect("websocket private docs public schema compiles")
     }

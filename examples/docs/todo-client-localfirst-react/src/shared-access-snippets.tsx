@@ -25,7 +25,7 @@ s.definePermissions(app, ({ policy, anyOf, session }) => {
       { $createdBy: session.user },
       policy.todoShares.exists.where({
         todoId: todo.id,
-        user_id: session.user_id,
+        user_id: session.user,
       }),
     ]),
   );
@@ -37,7 +37,7 @@ s.definePermissions(app, ({ policy, anyOf, session }) => {
       { $createdBy: session.user },
       policy.todoShares.exists.where({
         todoId: todo.id,
-        user_id: session.user_id,
+        user_id: session.user,
         can_edit: true,
       }),
     ]),
@@ -52,7 +52,7 @@ s.definePermissions(app, ({ policy, anyOf, session }) => {
       $createdBy: session.user,
     }),
   );
-  policy.todoShares.allowRead.where({ user_id: session.user_id });
+  policy.todoShares.allowRead.where({ user_id: session.user });
   policy.todoShares.allowDelete.where((share) =>
     policy.todos.exists.where({
       id: share.todoId,

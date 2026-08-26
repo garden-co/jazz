@@ -2009,18 +2009,19 @@ mod tests {
 
     #[test]
     fn schema_roundtrip_strips_policies_but_preserves_hash() {
-        let schema = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("todos")
-                    .column("id", ColumnType::Uuid)
-                    .column("owner_id", ColumnType::Uuid)
-                    .column("title", ColumnType::Text)
-                    .policies(TablePolicies::new().with_select(PolicyExpr::eq_session(
-                        "owner_id",
-                        vec!["user_id".to_string()],
-                    ))),
-            )
-            .build();
+        let schema =
+            SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("todos")
+                        .column("id", ColumnType::Uuid)
+                        .column("owner_id", ColumnType::Uuid)
+                        .column("title", ColumnType::Text)
+                        .policies(TablePolicies::new().with_select(PolicyExpr::eq_session(
+                            "owner_id",
+                            vec!["user".to_owned()],
+                        ))),
+                )
+                .build();
 
         let original_hash = jazz::tools::public_schema::SchemaHash::compute(&schema);
         let encoded = encode_schema(&schema);
@@ -2068,7 +2069,7 @@ mod tests {
                 column: "status".to_string(),
                 values: vec![
                     PolicyValue::Literal(Value::Text("active".to_string())),
-                    PolicyValue::SessionRef(vec!["user_id".to_string()]),
+                    PolicyValue::SessionRef(vec!["user".to_owned()]),
                 ],
             },
             PolicyExpr::SessionCmp {
@@ -2091,7 +2092,7 @@ mod tests {
                 path: vec!["claims".to_string(), "deleted_at".to_string()],
             },
             PolicyExpr::SessionIsNotNull {
-                path: vec!["userId".to_string()],
+                path: vec!["user".to_owned()],
             },
         ]);
         let permissions = HashMap::from([(

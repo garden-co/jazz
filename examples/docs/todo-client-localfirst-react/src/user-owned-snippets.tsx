@@ -66,9 +66,9 @@ export const explicitApp: s.App<ExplicitAppSchema> = s.defineApp(schemaExplicit)
 
 // #region owned-permissions-explicit
 s.definePermissions(explicitApp, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner_id: session.user_id });
+  policy.todos.allowRead.where({ owner_id: session.user });
   policy.todos.allowInsert.always();
-  policy.todos.allowUpdate.whereOld({ owner_id: session.user_id });
-  policy.todos.allowDelete.where({ owner_id: session.user_id });
+  policy.todos.allowUpdate.whereOld({ owner_id: session.user });
+  policy.todos.allowDelete.where({ owner_id: session.user });
 });
 // #endregion owned-permissions-explicit

@@ -161,7 +161,7 @@ fn recursive_permissions_schema() -> JazzSchema {
         "team_edges",
         "member",
         "parent",
-        RelValueRef::SessionRef(vec!["user_id".to_owned()]),
+        RelValueRef::SessionRef(vec!["user".to_owned()]),
     );
 
     schema_fixture::compile(

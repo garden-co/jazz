@@ -14,13 +14,13 @@ pub fn compile(builder: SchemaBuilder) -> JazzSchema {
 
 /// Compare a UUID column with the authenticated session identity.
 ///
-/// Public schemas expose that identity as `session.user_id`; JWT `sub` is an
+/// Public schemas expose that identity as `session.user`; JWT `sub` is an
 /// authentication transport detail, not a policy-session field.
 pub fn session_user_id_column(column: &str) -> PolicyExpr {
     PolicyExpr::Cmp {
         column: column.to_owned(),
         op: CmpOp::Eq,
-        value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+        value: PolicyValue::SessionRef(vec!["user".to_owned()]),
     }
 }
 
