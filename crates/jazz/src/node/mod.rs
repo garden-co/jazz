@@ -1183,16 +1183,33 @@ impl CurrentRow {
     pub(crate) fn provenance(&self) -> Result<Option<RowProvenance>, Error> {
         let descriptor = self.record.descriptor();
         let borrowed = self.record.borrowed();
-        let Some(created_by_idx) = descriptor.field_index("$createdBy") else {
-            return Ok(None);
+        let indices = match (
+            descriptor.field_index("$createdBy"),
+            descriptor.field_index("$createdAt"),
+            descriptor.field_index("$updatedBy"),
+            descriptor.field_index("$updatedAt"),
+        ) {
+            (Some(created_by), Some(created_at), Some(updated_by), Some(updated_at)) => {
+                Some((created_by, created_at, updated_by, updated_at))
+            }
+            _ if descriptor.field_index("schema_version").is_some()
+                && descriptor.field_index("branch_key").is_some() =>
+            {
+                match (
+                    descriptor.field_index("created_by"),
+                    descriptor.field_index("created_at"),
+                    descriptor.field_index("updated_by"),
+                    descriptor.field_index("updated_at"),
+                ) {
+                    (Some(created_by), Some(created_at), Some(updated_by), Some(updated_at)) => {
+                        Some((created_by, created_at, updated_by, updated_at))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
         };
-        let Some(created_at_idx) = descriptor.field_index("$createdAt") else {
-            return Ok(None);
-        };
-        let Some(updated_by_idx) = descriptor.field_index("$updatedBy") else {
-            return Ok(None);
-        };
-        let Some(updated_at_idx) = descriptor.field_index("$updatedAt") else {
+        let Some((created_by_idx, created_at_idx, updated_by_idx, updated_at_idx)) = indices else {
             return Ok(None);
         };
         Ok(Some(RowProvenance {
@@ -1301,25 +1318,31 @@ impl CurrentRow {
     /// spurious application-visible row update.
     pub(crate) fn subscription_equivalent(&self, other: &Self) -> bool {
         let provenance_matches = match (self.provenance(), other.provenance()) {
-            // Some physical current-row carriers retain no provenance fields.
-            // Their absence is representational rather than a statement that
-            // the public provenance changed, so compare it only when both
-            // sides can express it.
-            (Ok(Some(left)), Ok(Some(right))) => left == right,
-            (Ok(_), Ok(_)) => true,
+            (Ok(left), Ok(right)) => left == right,
             _ => false,
         };
-        let left_cells = self.subscription_cells();
-        let right_cells = other.subscription_cells();
         self.table == other.table
             && self.row_uuid() == other.row_uuid()
             && self.deleted == other.deleted
-            && left_cells == right_cells
+            && self.subscription_cells_equivalent(other)
             && provenance_matches
     }
 
-    fn subscription_cells(&self) -> BTreeMap<String, Option<Value>> {
+    fn subscription_cells_equivalent(&self, other: &Self) -> bool {
+        let right_count = other.subscription_cells().count();
+        let mut left_count = 0_usize;
+        let all_left_match = self.subscription_cells().all(|(left_name, left_value)| {
+            left_count += 1;
+            other.subscription_cells().any(|(right_name, right_value)| {
+                left_name == right_name && left_value == right_value
+            })
+        });
+        all_left_match && left_count == right_count
+    }
+
+    fn subscription_cells(&self) -> impl Iterator<Item = (&str, Option<Value>)> + '_ {
         let descriptor = self.record.descriptor();
+        let borrowed = self.record.borrowed();
         let physical_current = descriptor.field_index("schema_version").is_some()
             && descriptor.field_index("created_by").is_some()
             && descriptor.field_index("updated_by").is_some();
@@ -1327,15 +1350,13 @@ impl CurrentRow {
             .fields()
             .iter()
             .enumerate()
-            .filter_map(|(idx, field)| {
+            .filter_map(move |(idx, field)| {
                 let name = field.name.as_ref()?.as_str();
                 let name = if name.starts_with("user_") {
                     let name = self::query_engine::logical_user_column(name);
-                    self::query_engine::aggregate_output_logical_name(name)
-                        .unwrap_or(name)
-                        .to_owned()
+                    self::query_engine::aggregate_output_logical_name(name).unwrap_or(name)
                 } else if let Some(name) = self::query_engine::aggregate_output_logical_name(name) {
-                    name.to_owned()
+                    name
                 } else if matches!(
                     name,
                     "$createdBy"
@@ -1360,15 +1381,14 @@ impl CurrentRow {
                 {
                     return None;
                 } else {
-                    name.to_owned()
+                    name
                 };
-                let value = match self.record.borrowed().get_idx(idx).ok()? {
+                let value = match borrowed.get_idx(idx).ok()? {
                     Value::Nullable(value) => value.map(|value| *value),
                     value => Some(value),
                 };
                 Some((name, value))
             })
-            .collect()
     }
 
     #[cfg(test)]
