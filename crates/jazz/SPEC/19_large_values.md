@@ -418,10 +418,11 @@ name (or omitting `select`) materializes the complete primitive as before.
 The binding/query IR carries this demand to Groove; it is not implemented by
 first materializing a whole host value and slicing it in TypeScript.
 
-`Db.update` accepts partial mutations in the ordinary patch object:
+`Db.applyDiffs` accepts partial mutations, while `Db.update` retains ordinary
+whole-column replacement semantics:
 
 ```ts
-db.update(app.things, thingId, {
+db.applyDiffs(app.things, thingId, {
   byteField: { within: bytePage, splices: [{ at: 4, delete: 3, insert: bytes }] },
   textField: { within: textPage, splices: [{ at: 3, delete: 1, insert: "x" }] },
   textFieldUtf8: { within: utf8Page, splices: [{ atUtf8: 3, deleteUtf8: 1, insert: "x" }] },

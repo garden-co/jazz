@@ -783,14 +783,14 @@ type LargeValueUpdateForBuilder<TBuilder extends AnyTypedColumnBuilder> =
         ? JsonSetValueUpdate
         : never;
 
-/** Ordinary `Db.update` input augmented with typed partial large-value edits. */
+/** Typed partial-value input accepted by `Db.applyDiffs`. */
 export type TableLargeValueUpdate<
   TSchema extends SchemaLike,
   TTable extends TableName<TSchema>,
 > = Simplify<{
-  [TColumn in ColumnName<TSchema, TTable>]?:
-    | InsertColumnValue<BuilderForColumn<TSchema, TTable, TColumn>>
-    | LargeValueUpdateForBuilder<BuilderForColumn<TSchema, TTable, TColumn>>;
+  [TColumn in ColumnName<TSchema, TTable>]?: LargeValueUpdateForBuilder<
+    BuilderForColumn<TSchema, TTable, TColumn>
+  >;
 }>;
 
 type PageForValue<T> =
@@ -1329,7 +1329,7 @@ export interface Table<TTable extends string, TSchema extends SchemaLike> extend
   DefaultTableSelection<SchemaMeta<TTable, TSchema>>,
   TSchema
 > {
-  /** @internal Phantom used by `Db.update` to retain column-specific edit shapes. */
+  /** @internal Phantom used by `Db.applyDiffs` to retain column-specific edit shapes. */
   readonly _largeValueUpdateType: TableLargeValueUpdate<
     TSchema,
     Extract<TTable, TableName<TSchema>>

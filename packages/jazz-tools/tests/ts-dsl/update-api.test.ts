@@ -142,7 +142,7 @@ describe("TS Update API", () => {
 
   it("validates large-value update descriptor coordinates before native writes", () => {
     expect(() =>
-      db.update(app.table_with_defaults, "00000000-0000-0000-0000-000000000001", {
+      db.applyDiffs(app.table_with_defaults, "00000000-0000-0000-0000-000000000001", {
         string: {
           within: { from: 2, to: 1 },
           splices: [],
@@ -151,7 +151,7 @@ describe("TS Update API", () => {
     ).toThrow('Large-value page for "string" must have from <= to.');
 
     expect(() =>
-      db.update(app.table_with_defaults, "00000000-0000-0000-0000-000000000001", {
+      db.applyDiffs(app.table_with_defaults, "00000000-0000-0000-0000-000000000001", {
         bytes: {
           within: { from: 0, to: 1 },
           splices: [{ at: 0, delete: 0, insert: "x" }],
@@ -160,7 +160,7 @@ describe("TS Update API", () => {
     ).toThrow('Byte splice insert for "bytes" must be a Uint8Array.');
 
     expect(() =>
-      db.update(app.table_with_defaults, "00000000-0000-0000-0000-000000000001", {
+      db.applyDiffs(app.table_with_defaults, "00000000-0000-0000-0000-000000000001", {
         json: {
           edits: [{ op: "remove", at: "/name" }],
         },
@@ -168,7 +168,7 @@ describe("TS Update API", () => {
     ).toThrow('JSON update "json" supports only { op: "set", at, value } edits.');
   });
 
-  it("rejects large-value descriptors on upsert because the public DSL is update-only", () => {
+  it("rejects partial-value descriptors on upsert because the public DSL is applyDiffs-only", () => {
     expect(() =>
       db.upsert(app.table_with_defaults, "00000000-0000-0000-0000-000000000001", {
         string: {
@@ -176,7 +176,7 @@ describe("TS Update API", () => {
           splices: [{ at: 0, delete: 0, insert: "x" }],
         },
       } as never),
-    ).toThrow("Large-value partial descriptors are only supported by update.");
+    ).toThrow("Partial-value descriptors are only supported by applyDiffs.");
   });
 
   it("trying to update an already-deleted row fails", async () => {
