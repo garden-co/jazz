@@ -1308,7 +1308,7 @@ export class JazzClient {
     return new WriteHandle(committedBatchId(result), this);
   }
 
-  /** @internal Typed `Db.update` lowering; not exposed as an imperative API. */
+  /** @internal Typed `Db.applyDiffs` lowering; not exposed as an imperative API. */
   updateLargeValues(
     table: string,
     objectId: string,
@@ -1346,7 +1346,7 @@ export class JazzClient {
   ): MutationResult {
     if (openBatchId || branch) {
       throw new Error(
-        "Large-value partial updates are not yet supported inside transactions or branch views.",
+        "Partial-value updates are not yet supported inside transactions or branch views.",
       );
     }
     const effectiveSession = this.resolveWriteSession(session, attribution);
@@ -1357,7 +1357,7 @@ export class JazzClient {
       updatedAt,
     );
     if (!this.runtime.updateLargeValues) {
-      throw new Error("Native runtime does not support typed large-value updates.");
+      throw new Error("Native runtime does not support typed partial-value updates.");
     }
     return this.runtime.updateLargeValues(table, objectId, updates, descriptors, writeContext);
   }

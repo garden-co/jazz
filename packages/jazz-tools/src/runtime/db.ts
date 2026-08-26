@@ -711,7 +711,7 @@ function splitLargeValueUpdate(
 
 function rejectLargeValueDescriptorsInUpsert(descriptors: readonly WireLargeValueUpdate[]): void {
   if (descriptors.length > 0) {
-    throw new Error("Large-value partial descriptors are only supported by update.");
+    throw new Error("Partial-value descriptors are only supported by applyDiffs.");
   }
 }
 
@@ -1164,19 +1164,14 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * The update is scoped to this transaction, and will only be globally visible
    * once it's committed.
    */
-  update<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate>(
-    table: TableProxy<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate>,
+  update<T, Init>(
+    table: TableProxy<T, Init>,
     id: string,
-    data: LargeValueUpdate,
+    data: Partial<Init>,
     options?: UpdateOptions,
   ): void {
     this.bindTable(table);
-    const { ordinary, descriptors } = splitLargeValueUpdate(
-      data as Record<string, unknown>,
-      table._schema,
-      table._table,
-    );
-    const transformedData = transformInputColumns(table, ordinary);
+    const transformedData = transformInputColumns(table, data);
     const updates = toWriteRecordForOperation(
       "Update",
       transformedData,
@@ -1186,30 +1181,16 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const client = this.resolveClient(table._schema);
     const { openBatchId, session, attribution } = this.requireBinding("update");
     const normalizedOptions = normalizeUpdateOptions(table._schema, table._table, options);
-    if (descriptors.length > 0) {
-      client.updateLargeValuesInternal(
-        table._table,
-        id,
-        updates,
-        descriptors,
-        normalizedOptions?.updatedAt,
-        session,
-        attribution,
-        openBatchId,
-        normalizedOptions?.branch,
-      );
-    } else {
-      client.updateInternal(
-        table._table,
-        id,
-        updates,
-        normalizedOptions?.updatedAt,
-        session,
-        attribution,
-        openBatchId,
-        normalizedOptions?.branch,
-      );
-    }
+    client.updateInternal(
+      table._table,
+      id,
+      updates,
+      normalizedOptions?.updatedAt,
+      session,
+      attribution,
+      openBatchId,
+      normalizedOptions?.branch,
+    );
   }
 
   /**
@@ -1900,7 +1881,39 @@ export class Db {
    *
    * Use {@link WriteHandle.wait} to wait for durable confirmation.
    */
-  update<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate>(
+  update<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    options?: UpdateOptions,
+  ): WriteHandle {
+    const client = this.getClient(table._schema);
+    const transformedData = transformInputColumns(table, data);
+    const updates = toWriteRecordForOperation(
+      "Update",
+      transformedData,
+      table._schema,
+      table._table,
+    );
+    const context = this.getRuntimeOperationContext();
+    return this.wrapWriteWait(
+      client.update(
+        table._table,
+        id,
+        updates,
+        normalizeUpdateOptions(table._schema, table._table, options),
+        context?.session,
+        context?.attribution,
+      ),
+    );
+  }
+
+  /**
+   * Apply page-relative text/bytes splices or JSON edits to an existing value.
+   * This works for either inline or indirect storage; whole-column replacement
+   * remains {@link update}.
+   */
+  applyDiffs<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate>(
     table: TableProxy<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate>,
     id: string,
     data: LargeValueUpdate,
@@ -1912,34 +1925,20 @@ export class Db {
       table._schema,
       table._table,
     );
-    const transformedData = transformInputColumns(table, ordinary);
-    const updates = toWriteRecordForOperation(
-      "Update",
-      transformedData,
-      table._schema,
-      table._table,
-    );
+    if (Object.keys(ordinary).length > 0 || descriptors.length === 0) {
+      throw new Error("applyDiffs accepts one or more field diff descriptors, not whole-column values.");
+    }
     const context = this.getRuntimeOperationContext();
-    const normalized = normalizeUpdateOptions(table._schema, table._table, options);
     return this.wrapWriteWait(
-      descriptors.length > 0
-        ? client.updateLargeValues(
-            table._table,
-            id,
-            updates,
-            descriptors,
-            normalized,
-            context?.session,
-            context?.attribution,
-          )
-        : client.update(
-            table._table,
-            id,
-            updates,
-            normalized,
-            context?.session,
-            context?.attribution,
-          ),
+      client.updateLargeValues(
+        table._table,
+        id,
+        {},
+        descriptors,
+        normalizeUpdateOptions(table._schema, table._table, options),
+        context?.session,
+        context?.attribution,
+      ),
     );
   }
 
