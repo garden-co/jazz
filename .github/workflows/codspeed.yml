@@ -89,7 +89,10 @@ jobs:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')
     name: W1 read wall time (memory + RocksDB)
     runs-on: codspeed-macro
-    timeout-minutes: 20
+    # A cold macro runner currently spends ~14 minutes rebuilding RocksDB and
+    # another ~11 minutes measuring both backends. Keep enough headroom for the
+    # complete pair so a successful memory suite cannot starve RocksDB.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
