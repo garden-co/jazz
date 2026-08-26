@@ -321,7 +321,7 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
         fixture
     }
 
-    pub fn subscribe_point_activity_once(self) -> usize {
+    pub fn subscribe_point_activity_once(&self) -> usize {
         let mut subscription = block_on(self.db.subscribe(
             &self.point_activity,
             ReadOpts {

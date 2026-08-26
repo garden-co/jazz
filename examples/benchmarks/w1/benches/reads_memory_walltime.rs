@@ -81,6 +81,13 @@ fn subscribe_activity_policy_point_scaling_memory(
         .bench_local_values(|fixture| fixture.subscribe_point_activity_once());
 }
 
+#[divan::bench(sample_count = 5)]
+fn resubscribe_activity_point_profile_s_memory(bencher: divan::Bencher<'_, '_>) {
+    let fixture = Fixture::<MemoryStorage>::memory(300, 1_200, 9_000);
+    assert_eq!(fixture.subscribe_point_activity_once(), 1);
+    bencher.bench_local(|| fixture.subscribe_point_activity_once());
+}
+
 /// Fixed-result scaling receipt exposing query-engine candidate hydration.
 #[divan::bench(args = [(300, 1_200, 900), (3_000, 12_000, 9_000)], sample_count = 5)]
 fn query_comments_scaling_memory(
