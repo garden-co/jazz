@@ -1095,11 +1095,15 @@ fn membership_grant_then_parent_query_keeps_disjunctive_read_proof(indexed: bool
     assert!(workspace_subscription.try_next_event().is_some());
 }
 
+/// Covers the normal source layout after the self-membership subscription has
+/// already delivered workspace policy support to the client.
 #[test]
 fn db_sync_surface_membership_grant_then_parent_query_keeps_disjunctive_read_proof() {
     membership_grant_then_parent_query_keeps_disjunctive_read_proof(false);
 }
 
+/// Covers the indexed layout, where a disjunctive proof must still retain the
+/// complete source path instead of selecting one arm's index for the union.
 #[test]
 fn db_sync_surface_indexed_membership_grant_then_parent_query_keeps_disjunctive_read_proof() {
     membership_grant_then_parent_query_keeps_disjunctive_read_proof(true);
