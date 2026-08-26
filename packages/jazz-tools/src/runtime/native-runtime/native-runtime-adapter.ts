@@ -126,9 +126,14 @@ type NativeWriteOptions = {
 type PendingNativeRead = { poll(): Uint8Array | null };
 type NativeReadResult = Uint8Array | PendingNativeRead;
 type PendingNativeSubscriptionBatch = object;
+type PendingNativeWrite = { poll(): Write | null };
 
 function isPendingNativeRead(value: unknown): value is PendingNativeRead {
   return typeof (value as PendingNativeRead | null)?.poll === "function";
+}
+
+function isPendingNativeWrite(value: unknown): value is PendingNativeWrite {
+  return typeof (value as PendingNativeWrite | null)?.poll === "function";
 }
 
 type NativeInsertOptions = NativeWriteOptions & {
@@ -320,7 +325,7 @@ type NativeDb = {
     rowId: Uint8Array,
     column: string,
     bytes: Uint8Array,
-  ): Write | Promise<Write>;
+  ): Write | PendingNativeWrite | Promise<Write | PendingNativeWrite>;
   spliceValue?(
     table: string,
     rowId: Uint8Array,
@@ -328,7 +333,7 @@ type NativeDb = {
     offset: number,
     deleteLength: number,
     insert: Uint8Array,
-  ): Write | Promise<Write>;
+  ): Write | PendingNativeWrite | Promise<Write | PendingNativeWrite>;
   connectUpstream(): Transport;
   connectUpstreamWithSession?(
     protocolVersion: number,
@@ -924,8 +929,9 @@ export class NativeRuntimeAdapter implements Runtime {
       return await this.ownerRuntime.appendValue(table, objectId, column, bytes);
     }
     if (!this.db.appendValue) throw new Error("Native runtime does not expose value append");
+    const write = await this.db.appendValue(table, parseUuid(objectId), column, bytes);
     return this.finishMutation(
-      await this.db.appendValue(table, parseUuid(objectId), column, bytes),
+      isPendingNativeWrite(write) ? await this.awaitNativeWrite(write) : write,
     );
   }
 
@@ -948,8 +954,16 @@ export class NativeRuntimeAdapter implements Runtime {
       );
     }
     if (!this.db.spliceValue) throw new Error("Native runtime does not expose value splice");
+    const write = await this.db.spliceValue(
+      table,
+      parseUuid(objectId),
+      column,
+      offset,
+      deleteLength,
+      insert,
+    );
     return this.finishMutation(
-      await this.db.spliceValue(table, parseUuid(objectId), column, offset, deleteLength, insert),
+      isPendingNativeWrite(write) ? await this.awaitNativeWrite(write) : write,
     );
   }
 
@@ -2153,6 +2167,16 @@ export class NativeRuntimeAdapter implements Runtime {
       const bytes = result.poll();
       if (bytes !== null) return bytes;
       if (this.closed) throw new Error("large-value hydration was cancelled by runtime shutdown");
+      await this.pumpServerTransport();
+      await sleep(0);
+    }
+  }
+
+  private async awaitNativeWrite(pending: PendingNativeWrite): Promise<Write> {
+    for (;;) {
+      const write = pending.poll();
+      if (write !== null) return write;
+      if (this.closed) throw new Error("large-value mutation was cancelled by runtime shutdown");
       await this.pumpServerTransport();
       await sleep(0);
     }
