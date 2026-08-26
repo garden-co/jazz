@@ -1146,11 +1146,14 @@ fn edge_client_ingress_proves_actions_before_one_routed_edge_fate() {
     let client = open_db(0xa1, alice, &schema);
     let (client_transport, edge_transport, _client_sent, edge_sent) = duplex_with_taps();
     let client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let _edge_client = edge.server.accept_edge_authority_subscriber_with_claims(
-        edge_transport,
-        alice,
-        test_provider_claims(alice),
-    );
+    let _edge_client = edge
+        .server
+        .accept_edge_authority_subscriber_with_claims_and_trust(
+            edge_transport,
+            alice,
+            test_provider_claims(alice),
+            CommitUnitTrust::Session,
+        );
 
     let inserted = client
         .insert(
@@ -1513,11 +1516,14 @@ fn edge_route_capacity_rejects_instead_of_reporting_edge_acceptance() {
         2,
     );
     let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let _subscriber = edge.server.accept_edge_authority_subscriber_with_claims(
-        edge_transport,
-        identity,
-        BTreeMap::new(),
-    );
+    let _subscriber = edge
+        .server
+        .accept_edge_authority_subscriber_with_claims_and_trust(
+            edge_transport,
+            identity,
+            BTreeMap::new(),
+            CommitUnitTrust::Session,
+        );
     let write = client
         .insert(
             "todos",
@@ -1595,11 +1601,14 @@ fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
         13,
     );
     let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let edge_client = edge.server.accept_edge_authority_subscriber_with_claims(
-        edge_transport,
-        alice,
-        BTreeMap::new(),
-    );
+    let edge_client = edge
+        .server
+        .accept_edge_authority_subscriber_with_claims_and_trust(
+            edge_transport,
+            alice,
+            BTreeMap::new(),
+            CommitUnitTrust::Session,
+        );
 
     let write = client
         .insert(
@@ -1885,11 +1894,14 @@ fn edge_fate_handoff_redrives_real_downstream_write_and_ignores_old_authority() 
         2,
     );
     let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let edge_client = edge.server.accept_edge_authority_subscriber_with_claims(
-        edge_transport,
-        identity,
-        BTreeMap::new(),
-    );
+    let edge_client = edge
+        .server
+        .accept_edge_authority_subscriber_with_claims_and_trust(
+            edge_transport,
+            identity,
+            BTreeMap::new(),
+            CommitUnitTrust::Session,
+        );
 
     let write = client
         .insert(
@@ -2032,11 +2044,14 @@ fn edge_parks_downstream_fate_until_a_later_authority_connects() {
         2,
     );
     let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let _edge_client = edge.server.accept_edge_authority_subscriber_with_claims(
-        edge_transport,
-        identity,
-        BTreeMap::new(),
-    );
+    let _edge_client = edge
+        .server
+        .accept_edge_authority_subscriber_with_claims_and_trust(
+            edge_transport,
+            identity,
+            BTreeMap::new(),
+            CommitUnitTrust::Session,
+        );
     let write = client
         .insert(
             "todos",
@@ -2109,11 +2124,14 @@ fn edge_write_before_upstream_admission_binds_and_redrives_fate_route() {
         13,
     );
     let client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let edge_client = edge.server.accept_edge_authority_subscriber_with_claims(
-        edge_transport,
-        alice,
-        BTreeMap::new(),
-    );
+    let edge_client = edge
+        .server
+        .accept_edge_authority_subscriber_with_claims_and_trust(
+            edge_transport,
+            alice,
+            BTreeMap::new(),
+            CommitUnitTrust::Session,
+        );
 
     let write = client
         .insert(
@@ -2123,6 +2141,21 @@ fn edge_write_before_upstream_admission_binds_and_redrives_fate_route() {
         )
         .unwrap();
     let tx_id = write.mergeable_tx_id();
+    let canonical = client
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(tx_id)
+        .unwrap();
+    let mut reconstructed = canonical.clone();
+    let SyncMessage::CommitUnit { versions, .. } = &mut reconstructed else {
+        unreachable!("commit_unit_for returns a CommitUnit");
+    };
+    versions.clear();
+    edge.server.outbox.borrow_mut().push(PendingUpload {
+        tx_id,
+        unit: Some(reconstructed),
+    });
     client.tick().unwrap();
     edge.tick().unwrap();
     client.tick().unwrap();
@@ -2135,6 +2168,17 @@ fn edge_write_before_upstream_admission_binds_and_redrives_fate_route() {
         None,
         "an offline-ready edge retains the downstream obligation without inventing authority"
     );
+    let outbox = edge.server.outbox.borrow();
+    let retained = outbox
+        .iter()
+        .find(|pending| pending.tx_id == tx_id)
+        .expect("accepted Edge write remains queued for its future Core");
+    assert_eq!(
+        retained.unit.as_ref(),
+        Some(&canonical),
+        "the exact inbound unit must replace an earlier same-tx reconstruction"
+    );
+    drop(outbox);
     client_upstream
         .borrow_mut()
         .transport
@@ -2222,11 +2266,14 @@ fn stale_same_authority_session_cannot_settle_or_forward_a_routed_fate() {
         2,
     );
     let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let _edge_client = edge.server.accept_edge_authority_subscriber_with_claims(
-        edge_transport,
-        identity,
-        BTreeMap::new(),
-    );
+    let _edge_client = edge
+        .server
+        .accept_edge_authority_subscriber_with_claims_and_trust(
+            edge_transport,
+            identity,
+            BTreeMap::new(),
+            CommitUnitTrust::Session,
+        );
     let write = client
         .insert(
             "todos",
@@ -2288,6 +2335,102 @@ fn stale_same_authority_session_cannot_settle_or_forward_a_routed_fate() {
     assert_eq!(
         write.write_state().unwrap().durability,
         DurabilityTier::Global
+    );
+}
+
+#[test]
+fn outbox_release_requires_current_admitted_authority_receipt() {
+    let schema = schema();
+    let identity = AuthorSubject::for_test_bytes([0xa4; 16]);
+    let edge_node = NodeUuid::from_bytes([0xe4; 16]);
+    let authority_node = NodeUuid::from_bytes([0xa4; 16]);
+    let edge = open_core(0xe4, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xc4, identity, &schema);
+    let (client_transport, edge_transport) = duplex();
+    let _client_upstream = block_on(client.connect_upstream(client_transport));
+    let _edge_client = edge
+        .server
+        .accept_edge_authority_subscriber_with_claims_and_trust(
+            edge_transport,
+            identity,
+            BTreeMap::new(),
+            CommitUnitTrust::TrustedBackend,
+        );
+    let write = client
+        .insert(
+            "todos",
+            cells("authority receipt", false, identity),
+            Default::default(),
+        )
+        .unwrap();
+    let tx_id = write.mergeable_tx_id();
+    client.tick().unwrap();
+    edge.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(
+        write.write_state().unwrap().durability,
+        DurabilityTier::Edge,
+        "an Edge trusted-backend session must not assign Global durability locally"
+    );
+    assert!(
+        edge.server
+            .outbox
+            .borrow()
+            .iter()
+            .any(|pending| pending.tx_id == tx_id),
+        "local authority acceptance must retain the future upstream upload"
+    );
+
+    let old_authority = open_core(0xa4, AuthorSubject::SYSTEM, &schema);
+    let current_authority = open_core(0xa4, AuthorSubject::SYSTEM, &schema);
+    let (edge_old_transport, old_transport) =
+        duplex_with_admitted_session_context(identity, edge_node, 10, authority_node, 20);
+    let _edge_old = block_on(edge.server.connect_upstream(edge_old_transport));
+    let old = old_authority.accept_subscriber(old_transport, identity);
+    let (edge_current_transport, current_transport) =
+        duplex_with_admitted_session_context(identity, edge_node, 11, authority_node, 21);
+    let _edge_current = block_on(edge.server.connect_upstream(edge_current_transport));
+    let current = current_authority.accept_subscriber(current_transport, identity);
+    let current_context = edge.server.admitted_upstream_authorities.borrow()[1];
+    *edge.server.admitted_upstream_authority.borrow_mut() = Some(current_context);
+
+    old.borrow_mut()
+        .transport
+        .send(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(1)),
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    edge.tick().unwrap();
+    assert!(
+        edge.server
+            .outbox
+            .borrow()
+            .iter()
+            .any(|pending| pending.tx_id == tx_id),
+        "a direct terminal receipt from a superseded authority must not release the upload"
+    );
+
+    current
+        .borrow_mut()
+        .transport
+        .send(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(2)),
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    edge.tick().unwrap();
+    assert!(
+        edge.server
+            .outbox
+            .borrow()
+            .iter()
+            .all(|pending| pending.tx_id != tx_id),
+        "the currently admitted authority's terminal receipt releases the upload"
     );
 }
 

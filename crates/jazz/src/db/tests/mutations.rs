@@ -1303,6 +1303,7 @@ fn db_sync_surface_uploads_client_exclusive_commit_for_global_fate() {
         client.write_state(tx_id).unwrap(),
         WriteState {
             fate: Fate::Pending,
+            global_time: None,
             durability: DurabilityTier::Local,
         }
     );
@@ -1311,13 +1312,13 @@ fn db_sync_surface_uploads_client_exclusive_commit_for_global_fate() {
     server.tick().unwrap();
     client.tick().unwrap();
 
-    assert_eq!(
-        client.write_state(tx_id).unwrap(),
-        WriteState {
-            fate: Fate::Accepted,
-            durability: DurabilityTier::Global,
-        }
+    let state = client.write_state(tx_id).unwrap();
+    assert_eq!(state.fate, Fate::Accepted);
+    assert!(
+        state.global_time.is_some(),
+        "the authority acceptance carries its assigned Global timestamp"
     );
+    assert_eq!(state.durability, DurabilityTier::Global);
     let server_rows = server.read(&Query::from("todos")).unwrap();
     assert_eq!(server_rows.len(), 1);
     assert_eq!(server_rows[0].row_uuid(), row);
@@ -1396,13 +1397,13 @@ fn db_sync_surface_returns_exclusive_conflict_fate_to_client() {
     server.tick().unwrap();
     client.tick().unwrap();
 
-    assert_eq!(
-        client.write_state(first_tx).unwrap(),
-        WriteState {
-            fate: Fate::Accepted,
-            durability: DurabilityTier::Global,
-        }
+    let state = client.write_state(first_tx).unwrap();
+    assert_eq!(state.fate, Fate::Accepted);
+    assert!(
+        state.global_time.is_some(),
+        "the authority acceptance carries its assigned Global timestamp"
     );
+    assert_eq!(state.durability, DurabilityTier::Global);
     let rows = server.read(&Query::from("todos")).unwrap();
     assert_eq!(rows.len(), 1);
     let table = &schema.tables[0];
@@ -1455,6 +1456,7 @@ fn unhandled_rejection_is_delivered_as_mutation_error() {
         client.write_state(write.mergeable_tx_id()).unwrap(),
         WriteState {
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            global_time: None,
             durability: DurabilityTier::Edge,
         }
     );
@@ -1688,6 +1690,7 @@ fn write_fate_and_durability_are_queryable_through_facade() {
         write.write_state().unwrap(),
         WriteState {
             fate: Fate::Pending,
+            global_time: None,
             durability: DurabilityTier::Local,
         }
     );
@@ -1700,13 +1703,13 @@ fn write_fate_and_durability_are_queryable_through_facade() {
     server.tick().unwrap();
     client.tick().unwrap();
 
-    assert_eq!(
-        write.write_state().unwrap(),
-        WriteState {
-            fate: Fate::Accepted,
-            durability: DurabilityTier::Global,
-        }
+    let state = write.write_state().unwrap();
+    assert_eq!(state.fate, Fate::Accepted);
+    assert!(
+        state.global_time.is_some(),
+        "the authority acceptance carries its assigned Global timestamp"
     );
+    assert_eq!(state.durability, DurabilityTier::Global);
     assert_eq!(
         block_on(write.wait(DurabilityTier::Global)).unwrap(),
         write.mergeable_tx_id()
