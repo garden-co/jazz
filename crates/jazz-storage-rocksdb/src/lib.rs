@@ -996,20 +996,26 @@ mod tests {
             dir.path(),
             [
                 ColumnFamilyDescriptor::new("records", Options::default()),
-                ColumnFamilyDescriptor::new("__groove_storage_internal_v1", Options::default()),
+                ColumnFamilyDescriptor::new(ROCKSDB_INTERNAL_CF, Options::default()),
             ],
         )
         .unwrap();
         db.put_cf(
-            db.cf_handle("__groove_storage_internal_v1").unwrap(),
+            db.cf_handle(ROCKSDB_INTERNAL_CF).unwrap(),
             ROCKSDB_VALUE_FORMAT_KEY,
             b"v2",
         )
         .unwrap();
         drop(db);
         for _ in 0..2 {
-            assert!(RocksDbStorage::open(dir.path(), &["records"]).is_err());
+            assert!(RocksDbStorage::open(dir.path(), &["records", "must-not-be-created"]).is_err());
         }
+        assert!(
+            !DB::list_cf(&options, dir.path())
+                .unwrap()
+                .iter()
+                .any(|cf| cf == "must-not-be-created")
+        );
     }
 
     #[test]
