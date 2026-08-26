@@ -47,6 +47,20 @@ fn update_activity_indexed_predicate_no_subscription_memory(bencher: divan::Benc
     bencher.bench_local(|| fixture.toggle_activity_indexed_predicate());
 }
 
+/// Trusted-session update with a row-dependent SELECT/UPDATE policy.
+#[divan::bench(sample_count = 10)]
+fn update_activity_policy_no_subscription_memory(bencher: divan::Bencher<'_, '_>) {
+    let mut fixture = Fixture::<MemoryStorage>::memory_profile_s_policy_update();
+    bencher.bench_local(|| fixture.toggle_activity_indexed_predicate());
+}
+
+#[divan::bench(args = [900, 9_000], sample_count = 3)]
+fn update_activity_policy_scaling_memory(bencher: divan::Bencher<'_, '_>, activity_events: usize) {
+    let mut fixture =
+        Fixture::<MemoryStorage>::memory_policy_update(3_000, 12_000, activity_events);
+    bencher.bench_local(|| fixture.toggle_activity_indexed_predicate());
+}
+
 /// Fixed-result scaling receipt exposing query-engine candidate hydration.
 #[divan::bench(args = [(300, 1_200, 900), (3_000, 12_000, 9_000)], sample_count = 5)]
 fn query_comments_scaling_memory(

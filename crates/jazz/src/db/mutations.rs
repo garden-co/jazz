@@ -2473,18 +2473,13 @@ where
             };
             return Ok((patch, parent, authored_columns));
         }
-        let existing = self
-            .local_row_for_trusted_identity(table, row, identity)
-            .await?
-            .ok_or_else(|| read_for_write_denied("UPDATE", table))?;
         let (mut cells, parent) = {
             let mut node = self.node.node.lock().await;
-            let cells = node
-                .current_physical_cells_in_schema(self.schema_version_id, table, row)
+            let (cells, parent) = node
+                .current_physical_cells_and_winner_in_schema(self.schema_version_id, table, row)
                 .await?
-                .ok_or_else(|| read_for_write_denied("UPDATE", table))?;
-            let parent = node.current_row_tx_id(&existing).await;
-            (cells, parent)
+                .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+            (cells, Some(parent))
         };
         cells.extend(patch);
         Ok((cells, parent, authored_columns))
