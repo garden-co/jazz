@@ -55,7 +55,6 @@ import {
   parseJwtPayload,
   internalSessionFromVerifiedReservedJwtPayload,
   resolveClientInternalSessionSync,
-  type ClientSessionInput,
 } from "./client-session.js";
 import { canonicalAuthorSubject } from "./author-id.js";
 import {
