@@ -5,7 +5,7 @@
 
 use super::peer_connection::{
     ConnectionLink, PeerConnection, SubscriberConnectionState, UpstreamConnectionState,
-    mutation_error_event, take_pending_mutation_error_delivery,
+    handle_write_state_update, mutation_error_event, take_pending_mutation_error_delivery,
 };
 use super::*;
 
@@ -229,10 +229,22 @@ where
             };
             let tx_id = published.tx_id();
             let persistence = published.persist().await;
-            self.node
-                .lock()
-                .await
-                .settle_published_transaction(tx_id, persistence)?;
+            {
+                let mut node = self.node.lock().await;
+                node.settle_published_transaction(tx_id, persistence)?;
+            }
+            // Deferred publications advance a write from resident visibility
+            // to Local durability here, rather than through a peer fate
+            // message. Wake both binding callbacks and Rust waiters after the
+            // state transition so a waiter registered before the host tick can
+            // re-check the new durability.
+            handle_write_state_update(
+                &self.node,
+                &self.write_state_waiters,
+                &self.mutation_errors,
+                &self.scheduler,
+                tx_id,
+            );
             let settled = self
                 .pending_local_publications
                 .borrow_mut()

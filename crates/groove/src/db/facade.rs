@@ -16,6 +16,18 @@ fn is_retryable_upload_error(error: &Error) -> bool {
 }
 
 impl Database {
+    /// Whether this database owns the lifecycle mutex for resident
+    /// publications that have not reached the durable frontier. Only that
+    /// exact owner may continue its staging work without acquiring the mutex.
+    fn joins_held_resident_large_value_lifecycle(&self) -> bool {
+        let held = self.large_value_lifecycle_held.get();
+        debug_assert!(
+            !held || self.large_value_publication_lifecycle_guard.is_some(),
+            "resident lifecycle marker requires its owned mutex guard"
+        );
+        held
+    }
+
     /// Open a schema-aware database over an ordered key/value store.
     ///
     /// `Database::new` does not create storage column families itself. The
@@ -306,7 +318,16 @@ impl Database {
         require_existing: bool,
         pending_limit: Option<usize>,
     ) -> Result<bool, Error> {
-        let _lifecycle = self.large_value_lifecycle.lock().await;
+        // A resident publication that changes large-value reachability keeps
+        // this lock until its ordered persistence reaches the durable frontier.
+        // A later local write must be able to stage into that same publication
+        // sequence; waiting here would require the host tick that owns the
+        // first receipt, even though no competing lifecycle can interleave.
+        let _lifecycle = if self.joins_held_resident_large_value_lifecycle() {
+            None
+        } else {
+            Some(self.large_value_lifecycle.lock().await)
+        };
         // This must precede both chunk staging and metadata mutation. In
         // particular, a valid first child followed by a malformed second child
         // cannot strand the first in durable chunk storage.
@@ -520,7 +541,15 @@ impl Database {
         upload_id: crate::large_values::StagedLargeValueId,
         value_ref: &crate::large_values::LargeValueRef,
     ) -> Result<(), Error> {
-        let _lifecycle = self.large_value_lifecycle.lock().await;
+        // See `stage_large_value_chunk_batch_with_presence_and_pending_limit`:
+        // this receipt may be the next local member of an unpersisted resident
+        // publication sequence, so it must join the retained lock rather than
+        // wait for the host to persist its predecessor.
+        let _lifecycle = if self.joins_held_resident_large_value_lifecycle() {
+            None
+        } else {
+            Some(self.large_value_lifecycle.lock().await)
+        };
         let key = pending_large_value_upload_key(upload_id);
         let encoded = self
             .storage
@@ -835,7 +864,14 @@ impl Database {
         upload_id: crate::large_values::StagedLargeValueId,
         value_ref: crate::large_values::LargeValueRef,
     ) -> Result<Option<crate::large_values::StagedLargeValue>, Error> {
-        let _lifecycle = self.large_value_lifecycle.lock().await;
+        // The preceding stage may have joined an unpersisted resident
+        // publication sequence. Finalization is its same-thread continuation,
+        // not a competing lifecycle operation.
+        let _lifecycle = if self.joins_held_resident_large_value_lifecycle() {
+            None
+        } else {
+            Some(self.large_value_lifecycle.lock().await)
+        };
         let key = pending_large_value_upload_key(upload_id);
         let Some(encoded) = self
             .storage

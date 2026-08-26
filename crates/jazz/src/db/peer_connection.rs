@@ -4360,7 +4360,7 @@ fn notify_write_state_waiters(waiters: &WriteStateWaiters, tx_id: TxId) -> bool 
     handled_mutation_error
 }
 
-fn handle_write_state_update<S>(
+pub(super) fn handle_write_state_update<S>(
     node: &SharedNodeState<S>,
     waiters: &WriteStateWaiters,
     mutation_errors: &SharedMutationErrors,

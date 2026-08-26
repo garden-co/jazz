@@ -334,6 +334,72 @@ fn db_facade_mutation_lifecycle_writes_reads_deletes_and_restores() {
     assert_eq!(rows[0].cell(table, "done"), Some(Value::Bool(true)));
 }
 
+/// Deferred clients may construct a delete/restore handoff before the host
+/// has persisted the preceding resident writes.
+#[test]
+fn deferred_large_value_restore_does_not_wait_for_resident_handoff() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let chunks = std::rc::Rc::new(groove::chunks::MemoryChunkStorage::new());
+    block_on(async {
+        db.node.node.lock().await.set_chunk_storage(chunks);
+    });
+    db.set_deferred_local_persistence(true);
+    let title = "x".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 1);
+    let write = db
+        .insert(
+            "todos",
+            doctest_support::todo_cells(&title, false),
+            Default::default(),
+        )
+        .unwrap();
+    let row = write.row_uuid();
+    let update = db
+        .update(
+            "todos",
+            row,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            Default::default(),
+        )
+        .unwrap();
+    let delete = db.delete("todos", row, Default::default()).unwrap();
+    let restore = db
+        .restore(
+            "todos",
+            row,
+            Some(doctest_support::todo_cells(&title, true)),
+            Default::default(),
+        )
+        .unwrap();
+
+    let update_local = Rc::new(RefCell::new(None));
+    let update_local_callback = Rc::clone(&update_local);
+    db.wait_for_transaction_with(
+        update.mergeable_tx_id(),
+        DurabilityTier::Local,
+        move |result| {
+            *update_local_callback.borrow_mut() = Some(result);
+        },
+    );
+    block_on(db.tick()).unwrap();
+    assert!(
+        matches!(
+            update_local.borrow().as_ref(),
+            Some(Ok(tx_id)) if *tx_id == update.mergeable_tx_id()
+        ),
+        "a local receipt registered before the host tick observes deferred settlement"
+    );
+    block_on(write.wait(DurabilityTier::Local)).unwrap();
+    block_on(update.wait(DurabilityTier::Local)).unwrap();
+    block_on(delete.wait(DurabilityTier::Local)).unwrap();
+    block_on(restore.wait(DurabilityTier::Local)).unwrap();
+    let rows = prepared_read(&db, &db.table("todos"));
+    assert_eq!(row_ids(&rows), vec![row]);
+    assert_eq!(
+        rows[0].cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String(title))
+    );
+}
+
 #[test]
 fn full_row_replacement_cannot_bless_an_inherited_large_value_descriptor() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
