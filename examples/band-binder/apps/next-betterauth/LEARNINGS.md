@@ -28,6 +28,10 @@
   workspace/member/page/block prefix idempotently. A single transaction cannot
   currently admit this sequence because the membership write's permission
   cannot use the workspace created in the same batch as its authority witness.
+- Application membership rows use the public `session.author` value. It is the
+  canonical issuer-and-subject identity used by policies; app code must not
+  reconstruct it from raw JWT fields. Backend and test fixtures use
+  `sessionAuthor(issuer, subject)` when they need to map an external identity.
 - Large rich text and large attachment streaming remain tracked by #1833,
   #1839, and #1844. Small attachment bytes are represented directly today.
 - The Rust root-query builder accepts `$createdAt` in `select(...)`, but a

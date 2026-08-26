@@ -28,10 +28,9 @@ export function BandBinderApp() {
 
 function WorkspaceShell() {
   const session = useSession();
-  // The runtime's public session currently exposes JWT components, while
-  // policies receive `session.author`. Store the same issuer-scoped logical
-  // author used by the runtime — never a raw provider subject by itself.
-  const author = session ? JSON.stringify([session.issuer, session.user_id]) : null;
+  // `author` is the runtime-owned, issuer-scoped identity used by policies.
+  // Application code must not reproduce its wire encoding from JWT fields.
+  const author = session?.author ?? null;
   const { data: workspaces = [] } = useAll(app.workspaces.orderBy("name", "asc").limit(12));
   const selected = workspaces[0];
   return (

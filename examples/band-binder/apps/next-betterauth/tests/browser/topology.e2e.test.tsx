@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createDb, type Db } from "jazz-tools";
+import { createDb, sessionAuthor, type Db } from "jazz-tools";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
   TestCleanup,
@@ -173,14 +173,14 @@ describe("BandBinder cross-topology recovery", () => {
               await owner
                 .insert(app.members, {
                   workspaceId,
-                  author: JSON.stringify(["https://jazz.local", "band-binder-owner"]),
+                  author: sessionAuthor("https://jazz.local", "band-binder-owner"),
                   role: "owner",
                 })
                 .wait({ tier: "edge" });
               const membership = await owner
                 .insert(app.members, {
                   workspaceId,
-                  author: JSON.stringify(["https://jazz.local", "band-binder-manager"]),
+                  author: sessionAuthor("https://jazz.local", "band-binder-manager"),
                   role: "stage_manager",
                 })
                 .wait({ tier: "edge" });
@@ -189,7 +189,7 @@ describe("BandBinder cross-topology recovery", () => {
                 manager,
                 app.members.where({
                   id: managerMembershipId,
-                  author: JSON.stringify(["https://jazz.local", "band-binder-manager"]),
+                  author: sessionAuthor("https://jazz.local", "band-binder-manager"),
                 }),
                 (rows) => rows.length === 1,
                 "manager receives own membership grant",
@@ -217,8 +217,8 @@ describe("BandBinder cross-topology recovery", () => {
                     rows.length === 2 &&
                     rows.map((row) => row.author).join(",") ===
                       [
-                        JSON.stringify(["https://jazz.local", "band-binder-manager"]),
-                        JSON.stringify(["https://jazz.local", "band-binder-owner"]),
+                        sessionAuthor("https://jazz.local", "band-binder-manager"),
+                        sessionAuthor("https://jazz.local", "band-binder-owner"),
                       ].join(","),
                   "manager reads the workspace roster through its grant",
                   15_000,

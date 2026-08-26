@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { sessionAuthor } from "jazz-tools";
 import { createPolicyTestApp, type PolicyTestApp } from "jazz-tools/testing";
 import permissions from "../permissions.js";
 import { app } from "../schema.js";
@@ -22,7 +23,7 @@ const session = (user_id: string) => ({
   claims: {},
   authMode: "external" as const,
 });
-const author = (subject: string) => JSON.stringify(["https://band-binder.test", subject]);
+const author = (subject: string) => sessionAuthor("https://band-binder.test", subject);
 
 describe("BandBinder workspace roles", () => {
   it.each(bootstrapSteps)(
