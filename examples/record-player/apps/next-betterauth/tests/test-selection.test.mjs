@@ -27,5 +27,8 @@ test("the maintained package gate includes every non-topology receipt", () => {
   assert.match(packageJson.scripts.test, /test:unit/);
   assert.match(packageJson.scripts.test, /test:provider/);
   assert.match(packageJson.scripts.test, /test:selection/);
-  assert.equal(packageJson.scripts["test:topology"], "vitest run --config vitest.config.browser.ts");
+  assert.equal(
+    packageJson.scripts["test:topology"],
+    "vitest run --config vitest.config.browser.ts",
+  );
 });
