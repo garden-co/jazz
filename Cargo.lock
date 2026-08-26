@@ -2110,6 +2110,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-example-epic-drop-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "groove",
+ "jazz",
+]
+
+[[package]]
 name = "jazz-example-music-agent-benchmark"
 version = "0.1.0"
 dependencies = [

@@ -25,6 +25,7 @@ members = [
   # "examples/todo-server-rs",
   # "examples/docs/todo-server-rs",
   "examples/big-label/benchmarks",
+  "examples/epic-drop/benchmarks",
   "examples/band-chat/benchmarks",
   "examples/music-agent/benchmarks",
   "examples/benchmarks/smoke",
