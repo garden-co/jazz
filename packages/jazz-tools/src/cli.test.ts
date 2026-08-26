@@ -1522,7 +1522,7 @@ describe("cli migrations", () => {
     );
   });
 
-  it("preserves merge strategy markers in generated migration schema witnesses", async () => {
+  it("renders BIGINT counter migration operations and schema witnesses", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
     const fromHash = "4141414141414141414141414141414141414141414141414141414141414141";
@@ -1539,10 +1539,11 @@ describe("cli migrations", () => {
             columns: [
               {
                 name: "value",
-                column_type: { type: "Integer" },
+                column_type: { type: "BigInt" },
                 nullable: false,
                 merge_strategy: "Counter",
               },
+              { name: "removedValue", column_type: { type: "BigInt" }, nullable: true },
               { name: "label", column_type: { type: "Text" }, nullable: false },
             ],
           },
@@ -1555,10 +1556,11 @@ describe("cli migrations", () => {
             columns: [
               {
                 name: "value",
-                column_type: { type: "Integer" },
+                column_type: { type: "BigInt" },
                 nullable: false,
                 merge_strategy: "Counter",
               },
+              { name: "addedValue", column_type: { type: "BigInt" }, nullable: true },
               { name: "label", column_type: { type: "Text" }, nullable: true },
             ],
           },
@@ -1586,7 +1588,10 @@ describe("cli migrations", () => {
     }
 
     const generated = await readFile(filePath, "utf8");
-    expect(generated).toContain('"value": s.int().merge("counter"),');
+    expect(generated).toContain('"addedValue": s.add.bigint({ default: null }),');
+    expect(generated).toContain('"removedValue": s.drop.bigint({ backwardsDefault: null }),');
+    expect(generated).toContain('"value": s.bigint().merge("counter"),');
+    expect(generated).toContain('"label": s.string().optional(),');
   });
 
   it("still creates a migration file for nullability-only schema changes", async () => {
