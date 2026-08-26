@@ -2,4 +2,4 @@
 "jazz-tools": patch
 ---
 
-Reject embedded server stop calls when shutdown finalization fails.
+Make concurrent and repeated embedded server stop calls share the same successful or failed terminal shutdown result.

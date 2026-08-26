@@ -43,14 +43,16 @@ pub type JsonValue = serde_json::Value;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use futures::FutureExt;
 use futures::future::LocalBoxFuture;
 use futures::lock::Mutex as LocalMutex;
 use futures::task::{ArcWake, waker};
@@ -4535,7 +4537,18 @@ impl TestJwtIssuer {
 
 #[napi]
 pub struct JazzServer {
-    inner: Mutex<Option<JazzServerInner>>,
+    lifecycle: Arc<JazzServerLifecycle>,
+}
+
+struct JazzServerLifecycle {
+    state: Mutex<JazzServerState>,
+    changed: tokio::sync::watch::Sender<()>,
+}
+
+enum JazzServerState {
+    Running(JazzServerInner),
+    Stopping,
+    Stopped(std::result::Result<(), String>),
 }
 
 enum JazzServerInner {
@@ -4629,9 +4642,7 @@ impl JazzServer {
         )
         .await;
 
-        Ok(Self {
-            inner: Mutex::new(Some(JazzServerInner::Core(server))),
-        })
+        Ok(Self::from_inner(JazzServerInner::Core(server)))
     }
 
     #[napi(getter, js_name = "appId")]
@@ -4678,35 +4689,103 @@ impl JazzServer {
 
     #[napi]
     pub async fn stop(&self) -> napi::Result<()> {
-        let server = self
-            .inner
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?
-            .take();
-
-        if let Some(server) = server {
-            let phase = match server {
-                JazzServerInner::Core(server) => server.shutdown().await,
-            };
-            if phase != jazz_server::ShutdownPhase::StorageClosed {
-                return Err(napi::Error::from_reason(format!(
-                    "JazzServer shutdown failed during phase {phase:?}"
-                )));
+        let mut changes = self.lifecycle.changed.subscribe();
+        let shutdown_owner = {
+            let mut state = self
+                .lifecycle
+                .state
+                .lock()
+                .map_err(|_| napi::Error::from_reason("lock"))?;
+            match &*state {
+                JazzServerState::Running(_) => {
+                    let JazzServerState::Running(server) =
+                        std::mem::replace(&mut *state, JazzServerState::Stopping)
+                    else {
+                        unreachable!("running state changed while locked")
+                    };
+                    Some(server)
+                }
+                JazzServerState::Stopping | JazzServerState::Stopped(_) => None,
             }
+        };
+
+        if let Some(server) = shutdown_owner {
+            let lifecycle = Arc::clone(&self.lifecycle);
+            tokio::spawn(async move {
+                let result = AssertUnwindSafe(shutdown_jazz_server(server))
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|_| Err("JazzServer shutdown task panicked".to_owned()));
+                let mut state = lifecycle
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *state = JazzServerState::Stopped(result);
+                drop(state);
+                lifecycle.changed.send_replace(());
+            });
         }
 
-        Ok(())
+        loop {
+            let result = {
+                let state = self
+                    .lifecycle
+                    .state
+                    .lock()
+                    .map_err(|_| napi::Error::from_reason("lock"))?;
+                match &*state {
+                    JazzServerState::Running(_) => {
+                        return Err(napi::Error::from_reason(
+                            "JazzServer shutdown state returned to running",
+                        ));
+                    }
+                    JazzServerState::Stopping => None,
+                    JazzServerState::Stopped(result) => Some(result.clone()),
+                }
+            };
+            if let Some(result) = result {
+                return result.map_err(napi::Error::from_reason);
+            }
+            changes.changed().await.map_err(|_| {
+                napi::Error::from_reason("JazzServer shutdown state closed unexpectedly")
+            })?;
+        }
+    }
+
+    fn from_inner(inner: JazzServerInner) -> Self {
+        let (changed, _) = tokio::sync::watch::channel(());
+        Self {
+            lifecycle: Arc::new(JazzServerLifecycle {
+                state: Mutex::new(JazzServerState::Running(inner)),
+                changed,
+            }),
+        }
     }
 
     fn with_server<T>(&self, f: impl FnOnce(&JazzServerInner) -> T) -> napi::Result<T> {
-        let server = self
-            .inner
+        let state = self
+            .lifecycle
+            .state
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        let server = server
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("JazzServer has been stopped"))?;
-        Ok(f(server))
+        match &*state {
+            JazzServerState::Running(server) => Ok(f(server)),
+            JazzServerState::Stopping => Err(napi::Error::from_reason("JazzServer is stopping")),
+            JazzServerState::Stopped(_) => {
+                Err(napi::Error::from_reason("JazzServer has been stopped"))
+            }
+        }
+    }
+}
+
+async fn shutdown_jazz_server(server: JazzServerInner) -> std::result::Result<(), String> {
+    let phase = match server {
+        JazzServerInner::Core(server) => server.shutdown().await,
+    };
+    if phase == jazz_server::ShutdownPhase::StorageClosed {
+        Ok(())
+    } else {
+        Err(format!("JazzServer shutdown failed during phase {phase:?}"))
     }
 }
 
@@ -4783,21 +4862,23 @@ pub fn verify_local_first_identity_proof_napi(
 mod tests {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use std::collections::{BTreeMap, VecDeque};
+    use std::collections::{BTreeMap, HashSet, VecDeque};
     use std::rc::Rc;
+    use std::time::Duration;
 
     use futures::channel::oneshot;
 
     use crate::{
-        CoreOpenDbConfig, CoreSelfSignedClientProof, InsertOptions, NapiDb, NapiDbInnerStorage,
-        NapiTxKind, PendingNativeRead, PendingNativeSubscriptionBatch,
+        CoreOpenDbConfig, CoreSelfSignedClientProof, InsertOptions, JazzServer, JazzServerInner,
+        NapiDb, NapiDbInnerStorage, NapiTxKind, PendingNativeRead, PendingNativeSubscriptionBatch,
         PendingSubscriptionBatchOutcome, PendingSubscriptionBatchPoll, PreparedQuery,
         RestoreOptions, Tx, UpdateOptions, UpsertOptions, authority_epoch_from_bigint,
         core_author_id_from_bytes, core_block_on, core_claim_value_from_json, core_insert_options,
         core_open_backend_identity, core_open_identity, core_read_opts_from_json,
         core_read_tier_from_str, core_restore_options, core_subscription_event_to_napi,
         core_update_options, core_upsert_options, encode_core_subscription_delta,
-        requeue_retryable_subscription_batch, unknown_transaction_kind_message,
+        requeue_retryable_subscription_batch, terminal_bytes_to_numbers,
+        unknown_transaction_kind_message,
     };
 
     #[test]
@@ -4900,6 +4981,86 @@ mod tests {
             unknown_transaction_kind_message("invalid"),
             "unknown transaction kind invalid"
         );
+    }
+
+    async fn jazz_server_binding(
+        built: jazz_server::BuiltServer,
+        app_id: jazz::tools::AppId,
+    ) -> JazzServer {
+        let server = jazz_server::JazzServer::from_built(
+            built,
+            None,
+            app_id,
+            jazz_server::ServerDataDir::in_memory(),
+            "napi-stop-test-admin".to_owned(),
+            "napi-stop-test-backend".to_owned(),
+        )
+        .await;
+        JazzServer::from_inner(JazzServerInner::Core(server))
+    }
+
+    #[tokio::test]
+    async fn jazz_server_stop_shares_success_with_concurrent_and_later_callers() {
+        let app_id = jazz::tools::AppId::from_name("napi-stop-success");
+        let built = jazz_server::ServerBuilder::new(app_id)
+            .with_storage(jazz_server::StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build NAPI test server");
+        let server = jazz_server_binding(built, app_id).await;
+
+        let (first, second) = tokio::join!(server.stop(), server.stop());
+        assert!(first.is_ok(), "shutdown owner succeeds: {first:?}");
+        assert!(
+            second.is_ok(),
+            "concurrent waiter shares success: {second:?}"
+        );
+        assert!(
+            server.stop().await.is_ok(),
+            "later caller replays terminal success"
+        );
+    }
+
+    #[tokio::test]
+    async fn jazz_server_stop_shares_failure_with_concurrent_and_later_callers() {
+        let app_id = jazz::tools::AppId::from_name("napi-stop-failure");
+        let built = jazz_server::ServerBuilder::new(app_id)
+            .with_storage(jazz_server::StorageBackend::InMemory)
+            .with_shutdown_timeout(Duration::from_millis(1))
+            .build()
+            .await
+            .expect("build NAPI test server");
+        let active_request = built
+            .state
+            .shutdown
+            .try_enter_app_request()
+            .expect("hold request through shutdown timeout");
+        let server = jazz_server_binding(built, app_id).await;
+
+        let (first, second) = tokio::join!(server.stop(), server.stop());
+        let first = first
+            .expect_err("shutdown owner reports failure")
+            .reason
+            .clone();
+        let second = second
+            .expect_err("concurrent waiter reports failure")
+            .reason
+            .clone();
+        assert_eq!(second, first);
+        assert_eq!(
+            first, "JazzServer shutdown failed during phase Failed",
+            "binding preserves the embedded host's terminal failure"
+        );
+        assert_eq!(
+            server
+                .stop()
+                .await
+                .expect_err("later caller replays failure")
+                .reason
+                .clone(),
+            first
+        );
+        drop(active_request);
     }
     use jazz::db::{
         Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
