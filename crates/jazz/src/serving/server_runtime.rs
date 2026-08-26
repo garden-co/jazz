@@ -1,5 +1,7 @@
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
@@ -947,6 +949,15 @@ impl ServerRuntimeHandle {
 }
 
 fn shutdown_blocking(inner: &ServerShellInner) -> Result<(), String> {
+    shutdown_blocking_with(inner, perform_shutdown_blocking, || {})
+}
+
+fn shutdown_blocking_with(
+    inner: &ServerShellInner,
+    perform: impl FnOnce(&ServerShellInner) -> Result<(), String>,
+    on_waiting: impl FnOnce(),
+) -> Result<(), String> {
+    let mut on_waiting = Some(on_waiting);
     {
         let mut state = inner
             .shutdown
@@ -959,6 +970,9 @@ fn shutdown_blocking(inner: &ServerShellInner) -> Result<(), String> {
                     break;
                 }
                 ShutdownState::InProgress => {
+                    if let Some(on_waiting) = on_waiting.take() {
+                        on_waiting();
+                    }
                     state = inner
                         .shutdown_changed
                         .wait(state)
@@ -969,12 +983,27 @@ fn shutdown_blocking(inner: &ServerShellInner) -> Result<(), String> {
         }
     }
 
-    let result = perform_shutdown_blocking(inner);
-    if let Ok(mut state) = inner.shutdown.lock() {
-        *state = ShutdownState::Finished(result.clone());
-        inner.shutdown_changed.notify_all();
-    }
+    let result = catch_unwind(AssertUnwindSafe(|| perform(inner))).unwrap_or_else(|payload| {
+        Err(format!(
+            "server shell shutdown panicked: {}",
+            panic_payload_message(payload.as_ref())
+        ))
+    });
+    let mut state = inner
+        .shutdown
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *state = ShutdownState::Finished(result.clone());
+    inner.shutdown_changed.notify_all();
     result
+}
+
+fn panic_payload_message(payload: &(dyn Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown panic payload")
 }
 
 fn perform_shutdown_blocking(inner: &ServerShellInner) -> Result<(), String> {
@@ -1307,16 +1336,84 @@ mod tests {
         }
 
         let second_runtime = runtime.clone();
-        let second = tokio::spawn(async move { second_runtime.shutdown().await });
-        tokio::task::yield_now().await;
-        assert!(
-            !second.is_finished(),
-            "a concurrent shutdown must not return before the owner thread exits"
-        );
+        let (second_waiting_tx, second_waiting_rx) = oneshot::channel();
+        let second = tokio::task::spawn_blocking(move || {
+            shutdown_blocking_with(
+                &second_runtime.inner,
+                perform_shutdown_blocking,
+                move || {
+                    let _ = second_waiting_tx.send(());
+                },
+            )
+        });
+        let second_reached_wait = tokio::time::timeout(Duration::from_secs(1), second_waiting_rx)
+            .await
+            .is_ok_and(|result| result.is_ok());
+        let second_returned_early = second.is_finished();
 
         release.wait();
         blocked.await.unwrap().unwrap();
         first.await.unwrap().unwrap();
         second.await.unwrap().unwrap();
+        assert!(
+            second_reached_wait,
+            "the concurrent shutdown caller must reach the wait path"
+        );
+        assert!(
+            !second_returned_early,
+            "a concurrent shutdown must not return before the owner thread exits"
+        );
+    }
+
+    // This state-machine test is intentionally internal: a panic in the
+    // shutdown implementation cannot be injected through the public API.
+    #[tokio::test]
+    async fn shutdown_panic_is_published_to_waiters_and_late_callers() {
+        let (activity_tx, _) = watch::channel(0_u64);
+        let inner = Arc::new(ServerShellInner {
+            jobs: Mutex::new(None),
+            join: Mutex::new(None),
+            shutdown: Mutex::new(ShutdownState::Running),
+            shutdown_changed: Condvar::new(),
+            activity_tx,
+            io_wakers: Arc::new(Mutex::new(Vec::new())),
+        });
+        let (perform_entered_tx, perform_entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        let owner_inner = Arc::clone(&inner);
+        let owner = tokio::task::spawn_blocking(move || {
+            shutdown_blocking_with(
+                &owner_inner,
+                move |_| {
+                    let _ = perform_entered_tx.send(());
+                    release_rx.recv().unwrap();
+                    panic!("planted shutdown panic")
+                },
+                || {},
+            )
+        });
+        perform_entered_rx.await.unwrap();
+
+        let (waiter_entered_tx, waiter_entered_rx) = oneshot::channel();
+        let waiter_inner = Arc::clone(&inner);
+        let waiter = tokio::task::spawn_blocking(move || {
+            shutdown_blocking_with(&waiter_inner, perform_shutdown_blocking, move || {
+                let _ = waiter_entered_tx.send(());
+            })
+        });
+        tokio::time::timeout(Duration::from_secs(1), waiter_entered_rx)
+            .await
+            .expect("the waiter must enter shutdown")
+            .expect("the waiter must reach the wait path");
+
+        release_tx.send(()).unwrap();
+        let owner_result = owner.await.unwrap();
+        let waiter_result = waiter.await.unwrap();
+        assert_eq!(owner_result, waiter_result);
+        assert_eq!(
+            owner_result.unwrap_err(),
+            "server shell shutdown panicked: planted shutdown panic"
+        );
+        assert_eq!(shutdown_blocking(&inner), waiter_result);
     }
 }
