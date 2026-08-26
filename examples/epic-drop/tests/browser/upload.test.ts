@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createDb, type Db } from "jazz-tools";
+import { createDb, generateAuthSecret, type Db } from "jazz-tools";
 import { app } from "../../schema.js";
 import { fileListQuery } from "../../src/file-list-query.js";
 import { APP_ID, TEST_PORT } from "./test-constants.js";
@@ -108,29 +108,26 @@ describe("EpicDrop streamed upload foundation", () => {
   });
 
   it("requires both file ownership and folder authority for attach and moves", async () => {
-    const alice = await openRemoteDb("alice", "epic-drop-alice");
-    const bob = await openRemoteDb("bob", "epic-drop-bob");
+    const alice = await openRemoteDb("alice", generateAuthSecret());
+    const bob = await openRemoteDb("bob", generateAuthSecret());
     const aliceId = userId(alice);
     const bobId = userId(bob);
-    const aliceFolder = await alice
-      .insert(app.folders, { name: "Alice", owner_id: aliceId })
-      .wait({ tier: "edge" });
-    const bobFolder = await bob
-      .insert(app.folders, { name: "Bob", owner_id: bobId })
-      .wait({ tier: "edge" });
+    const aliceFolder = alice.insert(app.folders, { name: "Alice", owner_id: aliceId });
+    await aliceFolder.wait({ tier: "edge" });
+    const bobFolder = bob.insert(app.folders, { name: "Bob", owner_id: bobId });
+    await bobFolder.wait({ tier: "edge" });
 
-    const aliceFile = await alice
-      .insertStreaming(app.files, {
-        folder_id: aliceFolder.value.id,
-        name: "owned.wav",
-        content_type: "audio/wav",
-        size_bytes: 3,
-        owner_id: aliceId,
-        contents: (async function* () {
-          yield new Uint8Array([1, 2, 3]);
-        })(),
-      })
-      .then((write) => write.wait({ tier: "edge" }));
+    const aliceFile = await alice.insertStreaming(app.files, {
+      folder_id: aliceFolder.value.id,
+      name: "owned.wav",
+      content_type: "audio/wav",
+      size_bytes: 3,
+      owner_id: aliceId,
+      contents: (async function* () {
+        yield new Uint8Array([1, 2, 3]);
+      })(),
+    });
+    await aliceFile.wait({ tier: "edge" });
 
     await expect(
       alice
