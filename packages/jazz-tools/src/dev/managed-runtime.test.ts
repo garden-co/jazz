@@ -396,6 +396,35 @@ describe("ManagedDevRuntime", () => {
     );
   });
 
+  it("retries an atomic replacement between opening .env and its first identity check", async () => {
+    const schemaDir = await tempRoots.create("jazz-managed-dotenv-replaced-opening-");
+    const envPath = join(schemaDir, ".env");
+    const replacementPath = join(schemaDir, ".env.replacement");
+    await writeFile(envPath, "ORIGINAL=old\n");
+    let replaced = false;
+
+    expect(
+      ensureEnvAppId(envPath, "VITE_JAZZ_APP_ID", "generated", undefined, {
+        afterOpen() {
+          if (!replaced) {
+            writeFileSync(replacementPath, "REPLACED=visible\n");
+            renameSync(replacementPath, envPath);
+            replaced = true;
+          }
+        },
+        waitForLock: waitForLockSync,
+        unlock,
+        write: (descriptor, bytes, offset) =>
+          writeSync(descriptor, bytes, offset, bytes.byteLength - offset),
+        fsync: fsyncSync,
+      }),
+    ).toBe("generated");
+
+    await expect(readFile(envPath, "utf8")).resolves.toBe(
+      "REPLACED=visible\nVITE_JAZZ_APP_ID=generated\n",
+    );
+  });
+
   it("retries when .env is atomically replaced after the append", async () => {
     const schemaDir = await tempRoots.create("jazz-managed-dotenv-replaced-final-");
     const envPath = join(schemaDir, ".env");

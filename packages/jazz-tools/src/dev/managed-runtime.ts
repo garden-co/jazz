@@ -196,6 +196,8 @@ interface EnvFileOperations {
   unlock(descriptor: number): void;
   write(descriptor: number, bytes: Uint8Array, offset: number): number;
   fsync(descriptor: number): void;
+  /** Test seam for a pathname replacement after open(2), before fstat/lstat. */
+  afterOpen?(descriptor: number): void;
 }
 
 class EnvPathReplacedError extends Error {
@@ -262,7 +264,7 @@ function assertEnvPathMatchesDescriptor(envPath: string, descriptor: number): vo
   }
 }
 
-function openEnvForAppend(envPath: string): number {
+function openEnvForAppend(envPath: string, afterOpen?: (descriptor: number) => void): number {
   assertRegularEnvPath(envPath);
   const descriptor = openSync(
     envPath,
@@ -270,6 +272,7 @@ function openEnvForAppend(envPath: string): number {
     0o666,
   );
   try {
+    afterOpen?.(descriptor);
     assertEnvPathMatchesDescriptor(envPath, descriptor);
     return descriptor;
   } catch (error) {
@@ -302,11 +305,12 @@ export function ensureEnvAppId(
   // that keeps changing remains an explicit startup failure rather than a
   // false success on an unlinked descriptor.
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const descriptor = openEnvForAppend(envPath);
+    let descriptor: number | undefined;
     let result: string | undefined;
     let actionError: unknown;
     let locked = false;
     try {
+      descriptor = openEnvForAppend(envPath, operations.afterOpen);
       operations.waitForLock(descriptor);
       locked = true;
       // The lock is on the .env inode itself. Revalidate the pathname after
@@ -333,17 +337,19 @@ export function ensureEnvAppId(
     }
 
     let cleanupError: unknown;
-    if (locked) {
+    if (locked && descriptor !== undefined) {
       try {
         operations.unlock(descriptor);
       } catch (error) {
         cleanupError = error;
       }
     }
-    try {
-      closeSync(descriptor);
-    } catch (error) {
-      cleanupError ??= error;
+    if (descriptor !== undefined) {
+      try {
+        closeSync(descriptor);
+      } catch (error) {
+        cleanupError ??= error;
+      }
     }
     if (actionError !== undefined) {
       if (
