@@ -3,7 +3,6 @@
 use super::*;
 use crate::node::{ContributionMergeRequest, ContributionMergeRow};
 use crate::protocol::{BranchSelector, BranchViewBase};
-use crate::query::{col, eq, lit};
 
 /// Ordinary row mutation completed with one Groove-staged scalar.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2231,18 +2230,18 @@ where
         row: RowUuid,
         identity: AuthorSubject,
     ) -> Result<Option<CurrentRow>, Error> {
-        let query =
-            self.prepare_query(&Query::from(table).filter(eq(col("id"), lit(Value::Uuid(row.0)))))?;
+        let query = self.prepare_query(&Query::from(table))?;
         Ok(self
             .node
             .node
             .lock()
             .await
-            .query_rows_for_client(
+            .query_rows_for_client_physical_row(
                 &query.shape,
                 &query.binding,
                 DurabilityTier::Local,
                 identity,
+                row,
             )
             .await?
             .into_iter()
@@ -2255,19 +2254,18 @@ where
         row: RowUuid,
         identity: AuthorSubject,
     ) -> Result<Option<CurrentRow>, Error> {
-        let query =
-            self.prepare_query(&Query::from(table).filter(eq(col("id"), lit(Value::Uuid(row.0)))))?;
+        let query = self.prepare_query(&Query::from(table))?;
         Ok(self
             .node
             .node
             .lock()
             .await
-            .query_rows_with_prepared_plan_for_identity(
+            .query_rows_for_link_physical_row(
                 &query.shape,
                 &query.binding,
                 DurabilityTier::Local,
-                None,
                 identity,
+                row,
             )
             .await?
             .into_iter()
