@@ -11,6 +11,4 @@ export type CorrectnessArtifactSnapshot = Readonly<{
 export function correctnessArtifactStore(root: string): string;
 export function correctnessArtifactPointer(root: string): string;
 export function snapshotCorrectnessArtifacts(root: string): CorrectnessArtifactSnapshot;
-export function readCorrectnessArtifactSnapshot(
-  root: string,
-): CorrectnessArtifactSnapshot | null;
+export function readCorrectnessArtifactSnapshot(root: string): CorrectnessArtifactSnapshot | null;
