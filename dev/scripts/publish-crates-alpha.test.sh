@@ -16,7 +16,13 @@ case "${1:-}" in
   metadata)
     cat "${MOCK_METADATA_FILE:?}"
     ;;
-  check | publish)
+  check)
+    ;;
+  publish)
+    if [[ "${MOCK_PUBLISH_RESULT:-success}" == "already-published" ]]; then
+      echo "error: crate jazz-wasm-tracing@3.0.0-alpha.0 already exists on crates.io index" >&2
+      exit 101
+    fi
     ;;
   *)
     echo "unexpected cargo invocation: $*" >&2
@@ -133,6 +139,7 @@ run_case() {
   local name="$1"
   local metadata="$2"
   local mode="$3"
+  local publish_result="${4:-success}"
 
   CASE_LOG="$TEMP/$name.cargo.log"
   CASE_OUTPUT="$TEMP/$name.output"
@@ -144,6 +151,7 @@ run_case() {
     MOCK_METADATA_FILE="$metadata" \
     CARGO_NET_OFFLINE=true \
     CARGO_REGISTRY_TOKEN="test-token-never-sent" \
+    MOCK_PUBLISH_RESULT="$publish_result" \
     "$SCRIPT" "$mode" >"$CASE_OUTPUT" 2>&1
   CASE_STATUS=$?
   set -e
@@ -190,5 +198,16 @@ run_case valid-publish "$TEMP/metadata-valid.json" publish
 assert_log valid-publish \
   'metadata --no-deps --format-version 1' \
   'publish --allow-dirty -p jazz-wasm-tracing'
+
+run_case already-published "$TEMP/metadata-valid.json" publish already-published
+[[ "$CASE_STATUS" -eq 0 ]] || {
+  cat "$CASE_OUTPUT" >&2
+  fail 'already-published crate must be skipped successfully'
+}
+assert_log already-published \
+  'metadata --no-deps --format-version 1' \
+  'publish --allow-dirty -p jazz-wasm-tracing'
+grep -F 'already published, skipping' "$CASE_OUTPUT" >/dev/null ||
+  fail 'already-published result must be reported as skipped'
 
 echo 'crate alpha publish allowlist checks passed'
