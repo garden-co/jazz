@@ -12,6 +12,11 @@ pub(super) struct JazzSourceGraphPreparer<'a, S> {
     pub(super) read_view: &'a ReadView<RequestedSourceStage>,
     pub(super) inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
     pub(super) access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+    /// Whether access-path metrics should account for this logical graph
+    /// fragment. A policy proof specialized from its outer source reuses the
+    /// same deduplicated physical source node, so only the outer fragment owns
+    /// that source-plan receipt.
+    pub(super) count_access_path_metrics: bool,
     /// Query-local enum boundary targets, keyed by logical source.  Defining
     /// a variant target invalidates table inputs, so reuse it across the main
     /// source, access path, and metadata sidecars of one compiled program.
@@ -1366,7 +1371,9 @@ where
     ) -> Result<Option<GraphBuilder>, SourceResolutionError> {
         match access_path {
             CurrentAccessPath::PrimaryKey(prefix) => {
-                self.node.query_engine_read_metrics.source_primary_key_scans += 1;
+                if self.count_access_path_metrics {
+                    self.node.query_engine_read_metrics.source_primary_key_scans += 1;
+                }
                 Ok(Some(selected_visible_current_primary_key_graph(
                     table, tier, prefix,
                 )))
@@ -1665,7 +1672,9 @@ where
             let projection_target = self.current_projection_target(request, read_table)?;
             let content = match self.access_paths.get(&request.source).cloned() {
                 Some(CurrentAccessPath::PrimaryKey(prefix)) => {
-                    self.node.query_engine_read_metrics.source_primary_key_scans += 1;
+                    if self.count_access_path_metrics {
+                        self.node.query_engine_read_metrics.source_primary_key_scans += 1;
+                    }
                     self.node
                         .physical_current_source_scan_graph_with_projection_target(
                             self.read_view.read_schema,
@@ -1758,7 +1767,9 @@ where
         let access_path = self.access_paths.get(&request.source).cloned();
         let global = match &access_path {
             Some(CurrentAccessPath::PrimaryKey(prefix)) => {
-                self.node.query_engine_read_metrics.source_primary_key_scans += 1;
+                if self.count_access_path_metrics {
+                    self.node.query_engine_read_metrics.source_primary_key_scans += 1;
+                }
                 self.node
                     .physical_current_source_scan_graph_with_projection_target(
                         self.read_view.read_schema,
