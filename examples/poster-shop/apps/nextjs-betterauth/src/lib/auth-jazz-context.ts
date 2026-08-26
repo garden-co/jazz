@@ -1,6 +1,7 @@
 import type { JazzContext } from "jazz-tools/backend";
 import { createRequire as createRequireFromModule } from "node:module";
 import { configuredIssuer } from "./identity";
+import { serverSecret } from "./server-secret";
 
 const createRequire =
   process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
@@ -20,7 +21,7 @@ export function authJazzContext(): JazzContext {
       appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID ?? "poster-shop-local",
       driver: { type: "memory" },
       serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL ?? "http://127.0.0.1:4200",
-      backendSecret: process.env.BACKEND_SECRET ?? "poster-shop-development-backend-secret",
+      backendSecret: serverSecret("BACKEND_SECRET", "poster-shop-development-backend-secret"),
       env: configuredIssuer === "http://127.0.0.1:3000" ? "dev" : "prod",
       tier: "global",
     });
