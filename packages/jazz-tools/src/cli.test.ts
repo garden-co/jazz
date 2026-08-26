@@ -113,6 +113,38 @@ function spawnMigrationCreate(
   );
 }
 
+async function typecheckGeneratedMigration(migrationPath: string): Promise<void> {
+  const tsconfigPath = join(dirname(dirname(migrationPath)), "generated-migration.tsconfig.json");
+  await writeFile(
+    tsconfigPath,
+    JSON.stringify({
+      compilerOptions: {
+        target: "ES2022",
+        module: "NodeNext",
+        moduleResolution: "NodeNext",
+        skipLibCheck: true,
+        ignoreDeprecations: "6.0",
+        baseUrl: dirname(packageRoot),
+        paths: { "jazz-tools": ["src/index.ts"] },
+      },
+      files: [migrationPath],
+    }),
+  );
+  const result = spawnSync(
+    process.execPath,
+    [
+      join(dirname(packageRoot), "node_modules", "typescript", "bin", "tsc"),
+      "--noEmit",
+      "--project",
+      tsconfigPath,
+    ],
+    { cwd: dirname(packageRoot), encoding: "utf8" },
+  );
+  if (result.status !== 0) {
+    throw new Error(`Generated migration failed to typecheck:\n${result.stdout}\n${result.stderr}`);
+  }
+}
+
 async function waitForCrashMarker(marker: string, child: ReturnType<typeof spawn>): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (!(await fileExists(marker))) {
@@ -1522,7 +1554,7 @@ describe("cli migrations", () => {
     );
   });
 
-  it("renders BIGINT counter migration operations and schema witnesses", async () => {
+  it("renders a type-valid BIGINT counter migration", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
     const fromHash = "4141414141414141414141414141414141414141414141414141414141414141";
@@ -1561,7 +1593,7 @@ describe("cli migrations", () => {
                 merge_strategy: "Counter",
               },
               { name: "addedValue", column_type: { type: "BigInt" }, nullable: true },
-              { name: "label", column_type: { type: "Text" }, nullable: true },
+              { name: "label", column_type: { type: "Text" }, nullable: false },
             ],
           },
         });
@@ -1591,7 +1623,7 @@ describe("cli migrations", () => {
     expect(generated).toContain('"addedValue": s.add.bigint({ default: null }),');
     expect(generated).toContain('"removedValue": s.drop.bigint({ backwardsDefault: null }),');
     expect(generated).toContain('"value": s.bigint().merge("counter"),');
-    expect(generated).toContain('"label": s.string().optional(),');
+    await typecheckGeneratedMigration(filePath);
   });
 
   it("still creates a migration file for nullability-only schema changes", async () => {
