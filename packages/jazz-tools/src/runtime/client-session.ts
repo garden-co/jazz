@@ -90,6 +90,7 @@ export interface JwtPayload {
   sub?: unknown;
   iss?: unknown;
   claims?: unknown;
+  aud?: unknown;
   exp?: unknown;
 }
 

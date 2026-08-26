@@ -57,6 +57,10 @@ export type BackendContextConfig = Omit<AppContext, "schema" | "driver" | "clien
   jwksUrl?: string;
   /** Single JWK object or PEM/JWK string used to verify external bearer JWTs in `forRequest()`. */
   jwtPublicKey?: BackendJwtPublicKey;
+  /** Required issuer for external bearer JWTs accepted by `forRequest()`. */
+  jwtIssuer?: string;
+  /** Required audience, or audiences, for external bearer JWTs accepted by `forRequest()`. */
+  jwtAudience?: string | readonly string[];
   /** Whether local-first bearer JWTs are accepted in `forRequest()`. Defaults to `true`. */
   allowLocalFirstAuth?: boolean;
 } & BackendContextSchemaConfig;
@@ -401,6 +405,8 @@ export class JazzContext {
       appId: this.config.appId,
       jwksUrl: this.config.jwksUrl,
       jwtPublicKey: this.config.jwtPublicKey,
+      jwtIssuer: this.config.jwtIssuer,
+      jwtAudience: this.config.jwtAudience,
       allowLocalFirstAuth: this.config.allowLocalFirstAuth,
     });
   }

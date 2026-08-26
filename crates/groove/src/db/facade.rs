@@ -73,12 +73,15 @@ impl Database {
             )));
         let chunk_resolver: Rc<dyn crate::chunks::MissingChunkResolver> =
             Rc::new(crate::chunks::UnavailableChunkResolver);
+        let large_value_lifecycle = std::sync::Arc::new(futures::lock::Mutex::new(()));
         ivm_runtime.set_chunk_provider(Rc::new(
             crate::chunks::StorageChunkProvider::with_resolver_and_observer(
                 chunk_storage.clone(),
                 chunk_resolver.clone(),
                 Rc::new(MetadataChunkInstallObserver {
                     storage: Rc::downgrade(&storage),
+                    lifecycle: std::sync::Arc::downgrade(&large_value_lifecycle),
+                    resident_install: None,
                 }),
             ),
         ));
@@ -100,7 +103,10 @@ impl Database {
                 waiters: BTreeMap::new(),
                 failure: None,
             })),
-            large_value_lifecycle: Rc::new(futures::lock::Mutex::new(())),
+            large_value_lifecycle,
+            large_value_publication_lifecycle_guard: None,
+            large_value_lifecycle_held: Rc::new(Cell::new(false)),
+            large_value_lifecycle_publications: BTreeSet::new(),
             abandoned_application: Rc::new(Cell::new(false)),
             poisoned: false,
         })
@@ -187,6 +193,8 @@ impl Database {
                 self.chunk_resolver.clone(),
                 Rc::new(MetadataChunkInstallObserver {
                     storage: Rc::downgrade(&self.storage),
+                    lifecycle: std::sync::Arc::downgrade(&self.large_value_lifecycle),
+                    resident_install: None,
                 }),
             ),
         ));
@@ -203,6 +211,8 @@ impl Database {
                 resolver.clone(),
                 Rc::new(MetadataChunkInstallObserver {
                     storage: Rc::downgrade(&self.storage),
+                    lifecycle: std::sync::Arc::downgrade(&self.large_value_lifecycle),
+                    resident_install: None,
                 }),
             ),
         ));
@@ -398,12 +408,7 @@ impl Database {
                         "cannot decode pushed chunk metadata: {error}"
                     ))
                 })?;
-                let children = match node {
-                    crate::large_values::ChunkNode::Leaf { .. } => Vec::new(),
-                    crate::large_values::ChunkNode::Branch { children, .. } => {
-                        children.into_iter().map(|child| child.node_ref).collect()
-                    }
-                };
+                let children = unique_large_value_children(&node);
                 LargeValueNodeReferences {
                     references: 0,
                     upload_references: 1,
@@ -1025,7 +1030,6 @@ impl Database {
                 "staged receipt id is already bound to a different descriptor".to_owned(),
             ));
         }
-        let kind = value_ref.kind;
         let staged = crate::large_values::StagedLargeValue {
             id,
             value_ref,
@@ -1073,70 +1077,16 @@ impl Database {
                 value: references,
             },
         ];
-        let mut node_updates =
-            BTreeMap::<crate::large_values::NodeRef, LargeValueNodeReferences>::new();
-        let mut pending = if activate_root {
-            vec![staged.value_ref.root.clone()]
-        } else {
-            Vec::new()
-        };
-        while let Some(node_ref) = pending.pop() {
-            let mut metadata = if let Some(metadata) = node_updates.remove(&node_ref) {
-                metadata
-            } else if let Some(encoded) = self
-                .storage
-                .get(
-                    LARGE_VALUE_METADATA_CF.to_owned(),
-                    large_value_node_key(&node_ref)?,
+        if activate_root {
+            operations.extend(
+                large_value_node_transition_operations(
+                    &self.storage,
+                    BTreeMap::new(),
+                    vec![(staged.value_ref.root.clone(), 1)],
+                    false,
                 )
-                .await?
-            {
-                postcard::from_bytes(&encoded).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot decode node references: {error}"
-                    ))
-                })?
-            } else {
-                let encoded = self
-                    .chunk_storage
-                    .get(node_ref.locator, node_ref.object_hash)
-                    .await
-                    .map_err(crate::chunks::ChunkError::from)
-                    .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
-                let children =
-                    match crate::large_values::decode_node(kind, node_ref.object_hash, &encoded)
-                        .map_err(crate::ivm::runtime::IvmRuntimeError::from)?
-                    {
-                        crate::large_values::ChunkNode::Leaf { .. } => Vec::new(),
-                        crate::large_values::ChunkNode::Branch { children, .. } => {
-                            children.into_iter().map(|child| child.node_ref).collect()
-                        }
-                    };
-                LargeValueNodeReferences {
-                    references: 0,
-                    upload_references: 0,
-                    children,
-                }
-            };
-            let activate_children = metadata.references == 0;
-            metadata.references = metadata.references.checked_add(1).ok_or_else(|| {
-                Error::InvalidLargeValueMetadata("node reference count overflow".to_owned())
-            })?;
-            if activate_children {
-                pending.extend(metadata.children.iter().cloned());
-            }
-            node_updates.insert(node_ref, metadata);
-        }
-        for (node_ref, metadata) in node_updates {
-            operations.push(OwnedWriteOperation::Set {
-                cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                key: large_value_node_key(&node_ref)?,
-                value: postcard::to_allocvec(&metadata).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot encode node references: {error}"
-                    ))
-                })?,
-            });
+                .await?,
+            );
         }
         self.storage.write_many(operations).await?;
         Ok(staged)
@@ -1225,54 +1175,16 @@ impl Database {
                 })?,
             },
         ];
-        let mut pending = if deactivate_root {
-            vec![staged.value_ref.root.clone()]
-        } else {
-            Vec::new()
-        };
-        while let Some(node_ref) = pending.pop() {
-            let key = large_value_node_key(&node_ref)?;
-            let encoded = self
-                .storage
-                .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
-                .await?
-                .ok_or_else(|| {
-                    Error::InvalidLargeValueMetadata(
-                        "reachable node reference metadata is missing".to_owned(),
-                    )
-                })?;
-            let mut metadata: LargeValueNodeReferences =
-                postcard::from_bytes(&encoded).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot decode node references: {error}"
-                    ))
-                })?;
-            metadata.references = metadata.references.checked_sub(1).ok_or_else(|| {
-                Error::InvalidLargeValueMetadata("node reference count underflow".to_owned())
-            })?;
-            if metadata.references == 0 {
-                pending.extend(metadata.children.iter().cloned());
-            }
-            operations.push(OwnedWriteOperation::Set {
-                cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                key,
-                value: postcard::to_allocvec(&metadata).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot encode node references: {error}"
-                    ))
-                })?,
-            });
-            if metadata.references == 0 {
-                operations.push(OwnedWriteOperation::Set {
-                    cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                    key: large_value_reclaim_key(&node_ref)?,
-                    value: postcard::to_allocvec(&node_ref).map_err(|error| {
-                        Error::InvalidLargeValueMetadata(format!(
-                            "cannot encode reclaim entry: {error}"
-                        ))
-                    })?,
-                });
-            }
+        if deactivate_root {
+            operations.extend(
+                large_value_node_transition_operations(
+                    &self.storage,
+                    BTreeMap::new(),
+                    vec![(staged.value_ref.root.clone(), -1)],
+                    false,
+                )
+                .await?,
+            );
         }
         self.storage.write_many(operations).await?;
         Ok(true)

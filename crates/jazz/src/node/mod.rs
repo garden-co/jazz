@@ -668,6 +668,14 @@ struct SchemaCatalogue {
     lens_path_cache: BTreeMap<LensPathCacheKey, Option<Vec<MigrationLensId>>>,
     /// Table-specific, already-validated lens programs used by hot read/write paths.
     compiled_lens_cache: BTreeMap<CompiledLensCacheKey, Option<CompiledLensPath>>,
+    /// Immutable lowering plans reused by authored-to-physical row writes.
+    physical_write_plan_cache: BTreeMap<
+        SchemaVersionId,
+        BTreeMap<
+            String,
+            BTreeMap<physical::PhysicalWriteTarget, Arc<physical::PreparedPhysicalWritePlan>>,
+        >,
+    >,
     /// Schema version currently used for newly authored writes.
     current_write_schema: CurrentWriteSchema,
 }
@@ -775,7 +783,11 @@ struct QueryServing {
     /// Registered validated query shapes keyed by stable shape ID.
     registered_shapes: BTreeMap<ShapeId, ValidatedQuery>,
     /// Registered query binding values keyed by shape and usage-site binding ID.
-    registered_bindings: BTreeMap<ShapeId, BTreeMap<BindingId, RegisteredBinding>>,
+    // A wire subscription is identified by its usage binding handle *and* read
+    // view. The same canonical binding id may legitimately be registered at
+    // Local, Edge, and Global views in one relay, so keying by BindingId alone
+    // lets one view silently overwrite another's routing metadata.
+    registered_bindings: BTreeMap<ShapeId, BTreeMap<(BindingId, ReadViewKey), RegisteredBinding>>,
     /// Monotonically increasing receiver receipts for applied authoritative
     /// updates. Attachments capture the current receipt and require a later
     /// one; this remains logical binding-view state, never a wire nonce.
@@ -1480,6 +1492,10 @@ pub struct MergeableCommit {
     /// provenance prevents callers from handcrafting physical descriptors.
     prepared_large_columns: BTreeSet<String>,
     staged_large_values: Vec<groove::large_values::StagedLargeValueId>,
+    /// Construction-time proof that the production UUID source generated this
+    /// insert's row id.
+    /// Kept private so direct commits and replicated writes cannot assert it.
+    known_fresh_row: bool,
 }
 
 impl MergeableCommit {
@@ -1499,7 +1515,13 @@ impl MergeableCommit {
             user_metadata_json: None,
             prepared_large_columns: BTreeSet::new(),
             staged_large_values: Vec::new(),
+            known_fresh_row: false,
         }
+    }
+
+    pub(crate) fn known_fresh_row(mut self) -> Self {
+        self.known_fresh_row = true;
+        self
     }
 
     /// Target an exact branch-keyed row branch-local row.

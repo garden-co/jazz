@@ -4,6 +4,31 @@
 // the merge fast path relies on.
 
 #[test]
+fn merge_heads_match_history_for_first_and_subsequent_authored_versions() {
+    let schema = two_column_schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(0xa0), schema);
+    let row = row(0xa0);
+
+    let first = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row, 10)
+                .cells(BTreeMap::from([("title".to_owned(), "first".to_owned())])),
+        )
+        .unwrap();
+    core.assert_merge_heads_match_history_for_test("todos", row)
+        .unwrap();
+
+    core.commit_mergeable_settled(
+        MergeableCommit::new("todos", row, 11)
+            .parents(vec![first])
+            .cells(BTreeMap::from([("body".to_owned(), "second".to_owned())])),
+    )
+    .unwrap();
+    core.assert_merge_heads_match_history_for_test("todos", row)
+        .unwrap();
+}
+
+#[test]
 fn merge_heads_match_history_for_ordinary_concurrent_units() {
     let schema = two_column_schema();
     let (_writer_a_dir, mut writer_a) = open_node_with_schema(node(0xa1), schema.clone());

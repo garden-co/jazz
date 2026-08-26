@@ -28,7 +28,11 @@ async function waitFor(check: () => boolean, timeoutMs: number, message: string)
 // ---------------------------------------------------------------------------
 
 describe("Vue Todo App E2E", () => {
-  const mounts: Array<{ app: VueApp; container: HTMLDivElement }> = [];
+  const mounts: Array<{
+    app: VueApp;
+    container: HTMLDivElement;
+    storageNamespace: string | undefined;
+  }> = [];
 
   /** Mount the real App. Returns the container element. */
   async function mountApp(config: Partial<DbConfig> = {}): Promise<HTMLDivElement> {
@@ -37,16 +41,17 @@ describe("Vue Todo App E2E", () => {
 
     // Dynamic import so the Vue compiler processes the SFC
     const { default: App } = await import("../../src/App.vue");
+    const resolvedConfig: Partial<DbConfig> = {
+      appId: config.appId ?? "test-app",
+      driver: { type: "persistent", dbName: crypto.randomUUID() },
+      ...config,
+    };
+    const storageNamespace =
+      resolvedConfig.driver?.type === "persistent" ? resolvedConfig.driver.dbName : undefined;
 
-    const app = createApp(App, {
-      config: {
-        appId: config.appId ?? "test-app",
-        driver: { type: "persistent", dbName: crypto.randomUUID() },
-        ...config,
-      },
-    });
+    const app = createApp(App, { config: resolvedConfig });
     app.mount(el);
-    mounts.push({ app, container: el });
+    mounts.push({ app, container: el, storageNamespace });
 
     // Wait for JazzProvider to initialise and TodoList to render
     await waitFor(
@@ -58,28 +63,31 @@ describe("Vue Todo App E2E", () => {
     return el;
   }
 
-  /** Unmount a specific app instance (triggers JazzProvider shutdown). */
+  /** Unmount a specific app instance and await its persistent storage teardown. */
   async function unmountApp(el: HTMLDivElement): Promise<void> {
     const idx = mounts.findIndex((m) => m.container === el);
     if (idx === -1) return;
-    const { app } = mounts[idx];
+    const { app, storageNamespace } = mounts[idx];
     app.unmount();
     el.remove();
     mounts.splice(idx, 1);
-    // Give IndexedDB handles time to release
-    await new Promise((r) => setTimeout(r, 200));
+
+    if (storageNamespace) {
+      const storage = window.__jazz;
+      if (!storage) throw new Error("Jazz browser storage controls are unavailable");
+      await storage.shutdown(storageNamespace);
+      await waitFor(
+        () => !storage.listLiveStorageNamespaces().includes(storageNamespace),
+        5000,
+        "Unmounted Jazz storage should finish releasing",
+      );
+    }
   }
 
   afterEach(async () => {
-    for (const { app, container } of mounts) {
-      try {
-        app.unmount();
-      } catch {
-        /* best effort */
-      }
-      container.remove();
+    while (mounts.length > 0) {
+      await unmountApp(mounts[0].container);
     }
-    mounts.length = 0;
   });
 
   // -------------------------------------------------------------------------

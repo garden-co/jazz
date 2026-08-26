@@ -1,6 +1,30 @@
 //! Database opening, closing, and facade-level lifecycle tests.
 
 use super::*;
+use groove::storage::MemoryStorage;
+
+#[test]
+fn only_production_row_ids_enable_the_fresh_insert_proof() {
+    let seeded = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    assert!(!seeded.row_id_source_guarantees_fresh);
+
+    let schema = doctest_support::schema();
+    let column_families = schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let production = block_on(Db::open(DbConfig::new(
+        schema,
+        MemoryStorage::new(&refs),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x12; 16]),
+            author: AuthorSubject::for_test_bytes([0xa2; 16]),
+        },
+    )))
+    .unwrap();
+    assert!(production.row_id_source_guarantees_fresh);
+}
 
 #[test]
 fn db_facade_opens_writes_and_reads_todos_end_to_end() {

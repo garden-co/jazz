@@ -44,6 +44,8 @@ pub enum Error {
     PageTooLarge { page_id: PageId, page_size: usize },
     #[error("IDBTree store error: {0}")]
     Store(String),
+    #[error("IDBTree generation conflict: {0}")]
+    GenerationConflict(String),
     #[error("an IDBTree commit is already in flight")]
     CommitInFlight,
 }
@@ -473,7 +475,11 @@ impl<S: PageStore> TreeCore<S> {
                         self.deleted.push(page_id);
                     }
                 }
-                Err(Error::Store(error))
+                if error.contains("generation changed") {
+                    Err(Error::GenerationConflict(error))
+                } else {
+                    Err(Error::Store(error))
+                }
             }
         }
     }

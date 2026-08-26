@@ -7,7 +7,7 @@ use groove::ivm::{
     PlanExpr as GroovePlanExpr, PredicateExpr as GroovePredicateExpr, PredicateKind, ProjectField,
     TopByLimit, TopByOrder,
 };
-use groove::records::ValueType;
+use groove::records::{ValueType, collect_by_ordered_scalar};
 
 mod closure;
 use closure::{
@@ -510,7 +510,9 @@ fn parameter_domain(shape: &NormalizedRowSetShape) -> ParameterDomain {
                                 ty: column.ty.clone(),
                             },
                         );
-                        domain.routing_params.insert(param);
+                        if claim_route_is_ordered_scalar(&column.ty) {
+                            domain.routing_params.insert(param);
+                        }
                     }
                 }
             }
@@ -534,6 +536,17 @@ fn parameter_domain(shape: &NormalizedRowSetShape) -> ParameterDomain {
         }
     }
     domain
+}
+
+#[cfg(test)]
+pub(crate) fn parameter_domain_for_shape_for_test(
+    shape: &NormalizedRowSetShape,
+) -> ParameterDomain {
+    parameter_domain(shape)
+}
+
+fn claim_route_is_ordered_scalar(ty: &ColumnType) -> bool {
+    collect_by_ordered_scalar(ty)
 }
 
 fn parameter_domain_for_request(
@@ -652,7 +665,9 @@ fn collect_binding_source_params(graph: &GraphBuilder, domain: &mut ParameterDom
                             path,
                             ty: field.value_type.clone(),
                         });
-                    domain.routing_params.insert(name.to_owned());
+                    if claim_route_is_ordered_scalar(&field.value_type) {
+                        domain.routing_params.insert(name.to_owned());
+                    }
                 } else {
                     domain
                         .user_params

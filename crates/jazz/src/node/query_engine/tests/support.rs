@@ -679,6 +679,17 @@ impl SourceGraphPreparer for FakeSourceResolver {
 pub(super) struct InlineCollectorResolver {
     pub(super) requests: Vec<SourceRequest>,
     pub(super) denied_child_title: Option<&'static str>,
+    root_rows: Vec<InlineCollectorRootRow>,
+}
+
+#[derive(Clone, Copy)]
+struct InlineCollectorRootRow {
+    id: u8,
+    title: &'static str,
+    created_at: u64,
+    created_by: u8,
+    updated_at: u64,
+    updated_by: u8,
 }
 
 impl InlineCollectorResolver {
@@ -686,6 +697,58 @@ impl InlineCollectorResolver {
         Self {
             requests: Vec::new(),
             denied_child_title,
+            root_rows: vec![InlineCollectorRootRow {
+                id: 0xd1,
+                title: "parent",
+                created_at: 10,
+                created_by: 0xa1,
+                updated_at: 11,
+                updated_by: 0xa1,
+            }],
+        }
+    }
+
+    pub(super) fn with_root_rows(
+        root_rows: impl IntoIterator<Item = (u8, &'static str, u64)>,
+    ) -> Self {
+        Self {
+            requests: Vec::new(),
+            denied_child_title: None,
+            root_rows: root_rows
+                .into_iter()
+                .map(|(id, title, created_at)| InlineCollectorRootRow {
+                    id,
+                    title,
+                    created_at,
+                    created_by: 0xa1,
+                    updated_at: created_at + 1,
+                    updated_by: 0xa1,
+                })
+                .collect(),
+        }
+    }
+
+    pub(super) fn with_provenance_root_rows(
+        root_rows: impl IntoIterator<Item = (u8, &'static str, u64, u8, u64, u8)>,
+    ) -> Self {
+        Self {
+            requests: Vec::new(),
+            denied_child_title: None,
+            root_rows: root_rows
+                .into_iter()
+                .map(
+                    |(id, title, created_at, created_by, updated_at, updated_by)| {
+                        InlineCollectorRootRow {
+                            id,
+                            title,
+                            created_at,
+                            created_by,
+                            updated_at,
+                            updated_by,
+                        }
+                    },
+                )
+                .collect(),
         }
     }
 }
@@ -704,21 +767,29 @@ impl SourceGraphPreparer for InlineCollectorResolver {
             ),
             ("user_todo", ValueType::Nullable(Box::new(ValueType::Uuid))),
             ("$createdAt", ValueType::U64),
+            ("$createdBy", ValueType::Uuid),
             ("$updatedAt", ValueType::U64),
+            ("$updatedBy", ValueType::Uuid),
         ]);
         let parent = row(0xd1).0;
         let rows = match request.source.table.as_str() {
-            "todos" => vec![
-                descriptor
-                    .create(&[
-                        Value::Uuid(parent),
-                        Value::Nullable(Some(Box::new(Value::String("parent".to_owned())))),
-                        Value::Nullable(None),
-                        Value::U64(10),
-                        Value::U64(11),
-                    ])
-                    .expect("inline parent"),
-            ],
+            "todos" => self
+                .root_rows
+                .iter()
+                .map(|root| {
+                    descriptor
+                        .create(&[
+                            Value::Uuid(row(root.id).0),
+                            Value::Nullable(Some(Box::new(Value::String(root.title.to_owned())))),
+                            Value::Nullable(None),
+                            Value::U64(root.created_at),
+                            Value::Uuid(row(root.created_by).0),
+                            Value::U64(root.updated_at),
+                            Value::Uuid(row(root.updated_by).0),
+                        ])
+                        .expect("inline parent")
+                })
+                .collect(),
             "todo_tags" => [(0xd2, "allowed"), (0xd3, "denied")]
                 .into_iter()
                 .filter(|(_, title)| {
@@ -735,7 +806,9 @@ impl SourceGraphPreparer for InlineCollectorResolver {
                             Value::Nullable(Some(Box::new(Value::String(title.to_owned())))),
                             Value::Nullable(Some(Box::new(Value::Uuid(parent)))),
                             Value::U64(20),
+                            Value::Uuid(row(0xa2).0),
                             Value::U64(21),
+                            Value::Uuid(row(0xa2).0),
                         ])
                         .expect("inline child")
                 })
@@ -747,7 +820,9 @@ impl SourceGraphPreparer for InlineCollectorResolver {
                         Value::Nullable(Some(Box::new(Value::String("label".to_owned())))),
                         Value::Nullable(Some(Box::new(Value::Uuid(parent)))),
                         Value::U64(30),
+                        Value::Uuid(row(0xa3).0),
                         Value::U64(31),
+                        Value::Uuid(row(0xa3).0),
                     ])
                     .expect("inline sibling child"),
             ],
@@ -758,7 +833,9 @@ impl SourceGraphPreparer for InlineCollectorResolver {
                         Value::Nullable(Some(Box::new(Value::String("note".to_owned())))),
                         Value::Nullable(Some(Box::new(Value::Uuid(row(0xd2).0)))),
                         Value::U64(40),
+                        Value::Uuid(row(0xa4).0),
                         Value::U64(41),
+                        Value::Uuid(row(0xa4).0),
                     ])
                     .expect("inline grandchild"),
             ],

@@ -532,7 +532,8 @@ mod tests {
                 storage,
                 Vec::new(),
                 std::collections::HashSet::new(),
-            ),
+            )
+            .expect("build shutdown test catalogue"),
             catalogue: ServerCatalogue,
             app_id,
             auth_config: AuthConfig::default(),

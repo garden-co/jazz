@@ -28,7 +28,11 @@ async function waitFor(check: () => boolean, timeoutMs: number, message: string)
 // ---------------------------------------------------------------------------
 
 describe("Svelte Todo App E2E", () => {
-  const mounts: Array<{ instance: Record<string, never>; container: HTMLDivElement }> = [];
+  const mounts: Array<{
+    instance: Record<string, never>;
+    container: HTMLDivElement;
+    storageNamespace: string | undefined;
+  }> = [];
 
   /** Mount the real App. Returns the container element. */
   async function mountApp(config: Partial<DbConfig> = {}): Promise<HTMLDivElement> {
@@ -38,17 +42,18 @@ describe("Svelte Todo App E2E", () => {
     // Dynamic import so the Svelte compiler processes the component
     const { default: App } = await import("../../src/App.svelte");
 
+    const resolvedConfig: Partial<DbConfig> = {
+      appId: config.appId ?? "test-app",
+      driver: { type: "persistent", dbName: crypto.randomUUID() },
+      ...config,
+    };
+    const storageNamespace =
+      resolvedConfig.driver?.type === "persistent" ? resolvedConfig.driver.dbName : undefined;
     const instance = mount(App as Component, {
       target: el,
-      props: {
-        config: {
-          appId: config.appId ?? "test-app",
-          driver: { type: "persistent", dbName: crypto.randomUUID() },
-          ...config,
-        },
-      },
+      props: { config: resolvedConfig },
     });
-    mounts.push({ instance, container: el });
+    mounts.push({ instance, container: el, storageNamespace });
 
     // Wait for JazzSvelteProvider to initialise and TodoList to render
     await waitFor(
@@ -64,24 +69,27 @@ describe("Svelte Todo App E2E", () => {
   async function unmountApp(el: HTMLDivElement): Promise<void> {
     const idx = mounts.findIndex((m) => m.container === el);
     if (idx === -1) return;
-    const { instance } = mounts[idx];
-    unmount(instance);
+    const { instance, storageNamespace } = mounts[idx];
+    await unmount(instance);
     el.remove();
     mounts.splice(idx, 1);
-    // Give IndexedDB handles time to release
-    await new Promise((r) => setTimeout(r, 200));
+
+    if (storageNamespace) {
+      const storage = window.__jazz;
+      if (!storage) throw new Error("Jazz browser storage controls are unavailable");
+      await storage.shutdown(storageNamespace);
+      await waitFor(
+        () => !storage.listLiveStorageNamespaces().includes(storageNamespace),
+        5000,
+        "Unmounted Jazz storage should finish releasing",
+      );
+    }
   }
 
   afterEach(async () => {
-    for (const { instance, container } of mounts) {
-      try {
-        unmount(instance);
-      } catch {
-        /* best effort */
-      }
-      container.remove();
+    while (mounts.length > 0) {
+      await unmountApp(mounts[0].container);
     }
-    mounts.length = 0;
   });
 
   // -------------------------------------------------------------------------

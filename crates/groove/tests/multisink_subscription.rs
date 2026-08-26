@@ -6,7 +6,7 @@
 use std::sync::mpsc::TryRecvError;
 
 use groove::db::{Database, GraphBuilder, RoutedMultisinkTerminal};
-use groove::ivm::ProjectField;
+use groove::ivm::{CollectByField, ProjectField, TopByLimit};
 use groove::records::{RecordDescriptor, Value};
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
@@ -406,6 +406,43 @@ async fn multisink_subscription_delivers_initial_and_tick_deltas_for_all_sinks()
         tick.get("years").unwrap().to_values().unwrap(),
         [(vec![Value::U64(2), Value::U64(1957)], 1)]
     );
+}
+
+#[futures_test::test]
+async fn shared_structured_output_delivers_terminal_deltas_to_every_subscription() {
+    let mut db = database().await;
+    let graph = GraphBuilder::collect_root_ordered(
+        GraphBuilder::table("albums"),
+        ["id"],
+        [
+            CollectByField::named("id"),
+            CollectByField::named("title"),
+            CollectByField::named("year"),
+        ],
+        Vec::new(),
+        Vec::<String>::new(),
+        0,
+        TopByLimit::Unbounded,
+    );
+    let first = db.subscribe([("rows", graph.clone())]).unwrap();
+    let second = db.subscribe([("rows", graph)]).unwrap();
+    first.try_recv().expect("first initial snapshot");
+    second.try_recv().expect("second initial snapshot");
+
+    insert_album(&mut db, 1, "Kind of Blue", 1959).await;
+
+    let first_tick = first.try_recv().expect("first subscription tick");
+    let second_tick = second.try_recv().expect("second subscription tick");
+    let first_terminal = first_tick
+        .terminal_sinks
+        .get("rows")
+        .expect("first subscription receives structured terminal deltas");
+    let second_terminal = second_tick
+        .terminal_sinks
+        .get("rows")
+        .expect("second subscription receives structured terminal deltas");
+    assert!(!first_terminal.is_empty());
+    assert_eq!(second_terminal, first_terminal);
 }
 
 #[futures_test::test]

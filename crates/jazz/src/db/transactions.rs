@@ -161,26 +161,25 @@ where
         row: RowUuid,
         cells: RowCells,
         now_ms: Option<u64>,
+        known_fresh_row: bool,
     ) -> Result<(), Error> {
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
-        self.node
-            .node
-            .lock()
-            .await
-            .tx_write_mergeable_in_schema(
-                tx_id,
-                self.schema_version_id,
-                table,
-                row,
-                cells,
-                None,
-                Vec::new(),
-                now_ms,
-                false,
-            )
-            .await
-            .map_err(Into::into)
+        let mut node = self.node.node.lock().await;
+        node.tx_write_mergeable_in_schema(
+            tx_id,
+            self.schema_version_id,
+            table,
+            row,
+            cells,
+            None,
+            Vec::new(),
+            now_ms,
+            false,
+            known_fresh_row,
+        )
+        .await?;
+        Ok(())
     }
 
     pub(super) async fn stage_mergeable_insert_in_branch(
@@ -191,26 +190,25 @@ where
         row: RowUuid,
         cells: RowCells,
         now_ms: Option<u64>,
+        known_fresh_row: bool,
     ) -> Result<(), Error> {
         self.reject_attributed_mergeable_branch(tx_id).await?;
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
-        self.node
-            .node
-            .lock()
-            .await
-            .tx_write_mergeable_in_schema_and_branch(
-                tx_id,
-                self.schema_version_id,
-                table,
-                row,
-                cells,
-                None,
-                Vec::new(),
-                now_ms,
-                false,
-                branch,
-            )?;
+        let mut node = self.node.node.lock().await;
+        node.tx_write_mergeable_in_schema_and_branch(
+            tx_id,
+            self.schema_version_id,
+            table,
+            row,
+            cells,
+            None,
+            Vec::new(),
+            now_ms,
+            false,
+            branch,
+            known_fresh_row,
+        )?;
         Ok(())
     }
 
@@ -288,7 +286,7 @@ where
             ));
         };
         inherited.extend(patch);
-        self.stage_mergeable_insert_in_branch(tx_id, table, head, row, inherited, now_ms)
+        self.stage_mergeable_insert_in_branch(tx_id, table, head, row, inherited, now_ms, false)
             .await
     }
 
@@ -313,6 +311,7 @@ where
                 Some(DeletionEvent::Deleted),
                 Vec::new(),
                 now_ms,
+                false,
                 false,
             )
             .await
@@ -359,6 +358,7 @@ where
                 now_ms,
                 true,
                 head,
+                false,
             )?;
         Ok(())
     }
@@ -395,6 +395,7 @@ where
             content_parents,
             now_ms,
             true,
+            false,
         )
         .await?;
         node.tx_write_mergeable_in_schema(
@@ -407,6 +408,7 @@ where
             deletion_parents,
             now_ms,
             true,
+            false,
         )
         .await?;
         Ok(())
@@ -445,6 +447,7 @@ where
             now_ms,
             true,
             branch.clone(),
+            false,
         )?;
         node.tx_write_mergeable_in_schema_and_branch(
             tx_id,
@@ -457,6 +460,7 @@ where
             now_ms,
             true,
             branch,
+            false,
         )?;
         Ok(())
     }

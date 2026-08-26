@@ -51,6 +51,7 @@ where
             NodeState::new(config.identity.node, config.schema.clone(), config.storage).await?;
         let node = Node::new(node);
         node.restore_pending_uploads(config.identity)?;
+        let row_id_source_guarantees_fresh = config.id_source.is_none();
         Ok(Self {
             schema: config.schema,
             schema_version_id,
@@ -63,6 +64,7 @@ where
                     .id_source
                     .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
             )),
+            row_id_source_guarantees_fresh,
             next_now_ms: Rc::new(Cell::new(1)),
             backend_attribution: false,
         })
@@ -98,6 +100,7 @@ where
             false,
         )
         .await?;
+        let row_id_source_guarantees_fresh = config.id_source.is_none();
         let db = Self {
             schema: config.schema,
             schema_version_id,
@@ -110,6 +113,7 @@ where
                     .id_source
                     .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
             )),
+            row_id_source_guarantees_fresh,
             next_now_ms: Rc::new(Cell::new(1)),
             backend_attribution: false,
         };
@@ -132,6 +136,7 @@ where
             config.storage,
         )
         .await?;
+        let row_id_source_guarantees_fresh = config.id_source.is_none();
         Ok(Self {
             schema: config.schema,
             schema_version_id,
@@ -144,6 +149,7 @@ where
                     .id_source
                     .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
             )),
+            row_id_source_guarantees_fresh,
             next_now_ms: Rc::new(Cell::new(1)),
             backend_attribution: false,
         })
@@ -182,6 +188,7 @@ where
             NodeState::new_catalogue_uninitialized(config.identity.node, config.storage).await?;
         let node = Node::new(node);
         node.restore_pending_uploads(config.identity)?;
+        let row_id_source_guarantees_fresh = config.id_source.is_none();
         Ok(Self {
             schema: bootstrap_schema,
             schema_version_id,
@@ -194,6 +201,7 @@ where
                     .id_source
                     .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
             )),
+            row_id_source_guarantees_fresh,
             next_now_ms: Rc::new(Cell::new(1)),
             backend_attribution: false,
         })
@@ -304,6 +312,7 @@ where
             identity: self.identity,
             node: Rc::clone(&self.node),
             row_id_source: Rc::clone(&self.row_id_source),
+            row_id_source_guarantees_fresh: self.row_id_source_guarantees_fresh,
             next_now_ms: Rc::clone(&self.next_now_ms),
             backend_attribution: self.backend_attribution,
         })
@@ -779,6 +788,23 @@ where
     /// Test/bench-only runtime diagnostics used by performance receipts.
     pub fn runtime_stats_for_test(&self) -> groove::ivm::RuntimeStats {
         self.node.node.borrow().runtime_stats_for_test()
+    }
+
+    #[cfg(feature = "testing")]
+    /// Test-only count of relay-owned upstream usage sites. This deliberately
+    /// counts wire owners rather than coverage evaluators, so reconnect tests
+    /// can prove a detached downstream session left no orphaned owner behind.
+    pub fn relay_upstream_subscription_owner_count_for_test(&self) -> usize {
+        self.node.relay_upstream_subscription_owners.borrow().len()
+    }
+
+    #[cfg(feature = "testing")]
+    /// Test-only count of relay-registered downstream wire usage sites.
+    pub fn relay_registered_query_binding_count_for_test(&self) -> usize {
+        self.node
+            .node
+            .borrow()
+            .registered_query_binding_count_for_test()
     }
 
     #[cfg(feature = "testing")]

@@ -1,5 +1,7 @@
 //! Canonical indirect representation for large logical scalar values.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::{Deserialize, Serialize};
 
 mod json_syntax;
@@ -25,6 +27,21 @@ pub const BRANCH_MIN_CHILDREN: usize = 4;
 pub const BRANCH_TARGET_CHILDREN: usize = 16;
 pub const BRANCH_MAX_CHILDREN: usize = 64;
 pub const MAX_TREE_DEPTH: usize = 32;
+/// Maximum number of logical tree-edge occurrences one synchronous scalar
+/// operation may expand. Physical graph walks deduplicate shared nodes, but a
+/// shared node can occur at many logical positions. This bound prevents a
+/// small authenticated DAG with zero-length metrics from turning one
+/// materialization attempt into exponential CPU or memory work.
+pub const MAX_LOGICAL_TRAVERSAL_STEPS: usize = 128 * 1024;
+/// Maximum number of distinct immutable nodes a graph-oriented operation may
+/// retain while authenticating one descriptor. This matches the logical-work
+/// budget while still admitting multi-gigabyte canonical values: even at the
+/// minimum leaf size, a normally shaped tree can represent well over 1 GiB.
+///
+/// Physical traversals must remember every discovered node to deduplicate DAG
+/// edges and validate repeated references consistently, so this is also their
+/// memory boundary.
+pub const MAX_PHYSICAL_TRAVERSAL_NODES: usize = MAX_LOGICAL_TRAVERSAL_STEPS;
 /// JSON syntax validation retains one frame per open array/object. Keep this
 /// separate from the immutable-tree bound: a small logical value can otherwise
 /// use arbitrarily deep JSON nesting to grow validator memory.
@@ -1437,6 +1454,8 @@ pub(crate) fn consolidate_single_edit_attempt(
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum Error {
+    #[error("large-value upload batch limit must be non-zero")]
+    InvalidUploadBatchLimit,
     #[error("large string is not valid UTF-8")]
     InvalidUtf8,
     #[error("large JSON is not valid JSON")]
@@ -1453,6 +1472,10 @@ pub enum Error {
     DescriptorMismatch,
     #[error("large-value tree contains a cycle or exceeds its depth bound")]
     InvalidTree,
+    #[error("large-value logical traversal exceeded its deterministic work limit")]
+    TraversalWorkLimitExceeded,
+    #[error("large-value physical traversal exceeded its distinct-node limit")]
+    PhysicalTraversalNodeLimitExceeded,
     #[error("malformed physical scalar encoding")]
     MalformedScalar,
     #[error("indirect scalar requires interruptible evaluation")]
@@ -1465,6 +1488,265 @@ pub enum ReachabilityError {
     LargeValue(#[from] Error),
     #[error(transparent)]
     Chunk(#[from] crate::chunks::ChunkError),
+}
+
+#[derive(Clone)]
+struct PhysicalTraversalEntry {
+    node_ref: NodeRef,
+    /// Exact ancestors on this occurrence's path. Shared descendants are
+    /// legal; encountering an ancestor again is a cycle even when that node
+    /// was already authenticated through another path.
+    ancestors: Vec<NodeRef>,
+}
+
+#[derive(Clone, Copy)]
+struct PhysicalNodeState {
+    expected_logical_hash: ContentHash,
+    expected_metrics: Option<NodeMetrics>,
+    actual_metrics: Option<NodeMetrics>,
+}
+
+/// A physical graph traversal visits each immutable node once while retaining
+/// enough per-edge evidence to reject inconsistent shared references and
+/// cycles. Logical readers deliberately do not use this deduplication: every
+/// edge occurrence contributes bytes to the scalar and is instead protected by
+/// [`MAX_LOGICAL_TRAVERSAL_STEPS`].
+struct PhysicalTraversal {
+    root: NodeRef,
+    pending: Vec<PhysicalTraversalEntry>,
+    nodes: BTreeMap<NodeRef, PhysicalNodeState>,
+    edges: BTreeMap<NodeRef, Vec<NodeRef>>,
+    node_budget: PhysicalTraversalNodeBudget,
+}
+
+impl PhysicalTraversal {
+    fn new(
+        root: NodeRef,
+        expected_metrics: Option<NodeMetrics>,
+        expected_logical_hash: ContentHash,
+    ) -> Self {
+        Self::new_with_node_limit(
+            root,
+            expected_metrics,
+            expected_logical_hash,
+            MAX_PHYSICAL_TRAVERSAL_NODES,
+        )
+        .expect("the configured physical traversal node limit is non-zero")
+    }
+
+    fn new_with_node_limit(
+        root: NodeRef,
+        expected_metrics: Option<NodeMetrics>,
+        expected_logical_hash: ContentHash,
+        max_nodes: usize,
+    ) -> Result<Self, Error> {
+        let mut node_budget = PhysicalTraversalNodeBudget::with_limit(max_nodes);
+        node_budget.consume()?;
+        Ok(Self {
+            root: root.clone(),
+            pending: vec![PhysicalTraversalEntry {
+                node_ref: root.clone(),
+                ancestors: Vec::new(),
+            }],
+            nodes: BTreeMap::from([(
+                root,
+                PhysicalNodeState {
+                    expected_logical_hash,
+                    expected_metrics,
+                    actual_metrics: None,
+                },
+            )]),
+            edges: BTreeMap::new(),
+            node_budget,
+        })
+    }
+
+    fn pop(&mut self) -> Option<PhysicalTraversalEntry> {
+        self.pending.pop()
+    }
+
+    fn validate_node(
+        &mut self,
+        kind: LargeValueKind,
+        node_ref: &NodeRef,
+        node: &ChunkNode,
+    ) -> Result<(), Error> {
+        let state = self.nodes.get_mut(node_ref).ok_or(Error::InvalidTree)?;
+        if node_logical_hash(node) != state.expected_logical_hash {
+            return Err(Error::DescriptorMismatch);
+        }
+        let actual_metrics = node_metrics(kind, node)?;
+        if state
+            .expected_metrics
+            .is_some_and(|expected| expected != actual_metrics)
+        {
+            return Err(Error::DescriptorMismatch);
+        }
+        state.actual_metrics = Some(actual_metrics);
+        self.edges.insert(
+            node_ref.clone(),
+            match node {
+                ChunkNode::Leaf { .. } => Vec::new(),
+                ChunkNode::Branch { children, .. } => children
+                    .iter()
+                    .map(|child| child.node_ref.clone())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+            },
+        );
+        Ok(())
+    }
+
+    /// Verify the complete authenticated physical graph without enumerating
+    /// its potentially exponential logical paths. Memoized height evaluation
+    /// rejects both cycles and paths beyond the depth ceiling in O(V + E).
+    fn finish(&self) -> Result<(), Error> {
+        fn height(
+            node_ref: &NodeRef,
+            edges: &BTreeMap<NodeRef, Vec<NodeRef>>,
+            visiting: &mut BTreeSet<NodeRef>,
+            heights: &mut BTreeMap<NodeRef, usize>,
+        ) -> Result<usize, Error> {
+            if let Some(height) = heights.get(node_ref) {
+                return Ok(*height);
+            }
+            if !visiting.insert(node_ref.clone()) {
+                return Err(Error::InvalidTree);
+            }
+            let children = edges.get(node_ref).ok_or(Error::InvalidTree)?;
+            let mut result = 0_usize;
+            for child in children {
+                result = result.max(
+                    height(child, edges, visiting, heights)?
+                        .checked_add(1)
+                        .ok_or(Error::InvalidTree)?,
+                );
+                if result > MAX_TREE_DEPTH {
+                    return Err(Error::InvalidTree);
+                }
+            }
+            visiting.remove(node_ref);
+            heights.insert(node_ref.clone(), result);
+            Ok(result)
+        }
+
+        height(
+            &self.root,
+            &self.edges,
+            &mut BTreeSet::new(),
+            &mut BTreeMap::new(),
+        )?;
+        Ok(())
+    }
+
+    fn discover_child(
+        &mut self,
+        parent: &PhysicalTraversalEntry,
+        child: BranchChild,
+    ) -> Result<(), Error> {
+        let mut ancestors = parent.ancestors.clone();
+        ancestors.push(parent.node_ref.clone());
+        if ancestors.len() > MAX_TREE_DEPTH || ancestors.contains(&child.node_ref) {
+            return Err(Error::InvalidTree);
+        }
+        match self.nodes.entry(child.node_ref.clone()) {
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let state = entry.get_mut();
+                if state.expected_logical_hash != child.logical_hash
+                    || state
+                        .expected_metrics
+                        .is_some_and(|metrics| metrics != child.metrics)
+                    || state
+                        .actual_metrics
+                        .is_some_and(|metrics| metrics != child.metrics)
+                {
+                    return Err(Error::DescriptorMismatch);
+                }
+                state.expected_metrics = Some(child.metrics);
+            }
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                self.node_budget.consume()?;
+                entry.insert(PhysicalNodeState {
+                    expected_logical_hash: child.logical_hash,
+                    expected_metrics: Some(child.metrics),
+                    actual_metrics: None,
+                });
+                self.pending.push(PhysicalTraversalEntry {
+                    node_ref: child.node_ref,
+                    ancestors,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn discover_children(
+        &mut self,
+        parent: &PhysicalTraversalEntry,
+        children: Vec<BranchChild>,
+    ) -> Result<(), Error> {
+        for child in children.into_iter().rev() {
+            self.discover_child(parent, child)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct PhysicalTraversalNodeBudget {
+    remaining: usize,
+}
+
+impl PhysicalTraversalNodeBudget {
+    pub(crate) fn new() -> Self {
+        Self::with_limit(MAX_PHYSICAL_TRAVERSAL_NODES)
+    }
+
+    fn with_limit(limit: usize) -> Self {
+        Self { remaining: limit }
+    }
+
+    pub(crate) fn consume(&mut self) -> Result<(), Error> {
+        self.remaining = self
+            .remaining
+            .checked_sub(1)
+            .ok_or(Error::PhysicalTraversalNodeLimitExceeded)?;
+        Ok(())
+    }
+
+    pub(crate) fn consume_many(&mut self, count: usize) -> Result<(), Error> {
+        self.remaining = self
+            .remaining
+            .checked_sub(count)
+            .ok_or(Error::PhysicalTraversalNodeLimitExceeded)?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LogicalTraversalBudget {
+    remaining: usize,
+}
+
+impl LogicalTraversalBudget {
+    fn new() -> Self {
+        Self {
+            remaining: MAX_LOGICAL_TRAVERSAL_STEPS,
+        }
+    }
+
+    fn consume(&mut self) -> Result<(), Error> {
+        self.consume_many(1)
+    }
+
+    fn consume_many(&mut self, count: usize) -> Result<(), Error> {
+        self.remaining = self
+            .remaining
+            .checked_sub(count)
+            .ok_or(Error::TraversalWorkLimitExceeded)?;
+        Ok(())
+    }
 }
 
 /// Authenticate and visit every immutable node reachable from one descriptor.
@@ -1482,59 +1764,25 @@ pub async fn visit_reachable_chunks(
         byte_length: value.byte_length,
         utf16_length: value.utf16_length,
     });
-    let mut pending = vec![(
-        value.root.clone(),
-        0_usize,
-        root_metrics,
-        value.logical_hash,
-    )];
+    let mut traversal =
+        PhysicalTraversal::new(value.root.clone(), root_metrics, value.logical_hash);
     let mut visited = 0_u64;
-    while let Some((node_ref, depth, expected_metrics, expected_logical_hash)) = pending.pop() {
-        if depth > MAX_TREE_DEPTH {
-            return Err(Error::InvalidTree.into());
-        }
+    while let Some(entry) = traversal.pop() {
+        let node_ref = &entry.node_ref;
         let request = ChunkRequest {
             object_hash: node_ref.object_hash.0,
             locator: node_ref.locator,
         };
         let encoded = provider.get(request.clone()).await?;
         let node = decode_node(value.kind, node_ref.object_hash, &encoded)?;
-        if node_logical_hash(&node) != expected_logical_hash {
-            return Err(Error::DescriptorMismatch.into());
-        }
-        match &node {
-            ChunkNode::Leaf { bytes, .. } => {
-                if expected_metrics
-                    .is_some_and(|expected| metrics(value.kind, bytes).ok() != Some(expected))
-                {
-                    return Err(Error::DescriptorMismatch.into());
-                }
-            }
-            ChunkNode::Branch { children, .. } => {
-                if let Some(expected) = expected_metrics {
-                    let mut child_metrics = children.iter().map(|child| child.metrics);
-                    let Some(first) = child_metrics.next() else {
-                        return Err(Error::MalformedNode.into());
-                    };
-                    if child_metrics.try_fold(first, add_metrics)? != expected {
-                        return Err(Error::DescriptorMismatch.into());
-                    }
-                }
-            }
-        }
+        traversal.validate_node(value.kind, node_ref, &node)?;
         visit(&request);
         visited = visited.checked_add(1).ok_or(Error::MetricOverflow)?;
         if let ChunkNode::Branch { children, .. } = node {
-            for child in children.into_iter().rev() {
-                pending.push((
-                    child.node_ref,
-                    depth + 1,
-                    Some(child.metrics),
-                    child.logical_hash,
-                ));
-            }
+            traversal.discover_children(&entry, children)?;
         }
     }
+    traversal.finish()?;
     Ok(visited)
 }
 
@@ -1542,7 +1790,7 @@ pub async fn visit_reachable_chunks(
 pub struct LargeValueUploadCursor {
     kind: LargeValueKind,
     provider: crate::chunks::OwnedChunkProvider,
-    pending: Vec<(NodeRef, usize, Option<NodeMetrics>, ContentHash)>,
+    traversal: PhysicalTraversal,
 }
 
 impl LargeValueUploadCursor {
@@ -1558,69 +1806,44 @@ impl LargeValueUploadCursor {
         Ok(Self {
             kind: value.kind,
             provider,
-            pending: vec![(value.root.clone(), 0, root_metrics, value.logical_hash)],
+            traversal: PhysicalTraversal::new(value.root.clone(), root_metrics, value.logical_hash),
         })
     }
 
-    /// Read and authenticate at most `limit` nodes. An empty result means the
-    /// tree is complete; the cursor retains only the branch frontier.
+    /// Read and authenticate at most `limit` nodes. `limit` must be non-zero.
+    /// An empty result means the graph is complete; the cursor retains the
+    /// branch frontier plus one authenticated expectation per distinct physical
+    /// node.
     pub async fn next_batch(
         &mut self,
         limit: usize,
     ) -> Result<Vec<StagedChunk>, ReachabilityError> {
+        if limit == 0 {
+            return Err(Error::InvalidUploadBatchLimit.into());
+        }
         let mut batch = Vec::new();
-        while batch.len() < limit.max(1) {
-            let Some((node_ref, depth, expected_metrics, expected_logical_hash)) =
-                self.pending.pop()
-            else {
+        while batch.len() < limit {
+            let Some(entry) = self.traversal.pop() else {
                 break;
             };
-            if depth > MAX_TREE_DEPTH {
-                return Err(Error::InvalidTree.into());
-            }
+            let node_ref = &entry.node_ref;
             let request = ChunkRequest {
                 object_hash: node_ref.object_hash.0,
                 locator: node_ref.locator,
             };
             let encoded = self.provider.get(request).await?;
             let node = decode_node(self.kind, node_ref.object_hash, encoded.bytes())?;
-            if node_logical_hash(&node) != expected_logical_hash {
-                return Err(Error::DescriptorMismatch.into());
-            }
-            match &node {
-                ChunkNode::Leaf { bytes, .. } => {
-                    if expected_metrics
-                        .is_some_and(|expected| metrics(self.kind, bytes).ok() != Some(expected))
-                    {
-                        return Err(Error::DescriptorMismatch.into());
-                    }
-                }
-                ChunkNode::Branch { children, .. } => {
-                    if let Some(expected) = expected_metrics {
-                        let mut child_metrics = children.iter().map(|child| child.metrics);
-                        let Some(first) = child_metrics.next() else {
-                            return Err(Error::MalformedNode.into());
-                        };
-                        if child_metrics.try_fold(first, add_metrics)? != expected {
-                            return Err(Error::DescriptorMismatch.into());
-                        }
-                    }
-                }
-            }
+            self.traversal.validate_node(self.kind, node_ref, &node)?;
             if let ChunkNode::Branch { children, .. } = node {
-                for child in children.into_iter().rev() {
-                    self.pending.push((
-                        child.node_ref,
-                        depth + 1,
-                        Some(child.metrics),
-                        child.logical_hash,
-                    ));
-                }
+                self.traversal.discover_children(&entry, children)?;
             }
             batch.push(StagedChunk {
-                node_ref,
+                node_ref: entry.node_ref,
                 encoded: encoded.bytes().to_vec(),
             });
+        }
+        if self.traversal.pending.is_empty() {
+            self.traversal.finish()?;
         }
         Ok(batch)
     }
@@ -1639,22 +1862,16 @@ pub(crate) async fn missing_upload_frontier(
         byte_length: value.byte_length,
         utf16_length: value.utf16_length,
     });
-    let mut pending = vec![(
-        value.root.clone(),
-        0_usize,
-        root_metrics,
-        value.logical_hash,
-    )];
+    let mut traversal =
+        PhysicalTraversal::new(value.root.clone(), root_metrics, value.logical_hash);
     let mut missing = Vec::new();
-    while let Some((node_ref, depth, expected_metrics, expected_logical_hash)) = pending.pop() {
-        if depth > MAX_TREE_DEPTH {
-            return Err(Error::InvalidTree.into());
-        }
+    while let Some(entry) = traversal.pop() {
+        let node_ref = &entry.node_ref;
         let encoded = match reader.get(node_ref.locator, node_ref.object_hash).await {
             Ok(encoded) => encoded,
             Err(crate::chunks::ChunkStorageError::Unavailable) => {
-                missing.push(node_ref);
-                if missing.len() == limit {
+                missing.push(entry.node_ref);
+                if missing.len() >= limit.max(1) {
                     break;
                 }
                 continue;
@@ -1662,39 +1879,13 @@ pub(crate) async fn missing_upload_frontier(
             Err(error) => return Err(crate::chunks::ChunkError::from(error).into()),
         };
         let node = decode_node(value.kind, node_ref.object_hash, &encoded)?;
-        if node_logical_hash(&node) != expected_logical_hash {
-            return Err(Error::DescriptorMismatch.into());
-        }
-        match &node {
-            ChunkNode::Leaf { bytes, .. } => {
-                if expected_metrics
-                    .is_some_and(|expected| metrics(value.kind, bytes).ok() != Some(expected))
-                {
-                    return Err(Error::DescriptorMismatch.into());
-                }
-            }
-            ChunkNode::Branch { children, .. } => {
-                if let Some(expected) = expected_metrics {
-                    let mut child_metrics = children.iter().map(|child| child.metrics);
-                    let Some(first) = child_metrics.next() else {
-                        return Err(Error::MalformedNode.into());
-                    };
-                    if child_metrics.try_fold(first, add_metrics)? != expected {
-                        return Err(Error::DescriptorMismatch.into());
-                    }
-                }
-            }
-        }
+        traversal.validate_node(value.kind, node_ref, &node)?;
         if let ChunkNode::Branch { children, .. } = node {
-            for child in children.into_iter().rev() {
-                pending.push((
-                    child.node_ref,
-                    depth + 1,
-                    Some(child.metrics),
-                    child.logical_hash,
-                ));
-            }
+            traversal.discover_children(&entry, children)?;
         }
+    }
+    if missing.is_empty() {
+        traversal.finish()?;
     }
     Ok(missing)
 }
@@ -1715,22 +1906,16 @@ pub(crate) async fn validate_finalized_upload(
         byte_length: value.byte_length,
         utf16_length: value.utf16_length,
     });
-    let mut pending = vec![(
-        value.root.clone(),
-        0_usize,
-        root_metrics,
-        value.logical_hash,
-    )];
-    while let Some((node_ref, depth, expected_metrics, expected_logical_hash)) = pending.pop() {
-        if depth > MAX_TREE_DEPTH {
-            return Err(Error::InvalidTree.into());
-        }
+    let mut traversal =
+        PhysicalTraversal::new(value.root.clone(), root_metrics, value.logical_hash);
+    while let Some(entry) = traversal.pop() {
+        let node_ref = &entry.node_ref;
         // Descriptor-keyed peer uploads may legitimately discover that an
         // identical descriptor was completed by another connection. Once its
         // pending record was bound to that exact descriptor at `begin`, local
         // immutable nodes are safe to reuse. Unbound/raw uploads, in contrast,
         // must prove every reachable node was journaled by this upload.
-        if !descriptor_was_bound_before_completion && !uploaded_chunks.contains(&node_ref) {
+        if !descriptor_was_bound_before_completion && !uploaded_chunks.contains(node_ref) {
             return Err(Error::DescriptorMismatch.into());
         }
         let encoded = reader
@@ -1738,38 +1923,12 @@ pub(crate) async fn validate_finalized_upload(
             .await
             .map_err(crate::chunks::ChunkError::from)?;
         let node = decode_node(value.kind, node_ref.object_hash, &encoded)?;
-        if node_logical_hash(&node) != expected_logical_hash {
-            return Err(Error::DescriptorMismatch.into());
-        }
-        match &node {
-            ChunkNode::Leaf { bytes, .. } => {
-                if expected_metrics
-                    .is_some_and(|expected| metrics(value.kind, bytes).ok() != Some(expected))
-                {
-                    return Err(Error::DescriptorMismatch.into());
-                }
-            }
-            ChunkNode::Branch { children, .. } => {
-                if let Some(expected) = expected_metrics {
-                    let mut child_metrics = children.iter().map(|child| child.metrics);
-                    let Some(first) = child_metrics.next() else {
-                        return Err(Error::MalformedNode.into());
-                    };
-                    if child_metrics.try_fold(first, add_metrics)? != expected {
-                        return Err(Error::DescriptorMismatch.into());
-                    }
-                }
-                for child in children.iter().rev() {
-                    pending.push((
-                        child.node_ref.clone(),
-                        depth + 1,
-                        Some(child.metrics),
-                        child.logical_hash,
-                    ));
-                }
-            }
+        traversal.validate_node(value.kind, node_ref, &node)?;
+        if let ChunkNode::Branch { children, .. } = node {
+            traversal.discover_children(&entry, children)?;
         }
     }
+    traversal.finish()?;
     Ok(())
 }
 
@@ -2610,6 +2769,16 @@ pub(crate) fn decode_authenticated_node(
     expected_hash: ContentHash,
     encoded: &[u8],
 ) -> Result<ChunkNode, Error> {
+    decode_node_untyped_authenticated(expected_hash, encoded)
+}
+
+/// Authenticate and canonically decode an immutable-node envelope before a
+/// referencing descriptor is available. Descriptor-bound reads additionally
+/// apply [`decode_node`]'s kind check.
+pub(crate) fn decode_node_untyped_authenticated(
+    expected_hash: ContentHash,
+    encoded: &[u8],
+) -> Result<ChunkNode, Error> {
     if object_hash(encoded) != expected_hash {
         return Err(Error::ObjectHashMismatch);
     }
@@ -2977,7 +3146,9 @@ pub(crate) fn materialize_attempt(
     )];
     let mut leaves = Vec::<(NodeRef, Vec<u8>)>::new();
     let mut blocked = false;
+    let mut budget = LogicalTraversalBudget::new();
     while let Some((node_ref, depth, expected_metrics, expected_logical_hash)) = pending.pop() {
+        budget.consume()?;
         if depth > MAX_TREE_DEPTH {
             return Err(Error::InvalidTree.into());
         }
@@ -3013,6 +3184,7 @@ pub(crate) fn materialize_attempt(
                         return Err(Error::DescriptorMismatch.into());
                     }
                 }
+                budget.consume_many(children.len())?;
                 for child in children.into_iter().rev() {
                     pending.push((
                         child.node_ref,
@@ -3307,7 +3479,9 @@ fn base_utf16_range_attempt(
     )];
     let mut slices = Vec::new();
     let mut blocked = false;
+    let mut budget = LogicalTraversalBudget::new();
     while let Some((node_ref, hash, start, length, depth)) = pending.pop() {
+        budget.consume()?;
         if depth > MAX_TREE_DEPTH {
             return Err(Error::InvalidTree.into());
         }
@@ -3332,6 +3506,7 @@ fn base_utf16_range_attempt(
                 slices.push((start, part));
             }
             ChunkNode::Branch { children, .. } => {
+                budget.consume_many(children.len())?;
                 let mut child_start = start;
                 let mut next = Vec::with_capacity(children.len());
                 for child in children {
@@ -3467,7 +3642,9 @@ fn base_utf16_length_for_byte_range_attempt(
     )];
     let mut total = 0_u64;
     let mut blocked = false;
+    let mut budget = LogicalTraversalBudget::new();
     while let Some((node_ref, expected_hash, start, bytes_len, utf16_len, depth)) = pending.pop() {
+        budget.consume()?;
         if depth > MAX_TREE_DEPTH {
             return Err(Error::InvalidTree.into());
         }
@@ -3503,6 +3680,7 @@ fn base_utf16_length_for_byte_range_attempt(
                     .ok_or(Error::MetricOverflow)?;
             }
             ChunkNode::Branch { children, .. } => {
+                budget.consume_many(children.len())?;
                 let mut child_start = start;
                 let mut next = Vec::with_capacity(children.len());
                 for child in children {
@@ -3759,7 +3937,9 @@ fn base_range_attempt(
     )];
     let mut slices = Vec::<(u64, Vec<u8>)>::new();
     let mut blocked = false;
+    let mut budget = LogicalTraversalBudget::new();
     while let Some((node_ref, expected_hash, start, length, depth)) = pending.pop() {
+        budget.consume()?;
         if depth > MAX_TREE_DEPTH {
             return Err(Error::InvalidTree.into());
         }
@@ -3796,6 +3976,7 @@ fn base_range_attempt(
                 if total != length {
                     return Err(Error::DescriptorMismatch.into());
                 }
+                budget.consume_many(children.len())?;
                 let mut child_start = start;
                 let mut children_with_offsets = Vec::with_capacity(children.len());
                 for child in children {
@@ -3971,6 +4152,139 @@ fn gear(byte: u8) -> u64 {
     value ^ (value >> 31)
 }
 
+/// Build a valid bottom-up DAG whose every branch repeats the same child.
+/// Empty bytes keep all aggregate metrics at zero, so depth/fanout checks alone
+/// cannot bound its logical expansion. This is crate-private test scaffolding
+/// because canonical construction deliberately emits trees, not shared DAGs.
+#[cfg(test)]
+pub(crate) fn repeated_child_dag_fixture(depth: usize, fanout: usize) -> PreparedLargeValue {
+    assert!(depth <= MAX_TREE_DEPTH);
+    assert!((1..=BRANCH_MAX_CHILDREN).contains(&fanout));
+    let mut staged_chunks = Vec::new();
+    let mut nonce = 0_u64;
+    let mut locator = |hash: ContentHash| {
+        let mut seed = hash.0.to_vec();
+        seed.extend_from_slice(&nonce.to_le_bytes());
+        nonce += 1;
+        Locator::from_seed(&seed)
+    };
+    let leaf = ChunkNode::Leaf {
+        format: FORMAT_VERSION,
+        kind: LargeValueKind::Bytes,
+        bytes: Vec::new(),
+    };
+    let mut current = stage_node(
+        leaf.clone(),
+        node_metrics(LargeValueKind::Bytes, &leaf).unwrap(),
+        &mut locator,
+        &mut staged_chunks,
+    )
+    .unwrap();
+    for _ in 0..depth {
+        let node = ChunkNode::Branch {
+            format: FORMAT_VERSION,
+            kind: LargeValueKind::Bytes,
+            children: vec![
+                BranchChild {
+                    node_ref: current.node_ref.clone(),
+                    metrics: current.metrics,
+                    logical_hash: current.structural_hash,
+                };
+                fanout
+            ],
+        };
+        current = stage_node(
+            node.clone(),
+            node_metrics(LargeValueKind::Bytes, &node).unwrap(),
+            &mut locator,
+            &mut staged_chunks,
+        )
+        .unwrap();
+    }
+    PreparedLargeValue {
+        value_ref: LargeValueRef {
+            kind: LargeValueKind::Bytes,
+            format_version: FORMAT_VERSION,
+            logical_hash: current.structural_hash,
+            root: current.node_ref,
+            byte_length: 0,
+            utf16_length: None,
+            edit_tail: Vec::new(),
+        },
+        staged_chunks,
+    }
+}
+
+/// Build a four-node diamond in which two distinct physical branch nodes share
+/// one leaf. The branches intentionally use distinct locators even though their
+/// immutable bytes match, exercising ownership through distinct `NodeRef`s.
+#[cfg(test)]
+pub(crate) fn shared_child_dag_fixture() -> PreparedLargeValue {
+    let mut staged_chunks = Vec::new();
+    let mut nonce = 0_u64;
+    let mut locator = |hash: ContentHash| {
+        let mut seed = hash.0.to_vec();
+        seed.extend_from_slice(&nonce.to_le_bytes());
+        nonce += 1;
+        Locator::from_seed(&seed)
+    };
+    let mut stage = |node: ChunkNode| {
+        stage_node(
+            node.clone(),
+            node_metrics(LargeValueKind::Bytes, &node).unwrap(),
+            &mut locator,
+            &mut staged_chunks,
+        )
+        .unwrap()
+    };
+    let leaf = stage(ChunkNode::Leaf {
+        format: FORMAT_VERSION,
+        kind: LargeValueKind::Bytes,
+        bytes: Vec::new(),
+    });
+    let branch_node = ChunkNode::Branch {
+        format: FORMAT_VERSION,
+        kind: LargeValueKind::Bytes,
+        children: vec![BranchChild {
+            node_ref: leaf.node_ref.clone(),
+            metrics: leaf.metrics,
+            logical_hash: leaf.structural_hash,
+        }],
+    };
+    let left = stage(branch_node.clone());
+    let right = stage(branch_node);
+    let root_node = ChunkNode::Branch {
+        format: FORMAT_VERSION,
+        kind: LargeValueKind::Bytes,
+        children: vec![
+            BranchChild {
+                node_ref: left.node_ref,
+                metrics: left.metrics,
+                logical_hash: left.structural_hash,
+            },
+            BranchChild {
+                node_ref: right.node_ref,
+                metrics: right.metrics,
+                logical_hash: right.structural_hash,
+            },
+        ],
+    };
+    let root = stage(root_node);
+    drop(stage);
+    PreparedLargeValue {
+        value_ref: LargeValueRef {
+            kind: LargeValueKind::Bytes,
+            format_version: FORMAT_VERSION,
+            logical_hash: root.structural_hash,
+            root: root.node_ref,
+            byte_length: 0,
+            utf16_length: None,
+            edit_tail: Vec::new(),
+        },
+        staged_chunks,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4015,8 +4329,146 @@ mod tests {
         }
     }
 
+    #[test]
+    fn physical_graph_completion_accepts_sharing_but_rejects_cycles_and_long_paths() {
+        let node_ref = |id: u8| NodeRef {
+            object_hash: ContentHash([id; 32]),
+            locator: Locator::from_seed(&[id]),
+        };
+        let [root, left, right, shared] = [node_ref(1), node_ref(2), node_ref(3), node_ref(4)];
+        let mut diamond = PhysicalTraversal::new(root.clone(), None, ContentHash([9; 32]));
+        diamond
+            .edges
+            .insert(root.clone(), vec![left.clone(), right.clone()]);
+        diamond.edges.insert(left.clone(), vec![shared.clone()]);
+        diamond.edges.insert(right, vec![shared.clone()]);
+        diamond.edges.insert(shared, Vec::new());
+        assert_eq!(diamond.finish(), Ok(()));
+
+        let mut cycle = PhysicalTraversal::new(root.clone(), None, ContentHash([9; 32]));
+        cycle.edges.insert(root.clone(), vec![left.clone()]);
+        cycle.edges.insert(left, vec![root]);
+        assert_eq!(cycle.finish(), Err(Error::InvalidTree));
+
+        let path = (0..=MAX_TREE_DEPTH + 1)
+            .map(|id| node_ref(id as u8 + 10))
+            .collect::<Vec<_>>();
+        let mut too_deep = PhysicalTraversal::new(path[0].clone(), None, ContentHash([9; 32]));
+        for edge in path.windows(2) {
+            too_deep
+                .edges
+                .insert(edge[0].clone(), vec![edge[1].clone()]);
+        }
+        too_deep
+            .edges
+            .insert(path.last().unwrap().clone(), Vec::new());
+        assert_eq!(too_deep.finish(), Err(Error::InvalidTree));
+    }
+
+    #[test]
+    fn shared_dag_physical_walks_deduplicate_and_logical_materialization_is_bounded() {
+        let prepared = repeated_child_dag_fixture(MAX_TREE_DEPTH, BRANCH_MAX_CHILDREN);
+        assert_eq!(prepared.staged_chunks.len(), MAX_TREE_DEPTH + 1);
+
+        let provider = PreparedProvider::new(&prepared);
+        let mut visited = std::collections::BTreeSet::new();
+        let count = futures::executor::block_on(visit_reachable_chunks(
+            &prepared.value_ref,
+            &provider,
+            |request| {
+                visited.insert(request.clone());
+            },
+        ))
+        .unwrap();
+        assert_eq!(count as usize, prepared.staged_chunks.len());
+        assert_eq!(visited.len(), prepared.staged_chunks.len());
+
+        let owned = crate::chunks::OwnedChunkProvider::new(std::rc::Rc::new(
+            PreparedProvider::new(&prepared),
+        ));
+        let mut cursor = LargeValueUploadCursor::new(&prepared.value_ref, owned).unwrap();
+        assert!(matches!(
+            futures::executor::block_on(cursor.next_batch(0)),
+            Err(ReachabilityError::LargeValue(
+                Error::InvalidUploadBatchLimit
+            ))
+        ));
+        let mut uploaded = Vec::new();
+        loop {
+            let batch = futures::executor::block_on(cursor.next_batch(7)).unwrap();
+            if batch.is_empty() {
+                break;
+            }
+            uploaded.extend(batch);
+        }
+        assert_eq!(uploaded.len(), prepared.staged_chunks.len());
+        assert_eq!(
+            uploaded
+                .iter()
+                .map(|chunk| chunk.node_ref.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            prepared.staged_chunks.len()
+        );
+
+        let mut inputs = EvaluationInputs::default();
+        for chunk in &prepared.staged_chunks {
+            inputs.install_chunk(
+                ChunkRequest {
+                    object_hash: chunk.node_ref.object_hash.0,
+                    locator: chunk.node_ref.locator,
+                },
+                bytes::Bytes::copy_from_slice(&chunk.encoded),
+            );
+        }
+        assert!(matches!(
+            materialize_attempt(&prepared.value_ref, &mut inputs),
+            Err(IvmRuntimeError::LargeValue(
+                Error::TraversalWorkLimitExceeded
+            ))
+        ));
+    }
+
     fn deterministic_locator(hash: ContentHash) -> Locator {
         Locator(hash.0)
+    }
+
+    fn traverse_fixture_with_node_limit(
+        prepared: &PreparedLargeValue,
+        max_nodes: usize,
+    ) -> Result<usize, Error> {
+        let root_metrics = Some(NodeMetrics {
+            byte_length: prepared.value_ref.byte_length,
+            utf16_length: prepared.value_ref.utf16_length,
+        });
+        let chunks = prepared
+            .staged_chunks
+            .iter()
+            .map(|chunk| (chunk.node_ref.clone(), chunk))
+            .collect::<BTreeMap<_, _>>();
+        let mut traversal = PhysicalTraversal::new_with_node_limit(
+            prepared.value_ref.root.clone(),
+            root_metrics,
+            prepared.value_ref.logical_hash,
+            max_nodes,
+        )?;
+        let mut visited = 0;
+        while let Some(entry) = traversal.pop() {
+            let chunk = chunks
+                .get(&entry.node_ref)
+                .expect("fixture has every reachable physical node");
+            let node = decode_node(
+                prepared.value_ref.kind,
+                entry.node_ref.object_hash,
+                &chunk.encoded,
+            )?;
+            traversal.validate_node(prepared.value_ref.kind, &entry.node_ref, &node)?;
+            if let ChunkNode::Branch { children, .. } = node {
+                traversal.discover_children(&entry, children)?;
+            }
+            visited += 1;
+        }
+        Ok(visited)
     }
 
     fn encode_v12_primitive_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -4129,6 +4581,27 @@ mod tests {
         .unwrap();
         assert_eq!(count as usize, prepared.staged_chunks.len());
         assert_eq!(visited.len(), prepared.staged_chunks.len());
+    }
+
+    #[test]
+    fn physical_traversal_budget_allows_the_exact_distinct_node_boundary_for_shared_dag() {
+        let prepared = repeated_child_dag_fixture(2, BRANCH_MAX_CHILDREN);
+        assert_eq!(prepared.staged_chunks.len(), 3);
+        assert_eq!(
+            traverse_fixture_with_node_limit(&prepared, prepared.staged_chunks.len()),
+            Ok(prepared.staged_chunks.len()),
+            "repeated logical child edges consume one physical-node slot"
+        );
+    }
+
+    #[test]
+    fn physical_traversal_budget_rejects_one_distinct_node_over_the_boundary() {
+        let prepared = repeated_child_dag_fixture(3, BRANCH_MAX_CHILDREN);
+        assert_eq!(prepared.staged_chunks.len(), 4);
+        assert_eq!(
+            traverse_fixture_with_node_limit(&prepared, prepared.staged_chunks.len() - 1),
+            Err(Error::PhysicalTraversalNodeLimitExceeded)
+        );
     }
 
     struct WindowReader<'a> {

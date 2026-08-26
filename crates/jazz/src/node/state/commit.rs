@@ -305,6 +305,7 @@ where
         );
         let mut stored_versions = Vec::new();
         let mut pending_parents = BTreeSet::new();
+        let mut authored_content_rows = BTreeSet::new();
         for (write_schema_version, commit) in commits {
             let provenance_at = TxTime::from_physical_ms(commit.now_ms).map_err(|_| {
                 Error::InvalidMergeableCommit(
@@ -343,21 +344,43 @@ where
                 }
             }
             let layer = VersionLayer::for_commit(&commit);
-            let previous_current =
-                match self.query_local_layer_winner_in_branch(
+            let first_content_occurrence_in_batch = layer != VersionLayer::Content
+                || authored_content_rows.insert((
+                    table_id,
+                    branch_key.clone(),
+                    commit.row_uuid,
+                ));
+            let known_fresh_content_row = commit.known_fresh_row
+                && layer == VersionLayer::Content
+                && first_content_occurrence_in_batch;
+            let previous_local_current = if known_fresh_content_row {
+                None
+            } else {
+                self.query_local_layer_winner_in_branch(
                     &table_schema.name,
                     &branch_key,
                     commit.row_uuid,
                     layer,
-                ).await? {
-                    Some(previous) => Some(previous),
-                    None => self.query_global_layer_winner_in_branch(
+                )
+                .await?
+            };
+            let known_first_local_content_version =
+                layer == VersionLayer::Content
+                    && first_content_occurrence_in_batch
+                    && (known_fresh_content_row || previous_local_current.is_none());
+            let previous_current = match previous_local_current {
+                Some(previous) => Some(previous),
+                None if !known_fresh_content_row => {
+                    self.query_global_layer_winner_in_branch(
                         &table_schema.name,
                         &branch_key,
                         commit.row_uuid,
                         layer,
-                    ).await?,
-                };
+                    )
+                    .await?
+                }
+                None => None,
+            };
             let creator_source = if let Some(previous) = previous_current.as_ref() {
                 Some(previous.clone())
             } else if layer == VersionLayer::Deletion {
@@ -405,6 +428,18 @@ where
                     .clone()
                     .unwrap_or_else(|| cells.keys().cloned().collect()),
             );
+            let history_descriptor = if commit.deletion.is_none() {
+                Some(
+                    self.prepared_physical_write_plan(
+                        write_schema_version,
+                        &table_schema.name,
+                        PhysicalWriteTarget::History,
+                    )?
+                    .logical_descriptor,
+                )
+            } else {
+                None
+            };
             let stored = VersionRow::from_parts_with_schema_version(
                 &table_schema,
                 VersionRowParts {
@@ -425,6 +460,7 @@ where
                 },
                 (write_schema_version != self.catalogue.current_schema_version_id)
                     .then_some(write_schema_version),
+                history_descriptor,
             )?;
             let previous_winner = if let Some(previous) = previous_current.as_ref() {
                 Some((
@@ -444,8 +480,12 @@ where
                 self.version_storage_primary_key(&stored)?,
                 groove_record,
             );
-            self.update_merge_heads_for_content_version(&mut batch, &stored)
-                .await?;
+            self.update_merge_heads_for_content_version(
+                &mut batch,
+                &stored,
+                known_first_local_content_version,
+            )
+            .await?;
             self.write_ahead_current_insert(&mut batch, &stored)?;
             pending_parents.extend(stored.parents());
             stored_versions.push(stored);

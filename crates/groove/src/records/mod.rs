@@ -90,6 +90,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 pub use macros::{FieldKind, RecordField, assert_record_field_layout};
+pub use values::collect_by_ordered_scalar;
 pub use values::{
     EnumCase, EnumSchema, EnumValue, ScalarEnumSchema, SystemVariantRegistry, Value, ValueType,
     VariantRegistry, variant_registry_id_for_path,
@@ -1189,6 +1190,33 @@ impl<'a> BorrowedRecord<'a> {
             .collect()
     }
 
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        self.validate_inner(false)
+    }
+
+    pub(crate) fn validate_canonical(&self) -> Result<(), Error> {
+        self.validate_inner(true)
+    }
+
+    fn validate_inner(&self, canonical: bool) -> Result<(), Error> {
+        validate_record_header(self.raw, &self.descriptor)?;
+        self.descriptor
+            .fields
+            .iter()
+            .zip(&self.descriptor.layout.fields)
+            .try_for_each(|(field, layout)| {
+                let span = record_value_span_for_layout(self.raw, &self.descriptor, *layout)?;
+                if canonical {
+                    values::validate_canonical_value(
+                        &self.raw[span.start..span.end],
+                        &field.value_type,
+                    )
+                } else {
+                    values::validate_value(&self.raw[span.start..span.end], &field.value_type)
+                }
+            })
+    }
+
     pub fn get_u64(&self, field_idx: usize) -> Result<u64, Error> {
         let bytes = self.field_bytes(field_idx, &ValueType::U64)?;
         read_exact_array::<8>(bytes).map(u64::from_le_bytes)
@@ -1684,6 +1712,14 @@ pub struct VariantRecord {
     record: OwnedRecord,
 }
 
+/// An encoded variant record whose bytes were produced by its descriptor.
+///
+/// This proof lets commit paths retain the descriptor-compatibility check
+/// while avoiding a second structural validation pass over freshly encoded
+/// bytes. Arbitrary stored or caller-supplied bytes remain [`VariantRecord`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedVariantRecord(VariantRecord);
+
 impl VariantRecord {
     pub fn new(variant_tag: u32, record: OwnedRecord) -> Self {
         Self {
@@ -1737,8 +1773,42 @@ impl VariantRecord {
         self.record
     }
 
+    pub(crate) fn into_parts(self) -> (u32, OwnedRecord) {
+        (self.variant_tag, self.record)
+    }
+
     pub fn into_stored_bytes(self) -> Vec<u8> {
         encode_variant_record(self.variant_tag, self.record.raw())
+    }
+}
+
+impl ValidatedVariantRecord {
+    pub fn create(
+        variant_tag: u32,
+        descriptor: RecordDescriptor,
+        values: &[Value],
+    ) -> Result<Self, Error> {
+        let raw = descriptor.create(values)?;
+        Ok(Self(VariantRecord::new(
+            variant_tag,
+            OwnedRecord::new(raw, descriptor),
+        )))
+    }
+
+    pub fn variant_tag(&self) -> u32 {
+        self.0.variant_tag()
+    }
+
+    pub fn descriptor(&self) -> &RecordDescriptor {
+        self.0.descriptor()
+    }
+
+    pub fn record(&self) -> &OwnedRecord {
+        self.0.record()
+    }
+
+    pub(crate) fn into_parts(self) -> (u32, OwnedRecord) {
+        self.0.into_parts()
     }
 }
 
@@ -1812,6 +1882,10 @@ impl OwnedRecord {
 
     pub fn to_values(&self) -> Result<Vec<Value>, Error> {
         self.borrowed().to_values()
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        self.borrowed().validate()
     }
 }
 

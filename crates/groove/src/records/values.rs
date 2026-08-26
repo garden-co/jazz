@@ -425,6 +425,29 @@ enum InternalValueTypeRepr {
     StoredScalar(crate::large_values::LargeValueKind),
 }
 
+/// Whether a value can be used as an ordered `collect_by` key.
+///
+/// Nullable values retain the ordering of their inner scalar. Composite values
+/// deliberately do not: collector keys must be independently ordered values.
+pub fn collect_by_ordered_scalar(value_type: &ValueType) -> bool {
+    match value_type {
+        ValueType::Nullable(inner) => collect_by_ordered_scalar(inner),
+        ValueType::U8
+        | ValueType::U16
+        | ValueType::U32
+        | ValueType::U64
+        | ValueType::I32
+        | ValueType::I64
+        | ValueType::F64
+        | ValueType::Bool
+        | ValueType::String
+        | ValueType::Bytes
+        | ValueType::Uuid
+        | ValueType::EnumTag(_) => true,
+        _ => false,
+    }
+}
+
 impl ValueType {
     /// Whether this is an engine-only physical backing type. Public schema and
     /// binding layers use this predicate to reject it without gaining access to
@@ -1035,6 +1058,170 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
                 OwnedRecord::new(payload.to_vec(), case.payload),
             )))
         }
+    }
+}
+
+pub(super) fn validate_value(bytes: &[u8], value_type: &ValueType) -> Result<(), Error> {
+    validate_value_inner(bytes, value_type, false)
+}
+
+pub(super) fn validate_canonical_value(bytes: &[u8], value_type: &ValueType) -> Result<(), Error> {
+    validate_value_inner(bytes, value_type, true)
+}
+
+fn validate_value_inner(
+    bytes: &[u8],
+    value_type: &ValueType,
+    require_constructible: bool,
+) -> Result<(), Error> {
+    match value_type {
+        ValueType::U8 => read_exact::<1>(bytes).map(|_| ()),
+        ValueType::U16 => read_exact::<2>(bytes).map(|_| ()),
+        ValueType::U32 | ValueType::I32 => read_exact::<4>(bytes).map(|_| ()),
+        ValueType::U64 | ValueType::I64 => read_exact::<8>(bytes).map(|_| ()),
+        ValueType::F64 => {
+            let value = f64::from_le_bytes(read_exact::<8>(bytes)?);
+            if require_constructible && value.is_nan() {
+                Err(Error::InvalidF64NaN)
+            } else {
+                Ok(())
+            }
+        }
+        ValueType::Bool => match read_exact::<1>(bytes)?[0] {
+            0 | 1 => Ok(()),
+            value => Err(Error::InvalidBool(value)),
+        },
+        ValueType::String | ValueType::Bytes => {
+            use crate::large_values::{Error as LargeValueError, LargeValueKind};
+            let kind = match value_type {
+                ValueType::String => LargeValueKind::String,
+                ValueType::Bytes => LargeValueKind::Bytes,
+                _ => unreachable!("matched string or bytes value type"),
+            };
+            match crate::large_values::inline_scalar_bytes(kind, bytes) {
+                Ok(_) | Err(LargeValueError::RequiresEvaluation) => Ok(()),
+                Err(error) => Err(error.into()),
+            }
+        }
+        ValueType::Internal(InternalValueType(InternalValueTypeRepr::RawString)) => {
+            std::str::from_utf8(bytes)
+                .map(|_| ())
+                .map_err(|_| Error::InvalidUtf8)
+        }
+        ValueType::Internal(InternalValueType(InternalValueTypeRepr::RawBytes)) => Ok(()),
+        ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(kind))) => {
+            match crate::large_values::inline_scalar_bytes(*kind, bytes) {
+                Ok(_) | Err(crate::large_values::Error::RequiresEvaluation) => Ok(()),
+                Err(error) => Err(error.into()),
+            }
+        }
+        ValueType::Uuid => read_exact::<16>(bytes).map(|_| ()),
+        ValueType::EnumTag(schema) => {
+            let discriminant = read_exact::<1>(bytes)?[0];
+            schema.variant(discriminant).map(|_| ())
+        }
+        ValueType::Tuple(members) => validate_tuple(bytes, members, require_constructible),
+        ValueType::Array(element_type) => {
+            validate_array(bytes, element_type, require_constructible)
+        }
+        ValueType::Nullable(inner_type) => {
+            validate_nullable(bytes, inner_type, require_constructible)
+        }
+        ValueType::Record(descriptor) => descriptor.bind(bytes).validate_canonical(),
+        ValueType::Enum(schema) => {
+            let (tag, payload) =
+                super::split_variant_record(bytes).map_err(|error| match error {
+                    Error::InvalidSchemaVersionHeader => Error::InvalidEnumHeader,
+                    other => other,
+                })?;
+            schema.case(tag)?.payload.bind(payload).validate_canonical()
+        }
+    }
+}
+
+fn validate_nullable(
+    bytes: &[u8],
+    inner_type: &ValueType,
+    require_constructible: bool,
+) -> Result<(), Error> {
+    let (&flag, payload) = bytes.split_first().ok_or(Error::UnexpectedEof)?;
+    match flag {
+        0 if inner_type.fixed_size().is_some() && payload.iter().any(|byte| *byte != 0) => {
+            Err(Error::InvalidOffset)
+        }
+        0 if inner_type.fixed_size().is_none() && !payload.is_empty() => Err(Error::InvalidOffset),
+        0 => Ok(()),
+        1 => validate_value_inner(payload, inner_type, require_constructible),
+        value => Err(Error::InvalidNullFlag(value)),
+    }
+}
+
+fn validate_array(
+    bytes: &[u8],
+    element_type: &ValueType,
+    require_constructible: bool,
+) -> Result<(), Error> {
+    if let Some(element_size) = element_type.fixed_size() {
+        if element_size == 0 || !bytes.len().is_multiple_of(element_size) {
+            return Err(Error::InvalidOffset);
+        }
+        return bytes.chunks_exact(element_size).try_for_each(|chunk| {
+            validate_value_inner(chunk, element_type, require_constructible)
+        });
+    }
+
+    let count = u32_to_usize(read_u32_at(bytes, 0)?)?;
+    if count == 0 {
+        return if bytes.len() == 4 {
+            Ok(())
+        } else {
+            Err(Error::InvalidOffset)
+        };
+    }
+    let values_start = checked_add(4, count.saturating_sub(1) * 4)?;
+    if bytes.len() < values_start {
+        return Err(Error::UnexpectedEof);
+    }
+    let mut start = values_start;
+    for index in 0..count {
+        let end = if index + 1 == count {
+            bytes.len()
+        } else {
+            u32_to_usize(read_u32_at(bytes, 4 + index * 4)?)?
+        };
+        if end < start || end > bytes.len() {
+            return Err(Error::InvalidOffset);
+        }
+        validate_value_inner(&bytes[start..end], element_type, require_constructible)?;
+        start = end;
+    }
+    Ok(())
+}
+
+fn validate_tuple(
+    bytes: &[u8],
+    members: &[ValueType],
+    require_constructible: bool,
+) -> Result<(), Error> {
+    let mut offset = 0;
+    for member in members {
+        let width = member
+            .fixed_size()
+            .ok_or_else(|| Error::InvalidTupleMember {
+                member_type: member.clone(),
+            })?;
+        let end = checked_add(offset, width)?;
+        validate_value_inner(
+            bytes.get(offset..end).ok_or(Error::UnexpectedEof)?,
+            member,
+            require_constructible,
+        )?;
+        offset = end;
+    }
+    if offset == bytes.len() {
+        Ok(())
+    } else {
+        Err(Error::InvalidOffset)
     }
 }
 

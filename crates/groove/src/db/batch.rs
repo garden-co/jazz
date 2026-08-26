@@ -1,4 +1,5 @@
 use super::*;
+use crate::records::ValidatedVariantRecord;
 
 /// Mutable staged table writes whose reads observe writes already added to the
 /// stage. Commit runs one normal database batch commit, so current callers of
@@ -114,7 +115,12 @@ impl DatabaseBatch {
     /// This avoids a storage lookup during delta computation. It is only sound for
     /// internal append-only tables whose enclosing transaction identity proves
     /// freshness; ordinary insert callers must use [`Self::insert_raw`].
-    pub fn insert_raw_fresh(
+    /// # Safety
+    ///
+    /// The caller must guarantee that `key` is absent from both persisted storage
+    /// and earlier operations in this batch. A false proof would omit the previous
+    /// record's negative maintained-view delta.
+    pub unsafe fn insert_raw_fresh(
         &mut self,
         table: impl Into<String>,
         key: PrimaryKeyValue,
@@ -191,6 +197,7 @@ impl From<VariantRecord> for RecordInput {
 pub enum RawRecordInput {
     Payload(Vec<u8>),
     Record(VariantRecord),
+    ValidatedRecord(ValidatedVariantRecord),
 }
 
 impl From<Vec<u8>> for RawRecordInput {
@@ -202,6 +209,12 @@ impl From<Vec<u8>> for RawRecordInput {
 impl From<VariantRecord> for RawRecordInput {
     fn from(record: VariantRecord) -> Self {
         Self::Record(record)
+    }
+}
+
+impl From<ValidatedVariantRecord> for RawRecordInput {
+    fn from(record: ValidatedVariantRecord) -> Self {
+        Self::ValidatedRecord(record)
     }
 }
 

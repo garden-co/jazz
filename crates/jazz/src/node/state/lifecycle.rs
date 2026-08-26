@@ -532,6 +532,7 @@ where
                 next_physical_column_id,
                 lens_path_cache: BTreeMap::new(),
                 compiled_lens_cache: BTreeMap::new(),
+                physical_write_plan_cache: BTreeMap::new(),
                 current_write_schema,
             },
             catalogue_bootstrap_state,

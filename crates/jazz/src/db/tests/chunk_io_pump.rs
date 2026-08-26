@@ -507,3 +507,86 @@ fn a_late_response_from_a_disconnected_upstream_cannot_complete_reassigned_deman
         assert_eq!(pending.await.unwrap().as_ref(), &[2]);
     });
 }
+
+/// A chunk read sent by `alice` remains live when her upstream disconnects
+/// before `bob`'s replacement link registers; `bob` receives the same demand
+/// and only his response completes it.
+///
+/// ```text
+/// reader ──request──► alice ──disconnect──► bob ──response──► reader
+/// ```
+#[test]
+fn a_later_registered_upstream_retries_demand_drained_by_a_disconnected_predecessor() {
+    crate::db::block_on(async {
+        let resolver = PeerChunkResolver::default();
+        let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
+        let database = groove::db::Database::new(
+            schema,
+            groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF]),
+        )
+        .await
+        .unwrap();
+        let first = PeerIoPump::new(
+            resolver.clone(),
+            database.local_chunk_reader(),
+            12,
+            PeerIoPumpRole::Upstream,
+        );
+        let request = groove::chunks::ChunkRequest {
+            object_hash: [7; 32],
+            locator: groove::large_values::Locator::random(),
+        };
+        let mut pending = resolver.resolve(request);
+        let waker = futures::task::noop_waker();
+        let mut context = Context::from_waker(&waker);
+        assert!(matches!(
+            Pin::new(&mut pending).poll(&mut context),
+            Poll::Pending
+        ));
+        let request_id = match first.take_outbound(64).unwrap() {
+            SyncMessage::ChunkRequestBatch(batch) => batch.requests[0].request_id,
+            _ => unreachable!(),
+        };
+
+        first.disconnect();
+        let successor = PeerIoPump::new(
+            resolver.clone(),
+            database.local_chunk_reader(),
+            13,
+            PeerIoPumpRole::Upstream,
+        );
+        let retried_id = match successor.take_outbound(64).unwrap() {
+            SyncMessage::ChunkRequestBatch(batch) => batch.requests[0].request_id,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            retried_id, request_id,
+            "reconnect keeps the demand correlation id"
+        );
+
+        first
+            .route_incoming(SyncMessage::ChunkResponseBatch(ChunkResponseBatch {
+                responses: vec![ChunkResponseEntry {
+                    request_id,
+                    result: ChunkResponse::Found(vec![1]),
+                }],
+            }))
+            .await
+            .unwrap();
+        assert!(matches!(
+            Pin::new(&mut pending).poll(&mut context),
+            Poll::Pending
+        ));
+
+        successor
+            .route_incoming(SyncMessage::ChunkResponseBatch(ChunkResponseBatch {
+                responses: vec![ChunkResponseEntry {
+                    request_id: retried_id,
+                    result: ChunkResponse::Found(vec![2]),
+                }],
+            }))
+            .await
+            .unwrap();
+        assert_eq!(pending.await.unwrap().as_ref(), &[2]);
+    });
+}
