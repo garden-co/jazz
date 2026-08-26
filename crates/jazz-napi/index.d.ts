@@ -104,7 +104,7 @@ export declare class NapiDb {
   evictExpiredStagedLargeValues(): number
   readValueRange(table: string, rowId: Uint8Array, column: string, start: number, end: number): Uint8Array | PendingNativeRead
   readTextUtf16Range(table: string, rowId: Uint8Array, column: string, start: number, end: number): string | PendingNativeRead
-  readJsonPointer(table: string, rowId: Uint8Array, column: string, pointer: string): string | null | PendingNativeRead
+  readJsonPointer(table: string, rowId: Uint8Array, column: string, pointer: string): string | undefined | null | PendingNativeRead
   appendValue(table: string, rowId: Uint8Array, column: string, bytes: Uint8Array): Write | PendingNativeWrite
   spliceValue(table: string, rowId: Uint8Array, column: string, offset: number, deleteLength: number, insert: Uint8Array): Write | PendingNativeWrite
   setNonDurableClient(): void
@@ -113,6 +113,32 @@ export declare class NapiDb {
   mergeableTx(openBatchId: string): Tx
   mergeableTxForIdentity(openBatchId: string, author: Uint8Array): Tx
   close(): Promise<undefined>
+}
+
+/**
+ * A JavaScript-thread-owned binding read which suspended on asynchronous
+ * large-value storage. NAPI promises execute on a Send worker pool, whereas
+ * a Jazz runtime is deliberately `Rc`/thread-affine. The adapter drives this
+ * object after its peer transport makes progress instead of blocking Node.
+ */
+export declare class PendingNativeRead {
+  poll(): Uint8Array | null
+}
+
+/**
+ * Opaque marker returned while the next bounded native subscription batch is
+ * waiting for chunk I/O. Call `readAll` again after transport progress.
+ */
+export declare class PendingNativeSubscriptionBatch {
+
+}
+
+/**
+ * Thread-affine large-value mutation setup which is waiting for local or
+ * routed chunks. The completed value is the ordinary write receipt.
+ */
+export declare class PendingNativeWrite {
+  poll(): Write | null
 }
 
 export declare class PreparedQuery {
@@ -138,19 +164,6 @@ export declare class Subscription {
   readAll(): Array<SubscriptionEvent> | PendingNativeSubscriptionBatch
   drain(): Array<SubscriptionEvent> | PendingNativeSubscriptionBatch
   close(): boolean
-}
-
-/** A thread-affine Rust read suspended on local or routed chunk I/O. */
-export declare class PendingNativeRead {
-  poll(): Uint8Array | null
-}
-
-/** A bounded native subscription batch waiting for large-value chunk I/O. */
-export declare class PendingNativeSubscriptionBatch {}
-
-/** A thread-affine mutation setup waiting for large-value chunk I/O. */
-export declare class PendingNativeWrite {
-  poll(): Write | null
 }
 
 export declare class TestJwtIssuer {
