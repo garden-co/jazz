@@ -387,6 +387,10 @@ pub struct Database {
     last_commit_metrics: Option<CommitMetrics>,
     last_tick_metrics: Option<TickMetrics>,
     storage_read_metrics: Rc<RefCell<StorageReadMetrics>>,
+    /// Dense record descriptors are invariant for one table variant. Keep the
+    /// interned handles beside the database schema so scans do not rebuild and
+    /// re-hash the same logical field list once per stored row.
+    stored_record_descriptors: RefCell<BTreeMap<String, BTreeMap<u32, RecordDescriptor>>>,
     next_publication_id: u64,
     durable_publication_frontier: Option<PublicationId>,
     resident_publications: BTreeMap<PublicationId, Rc<RefCell<StagedWriteState>>>,

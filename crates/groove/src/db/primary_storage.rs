@@ -297,7 +297,7 @@ impl Database {
             return store
                 .get_raw(&encoded_key)
                 .await?
-                .map(|value| decode_stored_key_value(table_schema, encoded_key, value))
+                .map(|value| self.decode_stored_key_value(table_schema, encoded_key, value))
                 .transpose();
         }
 
@@ -309,7 +309,7 @@ impl Database {
         store
             .get_raw(&encoded_key)
             .await?
-            .map(|value| decode_stored_key_value(table_schema, encoded_key, value))
+            .map(|value| self.decode_stored_key_value(table_schema, encoded_key, value))
             .transpose()
     }
 
@@ -345,7 +345,7 @@ impl Database {
         store
             .get_raw(&encoded_key)
             .await?
-            .map(|value| decode_stored_key_value(table_schema, encoded_key, value))
+            .map(|value| self.decode_stored_key_value(table_schema, encoded_key, value))
             .transpose()
     }
 
@@ -382,7 +382,7 @@ impl Database {
             .prefix(&key_prefix)
             .await?
             .into_iter()
-            .map(|(key, value)| decode_stored_key_value(table_schema, key, value))
+            .map(|(key, value)| self.decode_stored_key_value(table_schema, key, value))
             .collect()
     }
 
@@ -418,7 +418,7 @@ impl Database {
         store
             .last_with_prefix(&key_prefix)
             .await?
-            .map(|(key, value)| decode_stored_key_value(table_schema, key, value))
+            .map(|(key, value)| self.decode_stored_key_value(table_schema, key, value))
             .transpose()
     }
 
@@ -470,7 +470,7 @@ impl Database {
             .range(&start_key, &end_key)
             .await?
             .into_iter()
-            .map(|(key, value)| decode_stored_key_value(table_schema, key, value))
+            .map(|(key, value)| self.decode_stored_key_value(table_schema, key, value))
             .collect()
     }
 
@@ -560,7 +560,7 @@ impl Database {
         store
             .last_with_prefix_before_or_at(&key_prefix, &upper_key)
             .await?
-            .map(|(key, value)| decode_stored_key_value(table_schema, key, value))
+            .map(|(key, value)| self.decode_stored_key_value(table_schema, key, value))
             .transpose()
     }
 
@@ -753,7 +753,7 @@ impl Database {
                 &index_record.get("value")?,
             )?;
             if let Some(record) = store.get_raw(&primary_key).await? {
-                records.push(decode_stored_key_value(table_schema, primary_key, record)?);
+                records.push(self.decode_stored_key_value(table_schema, primary_key, record)?);
             } else if table_schema.primary_key.is_some() {
                 return Err(Error::InvalidPersistedIndex(index_name.to_owned()));
             }
