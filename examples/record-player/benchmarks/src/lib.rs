@@ -1,6 +1,6 @@
 //! Self-contained RecordPlayer metadata and playlist-window workloads.
 
-use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, PreparedQuery, block_on};
+use jazz::db::{Db, DbConfig, DbIdentity, PreparedQuery, block_on};
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -143,15 +143,8 @@ fn schema() -> JazzSchema {
     .expect("RecordPlayer benchmark schema compiles")
 }
 fn insert(db: &BenchDb, table: &str, id: RowUuid, cells: BTreeMap<String, Value>) {
-    let write = block_on(db.insert(
-        table,
-        cells,
-        InsertOptions {
-            row_id: Some(id),
-            ..Default::default()
-        },
-    ))
-    .expect("insert fixture row");
+    let write = block_on(db.insert_with_id_attributed(AuthorSubject::SYSTEM, table, id, cells))
+        .expect("insert fixture row");
     block_on(write.wait(DurabilityTier::Local)).expect("fixture durable");
 }
 fn row_id(kind: u8, index: usize) -> RowUuid {
