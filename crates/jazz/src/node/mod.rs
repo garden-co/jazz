@@ -783,7 +783,11 @@ struct QueryServing {
     /// Registered validated query shapes keyed by stable shape ID.
     registered_shapes: BTreeMap<ShapeId, ValidatedQuery>,
     /// Registered query binding values keyed by shape and usage-site binding ID.
-    registered_bindings: BTreeMap<ShapeId, BTreeMap<BindingId, RegisteredBinding>>,
+    // A wire subscription is identified by its usage binding handle *and* read
+    // view. The same canonical binding id may legitimately be registered at
+    // Local, Edge, and Global views in one relay, so keying by BindingId alone
+    // lets one view silently overwrite another's routing metadata.
+    registered_bindings: BTreeMap<ShapeId, BTreeMap<(BindingId, ReadViewKey), RegisteredBinding>>,
     /// Monotonically increasing receiver receipts for applied authoritative
     /// updates. Attachments capture the current receipt and require a later
     /// one; this remains logical binding-view state, never a wire nonce.

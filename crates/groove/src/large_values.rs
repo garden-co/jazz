@@ -1454,6 +1454,8 @@ pub(crate) fn consolidate_single_edit_attempt(
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum Error {
+    #[error("large-value upload batch limit must be non-zero")]
+    InvalidUploadBatchLimit,
     #[error("large string is not valid UTF-8")]
     InvalidUtf8,
     #[error("large JSON is not valid JSON")]
@@ -1808,14 +1810,16 @@ impl LargeValueUploadCursor {
         })
     }
 
-    /// Read and authenticate at most `limit` nodes. An empty result means the
-    /// tree is complete; the cursor retains only the branch frontier.
+    /// Read and authenticate at most `limit` nodes. `limit` must be non-zero.
+    /// An empty result means the graph is complete; the cursor retains the
+    /// branch frontier plus one authenticated expectation per distinct physical
+    /// node.
     pub async fn next_batch(
         &mut self,
         limit: usize,
     ) -> Result<Vec<StagedChunk>, ReachabilityError> {
         if limit == 0 {
-            return Ok(Vec::new());
+            return Err(Error::InvalidUploadBatchLimit.into());
         }
         let mut batch = Vec::new();
         while batch.len() < limit {
@@ -4383,11 +4387,12 @@ mod tests {
             PreparedProvider::new(&prepared),
         ));
         let mut cursor = LargeValueUploadCursor::new(&prepared.value_ref, owned).unwrap();
-        assert!(
-            futures::executor::block_on(cursor.next_batch(0))
-                .unwrap()
-                .is_empty()
-        );
+        assert!(matches!(
+            futures::executor::block_on(cursor.next_batch(0)),
+            Err(ReachabilityError::LargeValue(
+                Error::InvalidUploadBatchLimit
+            ))
+        ));
         let mut uploaded = Vec::new();
         loop {
             let batch = futures::executor::block_on(cursor.next_batch(7)).unwrap();

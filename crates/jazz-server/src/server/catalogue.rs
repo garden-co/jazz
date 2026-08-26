@@ -57,6 +57,12 @@ pub(crate) struct CurrentPermissionsSummary {
 pub enum CatalogueError {
     QueryError(String),
     WriteError(String),
+    StorageError(String),
+    DecodeError {
+        object_id: ObjectId,
+        object_type: String,
+        error: String,
+    },
     NotFound,
     LockError,
 }
@@ -66,6 +72,15 @@ impl std::fmt::Display for CatalogueError {
         match self {
             CatalogueError::QueryError(message) => write!(f, "Query error: {message}"),
             CatalogueError::WriteError(message) => write!(f, "Write error: {message}"),
+            CatalogueError::StorageError(message) => write!(f, "Storage error: {message}"),
+            CatalogueError::DecodeError {
+                object_id,
+                object_type,
+                error,
+            } => write!(
+                f,
+                "Decode error in durable catalogue entry {object_id} ({object_type}): {error}"
+            ),
             CatalogueError::NotFound => write!(f, "Not found"),
             CatalogueError::LockError => write!(f, "Lock error"),
         }
@@ -121,12 +136,12 @@ impl StoredCatalogue {
         app_id: AppId,
         initial_schema: Option<Schema>,
         storage: DynCatalogueStorage,
-    ) -> Self {
-        let mut index = CatalogueIndex::from_storage(storage.as_ref(), app_id).unwrap_or_default();
+    ) -> Result<Self, CatalogueError> {
+        let mut index = CatalogueIndex::from_storage(storage.as_ref(), app_id)?;
         if let Some(schema) = initial_schema {
             index.add_schema(schema);
         }
-        Self {
+        Ok(Self {
             app_id,
             index: Mutex::new(index),
             #[cfg(test)]
@@ -134,7 +149,7 @@ impl StoredCatalogue {
             #[cfg(test)]
             test_local_durability_tiers: Mutex::new(HashSet::new()),
             storage: Mutex::new(storage),
-        }
+        })
     }
 
     #[cfg(test)]
@@ -144,8 +159,8 @@ impl StoredCatalogue {
         storage: DynCatalogueStorage,
         schema_branches: Vec<String>,
         local_durability_tiers: HashSet<DurabilityTier>,
-    ) -> Self {
-        let store = Self::new(app_id, initial_schema, storage);
+    ) -> Result<Self, CatalogueError> {
+        let store = Self::new(app_id, initial_schema, storage)?;
         *store
             .test_schema_branches
             .lock()
@@ -154,7 +169,7 @@ impl StoredCatalogue {
             .test_local_durability_tiers
             .lock()
             .expect("durability tiers lock") = local_durability_tiers;
-        store
+        Ok(store)
     }
 
     #[cfg(any(test, feature = "embedded-server"))]
@@ -240,7 +255,7 @@ impl StoredCatalogue {
 
 impl From<CatalogueStorageError> for CatalogueError {
     fn from(error: CatalogueStorageError) -> Self {
-        CatalogueError::WriteError(error.to_string())
+        CatalogueError::StorageError(error.to_string())
     }
 }
 
@@ -268,7 +283,7 @@ impl CatalogueIndex {
             if entry.metadata.get(MetadataKey::AppId.as_str()) != Some(&app_id.uuid().to_string()) {
                 continue;
             }
-            index.apply_entry(&entry);
+            index.apply_entry(&entry)?;
         }
         Ok(index)
     }
@@ -391,14 +406,17 @@ impl CatalogueIndex {
         seen
     }
 
-    fn apply_entry(&mut self, entry: &CatalogueEntry) {
+    fn apply_entry(&mut self, entry: &CatalogueEntry) -> Result<(), CatalogueError> {
         match entry.object_type() {
             Some(kind) if kind == ObjectType::CatalogueSchema.as_str() => {
-                let Ok(schema) = decode_schema(&entry.content) else {
-                    return;
-                };
+                let schema = decode_schema(&entry.content).map_err(|error| {
+                    corrupt_catalogue_entry(entry, format!("decode schema payload: {error}"))
+                })?;
                 if schema.is_empty() {
-                    return;
+                    // Old servers could write the empty-schema sentinel before
+                    // initialization. It is a valid, forward-compatible value
+                    // that must remain invisible to rehydration.
+                    return Ok(());
                 }
                 let hash = entry
                     .metadata
@@ -406,46 +424,53 @@ impl CatalogueIndex {
                     .and_then(|raw| SchemaHash::from_hex(raw))
                     .unwrap_or_else(|| SchemaHash::compute(&schema));
                 self.schemas.entry(hash).or_insert(schema);
-                if let Some(published_at) = entry
+                let published_at = entry
                     .metadata
                     .get(MetadataKey::PublishedAt.as_str())
-                    .and_then(|raw| raw.parse::<u64>().ok())
-                {
-                    self.schema_published_at
-                        .entry(hash)
-                        .and_modify(|existing| *existing = (*existing).max(published_at))
-                        .or_insert(published_at);
-                }
+                    .ok_or_else(|| corrupt_catalogue_entry(entry, "missing published_at metadata"))?
+                    .parse::<u64>()
+                    .map_err(|error| {
+                        corrupt_catalogue_entry(
+                            entry,
+                            format!("invalid published_at metadata: {error}"),
+                        )
+                    })?;
+                self.schema_published_at
+                    .entry(hash)
+                    .and_modify(|existing| *existing = (*existing).max(published_at))
+                    .or_insert(published_at);
             }
             Some(kind) if kind == ObjectType::CatalogueLens.as_str() => {
-                let Some(source) = entry
+                let source = entry
                     .metadata
                     .get(MetadataKey::SourceHash.as_str())
                     .and_then(|raw| SchemaHash::from_hex(raw))
-                else {
-                    return;
-                };
-                let Some(target) = entry
+                    .ok_or_else(|| {
+                        corrupt_catalogue_entry(entry, "missing or invalid source_hash metadata")
+                    })?;
+                let target = entry
                     .metadata
                     .get(MetadataKey::TargetHash.as_str())
                     .and_then(|raw| SchemaHash::from_hex(raw))
-                else {
-                    return;
-                };
-                let Ok(transform) = decode_lens_transform(&entry.content) else {
-                    return;
-                };
+                    .ok_or_else(|| {
+                        corrupt_catalogue_entry(entry, "missing or invalid target_hash metadata")
+                    })?;
+                let transform = decode_lens_transform(&entry.content).map_err(|error| {
+                    corrupt_catalogue_entry(entry, format!("decode lens payload: {error}"))
+                })?;
                 let lens = Lens::new(source, target, transform);
                 if !lens.is_draft() {
                     self.lens_edges.insert((source, target));
                 }
             }
             Some(kind) if kind == ObjectType::CataloguePermissionsBundle.as_str() => {
-                let Ok((schema_hash, version, parent_bundle_object_id, permissions)) =
-                    decode_permissions_bundle(&entry.content)
-                else {
-                    return;
-                };
+                let (schema_hash, version, parent_bundle_object_id, permissions) =
+                    decode_permissions_bundle(&entry.content).map_err(|error| {
+                        corrupt_catalogue_entry(
+                            entry,
+                            format!("decode permissions bundle payload: {error}"),
+                        )
+                    })?;
                 let head = PermissionsHeadSummary {
                     schema_hash,
                     version,
@@ -458,11 +483,13 @@ impl CatalogueIndex {
                 );
             }
             Some(kind) if kind == ObjectType::CataloguePermissionsHead.as_str() => {
-                let Ok((schema_hash, version, parent_bundle_object_id, bundle_object_id)) =
-                    decode_permissions_head(&entry.content)
-                else {
-                    return;
-                };
+                let (schema_hash, version, parent_bundle_object_id, bundle_object_id) =
+                    decode_permissions_head(&entry.content).map_err(|error| {
+                        corrupt_catalogue_entry(
+                            entry,
+                            format!("decode permissions head payload: {error}"),
+                        )
+                    })?;
                 let head = PermissionsHeadSummary {
                     schema_hash,
                     version,
@@ -476,8 +503,20 @@ impl CatalogueIndex {
                     self.permissions_head = Some(head);
                 }
             }
+            // A newer producer may persist catalogue kinds this server does
+            // not understand. They cannot influence this local index, so keep
+            // the established forward-compatible ignore behavior for them.
             _ => {}
         }
+        Ok(())
+    }
+}
+
+fn corrupt_catalogue_entry(entry: &CatalogueEntry, error: impl Into<String>) -> CatalogueError {
+    CatalogueError::DecodeError {
+        object_id: entry.object_id,
+        object_type: entry.object_type().unwrap_or("unknown").to_owned(),
+        error: error.into(),
     }
 }
 
@@ -579,7 +618,7 @@ impl CatalogueStore for StoredCatalogue {
         storage.upsert_catalogue_entry(&entry)?;
         let object_id = entry.object_id;
         let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
-        index.apply_entry(&entry);
+        index.apply_entry(&entry)?;
         index.schema_published_at.insert(schema_hash, published_at);
         Ok(object_id)
     }
@@ -662,7 +701,7 @@ impl CatalogueStore for StoredCatalogue {
         storage.upsert_catalogue_entry(&bundle_entry)?;
         storage.upsert_catalogue_entry(&head_entry)?;
         let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
-        index.apply_entry(&bundle_entry);
+        index.apply_entry(&bundle_entry)?;
         index.permissions_head = Some(head);
         Ok(Some(head_entry.object_id))
     }
@@ -677,7 +716,7 @@ impl CatalogueStore for StoredCatalogue {
         let mut storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
         storage.upsert_catalogue_entry(&entry)?;
         let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
-        index.apply_entry(&entry);
+        index.apply_entry(&entry)?;
         Ok(entry.object_id)
     }
 

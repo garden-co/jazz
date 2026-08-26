@@ -185,13 +185,15 @@ fn mixed_complex_select_policy() -> PolicyExpr {
     pe::all_of([
         pe::eq("published", true),
         pe::in_session("team_slug", "claims.team_slugs"),
-        pe::exists(pe::table("document_flags").where_(pe::rel::all_of([
-            pe::rel::eq_outer("document_id", "id"),
-            pe::rel::eq_literal("flag", "allow"),
-        ]))),
         pe::all_of([
-            pe::is_not_null("folder_id"),
-            pe::allowed_to_read("folder_id"),
+            pe::exists(pe::table("document_flags").where_(pe::rel::all_of([
+                pe::rel::eq_outer("document_id", "id"),
+                pe::rel::eq_literal("flag", "allow"),
+            ]))),
+            pe::all_of([
+                pe::is_not_null("folder_id"),
+                pe::allowed_to_read("folder_id"),
+            ]),
         ]),
     ])
 }
@@ -757,7 +759,6 @@ async fn exists_rel_hop_grants_and_denies_correctly_inner() {
 /// alice(claims=sales) ───────────────────────────────► sees only sales-matching row
 /// ```
 #[tokio::test]
-#[ignore = "#1761: mixed SELECT policy stays closed once EXISTS / INHERITS composition is involved"]
 async fn mixed_predicates_claims_exists_and_inherits_fail_closed() {
     tokio::task::LocalSet::new()
         .run_until(mixed_predicates_claims_exists_and_inherits_fail_closed_inner())
