@@ -1,8 +1,9 @@
 import { schema as s } from "jazz-tools";
 import type { RowRefValue } from "jazz-tools/permissions";
+import { betterAuthPermissions } from "./auth-schema";
 import { app } from "./schema";
 
-export default s.definePermissions(app, ({ policy, anyOf, allowedTo, session }) => {
+const recordPlayerPermissions = s.definePermissions(app, ({ policy, anyOf, allowedTo, session }) => {
   policy.albums.allowRead.where({});
   policy.albums.allowInsert.always();
   policy.tracks.allowRead.where({});
@@ -12,7 +13,10 @@ export default s.definePermissions(app, ({ policy, anyOf, allowedTo, session }) 
       { $createdBy: session.author },
       policy.invitations.exists.where({
         playlist_id: playlistId,
-        subject: session.user_id,
+        // This column carries Jazz's issuer-scoped canonical author, not a
+        // provider-local Better Auth user id. It stays stable across tokens
+        // and avoids conflating external account storage with row authority.
+        subject: session.author,
         status: "accepted",
       }),
     ]);
@@ -21,7 +25,7 @@ export default s.definePermissions(app, ({ policy, anyOf, allowedTo, session }) 
       { $createdBy: session.author },
       policy.invitations.exists.where({
         playlist_id: playlistId,
-        subject: session.user_id,
+        subject: session.author,
         role: "editor",
         status: "accepted",
       }),
@@ -36,7 +40,7 @@ export default s.definePermissions(app, ({ policy, anyOf, allowedTo, session }) 
   policy.playlist_entries.allowDelete.where((entry) => canEditPlaylist(entry.playlist_id));
   policy.invitations.allowRead.where((invite) =>
     anyOf([
-      { subject: session.user_id },
+      { subject: session.author },
       policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.author }),
     ]),
   );
@@ -49,7 +53,7 @@ export default s.definePermissions(app, ({ policy, anyOf, allowedTo, session }) 
   // Recipients may perform the one-way pending → accepted transition; every
   // other invitation change (including revoke) remains owner-controlled.
   policy.invitations.allowUpdate
-    .whereOld({ subject: session.user_id, status: "pending" })
+    .whereOld({ subject: session.author, status: "pending" })
     .whereNew((invite) =>
       policy.invitations.exists.where({
         id: invite.id,
@@ -59,10 +63,16 @@ export default s.definePermissions(app, ({ policy, anyOf, allowedTo, session }) 
         status: "pending",
       }),
     )
-    .whereNew({ subject: session.user_id, status: "accepted" });
+    .whereNew({ subject: session.author, status: "accepted" });
   policy.invitations.allowDelete.where((invite) =>
     policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.author }),
   );
   policy.playback_positions.allowRead.where({ $createdBy: session.author });
   policy.playback_positions.allowInsert.always();
+  policy.playback_positions.allowUpdate
+    .whereOld({ $createdBy: session.author })
+    .whereNew({ $createdBy: session.author });
+  policy.playback_positions.allowDelete.where({ $createdBy: session.author });
 });
+
+export default { ...betterAuthPermissions, ...recordPlayerPermissions };
