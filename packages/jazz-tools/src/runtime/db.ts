@@ -52,6 +52,7 @@ import {
 } from "./client-session.js";
 import { canonicalAuthorSubject } from "./author-id.js";
 import {
+  getDbInternalSession,
   getTrustedReservedSession,
   setDbInternalSession,
   setTrustedReservedSession,
@@ -1247,6 +1248,17 @@ export class Db {
     this.authStateStore.markUnauthenticated(reason);
   }
 
+  private publishAuthStateWithInternalSession<T>(nextSession: Session | null, publish: () => T): T {
+    const previousSession = getDbInternalSession(this);
+    setDbInternalSession(this, nextSession);
+    try {
+      return publish();
+    } catch (error) {
+      setDbInternalSession(this, previousSession);
+      throw error;
+    }
+  }
+
   protected applyAuthUpdate(token: string | null, trustedReservedSession?: Session): boolean {
     const jwtToken = token ?? undefined;
     const previousToken = this.config.jwtToken;
@@ -1256,7 +1268,9 @@ export class Db {
       jwtToken,
       trustedReservedSession,
     });
-    const nextState = this.authStateStore.applyJwtToken(jwtToken, trustedReservedSession);
+    const nextState = this.publishAuthStateWithInternalSession(nextInternalSession, () =>
+      this.authStateStore.applyJwtToken(jwtToken, trustedReservedSession),
+    );
     const tokenChanged = previousToken !== jwtToken;
 
     if (!tokenChanged && nextState === previousState) {
@@ -1265,7 +1279,6 @@ export class Db {
 
     this.config.jwtToken = jwtToken;
     setTrustedReservedSession(this.config, trustedReservedSession);
-    setDbInternalSession(this, nextInternalSession);
 
     this.connection.updateAuth({ jwtToken, trustedReservedSession });
 
@@ -1280,7 +1293,9 @@ export class Db {
       ...this.config,
       cookieSession,
     });
-    const nextState = this.authStateStore.applyCookieSession(cookieSession);
+    const nextState = this.publishAuthStateWithInternalSession(nextInternalSession, () =>
+      this.authStateStore.applyCookieSession(cookieSession),
+    );
     const sessionChanged = JSON.stringify(previousSession) !== JSON.stringify(cookieSession);
 
     if (!sessionChanged && nextState === previousState) {
@@ -1288,7 +1303,6 @@ export class Db {
     }
 
     this.config.cookieSession = cookieSession;
-    setDbInternalSession(this, nextInternalSession);
 
     this.connection.updateAuth({ cookieSession });
 
