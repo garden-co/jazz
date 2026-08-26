@@ -191,6 +191,17 @@ export interface InsertOptions {
   updatedAtMs?: number
 }
 
+/**
+ * Any JSON-compatible value crossing the native JavaScript boundary.
+ *
+ * Keep this alias exported through napi-rs rather than relying on its Rust
+ * import name: exported methods use `JsonValue` throughout their generated
+ * declarations, so the package must define that name for TypeScript
+ * consumers.
+ */
+export type JsonValue =
+  any
+
 export declare function mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
 
 /** Exact build/ABI fingerprint for the generated native artifact. */
