@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::thread;
 
 #[cfg(test)]
@@ -88,6 +88,23 @@ impl ServerTopology {
     }
 }
 
+/// Operational state of an edge server's owned upstream connector.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EdgeUpstreamHealth {
+    /// This server has no owned upstream connector.
+    NotConfigured,
+    /// Bootstrap or socket establishment is in progress.
+    Connecting,
+    /// The ordinary upstream wire is attached.
+    Connected,
+    /// A recoverable outcome is waiting for its next attempt.
+    Reconnecting { reason: String },
+    /// A fatal outcome stopped the connector generation.
+    Failed { reason: String },
+    /// Shutdown cancelled and joined the connector.
+    Stopped,
+}
+
 /// Server state shared across request handlers.
 pub struct ServerState {
     /// Direct, storage-backed admin catalogue store.
@@ -124,7 +141,22 @@ pub struct ServerState {
     /// generation remains usable offline; blank and refreshing generations do
     /// not admit new downstream sessions.
     dynamic_edge_catalogue_ready: AtomicBool,
+    edge_upstream_health: StdRwLock<EdgeUpstreamHealth>,
+    edge_upstream_task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
     pub shutdown: ShutdownController,
+}
+
+impl Drop for ServerState {
+    fn drop(&mut self) {
+        let task = self
+            .edge_upstream_task
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(task) = task {
+            task.abort();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -284,13 +316,17 @@ impl ServerState {
         )
     }
 
-    pub(crate) fn mark_dynamic_edge_catalogue_ready(&self) {
+    pub(crate) fn mark_dynamic_edge_catalogue_ready(&self) -> Result<(), String> {
         // Serialize this Ready transition with dynamic shell publication and
         // client snapshots. Callers reach this only after catalogue adoption
         // and any required projection-registry rebuild have returned.
         let _shell = self.core_server_shell.read().unwrap();
+        if self.shutdown.is_shutting_down() {
+            return Err("server shutdown started before edge readiness publication".to_owned());
+        }
         self.dynamic_edge_catalogue_ready
             .store(true, Ordering::Release);
+        Ok(())
     }
 
     fn mark_dynamic_edge_catalogue_refreshing(&self) {
@@ -307,14 +343,47 @@ impl ServerState {
         shell: &ServerRuntimeHandle,
         snapshot: jazz::protocol::CatalogueSnapshot,
     ) -> Result<(), String> {
+        if self.shutdown.is_shutting_down() {
+            return Err("server shutdown started before edge catalogue refresh".to_owned());
+        }
         self.mark_dynamic_edge_catalogue_refreshing();
         shell.apply_trusted_catalogue_snapshot(snapshot).await?;
         // Applying the snapshot returns only after a semantic transition has
         // rebuilt its local projections. The newly validated durable
         // generation may therefore serve offline even if normal upstream
         // attachment is still retrying.
-        self.mark_dynamic_edge_catalogue_ready();
-        Ok(())
+        self.mark_dynamic_edge_catalogue_ready()
+    }
+
+    pub fn edge_upstream_health(&self) -> EdgeUpstreamHealth {
+        self.edge_upstream_health.read().unwrap().clone()
+    }
+
+    pub(crate) fn set_edge_upstream_health(&self, health: EdgeUpstreamHealth) {
+        *self.edge_upstream_health.write().unwrap() = health;
+    }
+
+    pub(crate) fn own_edge_upstream_task(&self, task: tokio::task::JoinHandle<()>) {
+        let replaced = self.edge_upstream_task.lock().unwrap().replace(task);
+        debug_assert!(replaced.is_none(), "edge upstream task is installed once");
+    }
+
+    async fn stop_edge_upstream_task(&self) {
+        let task = self.edge_upstream_task.lock().unwrap().take();
+        if let Some(task) = task
+            && let Err(error) = task.await
+            && !error.is_cancelled()
+        {
+            tracing::error!(%error, "edge upstream lifecycle task failed");
+        }
+        if self.topology == ServerTopology::Edge
+            && !matches!(
+                self.edge_upstream_health(),
+                EdgeUpstreamHealth::Failed { .. }
+            )
+        {
+            self.set_edge_upstream_health(EdgeUpstreamHealth::Stopped);
+        }
     }
 
     pub(crate) fn start_core_server_shell(
@@ -354,6 +423,9 @@ impl ServerState {
         if self.topology != ServerTopology::Edge {
             return Err("dynamic catalogue bootstrap is only valid for edge topology".to_owned());
         }
+        if self.shutdown.is_shutting_down() {
+            return Err("server shutdown started before edge shell publication".to_owned());
+        }
         let storage_config = self
             .core_server_shell_storage_config
             .clone()
@@ -361,6 +433,9 @@ impl ServerState {
         let mut core_server_shell = self.core_server_shell.write().unwrap();
         if let Some(existing) = core_server_shell.clone() {
             return Ok(existing);
+        }
+        if self.shutdown.is_shutting_down() {
+            return Err("server shutdown started before edge shell publication".to_owned());
         }
         let started = ServerRuntimeHandle::start_dynamic_edge_with_catalogue_snapshot(
             storage_config,
@@ -370,6 +445,11 @@ impl ServerState {
         )?;
         self.dynamic_edge_catalogue_ready
             .store(false, Ordering::Release);
+        if self.shutdown.is_shutting_down() {
+            drop(core_server_shell);
+            drop(started);
+            return Err("server shutdown started before edge shell publication".to_owned());
+        }
         *core_server_shell = Some(started.clone());
         Ok(started)
     }
@@ -402,6 +482,7 @@ impl ServerState {
 
     async fn finalize_shutdown(&self) -> ShutdownPhase {
         self.shutdown.set_phase(ShutdownPhase::DrainingConnections);
+        self.stop_edge_upstream_task().await;
         let mut failed = false;
         let websockets_drained = self.shutdown.wait_for_websocket_drain().await;
         if !websockets_drained {
@@ -609,6 +690,8 @@ mod tests {
             runtime_catalogue_before_publication_hook: StdMutex::new(None),
             runtime_catalogue_after_permissions_read_hook: StdMutex::new(None),
             dynamic_edge_catalogue_ready: AtomicBool::new(true),
+            edge_upstream_health: StdRwLock::new(EdgeUpstreamHealth::NotConfigured),
+            edge_upstream_task: StdMutex::new(None),
             shutdown: ShutdownController::new(timeout),
         })
     }
