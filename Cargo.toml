@@ -26,6 +26,7 @@ members = [
   # "examples/docs/todo-server-rs",
   "examples/big-label/benchmarks",
   "examples/band-chat/benchmarks",
+  "examples/band-binder/benchmarks",
   "examples/music-agent/benchmarks",
   "examples/benchmarks/smoke",
   "dev/benchmarks/storage/bench-core",

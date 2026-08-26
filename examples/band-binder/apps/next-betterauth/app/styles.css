@@ -1,0 +1,29 @@
+:root {
+  color: #f4f1eb;
+  background: #191716;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+body {
+  margin: 0;
+}
+main {
+  max-width: 48rem;
+  margin: 0 auto;
+  padding: 5rem 1.5rem;
+}
+.eyebrow {
+  color: #d9b46c;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.8rem;
+}
+h1 {
+  font-size: clamp(3rem, 10vw, 6rem);
+  margin: 0.25rem 0;
+}
+section {
+  margin-top: 3rem;
+  padding: 1.5rem;
+  border: 1px solid #514b43;
+  border-radius: 0.75rem;
+}
