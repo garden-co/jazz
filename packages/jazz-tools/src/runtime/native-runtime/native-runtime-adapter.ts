@@ -437,8 +437,11 @@ type ServerConnectionAttempt = {
   generation: number;
   carrier: WebSocketCarrier;
   terminal: Promise<Error>;
-  terminate: (error: Error) => boolean;
+  resolveTerminal: (error: Error) => void;
+  finished: boolean;
+  outcome: Error | null;
   transport: Transport | null;
+  retirement: Promise<void> | null;
 };
 
 type RuntimeSession = {
@@ -921,7 +924,10 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this !== this.ownerRuntime) {
       return await this.ownerRuntime.waitForUpstreamServerConnection();
     }
-    if (!this.serverCarrierPromise) return;
+    if (!this.serverCarrierPromise) {
+      if (this.serverTransportError) throw this.serverTransportError;
+      return;
+    }
     await this.serverCarrierPromise;
   }
 
@@ -986,7 +992,9 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverConnectionGeneration += 1;
     const connectionAttempt = this.serverConnectionAttempt;
     this.serverConnectionAttempt = null;
-    connectionAttempt?.terminate(new Error("runtime closed"));
+    if (connectionAttempt) {
+      this.finishServerConnectionAttempt(connectionAttempt, new Error("runtime closed"));
+    }
     this.serverCarrierPromise = null;
     this.clearServerTransportErrorWaiters();
     this.resolveServerTransportWorkWaiters();
@@ -1782,7 +1790,6 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverTransportError = null;
     this.serverEndpointUrl = url;
     let resolveTerminal!: (error: Error) => void;
-    let terminalError: Error | null = null;
     const terminal = new Promise<Error>((resolve) => {
       resolveTerminal = resolve;
     });
@@ -1815,65 +1822,70 @@ export class NativeRuntimeAdapter implements Runtime {
       },
       onTerminal: (error) => {
         if (!attempt) return;
-        this.handleServerCarrierTerminal(attempt, new Error(error.message));
+        this.finishServerConnectionAttempt(attempt, new Error(error.message));
       },
     });
     attempt = {
       generation,
       carrier,
       terminal,
-      terminate: (error) => {
-        if (terminalError) return false;
-        terminalError = error;
-        resolveTerminal(error);
-        return true;
-      },
+      resolveTerminal,
+      finished: false,
+      outcome: null,
       transport: null,
+      retirement: null,
     };
     this.serverConnectionAttempt = attempt;
     this.serverCarrier = carrier;
-    this.serverCarrierPromise = carrier.ready().then(async (negotiation) => {
-      if (
-        generation !== this.serverConnectionGeneration ||
-        carrier !== this.serverCarrier ||
-        attempt !== this.serverConnectionAttempt
-      ) {
-        carrier.close();
+    this.serverCarrierPromise = carrier
+      .ready()
+      .then(async (negotiation) => {
+        if (
+          generation !== this.serverConnectionGeneration ||
+          carrier !== this.serverCarrier ||
+          attempt !== this.serverConnectionAttempt
+        ) {
+          carrier.close();
+          return carrier;
+        }
+        const admission = this.connectNegotiatedUpstream(negotiation).catch((error) => {
+          throw contextualError("connecting the negotiated upstream transport", error);
+        });
+        const outcome = await Promise.race([
+          admission.then((transport) => ({ type: "admitted" as const, transport })),
+          attempt.terminal.then((error) => ({ type: "terminal" as const, error })),
+        ]);
+        if (outcome.type === "terminal") {
+          void admission.then(
+            (transport) => this.retirePeerTransport(transport).catch(reportAsyncRuntimeError),
+            () => undefined,
+          );
+          throw outcome.error;
+        }
+        const transport = outcome.transport;
+        if (
+          this.closed ||
+          generation !== this.serverConnectionGeneration ||
+          carrier !== this.serverCarrier ||
+          attempt !== this.serverConnectionAttempt
+        ) {
+          carrier.close();
+          await this.retirePeerTransport(transport);
+          return carrier;
+        }
+        attempt.transport = transport;
+        this.serverTransport = transport;
+        void this.watchAuxiliaryOutbound(transport, carrier, generation);
+        this.flushQueuedServerFrames(carrier);
+        await this.pumpServerTransport();
+        this.pumpSubscriptions();
         return carrier;
-      }
-      const admission = this.connectNegotiatedUpstream(negotiation).catch((error) => {
-        throw contextualError("connecting the negotiated upstream transport", error);
+      })
+      .catch((error) => {
+        const failure = error instanceof Error ? error : new Error(errorMessage(error));
+        this.finishServerConnectionAttempt(attempt, failure);
+        throw attempt.outcome ?? failure;
       });
-      const outcome = await Promise.race([
-        admission.then((transport) => ({ type: "admitted" as const, transport })),
-        attempt.terminal.then((error) => ({ type: "terminal" as const, error })),
-      ]);
-      if (outcome.type === "terminal") {
-        void admission.then(
-          (transport) => this.retirePeerTransport(transport).catch(reportAsyncRuntimeError),
-          () => undefined,
-        );
-        throw outcome.error;
-      }
-      const transport = outcome.transport;
-      if (
-        this.closed ||
-        generation !== this.serverConnectionGeneration ||
-        carrier !== this.serverCarrier ||
-        attempt !== this.serverConnectionAttempt
-      ) {
-        carrier.close();
-        await this.retirePeerTransport(transport);
-        return carrier;
-      }
-      attempt.transport = transport;
-      this.serverTransport = transport;
-      void this.watchAuxiliaryOutbound(transport, carrier, generation);
-      this.flushQueuedServerFrames(carrier);
-      await this.pumpServerTransport();
-      this.pumpSubscriptions();
-      return carrier;
-    });
     this.serverCarrierPromise.catch((error) => {
       this.handleServerTransportError(error, generation);
     });
@@ -1900,7 +1912,9 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverConnectionGeneration += 1;
     const attempt = this.serverConnectionAttempt;
     this.serverConnectionAttempt = null;
-    attempt?.terminate(new Error("server transport disconnected"));
+    if (attempt) {
+      this.finishServerConnectionAttempt(attempt, new Error("server transport disconnected"));
+    }
     this.serverCarrier?.close();
     this.serverCarrier = null;
     this.serverCarrierPromise = null;
@@ -1923,6 +1937,7 @@ export class NativeRuntimeAdapter implements Runtime {
     // single-threaded RefCell mutex. Remove it from new work immediately, then
     // perform the physical detach once the owning tick has released the borrow.
     if (transport) await this.retirePeerTransport(transport);
+    if (attempt?.retirement) await attempt.retirement;
   }
 
   updateAuth(authJson: string): Promise<void> | void {
@@ -3022,25 +3037,32 @@ export class NativeRuntimeAdapter implements Runtime {
     this.resolveServerTransportErrorWaiters(this.serverTransportError);
   }
 
-  private handleServerCarrierTerminal(attempt: ServerConnectionAttempt, error: Error): void {
-    if (!attempt.terminate(error) || attempt !== this.serverConnectionAttempt) return;
-    if (
-      attempt.generation !== this.serverConnectionGeneration ||
-      attempt.carrier !== this.serverCarrier
-    ) {
-      return;
+  private finishServerConnectionAttempt(attempt: ServerConnectionAttempt, error: Error): void {
+    if (attempt.finished) return;
+    attempt.finished = true;
+    attempt.outcome = error;
+    attempt.resolveTerminal(error);
+    const isCurrent =
+      attempt === this.serverConnectionAttempt &&
+      attempt.generation === this.serverConnectionGeneration &&
+      attempt.carrier === this.serverCarrier;
+    if (isCurrent) {
+      this.serverConnectionGeneration += 1;
+      this.serverConnectionAttempt = null;
+      this.serverCarrier = null;
+      this.serverCarrierPromise = null;
     }
-    this.serverConnectionGeneration += 1;
-    this.serverConnectionAttempt = null;
-    this.serverCarrier = null;
-    this.serverCarrierPromise = null;
+    attempt.carrier.close();
     const transport = attempt.transport;
     attempt.transport = null;
-    if (transport && transport === this.serverTransport) {
-      this.serverTransport = null;
-      void this.retirePeerTransport(transport).catch(reportAsyncRuntimeError);
+    if (transport) {
+      if (transport === this.serverTransport) this.serverTransport = null;
+      attempt.retirement = this.retirePeerTransport(transport).catch(reportAsyncRuntimeError);
     }
-    this.resolveServerTransportWorkWaiters();
+    if (isCurrent) {
+      this.handleServerTransportError(error);
+      this.resolveServerTransportWorkWaiters();
+    }
   }
 
   private failActiveSubscriptions(error: Error): void {

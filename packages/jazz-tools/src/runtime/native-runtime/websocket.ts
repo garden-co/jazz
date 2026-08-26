@@ -160,11 +160,26 @@ export class WebSocketCarrier {
         this.socket.send(encodeWebSocketPrelude(options.authJson ?? "{}", options.peerIdentity));
         this.socket.send(encodeWebSocketFrameBatch([encodeWireClientHello()]));
       },
-      (error) => this.rejectNegotiation(error),
+      (error) => {
+        this.reportTerminal({
+          code: "websocket_error",
+          retry: "later",
+          message: error instanceof Error ? error.message : String(error),
+        });
+        this.close();
+      },
     );
     this.socket.addEventListener("message", (event) => {
       void this.handleMessage(event.data).catch((error) => {
-        this.rejectNegotiation(error);
+        this.reportTerminal(
+          {
+            code: "protocol_error",
+            retry: "never",
+            message: error instanceof Error ? error.message : String(error),
+          },
+          undefined,
+          false,
+        );
         this.close();
       });
     });
@@ -223,11 +238,15 @@ export class WebSocketCarrier {
     }
   }
 
-  private reportTerminal(error: WireError): void {
+  private reportTerminal(
+    error: WireError,
+    negotiationError = new Error(error.message),
+    notifyError = true,
+  ): void {
     if (this.closing || this.terminated) return;
     this.terminated = true;
-    this.rejectNegotiation(new Error(error.message));
-    this.onError?.(error);
+    this.rejectNegotiation(negotiationError);
+    if (notifyError) this.onError?.(error);
     this.onTerminal?.(error);
   }
 
@@ -244,15 +263,23 @@ export class WebSocketCarrier {
         if (isWireError(frame)) {
           const error = decodeWireError(frame);
           if (wireAuthFailureReason(error)) {
-            this.onError?.(error);
-            this.rejectNegotiation(
+            this.reportTerminal(
+              error,
               new Error(`websocket authentication failed before server hello: ${error.message}`),
             );
             this.close();
             return;
           }
         }
-        this.rejectNegotiation(new Error("websocket received semantic frame before server hello"));
+        this.reportTerminal(
+          {
+            code: "protocol_error",
+            retry: "never",
+            message: "websocket received semantic frame before server hello",
+          },
+          undefined,
+          false,
+        );
         this.close();
         return;
       }

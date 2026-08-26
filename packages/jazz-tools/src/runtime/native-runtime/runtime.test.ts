@@ -319,10 +319,13 @@ describe("NativeRuntimeAdapter server transport", () => {
       "ws://127.0.0.1:4200/apps/app-a/ws",
       JSON.stringify({ jwt_token: "invalid.jwt" }),
     );
+    const rejectedReadiness = runtime.waitForUpstreamServerConnection();
     await waitForFakeWebSocketNegotiation();
     sockets[0]!.emitMessage(encodeWebSocketFrameBatch([encodeWireError(3, 1, "invalid token")]));
     await waitForFakeWebSocketNegotiation();
 
+    await expect(rejectedReadiness).rejects.toThrow("invalid token");
+    await expect(runtime.waitForUpstreamServerConnection()).rejects.toThrow("invalid token");
     expect(authFailures).toEqual(["invalid"]);
     expect(upstreamConnections).toBe(0);
     expect(sockets[0]!.closed).toBe(true);
@@ -333,7 +336,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     allowServerHello = true;
     await runtime.updateAuth(JSON.stringify({ jwt_token: "fresh.jwt" }));
-    await waitForFakeWebSocketNegotiation();
+    await runtime.waitForUpstreamServerConnection();
 
     expect(sockets).toHaveLength(2);
     expect(upstreamConnections).toBe(1);
@@ -379,6 +382,60 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     expect(authFailures).toEqual([]);
     expect(transport.received).toEqual([]);
+    expect(transport.closed).toBe(false);
+    expect(sockets[0]!.closed).toBe(false);
+    await expect(runtime.waitForUpstreamServerConnection()).resolves.toBeUndefined();
+  });
+
+  it("cleans up native admission failure, retains it for late readiness, and reconnects", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const recoveredTransport = new FakeTransport([]);
+    let admissions = 0;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => new FakeTransport([]),
+            connectUpstreamWithSession: () => {
+              admissions += 1;
+              if (admissions === 1) throw new Error("native admission rejected");
+              return recoveredTransport;
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await expect(runtime.waitForUpstreamServerConnection()).rejects.toThrow(
+      "connecting the negotiated upstream transport: native admission rejected",
+    );
+    expect(sockets[0]!.closed).toBe(true);
+    await expect(runtime.waitForUpstreamServerConnection()).rejects.toThrow(
+      "connecting the negotiated upstream transport: native admission rejected",
+    );
+
+    await runtime.disconnect();
+    await expect(runtime.waitForUpstreamServerConnection()).resolves.toBeUndefined();
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await expect(runtime.waitForUpstreamServerConnection()).resolves.toBeUndefined();
+    expect(admissions).toBe(2);
+    expect(recoveredTransport.closed).toBe(false);
+    expect(sockets[1]!.closed).toBe(false);
   });
 
   it("retires an upstream admitted after its connection was disconnected", async () => {
@@ -465,6 +522,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     sockets[0]!.emitClose();
 
     await expect(readiness).rejects.toThrow("websocket closed");
+    await expect(runtime.waitForUpstreamServerConnection()).rejects.toThrow("websocket closed");
     resolveAdmission(transport);
     await vi.waitFor(() => expect(transport.closed).toBe(true));
     expect(transport.tickCount).toBe(0);
@@ -755,6 +813,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(updates.mock.calls[0]![0]).toBeInstanceOf(Error);
     expect((updates.mock.calls[0]![0] as Error).message).toBe("server died");
     expect(updates.mock.calls[0]![1]).toBeNull();
+    expect(transport.closed).toBe(false);
+    expect(sockets[0]!.closed).toBe(false);
+    await expect(runtime.waitForUpstreamServerConnection()).resolves.toBeUndefined();
   });
 
   it("settle-gates global native subscription chunks before app callbacks", () => {
