@@ -24,6 +24,60 @@ fn branch_sync_selector(byte: u8) -> BranchSelector {
     BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
 }
 
+fn serving_rows_in_read_view(
+    server: &CoreDb,
+    schema: &JazzSchema,
+    query: &Query,
+    identity: AuthorSubject,
+    read_view: &ReadViewSpec,
+) -> Vec<CurrentRow> {
+    let shape = query.validate(schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    server
+        .node()
+        .borrow_mut()
+        .query_relation_snapshot_for_serving_in_read_view(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            identity,
+            read_view,
+        )
+        .unwrap()
+        .rows
+}
+
+fn write_deletion_register(server: &CoreDb, table: &str, row: RowUuid, branch: BranchSelector) {
+    let node = server.node();
+    let parents = {
+        let mut state = node.borrow_mut();
+        let deletion =
+            block_on(state.local_deletion_winner_tx_id_in_branch(table, &branch, row)).unwrap();
+        let content = if deletion.is_none() {
+            block_on(state.local_content_winner_tx_id_in_branch(table, &branch, row)).unwrap()
+        } else {
+            None
+        };
+        deletion.or(content).into_iter().collect()
+    };
+    let authored_columns = branch.values.keys().cloned().collect::<BTreeSet<_>>();
+    let published = block_on(
+        node.borrow_mut().commit_mergeable(
+            crate::node::MergeableCommit::new(table, row, server.next_now_ms())
+                .made_by(AuthorSubject::SYSTEM)
+                .branch(branch)
+                .parents(parents)
+                .authored_columns(authored_columns)
+                .deletion(crate::tx::DeletionEvent::Deleted),
+        ),
+    )
+    .unwrap();
+    let tx_id = block_on(node.borrow_mut().persist_and_settle_transaction(published)).unwrap();
+    let outcome = block_on(node.borrow_mut().finalize_local_mergeable_commit(tx_id)).unwrap();
+    block_on(node.borrow_mut().persist_and_settle_outcome(outcome)).unwrap();
+    server.server.mark_subscriber_connections_dirty();
+}
+
 #[test]
 fn db_sync_surface_round_trips_subscription_to_client() {
     let schema = schema();
@@ -350,4 +404,89 @@ fn branch_view_subscriptions_disambiguate_same_row_and_tx_by_branch() {
         right_snapshot.rows[0].cell(table, "branch_id"),
         Some(right.values["branch_id"].decode().unwrap())
     );
+}
+
+#[test]
+fn default_current_subscription_reconciles_deletion_witness_without_reset() {
+    let schema = schema();
+    let owner = AuthorSubject::for_test_bytes([0x50; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0x51; 16]);
+    let server = open_core(0x52, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0x53, client_author, &schema);
+    let current_row = RowUuid::from_bytes([0x54; 16]);
+    server
+        .insert_with_id("todos", current_row, cells("current", false, owner))
+        .unwrap();
+    let query = Query::from("todos");
+    let current_view = ReadViewSpec::default();
+    assert_eq!(
+        row_ids(&serving_rows_in_read_view(
+            &server,
+            &schema,
+            &query,
+            client_author,
+            &current_view,
+        )),
+        vec![current_row]
+    );
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
+
+    let mut snapshot = RelationSnapshot::default();
+    for _ in 0..10 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+        while let Some(event) = subscription.try_next_event() {
+            apply_subscription_event(&mut snapshot, event);
+        }
+        if row_ids(&snapshot.rows) == vec![current_row] {
+            break;
+        }
+    }
+    assert_eq!(row_ids(&snapshot.rows), vec![current_row]);
+
+    write_deletion_register(&server, "todos", current_row, BranchSelector::default());
+    let mut saw_removal = false;
+    for _ in 0..10 {
+        server.tick().unwrap();
+        client.tick().unwrap();
+        while let Some(event) = subscription.try_next_event() {
+            match &event {
+                SubscriptionEvent::Delta {
+                    reset,
+                    added,
+                    removed,
+                    ..
+                } => {
+                    assert!(!reset, "deletion-witness reconcile must remain a delta");
+                    assert!(
+                        added.is_empty(),
+                        "default/current deletion reconcile must not add rows"
+                    );
+                    saw_removal |= removed
+                        .iter()
+                        .any(|removed| removed.row_uuid == current_row);
+                }
+                SubscriptionEvent::Rejected { reason } => {
+                    panic!("default/current subscription was rejected: {reason:?}")
+                }
+                SubscriptionEvent::Closed => panic!("default/current subscription closed"),
+            }
+            apply_subscription_event(&mut snapshot, event);
+        }
+        if saw_removal {
+            break;
+        }
+    }
+    assert!(
+        saw_removal,
+        "default/current reconcile must remove the deleted row"
+    );
+    let fresh = serving_rows_in_read_view(&server, &schema, &query, client_author, &current_view);
+    assert_eq!(row_ids(&snapshot.rows), row_ids(&fresh));
 }
