@@ -916,7 +916,9 @@ impl PeerState {
             }
             Err(error) => return Err(error),
             };
-        if shape.query().array_subqueries.is_empty() {
+        let retains_structured_terminal = !shape.query().array_subqueries.is_empty()
+            || !shape.query().order_by.is_empty();
+        if !retains_structured_terminal {
             maintained.discard_structured_app_rows();
         }
         if !initial_received {
