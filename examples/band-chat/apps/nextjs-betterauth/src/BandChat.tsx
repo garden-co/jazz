@@ -5,7 +5,10 @@ import type { DbConfig } from "jazz-tools";
 import { JazzProvider, useAll, useDb, useSession } from "jazz-tools/react";
 import { app } from "../schema";
 
-const MAX_ATTACHMENT_BYTES = 256 * 1024;
+// This only bounds files selected through this component. `s.bytes()` has no
+// corresponding schema or policy size constraint, so it must not be treated as
+// an authorization or security boundary for direct database writes.
+const ATTACHMENT_PICKER_MAX_BYTES = 256 * 1024;
 const allowedAttachmentTypes = new Set([
   "image/png",
   "image/jpeg",
@@ -155,9 +158,11 @@ function Composer({ roomId, profileId }: { roomId: string; profileId: string | n
       setError("Use PNG, JPEG, WebP, text, or PDF attachments.");
       return;
     }
-    if (candidate.size > MAX_ATTACHMENT_BYTES) {
+    if (candidate.size > ATTACHMENT_PICKER_MAX_BYTES) {
       setFile(null);
-      setError("Attachments are limited to 256 KB in this inline-bytes example.");
+      setError(
+        "The attachment picker accepts files up to 256 KiB; this is client-side validation only.",
+      );
       return;
     }
     setError(null);

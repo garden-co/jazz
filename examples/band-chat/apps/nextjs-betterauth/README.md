@@ -17,8 +17,12 @@ product slice, not another generic Todo tutorial.
   A guest cannot add themself. A message must reference a profile owned by the
   authenticated raw Better Auth user id, while Jazz records row provenance from
   the issuer-scoped `session.author`.
-- Attachments are inline bytes only for this small demo: PNG, JPEG, WebP, text,
-  and PDF files up to 256 KiB. Larger media belongs in the file/blob pattern.
+- The attachment picker accepts inline PNG, JPEG, WebP, text, and PDF files up
+  to 256 KiB. This is client-side UX validation only, not a Jazz authorization,
+  security, or storage limit: `s.bytes()` has no size constraint, so an actor
+  otherwise allowed to insert a message can write a different-sized value
+  directly. Larger media belongs in the file/blob pattern; enforce any
+  authoritative content limit at a trusted application boundary.
 - Room creation and messages are ordinary local-first writes, so they appear
   before a reconnect. The browser receipt exercises the real React form; the
   policy receipt exercises serving-authority admission and removal.
@@ -45,7 +49,8 @@ pnpm build
 The permission receipt covers the normal path (owner creates a room, bootstraps
 membership, invites a guest, and the guest posts) and the important failures:
 self-admission, selecting someone else's profile as sender, and posting after
-removal. `test:browser` covers the app's create/send path and attachment bound.
+removal. `test:browser` covers the app's create/send path and the attachment
+picker's client-side validation.
 
 ## Non-goals
 

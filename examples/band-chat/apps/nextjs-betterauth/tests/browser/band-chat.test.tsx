@@ -43,7 +43,7 @@ afterEach(async () => {
   }
 });
 
-it("creates a local room, sends a message, and rejects an oversized attachment", async () => {
+it("creates a local room, sends a message, and applies client-side picker validation", async () => {
   const element = await mount();
   const roomName = element.querySelector<HTMLInputElement>("#room-name")!;
   Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!.call(
@@ -83,5 +83,7 @@ it("creates a local room, sends a message, and rejects an oversized attachment",
     value: [new File([new Uint8Array(256 * 1024 + 1)], "too-big.png", { type: "image/png" })],
   });
   await act(async () => attachment.dispatchEvent(new Event("change", { bubbles: true })));
-  expect(element.querySelector("[role='alert']")?.textContent).toContain("256 KB");
+  expect(element.querySelector("[role='alert']")?.textContent).toContain(
+    "256 KiB; this is client-side validation only",
+  );
 });
