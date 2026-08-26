@@ -2907,23 +2907,33 @@ impl NapiDb {
         column: String,
         start: f64,
         end: f64,
-    ) -> napi::Result<Uint8Array> {
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let range = checked_u64_range(start, end)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let bytes = match db {
+        match db {
             NapiDbInnerStorage::Memory(db) => {
-                core_block_on(db.read_value_range(&table, row_id, &column, range))
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    db.read_value_range(&table, row_id, &column, range)
+                        .await
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
             }
             NapiDbInnerStorage::Persistent(db) => {
-                core_block_on(db.read_value_range(&table, row_id, &column, range))
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    db.read_value_range(&table, row_id, &column, range)
+                        .await
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
             }
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        Ok(Uint8Array::new(bytes))
     }
 
     #[napi(js_name = "readTextUtf16Range")]
@@ -2934,22 +2944,39 @@ impl NapiDb {
         column: String,
         start: f64,
         end: f64,
-    ) -> napi::Result<String> {
+    ) -> napi::Result<Either<String, PendingNativeRead>> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let range = checked_u64_range(start, end)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
+        let bytes = match db {
             NapiDbInnerStorage::Memory(db) => {
-                core_block_on(db.read_text_utf16_range(&table, row_id, &column, range))
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    db.read_text_utf16_range(&table, row_id, &column, range)
+                        .await
+                        .map(|value| Uint8Array::new(value.into_bytes()))
+                        .map_err(napi_error)
+                }))?
             }
             NapiDbInnerStorage::Persistent(db) => {
-                core_block_on(db.read_text_utf16_range(&table, row_id, &column, range))
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    db.read_text_utf16_range(&table, row_id, &column, range)
+                        .await
+                        .map(|value| Uint8Array::new(value.into_bytes()))
+                        .map_err(napi_error)
+                }))?
             }
-        }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))
+        };
+        Ok(match bytes {
+            Either::A(bytes) => {
+                Either::A(String::from_utf8(bytes.to_vec()).expect("Rust String is valid UTF-8"))
+            }
+            Either::B(pending) => Either::B(pending),
+        })
     }
 
     #[napi(js_name = "readJsonPointer")]

@@ -167,7 +167,7 @@ type NativeDb = {
     query: PreparedQuery,
     author: Uint8Array,
     opts: unknown,
-  ): Uint8Array | Promise<Uint8Array>;
+  ): NativeReadResult | Promise<NativeReadResult>;
   allRelationQuery?(queryJson: string, opts: unknown): NativeReadResult | Promise<NativeReadResult>;
   allRelationQueryForIdentity?(
     queryJson: string,
@@ -301,14 +301,14 @@ type NativeDb = {
     column: string,
     start: number,
     end: number,
-  ): Uint8Array | Promise<Uint8Array>;
+  ): NativeReadResult | Promise<NativeReadResult>;
   readTextUtf16Range?(
     table: string,
     rowId: Uint8Array,
     column: string,
     start: number,
     end: number,
-  ): string | Promise<string>;
+  ): string | PendingNativeRead | Promise<string | PendingNativeRead>;
   readJsonPointer?(
     table: string,
     rowId: Uint8Array,
@@ -873,7 +873,9 @@ export class NativeRuntimeAdapter implements Runtime {
       return await this.ownerRuntime.readValueRange(table, objectId, column, start, end);
     }
     if (!this.db.readValueRange) throw new Error("Native runtime does not expose value ranges");
-    return await this.db.readValueRange(table, parseUuid(objectId), column, start, end);
+    return this.awaitNativeRead(
+      this.db.readValueRange(table, parseUuid(objectId), column, start, end),
+    );
   }
 
   async readTextUtf16Range(
@@ -889,7 +891,10 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!this.db.readTextUtf16Range) {
       throw new Error("Native runtime does not expose UTF-16 value ranges");
     }
-    return await this.db.readTextUtf16Range(table, parseUuid(objectId), column, start, end);
+    const result = await this.db.readTextUtf16Range(table, parseUuid(objectId), column, start, end);
+    return isPendingNativeRead(result)
+      ? new TextDecoder().decode(await this.awaitNativeRead(result))
+      : result;
   }
 
   async readJsonPointer(

@@ -102,8 +102,8 @@ export declare class NapiDb {
   setLargeValueStagingPolicy(incomingBytesPerWindow: number, windowMs: number, maxAgeMs?: number | undefined | null): void
   /** Run one idempotent expiry pass; native hosts normally call this on a timer. */
   evictExpiredStagedLargeValues(): number
-  readValueRange(table: string, rowId: Uint8Array, column: string, start: number, end: number): Uint8Array
-  readTextUtf16Range(table: string, rowId: Uint8Array, column: string, start: number, end: number): string
+  readValueRange(table: string, rowId: Uint8Array, column: string, start: number, end: number): Uint8Array | PendingNativeRead
+  readTextUtf16Range(table: string, rowId: Uint8Array, column: string, start: number, end: number): string | PendingNativeRead
   readJsonPointer(table: string, rowId: Uint8Array, column: string, pointer: string): string | null
   appendValue(table: string, rowId: Uint8Array, column: string, bytes: Uint8Array): Write
   spliceValue(table: string, rowId: Uint8Array, column: string, offset: number, deleteLength: number, insert: Uint8Array): Write
