@@ -14,16 +14,16 @@ export default s.definePermissions(app, ({ allOf, allowedTo, policy, session }) 
   // File ownership alone must not let a caller attach it to (or move it into)
   // another principal's private folder. Keep the child and referenced-parent
   // authority checks paired for every operation.
-  policy.files.allowRead.where((file) =>
+  policy.files.allowRead.where((_file) =>
     allOf([{ owner_id: session.user_id }, allowedTo.read("folder_id")]),
   );
-  policy.files.allowInsert.where((file) =>
+  policy.files.allowInsert.where((_file) =>
     allOf([{ owner_id: session.user_id }, allowedTo.insert("folder_id")]),
   );
   policy.files.allowUpdate
-    .whereOld((file) => allOf([{ owner_id: session.user_id }, allowedTo.update("folder_id")]))
-    .whereNew((file) => allOf([{ owner_id: session.user_id }, allowedTo.update("folder_id")]));
-  policy.files.allowDelete.where((file) =>
+    .whereOld((_file) => allOf([{ owner_id: session.user_id }, allowedTo.update("folder_id")]))
+    .whereNew((_file) => allOf([{ owner_id: session.user_id }, allowedTo.update("folder_id")]));
+  policy.files.allowDelete.where((_file) =>
     allOf([{ owner_id: session.user_id }, allowedTo.delete("folder_id")]),
   );
 });
