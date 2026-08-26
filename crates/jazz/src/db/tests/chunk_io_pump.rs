@@ -525,6 +525,49 @@ fn mixed_waiter_and_immediate_response_saturation_never_exceeds_the_shared_cap()
 }
 
 #[test]
+fn completion_transfers_a_relay_reservation_until_the_response_is_acknowledged() {
+    let resolver = PeerChunkResolver::default();
+    let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
+    let database = crate::db::block_on(groove::db::Database::new(
+        schema,
+        groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF]),
+    ))
+    .unwrap();
+    let subscriber = PeerIoPump::new(
+        resolver.clone(),
+        database.local_chunk_reader(),
+        46,
+        PeerIoPumpRole::Subscriber,
+    );
+    resolver.enqueue_relay(
+        46,
+        ChunkRequestEntry {
+            request_id: 46,
+            locator: groove::large_values::Locator::random(),
+            expected_hash: [46; 32],
+            remaining_hops: DEFAULT_CHUNK_FORWARD_HOPS,
+        },
+    );
+    let upstream_id = resolver.take_outbound(1)[0].request_id;
+    assert_eq!(retained_relay_obligations(&resolver.state.borrow()), 1);
+    resolver.complete(ChunkResponseEntry {
+        request_id: upstream_id,
+        result: ChunkResponse::Found(vec![46]),
+    });
+    assert_eq!(
+        retained_relay_obligations(&resolver.state.borrow()),
+        1,
+        "completion transfers rather than releases the relay reservation"
+    );
+    let response = subscriber
+        .take_outbound(1)
+        .expect("completed response is queued");
+    assert_eq!(retained_relay_obligations(&resolver.state.borrow()), 1);
+    subscriber.acknowledge_outbound(&response);
+    assert_eq!(retained_relay_obligations(&resolver.state.borrow()), 0);
+}
+
+#[test]
 fn disconnect_mid_batch_stops_later_lookup_and_drops_the_resumed_result() {
     let schema = schema();
     let server = open_db(0x44, AuthorSubject::SYSTEM, &schema);
