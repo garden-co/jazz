@@ -1001,8 +1001,19 @@ where
         let mut loaded_tx_ids = BTreeSet::new();
         for (tx_id, tx_bundles) in bundles_by_tx {
             let first = tx_bundles[0];
+            let view_scoped = first.scope == crate::protocol::VersionBundleScope::ViewScoped;
+            // Each view-scoped bundle declares only its own redacted fragment
+            // cardinality. Compare the immutable transaction identity here and
+            // synthesize the receiver-local authorized cardinality only after
+            // exact version deduplication below.
+            let mut first_tx_identity = first.tx.clone();
+            first_tx_identity.n_total_writes = 0;
             if tx_bundles.iter().any(|bundle| {
-                bundle.tx != first.tx
+                let mut tx_identity = bundle.tx.clone();
+                tx_identity.n_total_writes = 0;
+                tx_identity != first_tx_identity
+                    || (bundle.scope == crate::protocol::VersionBundleScope::ViewScoped)
+                        != view_scoped
                     || bundle.fate != first.fate
                     || bundle.global_time != first.global_time
                     || bundle.durability != first.durability
@@ -1033,7 +1044,7 @@ where
                         version.deletion().is_some(),
                     );
                     match unique_versions.get(&key) {
-                        Some(existing) if existing.record().raw() != version.record().raw() => {
+                        Some(existing) if *existing != version => {
                             duplicate_conflict = true;
                             break;
                         }
@@ -1052,6 +1063,7 @@ where
             }
             let version_count = unique_versions.len();
             if first.tx.kind == TxKind::Exclusive
+                && !view_scoped
                 && usize::try_from(first.tx.n_total_writes).ok() != Some(version_count)
             {
                 continue;
@@ -1070,7 +1082,13 @@ where
                 continue;
             }
             if loaded_tx_ids.insert(tx_id) {
-                eligible.push(tx_bundles);
+                let mut local_tx = first.tx.clone();
+                if view_scoped {
+                    local_tx.n_total_writes = version_count
+                        .try_into()
+                        .map_err(|_| Error::InvalidStoredValue("view payload is too large"))?;
+                }
+                eligible.push((tx_bundles, local_tx, view_scoped));
             }
         }
         if eligible.is_empty() {
@@ -1078,7 +1096,9 @@ where
         }
         let eligible_versions = eligible
             .iter()
-            .flat_map(|tx_bundles| tx_bundles.iter().flat_map(|bundle| bundle.versions))
+            .flat_map(|(tx_bundles, _, _)| {
+                tx_bundles.iter().flat_map(|bundle| bundle.versions)
+            })
             .cloned()
             .collect::<Vec<_>>();
         self.prepare_authored_schema_variants_for_commit(&eligible_versions).await?;
@@ -1088,7 +1108,7 @@ where
         let mut batch = self.database.open_batch();
         let version_count = eligible
             .iter()
-            .flatten()
+            .flat_map(|(tx_bundles, _, _)| tx_bundles)
             .map(|bundle| bundle.versions.len())
             .sum::<usize>();
         batch.reserve(eligible.len() + version_count.saturating_mul(2));
@@ -1101,9 +1121,9 @@ where
             BTreeSet::<(PhysicalTableId, String, BranchKey, RowUuid)>::new();
         let mut applied_global_times = Vec::with_capacity(eligible.len());
 
-        for tx_bundles in eligible {
+        for (tx_bundles, local_tx, view_scoped) in eligible {
             let first = tx_bundles[0];
-            let tx = first.tx;
+            let tx = &local_tx;
             let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
             let global_time = first.global_time.expect("checked above");
             applied_global_times.push(global_time);
@@ -1119,7 +1139,7 @@ where
                     (*first.fate).clone(),
                     first.global_time,
                     first.durability,
-                    first.scope == crate::protocol::VersionBundleScope::ViewScoped,
+                    view_scoped,
                 ),
             );
 
