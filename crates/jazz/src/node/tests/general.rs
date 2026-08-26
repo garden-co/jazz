@@ -173,8 +173,17 @@ fn subscription_equivalence_canonicalizes_duplicate_logical_names_by_value() {
         ],
         vec![Value::U64(2), Value::U64(1)],
     );
+    let foo = query_row(
+        vec![("foo".to_owned(), records::ValueType::U64)],
+        vec![Value::U64(1)],
+    );
+    let bar = query_row(
+        vec![("bar".to_owned(), records::ValueType::U64)],
+        vec![Value::U64(1)],
+    );
 
     assert!(aggregate_layout.subscription_equivalent(&public_layout));
+    assert!(!foo.subscription_equivalent(&bar));
 }
 
 #[test]
