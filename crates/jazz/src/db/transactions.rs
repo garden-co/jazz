@@ -1,7 +1,6 @@
 //! Mergeable and exclusive transaction handles and staging.
 
 use super::*;
-use crate::query::{col, eq, lit};
 
 impl<S> Db<S>
 where
@@ -330,17 +329,34 @@ where
         let Some(identity) = permission_subject else {
             return Ok(());
         };
-        if self
-            .local_row_for_trusted_identity(table, row, identity)
-            .await?
-            .is_some()
-        {
+        // Resolve against this transaction's fixed snapshot plus its staged
+        // overlay. A session may update/upsert a row it inserted earlier in
+        // the same transaction, while a hidden snapshot or overlay row still
+        // follows the same non-disclosing denial path.
+        let target = self.transaction_read(tx_id, table, row).await?;
+        let visible = match (&target, self.table_schema(table)?.read_policy.clone()) {
+            (Some(_), _) if identity == AuthorSubject::SYSTEM => true,
+            (Some(_), None) => true,
+            (Some(_), Some(policy)) => {
+                self.node
+                    .node
+                    .lock()
+                    .await
+                    .read_policy_query_allows_open_tx_row(
+                        tx_id,
+                        &policy,
+                        self.schema_version_id,
+                        row,
+                        identity,
+                    )
+                    .await?
+            }
+            (None, _) => false,
+        };
+        if target.is_some() && visible {
             return Ok(());
         }
-        if self.local_current_row(table, row).await?.is_some() {
-            return Err(read_for_write_denied(operation, table));
-        }
-        if operation == "UPDATE" {
+        if target.is_some() || operation == "UPDATE" {
             return Err(read_for_write_denied(operation, table));
         }
         Ok(())
@@ -609,13 +625,31 @@ where
         table: &str,
         row: RowUuid,
     ) -> Result<Option<RowCells>, Error> {
-        let mut node = self.node.node.lock().await;
-        let mut cells = node
-            .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
-            .await?;
+        let mut cells = self.transaction_read_raw(tx_id, table, row).await?;
+        let node = self.node.node.lock().await;
         if let Some(cells) = &mut cells {
             node.hydrate_large_value_cells(cells).await?;
         }
+        Ok(cells)
+    }
+
+    /// Read the storage-form transaction row used as a mutation base.
+    ///
+    /// Mutation staging must preserve existing large-value locators; public
+    /// transaction reads hydrate those values separately above.
+    async fn transaction_read_raw(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<Option<RowCells>, Error> {
+        let cells = self
+            .node
+            .node
+            .lock()
+            .await
+            .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
+            .await?;
         Ok(cells)
     }
 
@@ -806,21 +840,10 @@ where
             .await
             .exclusive_transaction_bound_author(tx_id)?;
         let read_policy = self.table_schema(table)?.read_policy.clone();
-        let predicate_query = read_policy
-            .clone()
-            .unwrap_or_else(|| Query::from(table))
-            .filter(eq(col("id"), lit(Value::Uuid(row.0))));
-        let predicate = self.prepare_query(&predicate_query)?;
-        // Record the exact policy-shaped predicate read used by the mutation.
-        // The dedicated authorization subplan below remains the decision
-        // boundary so dependency sources are raw evidence under INV-RLS-21.
-        self.transaction_all_for_identity(tx_id, &predicate, identity, ReadOpts::default())
-            .await?;
-
         // This authoritative point read distinguishes a hidden target from a
         // genuinely absent one and records the exact snapshot/absence read for
         // conflict detection. Its result is never returned to the session.
-        let target = self.transaction_read(tx_id, table, row).await?;
+        let target = self.transaction_read_raw(tx_id, table, row).await?;
         let visible = match (&target, read_policy) {
             (Some(_), _) if identity == AuthorSubject::SYSTEM => true,
             (Some(_), None) => true,
@@ -829,7 +852,13 @@ where
                     .node
                     .lock()
                     .await
-                    .read_policy_query_allows_open_tx_row(tx_id, &policy, row, identity)
+                    .read_policy_query_allows_open_tx_row(
+                        tx_id,
+                        &policy,
+                        self.schema_version_id,
+                        row,
+                        identity,
+                    )
                     .await?
             }
             (None, _) => false,

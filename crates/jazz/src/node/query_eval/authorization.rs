@@ -169,15 +169,29 @@ where
         &mut self,
         tx_id: OpenTransactionId,
         policy: &crate::query::Query,
+        policy_schema_version: SchemaVersionId,
         row_uuid: RowUuid,
         identity: AuthorSubject,
     ) -> Result<bool, Error> {
-        let policy_shape = policy.validate(&self.catalogue.schema)?;
+        let policy_schema = if policy_schema_version == self.catalogue.current_schema_version_id {
+            &self.catalogue.schema
+        } else {
+            &self
+                .catalogue
+                .catalogue_schemas
+                .get(&policy_schema_version)
+                .ok_or(Error::InvalidStoredValue("policy schema payload missing"))?
+                .schema
+        }
+        .clone();
+        let policy_shape = policy
+            .clone()
+            .validate_with_schema_version(&policy_schema, policy_schema_version)?;
         let policy_binding = policy_shape.bind(BTreeMap::new())?;
         let policy_shape = bind_query_params_with_mode(
             &policy_shape,
             &policy_binding,
-            &self.catalogue.schema,
+            &policy_schema,
             ParamBindingMode::InlineAllReachableSeeds,
         )?;
         let binding = policy_shape.bind(BTreeMap::new())?;
@@ -220,7 +234,7 @@ where
             output: current_query_output_request(
                 CurrentQueryProgramOutput::PolicyPredicate,
                 policy_shape.query(),
-                &self.catalogue.schema,
+                &policy_schema,
             ),
         };
         let access_paths = BTreeMap::from([(

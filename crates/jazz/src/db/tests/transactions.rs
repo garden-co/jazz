@@ -1557,6 +1557,55 @@ fn exclusive_session_update_authorizes_snapshot_then_conflicts_on_toctou_change(
     assert_eq!(error.code, ErrorCode::TransactionConflict);
 }
 
+/// A session-authored mergeable transaction authorizes later mutations from
+/// its fixed overlay, not only from the pre-transaction current state.
+///
+/// alice tx: INSERT visible row ──UPDATE/UPSERT──► same staged row
+#[test]
+fn mergeable_session_mutations_observe_visible_rows_in_their_overlay() {
+    let schema = exclusive_read_for_write_schema();
+    let db = open_db(0xd7, AuthorSubject::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa7; 16]);
+    db.set_identity_claims(alice, test_provider_claims(alice));
+    let target = row(0xc8);
+    let open = OpenTransactionId::new();
+    db.begin_mergeable_for_identity(open, alice).unwrap();
+    let tx = db.mergeable_tx_ref(open);
+
+    tx.insert(
+        "todos",
+        cells("draft", false, alice),
+        InsertOptions {
+            row_id: Some(target),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tx.update(
+        "todos",
+        target,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        Default::default(),
+    )
+    .expect("the staged insert is visible to its session author");
+    tx.upsert(
+        "todos",
+        target,
+        BTreeMap::from([("title".to_owned(), Value::String("ready".to_owned()))]),
+        Default::default(),
+    )
+    .expect("upsert observes and merges the visible staged row");
+
+    db.commit_mergeable_handle(open).unwrap();
+    let committed = db.local_current_row("todos", target).unwrap().unwrap();
+    let table = &schema.tables[0];
+    assert_eq!(committed.cell(table, "done"), Some(Value::Bool(true)));
+    assert_eq!(
+        committed.cell(table, "title"),
+        Some(Value::String("ready".to_owned()))
+    );
+}
+
 /// Mergeable serving reads retain their existing per-call identity semantics.
 #[test]
 fn mergeable_transaction_identity_reads_are_not_forced_to_begin_author() {
