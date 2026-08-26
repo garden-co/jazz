@@ -67,8 +67,8 @@ job during diagnosis; it is likewise not a full CI-equivalent result.
 
 **Generated correctness bindings.** `pnpm build:test-artifacts` seals the
 fast-WASM/release-NAPI pair into a fingerprint-addressed store under the
-current worktree's Git metadata. Browser and native correctness tests consume
-that immutable pair, not the mutable package output directories. Do not copy
+current worktree's ignored `target/` directory. Browser and native correctness
+tests consume that immutable pair, not the mutable package output directories. Do not copy
 or share generated `pkg/` or NAPI generations between lanes; rebuild in the
 checkout whose tests you are running. The explicit ABI/provenance preflight is
 intentional and must remain fail-closed.
