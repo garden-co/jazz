@@ -14,6 +14,7 @@ const schema = {
     attachmentName: s.string().optional(),
   }),
   reactions: s.table({
+    roomId: s.ref("rooms"),
     messageId: s.ref("messages"),
     author: s.string(),
     emoji: s.string(),
@@ -23,3 +24,4 @@ const schema = {
 type AppSchema = s.Schema<typeof schema>;
 export const app: s.App<AppSchema> = s.defineApp(schema);
 export type Room = s.RowOf<typeof app.rooms>;
+export type Reaction = s.RowOf<typeof app.reactions>;

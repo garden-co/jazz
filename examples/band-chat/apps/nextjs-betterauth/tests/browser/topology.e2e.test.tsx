@@ -70,6 +70,7 @@ describe("BandChat cross-topology recovery", () => {
               await expect(
                 peer!.db
                   .insert(app.reactions, {
+                    roomId: roomId!,
                     messageId: ownerMessageId!,
                     author: owner!.author,
                     emoji: "forged",
@@ -159,6 +160,7 @@ describe("BandChat cross-topology recovery", () => {
               await Promise.all([
                 owner!.db
                   .insert(app.reactions, {
+                    roomId: roomId!,
                     messageId: ownerMessageId,
                     author: owner!.author,
                     emoji: "🎸",
@@ -166,6 +168,7 @@ describe("BandChat cross-topology recovery", () => {
                   .wait({ tier: "edge" }),
                 peer!.db
                   .insert(app.reactions, {
+                    roomId: roomId!,
                     messageId: ownerMessageId,
                     author: peer!.author,
                     emoji: "🔥",
@@ -252,6 +255,8 @@ describe("BandChat cross-topology recovery", () => {
     let peer: ClientIdentity | undefined;
     let roomId: string | undefined;
     let peerMembershipId: string | undefined;
+    let peerReactionId: string | undefined;
+    let reactionMessageId: string | undefined;
     const window = () =>
       app.messages.where({ roomId: roomId! }).select("id", "text").orderBy("text", "desc").limit(2);
     const receipt = await runTopologyScenario(
@@ -303,9 +308,10 @@ describe("BandChat cross-topology recovery", () => {
             name: "bounded projected delivery",
             run: async () => {
               for (const text of ["first", "second", "third"]) {
-                await owner!.db
+                const message = await owner!.db
                   .insert(app.messages, { roomId: roomId!, senderId: owner!.profileId, text })
                   .wait({ tier: "edge" });
+                if (text === "third") reactionMessageId = message.id;
               }
               const rows = await waitForQuery(
                 peer!.db,
@@ -316,6 +322,15 @@ describe("BandChat cross-topology recovery", () => {
                 "edge",
               );
               expect(rows.map((message) => message.text)).toEqual(["third", "second"]);
+              const reaction = await peer!.db
+                .insert(app.reactions, {
+                  roomId: roomId!,
+                  messageId: reactionMessageId!,
+                  author: peer!.author,
+                  emoji: "🎵",
+                })
+                .wait({ tier: "edge" });
+              peerReactionId = reaction.id;
             },
             faultsAfter: [{ kind: "disconnect", target: "peer" }],
           },
@@ -356,6 +371,19 @@ describe("BandChat cross-topology recovery", () => {
                     text: "rejected after revocation",
                   })
                   .wait({ tier: "edge" }),
+              ).rejects.toThrow(/permission_denied/i);
+              await expect(
+                peer!.db
+                  .insert(app.reactions, {
+                    roomId: roomId!,
+                    messageId: reactionMessageId!,
+                    author: peer!.author,
+                    emoji: "revoked reaction",
+                  })
+                  .wait({ tier: "edge" }),
+              ).rejects.toThrow(/permission_denied/i);
+              await expect(
+                peer!.db.delete(app.reactions, peerReactionId!).wait({ tier: "edge" }),
               ).rejects.toThrow(/permission_denied/i);
             },
           },
