@@ -273,6 +273,54 @@ fn client_side_rejection_cascades_to_local_mergeable_descendant() {
         Fate::Rejected(RejectionReason::Cascade { root: exclusive })
     );
 }
+
+// Stack safety is an implementation-level property. This NodeState integration
+// test arranges a deep speculative local chain, then asserts terminal states
+// and retracted local rows through its fate entry point.
+#[test]
+fn client_rejects_deep_local_causal_chain_without_recursing() {
+    const DEPTH: usize = 1_024;
+
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let mut parent = None;
+    let mut tx_ids = Vec::with_capacity(DEPTH);
+
+    for time in 1..=DEPTH {
+        // Spread versions across rows so test-only history consistency checks
+        // do not turn this stack-safety regression into a quadratic soak.
+        let mut commit = MergeableCommit::new("todos", row((time % 251) as u8), time as u64)
+            .cells(title_cells(&format!("depth-{time}")));
+        if let Some(parent) = parent {
+            commit = commit.parents(vec![parent]);
+        }
+        let (tx_id, _) = client.commit_mergeable_unit_settled(commit).unwrap();
+        parent = Some(tx_id);
+        tx_ids.push(tx_id);
+    }
+
+    let root = tx_ids[0];
+    client
+        .apply_fate_update(
+            root,
+            Fate::Rejected(RejectionReason::ClientClockTooFarAhead),
+            None,
+            None,
+        )
+        .unwrap();
+
+    for tx_id in tx_ids {
+        assert_eq!(
+            client.transaction_state_settled(tx_id).unwrap().0,
+            if tx_id == root {
+                Fate::Rejected(RejectionReason::ClientClockTooFarAhead)
+            } else {
+                Fate::Rejected(RejectionReason::Cascade { root })
+            }
+        );
+    }
+    assert!(client.current_rows("todos", DurabilityTier::Local).unwrap().is_empty());
+}
+
 #[test]
 fn authority_unparks_child_after_unknown_parent_accepts() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));
