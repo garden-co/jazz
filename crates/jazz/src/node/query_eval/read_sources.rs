@@ -30,6 +30,7 @@ pub(super) enum CurrentAccessPath {
     Index {
         column: String,
         prefix: Vec<Value>,
+        intersections: Vec<(String, Vec<Value>)>,
         /// A proved physical source cap for an ordinary one-shot read. This is
         /// never selected by policy compilation or subscriptions.
         source_limit: Option<usize>,
@@ -1373,6 +1374,7 @@ where
             CurrentAccessPath::Index {
                 column,
                 prefix,
+                intersections,
                 source_limit,
             } => {
                 if tier != DurabilityTier::Global {
@@ -1389,11 +1391,13 @@ where
                         self.read_view.read_schema,
                         &column,
                         &prefix,
+                        &intersections,
                         source_limit,
                         &projection_target,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                self.node.query_engine_read_metrics.source_index_probes += 1;
+                self.node.query_engine_read_metrics.source_index_probes +=
+                    1 + intersections.len() as u64;
                 Ok(Some(rows))
             }
         }
@@ -1677,16 +1681,19 @@ where
                 Some(CurrentAccessPath::Index {
                     column,
                     prefix,
+                    intersections,
                     source_limit,
                 }) => {
                     let source_limit = (!exclude_deleted).then_some(source_limit).flatten();
-                    self.node.query_engine_read_metrics.source_index_probes += 1;
+                    self.node.query_engine_read_metrics.source_index_probes +=
+                        1 + intersections.len() as u64;
                     self.node
                         .physical_global_current_source_for_index_scan(
                             read_table,
                             self.read_view.read_schema,
                             &column,
                             &prefix,
+                            &intersections,
                             source_limit,
                             &projection_target,
                         )
@@ -1765,18 +1772,21 @@ where
             Some(CurrentAccessPath::Index {
                 column,
                 prefix,
+                intersections,
                 source_limit,
             }) => {
                 // Select settled candidates before combining them with the
                 // corresponding Local ahead candidates below.
                 let source_limit = (!exclude_deleted).then_some(*source_limit).flatten();
-                self.node.query_engine_read_metrics.source_index_probes += 1;
+                self.node.query_engine_read_metrics.source_index_probes +=
+                    1 + intersections.len() as u64;
                 self.node
                     .physical_global_current_source_for_index_scan_with_output(
                         read_table,
                         self.read_view.read_schema,
                         column,
                         prefix,
+                        intersections,
                         source_limit,
                         &projection_target,
                         raw_global_output.clone(),
@@ -1812,12 +1822,14 @@ where
                 Some(CurrentAccessPath::Index {
                     column,
                     prefix,
+                    intersections,
                     source_limit,
                 }) => self.node.physical_ahead_current_source_for_index_scan(
                     read_table,
                     self.read_view.read_schema,
                     column,
                     prefix,
+                    intersections,
                     (!exclude_deleted).then_some(*source_limit).flatten(),
                     &projection_target,
                 ),
@@ -2876,9 +2888,16 @@ where
                 continue;
             };
             let table = self.table_in_schema(&source.table, read_view.read_schema)?;
-            let Some(path) = select_current_access_path(&table, &equalities) else {
+            let Some(mut path) = select_current_access_path(&table, &equalities) else {
                 continue;
             };
+            // Multi-index intersection is an ephemeral one-shot source. Keep
+            // maintained programs and reusable policy graphs on their existing
+            // single-index path until the fused source has incremental-update
+            // semantics of its own.
+            if !allow_local && let CurrentAccessPath::Index { intersections, .. } = &mut path {
+                intersections.clear();
+            }
             // Generic maintained programs remain Global-only. A one-shot Local
             // caller opts in only after arranging equivalent index scans over
             // both the settled and ahead physical sources.
@@ -3046,6 +3065,7 @@ where
         schema_version: SchemaVersionId,
         column: &str,
         prefix: &[Value],
+        intersections: &[(String, Vec<Value>)],
         source_limit: Option<usize>,
         projection_target: &str,
     ) -> Result<GraphBuilder, Error> {
@@ -3054,6 +3074,7 @@ where
             schema_version,
             column,
             prefix,
+            intersections,
             source_limit,
             projection_target,
             table.global_current_storage_tables()[0].record_schema(),
@@ -3066,6 +3087,7 @@ where
         schema_version: SchemaVersionId,
         column: &str,
         prefix: &[Value],
+        intersections: &[(String, Vec<Value>)],
         source_limit: Option<usize>,
         projection_target: &str,
         _output: RecordDescriptor,
@@ -3086,19 +3108,40 @@ where
                 "physical current index column mapping missing",
             ))?;
         let storage_table = physical_global_current_table_name(mapping.table_id);
-        Ok(GraphBuilder::variant_index_scan(
+        let scan = match source_limit {
+            Some(max_items) => StaticScanSpec::PrefixLimit {
+                prefix: prefix.iter().cloned().map(LiteralValue::from).collect(),
+                max_items,
+            },
+            None => {
+                StaticScanSpec::Prefix(prefix.iter().cloned().map(LiteralValue::from).collect())
+            }
+        };
+        let intersections = intersections
+            .iter()
+            .map(|(column, prefix)| {
+                let column_id =
+                    mapping
+                        .columns
+                        .get(column)
+                        .copied()
+                        .ok_or(Error::InvalidStoredValue(
+                            "physical current intersected index column mapping missing",
+                        ))?;
+                Ok((
+                    physical_current_index_name(column_id),
+                    StaticScanSpec::Prefix(
+                        prefix.iter().cloned().map(LiteralValue::from).collect(),
+                    ),
+                ))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(GraphBuilder::variant_index_intersection_scan(
             storage_table,
             physical_current_index_name(column_id),
+            scan,
+            intersections,
             projection_target,
-            match source_limit {
-                Some(max_items) => StaticScanSpec::PrefixLimit {
-                    prefix: prefix.iter().cloned().map(LiteralValue::from).collect(),
-                    max_items,
-                },
-                None => {
-                    StaticScanSpec::Prefix(prefix.iter().cloned().map(LiteralValue::from).collect())
-                }
-            },
         ))
     }
 
@@ -3108,6 +3151,7 @@ where
         schema_version: SchemaVersionId,
         column: &str,
         prefix: &[Value],
+        intersections: &[(String, Vec<Value>)],
         source_limit: Option<usize>,
         projection_target: &str,
     ) -> Result<GraphBuilder, Error> {
@@ -3126,19 +3170,40 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "physical current index column mapping missing",
             ))?;
-        Ok(GraphBuilder::variant_index_scan(
+        let scan = match source_limit {
+            Some(max_items) => StaticScanSpec::PrefixLimit {
+                prefix: prefix.iter().cloned().map(LiteralValue::from).collect(),
+                max_items,
+            },
+            None => {
+                StaticScanSpec::Prefix(prefix.iter().cloned().map(LiteralValue::from).collect())
+            }
+        };
+        let intersections = intersections
+            .iter()
+            .map(|(column, prefix)| {
+                let column_id =
+                    mapping
+                        .columns
+                        .get(column)
+                        .copied()
+                        .ok_or(Error::InvalidStoredValue(
+                            "physical ahead intersected index column mapping missing",
+                        ))?;
+                Ok((
+                    physical_current_index_name(column_id),
+                    StaticScanSpec::Prefix(
+                        prefix.iter().cloned().map(LiteralValue::from).collect(),
+                    ),
+                ))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(GraphBuilder::variant_index_intersection_scan(
             physical_ahead_current_table_name(mapping.table_id),
             physical_current_index_name(column_id),
+            scan,
+            intersections,
             projection_target,
-            match source_limit {
-                Some(max_items) => StaticScanSpec::PrefixLimit {
-                    prefix: prefix.iter().cloned().map(LiteralValue::from).collect(),
-                    max_items,
-                },
-                None => {
-                    StaticScanSpec::Prefix(prefix.iter().cloned().map(LiteralValue::from).collect())
-                }
-            },
         ))
     }
 }
