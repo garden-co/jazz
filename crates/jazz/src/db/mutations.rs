@@ -3,6 +3,7 @@
 use super::*;
 use crate::node::{ContributionMergeRequest, ContributionMergeRow};
 use crate::protocol::{BranchSelector, BranchViewBase};
+use crate::query::{col, eq, lit};
 
 /// Ordinary row mutation completed with one Groove-staged scalar.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2143,7 +2144,8 @@ where
         row: RowUuid,
         identity: AuthorSubject,
     ) -> Result<Option<CurrentRow>, Error> {
-        let query = self.prepare_query(&Query::from(table))?;
+        let query =
+            self.prepare_query(&Query::from(table).filter(eq(col("id"), lit(Value::Uuid(row.0)))))?;
         Ok(self
             .node
             .node
@@ -2157,7 +2159,7 @@ where
             )
             .await?
             .into_iter()
-            .find(|candidate| candidate.row_uuid() == row))
+            .next())
     }
 
     async fn local_row_for_trusted_identity(
@@ -2166,7 +2168,8 @@ where
         row: RowUuid,
         identity: AuthorSubject,
     ) -> Result<Option<CurrentRow>, Error> {
-        let query = self.prepare_query(&Query::from(table))?;
+        let query =
+            self.prepare_query(&Query::from(table).filter(eq(col("id"), lit(Value::Uuid(row.0)))))?;
         Ok(self
             .node
             .node
@@ -2181,7 +2184,7 @@ where
             )
             .await?
             .into_iter()
-            .find(|candidate| candidate.row_uuid() == row))
+            .next())
     }
 
     async fn no_op_update_handle_for_client(
