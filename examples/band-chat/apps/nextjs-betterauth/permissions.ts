@@ -1,12 +1,21 @@
 import { definePermissions, type RowContext } from "jazz-tools/permissions";
 import { permissions as betterAuthPermissions } from "./schema-better-auth/schema";
-import { app, type Room } from "./schema";
+import { app, type Reaction, type Room } from "./schema";
 
 const bandChatPermissions = definePermissions(
   app,
   ({ policy, session, allOf, anyOf, allowedTo }) => {
     const isMember = (room: RowContext<Room>) =>
       policy.roomMembers.exists.where({ roomId: room.id, memberAuthor: session.user });
+    const canMutateReaction = (reaction: RowContext<Reaction>) =>
+      allOf([
+        { author: session.user },
+        policy.messages.exists.where({ id: reaction.messageId, roomId: reaction.roomId }),
+        policy.roomMembers.exists.where({
+          roomId: reaction.roomId,
+          memberAuthor: session.user,
+        }),
+      ]);
 
     policy.profiles.allowRead.where({ author: session.user });
     policy.profiles.allowInsert.where({ author: session.user });
@@ -44,6 +53,14 @@ const bandChatPermissions = definePermissions(
     policy.messages.allowDelete.where((message) =>
       policy.profiles.exists.where({ id: message.senderId, author: session.user }),
     );
+
+    policy.reactions.allowRead.where(allowedTo.read("messageId"));
+    // `roomId` is a denormalized authorization carrier: matching it against
+    // both the referenced message and current membership is equivalent to the
+    // message read policy without trusting a caller-supplied room id alone.
+    policy.reactions.allowInsert.where(canMutateReaction);
+    policy.reactions.allowUpdate.never();
+    policy.reactions.allowDelete.where(canMutateReaction);
   },
 );
 

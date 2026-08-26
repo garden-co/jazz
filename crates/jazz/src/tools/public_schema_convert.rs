@@ -1300,13 +1300,11 @@ fn append_exists_policy_clause(
 
     let mut outer_correlations = Vec::new();
     let mut filters = Vec::new();
+    let mut nested_exists = Vec::new();
+    let mut conditions = Vec::new();
+    collect_policy_conjuncts(condition, &mut conditions);
 
-    let conditions = match condition {
-        PolicyExpr::And(exprs) => exprs.as_slice(),
-        expr => std::slice::from_ref(expr),
-    };
-
-    for (index, expr) in conditions.iter().enumerate() {
+    for (index, expr) in conditions.into_iter().enumerate() {
         match expr {
             PolicyExpr::Cmp {
                 column,
@@ -1318,6 +1316,10 @@ fn append_exists_policy_clause(
                     source_column: path_segments[1].clone(),
                 });
             }
+            PolicyExpr::Exists {
+                table: nested_table,
+                condition: nested_condition,
+            } => nested_exists.push((index, nested_table.as_str(), nested_condition.as_ref())),
             other => filters.push(convert_policy_predicate(
                 &exists_table_name,
                 &format!("{path}.Exists[{index}]"),
@@ -1341,23 +1343,52 @@ fn append_exists_policy_clause(
     let source_column = primary.source_column;
     let correlated_filters = outer_correlations;
 
-    if join_column == "id" {
-        Ok(query.join_via_row_id_with_correlations(
+    let query = if join_column == "id" {
+        query.join_via_row_id_with_correlations(
             exists_table,
             source_column,
             correlated_filters,
             filters,
-        ))
+        )
     } else if correlated_filters.is_empty() {
-        Ok(query.join_via_column(exists_table, join_column, source_column, filters))
+        query.join_via_column(exists_table, join_column, source_column, filters)
     } else {
-        Ok(query.join_via_column_with_correlations(
+        query.join_via_column_with_correlations(
             exists_table,
             join_column,
             source_column,
             correlated_filters,
             filters,
-        ))
+        )
+    };
+
+    // Legacy `Exists` has one outer-row scope, even when an all-of nests
+    // another EXISTS. Each nested existential is therefore an additional
+    // proof about the protected row, not a join relative to the first proof
+    // row. Lower it through this same correlated-join path so every declared
+    // FK edge remains independently validated by the core query contract.
+    nested_exists
+        .into_iter()
+        .try_fold(query, |query, (index, nested_table, nested_condition)| {
+            append_exists_policy_clause(
+                schema,
+                table,
+                &format!("{path}.Exists[{index}]"),
+                query,
+                nested_table,
+                nested_condition,
+            )
+        })
+}
+
+fn collect_policy_conjuncts<'a>(expr: &'a PolicyExpr, output: &mut Vec<&'a PolicyExpr>) {
+    match expr {
+        PolicyExpr::And(children) => {
+            for child in children {
+                collect_policy_conjuncts(child, output);
+            }
+        }
+        other => output.push(other),
     }
 }
 
@@ -3688,6 +3719,97 @@ mod tests {
                 Operand::Claim(DIRECT_USER_ID_CLAIM.to_owned()),
             )]
         );
+    }
+
+    // This conversion-boundary test stays internal because its purpose is to
+    // prove that legacy public-policy syntax is normalized into the same core
+    // join representation as relation-backed policies before any runtime
+    // schema can be admitted.
+    #[test]
+    fn converts_nested_correlated_exists_conjunction_to_independent_joins() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("canvases"))
+            .table(TableSchemaBuilder::new("layers").fk_column("canvas_id", "canvases"))
+            .table(
+                TableSchemaBuilder::new("canvas_members")
+                    .fk_column("canvas_id", "canvases")
+                    .column("user_id", ColumnType::Text)
+                    .column("role", ColumnType::Text),
+            )
+            .table(
+                TableSchemaBuilder::new("shapes")
+                    .fk_column("layer_id", "layers")
+                    .fk_column("canvas_id", "canvases")
+                    .policies(TablePolicies::new().with_insert(PolicyExpr::Exists {
+                        table: "layers".to_owned(),
+                        condition: Box::new(PolicyExpr::And(vec![
+                            PolicyExpr::Cmp {
+                                column: "id".to_owned(),
+                                op: CmpOp::Eq,
+                                value: PolicyValue::SessionRef(vec![
+                                    "__jazz_outer_row".to_owned(),
+                                    "layer_id".to_owned(),
+                                ]),
+                            },
+                            PolicyExpr::Cmp {
+                                column: "canvas_id".to_owned(),
+                                op: CmpOp::Eq,
+                                value: PolicyValue::SessionRef(vec![
+                                    "__jazz_outer_row".to_owned(),
+                                    "canvas_id".to_owned(),
+                                ]),
+                            },
+                            PolicyExpr::Exists {
+                                table: "canvas_members".to_owned(),
+                                condition: Box::new(PolicyExpr::And(vec![
+                                    PolicyExpr::Cmp {
+                                        column: "canvas_id".to_owned(),
+                                        op: CmpOp::Eq,
+                                        value: PolicyValue::SessionRef(vec![
+                                            "__jazz_outer_row".to_owned(),
+                                            "canvas_id".to_owned(),
+                                        ]),
+                                    },
+                                    PolicyExpr::Cmp {
+                                        column: "user_id".to_owned(),
+                                        op: CmpOp::Eq,
+                                        value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                                    },
+                                    PolicyExpr::Cmp {
+                                        column: "role".to_owned(),
+                                        op: CmpOp::Eq,
+                                        value: PolicyValue::Literal(Value::Text(
+                                            "editor".to_owned(),
+                                        )),
+                                    },
+                                ])),
+                            },
+                        ])),
+                    })),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema)
+            .expect("nested correlated EXISTS conjunction must compile");
+        let shapes = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "shapes")
+            .unwrap();
+        let policy = shapes.write_policies.insert_check.as_ref().unwrap();
+        assert_eq!(policy.joins.len(), 2);
+        assert_eq!(policy.joins[0].table, "layers");
+        assert_eq!(policy.joins[0].source_column.as_deref(), Some("layer_id"));
+        assert_eq!(
+            policy.joins[0].correlated_filters,
+            vec![JoinCorrelation {
+                join_column: "canvas_id".to_owned(),
+                source_column: "canvas_id".to_owned(),
+            }]
+        );
+        assert_eq!(policy.joins[1].table, "canvas_members");
+        assert_eq!(policy.joins[1].on_column, "canvas_id");
+        assert_eq!(policy.joins[1].source_column.as_deref(), Some("canvas_id"));
     }
 
     #[test]

@@ -226,6 +226,10 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
     assert_eq!(reader.sync_metrics().parked_orphans, 0);
 }
 
+/// Two independently authorized reset fragments from one exclusive transaction
+/// are coalesced into one atomic local current projection.
+///
+/// core ──todo fragment + sibling fragment──► alice's relay
 #[test]
 fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
@@ -320,9 +324,201 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
             .iter()
             .any(|version| version.table() == "todos" && version.row_uuid() == row(2))
     );
-    assert_eq!(reader.sync_metrics().receiver_bulk_ingest_commits, 0);
-    assert_eq!(reader.sync_metrics().receiver_bulk_bundle_ingests, 0);
-    assert_eq!(reader.sync_metrics().receiver_per_bundle_ingests, 2);
+    let stored_tx = reader.query_transaction(tx_id).unwrap().unwrap();
+    assert!(stored_tx.view_scoped_cardinality);
+    assert_eq!(stored_tx.tx.n_total_writes, 2);
+    for (title, expected_row) in [("one", row(1)), ("two", row(2))] {
+        let shape = Query::from("todos")
+            .filter(eq(col("title"), lit(title)))
+            .validate(&schema())
+            .unwrap();
+        assert_eq!(
+            reader
+                .query_rows(
+                    &shape,
+                    &shape.bind(BTreeMap::new()).unwrap(),
+                    DurabilityTier::Global,
+                )
+                .unwrap()
+                .into_iter()
+                .map(current_row_pair)
+                .collect::<BTreeMap<_, _>>(),
+            BTreeMap::from([(expected_row, title_cells(title))])
+        );
+    }
+    let hidden = Query::from("todos")
+        .filter(eq(col("title"), lit("not shipped")))
+        .validate(&schema())
+        .unwrap();
+    assert!(
+        reader
+            .query_rows(
+                &hidden,
+                &hidden.bind(BTreeMap::new()).unwrap(),
+                DurabilityTier::Global,
+            )
+            .unwrap()
+            .is_empty(),
+        "coalescing may expose only the exact authorized fragments in the frame"
+    );
+    assert_eq!(reader.sync_metrics().receiver_bulk_ingest_commits, 1);
+    assert_eq!(reader.sync_metrics().receiver_bulk_bundle_ingests, 1);
+    assert_eq!(reader.sync_metrics().receiver_per_bundle_ingests, 0);
+}
+
+/// Reordered and duplicate view-scoped fragments coalesce by exact version
+/// identity without changing the authorized current projection.
+///
+/// core ──row 2, row 1, row 1 replay──► alice's relay
+#[test]
+fn receiver_batch_coalesces_reordered_and_duplicate_view_scoped_fragments() {
+    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let tx_id = TxId::new(TxTime::from(10), node(1));
+    let tx = Transaction {
+        tx_id,
+        kind: TxKind::Exclusive,
+        n_total_writes: 1,
+        made_by: AuthorSubject::SYSTEM,
+        permission_subject: None,
+        base_snapshot: None,
+        row_read_set: None,
+        absent_read_set: None,
+        predicate_read_set: None,
+        user_metadata_json: None,
+        contribution_merge: None,
+    };
+    let first = version_record(row(1), Vec::new(), title_cells("one"), None);
+    let second = version_record(row(2), Vec::new(), title_cells("two"), None);
+    let update = |version: VersionRecord, result_row| ViewUpdateParts {
+        subscription,
+        settled_through: GlobalTime(1),
+        defer_settlement: false,
+        reset_result_set: true,
+        version_carriers: Vec::new(),
+        version_bundles: vec![VersionBundle {
+            scope: crate::protocol::VersionBundleScope::ViewScoped,
+            tx: tx.clone(),
+            versions: vec![version],
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(1)),
+            durability: DurabilityTier::Global,
+        }],
+        peer_complete_tx_payload_refs: Vec::new(),
+        authorization_progress: None,
+        opening_pending: false,
+        result_member_adds: vec![ResultMemberEntry::row((
+            "todos".to_owned().into(),
+            result_row,
+            tx_id,
+        ))],
+        result_member_removes: Vec::new(),
+        terminal_operations: Vec::new(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    };
+
+    reader
+        .apply_view_updates_in_batch(vec![
+            update(second, row(2)),
+            update(first.clone(), row(1)),
+            update(first, row(1)),
+        ])
+        .unwrap();
+
+    assert_eq!(reader.query_all_versions().unwrap().len(), 2);
+    for (title, expected_row) in [("one", row(1)), ("two", row(2))] {
+        let shape = Query::from("todos")
+            .filter(eq(col("title"), lit(title)))
+            .validate(&schema())
+            .unwrap();
+        assert_eq!(
+            reader
+                .query_rows(
+                    &shape,
+                    &shape.bind(BTreeMap::new()).unwrap(),
+                    DurabilityTier::Global,
+                )
+                .unwrap()
+                .into_iter()
+                .map(current_row_pair)
+                .collect::<BTreeMap<_, _>>(),
+            BTreeMap::from([(expected_row, title_cells(title))])
+        );
+    }
+    assert_eq!(reader.sync_metrics().receiver_bulk_ingest_commits, 1);
+}
+
+/// Conflicting transaction identity or row bytes in coalesced view-scoped
+/// fragments reject the complete receiver frame before any row becomes visible.
+///
+/// mallory ──conflicting sibling fragments──✗──► alice's relay
+#[test]
+fn receiver_batch_rejects_conflicting_view_scoped_fragments_atomically() {
+    let tx_id = TxId::new(TxTime::from(10), node(1));
+    let base_tx = Transaction {
+        tx_id,
+        kind: TxKind::Exclusive,
+        n_total_writes: 1,
+        made_by: AuthorSubject::SYSTEM,
+        permission_subject: None,
+        base_snapshot: None,
+        row_read_set: None,
+        absent_read_set: None,
+        predicate_read_set: None,
+        user_metadata_json: None,
+        contribution_merge: None,
+    };
+    let run = |identity_conflict: bool| {
+        let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+        let subscription = reader.whole_table_subscription_key("todos").unwrap();
+        let mut conflicting_tx = base_tx.clone();
+        if identity_conflict {
+            conflicting_tx.made_by = AuthorSubject::for_test_bytes([0x55; 16]);
+        }
+        let first = version_record(row(1), Vec::new(), title_cells("one"), None);
+        let conflicting = if identity_conflict {
+            version_record(row(2), Vec::new(), title_cells("two"), None)
+        } else {
+            version_record(row(1), Vec::new(), title_cells("changed"), None)
+        };
+        let update = |tx: Transaction, version: VersionRecord| ViewUpdateParts {
+            subscription,
+            settled_through: GlobalTime(1),
+            defer_settlement: false,
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: vec![VersionBundle {
+                scope: crate::protocol::VersionBundleScope::ViewScoped,
+                tx,
+                versions: vec![version],
+                fate: Fate::Accepted,
+                global_time: Some(GlobalTime(1)),
+                durability: DurabilityTier::Global,
+            }],
+            peer_complete_tx_payload_refs: Vec::new(),
+            authorization_progress: None,
+            opening_pending: false,
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        };
+        let result = reader.apply_view_updates_in_batch(vec![
+            update(base_tx.clone(), first),
+            update(conflicting_tx, conflicting),
+        ]);
+        assert!(matches!(result.resolve(), Err(Error::ConflictingCommitUnit(id)) if id == tx_id));
+        assert!(reader.query_all_versions().unwrap().is_empty());
+        assert!(reader
+            .current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .is_empty());
+    };
+
+    run(false);
+    run(true);
 }
 
 // This stays internal because it directly exercises the protocol receiver's

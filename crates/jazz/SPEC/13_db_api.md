@@ -47,6 +47,14 @@ Invariant digest:
 - `INV-API-29`: A `Db` is a client: facade writes MUST keep `permission_subject == made_by`, and a `Db` MUST reject any attempt to attribute a write to another author. Cross-author attribution is a node-level concern on the ingest side (a trusted serving `Node`, `INV-RLS-18`, ch. 9), never a `Db` capability.
 - `INV-API-30`: Reopening persistent storage with the same `DbIdentity` MUST schedule every locally originated transaction that reached `Local` durability and has not reached terminal settlement for upstream delivery. Locally originated means `TxId.node == DbIdentity.node` and `Transaction.made_by == DbIdentity.author`; delivery is at-least-once by `TxId` and relies on idempotent authority handling.
 
+  A durable browser relay is the narrow topology exception to the exact-node
+  recovery test: it also schedules unsettled transactions made by the same
+  canonical author that it durably accepted from its paired main-tab client,
+  whose node intentionally differs from the worker node. This relay exception
+  does not authorize general same-author recovery by ordinary databases and
+  does not weaken the exact node-and-author definition above outside the paired
+  browser client/worker boundary.
+
 ## Details
 
 ### 13.1 Two audiences
