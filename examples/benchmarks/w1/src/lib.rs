@@ -2,13 +2,17 @@
 
 use std::collections::BTreeMap;
 
-use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, MergeableTxOps, PreparedQuery, block_on};
+use jazz::db::{
+    Db, DbConfig, DbIdentity, InsertOptions, LocalUpdates, MergeableTxOps, PreparedQuery,
+    Propagation, ReadOpts, SubscriptionEvent, SubscriptionStream, block_on,
+};
 use jazz::groove::records::Value;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tx::DurabilityTier;
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use tempfile::TempDir;
 
@@ -22,6 +26,14 @@ pub struct Fixture<S: OrderedKvStorage> {
     comments: PreparedQuery,
     activity: PreparedQuery,
     bounded_activity_page: PreparedQuery,
+    maintained_activity: PreparedQuery,
+    activity_transition_row: RowUuid,
+    activity_transition_matching: bool,
+}
+
+pub struct MaintainedActivityFixture<S: OrderedKvStorage> {
+    fixture: Fixture<S>,
+    subscription: SubscriptionStream,
 }
 
 impl Fixture<MemoryStorage> {
@@ -171,7 +183,10 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
                         ),
                         ("created_at".to_owned(), Value::U64(index as u64)),
                     ]),
-                    InsertOptions::default(),
+                    InsertOptions {
+                        row_id: Some(row_id(4, index)),
+                        ..Default::default()
+                    },
                 )
                 .await?;
             }
@@ -190,12 +205,22 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
                     .limit(50),
             )
             .expect("prepare W1 two-equality activity page");
+        let maintained_activity = db
+            .prepare_query(
+                &Query::from("activity")
+                    .filter(eq(col("project"), lit(projects[0].0)))
+                    .filter(eq(col("kind"), lit("updated"))),
+            )
+            .expect("prepare W1 maintained two-equality activity query");
         let fixture = Self {
             db,
             board,
             comments: comments_query,
             activity: activity_query,
             bounded_activity_page,
+            maintained_activity,
+            activity_transition_row: row_id(4, PROJECTS),
+            activity_transition_matching: false,
         };
         assert_eq!(fixture.board_count(), tasks.div_ceil(PROJECTS).min(200));
         assert_eq!(fixture.comments_count(), comments.div_ceil(tasks).min(200));
@@ -230,11 +255,71 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
         self.read_count(&self.bounded_activity_page)
     }
 
+    pub fn into_maintained_activity(self) -> MaintainedActivityFixture<S> {
+        let subscription = block_on(self.db.subscribe(
+            &self.maintained_activity,
+            ReadOpts {
+                tier: DurabilityTier::Local,
+                local_updates: LocalUpdates::Deferred,
+                propagation: Propagation::LocalOnly,
+                ..ReadOpts::default()
+            },
+        ))
+        .expect("install W1 maintained activity delta subscription");
+        let mut fixture = MaintainedActivityFixture {
+            fixture: self,
+            subscription,
+        };
+        while fixture.subscription.try_next_event().is_some() {}
+        fixture
+    }
+
     fn read_count(&self, query: &PreparedQuery) -> usize {
         self.db
             .read(query)
             .expect("W1 benchmark read succeeds")
             .len()
+    }
+
+    pub fn toggle_activity_indexed_predicate(&mut self) {
+        let next_kind = if self.activity_transition_matching {
+            "commented"
+        } else {
+            "updated"
+        };
+        let write = block_on(self.db.update(
+            "activity",
+            self.activity_transition_row,
+            BTreeMap::from([("kind".to_owned(), Value::String(next_kind.to_owned()))]),
+            Default::default(),
+        ))
+        .expect("toggle W1 indexed predicate");
+        block_on(write.wait(DurabilityTier::Local)).expect("settle W1 indexed predicate toggle");
+        self.activity_transition_matching = !self.activity_transition_matching;
+    }
+}
+
+impl<S: OrderedKvStorage + ReopenableStorage + 'static> MaintainedActivityFixture<S> {
+    pub fn toggle_indexed_predicate(&mut self) -> usize {
+        self.fixture.toggle_activity_indexed_predicate();
+        let mut changed = 0;
+        while let Some(event) = self.subscription.try_next_event() {
+            changed += event_row_count(event);
+        }
+        changed
+    }
+}
+
+fn event_row_count(event: SubscriptionEvent) -> usize {
+    match event {
+        SubscriptionEvent::Delta {
+            added,
+            updated,
+            removed,
+            ..
+        } => added.len() + updated.len() + removed.len(),
+        SubscriptionEvent::Rejected { reason } => panic!("W1 subscription rejected: {reason:?}"),
+        SubscriptionEvent::Closed => panic!("W1 subscription closed"),
     }
 }
 
@@ -308,8 +393,11 @@ fn row_id(kind: u8, index: usize) -> RowUuid {
 }
 
 fn expected_bounded_activity_count(activity_events: usize) -> usize {
+    expected_maintained_activity_count(activity_events).min(50)
+}
+
+fn expected_maintained_activity_count(activity_events: usize) -> usize {
     (0..activity_events)
         .filter(|index| index % PROJECTS == 0 && (index / PROJECTS).is_multiple_of(2))
         .count()
-        .min(50)
 }
