@@ -264,7 +264,6 @@ where
         head: &BranchKey,
         base: Option<&BranchViewSourceBase>,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let read_table = self.table_in_schema(table, read_schema_version)?;
         let (head_content, head_deletions) = self
             .branch_winners_for_schema(table, read_schema_version, tier, head, None)
             .await?;
@@ -291,6 +290,59 @@ where
                 .await?
             }
         };
+        self.materialize_branch_view_winners(
+            table,
+            read_schema_version,
+            head,
+            head_content,
+            head_deletions,
+            base_content,
+            base_deletions,
+        )
+    }
+
+    /// Materialize only the frozen base relation for a snapshot-backed branch
+    /// view. The live head is deliberately absent: query lowering overlays its
+    /// maintained content and deletion registers separately.
+    pub(super) async fn branch_snapshot_rows_for_schema(
+        &mut self,
+        table: &str,
+        read_schema_version: SchemaVersionId,
+        output_branch: &BranchKey,
+        base_branch: &BranchKey,
+        snapshot: &SnapshotRef,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let (base_content, base_deletions) = self
+            .branch_winners_for_schema(
+                table,
+                read_schema_version,
+                DurabilityTier::Local,
+                base_branch,
+                Some(snapshot),
+            )
+            .await?;
+        self.materialize_branch_view_winners(
+            table,
+            read_schema_version,
+            output_branch,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            base_content,
+            base_deletions,
+        )
+    }
+
+    fn materialize_branch_view_winners(
+        &mut self,
+        table: &str,
+        read_schema_version: SchemaVersionId,
+        output_branch: &BranchKey,
+        head_content: BTreeMap<RowUuid, VersionRow>,
+        head_deletions: BTreeMap<RowUuid, VersionRow>,
+        base_content: BTreeMap<RowUuid, VersionRow>,
+        base_deletions: BTreeMap<RowUuid, VersionRow>,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let read_table = self.table_in_schema(table, read_schema_version)?;
         let row_ids = head_content
             .keys()
             .chain(base_content.keys())
@@ -330,7 +382,7 @@ where
                 continue;
             }
             for column_name in &read_table.branch_by {
-                let (_, encoded) = head
+                let (_, encoded) = output_branch
                     .values
                     .iter()
                     .find(|(name, _)| name == column_name)
