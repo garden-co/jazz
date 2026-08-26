@@ -1957,7 +1957,7 @@ type Outbox = Rc<RefCell<UploadOutbox>>;
 
 #[derive(Default)]
 struct UploadOutbox {
-    entries: Vec<PendingUpload>,
+    entries: VecDeque<PendingUpload>,
     tx_ids: HashSet<TxId>,
 }
 
@@ -1966,7 +1966,7 @@ impl UploadOutbox {
         if !self.tx_ids.insert(pending.tx_id) {
             return false;
         }
-        self.entries.push(pending);
+        self.entries.push_back(pending);
         true
     }
 
@@ -1978,15 +1978,29 @@ impl UploadOutbox {
         self.entries.len()
     }
 
-    fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
     fn retain(&mut self, mut keep: impl FnMut(&PendingUpload) -> bool) {
         self.entries.retain(|pending| keep(pending));
         self.tx_ids.clear();
         self.tx_ids
             .extend(self.entries.iter().map(|pending| pending.tx_id));
+    }
+
+    fn remove_released(&mut self, released: &mut HashSet<TxId>) {
+        while self
+            .entries
+            .front()
+            .is_some_and(|pending| released.remove(&pending.tx_id))
+        {
+            let pending = self
+                .entries
+                .pop_front()
+                .expect("released outbox front remains present");
+            self.tx_ids.remove(&pending.tx_id);
+        }
+        if released.is_empty() {
+            return;
+        }
+        self.retain(|pending| !released.contains(&pending.tx_id));
     }
 }
 
