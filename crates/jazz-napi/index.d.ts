@@ -19,6 +19,12 @@ export declare class NapiDb {
    */
   beginStreamingMutationAttributedEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, kind: string, mutation: string | undefined | null, author: Uint8Array | undefined | null, attribution: Uint8Array, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
   static openMemory(schema: Uint8Array, config: Uint8Array): NapiDb
+  /**
+   * Open with a verified Jazz self-signed client identity. This is a
+   * separate ABI entrypoint deliberately: a new client cannot accidentally
+   * hand proof bytes to an old constructor, and an old client cannot enter
+   * the proof-bearing path.
+   */
   static openMemoryWithSelfSignedProof(schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string): NapiDb
   static openPersistent(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDb
   static openPersistentWithSelfSignedProof(dataPath: string, schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string): NapiDb
