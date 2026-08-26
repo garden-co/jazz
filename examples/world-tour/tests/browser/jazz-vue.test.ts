@@ -192,8 +192,8 @@ describe("world-tour Jazz + Vue integration", () => {
 
     const { el, client } = await mount(StopList);
 
-    const userId = client.session?.user_id;
-    if (!userId) throw new Error("test session is missing user_id");
+    const userId = client.session?.user;
+    if (!userId) throw new Error("test session is missing user");
 
     // Each dependent insert awaits edge-tier confirmation. The stop's policy
     // check (isBandMember) and the include-resolution of `venue` both require

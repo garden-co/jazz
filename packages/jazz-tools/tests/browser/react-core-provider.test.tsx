@@ -561,13 +561,13 @@ describe("react-core provider/hooks browser coverage", () => {
         session?: Session,
       ) {
         subscribeCalls.push({
-          session: session?.user_id ?? liveSession?.user_id ?? "anon",
+          session: session?.user ?? liveSession?.user ?? "anon",
           callback,
         });
         return () => {};
       },
       all(_query: QueryBuilder<Todo>, _options?: QueryOptions, session?: Session) {
-        const userId = session?.user_id ?? liveSession?.user_id ?? "anon";
+        const userId = session?.user ?? liveSession?.user ?? "anon";
         if (userId === "alice") {
           if (!aliceRefreshStartedResolved) {
             aliceRefreshStartedResolved = true;

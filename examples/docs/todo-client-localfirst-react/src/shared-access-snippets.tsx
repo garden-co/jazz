@@ -79,7 +79,7 @@ export function SharedWithMe() {
     data: shares,
     isLoading,
     error,
-  } = useAll(app.todoShares.where({ user_id: session!.user_id }).include({ todo: true }));
+  } = useAll(app.todoShares.where({ user_id: session!.user }).include({ todo: true }));
 
   if (isLoading) return <p>Loading…</p>;
   if (error) return <p>Something went wrong!</p>;

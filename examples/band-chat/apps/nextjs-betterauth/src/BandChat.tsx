@@ -21,7 +21,7 @@ const allowedAttachmentTypes = new Set([
 /** Rendered inside the external-auth provider in the Next dashboard. */
 export function BandChat() {
   const session = useSession();
-  return session?.user_id ? (
+  return session?.user ? (
     <RoomWorkspace author={authorForSession(session.issuer, session.user)} />
   ) : (
     <p>Loading identity…</p>

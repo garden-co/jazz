@@ -29,7 +29,7 @@ export function CollaborativeCanvas({
 }) {
   const db = useDb();
   const session = useSession();
-  const userId = session?.user_id ?? null;
+  const userId = session?.user ?? null;
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRefs = useRef<Map<string, HTMLCanvasElement | null>>(new Map());
   const drawingRef = useRef(false);

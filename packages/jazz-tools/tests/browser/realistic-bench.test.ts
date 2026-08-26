@@ -1428,7 +1428,7 @@ function permissionRecursiveSchema(recursiveDepth: number): WasmSchema {
           op: "Eq",
           value: {
             type: "SessionRef",
-            path: ["user_id"],
+            path: ["claims", "sub"],
           },
         },
         {
@@ -1460,7 +1460,7 @@ function permissionRecursiveSchema(recursiveDepth: number): WasmSchema {
           op: "Eq",
           value: {
             type: "SessionRef",
-            path: ["user_id"],
+            path: ["claims", "sub"],
           },
         },
         {
@@ -1489,7 +1489,7 @@ function permissionRecursiveSchema(recursiveDepth: number): WasmSchema {
           op: "Eq",
           value: {
             type: "SessionRef",
-            path: ["user_id"],
+            path: ["claims", "sub"],
           },
         },
         {
@@ -1530,7 +1530,7 @@ function permissionRecursiveSchema(recursiveDepth: number): WasmSchema {
           op: "Eq",
           value: {
             type: "SessionRef",
-            path: ["user_id"],
+            path: ["claims", "sub"],
           },
         },
         {
@@ -1550,7 +1550,7 @@ function permissionRecursiveSchema(recursiveDepth: number): WasmSchema {
           op: "Eq",
           value: {
             type: "SessionRef",
-            path: ["user_id"],
+            path: ["claims", "sub"],
           },
         },
         {

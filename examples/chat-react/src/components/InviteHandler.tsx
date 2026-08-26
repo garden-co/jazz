@@ -21,7 +21,7 @@ export function InviteHandler({ chatId, code }: InviteHandlerProps) {
     [db],
   );
 
-  const userId = session?.user_id ?? null;
+  const userId = session?.user ?? null;
   const myProfile = useMyProfile();
 
   useEffect(() => {

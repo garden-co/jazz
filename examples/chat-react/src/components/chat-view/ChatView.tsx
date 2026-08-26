@@ -20,7 +20,7 @@ interface ChatViewProps {
 export const ChatView = ({ chatId }: ChatViewProps) => {
   const db = useDb();
   const session = useSession();
-  const userId = session?.user_id ?? null;
+  const userId = session?.user ?? null;
   const myProfile = useMyProfile();
   const sharedWriteOptions: { tier: DurabilityTier } = useMemo(
     () => ({ tier: db.getConfig().serverUrl ? "edge" : "local" }),

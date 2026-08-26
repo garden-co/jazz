@@ -48,7 +48,7 @@
 //! let owner_policy = PolicyExpr::Cmp {
 //!     column: "owner".to_owned(),
 //!     op: CmpOp::Eq,
-//!     value: PolicyValue::SessionRef(vec!["claims".to_owned(), "user_id".to_owned()]),
+//!     value: PolicyValue::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
 //! };
 //! let source = SchemaBuilder::new()
 //!     .table(
