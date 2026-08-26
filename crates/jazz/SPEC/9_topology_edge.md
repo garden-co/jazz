@@ -210,6 +210,19 @@ transactions for scopes where it is the fate authority. Requests that require
 global settlement defer or carry an explicit unsettled/staleness marker; upstream
 connectivity is not a precondition for edge-tier service.
 
+The server shell owns one upstream connector for the edge lifecycle. An
+established link ends when the target transport's socket pump reports closure,
+even when no semantic frame is in flight; the shell disconnects that peer state
+before reconnecting. Bootstrap/open failures, clean closure, native terminal
+failures, and transient I/O/backpressure failures retry with exponential delay
+from 100 ms capped at 5 s, with the failure streak reset after 30 seconds of
+stable connection. Semantic wire/catalogue failures and local catalogue-install
+failures are fatal for that connector generation: retry stops and `/health`
+reports the upstream failure.
+Shutdown wins races with bootstrap, connect, connected wait, and backoff, joins
+the owned connector before storage close, and forbids a late dynamic shell or
+ready-generation publication.
+
 ### 9.7 Star topology
 
 Edge authority and merge coordination route upstream through core rather than

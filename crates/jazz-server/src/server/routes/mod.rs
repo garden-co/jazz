@@ -151,7 +151,7 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::middleware::AuthConfig;
-    use crate::server::{ServerBuilder, ServerState, StorageBackend};
+    use crate::server::{EdgeUpstreamHealth, ServerBuilder, ServerState, StorageBackend};
     use jazz::wire::{
         FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, WireFrame, WireHello,
         WirePeerRole, decode_frame, encode_frame,
@@ -414,6 +414,36 @@ mod tests {
         assert_eq!(
             state.shutdown.phase(),
             crate::server::ShutdownPhase::ShuttingDown
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_edge_upstream_failure_is_visible_in_health() {
+        let state = make_state_with_schema(Schema::new()).await;
+        state.set_edge_upstream_health(EdgeUpstreamHealth::Failed {
+            reason: "authority rejected edge credentials".to_owned(),
+        });
+        let health = make_test_router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/health")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(health.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body::to_bytes(health.into_body(), usize::MAX)
+            .await
+            .expect("health body");
+        let json: Value = serde_json::from_slice(&body).expect("health json");
+        assert_eq!(json["status"].as_str(), Some("unhealthy"));
+        assert_eq!(json["component"].as_str(), Some("edge_upstream"));
+        assert!(
+            json["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("rejected edge credentials"))
         );
     }
 
