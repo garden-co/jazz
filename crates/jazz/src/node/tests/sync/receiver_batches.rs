@@ -506,17 +506,135 @@ enum ResetConflictPath {
 
 #[test]
 fn reset_batch_rejects_conflicting_authored_columns_in_both_orders() {
-    assert_reset_authored_columns_conflict(ResetConflictPath::Batch, false);
-    assert_reset_authored_columns_conflict(ResetConflictPath::Batch, true);
+    assert_reset_authored_columns_conflict(ResetConflictPath::Batch, false, false);
+    assert_reset_authored_columns_conflict(ResetConflictPath::Batch, true, false);
 }
 
 #[test]
 fn reset_single_rejects_conflicting_authored_columns_in_both_orders() {
-    assert_reset_authored_columns_conflict(ResetConflictPath::Single, false);
-    assert_reset_authored_columns_conflict(ResetConflictPath::Single, true);
+    assert_reset_authored_columns_conflict(ResetConflictPath::Single, false, false);
+    assert_reset_authored_columns_conflict(ResetConflictPath::Single, true, false);
 }
 
-fn assert_reset_authored_columns_conflict(path: ResetConflictPath, reversed: bool) {
+#[test]
+fn reset_conflicts_with_member_removals_are_atomic() {
+    assert_reset_authored_columns_conflict(ResetConflictPath::Batch, false, true);
+    assert_reset_authored_columns_conflict(ResetConflictPath::Single, false, true);
+}
+
+#[test]
+fn reset_accepts_identical_annotated_duplicates() {
+    for path in [ResetConflictPath::Batch, ResetConflictPath::Single] {
+        let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
+        let subscription = reader.whole_table_subscription_key("todos").unwrap();
+        let tx_id = TxId::new(TxTime::from(10), node(1));
+        let tx = Transaction {
+            tx_id,
+            kind: TxKind::Mergeable,
+            n_total_writes: 1,
+            made_by: AuthorSubject::SYSTEM,
+            permission_subject: None,
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json: None,
+            contribution_merge: None,
+        };
+        let version = version_record(row(1), Vec::new(), title_cells("one"), None)
+            .with_authored_columns(Some(BTreeSet::from(["title".to_owned()])));
+        let bundles = [version.clone(), version]
+            .into_iter()
+            .map(|version| VersionBundle {
+                scope: crate::protocol::VersionBundleScope::CompleteTransaction,
+                tx: tx.clone(),
+                versions: vec![version],
+                fate: Fate::Accepted,
+                global_time: Some(GlobalTime(1)),
+                durability: DurabilityTier::Global,
+            })
+            .collect();
+        let update = ViewUpdateParts {
+            subscription,
+            settled_through: GlobalTime(1),
+            defer_settlement: false,
+            reset_result_set: true,
+            version_carriers: crate::protocol::build_version_carriers_from_singletons(bundles)
+                .unwrap(),
+            version_bundles: Vec::new(),
+            peer_complete_tx_payload_refs: Vec::new(),
+            authorization_progress: None,
+            opening_pending: false,
+            result_member_adds: vec![ResultMemberEntry::row((
+                "todos".to_owned().into(),
+                row(1),
+                tx_id,
+            ))],
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        };
+        match path {
+            ResetConflictPath::Batch => reader.apply_view_updates_in_batch(vec![update]).unwrap(),
+            ResetConflictPath::Single => reader.apply_view_update(update).unwrap(),
+        }
+        assert!(reader.query_transaction(tx_id).unwrap().is_some());
+        assert_eq!(reader.query_versions_for_tx(tx_id).unwrap().len(), 1);
+
+        let conflicting = version_record(row(1), Vec::new(), title_cells("one"), None);
+        let replay = ViewUpdateParts {
+            subscription,
+            settled_through: GlobalTime(1),
+            defer_settlement: true,
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: vec![VersionBundle {
+                scope: crate::protocol::VersionBundleScope::CompleteTransaction,
+                tx: tx.clone(),
+                versions: vec![conflicting],
+                fate: Fate::Accepted,
+                global_time: Some(GlobalTime(1)),
+                durability: DurabilityTier::Global,
+            }],
+            peer_complete_tx_payload_refs: Vec::new(),
+            authorization_progress: None,
+            opening_pending: false,
+            result_member_adds: Vec::new(),
+            result_member_removes: vec![ResultMemberEntry::row((
+                "todos".to_owned().into(),
+                row(1),
+                tx_id,
+            ))],
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        };
+        let result = match path {
+            ResetConflictPath::Batch => reader.apply_view_updates_in_batch(vec![replay]).resolve(),
+            ResetConflictPath::Single => reader.apply_view_update(replay).resolve(),
+        };
+        assert!(matches!(
+            result,
+            Err(Error::ConflictingCommitUnit(conflicting)) if conflicting == tx_id
+        ));
+        let stored = reader.query_versions_for_tx(tx_id).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(
+            reader
+                .version_record_from_row(&stored[0])
+                .unwrap()
+                .authored_columns(),
+            Some(&BTreeSet::from(["title".to_owned()]))
+        );
+    }
+}
+
+fn assert_reset_authored_columns_conflict(
+    path: ResetConflictPath,
+    reversed: bool,
+    with_member_removal: bool,
+) {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
     let binding_view_key = reader
@@ -557,7 +675,9 @@ fn assert_reset_authored_columns_conflict(path: ResetConflictPath, reversed: boo
             global_time: Some(GlobalTime(1)),
             durability: DurabilityTier::Global,
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let version_carriers = crate::protocol::build_version_carriers_from_singletons(version_bundles)
+        .expect("two valid bundles form a packed carrier");
 
     reader.set_initial_sync_flush_cadence(2).unwrap();
     reader
@@ -583,8 +703,8 @@ fn assert_reset_authored_columns_conflict(path: ResetConflictPath, reversed: boo
         settled_through: GlobalTime(1),
         defer_settlement: true,
         reset_result_set: true,
-        version_carriers: Vec::new(),
-        version_bundles,
+        version_carriers,
+        version_bundles: Vec::new(),
         peer_complete_tx_payload_refs: Vec::new(),
         authorization_progress: None,
         opening_pending: false,
@@ -593,7 +713,12 @@ fn assert_reset_authored_columns_conflict(path: ResetConflictPath, reversed: boo
             row(1),
             tx_id,
         ))],
-        result_member_removes: Vec::new(),
+        result_member_removes: with_member_removal
+            .then(|| {
+                ResultMemberEntry::row(("todos".to_owned().into(), row(9), tx_id))
+            })
+            .into_iter()
+            .collect(),
         terminal_operations: vec![reset_conflict_terminal_operation(2)],
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),

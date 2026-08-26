@@ -198,6 +198,42 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    async fn preflight_view_bundle_conflicts(
+        &mut self,
+        bundles: &[VersionBundleRef<'_>],
+    ) -> Result<BTreeMap<TxId, VersionBundle>, Error> {
+        let mut merged = BTreeMap::<TxId, VersionBundle>::new();
+        for bundle in bundles {
+            merge_receiver_version_bundle_ref(&mut merged, *bundle)?;
+        }
+        for (tx_id, bundle) in &merged {
+            let Some(stored) = self.query_transaction(*tx_id).await? else {
+                continue;
+            };
+            let mut stored_identity = stored.tx;
+            stored_identity.n_total_writes = 0;
+            let mut incoming_identity = bundle.tx.clone();
+            incoming_identity.n_total_writes = 0;
+            if stored_identity != incoming_identity {
+                return Err(Error::ConflictingCommitUnit(*tx_id));
+            }
+            let stored_versions = self.query_versions_for_tx(*tx_id).await?;
+            let mut stored_by_key = BTreeMap::new();
+            for stored_version in &stored_versions {
+                let version = self.version_record_from_row(stored_version)?;
+                stored_by_key.insert(version_bundle_record_key(&version), version);
+            }
+            for version in &bundle.versions {
+                if let Some(existing) = stored_by_key.get(&version_bundle_record_key(version))
+                    && existing != version
+                {
+                    return Err(Error::ConflictingCommitUnit(*tx_id));
+                }
+            }
+        }
+        Ok(merged)
+    }
+
     /// Subscribe to the raw history storage table.
     pub async fn subscribe_history(&mut self, table: &str) -> Result<Subscription, Error> {
         self.table(table)?;
@@ -812,6 +848,7 @@ where
         // preceding valid bundle can advance clocks, allocate aliases, or
         // stage history before a later malformed bundle rejects the frame.
         self.validate_view_update_payloads(&updates)?;
+        let mut all_bundle_refs = Vec::new();
         let mut bulk_candidates = Vec::new();
         let mut initial_hydration_binding_views =
             self.query.initial_hydration_binding_views.clone();
@@ -827,6 +864,7 @@ where
                 &update.version_bundles,
                 &update.version_carriers,
             )?;
+            all_bundle_refs.extend(version_bundle_refs.iter().copied());
             let in_initial_hydration = initial_hydration_binding_views.contains(&binding_view_key);
             if update.reset_result_set
                 && update.peer_complete_tx_payload_refs.is_empty()
@@ -841,22 +879,17 @@ where
                 initial_hydration_binding_views.remove(&binding_view_key);
             }
         }
+        let mut receiver_candidates = self
+            .preflight_view_bundle_conflicts(&all_bundle_refs)
+            .await?;
         let bulk_loaded_tx_ids = self
             .ingest_reset_view_bundle_refs_in_bulk(&bulk_candidates)
             .await?;
         if updates.iter().any(|update| update.reset_result_set) {
             self.begin_initial_sync_flush_cadence().await?;
         }
-        let mut receiver_candidates = BTreeMap::<TxId, VersionBundle>::new();
-        for update in &updates {
-            for bundle in
-                version_bundle_refs_for_carriers(&update.version_bundles, &update.version_carriers)?
-            {
-                if bulk_loaded_tx_ids.contains(&bundle.tx.tx_id) {
-                    continue;
-                }
-                merge_receiver_version_bundle_ref(&mut receiver_candidates, bundle)?;
-            }
+        for tx_id in &bulk_loaded_tx_ids {
+            receiver_candidates.remove(tx_id);
         }
         let mut receiver_batch = self.database.open_batch();
         let mut receiver_batch_tx_ids = BTreeSet::new();
@@ -981,6 +1014,8 @@ where
             }
             Err(error) => return Err(error),
         };
+        self.preflight_view_bundle_conflicts(&version_bundle_refs)
+            .await?;
         let bulk_loaded_tx_ids = if let Some(preloaded) = preloaded_tx_ids {
             preloaded.clone()
         } else if reset_result_set
