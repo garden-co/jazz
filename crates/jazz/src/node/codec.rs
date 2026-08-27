@@ -263,10 +263,71 @@ groove::define_record! {
 
 groove::define_record! {
     pub(super) struct CatalogueRowRecord {
-        0 => kind: Vec<u8>,
+        // This is the epoch-pinned catalogue kernel.  Its numeric cases are
+        // permanent: higher-level Jazz records are described by catalogue
+        // entries rather than by adding more hard-coded storage layouts.
+        0 => kind: CatalogueRecordKind,
         1 => id: uuid::Uuid,
         2 => payload: Vec<u8>,
     }
+}
+
+/// Permanent discriminators for the tiny hard-coded catalogue kernel.
+///
+/// These values identify only the bootstrap records required to discover and
+/// activate immutable descriptors.  Application and ordinary Jazz system
+/// tables must remain catalogue-described rather than extending this enum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CatalogueRecordKind {
+    Genesis,
+    Schema,
+    Lens,
+    SchemaLineageStaged,
+    SchemaLineagePending,
+    SchemaLineageActive,
+    WritePointerPending,
+    BootstrapReady,
+}
+
+impl CatalogueRecordKind {
+    pub(super) const fn key(self) -> u64 {
+        match self {
+            Self::Genesis => 0,
+            Self::Schema => 1,
+            Self::Lens => 2,
+            Self::SchemaLineageStaged => 3,
+            Self::SchemaLineagePending => 4,
+            Self::SchemaLineageActive => 5,
+            Self::WritePointerPending => 6,
+            Self::BootstrapReady => 7,
+        }
+    }
+
+    pub(super) fn from_key(key: u64) -> Result<Self, records::Error> {
+        match key {
+            0 => Ok(Self::Genesis),
+            1 => Ok(Self::Schema),
+            2 => Ok(Self::Lens),
+            3 => Ok(Self::SchemaLineageStaged),
+            4 => Ok(Self::SchemaLineagePending),
+            5 => Ok(Self::SchemaLineageActive),
+            6 => Ok(Self::WritePointerPending),
+            7 => Ok(Self::BootstrapReady),
+            _ => Err(records::Error::NonCanonicalRecord),
+        }
+    }
+}
+
+impl records::RecordField for CatalogueRecordKind {
+    fn read(record: &records::BorrowedRecord<'_>, idx: usize) -> Result<Self, records::Error> {
+        Self::from_key(record.get_u64(idx)?)
+    }
+
+    fn to_value(&self) -> Value {
+        Value::U64(self.key())
+    }
+
+    const COLUMN_KIND: records::FieldKind = records::FieldKind::U64;
 }
 
 groove::define_record! {
