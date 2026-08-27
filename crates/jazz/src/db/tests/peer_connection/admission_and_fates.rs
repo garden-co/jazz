@@ -518,6 +518,123 @@ fn upstream_authorization_scope_intent_retries_after_bounded_transport_backpress
     drop(advice);
 }
 
+/// A permission preflight is a node-owned caller obligation, not an
+/// old-transport obligation. When the selected authority disconnects after
+/// accepting the request, the successor must receive one fresh intent and
+/// resolve the original future.
+#[test]
+fn scope_intent_retries_after_upstream_reconnect() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xd4; 16]);
+    let client = open_db(0xd4, author, &schema);
+    let (first_transport, mut first_authority) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xd4; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let first = crate::db::block_on(client.connect_upstream(first_transport));
+    let advice = client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: row(4),
+    });
+    client.tick().unwrap();
+    assert!(matches!(
+        try_recv_subscriber_payload(first_authority.as_mut()),
+        Some(SyncMessage::AuthorizationScopeIntent { .. })
+    ));
+    assert!(client.detach_connection(&first));
+
+    let (second_transport, mut second_authority) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xd4; 16]),
+        2,
+        NodeUuid::from_bytes([0x5e; 16]),
+        2,
+    );
+    let _second = crate::db::block_on(client.connect_upstream(second_transport));
+    client.tick().unwrap();
+    let request_id = match try_recv_subscriber_payload(second_authority.as_mut()) {
+        Some(SyncMessage::AuthorizationScopeIntent { request_id, .. }) => request_id,
+        message => panic!("reconnect must retry the live scope intent, got {message:?}"),
+    };
+    second_authority
+        .send(SyncMessage::AuthorizationScopeUnavailable { request_id })
+        .unwrap();
+    client.tick().unwrap();
+    assert_eq!(block_on(advice), PermissionAdvice::Unknown);
+}
+
+#[test]
+fn reconnect_replays_live_scope_waiters_once_and_drops_cancelled_ones() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xd5; 16]);
+    let client = open_db(0xd5, author, &schema);
+    let (first_transport, mut first_authority) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xd5; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let first = crate::db::block_on(client.connect_upstream(first_transport));
+    let action = PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: row(5),
+    };
+    let first_live = client.request_permission_advice(action.clone());
+    let second_live = client.request_permission_advice(action);
+    let cancelled = client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: row(6),
+    });
+    client.tick().unwrap();
+    assert!(matches!(
+        try_recv_subscriber_payload(first_authority.as_mut()),
+        Some(SyncMessage::AuthorizationScopeIntent { .. })
+    ));
+    assert!(matches!(
+        try_recv_subscriber_payload(first_authority.as_mut()),
+        Some(SyncMessage::AuthorizationScopeIntent { .. })
+    ));
+    drop(cancelled);
+    assert!(client.detach_connection(&first));
+
+    let (second_transport, mut second_authority) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xd5; 16]),
+        2,
+        NodeUuid::from_bytes([0x5e; 16]),
+        2,
+    );
+    let _second = crate::db::block_on(client.connect_upstream(second_transport));
+    client.tick().unwrap();
+    let request_id = match try_recv_subscriber_payload(second_authority.as_mut()) {
+        Some(SyncMessage::AuthorizationScopeIntent { request_id, action }) => {
+            assert_eq!(
+                action,
+                PermissionAdviceAction::Read {
+                    table: "todos".to_owned(),
+                    row: row(5),
+                }
+            );
+            request_id
+        }
+        message => panic!("reconnect must replay the one live shared intent, got {message:?}"),
+    };
+    assert!(
+        try_recv_subscriber_payload(second_authority.as_mut()).is_none(),
+        "two live waiters share one retry and the dropped waiter is not replayed"
+    );
+    second_authority
+        .send(SyncMessage::AuthorizationScopeUnavailable { request_id })
+        .unwrap();
+    client.tick().unwrap();
+    assert_eq!(block_on(first_live), PermissionAdvice::Unknown);
+    assert_eq!(block_on(second_live), PermissionAdvice::Unknown);
+}
+
 /// An authority-scope intent may expand to a multi-frame proof sequence. Its
 /// semantic producer queues that sequence before returning to inbound work, so
 /// bounded wire admission must preserve both order and exact multiplicity.
