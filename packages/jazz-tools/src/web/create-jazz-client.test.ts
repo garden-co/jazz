@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { canonicalAuthorSubject } from "../runtime/author-id.js";
 import type { Session } from "../runtime/context.js";
 import type { DbConfig } from "../runtime/db.js";
 
@@ -67,6 +68,7 @@ vi.mock("../subscriptions-orchestrator.js", () => ({
 
 import { createJazzClient, type JazzClientConfig } from "./create-jazz-client.js";
 import { getSubscriptionStore } from "../subscription-store-internal.js";
+import { setDbInternalSession } from "../runtime/db-internal-session.js";
 
 const originalWindow = (globalThis as { window?: unknown }).window;
 
@@ -75,16 +77,24 @@ function createMockDb(
   session: Session | null = null,
   config: DbConfig = { appId },
 ) {
-  return {
+  const db = {
     getAuthState: vi.fn(() => ({
       status: session ? "authenticated" : "unauthenticated",
-      session,
+      session: session
+        ? {
+            user: JSON.stringify([session.issuer, session.user_id]),
+            claims: { ...session.claims, iss: session.issuer, sub: session.user_id },
+            authMode: session.authMode,
+          }
+        : null,
     })),
     onAuthChanged: vi.fn(() => () => {}),
     deleteClientStorage: vi.fn(async () => undefined),
     shutdown: vi.fn(async () => undefined),
     getConfig: vi.fn(() => config),
   };
+  setDbInternalSession(db, session);
+  return db;
 }
 
 describe("framework-agnostic/createAgnosticJazzClient", () => {
@@ -127,7 +137,11 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
     expect(manager.init).toHaveBeenCalledTimes(1);
 
     expect(client.db).toBe(db);
-    expect(client.session).toEqual(session);
+    expect(client.session).toEqual({
+      user: canonicalAuthorSubject(session.issuer, session.user_id),
+      claims: { iss: session.issuer, sub: session.user_id },
+      authMode: session.authMode,
+    });
     expect("manager" in client).toBe(false);
     expect(getSubscriptionStore(client)).toBe(manager);
 

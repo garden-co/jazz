@@ -229,6 +229,11 @@ impl ServerBuilder {
             core_server_shell: std::sync::RwLock::new(core_server_shell),
             core_server_shell_storage_config,
             storage_factory: self.storage_factory.clone(),
+            runtime_catalogue_publication: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            runtime_catalogue_before_publication_hook: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            runtime_catalogue_after_permissions_read_hook: std::sync::Mutex::new(None),
             // A validated durable catalogue remains usable while its core is
             // offline. Blank edges have no such generation and stay behind
             // RetryLater until authenticated bootstrap completes.

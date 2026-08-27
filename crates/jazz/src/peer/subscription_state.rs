@@ -6,6 +6,7 @@
 //! assignment.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use groove::ivm::MultisinkSubscription;
 
@@ -15,8 +16,8 @@ use super::super::node::maintained_subscription_view::{
     MaintainedSubscriptionView, MaintainedTerminalSchemas,
 };
 use super::super::protocol::{
-    KnownStateCompleteness, KnownStateDeclaration, ProgramFactEntry, ReadViewSpec,
-    ResultMemberEntry, SubscriptionKey, VersionRecord,
+    BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, ProgramFactEntry, ReadViewSpec,
+    RegisterShapeOptions, ResultMemberEntry, SubscriptionKey, VersionRecord,
 };
 use super::super::query::{Binding, ValidatedQuery};
 use super::super::schema::TableSchema;
@@ -124,7 +125,11 @@ pub(super) struct PeerSubscriptionState {
 impl PeerSubscriptionState {
     pub(super) fn clear_groove_runtime_handles(&mut self) {
         self.maintained_subscription_view = None;
-        self.prepared_query = None;
+        if let Some(prepared_query) = &mut self.prepared_query {
+            // The compiled plan belongs to one runtime, but its semantic
+            // context remains the admitted context for this subscription.
+            prepared_query.clear_runtime_plan();
+        }
         self.groove_runtime_token = None;
     }
 
@@ -151,6 +156,8 @@ pub(super) struct MaintainedSubscriptionViewSubscription {
     pub(super) maintained: MaintainedSubscriptionView,
     pub(super) terminal_schemas: MaintainedTerminalSchemas,
     pub(super) tables: BTreeMap<String, TableSchema>,
+    /// Authoritative source membership for an Edge child of a durable relay.
+    pub(super) source_binding_view: Option<BindingViewKey>,
     pub(super) initial_received: bool,
 }
 
@@ -196,20 +203,45 @@ pub(super) enum MemberIndexKey {
 #[derive(Debug)]
 pub(super) struct CachedPeerQueryPlan {
     tier: DurabilityTier,
+    read_view: Arc<ReadViewSpec>,
     plan: Option<PreparedQueryPlanHandle>,
 }
 
 impl CachedPeerQueryPlan {
-    pub(super) fn with_plan(tier: DurabilityTier, plan: PreparedQueryPlanHandle) -> Self {
+    pub(super) fn with_plan(opts: &RegisterShapeOptions, plan: PreparedQueryPlanHandle) -> Self {
+        Self::with_context(opts.tier, Arc::new(opts.read_view.clone()), plan)
+    }
+
+    pub(super) fn with_context(
+        tier: DurabilityTier,
+        read_view: Arc<ReadViewSpec>,
+        plan: PreparedQueryPlanHandle,
+    ) -> Self {
         Self {
             tier,
+            read_view,
             plan: Some(plan),
         }
     }
 
     pub(super) fn tier(&self) -> DurabilityTier {
-        let _retained_plan = &self.plan;
         self.tier
+    }
+
+    pub(super) fn has_runtime_plan(&self) -> bool {
+        self.plan.is_some()
+    }
+
+    pub(super) fn replace_runtime_plan(&mut self, plan: PreparedQueryPlanHandle) {
+        self.plan = Some(plan);
+    }
+
+    pub(super) fn clear_runtime_plan(&mut self) {
+        self.plan = None;
+    }
+
+    pub(super) fn context(&self) -> (DurabilityTier, Arc<ReadViewSpec>) {
+        (self.tier, Arc::clone(&self.read_view))
     }
 }
 

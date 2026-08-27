@@ -2155,6 +2155,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-example-wequencer-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+]
+
+[[package]]
 name = "jazz-example-world-tour-benchmark"
 version = "0.1.0"
 dependencies = [
@@ -2354,6 +2362,7 @@ dependencies = [
  "base64 0.22.1",
  "console_error_panic_hook",
  "ed25519-dalek",
+ "futures-channel",
  "futures-util",
  "getrandom 0.2.17",
  "getrandom 0.3.4",

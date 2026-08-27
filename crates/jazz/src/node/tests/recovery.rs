@@ -745,7 +745,7 @@ struct FailReplayScanStorage {
 impl FailReplayScanStorage {
     fn new(column_families: &[&str]) -> Self {
         Self {
-            inner: MemoryStorage::new(column_families),
+            inner: MemoryStorage::new(column_families).expect("valid memory storage families"),
             fail_scans: Rc::new(Cell::new(false)),
         }
     }

@@ -65,7 +65,8 @@ fn deferred_local_chunk_reader() -> (groove::chunks::LocalChunkReader, Rc<Deferr
     let storage = Rc::new(DeferredChunkStorage::default());
     let mut database = crate::db::block_on(groove::db::Database::new(
         groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new()),
-        groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF]),
+        groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF])
+            .expect("valid memory storage families"),
     ))
     .unwrap();
     database.set_chunk_storage(storage.clone());
@@ -84,14 +85,16 @@ fn auxiliary_pump_completes_a_suspended_groove_chunk_read_without_a_semantic_tic
         let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
         let mut source_database = groove::db::Database::new(
             schema.clone(),
-            groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF]),
+            groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF])
+                .expect("valid memory storage families"),
         )
         .await
         .unwrap();
         source_database.set_chunk_storage(source.clone());
         let mut destination_database = groove::db::Database::new(
             schema,
-            groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF]),
+            groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF])
+                .expect("valid memory storage families"),
         )
         .await
         .unwrap();
@@ -188,7 +191,8 @@ fn subscriber_auxiliary_responses_are_bounded_to_one_chunk_per_wire_frame() {
     let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
     let database = crate::db::block_on(groove::db::Database::new(
         schema,
-        groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF]),
+        groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF])
+            .expect("valid memory storage families"),
     ))
     .unwrap();
     let subscriber = PeerIoPump::new(
@@ -256,7 +260,8 @@ fn bounded_auxiliary_drain_keeps_large_response_batches_fifo_and_within_bytes() 
     let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
     let database = crate::db::block_on(groove::db::Database::new(
         schema,
-        groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF]),
+        groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF])
+            .expect("valid memory storage families"),
     ))
     .unwrap();
     let subscriber = PeerIoPump::new(
@@ -335,7 +340,8 @@ fn dropping_the_last_suspended_consumer_cancels_unsent_chunk_demand() {
     let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
     let database = crate::db::block_on(groove::db::Database::new(
         schema,
-        groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF]),
+        groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF])
+            .expect("valid memory storage families"),
     ))
     .unwrap();
     let pump = PeerIoPump::new(
@@ -365,7 +371,8 @@ fn failed_send_restore_keeps_its_relay_reservation_across_later_admission() {
     let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
     let database = crate::db::block_on(groove::db::Database::new(
         schema,
-        groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF]),
+        groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF])
+            .expect("valid memory storage families"),
     ))
     .unwrap();
     let subscriber = PeerIoPump::new(
@@ -432,7 +439,8 @@ fn partial_drain_then_disconnect_releases_only_that_connections_obligations() {
     let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
     let database = crate::db::block_on(groove::db::Database::new(
         schema,
-        groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF]),
+        groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF])
+            .expect("valid memory storage families"),
     ))
     .unwrap();
     let first = PeerIoPump::new(
@@ -530,7 +538,8 @@ fn completion_transfers_a_relay_reservation_until_the_response_is_acknowledged()
     let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
     let database = crate::db::block_on(groove::db::Database::new(
         schema,
-        groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF]),
+        groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF])
+            .expect("valid memory storage families"),
     ))
     .unwrap();
     let subscriber = PeerIoPump::new(
@@ -694,14 +703,16 @@ fn five_concurrent_chunk_demands_are_delivered_in_two_decodable_batches() {
         let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
         let mut source_database = groove::db::Database::new(
             schema.clone(),
-            groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF]),
+            groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF])
+                .expect("valid memory storage families"),
         )
         .await
         .unwrap();
         source_database.set_chunk_storage(source.clone());
         let mut destination_database = groove::db::Database::new(
             schema,
-            groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF]),
+            groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF])
+                .expect("valid memory storage families"),
         )
         .await
         .unwrap();
@@ -782,7 +793,8 @@ fn retryable_chunk_response_preserves_retry_delay_and_allows_a_later_fulfillment
         let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
         let database = groove::db::Database::new(
             schema,
-            groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF]),
+            groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF])
+                .expect("valid memory storage families"),
         )
         .await
         .unwrap();
@@ -846,7 +858,8 @@ fn a_late_response_from_a_disconnected_upstream_cannot_complete_reassigned_deman
         let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
         let database = groove::db::Database::new(
             schema,
-            groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF]),
+            groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF])
+                .expect("valid memory storage families"),
         )
         .await
         .unwrap();
@@ -924,7 +937,8 @@ fn a_later_registered_upstream_retries_demand_drained_by_a_disconnected_predeces
         let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
         let database = groove::db::Database::new(
             schema,
-            groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF]),
+            groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF])
+                .expect("valid memory storage families"),
         )
         .await
         .unwrap();

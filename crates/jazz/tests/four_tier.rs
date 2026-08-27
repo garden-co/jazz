@@ -31,7 +31,7 @@ fn schema() -> JazzSchema {
     // fixture writes intentionally public; declaring SELECT alone now closes
     // the remaining operation clauses.
     let policies = TablePolicies::new()
-        .with_select(session_eq("owner", &["claims", "sub"]))
+        .with_select(session_eq("owner", &["user"]))
         .with_insert(jazz::tools::PolicyExpr::True)
         .with_update(
             Some(jazz::tools::PolicyExpr::True),
@@ -43,7 +43,7 @@ fn schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new("todos")
                     .column("title", ColumnType::Text)
-                    .column("owner", ColumnType::Uuid)
+                    .column("owner", ColumnType::Text)
                     .policies(policies),
             )
             .build(),
@@ -58,14 +58,14 @@ fn public_write_schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new("todos")
                     .column("title", ColumnType::Text)
-                    .column("owner", ColumnType::Uuid),
+                    .column("owner", ColumnType::Text),
             )
             .build(),
     )
 }
 
 fn read_write_policy_schema() -> JazzSchema {
-    let owner = session_eq("owner", &["claims", "sub"]);
+    let owner = session_eq("owner", &["user"]);
     let policies = TablePolicies::new()
         .with_select(owner.clone())
         .with_insert(owner.clone())
@@ -76,7 +76,7 @@ fn read_write_policy_schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new("todos")
                     .column("title", ColumnType::Text)
-                    .column("owner", ColumnType::Uuid)
+                    .column("owner", ColumnType::Text)
                     .policies(policies),
             )
             .build(),
@@ -86,10 +86,7 @@ fn read_write_policy_schema() -> JazzSchema {
 fn access_write_policy_schema() -> JazzSchema {
     let canvas = exists(
         "canvasInvites",
-        vec![
-            outer_eq("canvas", "id"),
-            session_eq("userID", &["claims", "sub"]),
-        ],
+        vec![outer_eq("canvas", "id"), session_eq("userID", &["user"])],
     );
     let policies = TablePolicies::new()
         .with_select(canvas.clone())
@@ -106,7 +103,7 @@ fn access_write_policy_schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new("canvasInvites")
                     .fk_column("canvas", "canvases")
-                    .column("userID", ColumnType::Uuid),
+                    .column("userID", ColumnType::Text),
             )
             .build(),
     )
@@ -138,7 +135,10 @@ fn reopen_node(
 fn cells(title: &str, owner: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.to_owned())),
-        ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
+        (
+            "owner".to_owned(),
+            Value::String(owner.canonical().to_owned()),
+        ),
     ])
 }
 
@@ -159,11 +159,11 @@ fn permission_scope_key(
         .expect("table should have a write policy");
     let mut values = BTreeMap::new();
     values.insert(
-        "__jazz_claim_sub".to_owned(),
-        Value::Uuid(writer.test_uuid()),
+        "__jazz_claim_user".to_owned(),
+        Value::String(writer.canonical().to_owned()),
     );
     let shape = Query::from(table)
-        .filter(eq(col("owner"), param("__jazz_claim_sub")))
+        .filter(eq(col("owner"), param("__jazz_claim_user")))
         .validate(schema)
         .expect("policy should validate as a scope shape");
     let binding = shape
@@ -189,7 +189,10 @@ fn whole_table_key(schema: &JazzSchema, table: &str) -> SubscriptionKey {
 fn invite_cells(canvas: RowUuid, user: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("canvas".to_owned(), Value::Uuid(canvas.0)),
-        ("userID".to_owned(), Value::Uuid(user.test_uuid())),
+        (
+            "userID".to_owned(),
+            Value::String(user.canonical().to_owned()),
+        ),
     ])
 }
 
@@ -355,10 +358,7 @@ fn core_ingest(
 
 fn install_uuid_sub_claim(node: &mut NodeState<RocksDbStorage>, identity: AuthorSubject) {
     if identity != AuthorSubject::SYSTEM {
-        node.admit_test_session_claims(
-            identity,
-            BTreeMap::from([("sub".to_owned(), Value::Uuid(identity.test_uuid()))]),
-        );
+        node.admit_test_session_claims(identity, BTreeMap::new());
     }
 }
 
@@ -654,7 +654,10 @@ fn edge_defers_mergeable_fate_until_permission_scope_settles() {
     );
     assert_eq!(edge_to_client.deferred_edge_fate_count(), 1);
     assert_eq!(edge_to_client.edge_scope_subscription_count(), 1);
-    assert_eq!(transaction_state(&mut edge, tx_id).0, Fate::Pending);
+    assert!(
+        block_on(edge.transaction_state(tx_id)).is_none(),
+        "an unresolved permission scope must keep the unit outside edge history"
+    );
 
     let [fate] = drain_edge_fates(&mut edge_to_client, &mut edge, u64::MAX - SKEW_TOLERANCE_MS)
         .try_into()
@@ -711,7 +714,10 @@ fn edge_permission_scope_is_write_policy_claim_not_whole_table() {
             .is_none()
     );
     assert_eq!(edge_to_client.deferred_edge_fate_count(), 1);
-    assert_eq!(transaction_state(&mut edge, tx_id).0, Fate::Pending);
+    assert!(
+        block_on(edge.transaction_state(tx_id)).is_none(),
+        "the narrow write-policy scope must not create pending table history"
+    );
 }
 
 #[test]
@@ -985,10 +991,9 @@ fn settled_permission_scope_for_one_writer_claim_does_not_unlock_whole_table() {
         .is_empty()
     );
     assert_eq!(edge_to_b.deferred_edge_fate_count(), 1);
-    assert_eq!(
-        transaction_state(&mut edge, first_b).0,
-        Fate::Pending,
-        "settled writer-A scope must not satisfy missing writer-B scope"
+    assert!(
+        block_on(edge.transaction_state(first_b)).is_none(),
+        "settled writer-A scope must not admit writer-B into edge history"
     );
 }
 
@@ -1064,7 +1069,10 @@ fn edge_restart_recovers_deferred_fate_from_client_outbox_redelivery() {
     );
     assert_eq!(edge_to_client.deferred_edge_fate_count(), 1);
     assert_eq!(edge_to_client.edge_scope_subscription_count(), 1);
-    assert_eq!(transaction_state(&mut edge, tx_id).0, Fate::Pending);
+    assert!(
+        block_on(edge.transaction_state(tx_id)).is_none(),
+        "a deferred edge upload must not persist before its permission scope settles"
+    );
     drop(edge);
     drop(edge_to_client);
 
@@ -1085,10 +1093,9 @@ fn edge_restart_recovers_deferred_fate_from_client_outbox_redelivery() {
         edge_to_client.subscription_result_sets(scope_key).is_none(),
         "scope subscription result state must not survive through a fresh peer after restart"
     );
-    assert_eq!(
-        transaction_state(&mut edge, tx_id).0,
-        Fate::Pending,
-        "the pending relay history survives restart, but not the in-memory gate"
+    assert!(
+        block_on(edge.transaction_state(tx_id)).is_none(),
+        "the unresolved upload must leave no durable edge history after restart"
     );
 
     let SyncMessage::CommitUnit { tx, versions } = unit else {

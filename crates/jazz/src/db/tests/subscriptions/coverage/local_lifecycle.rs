@@ -9,7 +9,7 @@ fn db_facade_local_subscription_reports_initial_and_changed_results() {
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let db = doctest_support::block_on(Db::open_history_complete(DbConfig {
         schema,
-        storage: doctest_support::MemoryStorage::new(&refs),
+        storage: doctest_support::MemoryStorage::new(&refs).expect("valid memory storage families"),
         identity: DbIdentity {
             node: NodeUuid::from_bytes([0x11; 16]),
             author: AuthorSubject::for_test_bytes([0xa1; 16]),

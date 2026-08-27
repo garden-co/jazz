@@ -202,6 +202,11 @@ pub(super) fn fact_public_fields(
                     .filter(|field| **field != schema.row_field)
                     .cloned(),
             );
+            // A union arm is part of a result occurrence address, just like
+            // its paired joined-row id. Retaining only the id causes prepared
+            // maintained subscriptions to publish a descriptor that cannot be
+            // decoded against the membership schema.
+            fields.extend(schema.occurrence_union_arm_fields.values().cloned());
             fields.extend(schema.branch_or_prefix_field.clone());
             fields.extend(result_membership_version_fields(&schema.version));
             fields.extend(schema.settle_position_field.clone());
@@ -760,5 +765,47 @@ where
             .bind_shape(prepared.id(), &values)
             .await
             .map_err(Error::Groove)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::node::query_engine::{
+        ContentVersionFields, ProgramFactSchema, ResultMembershipSchema,
+    };
+
+    #[test]
+    fn result_membership_public_fields_retain_union_arm_identity() {
+        let fields = fact_public_fields(&ProgramFactSchema::ResultMembership(
+            ResultMembershipSchema {
+                table_field: "table_name".to_owned(),
+                row_field: "row_uuid".to_owned(),
+                occurrence_id_fields: vec!["row_uuid".to_owned(), "__root_join_row_0".to_owned()],
+                occurrence_union_arm_fields: BTreeMap::from([(0, "__root_join_arm_0".to_owned())]),
+                payload_fields: Vec::new(),
+                branch_or_prefix_field: None,
+                version: ResultMembershipVersionSchema::Content(ContentVersionFields {
+                    tx_time_field: "content_tx_time".to_owned(),
+                    tx_node_field: "content_tx_node_id".to_owned(),
+                }),
+                settle_position_field: Some("settle_position".to_owned()),
+                routing_param_fields: BTreeSet::new(),
+            },
+        ))
+        .expect("result membership fields");
+
+        assert_eq!(
+            fields,
+            [
+                "table_name",
+                "row_uuid",
+                "__root_join_row_0",
+                "__root_join_arm_0",
+                "content_tx_time",
+                "content_tx_node_id",
+                "settle_position",
+            ]
+        );
     }
 }

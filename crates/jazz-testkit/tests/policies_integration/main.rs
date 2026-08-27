@@ -49,16 +49,16 @@ fn explicit_allow_all_policies(
 fn rebac_test_schema() -> Schema {
     let folders_policies = permissions(|p| {
         p.allow_read()
-            .where_(pe::eq("owner_id", pe::session("user_id")));
+            .where_(pe::eq("owner_id", pe::session(vec!["claims", "sub"])));
         p.allow_insert()
-            .where_(pe::eq("owner_id", pe::session("user_id")));
+            .where_(pe::eq("owner_id", pe::session(vec!["claims", "sub"])));
     });
 
     let docs_policies = permissions(|p| {
         p.allow_read()
-            .where_(pe::eq("owner_id", pe::session("user_id")));
+            .where_(pe::eq("owner_id", pe::session(vec!["claims", "sub"])));
         p.allow_insert()
-            .where_(pe::eq("owner_id", pe::session("user_id")));
+            .where_(pe::eq("owner_id", pe::session(vec!["claims", "sub"])));
     });
 
     SchemaBuilder::new()
@@ -85,7 +85,7 @@ fn provenance_notes_schema() -> Schema {
 }
 
 fn authorship_permissions_schema() -> Schema {
-    let created_by_is_session = pe::eq("$createdBy", pe::session("user_id"));
+    let created_by_is_session = pe::eq("$createdBy", pe::session("user"));
     let notes_policies = permissions(|p| {
         p.allow_read().where_(created_by_is_session.clone());
         p.allow_insert().where_(created_by_is_session.clone());
@@ -125,12 +125,12 @@ fn recursive_folders_schema(max_depth: Option<usize>) -> Schema {
 
     let folders_policies = permissions(|p| {
         p.allow_read().where_(pe::any_of([
-            pe::eq("owner_id", pe::session("user_id")),
+            pe::eq("owner_id", pe::session(vec!["claims", "sub"])),
             select_inherited,
         ]));
         p.allow_update()
             .where_old(pe::any_of([
-                pe::eq("owner_id", pe::session("user_id")),
+                pe::eq("owner_id", pe::session(vec!["claims", "sub"])),
                 update_inherited,
             ]))
             .where_new(pe::always());
@@ -151,12 +151,12 @@ fn declared_file_inheritance_schema(array_edge: bool) -> Schema {
     let source_fk_column = if array_edge { "images" } else { "image" };
     let files_policies = permissions(|p| {
         p.allow_read().where_(pe::any_of([
-            pe::eq("owner_id", pe::session("user_id")),
+            pe::eq("owner_id", pe::session(vec!["claims", "sub"])),
             pe::allowed_to_read_referencing("todos", source_fk_column),
         ]));
         p.allow_update()
             .where_old(pe::any_of([
-                pe::eq("owner_id", pe::session("user_id")),
+                pe::eq("owner_id", pe::session(vec!["claims", "sub"])),
                 pe::allowed_to_update_referencing("todos", source_fk_column),
             ]))
             .where_new(pe::always());
@@ -175,9 +175,9 @@ fn declared_file_inheritance_schema(array_edge: bool) -> Schema {
     };
     let todos_policies = permissions(|p| {
         p.allow_read()
-            .where_(pe::eq("owner_id", pe::session("user_id")));
+            .where_(pe::eq("owner_id", pe::session(vec!["claims", "sub"])));
         p.allow_update()
-            .where_old(pe::eq("owner_id", pe::session("user_id")))
+            .where_old(pe::eq("owner_id", pe::session(vec!["claims", "sub"])))
             .where_new(pe::always());
     });
 

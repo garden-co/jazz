@@ -125,12 +125,12 @@ async fn connect_admin(server: &JazzServer, schema: &Schema) -> JazzClient {
 fn owner_documents_policies() -> jazz::tools::TablePolicies {
     permissions(|p| {
         p.allow_read()
-            .where_(pe::eq("owner_id", pe::session("user_id")));
+            .where_(pe::eq("owner_id", pe::session(vec!["claims", "sub"])));
         p.allow_insert()
-            .where_(pe::eq("owner_id", pe::session("user_id")));
+            .where_(pe::eq("owner_id", pe::session(vec!["claims", "sub"])));
         p.allow_update()
-            .where_old(pe::eq("owner_id", pe::session("user_id")))
-            .where_new(pe::eq("owner_id", pe::session("user_id")));
+            .where_old(pe::eq("owner_id", pe::session(vec!["claims", "sub"])))
+            .where_new(pe::eq("owner_id", pe::session(vec!["claims", "sub"])));
     })
 }
 
@@ -489,7 +489,7 @@ fn membership_documents_policies() -> jazz::tools::TablePolicies {
             .where_(pe::exists(pe::table("memberships").where_(
                 pe::rel::all_of([
                     pe::rel::eq_outer("folder_id", "folder_id"),
-                    pe::rel::eq_session("user_id", "user_id"),
+                    pe::rel::eq_session("user_id", vec!["claims", "sub"]),
                 ]),
             )));
         p.allow_insert().always();
@@ -499,7 +499,7 @@ fn membership_documents_policies() -> jazz::tools::TablePolicies {
 fn memberships_policies() -> jazz::tools::TablePolicies {
     permissions(|p| {
         p.allow_read()
-            .where_(pe::eq("user_id", pe::session("user_id")));
+            .where_(pe::eq("user_id", pe::session(vec!["claims", "sub"])));
         p.allow_insert().always();
     })
 }

@@ -272,7 +272,7 @@ impl WireTransport for ScriptedSendTransport {
 }
 
 #[test]
-fn send_expires_stale_reassembly_before_pending_outbound_flush_returns_early() {
+fn pending_outbound_backpressure_rejects_later_logical_message_without_encoding_it() {
     let message = SyncMessage::SessionClaims {
         identity: AuthorSubject::for_test_bytes([0x76; 16]),
         claims: BTreeMap::new(),
@@ -713,6 +713,71 @@ fn first_frame_backpressure_queues_compressed_logical_message_without_retry() {
         "poll flushes the accepted message"
     );
     assert_eq!(receiver.try_recv(), Some(message));
+}
+
+#[test]
+fn pending_backpressure_rejects_later_receipt_for_semantic_retry() {
+    #[derive(Clone)]
+    struct BlockedWireTransport {
+        outbound: Rc<RefCell<std::collections::VecDeque<Vec<u8>>>>,
+        blocked: Rc<Cell<bool>>,
+    }
+
+    impl WireTransport for BlockedWireTransport {
+        fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+            if self.blocked.get() {
+                return Err(TransportError::Backpressure);
+            }
+            self.outbound.borrow_mut().push_back(frame);
+            Ok(())
+        }
+
+        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    let staged = Rc::new(RefCell::new(std::collections::VecDeque::new()));
+    let blocked = Rc::new(Cell::new(true));
+    let mut sender = WireTransportAdapter::current(BlockedWireTransport {
+        outbound: Rc::clone(&staged),
+        blocked: Rc::clone(&blocked),
+    });
+    let mut receiver = WireTransportAdapter::current(ByteDuplexTransport {
+        outbound: Rc::new(RefCell::new(std::collections::VecDeque::new())),
+        inbound: Rc::clone(&staged),
+    });
+    let view = SyncMessage::SessionClaims {
+        identity: AuthorSubject::for_test_bytes([0x76; 16]),
+        claims: BTreeMap::from([("view".to_owned(), Value::String("pending".to_owned()))]),
+    };
+    let receipt = SyncMessage::FateUpdate {
+        tx_id: TxId::new(
+            crate::time::TxTime::from(76),
+            NodeUuid::from_bytes([0x76; 16]),
+        ),
+        fate: Fate::Accepted,
+        global_time: None,
+        durability: Some(DurabilityTier::Edge),
+    };
+
+    assert_eq!(sender.send(view.clone()), Ok(()));
+    assert_eq!(
+        sender.send(receipt.clone()),
+        Err(TransportError::Backpressure),
+        "the adapter retains only the already-accepted view; its producer must retain the fate"
+    );
+    assert!(staged.borrow().is_empty());
+
+    blocked.set(false);
+    assert!(
+        sender.try_recv().is_none(),
+        "poll flushes the one already-accepted message"
+    );
+    assert_eq!(sender.send(receipt.clone()), Ok(()));
+    assert_eq!(receiver.try_recv(), Some(view));
+    assert_eq!(receiver.try_recv(), Some(receipt));
+    assert!(receiver.try_recv().is_none());
 }
 
 #[test]

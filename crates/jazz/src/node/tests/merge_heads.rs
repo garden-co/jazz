@@ -185,14 +185,14 @@ fn accepting_pending_history_does_not_rewalk_the_merge_chain() {
         versions.push(tx_id);
     }
 
-    super::super::ingest::reset_merge_head_reachability_walks_for_test();
+    edge.reset_merge_head_reachability_walks_for_test();
     for tx_id in versions.into_iter().rev() {
         edge.apply_fate_update(tx_id, Fate::Accepted, None, Some(DurabilityTier::Edge))
             .unwrap();
     }
 
     assert_eq!(
-        super::super::ingest::merge_head_reachability_walks_for_test(),
+        edge.merge_head_reachability_walks_for_test(),
         0,
         "accepting a pending chain must not replay historical reachability"
     );

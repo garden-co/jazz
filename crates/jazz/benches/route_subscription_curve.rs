@@ -328,7 +328,7 @@ fn open_db(seed: u64) -> BenchDb {
     block_on(Db::open(
         DbConfig::new(
             schema,
-            MemoryStorage::new(&family_refs),
+            MemoryStorage::new(&family_refs).expect("valid memory storage families"),
             DbIdentity {
                 node: NodeUuid::from_bytes((0x7600_u128 + seed as u128).to_be_bytes()),
                 author: WRITER,
