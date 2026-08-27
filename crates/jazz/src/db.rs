@@ -4461,30 +4461,66 @@ fn apply_maintained_membership_update_to_snapshot(
         }
     }
 
-    for occurrence_id in &update_removed {
-        if update_added.iter().any(|(added, _)| added == occurrence_id) {
-            continue;
-        }
-        let Some(index) = snapshot_index.roots.get(occurrence_id).copied() else {
-            continue;
-        };
-        let row = snapshot.rows.remove(index);
-        snapshot.root_count -= 1;
-        snapshot_index.roots.remove(occurrence_id);
-        for position in snapshot_index.roots.values_mut() {
-            if *position > index {
-                *position -= 1;
+    if !update_removed.is_empty() {
+        let replaced = update_added
+            .iter()
+            .map(|(occurrence, _)| occurrence)
+            .collect::<BTreeSet<_>>();
+        let requested_removals = update_removed.iter().collect::<BTreeSet<_>>();
+        let mut removals = requested_removals
+            .iter()
+            .filter(|occurrence| !replaced.contains(*occurrence))
+            .filter_map(|occurrence| {
+                snapshot_index
+                    .roots
+                    .get(*occurrence)
+                    .copied()
+                    .map(|position| ((*occurrence).clone(), position))
+            })
+            .collect::<Vec<_>>();
+        removals.sort_by_key(|(_, position)| *position);
+        if !removals.is_empty() {
+            // A removed index is part of the public delta contract: it is the
+            // position in the complete pre-frame result, not the position after
+            // a preceding removal has already shifted the snapshot.  Remove the
+            // whole batch together so both that contract and the index repair are
+            // linear in the result size rather than quadratic in removed roots.
+            let removed_positions = removals
+                .iter()
+                .map(|(_, position)| *position)
+                .collect::<Vec<_>>();
+            let removal_ids = removals
+                .iter()
+                .map(|(occurrence, _)| occurrence)
+                .collect::<BTreeSet<_>>();
+            removed.extend(removals.iter().map(|(occurrence_id, index)| {
+                let row = &snapshot.rows[*index];
+                RemovedRow {
+                    table: row.table().to_owned(),
+                    row_uuid: row.row_uuid(),
+                    occurrence_id: occurrence_id.clone(),
+                    index: *index,
+                }
+            }));
+            let root_count_before_removals = snapshot.root_count;
+            let mut position = 0;
+            snapshot.rows.retain(|_| {
+                let keep = position >= root_count_before_removals
+                    || removed_positions.binary_search(&position).is_err();
+                position += 1;
+                keep
+            });
+            snapshot.root_count -= removed_positions.len();
+            snapshot_index
+                .roots
+                .retain(|occurrence, _| !removal_ids.contains(occurrence));
+            for position in snapshot_index.roots.values_mut() {
+                *position -= removed_positions.partition_point(|removed| removed < position);
+            }
+            for position in snapshot_index.related.values_mut() {
+                *position -= removed_positions.len();
             }
         }
-        for position in snapshot_index.related.values_mut() {
-            *position -= 1;
-        }
-        removed.push(RemovedRow {
-            table: row.table().to_owned(),
-            row_uuid: row.row_uuid(),
-            occurrence_id: occurrence_id.clone(),
-            index,
-        });
     }
 
     SubscriptionEvent::Delta {
