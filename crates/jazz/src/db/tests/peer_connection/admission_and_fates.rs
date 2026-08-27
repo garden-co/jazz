@@ -1,6 +1,7 @@
 //! Link admission, authority selection, permission advice, and routed fates.
 
 use super::*;
+use crate::db::peer_connection::{ConnectionLink, PendingSubscriberControlResponse};
 use crate::node::SKEW_TOLERANCE_MS;
 
 #[test]
@@ -161,6 +162,73 @@ fn ordinary_wire_chunk_response_retries_after_bounded_transport_backpressure() {
     assert!(outbound.borrow().is_empty());
 }
 
+/// Missing-version repair is an upstream one-shot request, not a recomputable
+/// subscription update. A bounded transport must therefore retain it locally
+/// and arrange its own retry instead of relying on an unrelated reconnect or
+/// inbound wakeup to make the repair possible.
+#[test]
+fn upstream_row_version_fetch_retries_after_bounded_transport_backpressure() {
+    let identity = AuthorSubject::for_test_bytes([0xc3; 16]);
+    let schema = schema();
+    let client = open_db(0xc3, identity, &schema);
+    let outbound = Rc::new(RefCell::new(VecDeque::new()));
+    let upstream =
+        crate::db::block_on(client.connect_upstream(Box::new(BackpressureOnceTransport {
+            outbound: Rc::clone(&outbound),
+            failed: false,
+        })));
+    let request = RowVersionRef::new(
+        "todos",
+        RowUuid::from_bytes([0xc3; 16]),
+        TxId::new(TxTime::from(3), NodeUuid::from_bytes([0xc3; 16])),
+    );
+    {
+        let mut connection = upstream.borrow_mut();
+        let ConnectionLink::Upstream(state) = &mut connection.link else {
+            panic!("client connection must be upstream");
+        };
+        state
+            .pending_row_version_fetches
+            .push_back(vec![request.clone()]);
+    }
+
+    upstream
+        .borrow_mut()
+        .tick()
+        .expect("backpressure retains the upstream repair fetch");
+    {
+        let connection = upstream.borrow();
+        let ConnectionLink::Upstream(state) = &connection.link else {
+            panic!("client connection must be upstream");
+        };
+        assert_eq!(
+            state.pending_row_version_fetches.front(),
+            Some(&vec![request.clone()]),
+            "a rejected byte admission retains the exact upstream repair request"
+        );
+    }
+    assert!(outbound.borrow().is_empty());
+
+    upstream
+        .borrow_mut()
+        .tick()
+        .expect("scheduled retry accepts the upstream repair fetch");
+    {
+        let connection = upstream.borrow();
+        let ConnectionLink::Upstream(state) = &connection.link else {
+            panic!("client connection must be upstream");
+        };
+        assert!(state.pending_row_version_fetches.is_empty());
+    }
+    assert_eq!(
+        outbound.borrow_mut().pop_front(),
+        Some(SyncMessage::FetchRowVersions {
+            requests: vec![request]
+        })
+    );
+    assert!(outbound.borrow().is_empty());
+}
+
 /// Subscription rejection follows the same ownership rule. A malformed or
 /// unsupported one-shot registration must not turn into a permanently pending
 /// caller when the first byte admission is temporarily full.
@@ -185,10 +253,10 @@ fn subscriber_control_reply_retries_after_bounded_transport_backpressure() {
         },
         reason: SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission,
     };
-    subscriber
-        .borrow_mut()
-        .pending_control_responses
-        .extend([rejection.clone(), rejection.clone()]);
+    subscriber.borrow_mut().pending_control_responses.extend([
+        PendingSubscriberControlResponse::Direct(rejection.clone()),
+        PendingSubscriberControlResponse::Direct(rejection.clone()),
+    ]);
 
     subscriber
         .borrow_mut()
@@ -199,7 +267,7 @@ fn subscriber_control_reply_retries_after_bounded_transport_backpressure() {
             .borrow()
             .pending_control_responses
             .iter()
-            .cloned()
+            .map(|response| response.message().clone())
             .collect::<Vec<_>>(),
         vec![rejection.clone(), rejection.clone()],
         "a stalled link keeps every already-bounded control obligation in FIFO order"
@@ -209,23 +277,9 @@ fn subscriber_control_reply_retries_after_bounded_transport_backpressure() {
     subscriber
         .borrow_mut()
         .tick()
-        .expect("later capacity accepts only the first retained control reply");
-    assert_eq!(
-        subscriber
-            .borrow()
-            .pending_control_responses
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>(),
-        vec![rejection.clone()],
-        "one accepted reply does not let a tick skip or duplicate the next obligation"
-    );
-    assert_eq!(outbound.borrow_mut().pop_front(), Some(rejection));
-    subscriber
-        .borrow_mut()
-        .tick()
-        .expect("the following tick accepts the second retained control reply");
+        .expect("later capacity accepts every retained FIFO control reply");
     assert!(subscriber.borrow().pending_control_responses.is_empty());
+    assert_eq!(outbound.borrow_mut().pop_front(), Some(rejection));
     assert!(matches!(
         outbound.borrow_mut().pop_front(),
         Some(SyncMessage::SubscribeRejected { .. })
@@ -273,10 +327,10 @@ fn subscriber_control_replies_stay_bounded_during_permanent_backpressure() {
         },
         reason: SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission,
     };
-    subscriber
-        .borrow_mut()
-        .pending_control_responses
-        .extend([rejection.clone(), rejection.clone()]);
+    subscriber.borrow_mut().pending_control_responses.extend([
+        PendingSubscriberControlResponse::Direct(rejection.clone()),
+        PendingSubscriberControlResponse::Direct(rejection.clone()),
+    ]);
 
     for _ in 0..4 {
         subscriber
@@ -288,7 +342,7 @@ fn subscriber_control_replies_stay_bounded_during_permanent_backpressure() {
                 .borrow()
                 .pending_control_responses
                 .iter()
-                .cloned()
+                .map(|response| response.message().clone())
                 .collect::<Vec<_>>(),
             vec![rejection.clone(), rejection.clone()],
             "retries retain the same bounded FIFO without accumulating copies"
@@ -299,6 +353,109 @@ fn subscriber_control_replies_stay_bounded_during_permanent_backpressure() {
         4,
         "one logical control reply is retried per tick"
     );
+}
+
+/// Repair payloads retain the normal sync-context send path. This matters on
+/// trusted links where `send_with_sync_context` may first announce a catalogue
+/// snapshot; the row-version response itself must still remain pending until
+/// the adapter accepts it.
+#[test]
+fn row_version_repair_reply_retries_with_sync_context_after_backpressure() {
+    let identity = AuthorSubject::for_test_bytes([0xc6; 16]);
+    let schema = schema();
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let outbound = Rc::new(RefCell::new(VecDeque::new()));
+    let subscriber = server.accept_subscriber(
+        Box::new(BackpressureOnceTransport {
+            outbound: Rc::clone(&outbound),
+            failed: false,
+        }),
+        identity,
+    );
+    let response = SyncMessage::RowVersionPayloads {
+        version_bundles: Vec::new(),
+    };
+    subscriber.borrow_mut().pending_control_responses.push_back(
+        PendingSubscriberControlResponse::WithSyncContext(response.clone()),
+    );
+
+    subscriber
+        .borrow_mut()
+        .tick()
+        .expect("bounded transport defers the repair reply");
+    assert_eq!(
+        subscriber
+            .borrow()
+            .pending_control_responses
+            .front()
+            .map(PendingSubscriberControlResponse::message),
+        Some(&response)
+    );
+    subscriber
+        .borrow_mut()
+        .tick()
+        .expect("later capacity accepts the retained repair reply");
+    assert!(subscriber.borrow().pending_control_responses.is_empty());
+    assert!(matches!(
+        outbound.borrow_mut().pop_front(),
+        Some(SyncMessage::CatalogueSnapshot(_))
+    ));
+    assert_eq!(outbound.borrow_mut().pop_front(), Some(response));
+    assert!(outbound.borrow().is_empty());
+}
+
+/// An authority-scope intent may expand to a multi-frame proof sequence. Its
+/// semantic producer queues that sequence before returning to inbound work, so
+/// bounded wire admission must preserve both order and exact multiplicity.
+#[test]
+fn authorization_scope_replies_retry_fifo_after_backpressure() {
+    let identity = AuthorSubject::for_test_bytes([0xc7; 16]);
+    let schema = schema();
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let outbound = Rc::new(RefCell::new(VecDeque::new()));
+    let subscriber = server.accept_subscriber(
+        Box::new(BackpressureOnceTransport {
+            outbound: Rc::clone(&outbound),
+            failed: false,
+        }),
+        identity,
+    );
+    let first = SyncMessage::AuthorizationScopeUnavailable {
+        request_id: PermissionAdviceRequestId([7; 16]),
+    };
+    let second = SyncMessage::AuthorizationScopeUnavailable {
+        request_id: PermissionAdviceRequestId([8; 16]),
+    };
+    subscriber.borrow_mut().pending_control_responses.extend([
+        PendingSubscriberControlResponse::Direct(first.clone()),
+        PendingSubscriberControlResponse::Direct(second.clone()),
+    ]);
+
+    subscriber
+        .borrow_mut()
+        .tick()
+        .expect("backpressure retains the whole authority-scope reply sequence");
+    assert_eq!(
+        subscriber
+            .borrow()
+            .pending_control_responses
+            .iter()
+            .map(PendingSubscriberControlResponse::message)
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![first.clone(), second.clone()]
+    );
+    subscriber
+        .borrow_mut()
+        .tick()
+        .expect("first scope reply is accepted once capacity returns");
+    assert_eq!(outbound.borrow_mut().pop_front(), Some(first));
+    subscriber
+        .borrow_mut()
+        .tick()
+        .expect("second scope reply remains FIFO behind the first");
+    assert_eq!(outbound.borrow_mut().pop_front(), Some(second));
+    assert!(subscriber.borrow().pending_control_responses.is_empty());
 }
 
 #[test]

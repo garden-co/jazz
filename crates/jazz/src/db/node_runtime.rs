@@ -969,6 +969,7 @@ where
                 large_value_uploads: transferred_large_value_uploads,
                 awaiting_large_value_uploads: BTreeMap::new(),
                 failed_large_value_uploads: BTreeSet::new(),
+                pending_row_version_fetches: VecDeque::new(),
                 pending_row_version_repairs: VecDeque::new(),
                 scope_view_cuts: BTreeMap::new(),
                 scope_receipts: BTreeMap::new(),
