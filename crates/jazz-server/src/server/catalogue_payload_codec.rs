@@ -3130,6 +3130,66 @@ mod tests {
         );
     }
 
+    const BUG_124_POLICY_EXPRESSION_MAX_DEPTH: usize = 64;
+    const BUG_124_POLICY_EXPRESSION_MAX_NODES: usize = 4_096;
+
+    fn nested_policy_expression(nodes: usize) -> PolicyExpr {
+        assert!(nodes > 0);
+        (1..nodes).fold(PolicyExpr::True, |expression, _| {
+            PolicyExpr::Not(Box::new(expression))
+        })
+    }
+
+    fn wide_policy_expression(nodes: usize) -> PolicyExpr {
+        assert!(nodes > 0);
+        PolicyExpr::And((1..nodes).map(|_| PolicyExpr::True).collect())
+    }
+
+    fn permissions_with_policy(expression: PolicyExpr) -> HashMap<TableName, TablePolicies> {
+        HashMap::from([(
+            TableName::new("documents"),
+            TablePolicies::new().with_select(expression),
+        )])
+    }
+
+    #[test]
+    fn permissions_decode_enforces_policy_depth_and_total_node_boundaries() {
+        // This stays internal because the binary catalogue decoder is the
+        // untrusted boundary and public policy builders already own their tree.
+        let at_depth_limit = permissions_with_policy(nested_policy_expression(
+            BUG_124_POLICY_EXPRESSION_MAX_DEPTH,
+        ));
+        assert_eq!(
+            decode_permissions(&encode_permissions(&at_depth_limit))
+                .expect("exact catalogue policy depth boundary remains valid"),
+            at_depth_limit
+        );
+
+        let over_depth_limit = permissions_with_policy(nested_policy_expression(
+            BUG_124_POLICY_EXPRESSION_MAX_DEPTH + 1,
+        ));
+        assert!(
+            decode_permissions(&encode_permissions(&over_depth_limit)).is_err(),
+            "catalogue policy depth must be rejected while parsing"
+        );
+
+        let at_node_limit =
+            permissions_with_policy(wide_policy_expression(BUG_124_POLICY_EXPRESSION_MAX_NODES));
+        assert_eq!(
+            decode_permissions(&encode_permissions(&at_node_limit))
+                .expect("exact catalogue policy node boundary remains valid"),
+            at_node_limit
+        );
+
+        let over_node_limit = permissions_with_policy(wide_policy_expression(
+            BUG_124_POLICY_EXPRESSION_MAX_NODES + 1,
+        ));
+        assert!(
+            decode_permissions(&encode_permissions(&over_node_limit)).is_err(),
+            "catalogue policy node count must be rejected while parsing"
+        );
+    }
+
     #[test]
     fn permissions_bundle_roundtrip_preserves_target_schema() {
         let schema_hash = SchemaHash::compute(

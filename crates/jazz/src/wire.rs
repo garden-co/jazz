@@ -794,7 +794,7 @@ mod tests {
         build_version_bundle_runs_from_singletons, expand_version_carriers,
     };
     use crate::protocol_limits::{MAX_CHUNK_REQUEST_BATCH_ENTRIES, MAX_WIRE_FRAME_BYTES};
-    use crate::query::{BindingId, Query, ShapeId};
+    use crate::query::{BindingId, Operand, Predicate, Query, ShapeId};
     use crate::schema::{ColumnSchema, TableSchema};
     use crate::time::{GlobalTime, TxTime};
     use crate::tx::{DurabilityTier, Fate, RejectionReason, Transaction, TxId, TxKind};
@@ -1092,6 +1092,80 @@ mod tests {
         assert!(
             decode_sync_message(&encoded).is_err(),
             "remote request cardinality must be bounded before storage work"
+        );
+    }
+
+    const BUG_124_POLICY_EXPRESSION_MAX_DEPTH: usize = 64;
+    const BUG_124_POLICY_EXPRESSION_MAX_NODES: usize = 4_096;
+
+    fn nested_policy_predicate(nodes: usize) -> Predicate {
+        assert!(nodes > 0);
+        (1..nodes).fold(
+            Predicate::IsNull(Operand::Column("owner".to_owned())),
+            |predicate, _| Predicate::Not(Box::new(predicate)),
+        )
+    }
+
+    fn wide_policy_predicate(nodes: usize) -> Predicate {
+        assert!(nodes > 0);
+        Predicate::All(
+            (1..nodes)
+                .map(|_| Predicate::IsNull(Operand::Column("owner".to_owned())))
+                .collect(),
+        )
+    }
+
+    fn register_shape_with_policy_predicate(predicate: Predicate) -> SyncMessage {
+        SyncMessage::RegisterShape {
+            shape_id: ShapeId(uuid::Uuid::from_bytes([0x22; 16])),
+            ast: ShapeAst::new(
+                Query::from("documents").filter(predicate),
+                SchemaVersionId::from_bytes([0x33; 16]),
+            ),
+            opts: RegisterShapeOptions::default(),
+        }
+    }
+
+    #[test]
+    fn policy_predicate_wire_decode_enforces_depth_and_total_node_boundaries() {
+        // This stays internal because postcard decode is the untrusted wire
+        // boundary; public query builders only construct already-owned trees.
+        let at_depth_limit = register_shape_with_policy_predicate(nested_policy_predicate(
+            BUG_124_POLICY_EXPRESSION_MAX_DEPTH,
+        ));
+        let encoded = encode_sync_message(&at_depth_limit).expect("encode depth-limit policy");
+        assert_eq!(
+            decode_sync_message(&encoded).expect("exact policy depth boundary remains valid"),
+            at_depth_limit
+        );
+
+        let over_depth_limit = register_shape_with_policy_predicate(nested_policy_predicate(
+            BUG_124_POLICY_EXPRESSION_MAX_DEPTH + 1,
+        ));
+        let encoded =
+            encode_sync_message(&over_depth_limit).expect("encode over-depth policy fixture");
+        assert!(
+            decode_sync_message(&encoded).is_err(),
+            "policy depth must be rejected while postcard is parsing"
+        );
+
+        let at_node_limit = register_shape_with_policy_predicate(wide_policy_predicate(
+            BUG_124_POLICY_EXPRESSION_MAX_NODES,
+        ));
+        let encoded = encode_sync_message(&at_node_limit).expect("encode node-limit policy");
+        assert_eq!(
+            decode_sync_message(&encoded).expect("exact policy node boundary remains valid"),
+            at_node_limit
+        );
+
+        let over_node_limit = register_shape_with_policy_predicate(wide_policy_predicate(
+            BUG_124_POLICY_EXPRESSION_MAX_NODES + 1,
+        ));
+        let encoded =
+            encode_sync_message(&over_node_limit).expect("encode over-node policy fixture");
+        assert!(
+            decode_sync_message(&encoded).is_err(),
+            "policy node count must be rejected while postcard is parsing"
         );
     }
 
