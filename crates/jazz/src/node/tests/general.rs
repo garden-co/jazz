@@ -1737,6 +1737,75 @@ fn known_parent_must_match_exact_row_coordinate_and_layer() {
 }
 
 #[test]
+fn known_parent_must_match_exact_physical_table_for_local_and_replicated_versions() {
+    let schema = todos_notes_schema();
+    let (_dir, mut core) = open_node_with_schema(node(0x7a), schema.clone());
+    let row_uuid = row(0x7a);
+    let parent = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("parent")),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        core.commit_mergeable_settled(
+            MergeableCommit::new("notes", row_uuid, 11)
+                .parents(vec![parent])
+                .cells(BTreeMap::from([("body".to_owned(), v("wrong table"))])),
+        ),
+        Err(Error::InvalidMergeableCommit(
+            "version parent does not resolve to the same physical row, branch, and layer"
+        ))
+    ));
+
+    let notes = schema
+        .tables
+        .iter()
+        .find(|table| table.name == "notes")
+        .expect("notes table");
+    let remote = VersionRecord::from_cells(
+        notes,
+        schema.version_id(),
+        row_uuid,
+        vec![parent],
+        AuthorSubject::SYSTEM,
+        TxTime(12),
+        AuthorSubject::SYSTEM,
+        TxTime(12),
+        &BTreeMap::from([("body".to_owned(), v("replicated wrong table"))]),
+        None,
+    )
+    .unwrap();
+    let error = core
+        .ingest_known_transaction(
+            Transaction {
+                tx_id: TxId::new(TxTime::from(12), node(0x7b)),
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorSubject::SYSTEM,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![remote],
+            Fate::Accepted,
+            None,
+            DurabilityTier::Edge,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::InvalidMergeableCommit(
+            "version parent does not resolve to the same physical row, branch, and layer"
+        )
+    ));
+}
+
+#[test]
 fn unknown_parent_constraint_rejects_child_when_wrong_parent_row_arrives() {
     let schema = schema();
     let dir = tempfile::tempdir().unwrap();
@@ -1784,6 +1853,73 @@ fn unknown_parent_constraint_rejects_child_when_wrong_parent_row_arrives() {
         core.transaction_record(child).unwrap().fate,
         Fate::Rejected(RejectionReason::CausalityViolation),
         "arrival of a parent transaction with only another row must resolve the durable constraint"
+    );
+}
+
+#[test]
+fn unknown_parent_constraint_rejects_cross_table_parent_after_reopen() {
+    let schema = todos_notes_schema();
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = open_node_at(&dir, schema.clone());
+    let row_uuid = row(0x7c);
+    let parent = TxId::new(TxTime::from(40), node(0x7d));
+    let child = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("notes", row_uuid, 50)
+                .parents(vec![parent])
+                .cells(BTreeMap::from([("body".to_owned(), v("constrained child"))])),
+        )
+        .unwrap();
+    core.database.close().unwrap();
+    drop(core);
+    let mut core = reopen_node_at(&dir, node(1), schema);
+    let todos = core
+        .catalogue
+        .catalogue_schemas
+        .get(&core.catalogue.current_schema_version_id)
+        .expect("current schema")
+        .schema
+        .tables
+        .iter()
+        .find(|table| table.name == "todos")
+        .expect("todos table")
+        .clone();
+    let parent_version = VersionRecord::from_cells(
+        &todos,
+        core.catalogue.current_schema_version_id,
+        row_uuid,
+        Vec::new(),
+        AuthorSubject::SYSTEM,
+        TxTime(40),
+        AuthorSubject::SYSTEM,
+        TxTime(40),
+        &title_cells("wrong physical table"),
+        None,
+    )
+    .unwrap();
+
+    core.ingest_commit_unit_settled(
+        Transaction {
+            tx_id: parent,
+            kind: TxKind::Mergeable,
+            n_total_writes: 1,
+            made_by: AuthorSubject::SYSTEM,
+            permission_subject: None,
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json: None,
+            contribution_merge: None,
+        },
+        vec![parent_version],
+        u64::MAX - SKEW_TOLERANCE_MS,
+    )
+    .unwrap();
+
+    assert_eq!(
+        core.transaction_record(child).unwrap().fate,
+        Fate::Rejected(RejectionReason::CausalityViolation)
     );
 }
 
