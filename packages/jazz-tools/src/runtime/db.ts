@@ -706,12 +706,6 @@ function splitLargeValueUpdate(
   return { ordinary, descriptors };
 }
 
-function rejectLargeValueDescriptorsInUpsert(descriptors: readonly WireLargeValueUpdate[]): void {
-  if (descriptors.length > 0) {
-    throw new Error("Partial-value descriptors are only supported by applyDiffs.");
-  }
-}
-
 type PartialValueSelection =
   | { from: number; to: number }
   | { fromUtf8: number; toUtf8: number }
@@ -1238,13 +1232,9 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     options?: UpdateOptions,
   ): void {
     this.bindTable(table);
-    const { ordinary, descriptors } = splitLargeValueUpdate(
-      data as Record<string, unknown>,
-      table._schema,
-      table._table,
-    );
-    rejectLargeValueDescriptorsInUpsert(descriptors);
-    const transformedData = transformInputColumns(table, ordinary);
+    // `edits` is valid ordinary JSON data. Only `applyDiffs` interprets the
+    // descriptor-shaped DSL, so upsert must preserve that JSON shape exactly.
+    const transformedData = transformInputColumns(table, data);
     const values = toWriteRecordForOperation(
       "Upsert",
       transformedData,
@@ -1924,13 +1914,9 @@ export class Db {
     options?: UpdateOptions,
   ): WriteHandle {
     const client = this.getClient(table._schema);
-    const { ordinary, descriptors } = splitLargeValueUpdate(
-      data as Record<string, unknown>,
-      table._schema,
-      table._table,
-    );
-    rejectLargeValueDescriptorsInUpsert(descriptors);
-    const transformedData = transformInputColumns(table, ordinary);
+    // `edits` is valid ordinary JSON data. Only `applyDiffs` interprets the
+    // descriptor-shaped DSL, so upsert must preserve that JSON shape exactly.
+    const transformedData = transformInputColumns(table, data);
     const values = toWriteRecordForOperation(
       "Upsert",
       transformedData,

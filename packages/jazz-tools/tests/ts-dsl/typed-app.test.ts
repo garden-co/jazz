@@ -526,9 +526,13 @@ describe("typed app prototype", () => {
     if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
       // Whole-column updates continue to use the ordinary Db.update API; the
       // narrow LargeValueUpdateOf surface intentionally accepts only diffs.
-      const db = null as unknown as Pick<Db, "update">;
+      const db = null as unknown as Pick<Db, "update" | "upsert">;
       db.update(largeValueUpdateApp.documents, "00000000-0000-0000-0000-000000000001", {
         done: true,
+      });
+      db.upsert(largeValueUpdateApp.documents, "00000000-0000-0000-0000-000000000001", {
+        // @ts-expect-error partial descriptors belong exclusively to applyDiffs
+        title: { within: { from: 0, to: 1 }, splices: [{ at: 0, delete: 0, insert: "x" }] },
       });
 
       const byteUpdateWithText = {

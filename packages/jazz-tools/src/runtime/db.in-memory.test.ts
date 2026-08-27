@@ -145,4 +145,34 @@ describe("createDb in-memory driver", () => {
       metadata: 43,
     });
   });
+
+  it("keeps descriptor-shaped JSON values ordinary for direct and transactional upserts", async () => {
+    db = await createDb({
+      appId: "in-memory-large-value-json-upsert-shape-test",
+      driver: { type: "memory" },
+    });
+
+    const { value: inserted } = db.insert(largeValues.documents, {
+      payload: new Uint8Array(),
+      body: "body",
+      metadata: {},
+      done: false,
+    });
+    const direct = { edits: [{ op: "set", at: "/ordinary", value: "direct" }] };
+    await db
+      .upsert(largeValues.documents, inserted.id, { metadata: direct })
+      .wait({ tier: "local" });
+    await expect(
+      db.one(largeValues.documents.where({ id: inserted.id }), { tier: "local" }),
+    ).resolves.toMatchObject({ metadata: direct });
+
+    const transactional = { edits: [{ op: "set", at: "/ordinary", value: "transaction" }] };
+    const committed = await db.transaction((tx) => {
+      tx.upsert(largeValues.documents, inserted.id, { metadata: transactional });
+    });
+    await committed.wait({ tier: "local" });
+    await expect(
+      db.one(largeValues.documents.where({ id: inserted.id }), { tier: "local" }),
+    ).resolves.toMatchObject({ metadata: transactional });
+  });
 });
