@@ -2345,6 +2345,17 @@ fn outbox_release_requires_current_admitted_authority_receipt() {
     let edge_node = NodeUuid::from_bytes([0xe4; 16]);
     let authority_node = NodeUuid::from_bytes([0xa4; 16]);
     let edge = open_core(0xe4, AuthorSubject::SYSTEM, &schema);
+    let current_authority = open_core(0xa4, AuthorSubject::SYSTEM, &schema);
+    let (edge_current_transport, current_transport) =
+        duplex_with_admitted_session_context(identity, edge_node, 11, authority_node, 21);
+    let edge_current = block_on(edge.server.connect_upstream(edge_current_transport));
+    let current = current_authority.accept_subscriber(current_transport, identity);
+    let old_authority = open_core(0xa4, AuthorSubject::SYSTEM, &schema);
+    let (edge_old_transport, old_transport) =
+        duplex_with_admitted_session_context(identity, edge_node, 10, authority_node, 20);
+    let edge_old = block_on(edge.server.connect_upstream(edge_old_transport));
+    let old = old_authority.accept_subscriber(old_transport, identity);
+
     let client = open_db(0xc4, identity, &schema);
     let (client_transport, edge_transport) = duplex();
     let _client_upstream = block_on(client.connect_upstream(client_transport));
@@ -2381,19 +2392,9 @@ fn outbox_release_requires_current_admitted_authority_receipt() {
         "local authority acceptance must retain the future upstream upload"
     );
 
-    let old_authority = open_core(0xa4, AuthorSubject::SYSTEM, &schema);
-    let current_authority = open_core(0xa4, AuthorSubject::SYSTEM, &schema);
-    let (edge_old_transport, old_transport) =
-        duplex_with_admitted_session_context(identity, edge_node, 10, authority_node, 20);
-    let _edge_old = block_on(edge.server.connect_upstream(edge_old_transport));
-    let old = old_authority.accept_subscriber(old_transport, identity);
-    let (edge_current_transport, current_transport) =
-        duplex_with_admitted_session_context(identity, edge_node, 11, authority_node, 21);
-    let _edge_current = block_on(edge.server.connect_upstream(edge_current_transport));
-    let current = current_authority.accept_subscriber(current_transport, identity);
-    let current_context = edge.server.admitted_upstream_authorities.borrow()[1];
-    *edge.server.admitted_upstream_authority.borrow_mut() = Some(current_context);
-
+    // The superseded connection advertises the same authority node UUID, so
+    // physical admission epoch -- not just the node identity -- must guard
+    // outbox release.
     old.borrow_mut()
         .transport
         .send(SyncMessage::FateUpdate {
@@ -2413,7 +2414,67 @@ fn outbox_release_requires_current_admitted_authority_receipt() {
         "a direct terminal receipt from a superseded authority must not release the upload"
     );
 
+    // These are real admitted authority frames, but neither is a terminal
+    // Global acceptance: both must leave the canonical upload replayable.
     current
+        .borrow_mut()
+        .transport
+        .send(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Pending,
+            global_time: None,
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    edge.tick().unwrap();
+    assert!(
+        edge.server
+            .outbox
+            .borrow()
+            .iter()
+            .any(|pending| pending.tx_id == tx_id),
+        "a Pending/Global receipt without time must not release the upload"
+    );
+
+    current
+        .borrow_mut()
+        .transport
+        .send(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_time: None,
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    edge.tick().unwrap();
+    assert!(
+        edge.server
+            .outbox
+            .borrow()
+            .iter()
+            .any(|pending| pending.tx_id == tx_id),
+        "an Accepted/Global receipt without time must not release the upload"
+    );
+
+    // Disconnect every previous authority. The new admitted session must be
+    // sent the canonical unit again; if either nonterminal receipt had pruned
+    // it, this reconnect would have no upload to retransmit.
+    assert!(edge.server.detach_connection(&edge_current));
+    assert!(edge.server.detach_connection(&edge_old));
+    let reconnected_authority = open_core(0xa4, AuthorSubject::SYSTEM, &schema);
+    let (edge_reconnected_transport, reconnected_transport) =
+        duplex_with_admitted_session_context(identity, edge_node, 12, authority_node, 22);
+    let _edge_reconnected = block_on(edge.server.connect_upstream(edge_reconnected_transport));
+    let reconnected = reconnected_authority.accept_subscriber(reconnected_transport, identity);
+    edge.tick().unwrap();
+    assert!(
+        std::iter::from_fn(|| reconnected.borrow_mut().transport.try_recv()).any(
+            |message| matches!(message, SyncMessage::CommitUnit { tx, .. } if tx.tx_id == tx_id)
+        ),
+        "the retained canonical upload must be retransmitted after authority reconnect"
+    );
+
+    reconnected
         .borrow_mut()
         .transport
         .send(SyncMessage::FateUpdate {
@@ -2430,7 +2491,7 @@ fn outbox_release_requires_current_admitted_authority_receipt() {
             .borrow()
             .iter()
             .all(|pending| pending.tx_id != tx_id),
-        "the currently admitted authority's terminal receipt releases the upload"
+        "the current authority's time-bearing Global acceptance releases the upload"
     );
 }
 

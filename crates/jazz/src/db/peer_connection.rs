@@ -2265,13 +2265,16 @@ where
                                     SyncMessage::FateUpdate {
                                         tx_id,
                                         fate,
+                                        global_time,
                                         durability,
                                         ..
                                     } if current_authority_receipt_eligible
                                         && (matches!(fate, Fate::Rejected(_))
-                                            || durability.is_some_and(|tier| {
-                                                tier >= DurabilityTier::Global
-                                            })) =>
+                                            || (matches!(fate, Fate::Accepted)
+                                                && global_time.is_some()
+                                                && durability.is_some_and(|tier| {
+                                                    tier >= DurabilityTier::Global
+                                                }))) =>
                                     {
                                         Some(*tx_id)
                                     }

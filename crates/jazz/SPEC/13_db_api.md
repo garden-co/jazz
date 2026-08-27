@@ -46,7 +46,7 @@ Invariant digest:
 - `INV-API-33`: Ordinary `Db` reads and subscriptions MUST use client-local lowering: policy is enforced by the trusted upstream before emission and is never re-applied to received rows. Local/None reads scan locally available data; Edge/Global settled reads consume the identity-scoped settled view received upstream.
 - `INV-API-29`: A `Db` is a client: facade writes MUST keep `permission_subject == made_by`, and a `Db` MUST reject any attempt to attribute a write to another author. Cross-author attribution is a node-level concern on the ingest side (a trusted serving `Node`, `INV-RLS-18`, ch. 9), never a `Db` capability.
 - `INV-API-30`: Reopening persistent storage with the same `DbIdentity` MUST schedule every locally originated transaction that reached `Local` durability and has not reached terminal settlement for upstream delivery. Locally originated means `TxId.node == DbIdentity.node` and `Transaction.made_by == DbIdentity.author`; delivery is at-least-once by `TxId` and relies on idempotent authority handling.
-- `INV-API-34`: An edge outbox MUST retain an edge-accepted upload until an authenticated terminal fate receipt for that `TxId` arrives directly from the currently admitted upstream fate authority; local acceptance, hydrated state, staged/replayed updates, and receipts from detached or superseded authorities MUST NOT release it.
+- `INV-API-34`: An edge outbox MUST retain an edge-accepted upload until an authenticated terminal rejection or an `Accepted` receipt carrying both Global durability and an authority-assigned `GlobalTime` for that `TxId` arrives directly from the currently admitted upstream fate authority; local acceptance, hydrated state, staged/replayed updates, and receipts from detached or superseded authorities MUST NOT release it.
 - `INV-SYNC-30`: A fresh `Edge`/`Global` settled one-shot read MUST obtain settled authority coverage for its exact current usage-site subscription; an update for a detached predecessor MUST NOT satisfy it even when shape, binding, and options are equal. This freshness rule MUST NOT change local-read semantics or prevent reuse of still-live maintained subscription coverage.
 
   A durable browser relay is the narrow topology exception to the exact-node
@@ -320,10 +320,12 @@ that safe, while each individual connection still sends a `TxId` at most once.
 
 An edge-authority decision is likewise not permission to discard the edge's
 upstream outbox entry. The edge retains an edge-accepted upload until a terminal
-fate receipt for that `TxId` arrives directly on the authenticated connection
-to the currently admitted upstream fate authority. Local acceptance, view
-hydration, staged or replayed updates, and receipts associated with a detached
-or superseded authority cannot release the entry (`INV-API-34`, ch. 9).
+rejection, or an `Accepted` receipt that carries both Global durability and an
+authority-assigned `GlobalTime`, arrives for that `TxId` directly on the
+authenticated connection to the currently admitted upstream fate authority.
+Local acceptance, view hydration, staged or replayed updates, and receipts
+associated with a detached or superseded authority cannot release the entry
+(`INV-API-34`, ch. 9).
 
 Field-level semantics are the same regardless of the write method. An explicit
 null clears a nullable column. A JSON column accepts only syntactically valid
