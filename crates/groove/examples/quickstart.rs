@@ -21,7 +21,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
 
-    let storage = MemoryStorage::new(&["albums", "indices"]);
+    let storage =
+        MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(schema, storage).await?;
 
     let mut batch = database.open_batch();

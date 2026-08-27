@@ -2,7 +2,9 @@ name: Preview build (pkg.pr.new)
 
 on:
   pull_request:
-    types: [labeled]
+    # Keep previews current after the label opt-in. An unlabeled event cancels
+    # any in-flight preview when its last preview label is removed.
+    types: [labeled, unlabeled, synchronize, reopened]
 
 concurrency:
   group: preview-build-${{ github.event.pull_request.number }}
@@ -18,16 +20,40 @@ env:
 
 jobs:
   build:
-    if: github.event.label.name == 'preview-build'
+    # `preview-build` publishes a package preview using OIDC in the downstream
+    # job. Labels do not make fork code trusted, so every path through this
+    # reusable build is restricted to same-repository pull requests.
+    if: >-
+      ${{
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        (
+          contains(github.event.pull_request.labels.*.name, 'preview-build') ||
+          contains(github.event.pull_request.labels.*.name, 'rn-preview-release')
+        )
+      }}
     uses: ./.github/workflows/build-jazz-packages.yml
     secrets: inherit
     with:
       ref: ${{ github.event.pull_request.head.sha }}
       napi_matrix: '[{"os":"blacksmith-4vcpu-ubuntu-2404","target":"x86_64-unknown-linux-gnu","platform":"linux-x64-gnu","use_sccache":true},{"os":"blacksmith-6vcpu-macos-15","target":"x86_64-apple-darwin","platform":"darwin-x64","use_sccache":false},{"os":"blacksmith-6vcpu-macos-15","target":"aarch64-apple-darwin","platform":"darwin-arm64","use_sccache":false}]'
+      include_rn: >-
+        ${{
+          contains(github.event.pull_request.labels.*.name, 'rn-preview-release') &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        }}
 
   publish-pkg-pr-new:
     name: Publish to pkg.pr.new
-    if: github.event.label.name == 'preview-build'
+    if: >-
+      ${{
+        always() &&
+        needs.build.result == 'success' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        (
+          contains(github.event.pull_request.labels.*.name, 'preview-build') ||
+          contains(github.event.pull_request.labels.*.name, 'rn-preview-release')
+        )
+      }}
     needs: [build]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
@@ -86,3 +112,23 @@ jobs:
             './crates/jazz-napi/npm/darwin-x64' \
             './crates/jazz-napi/npm/darwin-arm64' \
             './packages/create-jazz'
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        if: >-
+          contains(github.event.pull_request.labels.*.name, 'rn-preview-release') &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        with:
+          name: pkg-jazz-rn
+          path: crates/jazz-rn
+
+      - name: Publish jazz-rn to pkg.pr.new
+        if: >-
+          contains(github.event.pull_request.labels.*.name, 'rn-preview-release') &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          pnpm exec pkg-pr-new publish \
+            --pnpm \
+            --comment=update \
+            --commentWithSha \
+            --packageManager=pnpm \
+            './crates/jazz-rn'

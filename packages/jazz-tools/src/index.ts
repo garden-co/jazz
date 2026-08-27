@@ -19,6 +19,7 @@ import {
 import type {
   App as TypedApp,
   InsertOf as TypedInsertOf,
+  LargeValueUpdateOf as TypedLargeValueUpdateOf,
   StreamingInsertOf as TypedStreamingInsertOf,
   StreamingUpdateOf as TypedStreamingUpdateOf,
   StreamingUpsertOf as TypedStreamingUpsertOf,
@@ -150,6 +151,7 @@ export type {
   TypedApp,
   RowOf,
   InsertOf,
+  LargeValueUpdateOf,
   StreamingInsertOf,
   StreamingUpdateOf,
   StreamingUpsertOf,
@@ -212,6 +214,8 @@ export namespace schema {
    * Input type for new rows inserted into a table (no `id`, respects optionals and defaults)
    */
   export type InsertOf<TTable> = TypedInsertOf<TTable>;
+  /** Input type for updating a row, including typed partial large-value descriptors. */
+  export type LargeValueUpdateOf<TTable> = TypedLargeValueUpdateOf<TTable>;
   /** Input type for inserting a row with one streamed Text, JSON, or Bytea column. */
   export type StreamingInsertOf<TTable> = TypedStreamingInsertOf<TTable>;
   export type StreamingUpdateOf<TTable> = TypedStreamingUpdateOf<TTable>;

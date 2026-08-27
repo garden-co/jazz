@@ -38,7 +38,7 @@ mod relay_topology {
             .collect::<Vec<_>>();
         block_on(Db::open(DbConfig::new(
             schema,
-            MemoryStorage::new(&refs),
+            MemoryStorage::new(&refs).expect("valid memory storage families"),
             DbIdentity {
                 node: NodeUuid::from_bytes([node; 16]),
                 author,
@@ -56,7 +56,7 @@ mod relay_topology {
             .collect::<Vec<_>>();
         block_on(Db::open_history_complete(DbConfig::new(
             schema,
-            MemoryStorage::new(&refs),
+            MemoryStorage::new(&refs).expect("valid memory storage families"),
             DbIdentity {
                 node: NodeUuid::from_bytes([node; 16]),
                 author: AuthorSubject::SYSTEM,

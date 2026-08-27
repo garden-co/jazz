@@ -1,4 +1,5 @@
-import { createJazzContext, Db, Session, type JazzContext } from "../backend/index.js";
+import { createJazzContext, Db, type JazzContext } from "../backend/index.js";
+import type { Session } from "../runtime/context.js";
 import type { WasmSchema } from "../drivers/types.js";
 import type { CompiledPermissions } from "../permissions/index.js";
 import { deploy } from "../dev/catalogue.js";

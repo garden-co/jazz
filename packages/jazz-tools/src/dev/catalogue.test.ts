@@ -51,7 +51,7 @@ import { schema as s } from ${JSON.stringify(new URL(indexImportPath, import.met
 import { app } from "./schema.ts";
 
 export default s.definePermissions(app, ({ policy, session }) => [
-  policy.todos.allowRead.where({ ownerId: session.user_id }),
+  policy.todos.allowRead.where({ ownerId: session.user }),
 ]);
 `;
 }

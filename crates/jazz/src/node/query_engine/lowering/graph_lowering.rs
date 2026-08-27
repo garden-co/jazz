@@ -3369,16 +3369,20 @@ pub(super) fn claim_value(
             ));
         }
     };
-    let [name] = path.0.as_slice() else {
-        return Err(UnsupportedReason::Operator(
-            "nested claim paths are not lowered yet".to_owned(),
-        ));
+    let name = match path.0.as_slice() {
+        [name] => name.clone(),
+        [claims, name] if claims == "claims" => crate::query::provider_claim_key(name),
+        _ => {
+            return Err(UnsupportedReason::Operator(
+                "unsupported session claim path".to_owned(),
+            ));
+        }
     };
-    if let Some(value) = claims.get(name) {
+    if let Some(value) = claims.get(&name) {
         return Ok(value.clone());
     }
     match name.as_str() {
-        "author" => Ok(Value::String(permission_subject.canonical().to_owned())),
+        "user" => Ok(Value::String(permission_subject.canonical().to_owned())),
         _ => Err(UnsupportedReason::UnboundClaim(path.clone())),
     }
 }

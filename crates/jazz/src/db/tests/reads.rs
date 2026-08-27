@@ -2053,12 +2053,12 @@ fn client_read_advice_is_unknown_even_when_a_local_winner_exists() {
         .node
         .node
         .borrow_mut()
-        .set_session_claims(owner, test_provider_claims(owner));
+        .set_test_provider_claims(owner, test_provider_claims(owner));
     other_db
         .node
         .node
         .borrow_mut()
-        .set_session_claims(other, test_provider_claims(other));
+        .set_test_provider_claims(other, test_provider_claims(other));
     let unit = core
         .node()
         .borrow_mut()

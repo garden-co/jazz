@@ -16,7 +16,7 @@ fn only_production_row_ids_enable_the_fresh_insert_proof() {
         .collect::<Vec<_>>();
     let production = block_on(Db::open(DbConfig::new(
         schema,
-        MemoryStorage::new(&refs),
+        MemoryStorage::new(&refs).expect("valid memory storage families"),
         DbIdentity {
             node: NodeUuid::from_bytes([0x12; 16]),
             author: AuthorSubject::for_test_bytes([0xa2; 16]),

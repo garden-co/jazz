@@ -685,12 +685,17 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     const dbName = uniqueDbName("catalogue-current-schema-rehydrate");
     const testingServer = await publishCatalogueSchemaFamily("catalogue-current-schema-rehydrate");
+    const jwtToken = await getJazzServerJwtForUser(
+      "catalogue-current-schema-rehydrate",
+      undefined,
+      testingServer.appId,
+    );
 
     const seeded = track(
       await createDb({
         appId: testingServer.appId,
         serverUrl: testingServer.serverUrl,
-        adminSecret: testingServer.adminSecret,
+        jwtToken,
         driver: { type: "persistent", dbName },
       }),
     );
@@ -719,7 +724,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       await createDb({
         appId: testingServer.appId,
         serverUrl: testingServer.serverUrl,
-        adminSecret: testingServer.adminSecret,
+        jwtToken,
         driver: { type: "persistent", dbName },
       }),
     );
@@ -737,7 +742,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       await createDb({
         appId: testingServer.appId,
         serverUrl: testingServer.serverUrl,
-        adminSecret: testingServer.adminSecret,
+        jwtToken,
         driver: { type: "persistent", dbName: uniqueDbName("catalogue-remote-authority") },
       }),
     );
@@ -1087,7 +1092,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     expect(rowsAtEdge.some((row) => row.id === insertedTodo.id)).toBe(true);
   }, 60000);
 
-  it("preserves admin write authority through the SharedWorker relay", async () => {
+  it("rejects backend credentials through the SharedWorker relay", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions(
       "sync-admin-write-authority",
       readOnlyPermissions,
@@ -1105,28 +1110,12 @@ describe("SharedWorker bridge with IndexedDB", () => {
       }),
     );
 
-    const inserted = db.insert(todos, {
-      title: `admin-write-${Date.now()}`,
-      done: false,
-    });
-    await withTimeout(inserted.wait({ tier: "edge" }), 10_000, "admin insert was rejected");
-
-    const updatedTitle = `admin-update-${Date.now()}`;
-    await withTimeout(
-      db.update(todos, inserted.value.id, { title: updatedTitle }).wait({ tier: "edge" }),
-      10_000,
-      "admin update was rejected",
+    // A browser worker is a persistent client runtime, never a trusted
+    // backend. Keeping backend credentials out of it avoids handing a
+    // privileged capability to browser storage or worker ports.
+    expect(() => db.insert(todos, { title: `backend-write-${Date.now()}`, done: false })).toThrow(
+      "Persistent browser workers require a verified client session",
     );
-
-    const rows = await waitForTodos(
-      db,
-      (current) =>
-        current.some((row) => row.id === inserted.value.id && row.title === updatedTitle),
-      "admin update should be authoritative",
-      15_000,
-      "edge",
-    );
-    expect(rows.find((row) => row.id === inserted.value.id)?.title).toBe(updatedTitle);
   });
 
   it("server permissions check rejects client optimistic insert - wait notification", async () => {
@@ -1316,7 +1305,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     }
   });
 
-  it("rehydrates rejected worker batches without replaying an absent runtime's notification", async () => {
+  it("delivers a rejection to a runtime attached while the worker rehydrates", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions(
       "sync-on-mutation-error-undelivered-restart",
       readOnlyPermissions,
@@ -1371,8 +1360,15 @@ describe("SharedWorker bridge with IndexedDB", () => {
       5000,
       "rejected transaction should not rehydrate into the restarted local view",
     );
-    await sleep(500);
-    expect(replayAfterRestartSpy).not.toHaveBeenCalled();
+    // This runtime is already attached when the restored worker receives the
+    // settlement, so it is a live notification rather than unsupported
+    // cross-lifecycle toast continuity. A later runtime still only observes
+    // the reconciled row state below.
+    await waitForCondition(
+      () => replayAfterRestartSpy.mock.calls.length === 1,
+      5000,
+      "attached runtime should receive the restored worker's live rejection",
+    );
 
     await dbAfterRestart.shutdown();
     untrack(dbAfterRestart);

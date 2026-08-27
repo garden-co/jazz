@@ -85,7 +85,7 @@ betterAuth({
           claims: { role: user.role ?? "" },
           username: user.name,
         }),
-        getSubject: ({ user }) => user.id, // becomes session.user_id in Jazz
+        getSubject: ({ user }) => user.id, // becomes session.user in Jazz
       },
     }),
   ],
@@ -108,7 +108,7 @@ on-disk storage in the Next app.
   into a short-lived JWT signed by Better Auth's managed ES256 key pair.
 - **`jwt` plugin** — manages JWKS key rotation and controls the JWT payload shape.
   `definePayload` injects `claims.role` and `username`; `getSubject` sets the JWT `sub` claim,
-  which Jazz surfaces as `session.user_id` on the client.
+  which Jazz surfaces as `session.user` on the client.
 
 The JWKS endpoint (`/api/auth/jwks`) is automatically provided by the `jwt` plugin and is what
 the Jazz sync server polls to verify every incoming token. The same sync server also accepts the

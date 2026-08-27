@@ -18,22 +18,31 @@ fi
 write_manifest() {
   local destination=$1
   shift
-  node - "$destination" "$abi" "$@" <<'NODE'
+  local source_revision
+  source_revision=${JAZZ_NATIVE_RELAY_SOURCE_REVISION:-$(git -C "$root" rev-parse HEAD)}
+  local cargo_ndk_version=${JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION:-}
+  node - "$destination" "$abi" "$source_revision" "$cargo_ndk_version" "$@" <<'NODE'
 const { createHash } = require("node:crypto");
 const { readdirSync, readFileSync, statSync, writeFileSync } = require("node:fs");
-const { join } = require("node:path");
-const [destination, abi, ...roots] = process.argv.slice(2);
+const { join, relative } = require("node:path");
+const [destination, abi, sourceRevision, cargoNdkVersion, ...roots] = process.argv.slice(2);
 const files = [];
-const visit = root => {
-  for (const name of readdirSync(root)) {
-    const path = join(root, name), stat = statSync(path);
-    if (stat.isDirectory()) visit(path);
-    else files.push([path, createHash("sha256").update(readFileSync(path)).digest("hex")]);
+const visit = (root, directory = root) => {
+  for (const name of readdirSync(directory).sort()) {
+    const path = join(directory, name), stat = statSync(path);
+    if (stat.isDirectory()) visit(root, path);
+    else if (stat.isFile()) {
+      files.push({
+        path: relative(root, path).split("\\").join("/"),
+        sha256: createHash("sha256").update(readFileSync(path)).digest("hex"),
+      });
+    } else throw new Error(`relay artifact is not a regular file: ${path}`);
   }
 };
 for (const root of roots) visit(root);
 if (!files.length) throw new Error("relay artifact build produced no static libraries");
-writeFileSync(destination, JSON.stringify({ nativeRelayAbi: Number(abi), files }, null, 2) + "\n");
+const toolchain = cargoNdkVersion ? { cargoNdk: cargoNdkVersion } : undefined;
+writeFileSync(destination, JSON.stringify({ format: 1, nativeRelayAbi: Number(abi), sourceRevision, toolchain, files }, null, 2) + "\n");
 NODE
 }
 
@@ -49,6 +58,16 @@ case "$platform" in
       exit 1
     }
     stage="$package/android/src/main/jniLibs"
+    detected_cargo_ndk_version=$(cargo ndk --version | sed -nE 's/.* ([0-9]+\.[0-9]+\.[0-9]+)$/\1/p')
+    if [[ -z "$detected_cargo_ndk_version" ]]; then
+      echo "could not determine cargo-ndk version" >&2
+      exit 1
+    fi
+    if [[ -n "${JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION:-}" && "$JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION" != "$detected_cargo_ndk_version" ]]; then
+      echo "cargo-ndk version $detected_cargo_ndk_version does not match requested $JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION" >&2
+      exit 1
+    fi
+    export JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="$detected_cargo_ndk_version"
     stage_header
     rm -rf "$stage"
     mkdir -p "$stage"
@@ -79,15 +98,17 @@ case "$platform" in
     done
     staging=$(mktemp -d)
     trap 'rm -rf "$staging"' EXIT
+    simulator_stage="$staging/simulator"
+    mkdir -p "$simulator_stage"
     lipo -create \
       "$root/target/aarch64-apple-ios-sim/release/libjazz_native_relay.a" \
       "$root/target/x86_64-apple-ios/release/libjazz_native_relay.a" \
-      -output "$staging/libjazz_native_relay_simulator.a"
+      -output "$simulator_stage/libjazz_native_relay.a"
     framework="$package/JazzNativeRelay.xcframework"
     rm -rf "$framework"
     xcodebuild -create-xcframework \
       -library "$root/target/$device_target/release/libjazz_native_relay.a" -headers "$root/crates/jazz-native-relay/include" \
-      -library "$staging/libjazz_native_relay_simulator.a" -headers "$root/crates/jazz-native-relay/include" \
+      -library "$simulator_stage/libjazz_native_relay.a" -headers "$root/crates/jazz-native-relay/include" \
       -output "$framework"
     write_manifest "$package/ios/jazz-native-relay.manifest.json" "$framework"
     ;;

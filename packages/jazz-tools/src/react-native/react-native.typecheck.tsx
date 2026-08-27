@@ -60,6 +60,7 @@ function Hooks({ children }: { children: ReactNode }) {
   db satisfies Db;
   client satisfies { db: Db; shutdown(): Promise<void> };
   session satisfies ReturnType<typeof useSession>;
+  if (session) session.user satisfies string;
   auth.secret satisfies string | null;
   todos satisfies ReturnType<typeof useAll<typeof app.todos._rowType>>;
   suspenseTodos satisfies Array<{ id: string; title: string; done?: boolean | null }>;

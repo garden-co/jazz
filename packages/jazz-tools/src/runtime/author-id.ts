@@ -1,8 +1,25 @@
-import type { Session } from "./context.js";
+import type { PublicSession, Session } from "./context.js";
 
 const canonicalAuthorDecoder = new TextDecoder("utf-8", { fatal: true });
 const STORED_SCALAR_INLINE_TAG = 2;
 const CANONICAL_AUTHOR_OPEN_BRACKET = 0x5b;
+const publicSessions = new WeakMap<Session, PublicSession>();
+
+function cloneAndFreezeClaim(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return Object.freeze(value.map(cloneAndFreezeClaim));
+  }
+  if (value !== null && typeof value === "object") {
+    const cloned = Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, nested]) => [
+        key,
+        cloneAndFreezeClaim(nested),
+      ]),
+    );
+    return Object.freeze(cloned);
+  }
+  return value;
+}
 
 export type CanonicalAuthorSubject = {
   issuer: string;
@@ -45,6 +62,32 @@ export function canonicalAuthorSubject(issuer: string, subject: string): string 
     throw new Error("Author issuer and subject must be portable and nonempty");
   }
   return JSON.stringify([issuer, subject]);
+}
+
+/**
+ * Attach the canonical logical user identity to a session crossing a public
+ * binding boundary. Never preserve a caller-provided `user`: credentials
+ * control `iss`/`sub`, and the identity is derived from those exact values.
+ *
+ * @internal Public bindings expose the resulting `PublicSession`; applications
+ * should read `session.user` instead of reproducing this encoding.
+ */
+export function withCanonicalUser(session: Session): PublicSession {
+  const existing = publicSessions.get(session);
+  if (existing) return existing;
+  const user = canonicalAuthorSubject(session.issuer, session.user_id);
+  const claims = cloneAndFreezeClaim({
+    ...session.claims,
+    iss: session.issuer,
+    sub: session.user_id,
+  }) as Readonly<Record<string, unknown>>;
+  const published: PublicSession = Object.freeze({
+    user,
+    claims,
+    authMode: session.authMode,
+  });
+  publicSessions.set(session, published);
+  return published;
 }
 
 export function parseCanonicalAuthorSubject(value: string): CanonicalAuthorSubject | null {

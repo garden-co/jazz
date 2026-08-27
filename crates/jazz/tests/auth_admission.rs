@@ -48,9 +48,19 @@ fn signed_external_jwt_preserves_exact_issuer_and_subject() {
         r#"[" https://issuer.example "," user "]"#
     );
     assert_eq!(
-        admitted.claims.get("iss"),
+        admitted.claims.get("\0claims:role"),
+        Some(&Value::String("editor".to_owned()))
+    );
+    assert_eq!(
+        admitted.claims.get("\0claims:iss"),
         Some(&Value::String(" https://issuer.example ".to_owned()))
     );
+    assert_eq!(
+        admitted.claims.get("\0claims:sub"),
+        Some(&Value::String(" user ".to_owned()))
+    );
+    assert!(!admitted.claims.contains_key("iss"));
+    assert!(!admitted.claims.contains_key("sub"));
 }
 
 #[test]

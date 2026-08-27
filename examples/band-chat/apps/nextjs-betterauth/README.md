@@ -16,7 +16,7 @@ product slice, not another generic Todo tutorial.
 - A room creator may bootstrap their own membership and admit another profile.
   The room UI lists members and lets its issuer-scoped creator admit or remove
   them. A guest cannot add themself. A message must reference a profile owned by
-  the authenticated canonical `session.author`. Profiles and memberships store
+  the authenticated canonical `session.user`. Profiles and memberships store
   that same `[issuer, subject]` identity, so equal raw Better Auth user ids from
   different issuers cannot inherit one another's profile, rooms, membership, or
   send authority. Revocation rejects subsequent writes at the serving authority;
