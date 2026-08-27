@@ -346,6 +346,17 @@ pub(super) fn history_top_by_stamp_asc(limit: u64) -> GraphBuilder {
     )
 }
 
+pub(super) fn history_top_by_stamp_asc_unbounded() -> GraphBuilder {
+    GraphBuilder::top_by(
+        GraphBuilder::table("history"),
+        ["row"],
+        [TopByOrder::asc("stamp")],
+        ["node"],
+        0,
+        TopByLimit::Unbounded,
+    )
+}
+
 pub(super) fn history_top_by_stamp_desc(limit: u64) -> GraphBuilder {
     GraphBuilder::top_by(
         GraphBuilder::table("history"),

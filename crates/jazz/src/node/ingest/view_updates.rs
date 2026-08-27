@@ -757,8 +757,10 @@ where
         start: TxId,
         target: TxId,
     ) -> Result<bool, Error> {
-        #[cfg(test)]
-        MERGE_HEAD_REACHABILITY_WALKS.fetch_add(1, Ordering::Relaxed);
+        #[cfg(any(test, feature = "testing"))]
+        {
+            self.merge_head_reachability_walks += 1;
+        }
         let mut stack = vec![start];
         let mut seen = BTreeSet::new();
         while let Some(tx_id) = stack.pop() {
@@ -791,8 +793,10 @@ where
         start: TxId,
         target: TxId,
     ) -> Result<bool, Error> {
-        #[cfg(test)]
-        MERGE_HEAD_REACHABILITY_WALKS.fetch_add(1, Ordering::Relaxed);
+        #[cfg(any(test, feature = "testing"))]
+        {
+            self.merge_head_reachability_walks += 1;
+        }
         let mut stack = vec![start];
         let mut seen = BTreeSet::new();
         while let Some(tx_id) = stack.pop() {
