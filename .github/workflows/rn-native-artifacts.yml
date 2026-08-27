@@ -16,6 +16,9 @@ on:
 permissions:
   contents: read
 
+env:
+  JAZZ_RN_CARGO_NDK_VERSION: 4.1.2
+
 concurrency:
   # An unlabeled run has no jobs, but still cancels stale work for this PR.
   group: rn-native-artifacts-${{ github.event.pull_request.number || github.ref }}
@@ -45,13 +48,14 @@ jobs:
         with:
           toolchain: 1.93.1
           targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
-      - run: cargo install cargo-ndk --locked
+      - run: cargo install cargo-ndk@${{ env.JAZZ_RN_CARGO_NDK_VERSION }} --locked
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
       - run: sdkmanager --install "ndk;27.1.12297006"
       - run: pnpm --filter jazz-rn build:relay:android
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/27.1.12297006
-      - run: JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" node crates/jazz-rn/scripts/verify-relay-artifacts.mjs android
+          JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION: ${{ env.JAZZ_RN_CARGO_NDK_VERSION }}
+      - run: JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" node crates/jazz-rn/scripts/verify-relay-artifacts.mjs android
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-rn-relay-android
