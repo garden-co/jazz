@@ -799,8 +799,8 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const received: Todo[][] = [];
 
     const unsub = trackSubscription(
-      db.subscribeAll(allTodos, (delta) => {
-        received.push([...(delta.all ?? [])]);
+      db.subscribe(allTodos, (rows) => {
+        received.push(rows);
       }),
     );
 
@@ -834,8 +834,8 @@ describe("SharedWorker bridge with IndexedDB", () => {
       value: { id: projectId },
     } = db.insert(projects, { name: "Observed Project" });
     const unsub = trackSubscription(
-      db.subscribeAll(todosByProject(projectId), (delta) => {
-        received.push([...(delta.all ?? [])]);
+      db.subscribe(todosByProject(projectId), (rows) => {
+        received.push(rows);
       }),
     );
 
@@ -905,10 +905,10 @@ describe("SharedWorker bridge with IndexedDB", () => {
     );
     const snapshots: Todo[][] = [];
     const unsubscribe = trackSubscription(
-      fresh.subscribeAll(
+      fresh.subscribe(
         todosByProject(projectId),
-        (delta) => {
-          snapshots.push([...(delta.all ?? [])]);
+        (rows) => {
+          snapshots.push(rows);
         },
         { tier: "global" },
       ),
@@ -948,8 +948,8 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const targetId = insertedIds[0];
     const received: Todo[][] = [];
     const unsub = trackSubscription(
-      db.subscribeAll(todos.where({ id: targetId }), (delta) => {
-        received.push([...(delta.all ?? [])]);
+      db.subscribe(todos.where({ id: targetId }), (rows) => {
+        received.push(rows);
       }),
     );
 
@@ -995,8 +995,8 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const targetId = insertedIds[0];
     const received: Todo[][] = [];
     const unsub = trackSubscription(
-      db.subscribeAll(todos.where({ id: targetId }), (delta) => {
-        received.push([...(delta.all ?? [])]);
+      db.subscribe(todos.where({ id: targetId }), (rows) => {
+        received.push(rows);
       }),
     );
 
@@ -1858,10 +1858,10 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     const snapshots: Todo[][] = [];
     const unsub = trackSubscription(
-      dbA.subscribeAll(
+      dbA.subscribe(
         allTodos,
-        (delta) => {
-          snapshots.push([...(delta.all ?? [])]);
+        (rows) => {
+          snapshots.push(rows);
         },
         { propagation: "local-only" },
       ),
@@ -1911,10 +1911,10 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     const snapshots: Todo[][] = [];
     const unsub = trackSubscription(
-      dbB.subscribeAll(
+      dbB.subscribe(
         allTodos,
-        (delta) => {
-          snapshots.push([...(delta.all ?? [])]);
+        (rows) => {
+          snapshots.push(rows);
         },
         { propagation: "local-only" },
       ),
@@ -1979,14 +1979,11 @@ describe("SharedWorker bridge with IndexedDB", () => {
     await Promise.all([dbA.all(allTodos, { tier: "local" }), dbB.all(allTodos, { tier: "local" })]);
 
     const receivedByLeader: string[] = [];
-    const unsubscribe = dbA.subscribeAll(
-      allTodos as QueryBuilder<Todo & { id: string }>,
-      (delta) => {
-        for (const todo of delta.all ?? []) {
-          receivedByLeader.push(todo.title);
-        }
-      },
-    );
+    const unsubscribe = dbA.subscribe(allTodos as QueryBuilder<Todo & { id: string }>, (rows) => {
+      for (const todo of rows) {
+        receivedByLeader.push(todo.title);
+      }
+    });
 
     dbB.insert(todos, { title: "Routed through SharedWorker", done: false });
 
@@ -2393,8 +2390,8 @@ describe("SharedWorker bridge with IndexedDB", () => {
     );
     const snapshots: Todo[][] = [];
     const unsubscribe = trackSubscription(
-      second.subscribeAll(allTodos, (delta) => {
-        snapshots.push([...(delta.all ?? [])]);
+      second.subscribe(allTodos, (rows) => {
+        snapshots.push(rows);
       }),
     );
 

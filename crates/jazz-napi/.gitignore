@@ -6,3 +6,4 @@ index.js
 .napi-stage-*/
 native-loader.cjs
 native-binding.pointer.cjs
+correctness-native-binding.pointer.cjs

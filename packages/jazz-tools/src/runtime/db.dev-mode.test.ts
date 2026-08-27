@@ -47,7 +47,7 @@ async function makeDb(devMode?: boolean): Promise<Db> {
 describe("Db devMode active query tracing", () => {
   it("does not expose traces when devMode is disabled", async () => {
     const db = await makeDb(false);
-    const unsubscribe = db.subscribeAll(makeQuery(), () => undefined);
+    const unsubscribe = db.subscribe(makeQuery(), () => undefined);
 
     expect(db.getActiveQuerySubscriptions()).toEqual([]);
 
@@ -61,7 +61,7 @@ describe("Db devMode active query tracing", () => {
       observed.push(traces.map((trace) => ({ ...trace })));
     });
 
-    const unsubscribe = db.subscribeAll(makeQuery(), () => undefined);
+    const unsubscribe = db.subscribe(makeQuery(), () => undefined);
     const [trace] = db.getActiveQuerySubscriptions();
 
     expect(trace?.table).toBe("todos");
@@ -83,7 +83,7 @@ describe("Db devMode active query tracing", () => {
   it("filters hidden subscriptions out of the inspector list", async () => {
     const db = await makeDb(true);
 
-    const unsubscribe = db.subscribeAll(makeQuery(), () => undefined, {
+    const unsubscribe = db.subscribe(makeQuery(), () => undefined, {
       visibility: "hidden_from_live_query_list",
     });
 
@@ -94,7 +94,7 @@ describe("Db devMode active query tracing", () => {
 
   it("records explicit tier overrides", async () => {
     const db = await makeDb(true);
-    const unsubscribe = db.subscribeAll(makeQuery(), () => undefined, {
+    const unsubscribe = db.subscribe(makeQuery(), () => undefined, {
       tier: "edge",
       propagation: "local-only",
     });
@@ -130,7 +130,7 @@ describe("Db devMode active query tracing", () => {
       observed.push(traces.map((trace) => ({ ...trace })));
     });
 
-    db.subscribeAll(makeQuery(), () => undefined);
+    db.subscribe(makeQuery(), () => undefined);
     await db.shutdown();
     dbs.splice(dbs.indexOf(db), 1);
 

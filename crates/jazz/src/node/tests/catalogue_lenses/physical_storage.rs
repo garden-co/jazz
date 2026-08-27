@@ -476,19 +476,19 @@ fn shared_deletion_history_keeps_same_row_uuid_table_scoped() {
 
 #[test]
 fn changed_merge_semantics_start_a_new_physical_column_epoch() {
-    // The stored scalar representation remains U64, but counter and LWW cells
+    // The stored scalar representation remains I32, but counter and LWW cells
     // cannot share one physical column identity or its derived indexes.
     let base = build_public_test_schema(
         PublicSchemaBuilder::new().table(
             PublicTableSchemaBuilder::new("counts")
-                .column("value", PublicColumnType::Timestamp),
+                .column("value", PublicColumnType::Integer),
         ),
     );
     let evolved = SchemaVersion::new(compile_public_test_schema(
         &[(
             PublicTableName::new("counts"),
             PublicTableSchema::new(PublicRowDescriptor::new(vec![
-                PublicColumnDescriptor::new("value", PublicColumnType::Timestamp)
+                PublicColumnDescriptor::new("value", PublicColumnType::Integer)
                     .merge_strategy(PublicColumnMergeStrategy::Counter),
             ])),
         )]

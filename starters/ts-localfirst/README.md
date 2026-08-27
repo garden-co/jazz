@@ -48,15 +48,14 @@ Every browser gets its own Ed25519 secret, generated and stored by
 Each widget receives the `Db` handle and wires its DOM straight to it:
 
 ```ts
-return db.subscribeAll(app.todos, (delta) => {
-  list.replaceChildren(...delta.all.map(renderRow));
+return db.subscribe(app.todos, (todos) => {
+  list.replaceChildren(...todos.map(renderRow));
 });
 ```
 
 The subscription callback fires on every change with the full materialised
-result set in `delta.all`. The widget rebuilds its `<ul>` on each tick —
-simple, fast enough for the kinds of lists a starter needs, and easy to
-swap for per-row patches via `delta.delta` if you ever need them.
+result set. The widget rebuilds its `<ul>` on each tick — simple and fast
+enough for the kinds of lists a starter needs.
 
 Data syncs to the Jazz server under the device's anonymous identity. There
 is no concept of a user account, no sign-in, no sign-out — the device _is_

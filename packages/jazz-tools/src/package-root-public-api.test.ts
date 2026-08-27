@@ -175,6 +175,7 @@ void (null as unknown as PackageRootBeginBatch);
 void (null as unknown as PackageRootBatch);
 
 const internalRuntimeExports = [
+  "RowChangeKind",
   "NativeRuntimeAdapter",
   "WebSocketCarrier",
   "encodeSchema",
@@ -226,6 +227,7 @@ const removedBrowserRuntimeExportNames = [
   "createBrowserBrokerClient",
   "createSyncTransport",
   "createWithWorker",
+  "applySubscriptionDelta",
 ] as const;
 
 const removedBrowserRuntimeExportPathFragments = [
@@ -304,7 +306,6 @@ describe("package root public API", () => {
       "BrowserAuthSecretStore",
       "Db",
       "PersistedWriteRejectedError",
-      "RowChangeKind",
       "Transaction",
       "createDb",
       "fetchSchemaHashes",

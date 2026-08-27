@@ -1,5 +1,5 @@
 import { applySubscriptionDelta, type SubscriptionDelta } from "./runtime/subscription-manager.js";
-import type { QueryBuilder, QueryOptions } from "./runtime/db.js";
+import type { DbSubscriptionSource, QueryBuilder, QueryOptions } from "./runtime/db.js";
 import type { Session } from "./runtime/context.js";
 
 type UseAllStatePending<T> = {
@@ -15,7 +15,7 @@ type UseAllStatefulfilledData<T> = {
   error: null;
 };
 
-type UseAllStateError<T> = {
+type UseAllStateError = {
   status: "rejected";
   data: undefined;
   error: unknown;
@@ -24,7 +24,7 @@ type UseAllStateError<T> = {
 export type UseAllState<T extends { id: string }> =
   | UseAllStatePending<T>
   | UseAllStatefulfilledData<T>
-  | UseAllStateError<T>;
+  | UseAllStateError;
 
 export type QueryEntryCallbacks<T extends { id: string }> = {
   onfulfilled?: (data: T[]) => void;
@@ -165,20 +165,6 @@ const SHARED_PENDING: UseAllStatePending<any> = {
   error: null,
 };
 
-interface DbLike {
-  all?<T extends { id: string }>(
-    query: QueryBuilder<T>,
-    options?: QueryOptions,
-    session?: Session,
-  ): Promise<T[]> | T[];
-  subscribeAll<T extends { id: string }>(
-    query: QueryBuilder<T>,
-    callback: (delta: SubscriptionDelta<T>) => void,
-    options?: QueryOptions,
-    session?: Session,
-  ): () => void;
-}
-
 export class SubscriptionsOrchestrator {
   private readonly cleanupDelayMs = 30_000;
   private readonly entries = new Map<string, InternalCacheEntry<any>>();
@@ -190,7 +176,7 @@ export class SubscriptionsOrchestrator {
 
   constructor(
     private readonly config: { appId: string },
-    private readonly db: DbLike,
+    private readonly db: DbSubscriptionSource,
     session?: Session | null,
   ) {
     this.session = session;
@@ -401,7 +387,7 @@ export class SubscriptionsOrchestrator {
   private subscribeEntry<T extends { id: string }>(entry: InternalCacheEntry<T>): void {
     const generation = entry.generation;
     try {
-      entry.unsubscribe = this.db.subscribeAll<T>(
+      entry.unsubscribe = this.db.subscribeDelta<T>(
         entry.query,
         (delta) => {
           if (entry.generation !== generation) return;
@@ -441,7 +427,7 @@ export class SubscriptionsOrchestrator {
         this.session ?? undefined,
       );
     } catch (error) {
-      // Only a synchronous setup (protocol-level) failure from `subscribeAll`
+      // Only a synchronous setup (protocol-level) failure from the delta source
       // lands here and drives the entry to `rejected`. Data-level errors inside
       // an established subscription flow through the subscription's own on-error
       // channel and do not reject the entry; that separation is intentional.

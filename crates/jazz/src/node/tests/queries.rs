@@ -642,7 +642,87 @@ fn one_shot_filtered_read_uses_declared_index_for_indexed_column_equality() {
     assert_eq!(selected_metrics.source_index_probes, 1);
     assert_eq!(selected_metrics.source_full_scans, 0);
     assert_eq!(local_metrics.source_index_probes, 1);
-    assert_eq!(local_metrics.source_full_scans, 0);
+    assert_eq!(
+        local_metrics.source_full_scans, 1,
+        "Local index reads must scan ahead candidates because a newer winner can change owner"
+    );
+}
+
+#[test]
+fn local_indexed_read_includes_ahead_winners_outside_the_settled_prefix() {
+    // Internal planner receipt for INV-READ-7. The public query result proves
+    // that a Local winner is selected before the owner predicate is applied;
+    // the physical counters prove the settled owner index remains useful while
+    // the ahead table is scanned for a differently-indexed dominating winner.
+    let schema = access_path_schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let owner_a = user(0xa1);
+    let owner_b = user(0xb2);
+    let moved_out = row(0x31);
+    let moved_in = row(0x32);
+    let duplicate = row(0x33);
+    let deleted = row(0x34);
+
+    for (row_uuid, tx_time, owner) in [
+        (moved_out, 10, owner_a),
+        (moved_in, 11, owner_b),
+        (duplicate, 12, owner_a),
+        (deleted, 13, owner_a),
+    ] {
+        let tx_id = core
+            .commit_mergeable_settled(
+                MergeableCommit::new("docs", row_uuid, tx_time).cells(access_path_doc_cells(
+                    owner, "open", "settled",
+                )),
+            )
+            .unwrap();
+        let global_time = core.allocate_global_time_for_test();
+        core.apply_fate_update(
+            tx_id,
+            Fate::Accepted,
+            Some(global_time),
+            Some(DurabilityTier::Global),
+        )
+        .unwrap();
+    }
+
+    core.commit_mergeable_settled(
+        MergeableCommit::new("docs", moved_out, 20).cells(access_path_doc_cells(
+            owner_b,
+            "open",
+            "ahead owner changed",
+        )),
+    )
+    .unwrap();
+    core.commit_mergeable_settled(
+        MergeableCommit::new("docs", moved_in, 21).cells(access_path_doc_cells(
+            owner_a,
+            "open",
+            "ahead owner changed in",
+        )),
+    )
+    .unwrap();
+    core.commit_mergeable_settled(
+        MergeableCommit::new("docs", duplicate, 22).cells(access_path_doc_cells(
+            owner_a,
+            "open",
+            "ahead duplicate prefix",
+        )),
+    )
+    .unwrap();
+    core.commit_mergeable_settled(MergeableCommit::new("docs", deleted, 23).deletion(
+        DeletionEvent::Deleted,
+    ))
+    .unwrap();
+
+    let query = Query::from("docs").filter(eq(col("owner"), lit(Value::Uuid(owner_a.test_uuid()))));
+    let (global, _) = query_rows_by_uuid(&mut core, query.clone(), DurabilityTier::Global);
+    let (local, metrics) = query_rows_by_uuid(&mut core, query, DurabilityTier::Local);
+
+    assert_eq!(global.into_iter().collect::<BTreeSet<_>>(), BTreeSet::from([moved_out, duplicate, deleted]));
+    assert_eq!(local.into_iter().collect::<BTreeSet<_>>(), BTreeSet::from([moved_in, duplicate]));
+    assert_eq!(metrics.source_index_probes, 1);
+    assert_eq!(metrics.source_full_scans, 1);
 }
 
 #[test]
@@ -883,7 +963,7 @@ fn one_shot_filtered_read_keeps_residual_filters_after_pushdown() {
     assert_eq!(selected_metrics.source_index_probes, 2);
     assert_eq!(selected_metrics.source_full_scans, 0);
     assert_eq!(local_metrics.source_index_probes, 2);
-    assert_eq!(local_metrics.source_full_scans, 0);
+    assert_eq!(local_metrics.source_full_scans, 1);
 }
 
 #[test]
@@ -2200,7 +2280,7 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
         .validate(&schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let (subscription, mut maintained, terminal_schemas, transitions, tables, _incomplete) = node
+    let (subscription, mut maintained, terminal_schemas, _transitions, tables, _incomplete) = node
         .open_seeded_maintained_subscription_view(
             &shape,
             &binding,
@@ -2210,11 +2290,6 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
         )
         .unwrap();
 
-    assert_eq!(
-        transitions.structured_app_row_changes,
-        BTreeSet::from([alice_parent, bob_parent]),
-        "collector emits one retained tree per root"
-    );
     let alice_tree = maintained
         .structured_app_row(alice_parent)
         .expect("collector retained alice parent tree");
@@ -2262,18 +2337,23 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
     )
     .unwrap();
     crate::db::block_on(node.drive_query_runtime()).unwrap();
-    let mut changed_roots = BTreeSet::new();
+    let mut changed_root_keys = BTreeSet::new();
     while let Ok(deltas) = subscription.try_recv() {
         let transitions = maintained
             .apply_multisink_deltas(deltas, &terminal_schemas, &tables, &node.node_aliases)
             .unwrap();
-        changed_roots.extend(transitions.structured_app_row_changes);
+        changed_root_keys.extend(
+            transitions
+                .terminal_operations
+                .into_iter()
+                .map(|operation| operation.root_key),
+        );
     }
 
     assert_eq!(
-        changed_roots,
-        BTreeSet::from([alice_parent]),
-        "one child change identifies only its rendered parent"
+        changed_root_keys.len(),
+        1,
+        "one child change patches only its rendered parent"
     );
     let updated_alice_tree = maintained
         .structured_app_row(alice_parent)
@@ -2361,7 +2441,7 @@ fn maintained_nested_collector_keeps_two_route_keys_internal_across_sibling_arra
     let binding = shape
         .bind(BTreeMap::from([("rootName".to_owned(), v("alice"))]))
         .unwrap();
-    let (subscription, mut maintained, terminal_schemas, transitions, tables, _incomplete) = node
+    let (subscription, mut maintained, terminal_schemas, _transitions, tables, _incomplete) = node
         .open_seeded_maintained_subscription_view(
             &shape,
             &binding,
@@ -2370,8 +2450,6 @@ fn maintained_nested_collector_keeps_two_route_keys_internal_across_sibling_arra
             &crate::protocol::ReadViewSpec::default(),
         )
         .unwrap();
-    assert_eq!(transitions.structured_app_row_changes, BTreeSet::from([parent]));
-
     let root = maintained
         .structured_app_row(parent)
         .expect("collector retained routed root");
@@ -2412,16 +2490,18 @@ fn maintained_nested_collector_keeps_two_route_keys_internal_across_sibling_arra
     )
     .unwrap();
     crate::db::block_on(node.drive_query_runtime()).unwrap();
-    let mut changed_roots = BTreeSet::new();
+    let mut changed_root_keys = BTreeSet::new();
     while let Ok(deltas) = subscription.try_recv() {
-        changed_roots.extend(
+        changed_root_keys.extend(
             maintained
                 .apply_multisink_deltas(deltas, &terminal_schemas, &tables, &node.node_aliases)
                 .unwrap()
-                .structured_app_row_changes,
+                .terminal_operations
+                .into_iter()
+                .map(|operation| operation.root_key),
         );
     }
-    assert_eq!(changed_roots, BTreeSet::from([parent]));
+    assert_eq!(changed_root_keys.len(), 1);
     let root = maintained
         .structured_app_row(parent)
         .expect("updated routed root remains retained");

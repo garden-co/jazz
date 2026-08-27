@@ -1023,8 +1023,6 @@ where
         #[cfg(feature = "testing")] mut receipt: Option<&mut NodeOpenReceipt>,
     ) -> Result<(), Error> {
         self.ahead_current_keys.clear();
-        self.ahead_current_rows.clear();
-        self.ahead_current_latest.clear();
         let physical_table_ids = self
             .catalogue
             .physical_mappings
@@ -1032,83 +1030,31 @@ where
             .flat_map(|mapping| mapping.tables.values().map(|table| table.table_id))
             .collect::<BTreeSet<_>>();
         for table_id in physical_table_ids {
+            let content_table = physical_ahead_current_table_name(table_id);
             let content_rows = self
                 .database
-                .primary_key_scan_raw(&physical_ahead_current_table_name(table_id), &[])
-                .await?
-                .into_iter()
-                .map(|raw| {
-                    let record = raw.record();
-                    Ok((
-                        BranchKey::from_canonical_bytes(
-                            record.get_bytes(GlobalCurrentRowRecord::FIELD_BRANCH_KEY_IDX)?,
-                        )
-                        .map_err(|_| Error::InvalidStoredValue("invalid ahead-current branch key"))?,
-                        SchemaVersionAlias(
-                            record.get_u64(GlobalCurrentRowRecord::FIELD_SCHEMA_VERSION_IDX)?,
-                        ),
-                        RowUuid(record.get_uuid(GlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?),
-                        TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?),
-                        NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?),
-                    ))
-                })
-                .collect::<Result<Vec<_>, Error>>()?;
-            for (branch_key, alias, row_uuid, tx_time, tx_node_alias) in content_rows {
+                .primary_key_scan_raw(&content_table, &[])
+                .await?;
+            for raw in content_rows {
                 #[cfg(feature = "testing")]
                 if let Some(receipt) = &mut receipt {
                     receipt.ahead_current_entries += 1;
                 }
-                self.insert_ahead_current_key(
-                    self.logical_table_for_physical_alias(table_id, alias)?,
-                    branch_key,
-                    VersionLayer::Content,
-                    row_uuid,
-                    tx_time,
-                    tx_node_alias,
-                );
+                self.ahead_current_keys
+                    .insert((table_id, VersionLayer::Content, raw.key().to_vec()));
             }
+            let deletion_table = physical_register_ahead_current_table_name(table_id);
             let deletion_rows = self
                 .database
-                .primary_key_scan_raw(&physical_register_ahead_current_table_name(table_id), &[])
-                .await?
-                .into_iter()
-                .map(|raw| {
-                    let record = raw.record();
-                    Ok((
-                        BranchKey::from_canonical_bytes(
-                            record.get_bytes(
-                                RegisterGlobalCurrentRowRecord::FIELD_BRANCH_KEY_IDX,
-                            )?,
-                        )
-                        .map_err(|_| Error::InvalidStoredValue("invalid ahead-current branch key"))?,
-                        SchemaVersionAlias(
-                            record.get_u64(
-                                RegisterGlobalCurrentRowRecord::FIELD_SCHEMA_VERSION_IDX,
-                            )?,
-                        ),
-                        RowUuid(
-                            record.get_uuid(RegisterGlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?,
-                        ),
-                        TxTime(record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?),
-                        NodeAlias(
-                            record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?,
-                        ),
-                    ))
-                })
-                .collect::<Result<Vec<_>, Error>>()?;
-            for (branch_key, alias, row_uuid, tx_time, tx_node_alias) in deletion_rows {
+                .primary_key_scan_raw(&deletion_table, &[])
+                .await?;
+            for raw in deletion_rows {
                 #[cfg(feature = "testing")]
                 if let Some(receipt) = &mut receipt {
                     receipt.ahead_current_entries += 1;
                 }
-                self.insert_ahead_current_key(
-                    self.logical_table_for_physical_alias(table_id, alias)?,
-                    branch_key,
-                    VersionLayer::Deletion,
-                    row_uuid,
-                    tx_time,
-                    tx_node_alias,
-                );
+                self.ahead_current_keys
+                    .insert((table_id, VersionLayer::Deletion, raw.key().to_vec()));
             }
         }
         Ok(())
@@ -1116,74 +1062,22 @@ where
 
     fn insert_ahead_current_key(
         &mut self,
-        table: String,
-        branch_key: BranchKey,
+        table_id: PhysicalTableId,
         layer: VersionLayer,
-        row_uuid: RowUuid,
-        tx_time: TxTime,
-        tx_node_alias: NodeAlias,
+        encoded_primary_key: Vec<u8>,
     ) {
         self.ahead_current_keys
-            .insert((table.clone(), branch_key, layer, row_uuid, tx_time, tx_node_alias));
-        self.ahead_current_rows.insert((table.clone(), row_uuid));
-        self.ahead_current_latest
-            .entry((table, layer, row_uuid))
-            .and_modify(|latest| {
-                if (tx_time, tx_node_alias) > *latest {
-                    *latest = (tx_time, tx_node_alias);
-                }
-            })
-            .or_insert((tx_time, tx_node_alias));
+            .insert((table_id, layer, encoded_primary_key));
     }
 
     fn remove_ahead_current_key(
         &mut self,
-        table: &str,
-        branch_key: &BranchKey,
+        table_id: PhysicalTableId,
         layer: VersionLayer,
-        row_uuid: RowUuid,
-        tx_time: TxTime,
-        tx_node_alias: NodeAlias,
+        encoded_primary_key: Vec<u8>,
     ) {
-        let table_key = table.to_owned();
-        self.ahead_current_keys.remove(&(
-            table_key.clone(),
-            branch_key.clone(),
-            layer,
-            row_uuid,
-            tx_time,
-            tx_node_alias,
-        ));
-        let latest_key = (table_key.clone(), layer, row_uuid);
-        if self.ahead_current_latest.get(&latest_key) == Some(&(tx_time, tx_node_alias)) {
-            if let Some((_, _, _, _, next_time, next_alias)) = self
-                .ahead_current_keys
-                .iter()
-                .filter(|(candidate_table, _, candidate_layer, candidate_row, _, _)| {
-                    candidate_table == &table_key
-                        && *candidate_layer == layer
-                        && *candidate_row == row_uuid
-                })
-                .max_by_key(|(_, _, _, _, time, alias)| (*time, *alias))
-                .cloned()
-            {
-                self.ahead_current_latest
-                    .insert(latest_key, (next_time, next_alias));
-            } else {
-                self.ahead_current_latest.remove(&latest_key);
-            }
-        }
-        if !self.ahead_current_latest.contains_key(&(
-            table_key.clone(),
-            VersionLayer::Content,
-            row_uuid,
-        )) && !self.ahead_current_latest.contains_key(&(
-            table_key.clone(),
-            VersionLayer::Deletion,
-            row_uuid,
-        )) {
-            self.ahead_current_rows.remove(&(table_key, row_uuid));
-        }
+        self.ahead_current_keys
+            .remove(&(table_id, layer, encoded_primary_key));
     }
 
     pub(super) fn cached_tx_version_tables(&self, tx_id: TxId) -> Option<BTreeSet<String>> {

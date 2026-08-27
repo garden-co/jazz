@@ -1,5 +1,7 @@
 //! Thin Rust client facade over `crate::db`.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::ops::Deref;
@@ -13,8 +15,7 @@ use crate::db::{
     ErrorCode as CoreDbErrorCode, ExclusiveTxOps, LocalUpdates as CoreLocalUpdates,
     PeerConnection as CorePeerConnection, Propagation as CorePropagation, ReadOpts as CoreReadOpts,
     SubscriptionEvent as CoreSubscriptionEvent, SubscriptionOutputRow as CoreSubscriptionOutputRow,
-    TerminalRootLayout, TickScheduler, TickUrgency, Transport as CoreTransport,
-    WireTransportAdapter,
+    TickScheduler, TickUrgency, Transport as CoreTransport, WireTransportAdapter,
 };
 use crate::groove::records::{
     BorrowedRecord, OwnedRecord, Value as CoreValue, ValueType as CoreValueType,
@@ -74,14 +75,6 @@ fn load_tolerant_test_timeout(timeout: Duration) -> Duration {
 }
 
 type StorageBundle = CoreStorage;
-
-#[derive(Default)]
-struct AppliedTerminalOperations {
-    added: Vec<CoreSubscriptionOutputRow>,
-    updated: Vec<CoreSubscriptionOutputRow>,
-    removed: Vec<crate::db::RemovedRow>,
-    moved: Vec<OutputOccurrenceId>,
-}
 
 #[derive(Debug, Deserialize)]
 struct UnverifiedJwtClaims {
@@ -161,7 +154,10 @@ struct PublicQueryDecoder {
 }
 
 struct ClientDbInner {
-    db: Backend,
+    // This is deliberately removed as the first step of shutdown. All public
+    // JazzClient facades share this inner state, so a retained clone cannot
+    // keep the local storage handle alive or resume work after shutdown.
+    db: Option<Backend>,
     identity: CoreDbIdentity,
     connect_config: Option<ConnectConfig>,
     scheduler: Rc<TickSchedulerImpl>,
@@ -172,6 +168,99 @@ struct ClientDbInner {
     closed_transactions: HashMap<OpenTransactionId, ClosedTransactionState>,
     tick_driver_error: Option<String>,
     tick_driver_error_notify: Arc<tokio::sync::Notify>,
+    subscription_forwarders: HashMap<u64, SubscriptionForwarder>,
+    next_subscription_forwarder: u64,
+    shutdown_state: ShutdownState,
+    shutdown_notify: Arc<tokio::sync::Notify>,
+}
+
+/// A public subscription admission or forwarding task owned by the facade.
+///
+/// Shutdown closes admission through `cancellation` and waits for `completion`
+/// before releasing the core database. This keeps a retained public stream from
+/// retaining a core stream (and therefore persistent storage) past shutdown.
+struct SubscriptionForwarder {
+    cancellation: oneshot::Sender<()>,
+    completion: oneshot::Receiver<()>,
+}
+
+/// Completes a forwarding admission even when its async future returns early.
+struct SubscriptionForwarderCompletion(Option<oneshot::Sender<()>>);
+
+impl SubscriptionForwarderCompletion {
+    fn new(sender: oneshot::Sender<()>) -> Self {
+        Self(Some(sender))
+    }
+}
+
+impl Drop for SubscriptionForwarderCompletion {
+    fn drop(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ShutdownState {
+    Open,
+    Closing,
+    Closed,
+    Failed(String),
+}
+
+/// Completes a shared terminal shutdown even when its caller is cancelled.
+///
+/// Cancellation cannot safely resume a `Db::close` future after its
+/// finalization admission has begun.  In that case the backend is dropped and
+/// every shared client facade remains terminal rather than being allowed to
+/// reconnect against a partially closed core.
+struct ShutdownCompletion {
+    inner: Rc<RefCell<ClientDbInner>>,
+    backend: Backend,
+    finished: bool,
+}
+
+impl ShutdownCompletion {
+    fn new(inner: Rc<RefCell<ClientDbInner>>, backend: Backend) -> Self {
+        Self {
+            inner,
+            backend,
+            finished: false,
+        }
+    }
+
+    fn finish(&mut self, result: std::result::Result<(), String>) -> Result<()> {
+        let mut inner = self.inner.borrow_mut();
+        inner.shutdown_state = match result {
+            Ok(()) => ShutdownState::Closed,
+            Err(error) => ShutdownState::Failed(error),
+        };
+        inner.shutdown_notify.notify_waiters();
+        self.finished = true;
+        match &inner.shutdown_state {
+            ShutdownState::Closed => Ok(()),
+            ShutdownState::Failed(error) => Err(JazzError::Connection(format!(
+                "client shutdown failed: {error}"
+            ))),
+            ShutdownState::Open | ShutdownState::Closing => unreachable!("shutdown completed"),
+        }
+    }
+}
+
+impl Drop for ShutdownCompletion {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let mut inner = self.inner.borrow_mut();
+        inner.shutdown_state = ShutdownState::Failed(
+            "shutdown was cancelled before the storage close completed".to_string(),
+        );
+        inner.shutdown_notify.notify_waiters();
+        // `backend` drops with this guard, releasing storage resources without
+        // advertising an unfinished context as usable.
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -250,6 +339,16 @@ enum ClosedTransactionState {
 #[derive(Clone)]
 struct Backend(Rc<CoreClientDb>);
 
+#[cfg(test)]
+thread_local! {
+    static COMPLETED_BACKEND_CLOSES: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+fn completed_backend_close_count() -> usize {
+    COMPLETED_BACKEND_CLOSES.with(Cell::get)
+}
+
 impl Backend {
     async fn open(
         schema: crate::schema::JazzSchema,
@@ -265,6 +364,16 @@ impl Backend {
 
     fn set_tick_scheduler(&self, scheduler: Rc<TickSchedulerImpl>) {
         self.0.set_tick_scheduler(Some(scheduler));
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.0
+            .close()
+            .await
+            .map_err(|error| JazzError::Connection(error.to_string()))?;
+        #[cfg(test)]
+        COMPLETED_BACKEND_CLOSES.with(|count| count.set(count.get() + 1));
+        Ok(())
     }
 
     async fn connect_upstream(&self, transport: Box<dyn CoreTransport>) -> BackendConnection {
@@ -687,6 +796,76 @@ impl ClientDb {
         }))
     }
 
+    async fn close(&self) -> Result<()> {
+        let (backend, forwarders) = {
+            let mut inner = self.inner.borrow_mut();
+            match inner.shutdown_state {
+                ShutdownState::Open => {
+                    inner.disconnect_upstream();
+                    inner.connect_config = None;
+                    inner.tick_driver_error = Some("client shut down".to_string());
+                    inner.tick_driver_error_notify.notify_waiters();
+                    inner.shutdown_state = ShutdownState::Closing;
+                    let backend = inner.db.take().ok_or_else(ClientDbInner::shutdown_error)?;
+                    let forwarders = std::mem::take(&mut inner.subscription_forwarders);
+                    (backend, forwarders)
+                }
+                ShutdownState::Closing | ShutdownState::Closed => {
+                    drop(inner);
+                    return self.wait_for_shutdown().await;
+                }
+                ShutdownState::Failed(ref error) => {
+                    return Err(JazzError::Connection(format!(
+                        "client shutdown previously failed: {error}"
+                    )));
+                }
+            }
+        };
+        // Install the cancellation guard before the first await: forwarder
+        // draining is part of shutdown, and cancellation there must still
+        // leave every retained facade terminal and wake concurrent shutdowns.
+        let mut completion = ShutdownCompletion::new(Rc::clone(&self.inner), backend);
+        let mut completions = Vec::with_capacity(forwarders.len());
+        for SubscriptionForwarder {
+            cancellation,
+            completion,
+        } in forwarders.into_values()
+        {
+            let _ = cancellation.send(());
+            completions.push(completion);
+        }
+        for completion in completions {
+            let _ = completion.await;
+        }
+        let result = completion
+            .backend
+            .close()
+            .await
+            .map_err(|error| error.to_string());
+        completion.finish(result)
+    }
+
+    async fn wait_for_shutdown(&self) -> Result<()> {
+        loop {
+            let notified = {
+                let inner = self.inner.borrow();
+                match &inner.shutdown_state {
+                    ShutdownState::Closed => return Ok(()),
+                    ShutdownState::Failed(error) => {
+                        return Err(JazzError::Connection(format!(
+                            "client shutdown failed: {error}"
+                        )));
+                    }
+                    ShutdownState::Open => {
+                        return Err(ClientDbInner::shutdown_error());
+                    }
+                    ShutdownState::Closing => Arc::clone(&inner.shutdown_notify).notified_owned(),
+                }
+            };
+            notified.await;
+        }
+    }
+
     async fn query_rows(
         &self,
         query: crate::query::Query,
@@ -709,7 +888,7 @@ impl ClientDb {
         let prepared = {
             let inner = self.inner.borrow();
             inner
-                .db
+                .backend()?
                 .prepare_query(&query)
                 .map_err(|error| JazzError::Query(error.to_string()))?
         };
@@ -717,7 +896,7 @@ impl ClientDb {
             let inner = self.inner.borrow();
             inner.ensure_transaction_open(transaction_id)?;
             inner
-                .db
+                .backend()?
                 .transaction_all_for_identity(transaction_id, &prepared, author, opts)
                 .map_err(|error| JazzError::Query(error.to_string()))?
         };
@@ -759,9 +938,9 @@ impl ClientDb {
                 let row_uuid = CoreRowUuid(uuid);
                 let tx_id = match identity {
                     Some(identity) => inner
-                        .db
+                        .backend()?
                         .insert_with_id_for_identity(identity, &table, row_uuid, cells),
-                    None => inner.db.insert_with_id(&table, row_uuid, cells),
+                    None => inner.backend()?.insert_with_id(&table, row_uuid, cells),
                 }
                 .map_err(|error| JazzError::Write(error.to_string()))?;
                 (row_uuid, tx_id)
@@ -769,18 +948,18 @@ impl ClientDb {
             None => {
                 if let Some(identity) = identity {
                     inner
-                        .db
+                        .backend()?
                         .insert_for_identity(identity, &table, cells)
                         .map_err(|error| JazzError::Write(error.to_string()))?
                 } else {
                     inner
-                        .db
+                        .backend()?
                         .insert(&table, cells)
                         .map_err(|error| JazzError::Write(error.to_string()))?
                 }
             }
         };
-        JazzClient::check_core_write_not_rejected(&inner.db, tx_id)?;
+        JazzClient::check_core_write_not_rejected(inner.backend()?, tx_id)?;
         let object_id = ObjectId::from_uuid(row_uuid.0);
         inner.remember_write(object_id, &table, tx_id);
         Ok((object_id, tx_id))
@@ -798,7 +977,7 @@ impl ClientDb {
         inner.ensure_transaction_open(transaction_id)?;
         let tx_id = transaction_id;
         inner
-            .db
+            .backend()?
             .exclusive_write(tx_id, &table, CoreRowUuid(*row_id.uuid()), cells.clone())
             .map_err(|error| JazzError::Write(error.to_string()))?;
         let tx = inner
@@ -823,7 +1002,7 @@ impl ClientDb {
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
         let write = match identity {
-            Some(identity) => inner.db.upsert_for_identity(
+            Some(identity) => inner.backend()?.upsert_for_identity(
                 identity,
                 &table,
                 CoreRowUuid(row_id),
@@ -831,11 +1010,11 @@ impl ClientDb {
                 updated_at_ms,
             ),
             None => inner
-                .db
+                .backend()?
                 .upsert(&table, CoreRowUuid(row_id), cells, updated_at_ms),
         }
         .map_err(|error| JazzError::Write(error.to_string()))?;
-        JazzClient::check_core_write_not_rejected(&inner.db, write)?;
+        JazzClient::check_core_write_not_rejected(inner.backend()?, write)?;
         let object_id = ObjectId::from_uuid(row_id);
         inner.remember_write(object_id, &table, write);
         let tx_id = write;
@@ -854,7 +1033,7 @@ impl ClientDb {
         inner.ensure_transaction_open(transaction_id)?;
         let tx_id = transaction_id;
         inner
-            .db
+            .backend()?
             .exclusive_write(tx_id, &table, CoreRowUuid(row_id), cells.clone())
             .map_err(|error| JazzError::Write(error.to_string()))?;
         let tx = inner
@@ -881,19 +1060,21 @@ impl ClientDb {
             JazzError::Write("update requires a row created or observed by this client".to_string())
         })?;
         let write = match identity {
-            Some(identity) => inner.db.upsert_for_identity(
+            Some(identity) => inner.backend()?.upsert_for_identity(
                 identity,
                 &table,
                 CoreRowUuid(*row_id.uuid()),
                 cells,
                 updated_at_ms,
             ),
-            None => inner
-                .db
-                .update(&table, CoreRowUuid(*row_id.uuid()), cells, updated_at_ms),
+            None => {
+                inner
+                    .backend()?
+                    .update(&table, CoreRowUuid(*row_id.uuid()), cells, updated_at_ms)
+            }
         }
         .map_err(|error| JazzError::Write(error.to_string()))?;
-        JazzClient::check_core_write_not_rejected(&inner.db, write)?;
+        JazzClient::check_core_write_not_rejected(inner.backend()?, write)?;
         inner.remember_write(row_id, &table, write);
         let tx_id = write;
         Ok(tx_id)
@@ -912,7 +1093,7 @@ impl ClientDb {
         inner.ensure_transaction_open(transaction_id)?;
         let tx_id = transaction_id;
         inner
-            .db
+            .backend()?
             .exclusive_update(tx_id, &table, CoreRowUuid(*row_id.uuid()), cells.clone())
             .map_err(|error| JazzError::Write(error.to_string()))?;
         let tx = inner
@@ -931,13 +1112,13 @@ impl ClientDb {
         let write = match identity {
             Some(identity) => {
                 inner
-                    .db
+                    .backend()?
                     .delete_for_identity(identity, &table, CoreRowUuid(*row_id.uuid()))
             }
-            None => inner.db.delete(&table, CoreRowUuid(*row_id.uuid())),
+            None => inner.backend()?.delete(&table, CoreRowUuid(*row_id.uuid())),
         }
         .map_err(|error| JazzError::Write(error.to_string()))?;
-        JazzClient::check_core_write_not_rejected(&inner.db, write)?;
+        JazzClient::check_core_write_not_rejected(inner.backend()?, write)?;
         inner.remember_write(row_id, &table, write);
         let tx_id = write;
         Ok(tx_id)
@@ -951,7 +1132,7 @@ impl ClientDb {
         inner.ensure_transaction_open(transaction_id)?;
         let tx_id = transaction_id;
         inner
-            .db
+            .backend()?
             .exclusive_delete(tx_id, &table, CoreRowUuid(*row_id.uuid()))
             .map_err(|error| JazzError::Write(error.to_string()))?;
         let tx = inner
@@ -972,9 +1153,9 @@ impl ClientDb {
         }
         match author {
             Some(author) => inner
-                .db
+                .backend()?
                 .begin_exclusive_for_identity(transaction_id, author),
-            None => inner.db.begin_exclusive(transaction_id),
+            None => inner.backend()?.begin_exclusive(transaction_id),
         }
         .map_err(|error| JazzError::Write(error.to_string()))?;
         inner.transactions.insert(
@@ -1007,9 +1188,9 @@ impl ClientDb {
             .expect("transaction open checked above");
         let tx_id = match state.author {
             Some(author) => inner
-                .db
+                .backend()?
                 .commit_exclusive_handle_for_identity(transaction_id, author),
-            None => inner.db.commit_exclusive_handle(transaction_id),
+            None => inner.backend()?.commit_exclusive_handle(transaction_id),
         }
         .map_err(|error| JazzError::Write(error.to_string()))?;
         let committed_id = core_batch_id(tx_id);
@@ -1025,6 +1206,7 @@ impl ClientDb {
 
     fn rollback_transaction(&self, transaction_id: OpenTransactionId) -> Result<bool> {
         let mut inner = self.inner.borrow_mut();
+        inner.backend()?;
         inner.ensure_transaction_open(transaction_id)?;
         let removed = inner.transactions.remove(&transaction_id).is_some();
         if removed {
@@ -1079,7 +1261,10 @@ impl ClientDb {
                     if urgency == TickUrgency::Deferred {
                         tokio::time::sleep(Duration::from_millis(1)).await;
                     }
-                    let tick_result = { inner.borrow().db.tick() };
+                    let tick_result = match inner.borrow().backend() {
+                        Ok(db) => db.tick(),
+                        Err(_) => return,
+                    };
                     match tick_result {
                         Ok(()) => recovery_attempts = 0,
                         Err(error) => {
@@ -1115,20 +1300,64 @@ impl ClientDb {
 }
 
 impl ClientDbInner {
+    fn shutdown_error() -> JazzError {
+        JazzError::Connection("client is shut down".to_string())
+    }
+
+    fn backend(&self) -> Result<&Backend> {
+        self.db.as_ref().ok_or_else(Self::shutdown_error)
+    }
+
+    fn backend_clone(&self) -> Result<Backend> {
+        Ok(self.backend()?.clone())
+    }
+
     fn disconnect_upstream(&mut self) -> bool {
         let Some(connection) = self.upstream.take() else {
             return false;
         };
-        self.db.detach_connection(&connection)
+        self.db
+            .as_ref()
+            .is_some_and(|db| db.detach_connection(&connection))
     }
 
     fn ensure_tick_driver_running(&self) -> Result<()> {
+        if !matches!(self.shutdown_state, ShutdownState::Open) {
+            return Err(Self::shutdown_error());
+        }
         match &self.tick_driver_error {
             Some(error) => Err(JazzError::Sync(format!(
                 "client tick driver stopped: {error}"
             ))),
             None => Ok(()),
         }
+    }
+
+    fn admit_subscription(
+        &mut self,
+    ) -> Result<(oneshot::Receiver<()>, SubscriptionForwarderCompletion)> {
+        self.ensure_tick_driver_running()?;
+        self.subscription_forwarders.retain(|_, forwarder| {
+            matches!(
+                forwarder.completion.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            )
+        });
+        let id = self.next_subscription_forwarder;
+        self.next_subscription_forwarder = self.next_subscription_forwarder.wrapping_add(1);
+        let (cancellation, cancellation_rx) = oneshot::channel();
+        let (completion, completion_rx) = oneshot::channel();
+        self.subscription_forwarders.insert(
+            id,
+            SubscriptionForwarder {
+                cancellation,
+                completion: completion_rx,
+            },
+        );
+        Ok((
+            cancellation_rx,
+            SubscriptionForwarderCompletion::new(completion),
+        ))
     }
 
     fn record_tick_driver_failure(&mut self, error: String) {
@@ -1166,7 +1395,7 @@ impl ClientDbInner {
             None
         };
         let mut inner = Self {
-            db,
+            db: Some(db),
             identity,
             connect_config,
             scheduler,
@@ -1177,6 +1406,10 @@ impl ClientDbInner {
             closed_transactions: HashMap::new(),
             tick_driver_error: None,
             tick_driver_error_notify: Arc::new(tokio::sync::Notify::new()),
+            subscription_forwarders: HashMap::new(),
+            next_subscription_forwarder: 0,
+            shutdown_state: ShutdownState::Open,
+            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         };
         inner.connect_upstream_transport().await?;
         Ok(inner)
@@ -1185,6 +1418,9 @@ impl ClientDbInner {
     async fn reconnect_upstream(inner: &Rc<RefCell<Self>>) -> Result<bool> {
         let (db, identity, scheduler, config) = {
             let inner = inner.borrow();
+            if !matches!(inner.shutdown_state, ShutdownState::Open) {
+                return Err(Self::shutdown_error());
+            }
             if inner.upstream.is_some() {
                 return Ok(false);
             }
@@ -1192,7 +1428,7 @@ impl ClientDbInner {
                 return Ok(false);
             };
             (
-                inner.db.clone(),
+                inner.backend_clone()?,
                 inner.identity,
                 Rc::clone(&inner.scheduler),
                 config,
@@ -1200,7 +1436,8 @@ impl ClientDbInner {
         };
         let connection = Self::connect_with_config(&db, identity, scheduler, config).await?;
         let mut inner = inner.borrow_mut();
-        if inner.upstream.is_some() {
+        if !matches!(inner.shutdown_state, ShutdownState::Open) || inner.upstream.is_some() {
+            db.detach_connection(&connection);
             return Ok(false);
         }
         inner.upstream = Some(connection);
@@ -1215,8 +1452,13 @@ impl ClientDbInner {
             return Ok(());
         };
         self.upstream = Some(
-            Self::connect_with_config(&self.db, self.identity, Rc::clone(&self.scheduler), config)
-                .await?,
+            Self::connect_with_config(
+                self.backend()?,
+                self.identity,
+                Rc::clone(&self.scheduler),
+                config,
+            )
+            .await?,
         );
         Ok(())
     }
@@ -1292,9 +1534,9 @@ impl ClientDbInner {
         let (db, prepared) = {
             let inner = inner.borrow();
             (
-                inner.db.clone(),
+                inner.backend_clone()?,
                 inner
-                    .db
+                    .backend()?
                     .prepare_query(&query)
                     .map_err(|error| JazzError::Query(error.to_string()))?,
             )
@@ -1324,14 +1566,22 @@ impl ClientDbInner {
         inner: &Rc<RefCell<Self>>,
         attachment: &crate::db::QueryAttachment,
     ) -> Result<()> {
-        if inner.borrow().db.query_attachment_is_covered(attachment) {
+        if inner
+            .borrow()
+            .backend()?
+            .query_attachment_is_covered(attachment)
+        {
             return Ok(());
         }
         let deadline =
             tokio::time::Instant::now() + load_tolerant_test_timeout(QUERY_COVERAGE_TIMEOUT);
         loop {
             inner.borrow().ensure_tick_driver_running()?;
-            if inner.borrow().db.query_attachment_is_covered(attachment) {
+            if inner
+                .borrow()
+                .backend()?
+                .query_attachment_is_covered(attachment)
+            {
                 return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
@@ -1352,20 +1602,27 @@ impl ClientDbInner {
         tx: mpsc::UnboundedSender<SubscriptionStreamItem>,
         mut cancellation: oneshot::Receiver<()>,
     ) -> Result<()> {
+        // Register before cloning the backend or awaiting core admission. A
+        // concurrent shutdown can therefore cancel and await this path even
+        // when core subscription setup is still in flight.
+        let (mut shutdown_cancellation, completion) = inner.borrow_mut().admit_subscription()?;
         let (db, prepared) = {
             let inner = inner.borrow();
             let prepared = inner
-                .db
+                .backend()?
                 .prepare_query(&query)
                 .map_err(|error| JazzError::Query(error.to_string()))?;
-            (inner.db.clone(), prepared)
+            (inner.backend_clone()?, prepared)
         };
-        let stream = db
-            .subscribe(&prepared, opts)
-            .await
-            .map_err(|error| JazzError::Query(error.to_string()))?;
+        let stream = tokio::select! {
+            biased;
+            _ = &mut shutdown_cancellation => return Err(ClientDbInner::shutdown_error()),
+            stream = db.subscribe(&prepared, opts) => stream
+                .map_err(|error| JazzError::Query(error.to_string()))?,
+        };
         let inner = Rc::clone(inner);
         tokio::task::spawn_local(async move {
+            let _completion = completion;
             let mut stream = stream;
             let mut current_rows: Vec<CoreSubscriptionOutputRow> = Vec::new();
             // A fresh subscription may be hydrated by consecutive reset
@@ -1377,6 +1634,7 @@ impl ClientDbInner {
                 let Some(event) = (tokio::select! {
                     biased;
                     _ = &mut cancellation => None,
+                    _ = &mut shutdown_cancellation => None,
                     event = stream.next_event() => event,
                 }) else {
                     break;
@@ -1387,8 +1645,6 @@ impl ClientDbInner {
                         added,
                         updated,
                         removed,
-                        terminal_operations,
-                        terminal_layout,
                         settled,
                         ..
                     } => {
@@ -1426,38 +1682,22 @@ impl ClientDbInner {
                             normalize_subscription_updates(surviving_rows, added, updated, |row| {
                                 &row.occurrence_id
                             });
-                        let terminal_changes;
-                        let (delta_added, delta_updated, delta_removed, delta_moved) =
-                            if terminal_operations.is_empty() {
-                                PublicQueryDecoder::apply_core_subscription_rows(
-                                    &mut current_rows,
-                                    &effective_added,
-                                    &effective_updated,
-                                    &removed,
-                                );
-                                (&effective_added, &effective_updated, &removed, &[][..])
-                            } else {
-                                let Some(layout) = terminal_layout.as_ref() else {
-                                    break;
-                                };
-                                let Ok(changes) =
-                                    PublicQueryDecoder::apply_core_subscription_terminal_operations(
-                                        &mut current_rows,
-                                        &terminal_operations,
-                                        layout,
-                                        &table,
-                                    )
-                                else {
-                                    break;
-                                };
-                                terminal_changes = changes;
-                                (
-                                    &terminal_changes.added,
-                                    &terminal_changes.updated,
-                                    &terminal_changes.removed,
-                                    terminal_changes.moved.as_slice(),
-                                )
-                            };
+                        let change_delta = (!reset_replaces_initial_view).then(|| {
+                            query_decoder.core_subscription_change_delta(
+                                &db,
+                                &query,
+                                &current_rows,
+                                &effective_added,
+                                &effective_updated,
+                                &removed,
+                            )
+                        });
+                        PublicQueryDecoder::apply_core_subscription_rows(
+                            &mut current_rows,
+                            &effective_added,
+                            &effective_updated,
+                            &removed,
+                        );
                         let rows_for_cache = current_rows
                             .iter()
                             .map(|row| row.row.clone())
@@ -1471,16 +1711,7 @@ impl ClientDbInner {
                                 &current_rows,
                             )
                         } else {
-                            query_decoder.core_subscription_change_delta(
-                                &db,
-                                &query,
-                                &previous_rows,
-                                &current_rows,
-                                delta_added,
-                                delta_updated,
-                                delta_removed,
-                                delta_moved,
-                            )
+                            change_delta.expect("non-reset subscription frame has a change delta")
                         };
                         if !reset_replaces_initial_view {
                             initial_hydration = false;
@@ -1556,7 +1787,7 @@ impl ClientDbInner {
             };
             let state = inner
                 .borrow()
-                .db
+                .backend()?
                 .write_state(tx_id)
                 .map_err(|error| JazzError::Sync(error.to_string()))?;
             if let CoreFate::Rejected(reason) = state.fate {
@@ -1578,7 +1809,7 @@ impl ClientDbInner {
             let (db, tick_driver_error_notify) = {
                 let inner = inner.borrow();
                 (
-                    inner.db.clone(),
+                    inner.backend_clone()?,
                     Arc::clone(&inner.tick_driver_error_notify),
                 )
             };
@@ -2146,147 +2377,6 @@ fn aggregate_public_values(
         .collect()
 }
 
-fn terminal_subscription_output_row(
-    table: &str,
-    occurrence_id: OutputOccurrenceId,
-    raw: &[u8],
-    layout: &TerminalRootLayout,
-) -> Result<CoreSubscriptionOutputRow> {
-    let fields = layout.root_descriptor.fields();
-    let Some(root_field) = fields.get(layout.root_key_slot) else {
-        return Err(JazzError::Query(
-            "terminal root layout key slot is out of bounds".to_owned(),
-        ));
-    };
-    if root_field.name.as_deref() != Some(layout.root_key_field_name.as_str()) {
-        return Err(JazzError::Query(
-            "terminal root layout key slot does not match its descriptor".to_owned(),
-        ));
-    }
-    // `CurrentRow`'s stable UUID accessor is deliberately fixed at slot zero.
-    // Structured app-row terminals currently preserve that invariant even
-    // though the binding layout names the slot explicitly.
-    if layout.root_key_slot != 0 {
-        return Err(JazzError::Query(
-            "terminal root layout cannot be represented as a current row".to_owned(),
-        ));
-    }
-    let mut occupied_slots = BTreeSet::from([layout.root_key_slot]);
-    for field in &layout.public_fields {
-        let Some(descriptor_field) = fields.get(field.slot) else {
-            return Err(JazzError::Query(format!(
-                "terminal root layout field {} is out of bounds",
-                field.name
-            )));
-        };
-        if descriptor_field.name.as_deref() != Some(field.descriptor_field_name.as_str())
-            || !occupied_slots.insert(field.slot)
-        {
-            return Err(JazzError::Query(format!(
-                "terminal root layout field {} does not match its descriptor",
-                field.name
-            )));
-        }
-    }
-
-    let borrowed = BorrowedRecord::new(raw, &layout.root_descriptor);
-    borrowed
-        .to_values()
-        .map_err(|error| JazzError::Query(format!("invalid terminal root payload: {error}")))?;
-    let row_uuid = borrowed
-        .get_uuid(layout.root_key_slot)
-        .map_err(|error| JazzError::Query(format!("invalid terminal root key: {error}")))?;
-    if occurrence_id.canonical_bytes().get(..16) != Some(row_uuid.as_bytes()) {
-        return Err(JazzError::Query(
-            "terminal root payload key does not match its addressed result".to_owned(),
-        ));
-    }
-
-    Ok(CoreSubscriptionOutputRow {
-        occurrence_id,
-        row: crate::node::CurrentRow::new(
-            table.to_owned(),
-            OwnedRecord::new(raw.to_vec(), layout.root_descriptor.clone()),
-        ),
-    })
-}
-
-/// Decode the Groove ordered key used to address one root output occurrence.
-/// Plain joins are UUID sequences. A union-derived joined source is preceded
-/// by its ordered UTF-8 discriminator.
-fn terminal_root_occurrence_id(encoded: &[u8]) -> Result<OutputOccurrenceId> {
-    fn uuid_at(encoded: &[u8], cursor: &mut usize) -> Option<ObjectId> {
-        if encoded.get(*cursor).copied() != Some(10) {
-            return None;
-        }
-        let start = *cursor + 1;
-        let end = start + 16;
-        let uuid = Uuid::from_slice(encoded.get(start..end)?).ok()?;
-        *cursor = end;
-        Some(ObjectId::from_uuid(uuid))
-    }
-
-    fn ordered_string_at(encoded: &[u8], cursor: &mut usize) -> Option<String> {
-        if encoded.get(*cursor).copied() != Some(6) {
-            return None;
-        }
-        *cursor += 1;
-        let mut decoded = Vec::new();
-        loop {
-            let byte = *encoded.get(*cursor)?;
-            *cursor += 1;
-            if byte != 0 {
-                decoded.push(byte);
-                continue;
-            }
-            match encoded.get(*cursor).copied()? {
-                0 => {
-                    *cursor += 1;
-                    break;
-                }
-                0xff => {
-                    *cursor += 1;
-                    decoded.push(0);
-                }
-                _ => return None,
-            }
-        }
-        String::from_utf8(decoded).ok()
-    }
-
-    let mut cursor = 0;
-    let root = uuid_at(encoded, &mut cursor)
-        .ok_or_else(|| JazzError::Query("terminal root key must begin with a UUID".to_owned()))?;
-    let mut joined = Vec::new();
-    let mut union_arms = Vec::new();
-    while cursor < encoded.len() {
-        let discriminator = if encoded[cursor] == 6 {
-            Some(ordered_string_at(encoded, &mut cursor).ok_or_else(|| {
-                JazzError::Query(
-                    "terminal root key contains an invalid union discriminator".to_owned(),
-                )
-            })?)
-        } else {
-            None
-        };
-        let joined_id = uuid_at(encoded, &mut cursor).ok_or_else(|| {
-            JazzError::Query("terminal root key contains an unsupported component".to_owned())
-        })?;
-        if let Some(discriminator) = discriminator {
-            union_arms.push((joined.len(), discriminator));
-        }
-        joined.push(joined_id);
-    }
-
-    if union_arms.is_empty() {
-        Ok(OutputOccurrenceId::new(root, joined))
-    } else {
-        OutputOccurrenceId::with_union_arms(root, joined, union_arms).ok_or_else(|| {
-            JazzError::Query("terminal root key contains invalid union discriminators".to_owned())
-        })
-    }
-}
-
 fn core_batch_id(tx_id: CoreTxId) -> TransactionId {
     TransactionId::from_committed_tx(tx_id)
 }
@@ -2340,7 +2430,7 @@ impl JazzClient {
         self.db
             .inner
             .borrow()
-            .db
+            .backend()?
             .set_identity_claims(identity, claims);
         Ok(Some(identity))
     }
@@ -2711,166 +2801,41 @@ impl PublicQueryDecoder {
         updated_rows: &[CoreSubscriptionOutputRow],
         removed_rows: &[crate::db::RemovedRow],
     ) {
-        current_rows.retain(|row| {
-            !removed_rows
-                .iter()
-                .any(|removed| row.occurrence_id == removed.occurrence_id)
-        });
-        for row in updated_rows {
-            if let Some(position) = current_rows
-                .iter()
-                .position(|current| current.occurrence_id == row.occurrence_id)
-            {
-                current_rows[position] = row.clone();
-            }
+        let changed = added_rows
+            .iter()
+            .chain(updated_rows)
+            .map(|row| row.occurrence_id.clone())
+            .chain(removed_rows.iter().map(|row| row.occurrence_id.clone()))
+            .collect::<BTreeSet<_>>();
+        current_rows.retain(|row| !changed.contains(&row.occurrence_id));
+        let mut placements = added_rows
+            .iter()
+            .chain(updated_rows)
+            .cloned()
+            .collect::<Vec<_>>();
+        placements.sort_by_key(|row| row.index);
+        for row in placements {
+            let index = row.index.min(current_rows.len());
+            current_rows.insert(index, row);
         }
-        for row in added_rows {
-            if let Some(position) = current_rows
-                .iter()
-                .position(|current| current.occurrence_id == row.occurrence_id)
-            {
-                current_rows[position] = row.clone();
-            } else {
-                current_rows.push(row.clone());
-            }
-        }
-    }
-
-    /// Apply structured root edits emitted by an ordered terminal.
-    ///
-    /// These operations own both the projected payload and its position. The
-    /// producer-supplied layout is therefore the only valid descriptor for an
-    /// insert or update; a table descriptor cannot decode a projected record.
-    fn apply_core_subscription_terminal_operations(
-        current_rows: &mut Vec<CoreSubscriptionOutputRow>,
-        operations: &[groove::ivm::TerminalOperation],
-        layout: &TerminalRootLayout,
-        table: &str,
-    ) -> Result<AppliedTerminalOperations> {
-        let previous_rows = current_rows.clone();
-        let mut affected = BTreeSet::new();
-        for operation in operations {
-            if !operation.path.is_empty() {
-                continue;
-            }
-
-            if operation.root_descriptor != layout.root_descriptor {
-                return Err(JazzError::Query(
-                    "terminal operation descriptor disagrees with its prepared root layout"
-                        .to_owned(),
-                ));
-            }
-            let edit_key = match &operation.edit {
-                groove::ivm::TerminalEdit::Insert { key, .. }
-                | groove::ivm::TerminalEdit::Update { key, .. }
-                | groove::ivm::TerminalEdit::Remove { key }
-                | groove::ivm::TerminalEdit::Move { key, .. } => key,
-            };
-            if edit_key != &operation.root_key {
-                return Err(JazzError::Query(
-                    "terminal root edit key does not match its addressed root key".to_owned(),
-                ));
-            }
-
-            let occurrence_id = terminal_root_occurrence_id(&operation.root_key)?;
-            affected.insert(occurrence_id.clone());
-            match &operation.edit {
-                groove::ivm::TerminalEdit::Insert { index, value, .. } => {
-                    let row = terminal_subscription_output_row(
-                        table,
-                        occurrence_id.clone(),
-                        value,
-                        layout,
-                    )?;
-                    current_rows.retain(|current| current.occurrence_id != occurrence_id);
-                    current_rows.insert((*index).min(current_rows.len()), row);
-                }
-                groove::ivm::TerminalEdit::Update { value, .. } => {
-                    let Some(position) = current_rows
-                        .iter()
-                        .position(|current| current.occurrence_id == occurrence_id)
-                    else {
-                        return Err(JazzError::Query(
-                            "terminal root update addressed a missing result".to_owned(),
-                        ));
-                    };
-                    current_rows[position] =
-                        terminal_subscription_output_row(table, occurrence_id, value, layout)?;
-                }
-                groove::ivm::TerminalEdit::Remove { .. } => {
-                    current_rows.retain(|current| current.occurrence_id != occurrence_id);
-                }
-                groove::ivm::TerminalEdit::Move { index, .. } => {
-                    let Some(position) = current_rows
-                        .iter()
-                        .position(|current| current.occurrence_id == occurrence_id)
-                    else {
-                        return Err(JazzError::Query(
-                            "terminal root move addressed a missing result".to_owned(),
-                        ));
-                    };
-                    let row = current_rows.remove(position);
-                    current_rows.insert((*index).min(current_rows.len()), row);
-                }
-            }
-        }
-
-        let mut changes = AppliedTerminalOperations::default();
-        for occurrence_id in affected {
-            let previous = previous_rows
-                .iter()
-                .enumerate()
-                .find(|(_, row)| row.occurrence_id == occurrence_id);
-            let current = current_rows
-                .iter()
-                .enumerate()
-                .find(|(_, row)| row.occurrence_id == occurrence_id);
-            match (previous, current) {
-                (None, Some((_, row))) => changes.added.push(row.clone()),
-                (Some((_, row)), None) => changes.removed.push(crate::db::RemovedRow {
-                    table: row.row.table().to_owned(),
-                    row_uuid: row.row.row_uuid(),
-                    occurrence_id,
-                }),
-                (Some((previous_index, previous)), Some((current_index, current))) => {
-                    if previous.row != current.row {
-                        changes.updated.push(current.clone());
-                    }
-                    if previous_index != current_index {
-                        changes.moved.push(occurrence_id);
-                    }
-                }
-                (None, None) => {}
-            }
-        }
-        Ok(changes)
     }
 
     fn core_subscription_change_delta(
         &self,
         db: &Backend,
         query: &Query,
-        previous_rows: &[OutputOccurrenceId],
-        current_rows: &[CoreSubscriptionOutputRow],
+        previous_rows: &[CoreSubscriptionOutputRow],
         added_rows: &[CoreSubscriptionOutputRow],
         updated_rows: &[CoreSubscriptionOutputRow],
         removed_rows: &[crate::db::RemovedRow],
-        moved_rows: &[OutputOccurrenceId],
     ) -> Result<OrderedRowDelta> {
-        let index_of = |id: &OutputOccurrenceId| {
-            current_rows
-                .iter()
-                .position(|row| &row.occurrence_id == id)
-                .unwrap_or(0)
-        };
         let added = added_rows
             .iter()
             .map(|row| {
                 let public = self.core_subscription_row_to_public(db, query, row)?;
-                let index = index_of(public.id.as_occurrence());
                 Ok(OrderedAdded {
                     id: public.id.clone(),
-                    index,
+                    index: row.index,
                     row: public,
                 })
             })
@@ -2879,55 +2844,23 @@ impl PublicQueryDecoder {
             .iter()
             .map(|row| {
                 let public = self.core_subscription_row_to_public(db, query, row)?;
-                let new_index = index_of(public.id.as_occurrence());
-                let old_index = previous_rows
+                let content_changed = previous_rows
                     .iter()
-                    .position(|id| id == public.id.as_occurrence())
-                    .unwrap_or(new_index);
+                    .find(|previous| previous.occurrence_id == row.occurrence_id)
+                    .is_none_or(|previous| !previous.row.subscription_equivalent(&row.row));
                 Ok(OrderedUpdated {
                     id: public.id.clone(),
-                    old_index,
-                    new_index,
-                    row: Some(public),
+                    old_index: row.previous_index.unwrap_or(row.index),
+                    new_index: row.index,
+                    row: content_changed.then_some(public),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let updated_ids = updated
-            .iter()
-            .map(|update| update.id.as_occurrence().clone())
-            .collect::<BTreeSet<_>>();
-        let mut updated = updated;
-        for occurrence_id in moved_rows {
-            if updated_ids.contains(occurrence_id)
-                || added_rows
-                    .iter()
-                    .any(|row| row.occurrence_id == *occurrence_id)
-                || removed_rows
-                    .iter()
-                    .any(|row| row.occurrence_id == *occurrence_id)
-            {
-                continue;
-            }
-            let new_index = index_of(occurrence_id);
-            let old_index = previous_rows
-                .iter()
-                .position(|id| id == occurrence_id)
-                .unwrap_or(new_index);
-            updated.push(OrderedUpdated {
-                id: ResultKey::from_occurrence(occurrence_id.clone()),
-                old_index,
-                new_index,
-                row: None,
-            });
-        }
         let removed = removed_rows
             .iter()
             .map(|row| OrderedRemoved {
                 id: ResultKey::from_occurrence(row.occurrence_id.clone()),
-                index: previous_rows
-                    .iter()
-                    .position(|id| id == &row.occurrence_id)
-                    .unwrap_or(0),
+                index: row.index,
             })
             .collect();
         Ok(OrderedRowDelta {
@@ -3078,7 +3011,7 @@ impl JazzClient {
                 let claims = session_claims_to_core_claims(session)?;
                 db.inner
                     .borrow()
-                    .db
+                    .backend()?
                     .set_identity_claims(identity.author, claims);
             }
             let client = Self {
@@ -3226,7 +3159,7 @@ impl JazzClient {
                 .query_rows(query.clone(), opts, table, wait_for_coverage)
                 .await?
         };
-        let db = self.db.inner.borrow().db.clone();
+        let db = self.db.inner.borrow().backend_clone()?;
         self.db
             .query_decoder
             .core_rows_to_query_results(&db, &query, rows)
@@ -3436,10 +3369,15 @@ impl JazzClient {
         self.with_write_context(WriteContext::from_session(session))
     }
 
-    /// Shutdown the client and release resources.
+    /// Shutdown this shared client context and release its resources.
+    ///
+    /// Every [`JazzClient`] clone for this context becomes unusable once
+    /// shutdown starts. Concurrent shutdown calls wait for the same close. If
+    /// the shutdown future is cancelled, the context remains terminal and its
+    /// storage handle is released, but callers must not treat it as a clean
+    /// close.
     pub async fn shutdown(self) -> Result<()> {
-        self.db.disconnect_upstream();
-        Ok(())
+        self.db.close().await
     }
 }
 
@@ -3770,9 +3708,10 @@ mod tests {
         let (backend, prepared) = {
             let inner = client.db.inner.borrow();
             (
-                inner.db.clone(),
+                inner.backend_clone().expect("client is open"),
                 inner
-                    .db
+                    .backend()
+                    .expect("client is open")
                     .prepare_query(&Query::from("todos"))
                     .expect("prepare query"),
             )
@@ -3859,7 +3798,7 @@ mod tests {
             )
             .await
             .expect("wait for local durability");
-        drop(client);
+        client.shutdown().await.expect("gracefully close client");
 
         let restarted = JazzClient::connect(context)
             .await
@@ -3876,6 +3815,283 @@ mod tests {
                 vec![Value::Text("rehydrated".to_string()), Value::Boolean(false)]
             )]
         );
+    }
+
+    /// A retained public subscription must become terminal during shutdown so
+    /// that alice can reopen the same persistent client directory immediately.
+    ///
+    /// ```text
+    /// alice ──subscribe──► local core stream
+    /// alice ──shutdown───► cancel forwarder ──► close RocksDB
+    /// alice ──reopen─────► same directory
+    /// ```
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_terminates_retained_subscription_before_persistent_reopen() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let data_dir = TempDir::new().expect("temp client dir");
+                let app_id = AppId::from_name("retained-subscription-persistent-reopen");
+                let context = make_offline_context_with_storage(
+                    app_id,
+                    data_dir.path().to_path_buf(),
+                    declared_todo_schema(),
+                    ClientStorage::Persistent,
+                );
+                let client = JazzClient::connect(context.clone())
+                    .await
+                    .expect("connect offline client");
+                let mut subscription = client
+                    .subscribe_with_read_tier(Query::from("todos"), ReadTier::LocalFirst)
+                    .await
+                    .expect("subscribe before shutdown");
+
+                client
+                    .shutdown()
+                    .await
+                    .expect("close retained subscription");
+
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    while subscription.next().await.is_some() {}
+                })
+                .await
+                .expect("retained public stream must close after shutdown");
+
+                let restarted = JazzClient::connect(context)
+                    .await
+                    .expect("reopen persistent directory after retained stream shutdown");
+                restarted
+                    .shutdown()
+                    .await
+                    .expect("close reopened persistent client");
+            })
+            .await;
+    }
+
+    /// A failed public subscription admission must complete its facade
+    /// lifecycle before alice shuts down and reopens persistent storage.
+    ///
+    /// ```text
+    /// alice ──subscribe missing table──► admission error
+    /// alice ──shutdown─────────────────► close RocksDB
+    /// alice ──reopen───────────────────► same directory
+    /// ```
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_subscription_admission_is_terminal_before_persistent_reopen() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let data_dir = TempDir::new().expect("temp client dir");
+                let app_id = AppId::from_name("failed-subscription-admission-reopen");
+                let context = make_offline_context_with_storage(
+                    app_id,
+                    data_dir.path().to_path_buf(),
+                    declared_todo_schema(),
+                    ClientStorage::Persistent,
+                );
+                let client = JazzClient::connect(context.clone())
+                    .await
+                    .expect("connect offline client");
+
+                let error = match client
+                    .subscribe_with_read_tier(Query::from("missing"), ReadTier::LocalFirst)
+                    .await
+                {
+                    Ok(_) => panic!("missing-table subscription must fail"),
+                    Err(error) => error,
+                };
+                assert!(
+                    matches!(error, JazzError::Query(_)),
+                    "unexpected missing-table subscription error: {error}"
+                );
+
+                client
+                    .shutdown()
+                    .await
+                    .expect("close failed admission client");
+                let restarted = JazzClient::connect(context)
+                    .await
+                    .expect("reopen persistent directory after failed admission");
+                restarted
+                    .shutdown()
+                    .await
+                    .expect("close reopened persistent client");
+            })
+            .await;
+    }
+
+    /// Shutdown must cancel and wait for the admission interval between the
+    /// facade accepting alice's subscription and core creating its stream.
+    ///
+    /// This is a narrow internal receipt because the public offline adapter
+    /// completes core admission synchronously; the registry is the exact
+    /// observable-to-shutdown boundary that makes the concurrent interleaving
+    /// deterministic without mocking storage or transport.
+    ///
+    /// ```text
+    /// alice ──admit subscription──► core subscribe is in flight
+    /// alice ──shutdown────────────► cancellation ──► wait for admission exit
+    /// ```
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_cancels_and_waits_for_in_flight_subscription_admission() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let data_dir = TempDir::new().expect("temp client dir");
+                let app_id = AppId::from_name("in-flight-subscription-admission-shutdown");
+                let context = make_offline_context_with_storage(
+                    app_id,
+                    data_dir.path().to_path_buf(),
+                    declared_todo_schema(),
+                    ClientStorage::Persistent,
+                );
+                let client = JazzClient::connect(context.clone())
+                    .await
+                    .expect("connect offline client");
+                let (mut cancellation, completion) = client
+                    .db
+                    .inner
+                    .borrow_mut()
+                    .admit_subscription()
+                    .expect("admit in-flight subscription");
+
+                let shutdown = tokio::task::spawn_local(client.shutdown());
+                tokio::time::timeout(Duration::from_secs(1), &mut cancellation)
+                    .await
+                    .expect("shutdown must cancel in-flight admission")
+                    .expect("shutdown cancellation sender must stay alive");
+                assert!(
+                    !shutdown.is_finished(),
+                    "shutdown must wait for the in-flight admission completion"
+                );
+
+                drop(completion);
+                shutdown
+                    .await
+                    .expect("shutdown task must not panic")
+                    .expect("shutdown after admitted subscription");
+
+                let restarted = JazzClient::connect(context)
+                    .await
+                    .expect("reopen persistent directory after in-flight admission");
+                restarted
+                    .shutdown()
+                    .await
+                    .expect("close reopened persistent client");
+            })
+            .await;
+    }
+
+    /// Cancelling shutdown while it drains alice's in-flight admission must
+    /// leave retained facades terminal rather than stranded in `Closing`.
+    ///
+    /// This is a narrow internal receipt for task cancellation during the
+    /// drain await; public adapters cannot deterministically suspend that
+    /// interval without mocking transport or storage.
+    ///
+    /// ```text
+    /// alice ──admit subscription──► shutdown waits for admission exit
+    /// alice ──abort shutdown──────► retained clone observes terminal failure
+    /// alice ──reopen─────────────► same directory
+    /// ```
+    #[tokio::test(flavor = "current_thread")]
+    async fn aborting_shutdown_during_subscription_drain_notifies_retained_clone() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let data_dir = TempDir::new().expect("temp client dir");
+                let app_id = AppId::from_name("abort-subscription-drain-shutdown");
+                let context = make_offline_context_with_storage(
+                    app_id,
+                    data_dir.path().to_path_buf(),
+                    declared_todo_schema(),
+                    ClientStorage::Persistent,
+                );
+                let client = JazzClient::connect(context.clone())
+                    .await
+                    .expect("connect offline client");
+                let retained_clone = client.clone();
+                let (mut cancellation, admission_completion) = client
+                    .db
+                    .inner
+                    .borrow_mut()
+                    .admit_subscription()
+                    .expect("admit in-flight subscription");
+
+                let shutdown = tokio::task::spawn_local(client.shutdown());
+                tokio::time::timeout(Duration::from_secs(1), &mut cancellation)
+                    .await
+                    .expect("shutdown must cancel in-flight admission")
+                    .expect("shutdown cancellation sender must stay alive");
+                assert!(
+                    !shutdown.is_finished(),
+                    "shutdown must still be draining the in-flight admission"
+                );
+
+                shutdown.abort();
+                let cancellation = shutdown
+                    .await
+                    .expect_err("aborted shutdown task must not complete normally");
+                assert!(
+                    cancellation.is_cancelled(),
+                    "shutdown task must report task cancellation: {cancellation}"
+                );
+                drop(admission_completion);
+
+                let error = tokio::time::timeout(Duration::from_secs(1), retained_clone.shutdown())
+                    .await
+                    .expect("retained clone shutdown must not hang after cancellation")
+                    .expect_err("retained clone must observe terminal shutdown failure");
+                assert!(
+                    matches!(error, JazzError::Connection(ref message) if message.contains("shutdown previously failed")),
+                    "unexpected retained-clone shutdown error: {error}"
+                );
+
+                let restarted = JazzClient::connect(context)
+                    .await
+                    .expect("reopen persistent directory after cancelled shutdown");
+                restarted
+                    .shutdown()
+                    .await
+                    .expect("close reopened persistent client");
+            })
+            .await;
+    }
+
+    // The successful core close boundary is not visible through the public
+    // facade: RocksDB can release its lock when the final Rc drops even if a
+    // regression bypasses `Db::close`. Keep this narrow internal receipt in
+    // addition to the black-box retained-clone/reopen integration test.
+    #[tokio::test]
+    async fn shutdown_closes_the_shared_backend_once_and_retires_clones() {
+        let client = JazzClient::connect(make_offline_context(
+            AppId::from_name("shared-terminal-shutdown"),
+            TempDir::new().expect("tempdir").keep(),
+            declared_todo_schema(),
+        ))
+        .await
+        .expect("connect offline client");
+        let retained_clone = client.clone();
+        let second_shutdown = client.clone();
+        let close_count_before = completed_backend_close_count();
+
+        let (first, second) = tokio::join!(client.shutdown(), second_shutdown.shutdown());
+        first.expect("first shutdown succeeds");
+        second.expect("concurrent shutdown waits for the shared close");
+        assert_eq!(
+            completed_backend_close_count(),
+            close_count_before + 1,
+            "shutdown must complete the core close boundary exactly once"
+        );
+
+        let error = retained_clone
+            .query_with_read_tier(Query::from("todos"), ReadTier::LocalFirst)
+            .await
+            .expect_err("retained clone must not operate after shared shutdown");
+        assert!(
+            matches!(error, JazzError::Connection(ref message) if message == "client is shut down"),
+            "unexpected retained-clone error: {error}"
+        );
+        retained_clone
+            .shutdown()
+            .await
+            .expect("completed shutdown remains idempotent for retained clones");
     }
 
     #[tokio::test]

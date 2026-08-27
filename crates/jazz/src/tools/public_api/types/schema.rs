@@ -321,13 +321,13 @@ impl ColumnDescriptor {
         match self.merge_strategy {
             None => Ok(()),
             Some(ColumnMergeStrategy::Counter) => {
-                if self.nullable || self.column_type != ColumnType::Integer {
-                    Err(format!(
-                        "counter merge strategy is only supported on non-nullable INTEGER columns, got {} ({:?}, nullable={})",
-                        self.name_str(),
-                        self.column_type,
-                        self.nullable
-                    ))
+                if self.nullable
+                    || !matches!(self.column_type, ColumnType::Integer | ColumnType::BigInt)
+                {
+                    Err(
+                        "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns"
+                            .to_owned(),
+                    )
                 } else {
                     Ok(())
                 }

@@ -163,7 +163,7 @@ export function makeQuery<T>(table: string, wasmSchema: WasmSchema): QueryBuilde
  * afterEach(() => ctx.cleanup());
  *
  * const db = ctx.track(await createDb(...));
- * const unsub = ctx.trackSubscription(db.subscribeAll(...));
+ * const unsub = ctx.trackSubscription(db.subscribe(...));
  * ```
  */
 export class TestCleanup {

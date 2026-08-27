@@ -15,8 +15,7 @@ const db = await createDb({
 // #region list-ts
 const list = document.getElementById("todos")!;
 
-db.subscribeAll(app.todos, ({ all }) => {
-  const todos = all ?? [];
+db.subscribe(app.todos, (todos) => {
   list.replaceChildren(...todos.map((todo) => renderTodoItem(todo, db, app)));
 });
 // #endregion list-ts

@@ -1,5 +1,11 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
+import {
+  createDb,
+  getDbSubscriptionSource,
+  type Db,
+  type QueryBuilder,
+  type TableProxy,
+} from "../../src/runtime/db.js";
 import type { SubscriptionDelta } from "../../src/runtime/subscription-manager.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 
@@ -199,7 +205,7 @@ function hasChangeForId<T>(delta: SubscriptionDelta<T>, kind: 0 | 1 | 2, id: str
   return delta.delta.some((change) => change.kind === kind && change.id === id);
 }
 
-describe("db.subscribeAll browser integration", () => {
+describe("internal subscription delta browser integration", () => {
   const dbs: Db[] = [];
   const unsubscribes: Array<() => void> = [];
   let conditionsDb: Db;
@@ -410,7 +416,7 @@ describe("db.subscribeAll browser integration", () => {
 
     const deltas: Array<SubscriptionDelta<Todo>> = [];
     const unsubscribe = trackUnsubscribe(
-      db.subscribeAll(
+      getDbSubscriptionSource(db).subscribeDelta(
         makeQuery<Todo>("todos", {
           conditions: [{ column: "done", op: "eq", value: false }],
         }),
@@ -467,7 +473,9 @@ describe("db.subscribeAll browser integration", () => {
     );
     const deltas: Array<SubscriptionDelta<Todo>> = [];
     const unsubscribe = trackUnsubscribe(
-      db.subscribeAll(makeQuery<Todo>("todos", {}), (delta) => deltas.push(delta)),
+      getDbSubscriptionSource(db).subscribeDelta(makeQuery<Todo>("todos", {}), (delta) =>
+        deltas.push(delta),
+      ),
     );
 
     const { value } = db.insert(todos, {
@@ -492,7 +500,7 @@ describe("db.subscribeAll browser integration", () => {
     it(`supports condition filter ${testCase.name}`, async () => {
       const deltas: Array<SubscriptionDelta<Todo>> = [];
       const unsubscribe = trackUnsubscribe(
-        conditionsDb.subscribeAll(testCase.query, (delta) => {
+        getDbSubscriptionSource(conditionsDb).subscribeDelta(testCase.query, (delta) => {
           deltas.push(delta);
         }),
       );
@@ -521,7 +529,7 @@ describe("db.subscribeAll browser integration", () => {
 
     const deltas: Array<SubscriptionDelta<Todo>> = [];
     const unsubscribe = trackUnsubscribe(
-      db.subscribeAll(
+      getDbSubscriptionSource(db).subscribeDelta(
         makeQuery<Todo>("todos", {
           conditions: [{ column: "title", op: "eq", value: "bytes-hit" }],
         }),
@@ -563,7 +571,7 @@ describe("db.subscribeAll browser integration", () => {
 
     const deltas: Array<SubscriptionDelta<Todo>> = [];
     const unsubscribe = trackUnsubscribe(
-      db.subscribeAll(
+      getDbSubscriptionSource(db).subscribeDelta(
         makeQuery<Todo>("todos", {
           orderBy: [["priority", "desc"]],
           offset: 1,
@@ -614,7 +622,7 @@ describe("db.subscribeAll browser integration", () => {
 
     const deltas: Array<SubscriptionDelta<Todo>> = [];
     const unsubscribe = trackUnsubscribe(
-      db.subscribeAll(
+      getDbSubscriptionSource(db).subscribeDelta(
         makeQuery<Todo>("todos", {
           conditions: [{ column: "title", op: "contains", value: "needle" }],
         }),
@@ -648,7 +656,7 @@ describe("db.subscribeAll browser integration", () => {
 
     const deltas: Array<SubscriptionDelta<Todo>> = [];
     const unsubscribe = trackUnsubscribe(
-      db.subscribeAll(
+      getDbSubscriptionSource(db).subscribeDelta(
         makeQuery<Todo>("todos", {
           conditions: [{ column: "title", op: "in", value: [] }],
         }),
@@ -682,7 +690,7 @@ describe("db.subscribeAll browser integration", () => {
 
     const deltas: Array<SubscriptionDelta<User>> = [];
     const unsubscribe = trackUnsubscribe(
-      db.subscribeAll(
+      getDbSubscriptionSource(db).subscribeDelta(
         makeQuery<User>("users", {
           includes: { todosViaOwner: true },
         }),
@@ -726,7 +734,7 @@ describe("db.subscribeAll browser integration", () => {
 
     const deltas: Array<SubscriptionDelta<User & { todosViaOwner?: Todo[] }>> = [];
     const unsubscribe = trackUnsubscribe(
-      db.subscribeAll(
+      getDbSubscriptionSource(db).subscribeDelta(
         makeQuery<User & { todosViaOwner?: Todo[] }>("users", {
           conditions: [{ column: "id", op: "eq", value: userId }],
           includes: { todosViaOwner: true },
@@ -756,7 +764,7 @@ describe("db.subscribeAll browser integration", () => {
         );
       },
       4000,
-      "expected reverse include target update to wake subscribeAll",
+      "expected reverse include target update to wake the subscription",
     );
 
     unsubscribe();
@@ -775,7 +783,7 @@ describe("db.subscribeAll browser integration", () => {
     } = db.insert(users, { name: "Owner", team_id: undefined });
     const deltas: Array<SubscriptionDelta<User & { todosViaOwner?: Todo[] }>> = [];
     const unsubscribe = trackUnsubscribe(
-      db.subscribeAll(
+      getDbSubscriptionSource(db).subscribeDelta(
         makeQuery<User & { todosViaOwner?: Todo[] }>("users", {
           conditions: [{ column: "id", op: "eq", value: userId }],
           includes: { todosViaOwner: true },
@@ -835,7 +843,7 @@ describe("db.subscribeAll browser integration", () => {
 
     const deltas: Array<SubscriptionDelta<Org>> = [];
     const unsubscribe = trackUnsubscribe(
-      db.subscribeAll(
+      getDbSubscriptionSource(db).subscribeDelta(
         makeQuery<Org>("users", {
           hops: ["team", "org"],
         }),
@@ -901,7 +909,7 @@ describe("db.subscribeAll browser integration", () => {
 
     const deltas: Array<SubscriptionDelta<Team>> = [];
     const unsubscribe = trackUnsubscribe(
-      db.subscribeAll(
+      getDbSubscriptionSource(db).subscribeDelta(
         makeQuery<Team>("users", {
           conditions: [{ column: "id", op: "eq", value: userId }],
           hops: ["team"],
@@ -956,7 +964,7 @@ describe("db.subscribeAll browser integration", () => {
 
     const deltas: Array<SubscriptionDelta<BundleItem>> = [];
     const unsubscribe = trackUnsubscribe(
-      db.subscribeAll(
+      getDbSubscriptionSource(db).subscribeDelta(
         makeQuery<BundleItem>("bundles", {
           conditions: [{ column: "id", op: "eq", value: bundleId }],
           hops: ["items"],
@@ -1001,7 +1009,7 @@ describe("db.subscribeAll browser integration", () => {
 
     const deltas: Array<SubscriptionDelta<Team>> = [];
     const unsubscribe = trackUnsubscribe(
-      db.subscribeAll(
+      getDbSubscriptionSource(db).subscribeDelta(
         makeQuery<Team>("teams", {
           conditions: [{ column: "name", op: "eq", value: "leaf" }],
           gather: {

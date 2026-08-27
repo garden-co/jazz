@@ -25,6 +25,10 @@ vi.mock("./create-db.js", () => ({
   createDb: mocks.createDb,
 }));
 
+vi.mock("../runtime/db.js", () => ({
+  getDbSubscriptionSource: (db: unknown) => db,
+}));
+
 vi.mock("../subscriptions-orchestrator.js", () => ({
   SubscriptionsOrchestrator: mocks.MockSubscriptionsOrchestrator,
   trackPromise: <T>(promise: Promise<T>) => promise,

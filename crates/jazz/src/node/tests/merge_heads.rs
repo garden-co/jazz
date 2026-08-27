@@ -162,6 +162,45 @@ fn merge_heads_match_history_for_relay_pending_then_edge_fate() {
 }
 
 #[test]
+fn accepting_pending_history_does_not_rewalk_the_merge_chain() {
+    // A relay installs pending versions into current/merge-head state. Their
+    // later accepted fates do not alter head membership, even when transport
+    // delivers the fates newest-first. Rewalking the chain here made a 500
+    // revision subscription starve unrelated query tests.
+    let schema = two_column_schema();
+    let (_edge_dir, mut edge) = open_node_with_schema(node(0xfb), schema);
+    let row = row(0xfb);
+    let mut versions = Vec::new();
+    let mut parent = None;
+
+    for _ in 0..32 {
+        let mut commit = MergeableCommit::new("todos", row, 10)
+            .cells(BTreeMap::from([("title".to_owned(), "revision".to_owned())]));
+        if let Some(parent) = parent {
+            commit = commit.parents(vec![parent]);
+        }
+        let published = edge.commit_mergeable(commit).unwrap();
+        let tx_id = settle_published(&mut edge, published).unwrap();
+        parent = Some(tx_id);
+        versions.push(tx_id);
+    }
+
+    super::super::ingest::reset_merge_head_reachability_walks_for_test();
+    for tx_id in versions.into_iter().rev() {
+        edge.apply_fate_update(tx_id, Fate::Accepted, None, Some(DurabilityTier::Edge))
+            .unwrap();
+    }
+
+    assert_eq!(
+        super::super::ingest::merge_head_reachability_walks_for_test(),
+        0,
+        "accepting a pending chain must not replay historical reachability"
+    );
+    edge.assert_merge_heads_match_history_for_test("todos", row)
+        .unwrap();
+}
+
+#[test]
 fn merge_heads_match_history_after_parked_unit_resolves() {
     let schema = two_column_schema();
     let (_parent_dir, mut parent_writer) = open_node_with_schema(node(0xb1), schema.clone());
