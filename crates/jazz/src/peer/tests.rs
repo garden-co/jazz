@@ -1,6 +1,6 @@
 use super::*;
 use crate::legacy_test_future::{
-    OptionFutureExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
+    FutureResolveExt as _, OptionFutureExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
 };
 
 use std::collections::BTreeMap;
@@ -865,6 +865,40 @@ fn edge_ingest_turns_missing_prepared_seed_claim_into_deferred_empty_support() {
     assert!(
         edge.transaction_state(tx.tx_id).is_none(),
         "a pending support proof must not admit a client commit into edge history"
+    );
+}
+
+#[test]
+fn deferred_edge_ingest_rejects_a_conflicting_retransmit() {
+    let schema = session_seed_write_policy_schema();
+    let writer = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let resource = row(0xc2);
+    let (_writer_dir, mut writer_node) = open_node_with_schema(node(0xc3), schema.clone());
+    let (tx, versions) = resource_commit_unit(&mut writer_node, writer, resource);
+    let (_edge_dir, mut edge) = open_node_with_schema(node(0xc4), schema);
+    let mut peer = PeerState::edge_client(writer);
+
+    let _ = peer
+        .ingest_edge_mergeable_commit_unit(&mut edge, tx.clone(), versions.clone(), 10)
+        .expect("missing support claim parks the first commit unit");
+    assert_eq!(peer.deferred_edge_fate_count(), 1);
+
+    let _ = peer
+        .ingest_edge_mergeable_commit_unit(&mut edge, tx.clone(), versions.clone(), 10)
+        .expect("an identical deferred retransmit remains idempotent");
+    assert_eq!(peer.deferred_edge_fate_count(), 1);
+
+    let mut conflicting = tx.clone();
+    conflicting.n_total_writes = conflicting.n_total_writes.saturating_add(1);
+    assert!(matches!(
+        peer.ingest_edge_mergeable_commit_unit(&mut edge, conflicting, versions, 10)
+            .resolve(),
+        Err(Error::ConflictingCommitUnit(tx_id)) if tx_id == tx.tx_id
+    ));
+    assert_eq!(peer.deferred_edge_fate_count(), 1);
+    assert!(
+        edge.transaction_state(tx.tx_id).is_none(),
+        "a conflicting retry must not enter history while the original remains deferred"
     );
 }
 
