@@ -391,6 +391,9 @@ jobs:
     if: needs.release-push-gate.outputs.should_run == 'true' && needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
     uses: ./.github/workflows/build-jazz-packages.yml
     secrets: inherit
+    with:
+      # Alpha releases publish jazz-rn, unlike an ordinary pkg.pr.new preview.
+      include_rn: true
 
   publish-npm:
     name: Publish npm alpha

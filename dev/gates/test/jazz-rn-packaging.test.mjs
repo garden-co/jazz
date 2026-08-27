@@ -6,6 +6,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { parse } from "yaml";
 
 const require = createRequire(import.meta.url);
 const packageJson = JSON.parse(
@@ -230,17 +231,47 @@ test("a dry package includes every staged native relay artifact class", async ()
 });
 
 test("release, preview, and labeled platform gates seal and link the staged relay package", async () => {
-  const [packageBuild, alphaPublish, previewBuild, rnWorkflow, artifactScript, verifier] = await Promise.all([
-    readFile(new URL("../../../.github/workflows/build-jazz-packages.yml", import.meta.url), "utf8"),
-    readFile(new URL("../../../.github/workflows/publish-jazz-tools-alpha.yml", import.meta.url), "utf8"),
-    readFile(new URL("../../../.github/workflows/preview-build.yml", import.meta.url), "utf8"),
-    readFile(new URL("../../../.github/workflows/rn-native-artifacts.yml", import.meta.url), "utf8"),
-    readFile(new URL("../../../crates/jazz-rn/scripts/build-relay-artifacts.sh", import.meta.url), "utf8"),
-    readFile(new URL("../../../crates/jazz-rn/scripts/verify-relay-artifacts.mjs", import.meta.url), "utf8"),
-  ]);
+  const [packageBuild, alphaPublish, previewBuild, rnWorkflow, artifactScript, verifier] =
+    await Promise.all([
+      readFile(
+        new URL("../../../.github/workflows/build-jazz-packages.yml", import.meta.url),
+        "utf8",
+      ),
+      readFile(
+        new URL("../../../.github/workflows/publish-jazz-tools-alpha.yml", import.meta.url),
+        "utf8",
+      ),
+      readFile(new URL("../../../.github/workflows/preview-build.yml", import.meta.url), "utf8"),
+      readFile(
+        new URL("../../../.github/workflows/rn-native-artifacts.yml", import.meta.url),
+        "utf8",
+      ),
+      readFile(
+        new URL("../../../crates/jazz-rn/scripts/build-relay-artifacts.sh", import.meta.url),
+        "utf8",
+      ),
+      readFile(
+        new URL("../../../crates/jazz-rn/scripts/verify-relay-artifacts.mjs", import.meta.url),
+        "utf8",
+      ),
+    ]);
+  const packageBuildWorkflow = parse(packageBuild);
+  const previewBuildWorkflow = parse(previewBuild);
 
   assert.match(packageBuild, /build-jazz-rn-android/);
   assert.match(packageBuild, /build-jazz-rn-ios/);
+  assert.match(
+    packageBuild,
+    /include_rn:[\s\S]*type: boolean[\s\S]*default: false/,
+    "the reusable package build must make RN release assembly an explicit opt-in",
+  );
+  assert.match(packageBuild, /if: inputs\.include_rn/);
+  assert.match(packageBuild, /assemble-jazz-rn:[\s\S]*always\(\)[\s\S]*inputs\.include_rn/);
+  assert.match(
+    packageBuild,
+    /jazz_rn_artifact:[\s\S]*value: \$\{\{ jobs\.assemble-jazz-rn\.outputs\.artifact \}\}/,
+    "a disabled RN job must produce an empty reusable-workflow output rather than a missing reference",
+  );
   assert.match(packageBuild, /name: jazz-rn-relay-android/);
   assert.match(packageBuild, /name: jazz-rn-relay-ios/);
   assert.match(packageBuild, /name: pkg-jazz-rn/);
@@ -249,8 +280,69 @@ test("release, preview, and labeled platform gates seal and link the staged rela
   assert.match(alphaPublish, /pkg-jazz-rn/);
   assert.match(alphaPublish, /Verify packed jazz-rn relay payload/);
   assert.match(alphaPublish, /Publish jazz-rn \(alpha tag\)/);
+  assert.match(
+    alphaPublish,
+    /uses: \.\/\.github\/workflows\/build-jazz-packages\.yml[\s\S]*include_rn: true/,
+  );
+  assert.match(previewBuild, /types: \[labeled, unlabeled, synchronize, reopened\]/);
+  assert.match(previewBuild, /'preview-build'/);
+  assert.match(previewBuild, /'rn-preview-release'/);
+  assert.match(
+    previewBuild,
+    /include_rn: \$\{\{ contains\(github\.event\.pull_request\.labels\.\*\.name, 'rn-preview-release'\) \}\}/,
+  );
   assert.match(previewBuild, /name: pkg-jazz-rn/);
   assert.match(previewBuild, /'\.\/crates\/jazz-rn'/);
+  assert.doesNotMatch(
+    previewBuild,
+    /'react-native'/,
+    "the React Native validation label must not cause a package preview release",
+  );
+
+  const regularPreviewPublish = previewBuild.slice(
+    previewBuild.indexOf("- name: Publish to pkg.pr.new"),
+    previewBuild.indexOf("- name: Publish jazz-rn to pkg.pr.new"),
+  );
+  assert.doesNotMatch(
+    regularPreviewPublish,
+    /'\.\/crates\/jazz-rn'/,
+    "ordinary preview-build runs must neither download nor publish jazz-rn",
+  );
+  assert.throws(
+    () =>
+      assert.match(
+        regularPreviewPublish.replace("'./packages/create-jazz'", "'./crates/jazz-rn'"),
+        /ordinary preview-build runs must neither download nor publish jazz-rn/,
+      ),
+    /ordinary preview-build runs must neither download nor publish jazz-rn/,
+  );
+
+  const previewMode = (labels) => ({
+    runs: labels.includes("preview-build") || labels.includes("rn-preview-release"),
+    includesRn: labels.includes("rn-preview-release"),
+  });
+  assert.deepEqual(previewMode([]), { runs: false, includesRn: false });
+  assert.deepEqual(previewMode(["preview-build"]), { runs: true, includesRn: false });
+  assert.deepEqual(previewMode(["rn-preview-release"]), { runs: true, includesRn: true });
+  assert.deepEqual(previewMode(["preview-build", "rn-preview-release", "react-native"]), {
+    runs: true,
+    includesRn: true,
+  });
+  assert.deepEqual(previewBuildWorkflow.on.pull_request.types, [
+    "labeled",
+    "unlabeled",
+    "synchronize",
+    "reopened",
+  ]);
+  assert.equal(
+    packageBuildWorkflow.on.workflow_call.inputs.include_rn.default,
+    false,
+    "the reusable package build defaults to its fast, non-RN path",
+  );
+  assert.equal(
+    previewBuildWorkflow.jobs.build.with.include_rn,
+    "${{ contains(github.event.pull_request.labels.*.name, 'rn-preview-release') }}",
+  );
   assert.match(rnWorkflow, /Android relay linked AAR/);
   assert.match(rnWorkflow, /:app:assembleDebug/);
   assert.match(rnWorkflow, /iOS relay linked app/);

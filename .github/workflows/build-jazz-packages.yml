@@ -13,6 +13,11 @@ on:
         required: false
         type: string
         default: '[{"os":"blacksmith-4vcpu-ubuntu-2404","target":"x86_64-unknown-linux-gnu","platform":"linux-x64-gnu","use_sccache":true},{"os":"blacksmith-6vcpu-macos-15","target":"x86_64-apple-darwin","platform":"darwin-x64","use_sccache":false},{"os":"blacksmith-6vcpu-macos-15","target":"aarch64-apple-darwin","platform":"darwin-arm64","use_sccache":false},{"os":"blacksmith-2vcpu-windows-2025","target":"x86_64-pc-windows-msvc","platform":"win32-x64-msvc","use_sccache":false}]'
+      include_rn:
+        description: Build and stage jazz-rn's Android and iOS relay artifacts. Keep false for ordinary package previews; releases opt in explicitly.
+        required: false
+        type: boolean
+        default: false
     outputs:
       tools_artifact:
         description: Artifact name for the assembled jazz-tools package.
@@ -27,8 +32,8 @@ on:
         description: Artifact name for the assembled create-jazz package.
         value: pkg-create-jazz
       jazz_rn_artifact:
-        description: Artifact name for the assembled jazz-rn package with its Android and iOS relay artifacts.
-        value: pkg-jazz-rn
+        description: Artifact name for the assembled jazz-rn package with its Android and iOS relay artifacts, or empty when RN packaging is disabled.
+        value: ${{ jobs.assemble-jazz-rn.outputs.artifact }}
 
 env:
   CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
@@ -219,6 +224,7 @@ jobs:
 
   build-jazz-rn-android:
     name: Build jazz-rn Android relay artifacts
+    if: inputs.include_rn
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -255,6 +261,7 @@ jobs:
 
   build-jazz-rn-ios:
     name: Build jazz-rn iOS relay XCFramework
+    if: inputs.include_rn
     runs-on: blacksmith-6vcpu-macos-15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -290,8 +297,6 @@ jobs:
       - build-macos
       - build-wasm
       - build-napi
-      - build-jazz-rn-android
-      - build-jazz-rn-ios
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -323,21 +328,6 @@ jobs:
           pattern: jazz-napi-binding-*
           path: crates/jazz-napi/artifacts
           merge-multiple: true
-
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: jazz-rn-relay-android
-          path: crates/jazz-rn
-
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: jazz-rn-relay-ios
-          path: crates/jazz-rn
-
-      - name: Verify staged jazz-rn relay artifacts
-        run: |
-          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
-            node crates/jazz-rn/scripts/verify-relay-artifacts.mjs android ios
 
       - name: Stage jazz-napi platform package artifacts
         run: |
@@ -382,9 +372,6 @@ jobs:
       - name: Build create-jazz TypeScript package
         run: pnpm --filter create-jazz build
 
-      - name: Build jazz-rn TypeScript package
-        run: pnpm --filter jazz-rn build
-
       - name: Verify jazz-tools publish artifacts
         run: |
           test -f packages/jazz-tools/dist/index.js
@@ -392,11 +379,6 @@ jobs:
           test -f packages/jazz-tools/dist/backend/index.js
           test -f packages/jazz-tools/dist/react/index.js
           test -f packages/jazz-tools/dist/permissions/index.js
-
-      - name: Verify jazz-rn publish artifacts
-        run: |
-          test -f crates/jazz-rn/lib/module/index.js
-          test -f crates/jazz-rn/lib/typescript/src/index.d.ts
 
       - name: Stage CLI binaries into jazz-tools npm package
         run: |
@@ -455,6 +437,60 @@ jobs:
             !packages/create-jazz/node_modules
           include-hidden-files: true
           if-no-files-found: error
+
+  assemble-jazz-rn:
+    name: Assemble jazz-rn npm package
+    needs:
+      - build-jazz-rn-android
+      - build-jazz-rn-ios
+    # A skipped optional platform build must not make the normal package
+    # assembly skip. Conversely, require both relay receipts whenever RN was
+    # explicitly requested.
+    if: >-
+      ${{
+        always() &&
+        inputs.include_rn &&
+        needs.build-jazz-rn-android.result == 'success' &&
+        needs.build-jazz-rn-ios.result == 'success'
+      }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    outputs:
+      artifact: ${{ steps.artifact.outputs.name }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-toolchain: ""
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-rn-relay-android
+          path: crates/jazz-rn
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-rn-relay-ios
+          path: crates/jazz-rn
+
+      - name: Verify staged jazz-rn relay artifacts
+        run: |
+          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
+            node crates/jazz-rn/scripts/verify-relay-artifacts.mjs android ios
+
+      - name: Build jazz-rn TypeScript package
+        run: pnpm --filter jazz-rn build
+
+      - name: Verify jazz-rn publish artifacts
+        run: |
+          test -f crates/jazz-rn/lib/module/index.js
+          test -f crates/jazz-rn/lib/typescript/src/index.d.ts
+
+      - id: artifact
+        run: echo "name=pkg-jazz-rn" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
