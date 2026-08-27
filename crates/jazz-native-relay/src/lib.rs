@@ -37,6 +37,9 @@ const NATIVE_RELAY_QUEUE_MAX_BYTES: usize = MAX_LOGICAL_MESSAGE_BYTES;
 const NATIVE_RELAY_DRAIN_MAX_MESSAGES: usize = 64;
 const NATIVE_RELAY_DRAIN_TARGET_BYTES: usize = 8 * 1024 * 1024;
 const NATIVE_RELAY_PUMP_MAX_CLIENTS: usize = 64;
+/// Trusted platform admission carries schema and validated claims, but must
+/// remain bounded independently of the generic peer-frame budget.
+const NATIVE_RELAY_ADMISSION_MAX_BYTES: usize = 1024 * 1024;
 
 /// Codec-owned commands accepted by the native relay C ABI.
 ///
@@ -97,11 +100,10 @@ pub struct RelayScopeRequest {
     pub auth_scope: Option<String>,
 }
 
-/// Configuration admitted by trusted platform code before JavaScript may open
-/// a relay. This uses a separate C ABI entry point and is deliberately not a
-/// [`RelayCommandRequest`] variant.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-pub struct RelayScopeAdmissionRequest {
+/// Normalized configuration admitted internally after the strict trusted JSON
+/// boundary. It is deliberately not a [`RelayCommandRequest`] variant.
+#[derive(Clone, Debug, PartialEq)]
+struct RelayScopeAdmissionRequest {
     pub scope: RelayScopeRequest,
     pub sqlite_path: String,
     pub schema_json: String,
@@ -109,15 +111,96 @@ pub struct RelayScopeAdmissionRequest {
     pub claims: BTreeMap<String, Value>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct RelayScopeAdmissionResponse {
-    pub admitted_scope: AdmissionCapability,
+/// JSON-shaped form accepted only by the platform-owned admission C entry
+/// point. Keeping this separate from the postcard command codec makes the
+/// platform integration practical without letting JavaScript construct scope
+/// configuration. Rust still owns validation and normalization.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrustedRelayScopeAdmissionJson {
+    scope: TrustedRelayScopeJson,
+    sqlite_path: String,
+    schema_json: String,
+    identity: TrustedRelayIdentityJson,
+    claims: BTreeMap<String, Value>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrustedRelayScopeJson {
+    app_namespace: String,
+    storage_namespace: String,
+    auth_scope: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrustedRelayIdentityJson {
+    node: jazz::ids::NodeUuid,
+    author: jazz::ids::AuthorSubject,
+}
+
+impl TrustedRelayScopeAdmissionJson {
+    fn normalize(self) -> Result<RelayScopeAdmissionRequest, JazzNativeRelayStatus> {
+        if self.sqlite_path.trim().is_empty() {
+            return Err(JazzNativeRelayStatus::LifecycleFailure);
+        }
+        let scope = RelayScopeRequest {
+            app_namespace: self.scope.app_namespace,
+            storage_namespace: self.scope.storage_namespace,
+            auth_scope: self.scope.auth_scope,
+        };
+        RelayScope::from(scope.clone())
+            .validate()
+            .map_err(relay_status)?;
+        if matches!(self.identity.author, jazz::ids::AuthorSubject::System) {
+            return Err(JazzNativeRelayStatus::LifecycleFailure);
+        }
+        reject_bearer_claims(&self.claims)?;
+        // Parse and reserialize before storing so the trusted boundary has one
+        // normalized schema spelling and malformed JSON cannot reach admission.
+        let schema_value = serde_json::from_str::<serde_json::Value>(&self.schema_json)
+            .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        let schema_json = serde_json::to_string(&schema_value)
+            .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        Ok(RelayScopeAdmissionRequest {
+            scope,
+            sqlite_path: self.sqlite_path,
+            schema_json,
+            identity: DbIdentity {
+                node: self.identity.node,
+                author: self.identity.author,
+            },
+            claims: self.claims,
+        })
+    }
+}
+
+fn reject_bearer_claims(claims: &BTreeMap<String, Value>) -> Result<(), JazzNativeRelayStatus> {
+    // These values belong exclusively to upstream-session negotiation. The
+    // relay receives validated identity claims, never a bearer credential that
+    // could be persisted or exposed through diagnostics.
+    const CREDENTIAL_CLAIMS: &[&str] = &[
+        "authorization",
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "bearer_token",
+        "token",
+    ];
+    if claims.keys().any(|key| {
+        let normalized = key.to_ascii_lowercase();
+        CREDENTIAL_CLAIMS.contains(&normalized.as_str())
+    }) {
+        return Err(JazzNativeRelayStatus::LifecycleFailure);
+    }
+    Ok(())
 }
 
 /// Unguessable authority to open one host-admitted native scope.
 ///
 /// Its representation is opaque to JavaScript and platform bindings. They
-/// carry the postcard bytes returned by trusted admission unchanged.
+/// carry its raw 32 bytes only as a handle for ordinary relay commands.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
 pub struct AdmissionCapability([u8; 32]);
 
@@ -125,16 +208,6 @@ impl std::fmt::Debug for AdmissionCapability {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("AdmissionCapability([redacted])")
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct RelayScopeRevocationRequest {
-    pub admitted_scope: AdmissionCapability,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct RelayScopeRevocationResponse {
-    pub revoked: bool,
 }
 
 impl From<RelayScopeRequest> for RelayScope {
@@ -445,33 +518,51 @@ impl NativeRelayHost {
     fn admit_scope(
         &mut self,
         request: RelayScopeAdmissionRequest,
-    ) -> Result<RelayScopeAdmissionResponse, JazzNativeRelayStatus> {
+    ) -> Result<AdmissionCapability, JazzNativeRelayStatus> {
+        RelayScope::from(request.scope.clone())
+            .validate()
+            .map_err(relay_status)?;
+        if matches!(request.identity.author, jazz::ids::AuthorSubject::System) {
+            return Err(JazzNativeRelayStatus::LifecycleFailure);
+        }
+        reject_bearer_claims(&request.claims)?;
         let public_schema = serde_json::from_str(&request.schema_json)
             .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
         let schema =
             JazzSchema::new(&public_schema).map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        let config = RelayOpenConfig {
+            supported_abi: NativeRelayAbiRange {
+                minimum: NATIVE_RELAY_ABI_VERSION,
+                maximum: NATIVE_RELAY_ABI_VERSION,
+            },
+            scope: request.scope.into(),
+            sqlite_path: PathBuf::from(request.sqlite_path),
+            schema,
+            identity: request.identity,
+            #[cfg(test)]
+            thread_start_counter: self.thread_start_counter.clone(),
+        };
+        // A scope is immutable once trusted code has admitted it. Reject a
+        // conflicting second configuration before JavaScript can receive a
+        // capability, even if no relay alias has been opened yet.
+        if self.admitted_scopes.values().any(|admitted| {
+            admitted.config.scope == config.scope
+                && (admitted.config.sqlite_path != config.sqlite_path
+                    || admitted.config.schema.version_id() != config.schema.version_id()
+                    || admitted.config.identity != config.identity
+                    || admitted.claims != request.claims)
+        }) {
+            return Err(JazzNativeRelayStatus::LifecycleFailure);
+        }
         let handle = self.allocate_admission_capability().map_err(relay_status)?;
         self.admitted_scopes.insert(
             handle,
             AdmittedRelayScope {
-                config: RelayOpenConfig {
-                    supported_abi: NativeRelayAbiRange {
-                        minimum: NATIVE_RELAY_ABI_VERSION,
-                        maximum: NATIVE_RELAY_ABI_VERSION,
-                    },
-                    scope: request.scope.into(),
-                    sqlite_path: PathBuf::from(request.sqlite_path),
-                    schema,
-                    identity: request.identity,
-                    #[cfg(test)]
-                    thread_start_counter: self.thread_start_counter.clone(),
-                },
+                config,
                 claims: request.claims,
             },
         );
-        Ok(RelayScopeAdmissionResponse {
-            admitted_scope: handle,
-        })
+        Ok(handle)
     }
 
     fn revoke_scope(&mut self, admitted_scope: AdmissionCapability) -> bool {
@@ -683,18 +774,20 @@ pub unsafe extern "C" fn jazz_native_relay_host_execute(
     JazzNativeRelayStatus::Ok
 }
 
-/// Admit one persistence/authentication scope from trusted platform code.
+/// Admit one complete trusted scope described as strict JSON by Kotlin or
+/// Swift/Objective-C. This is intentionally a separate platform-only entry
+/// point: generic JavaScript `execute` accepts only [`RelayCommandRequest`]
+/// and can never carry paths, schema, claims, or bearer credentials.
 ///
-/// This entry point is intentionally separate from the opaque JavaScript
-/// command channel. JNI/Swift derive the path, schema, database identity, and
-/// opaque authentication scope, admit them here, then reveal only the returned
-/// handle to JavaScript.
+/// The returned bytes are exactly one random 256-bit capability. They are
+/// opaque to JavaScript; the platform host may hand them to foreground code,
+/// but only the native relay can interpret them.
 ///
 /// # Safety
 /// `host`, request bytes, and `out` follow the same rules as
 /// [`jazz_native_relay_host_execute`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn jazz_native_relay_host_admit_scope(
+pub unsafe extern "C" fn jazz_native_relay_host_admit_scope_json(
     host: *mut JazzNativeRelayHost,
     request: *const u8,
     request_len: usize,
@@ -704,87 +797,65 @@ pub unsafe extern "C" fn jazz_native_relay_host_admit_scope(
         return JazzNativeRelayStatus::InvalidArgument;
     }
     unsafe { *out = JazzNativeRelayBytes::EMPTY };
-    if host.is_null() || (request.is_null() && request_len != 0) {
+    if host.is_null()
+        || request.is_null()
+        || request_len == 0
+        || request_len > NATIVE_RELAY_ADMISSION_MAX_BYTES
+    {
         return JazzNativeRelayStatus::InvalidArgument;
     }
-    let request = if request_len == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(request, request_len) }
-    };
-    let request = match postcard::from_bytes::<RelayScopeAdmissionRequest>(request) {
+    let request = unsafe { std::slice::from_raw_parts(request, request_len) };
+    let request = match serde_json::from_slice::<TrustedRelayScopeAdmissionJson>(request) {
         Ok(request) => request,
         Err(_) => return JazzNativeRelayStatus::InvalidCommand,
+    };
+    let request = match request.normalize() {
+        Ok(request) => request,
+        Err(status) => return status,
     };
     let mut host = match unsafe { (&*host).inner.lock() } {
         Ok(host) => host,
         Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
     };
-    let response = match host.admit_scope(request) {
-        Ok(response) => response,
+    let capability = match host.admit_scope(request) {
+        Ok(capability) => capability,
         Err(status) => return status,
     };
-    let bytes = match postcard::to_allocvec(&response) {
-        Ok(bytes) => bytes,
-        Err(_) => return JazzNativeRelayStatus::EncodeFailure,
-    };
-    let boxed = bytes.into_boxed_slice();
+    let mut capability = capability.0.to_vec();
     unsafe {
         *out = JazzNativeRelayBytes {
-            len: boxed.len(),
-            data: Box::into_raw(boxed).cast(),
+            len: capability.len(),
+            data: capability.as_mut_ptr(),
         };
     }
+    std::mem::forget(capability);
     JazzNativeRelayStatus::Ok
 }
 
-/// Revoke one trusted admission capability and close every relay/client alias
-/// opened through it. Unknown or already-revoked capabilities are idempotent.
+/// Revoke exactly one opaque 256-bit admission capability held by trusted
+/// platform lifecycle code. This avoids making Kotlin/Swift encode a postcard
+/// revocation request and remains deliberately unavailable to JavaScript.
 ///
 /// # Safety
-/// `host`, request bytes, and `out` follow the same rules as
-/// [`jazz_native_relay_host_execute`].
+/// `host` must be a live host pointer. When non-null, `capability` must point
+/// to exactly 32 readable bytes for this call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn jazz_native_relay_host_revoke_scope(
+pub unsafe extern "C" fn jazz_native_relay_host_revoke_scope_capability(
     host: *mut JazzNativeRelayHost,
-    request: *const u8,
-    request_len: usize,
-    out: *mut JazzNativeRelayBytes,
+    capability: *const u8,
+    capability_len: usize,
 ) -> JazzNativeRelayStatus {
-    if out.is_null() {
+    if host.is_null() || capability.is_null() || capability_len != 32 {
         return JazzNativeRelayStatus::InvalidArgument;
     }
-    unsafe { *out = JazzNativeRelayBytes::EMPTY };
-    if host.is_null() || (request.is_null() && request_len != 0) {
-        return JazzNativeRelayStatus::InvalidArgument;
-    }
-    let request = if request_len == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(request, request_len) }
-    };
-    let request = match postcard::from_bytes::<RelayScopeRevocationRequest>(request) {
-        Ok(request) => request,
-        Err(_) => return JazzNativeRelayStatus::InvalidCommand,
-    };
+    let capability = unsafe { std::slice::from_raw_parts(capability, capability_len) };
+    let mut bytes = [0_u8; 32];
+    bytes.copy_from_slice(capability);
     let mut host = match unsafe { (&*host).inner.lock() } {
         Ok(host) => host,
         Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
     };
-    let response = RelayScopeRevocationResponse {
-        revoked: host.revoke_scope(request.admitted_scope),
-    };
-    let bytes = match postcard::to_allocvec(&response) {
-        Ok(bytes) => bytes,
-        Err(_) => return JazzNativeRelayStatus::EncodeFailure,
-    };
-    let boxed = bytes.into_boxed_slice();
-    unsafe {
-        *out = JazzNativeRelayBytes {
-            len: boxed.len(),
-            data: Box::into_raw(boxed).cast(),
-        };
-    }
+    let _ = host.revoke_scope(AdmissionCapability(bytes));
     JazzNativeRelayStatus::Ok
 }
 
@@ -1995,25 +2066,8 @@ mod tests {
             identity,
             claims: BTreeMap::new(),
         };
-        let admission_bytes = postcard::to_allocvec(&admission).unwrap();
-        let mut admission_output = JazzNativeRelayBytes::EMPTY;
-        assert_eq!(
-            unsafe {
-                jazz_native_relay_host_admit_scope(
-                    host,
-                    admission_bytes.as_ptr(),
-                    admission_bytes.len(),
-                    &mut admission_output,
-                )
-            },
-            JazzNativeRelayStatus::Ok
-        );
-        let admitted_scope = postcard::from_bytes::<RelayScopeAdmissionResponse>(unsafe {
-            std::slice::from_raw_parts(admission_output.data, admission_output.len)
-        })
-        .unwrap()
-        .admitted_scope;
-        unsafe { jazz_native_relay_bytes_free(&mut admission_output) };
+        let admitted_scope = unsafe { (*host).inner.lock().unwrap().admit_scope(admission) }
+            .expect("test admission is valid");
         let open = RelayCommandRequest::Open {
             supported_abi_minimum: NATIVE_RELAY_ABI_VERSION,
             supported_abi_maximum: NATIVE_RELAY_ABI_VERSION,
@@ -2138,7 +2192,6 @@ mod tests {
                     claims: BTreeMap::new(),
                 })
                 .unwrap()
-                .admitted_scope
         };
         let request = |minimum, maximum| RelayCommandRequest::Open {
             supported_abi_minimum: minimum,
@@ -2190,6 +2243,149 @@ mod tests {
         unsafe { jazz_native_relay_host_free(host) };
     }
 
+    // This is necessarily an internal ABI-boundary test: Kotlin/Swift do not
+    // run in this Rust target, but the production C entry proves their only
+    // permitted admission path rejects malformed/credential-bearing config
+    // before a JavaScript-visible capability exists.
+    #[test]
+    fn trusted_json_admission_is_strict_bounded_and_never_echoes_config() {
+        let directory = tempfile::tempdir().unwrap();
+        let host = jazz_native_relay_host_new();
+        let identity = DbIdentity {
+            node: NodeUuid::from_bytes([0x91; 16]),
+            author: AuthorSubject::for_test_bytes([0x92; 16]),
+        };
+        let request = |claims: BTreeMap<String, Value>| {
+            serde_json::json!({
+                "scope": {
+                    "app_namespace": "trusted-host",
+                    "storage_namespace": "primary",
+                    "auth_scope": "opaque-validated-subject",
+                },
+                "sqlite_path": directory.path().join("trusted.sqlite").display().to_string(),
+                "schema_json": serde_json::to_string(schema().public_schema()).unwrap(),
+                "identity": serde_json::to_value(identity).unwrap(),
+                "claims": serde_json::to_value(claims).unwrap(),
+            })
+        };
+        let encoded = serde_json::to_vec(&request(BTreeMap::from([(
+            "role".to_owned(),
+            Value::String("member".to_owned()),
+        )])))
+        .unwrap();
+        let mut output = JazzNativeRelayBytes::EMPTY;
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_admit_scope_json(
+                    host,
+                    encoded.as_ptr(),
+                    encoded.len(),
+                    &mut output,
+                )
+            },
+            JazzNativeRelayStatus::Ok
+        );
+        assert_eq!(output.len, 32, "only the opaque capability crosses out");
+        assert_ne!(
+            unsafe { std::slice::from_raw_parts(output.data, output.len) },
+            encoded.as_slice(),
+            "the trusted config must never be reflected to JavaScript"
+        );
+        unsafe { jazz_native_relay_bytes_free(&mut output) };
+
+        let mut unknown = request(BTreeMap::new());
+        unknown["unexpected"] = serde_json::Value::Bool(true);
+        let unknown = serde_json::to_vec(&unknown).unwrap();
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_admit_scope_json(
+                    host,
+                    unknown.as_ptr(),
+                    unknown.len(),
+                    &mut output,
+                )
+            },
+            JazzNativeRelayStatus::InvalidCommand
+        );
+
+        let mut bearer = request(BTreeMap::from([(
+            "access_token".to_owned(),
+            Value::String("never-persist-a-bearer".to_owned()),
+        )]));
+        // Keep this otherwise-valid request outside the already-admitted
+        // scope, so rejection proves the credential filter rather than the
+        // immutable-scope configuration check below.
+        bearer["scope"]["auth_scope"] =
+            serde_json::Value::String("different-valid-subject".to_owned());
+        let bearer = serde_json::to_vec(&bearer).unwrap();
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_admit_scope_json(
+                    host,
+                    bearer.as_ptr(),
+                    bearer.len(),
+                    &mut output,
+                )
+            },
+            JazzNativeRelayStatus::LifecycleFailure
+        );
+
+        let oversized = vec![b'x'; NATIVE_RELAY_ADMISSION_MAX_BYTES + 1];
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_admit_scope_json(
+                    host,
+                    oversized.as_ptr(),
+                    oversized.len(),
+                    &mut output,
+                )
+            },
+            JazzNativeRelayStatus::InvalidArgument
+        );
+        assert!(output.data.is_null());
+        assert_eq!(output.len, 0);
+        unsafe { jazz_native_relay_host_free(host) };
+    }
+
+    #[test]
+    fn trusted_admission_rejects_conflicting_scope_before_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut host = NativeRelayHost::default();
+        let admission =
+            |sqlite_path: &str, claims: BTreeMap<String, Value>| RelayScopeAdmissionRequest {
+                scope: RelayScopeRequest {
+                    app_namespace: "trusted-host".to_owned(),
+                    storage_namespace: "primary".to_owned(),
+                    auth_scope: Some("opaque-validated-subject".to_owned()),
+                },
+                sqlite_path: sqlite_path.to_owned(),
+                schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
+                identity: DbIdentity {
+                    node: NodeUuid::from_bytes([0xa1; 16]),
+                    author: AuthorSubject::for_test_bytes([0xa2; 16]),
+                },
+                claims,
+            };
+        let primary = directory
+            .path()
+            .join("primary.sqlite")
+            .display()
+            .to_string();
+        host.admit_scope(admission(&primary, BTreeMap::new()))
+            .unwrap();
+        let other = directory.path().join("other.sqlite").display().to_string();
+        assert_eq!(
+            host.admit_scope(admission(&other, BTreeMap::new())),
+            Err(JazzNativeRelayStatus::LifecycleFailure),
+            "a scope cannot mint a second capability with different trusted storage"
+        );
+        assert_eq!(
+            host.admitted_scopes.len(),
+            1,
+            "failed admission must not leave a usable capability"
+        );
+    }
+
     #[test]
     fn admitted_scope_capabilities_are_unguessable_and_revocation_closes_all_aliases() {
         let directory = tempfile::tempdir().unwrap();
@@ -2216,25 +2412,8 @@ mod tests {
             host: *mut JazzNativeRelayHost,
             request: RelayScopeAdmissionRequest,
         ) -> AdmissionCapability {
-            let request = postcard::to_allocvec(&request).unwrap();
-            let mut output = JazzNativeRelayBytes::EMPTY;
-            assert_eq!(
-                unsafe {
-                    jazz_native_relay_host_admit_scope(
-                        host,
-                        request.as_ptr(),
-                        request.len(),
-                        &mut output,
-                    )
-                },
-                JazzNativeRelayStatus::Ok
-            );
-            let response = postcard::from_bytes::<RelayScopeAdmissionResponse>(unsafe {
-                std::slice::from_raw_parts(output.data, output.len)
-            })
-            .unwrap();
-            unsafe { jazz_native_relay_bytes_free(&mut output) };
-            response.admitted_scope
+            unsafe { (*host).inner.lock().unwrap().admit_scope(request) }
+                .expect("test admission is valid")
         }
         let alice = unsafe { admit(host, admission("alice", 0xa1)) };
         let bob = unsafe { admit(host, admission("bob", 0xb1)) };
@@ -2273,30 +2452,7 @@ mod tests {
             Err(JazzNativeRelayStatus::InvalidHandle)
         );
 
-        let request = postcard::to_allocvec(&RelayScopeRevocationRequest {
-            admitted_scope: alice,
-        })
-        .unwrap();
-        let mut output = JazzNativeRelayBytes::EMPTY;
-        assert_eq!(
-            unsafe {
-                jazz_native_relay_host_revoke_scope(
-                    host,
-                    request.as_ptr(),
-                    request.len(),
-                    &mut output,
-                )
-            },
-            JazzNativeRelayStatus::Ok
-        );
-        assert!(
-            postcard::from_bytes::<RelayScopeRevocationResponse>(unsafe {
-                std::slice::from_raw_parts(output.data, output.len)
-            })
-            .unwrap()
-            .revoked
-        );
-        unsafe { jazz_native_relay_bytes_free(&mut output) };
+        assert!(unsafe { (*host).inner.lock().unwrap().revoke_scope(alice) });
 
         assert_eq!(
             execute(open(alice)),

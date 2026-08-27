@@ -3,6 +3,130 @@
 use super::*;
 
 #[test]
+fn maintained_physical_point_subscriptions_keep_policy_scopes_live() {
+    let schema = owner_read_schema();
+    let db = open_db(0xa0, AuthorSubject::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+    for identity in [alice, bob] {
+        db.node
+            .node
+            .borrow_mut()
+            .set_session_claims(identity, test_provider_claims(identity));
+    }
+
+    let target = row(0x71);
+    let other = row(0x72);
+    for (row_id, title, owner) in [(target, "target", alice), (other, "other", bob)] {
+        db.insert(
+            "todos",
+            cells(title, false, owner),
+            crate::db::InsertOptions {
+                row_id: Some(row_id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    let target_query = db
+        .prepare_query(&Query::from("todos").filter(eq(col("id"), lit(Value::Uuid(target.0)))))
+        .unwrap();
+    let other_query = db
+        .prepare_query(&Query::from("todos").filter(eq(col("id"), lit(Value::Uuid(other.0)))))
+        .unwrap();
+    let opts = ReadOpts::default();
+    let mut alice_target =
+        block_on(db.subscribe_for_identity(&target_query, opts.clone(), alice)).unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(block_on(alice_target.next_raw()).unwrap())),
+        vec![target],
+        "the target's owner receives the maintained physical-point seed"
+    );
+    let mut bob_target =
+        block_on(db.subscribe_for_identity(&target_query, opts.clone(), bob)).unwrap();
+    assert!(
+        opened_rows(block_on(bob_target.next_raw()).unwrap()).is_empty(),
+        "a second identity must not inherit the first identity's point-policy result"
+    );
+    let mut bob_other = block_on(db.subscribe_for_identity(&other_query, opts, bob)).unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(block_on(bob_other.next_raw()).unwrap())),
+        vec![other],
+        "independent point subscriptions retain their own physical target"
+    );
+
+    db.update(
+        "todos",
+        other,
+        BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("other changed".to_owned()),
+        )]),
+        Default::default(),
+    )
+    .unwrap();
+    assert!(alice_target.try_next_event().is_none());
+    assert!(bob_target.try_next_event().is_none());
+    let (_, updated, removed) = delta_rows(block_on(bob_other.next_raw()).unwrap());
+    assert!(updated.iter().any(|row| row.row_uuid() == other));
+    assert!(removed.is_empty());
+
+    db.update(
+        "todos",
+        target,
+        BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("target changed".to_owned()),
+        )]),
+        Default::default(),
+    )
+    .unwrap();
+    assert!(bob_target.try_next_event().is_none());
+    let (_, updated, removed) = delta_rows(block_on(alice_target.next_raw()).unwrap());
+    assert!(updated.iter().any(|row| row.row_uuid() == target));
+    assert!(removed.is_empty());
+
+    db.update(
+        "todos",
+        target,
+        BTreeMap::from([("owner".to_owned(), Value::Uuid(bob.test_uuid()))]),
+        Default::default(),
+    )
+    .unwrap();
+    let (_, updated, removed) = delta_rows(block_on(alice_target.next_raw()).unwrap());
+    assert!(updated.is_empty());
+    assert_eq!(
+        removed.iter().map(|row| row.row_uuid).collect::<Vec<_>>(),
+        vec![target]
+    );
+    let (added, updated, removed) = delta_rows(block_on(bob_target.next_raw()).unwrap());
+    assert_eq!(row_ids(&added), vec![target]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+
+    db.delete("todos", target, Default::default()).unwrap();
+    let (_, updated, removed) = delta_rows(block_on(bob_target.next_raw()).unwrap());
+    assert!(updated.is_empty());
+    assert_eq!(
+        removed.iter().map(|row| row.row_uuid).collect::<Vec<_>>(),
+        vec![target]
+    );
+
+    db.restore(
+        "todos",
+        target,
+        Some(cells("target restored", false, bob)),
+        Default::default(),
+    )
+    .unwrap();
+    let (added, updated, removed) = delta_rows(block_on(bob_target.next_raw()).unwrap());
+    assert_eq!(row_ids(&added), vec![target]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+}
+
+#[test]
 fn maintained_subscription_emits_created_by_scoped_insert_after_empty_seed() {
     let schema = created_by_read_schema();
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
