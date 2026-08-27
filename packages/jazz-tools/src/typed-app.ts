@@ -788,7 +788,7 @@ type LargeValueUpdateForBuilder<TBuilder extends AnyTypedColumnBuilder> =
         ? JsonSetValueUpdate
         : never;
 
-/** Typed partial-value input accepted by `Db.applyDiffs`. */
+/** Typed diff map accepted by the `applyDiffs` option of `Db.update`. */
 export type TableLargeValueUpdate<
   TSchema extends SchemaLike,
   TTable extends TableName<TSchema>,
@@ -1355,7 +1355,7 @@ export interface Table<TTable extends string, TSchema extends SchemaLike> extend
   DefaultTableSelection<SchemaMeta<TTable, TSchema>>,
   TSchema
 > {
-  /** @internal Phantom used by `Db.applyDiffs` to retain column-specific edit shapes. */
+  /** @internal Phantom used by `Db.update` to retain column-specific diff shapes. */
   readonly _largeValueUpdateType: TableLargeValueUpdate<
     TSchema,
     Extract<TTable, TableName<TSchema>>

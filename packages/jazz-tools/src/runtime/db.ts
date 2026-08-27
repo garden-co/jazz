@@ -236,6 +236,20 @@ export interface UpdateOptions extends TimestampOverrideOptions {
   base?: BranchBase;
 }
 
+type UpdateOptionsWithDiffs<TReplacements extends object, TDiffs> = UpdateOptions & {
+  /**
+   * Page-relative text/bytes splices or JSON edits to apply atomically with
+   * `replacements`. A column may appear in either input, but not both.
+   */
+  applyDiffs?: TDiffs | object;
+};
+
+type LargeValueUpdateForTable<TTable> = TTable extends {
+  readonly _largeValueUpdateType: infer TDiffs;
+}
+  ? NonNullable<TDiffs>
+  : object;
+
 export interface DeleteOptions extends TimestampOverrideOptions {
   branch?: Branch;
   base?: BranchBase;
@@ -1235,7 +1249,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     options?: UpdateOptions,
   ): void {
     this.bindTable(table);
-    // `edits` is valid ordinary JSON data. Only `applyDiffs` interprets the
+    // `edits` is valid ordinary JSON data. Only `update`'s `applyDiffs` option interprets the
     // descriptor-shaped DSL, so upsert must preserve that JSON shape exactly.
     const transformedData = transformInputColumns(table, data);
     const values = toWriteRecordForOperation(
@@ -1952,7 +1966,7 @@ export class Db {
     options?: UpdateOptions,
   ): WriteHandle {
     const client = this.getClient(table._schema);
-    // `edits` is valid ordinary JSON data. Only `applyDiffs` interprets the
+    // `edits` is valid ordinary JSON data. Only `update`'s `applyDiffs` option interprets the
     // descriptor-shaped DSL, so upsert must preserve that JSON shape exactly.
     const transformedData = transformInputColumns(table, data);
     const values = toWriteRecordForOperation(
@@ -1979,13 +1993,26 @@ export class Db {
    *
    * Use {@link WriteHandle.wait} to wait for durable confirmation.
    */
-  update<T, Init>(
-    table: TableProxy<T, Init>,
+  update<
+    TTable extends TableProxy<any, any, any, any, any>,
+    TReplacements extends Partial<TTable["_initType"]>,
+  >(
+    table: TTable,
     id: string,
-    data: Partial<Init>,
-    options?: UpdateOptions,
+    data: TReplacements,
+    options?: UpdateOptionsWithDiffs<TReplacements, LargeValueUpdateForTable<TTable>>,
   ): WriteHandle {
     const client = this.getClient(table._schema);
+    const diffs = options?.applyDiffs;
+    if (
+      diffs !== undefined &&
+      (typeof diffs !== "object" || diffs === null || Array.isArray(diffs))
+    ) {
+      throw new Error("update option applyDiffs must be an object keyed by column name.");
+    }
+    if (diffs && Object.keys(data).some((column) => Object.hasOwn(diffs, column))) {
+      throw new Error("update replacements and applyDiffs must not both specify the same column.");
+    }
     const transformedData = transformInputColumns(table, data);
     const updates = toWriteRecordForOperation(
       "Update",
@@ -1994,47 +2021,36 @@ export class Db {
       table._table,
     );
     const context = this.getRuntimeOperationContext();
+    if (diffs !== undefined) {
+      const { ordinary, descriptors } = splitLargeValueUpdate(
+        diffs as Record<string, unknown>,
+        table._schema,
+        table._table,
+      );
+      if (Object.keys(ordinary).length > 0) {
+        throw new Error(
+          "update option applyDiffs accepts only field diff descriptors, not whole-column values.",
+        );
+      }
+      if (descriptors.length > 0) {
+        return this.wrapWriteWait(
+          client.updateLargeValues(
+            table._table,
+            id,
+            updates,
+            descriptors,
+            normalizeUpdateOptions(table._schema, table._table, options),
+            context?.session,
+            context?.attribution,
+          ),
+        );
+      }
+    }
     return this.wrapWriteWait(
       client.update(
         table._table,
         id,
         updates,
-        normalizeUpdateOptions(table._schema, table._table, options),
-        context?.session,
-        context?.attribution,
-      ),
-    );
-  }
-
-  /**
-   * Apply page-relative text/bytes splices or JSON edits to an existing value.
-   * This works for either inline or indirect storage; whole-column replacement
-   * remains {@link update}.
-   */
-  applyDiffs<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate>(
-    table: TableProxy<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate>,
-    id: string,
-    data: LargeValueUpdate,
-    options?: UpdateOptions,
-  ): WriteHandle {
-    const client = this.getClient(table._schema);
-    const { ordinary, descriptors } = splitLargeValueUpdate(
-      data as Record<string, unknown>,
-      table._schema,
-      table._table,
-    );
-    if (Object.keys(ordinary).length > 0 || descriptors.length === 0) {
-      throw new Error(
-        "applyDiffs accepts one or more field diff descriptors, not whole-column values.",
-      );
-    }
-    const context = this.getRuntimeOperationContext();
-    return this.wrapWriteWait(
-      client.updateLargeValues(
-        table._table,
-        id,
-        {},
-        descriptors,
         normalizeUpdateOptions(table._schema, table._table, options),
         context?.session,
         context?.attribution,

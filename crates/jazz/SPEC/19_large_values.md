@@ -423,16 +423,23 @@ columns or treat that fallback as a chunk-demand model. Issue #2090 tracks
 replacing that temporary carrier fallback with exact terminal demand into
 Groove. It does not gate the executability or correctness of this public API.
 
-`Db.applyDiffs` accepts partial mutations, while `Db.update` retains ordinary
-whole-column replacement semantics:
+`Db.update` accepts ordinary replacements and an `applyDiffs` option. Both are
+one atomic mutation, but the same column MUST NOT appear in both inputs:
 
 ```ts
-db.applyDiffs(app.things, thingId, {
-  byteField: { within: bytePage, splices: [{ at: 4, delete: 3, insert: bytes }] },
-  textField: { within: textPage, splices: [{ at: 3, delete: 1, insert: "x" }] },
-  textFieldUtf8: { within: utf8Page, splices: [{ atUtf8: 3, deleteUtf8: 1, insert: "x" }] },
-  jsonField: { edits: [{ op: "set", at: "/someKey/11", value: next }] },
-});
+db.update(
+  app.things,
+  thingId,
+  { name: "renamed" },
+  {
+    applyDiffs: {
+      byteField: { within: bytePage, splices: [{ at: 4, delete: 3, insert: bytes }] },
+      textField: { within: textPage, splices: [{ at: 3, delete: 1, insert: "x" }] },
+      textFieldUtf8: { within: utf8Page, splices: [{ atUtf8: 3, deleteUtf8: 1, insert: "x" }] },
+      jsonField: { edits: [{ op: "set", at: "/someKey/11", value: next }] },
+    },
+  },
+);
 ```
 
 `within` is the same range descriptor used by the read and makes splice
@@ -443,8 +450,8 @@ defaults to UTF-16; UTF-8 splice fields opt in explicitly. Bounds, integer
 overflow, UTF-8 boundaries, and UTF-16 surrogate splits fail rather than round.
 JSON edits use RFC 6901 pointer escaping, fail for a missing path or incompatible
 schema/kind/nullability, and lower to Groove's ordinary binary edit-tail model;
-they do not create a JSON-specific storage model. All fields in one `applyDiffs`
-commit atomically. There is deliberately no page staleness/CAS promise in this
+they do not create a JSON-specific storage model. All fields in one `update`
+call, including `applyDiffs`, commit atomically. There is deliberately no page staleness/CAS promise in this
 API revision.
 
 Object-form partial selections apply to the root query only in this revision.

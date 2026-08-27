@@ -109,26 +109,40 @@ describe("createDb in-memory driver", () => {
     expect(utf8Page).toEqual({ id: inserted.id, body: "😀" });
 
     await db
-      .applyDiffs(largeValues.documents, inserted.id, {
-        payload: {
-          within: { from: payloadOffset + 1, to: payloadOffset + 5 },
-          splices: [{ at: 1, delete: 2, insert: new Uint8Array([9, 8]) }],
+      .update(
+        largeValues.documents,
+        inserted.id,
+        { done: true },
+        {
+          applyDiffs: {
+            payload: {
+              within: { from: payloadOffset + 1, to: payloadOffset + 5 },
+              splices: [{ at: 1, delete: 2, insert: new Uint8Array([9, 8]) }],
+            },
+            body: {
+              within: { from: textPrefix.length + 1, to: textPrefix.length + 3 },
+              splices: [{ at: 0, delete: 2, insert: "🪩" }],
+            },
+            metadata: { edits: [{ op: "set", at: "/nested/answer", value: 43 }] },
+          },
         },
-        body: {
-          within: { from: textPrefix.length + 1, to: textPrefix.length + 3 },
-          splices: [{ at: 0, delete: 2, insert: "🪩" }],
-        },
-        metadata: { edits: [{ op: "set", at: "/nested/answer", value: 43 }] },
-      })
+      )
       .wait({ tier: "local" });
 
     await db
-      .applyDiffs(largeValues.documents, inserted.id, {
-        body: {
-          within: { fromUtf8: textPrefix.length + 1, toUtf8: textPrefix.length + 5 },
-          splices: [{ atUtf8: 0, deleteUtf8: 4, insert: "🚀" }],
+      .update(
+        largeValues.documents,
+        inserted.id,
+        {},
+        {
+          applyDiffs: {
+            body: {
+              within: { fromUtf8: textPrefix.length + 1, toUtf8: textPrefix.length + 5 },
+              splices: [{ atUtf8: 0, deleteUtf8: 4, insert: "🚀" }],
+            },
+          },
         },
-      })
+      )
       .wait({ tier: "local" });
 
     const [updated] = await db.all(

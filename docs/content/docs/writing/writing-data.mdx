@@ -118,36 +118,60 @@ Required fields cannot be set to `null`.
 
 ### Editing a page of a large value
 
-Use `update(...)` to replace a complete primitive. Use `applyDiffs(...)` when
-editing a selected page of a `bytes` or `string` column, or when setting an
-existing JSON member. Splice coordinates are relative to `within`, and multiple
-splices run in order against the result of the previous splice. The mutation is
-still one ordinary row update, so all fields in one call succeed or fail
-together.
+Use `update(...)` to replace complete primitives and, with its `applyDiffs`
+option, edit a selected page of a `bytes` or `string` column or set an existing
+JSON member. Replacements and diffs are one atomic update, but a column must
+appear in only one of them. Splice coordinates are relative to `within`, and
+multiple splices run in order against the result of the previous splice.
 
 ```ts
-db.applyDiffs(app.documents, documentId, {
-  bytes: {
-    within: { from: 1_000_000, to: 2_000_000 },
-    splices: [{ at: 4, delete: 3, insert: new Uint8Array([1, 2]) }],
+db.update(
+  app.documents,
+  documentId,
+  { title: "Revised document" },
+  {
+    applyDiffs: {
+      bytes: {
+        within: { from: 1_000_000, to: 2_000_000 },
+        splices: [{ at: 4, delete: 3, insert: new Uint8Array([1, 2]) }],
+      },
+      text: {
+        within: { from: 4, to: 124 }, // UTF-16 coordinates
+        splices: [{ at: 3, delete: 1, insert: "revised" }],
+      },
+      metadata: {
+        edits: [{ op: "set", at: "/chapters/0/title", value: "New title" }],
+      },
+    },
   },
-  text: {
-    within: { from: 4, to: 124 }, // UTF-16 coordinates
-    splices: [{ at: 3, delete: 1, insert: "revised" }],
+);
+```
+
+For a diff-only update, pass an empty replacement object:
+
+```ts
+db.update(
+  app.documents,
+  documentId,
+  {},
+  {
+    applyDiffs: {
+      text: {
+        within: { from: 4, to: 124 },
+        splices: [{ at: 3, delete: 1, insert: "revised" }],
+      },
+    },
   },
-  metadata: {
-    edits: [{ op: "set", at: "/chapters/0/title", value: "New title" }],
-  },
-});
+);
 ```
 
 For byte-oriented text, use `{ fromUtf8, toUtf8 }` in `within` and
 `{ atUtf8, deleteUtf8, insert }` in each splice. Jazz rejects out-of-range
 coordinates and text boundaries that split a code point or surrogate pair. This
 revision does not add a page-staleness/CAS check; keep page coordinates aligned
-with the value your application last read. `applyDiffs(...)` is for existing
-rows only; inserts and full replacement continue to use the ordinary mutation
-methods.
+with the value your application last read. `update(..., { applyDiffs })` is for
+existing rows only; inserts and full replacement continue to use the ordinary
+mutation methods.
 
 ## Write durability tiers
 

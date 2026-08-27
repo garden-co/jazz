@@ -1308,7 +1308,7 @@ export class JazzClient {
     return new WriteHandle(committedBatchId(result), this);
   }
 
-  /** @internal Typed `Db.applyDiffs` lowering; not exposed as an imperative API. */
+  /** @internal Typed `Db.update` diff lowering; not exposed as an imperative API. */
   updateLargeValues(
     table: string,
     objectId: string,

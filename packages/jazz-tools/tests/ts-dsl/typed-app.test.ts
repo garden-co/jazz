@@ -524,14 +524,24 @@ describe("typed app prototype", () => {
     void utf8TextUpdate;
 
     if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
-      // Whole-column updates continue to use the ordinary Db.update API; the
-      // narrow LargeValueUpdateOf surface intentionally accepts only diffs.
-      const db = null as unknown as Pick<Db, "update" | "upsert">;
-      db.update(largeValueUpdateApp.documents, "00000000-0000-0000-0000-000000000001", {
-        done: true,
-      });
+      // Whole-column replacements and column-specific diffs share Db.update.
+      const db = null as unknown as Db;
+      db.update(
+        largeValueUpdateApp.documents,
+        "00000000-0000-0000-0000-000000000001",
+        {
+          done: true,
+        },
+        {
+          applyDiffs: {
+            title: { within: { from: 0, to: 1 }, splices: [{ at: 0, delete: 0, insert: "x" }] },
+          },
+        },
+      );
+      // @ts-expect-error Db no longer exposes a separate applyDiffs method
+      db.applyDiffs(largeValueUpdateApp.documents, "00000000-0000-0000-0000-000000000001", {});
       db.upsert(largeValueUpdateApp.documents, "00000000-0000-0000-0000-000000000001", {
-        // @ts-expect-error partial descriptors belong exclusively to applyDiffs
+        // @ts-expect-error partial descriptors belong exclusively to update's applyDiffs option
         title: { within: { from: 0, to: 1 }, splices: [{ at: 0, delete: 0, insert: "x" }] },
       });
 
