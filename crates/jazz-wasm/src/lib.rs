@@ -3,13 +3,17 @@ use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use futures_channel::mpsc::{unbounded, UnboundedSender};
 use futures_util::future::{AbortHandle, Abortable};
 use futures_util::lock::Mutex as LocalMutex;
 use futures_util::stream;
+use futures_util::task::{waker, ArcWake};
 use futures_util::{Stream, StreamExt};
 #[cfg(target_arch = "wasm32")]
 use idb_tree::IndexedDbPageStore;
@@ -588,6 +592,24 @@ struct WasmWireTransport {
 
 struct WasmTickScheduler {
     callback: js_sys::Function,
+    progress_wake: UnboundedSender<()>,
+    progress_wake_pending: Arc<AtomicBool>,
+}
+
+/// `Waker` itself must be Send + Sync, while a JS callback is deliberately
+/// thread-affine. Keep only a thread-safe channel in the waker and forward it
+/// back to the WASM local task before touching JS.
+struct WasmQueryRuntimeWake {
+    sender: UnboundedSender<()>,
+    pending: Arc<AtomicBool>,
+}
+
+impl ArcWake for WasmQueryRuntimeWake {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        if !arc_self.pending.swap(true, Ordering::AcqRel) {
+            let _ = arc_self.sender.unbounded_send(());
+        }
+    }
 }
 
 impl TickScheduler for WasmTickScheduler {
@@ -606,6 +628,13 @@ impl TickScheduler for WasmTickScheduler {
             &JsValue::NULL,
             &JsValue::from_str(&format!("after:{delay_ms}")),
         );
+    }
+
+    fn query_runtime_waker(&self) -> Option<Waker> {
+        Some(waker(Arc::new(WasmQueryRuntimeWake {
+            sender: self.progress_wake.clone(),
+            pending: Arc::clone(&self.progress_wake_pending),
+        })))
     }
 }
 
@@ -961,7 +990,21 @@ impl WasmDbInner {
     }
 
     fn set_tick_scheduler(&self, callback: js_sys::Function) {
-        let scheduler = Rc::new(WasmTickScheduler { callback });
+        let (progress_wake, mut progress_events) = unbounded();
+        let progress_wake_pending = Arc::new(AtomicBool::new(false));
+        let progress_callback = callback.clone();
+        let progress_pending = Arc::clone(&progress_wake_pending);
+        wasm_bindgen_futures::spawn_local(async move {
+            while progress_events.next().await.is_some() {
+                progress_pending.store(false, Ordering::Release);
+                let _ = progress_callback.call1(&JsValue::NULL, &JsValue::from_str("immediate"));
+            }
+        });
+        let scheduler = Rc::new(WasmTickScheduler {
+            callback,
+            progress_wake,
+            progress_wake_pending,
+        });
         with_wasm_db!(self, |db| db.set_tick_scheduler(Some(scheduler)))
     }
 
