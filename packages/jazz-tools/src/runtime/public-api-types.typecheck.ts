@@ -9,6 +9,10 @@ import type {
 } from "./index.js";
 import { userIdentity } from "../index.js";
 
+// @ts-expect-error Internal app contexts can carry server-only credentials.
+import type { AppContext } from "../index.js";
+void (null as unknown as AppContext);
+
 // @ts-expect-error Internal transport sessions are not a public package type.
 import type { Session } from "../index.js";
 declare const unavailableSession: Session;
@@ -55,6 +59,7 @@ const cookie: RuntimeDbConfig = {
 const admin: PackageDbConfig = { appId: "app", adminSecret: "admin" };
 const backend: PackageDbConfig = {
   appId: "app",
+  // @ts-expect-error backend admission credentials are server-only; use jazz-tools/backend.
   backendSecret: "backend",
   cookieSession,
 };

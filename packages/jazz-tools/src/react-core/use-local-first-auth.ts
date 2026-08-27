@@ -4,6 +4,8 @@ import type { AuthSecretStore } from "../runtime/auth-secret-store.js";
 export interface LocalFirstAuth {
   secret: string | null;
   isLoading: boolean;
+  /** Non-null when loading the durable root failed (for example, malformed storage). */
+  error: Error | null;
   login(secret: string): Promise<void>;
   signOut(): Promise<void>;
 }
@@ -41,6 +43,7 @@ export function createUseLocalFirstAuth(store: AuthSecretStore): () => LocalFirs
     const currentVersion = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
     const [secret, setSecret] = useState<string | null>(null);
     const [isLoading, setIsLoading] = useState(true);
+    const [error, setError] = useState<Error | null>(null);
 
     useEffect(() => {
       let cancelled = false;
@@ -51,18 +54,20 @@ export function createUseLocalFirstAuth(store: AuthSecretStore): () => LocalFirs
           if (cancelled) return;
           setSecret(resolved);
           setIsLoading(false);
+          setError(null);
         })
-        .catch(() => {
+        .catch((error: unknown) => {
           if (cancelled) return;
           setSecret(null);
           setIsLoading(false);
+          setError(error instanceof Error ? error : new Error(String(error)));
         });
       return () => {
         cancelled = true;
       };
     }, [currentVersion]);
 
-    return { secret, isLoading, login, signOut };
+    return { secret, isLoading, error, login, signOut };
   };
 }
 

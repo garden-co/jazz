@@ -170,6 +170,29 @@ physical id while `v1.title` and `v2.name` remain their respective authored
 wire names. This epoch intentionally does not accept the former JSON-in-bytes
 storage spelling.
 
+Contribution-merge provenance is likewise logical on the transaction/wire
+surface, but its durable `jazz_transactions` coordinate is a standard Groove
+record with nonzero `physical_table_id: U64` and a permanent component enum:
+`column` has tag 0 and the one-field record `{ physical_column_id: U64 }`,
+`operation` has tag 1 and `{ physical_column_id: U64, identity: Bytes }`, and
+`register` has tag 2 and an empty record. The field order and enum tags are
+durable. The storage boundary resolves a logical `(table, column)` to those
+local ids when writing and resolves the ids back to the active logical
+spellings when reading. Compatible table and column lens renames retain the
+same ids; recovery consults retained mappings when the active spelling has
+changed.
+
+An operation identity is strategy-owned rather than opaque provenance:
+`Counter` uses exactly an empty `identity`, while `GSet` uses exactly the
+canonical one-field Groove record `{ element: <the declared array element
+type> }`. The receiving node validates the table/column ownership, content
+layer, merge strategy, enum tag, payload shape, and canonical identity bytes
+at remote admission and again while reopening durable state, before any
+derived mutation or resident state. Zero, unknown, ambiguous, malformed,
+trailing, or noncanonical contribution payloads fail closed. This is local
+storage identity only: API and wire records never expose physical ids or a
+private postcard contribution encoding.
+
 Jazz registers a schema variant and every projection needed for its logical
 views before activating a catalogue bundle or accepting a row under that
 alias. Variant registration is append-only: extending a lineage with a new

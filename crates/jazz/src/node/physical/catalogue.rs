@@ -1,7 +1,7 @@
 /// Lower Jazz's durable schema alias into Groove's deliberately smaller,
 /// table-local union-case space. A future user-declared top-level union will
 /// allocate a distinct tag for each `(schema alias, user case)` pair here.
-fn groove_variant_tag(alias: SchemaVersionAlias) -> Result<u32, Error> {
+pub(super) fn groove_variant_tag(alias: SchemaVersionAlias) -> Result<u32, Error> {
     u32::try_from(alias.0)
         .map_err(|_| Error::InvalidStoredValue("physical table variant tag exhausted"))
 }

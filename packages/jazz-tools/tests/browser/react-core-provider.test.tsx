@@ -145,7 +145,10 @@ describe("react-core provider/hooks browser coverage", () => {
 
     render(
       <ConfiguredJazzProvider
-        config={{ appId: "provider-browser-lifecycle", secret: "anonymous" }}
+        config={{
+          appId: "provider-browser-lifecycle",
+          secret: "jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        }}
         createJazzClient={createJazzClient}
         fallback={<div data-testid="configured-provider">loading</div>}
       >
