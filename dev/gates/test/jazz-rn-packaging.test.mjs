@@ -170,6 +170,39 @@ test("jazz-rn reserves a thin binary relay TurboModule boundary for matching nat
   assert.match(androidRelay, /E_JAZZ_RELAY_UNAVAILABLE/);
 });
 
+test("trusted relay admission stays outside the JavaScript command channel", async () => {
+  const nativeSpec = await readFile(
+    new URL("../../../crates/jazz-rn/src/NativeJazzRelay.ts", import.meta.url),
+    "utf8",
+  );
+  const androidBridge = await readFile(
+    new URL(
+      "../../../crates/jazz-rn/android/src/main/java/com/jazzrn/JazzRelayBridge.kt",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const iosRelay = await readFile(
+    new URL("../../../crates/jazz-rn/ios/JazzRelay.mm", import.meta.url),
+    "utf8",
+  );
+  const header = await readFile(
+    new URL("../../../crates/jazz-native-relay/include/jazz_native_relay.h", import.meta.url),
+    "utf8",
+  );
+
+  assert.doesNotMatch(nativeSpec, /admit|revoke|claims|token/i);
+  assert.match(androidBridge, /object JazzRelayTrustedAdmission/);
+  assert.match(androidBridge, /nativeAdmitTrustedScopeJson/);
+  assert.match(androidBridge, /nativeRevokeTrustedScope/);
+  assert.match(androidBridge, /releaseRuntime/);
+  assert.match(iosRelay, /JazzRelayTrustedAdmission/);
+  assert.match(iosRelay, /jazz_native_relay_host_admit_scope_json/);
+  assert.match(iosRelay, /jazz_native_relay_host_revoke_scope_capability/);
+  assert.match(header, /jazz_native_relay_host_admit_scope_json/);
+  assert.match(header, /jazz_native_relay_host_revoke_scope_capability/);
+});
+
 test("relay artifact staging targets every Android ABI and iOS framework slice", async () => {
   const script = await readFile(
     new URL("../../../crates/jazz-rn/scripts/build-relay-artifacts.sh", import.meta.url),
