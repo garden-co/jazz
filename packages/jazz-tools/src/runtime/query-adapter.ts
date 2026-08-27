@@ -284,6 +284,11 @@ function validateIncludeBuilderSpec(
   if (spec.gather) {
     throw new Error(`Include builder for relation "${relationName}" does not support gather(...).`);
   }
+  if (Object.keys(spec.partialSelect).length > 0) {
+    throw new Error(
+      `Include builder for relation "${relationName}" does not support partial large-value selections.`,
+    );
+  }
 }
 
 function toArraySubqueries(

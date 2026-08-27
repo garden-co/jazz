@@ -218,6 +218,21 @@ describe("translateQuery", () => {
       { kind: "json_pointer", column: "metadata", at: "/someKey/11/otherKey" },
     ]);
   });
+
+  it("rejects partial large-value selections in include builders", () => {
+    expect(() =>
+      translateQuery(
+        app.projects
+          .include({
+            todosViaProject: app.todos.select({ body: { from: 4, to: 124 } }),
+          })
+          ._build(),
+        app.wasmSchema,
+      ),
+    ).toThrow(
+      'Include builder for relation "todosViaProject" does not support partial large-value selections.',
+    );
+  });
   it("keeps native relation IR for relation traversal queries", () => {
     const translated = JSON.parse(
       translateQuery(app.todos.where({ done: false }).hopTo("owner")._build(), app.wasmSchema),
