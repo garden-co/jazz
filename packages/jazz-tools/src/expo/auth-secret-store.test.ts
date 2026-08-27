@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
-vi.mock("expo-crypto", () => ({ getRandomBytes: vi.fn() }));
+// A valid deterministic root makes corrupt-value tests prove that the store
+// rejects rather than silently regenerating and overwriting the existing value.
+vi.mock("expo-crypto", () => ({ getRandomBytes: vi.fn(() => new Uint8Array(32)) }));
 vi.mock("expo-secure-store", () => ({
   deleteItemAsync: vi.fn(),
   getItemAsync: vi.fn(),
