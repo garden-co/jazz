@@ -96,7 +96,7 @@ fn point_read_authorization_keeps_using_physical_row_uuid_with_declared_id() {
         alice,
         BTreeMap::from([("sub".to_owned(), Value::Uuid(alice.test_uuid()))]),
     );
-    core.set_session_claims(
+    core.set_test_provider_claims(
         bob,
         BTreeMap::from([("sub".to_owned(), Value::Uuid(bob.test_uuid()))]),
     );
