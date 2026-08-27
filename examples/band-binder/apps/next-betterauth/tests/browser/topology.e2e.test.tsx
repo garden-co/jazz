@@ -79,6 +79,7 @@ describe("BandBinder cross-topology recovery", () => {
     const expectedChildPages: { id: string; title: string }[] = [];
     let expectedChildPagesBeforeReconnect: { id: string; title: string }[] = [];
     const ownerMutationErrors: unknown[] = [];
+    const managerMutationErrors: unknown[] = [];
     const taskSubscriptionSnapshots: string[][] = [];
     const childPageWindowSubscriptionSnapshots: { id: string; title: string }[][] = [];
     const managerChildPageWindowSubscriptionSnapshots: { id: string; title: string }[][] = [];
@@ -119,6 +120,9 @@ describe("BandBinder cross-topology recovery", () => {
               await manager!.shutdown();
               cleanup.untrack(manager!);
               manager = await openClient(server!, "manager", managerJwt, managerDbName);
+              cleanup.trackSubscription(
+                manager.onMutationError((event) => managerMutationErrors.push(event)),
+              );
             },
           },
           serverNetwork: {
@@ -165,6 +169,9 @@ describe("BandBinder cross-topology recovery", () => {
                 owner.onMutationError((event) => ownerMutationErrors.push(event)),
               );
               manager = await openClient(server, "manager", managerJwt, managerDbName);
+              cleanup.trackSubscription(
+                manager.onMutationError((event) => managerMutationErrors.push(event)),
+              );
               // Bootstrap is an explicit grant, not an implicit initial read.
               // A signed-in client starts with no workspace-visible state.
               expect(await manager.all(app.workspaces.where({}), { tier: "edge" })).toEqual([]);
@@ -316,6 +323,8 @@ describe("BandBinder cross-topology recovery", () => {
                   settle(
                     "manager settles root block at edge",
                     managerBlockWrite.wait({ tier: "edge" }),
+                    15_000,
+                    () => `mutationErrors=${JSON.stringify(managerMutationErrors)}`,
                   ),
                 ),
               ]);
