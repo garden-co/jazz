@@ -253,7 +253,6 @@ function runtimeAuth(config: DbForConnection["config"]): Record<string, unknown>
   return {
     jwt_token: config.jwtToken ?? null,
     ...(config.adminSecret ? { admin_secret: config.adminSecret } : {}),
-    ...(config.backendSecret ? { backend_secret: config.backendSecret } : {}),
     ...(config.cookieSession ? { backend_session: config.cookieSession } : {}),
   };
 }

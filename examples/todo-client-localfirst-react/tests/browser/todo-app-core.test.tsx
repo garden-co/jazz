@@ -163,14 +163,14 @@ describe("React Todo App core browser canary", () => {
       driver: { type: "persistent", dbName: writerDbName },
       serverUrl: SERVER_URL,
       adminSecret: ADMIN_SECRET,
-      secret: "Tb9eLjnS22z-_s9FK0EtiFIIRDe4EAygLAdni55RvAs",
+      secret: "jazz-auth-v1:Tb9eLjnS22z-_s9FK0EtiFIIRDe4EAygLAdni55RvAs",
     });
     const reader = await mountApp({
       appId: APP_ID,
       driver: { type: "persistent", dbName: readerDbName },
       serverUrl: SERVER_URL,
       adminSecret: ADMIN_SECRET,
-      secret: "VDOGX2nez-5T9Lgk4VfYMT33Qsa6J4loRAoKLZpvxBg",
+      secret: "jazz-auth-v1:VDOGX2nez-5T9Lgk4VfYMT33Qsa6J4loRAoKLZpvxBg",
     });
 
     await act(async () => {
@@ -228,7 +228,7 @@ describe("React Todo App core browser canary", () => {
       driver: { type: "persistent", dbName },
       serverUrl: SERVER_URL,
       adminSecret: ADMIN_SECRET,
-      secret: "GWA1Dzw4x_QVSAKK3_i0U4MlfJBdYlG3jOwAK_rLx28",
+      secret: "jazz-auth-v1:GWA1Dzw4x_QVSAKK3_i0U4MlfJBdYlG3jOwAK_rLx28",
     });
 
     await addTodoAndWaitForLocalDurability(firstSession, title);
@@ -245,7 +245,7 @@ describe("React Todo App core browser canary", () => {
       driver: { type: "persistent", dbName },
       serverUrl: SERVER_URL,
       adminSecret: ADMIN_SECRET,
-      secret: "GWA1Dzw4x_QVSAKK3_i0U4MlfJBdYlG3jOwAK_rLx28",
+      secret: "jazz-auth-v1:GWA1Dzw4x_QVSAKK3_i0U4MlfJBdYlG3jOwAK_rLx28",
     });
 
     await waitFor(
@@ -260,8 +260,8 @@ describe("React Todo App core browser canary", () => {
   it("reopened persistent IndexedDB client catches up a locally durable write after websocket reconnect", async () => {
     const writerDbName = uniqueDbName("core-reconnect-writer");
     const readerDbName = uniqueDbName("core-reconnect-reader");
-    const writerSecret = "71E6G0xpMXIiQ_dFv6tCLVCEt33kivVHtQ7FD-fkYlc";
-    const readerSecret = "Hw5MHsjqxaP82KsnDXOB9V_7bRWGip1wDRY70fVr8Z8";
+    const writerSecret = "jazz-auth-v1:71E6G0xpMXIiQ_dFv6tCLVCEt33kivVHtQ7FD-fkYlc";
+    const readerSecret = "jazz-auth-v1:Hw5MHsjqxaP82KsnDXOB9V_7bRWGip1wDRY70fVr8Z8";
     const onlineTitle = "Core reconnect online todo";
     const offlineTitle = "Core reconnect offline todo";
     let writerEdgeResult: Error | null | undefined;

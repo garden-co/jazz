@@ -107,6 +107,9 @@ where
                 );
             }
         }
+        let contribution_merge = self.contribution_merge_storage_value(
+            stored.tx.contribution_merge.as_ref(),
+        )?;
         batch.update(
             "jazz_transactions",
             transaction_values_with_cardinality_scope(
@@ -116,6 +119,7 @@ where
                 stored.global_time,
                 stored.durability,
                 stored.view_scoped_cardinality,
+                contribution_merge,
             ),
         );
         // Pending and accepted content versions both participate in local

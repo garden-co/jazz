@@ -584,6 +584,128 @@ async fn incomplete_push_upload_is_restart_persistent_and_reclaimable() {
     assert_eq!(chunks.len(), 0);
 }
 
+// This is intentionally a facade-level internal receipt: a mismatched reclaim
+// key/value pair can only be introduced by corrupt durable engine metadata,
+// not through Groove's public row API. It proves corruption fails closed
+// before the maintenance path deletes either the queue work, metadata, or the
+// immutable blob, including after a reopen.
+#[futures_test::test]
+async fn reclaim_rejects_mismatched_queue_identity_without_mutation_after_reopen() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema.clone(), storage.clone())
+        .await
+        .unwrap();
+    database.set_chunk_storage(chunks.clone());
+    let staged = database
+        .prepare_and_stage_large_value(
+            crate::large_values::LargeValueKind::Bytes,
+            &vec![0x5a; crate::large_values::INLINE_VALUE_MAX_BYTES + 1],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        chunks.len(),
+        1,
+        "this focused receipt uses one node so its corrupt queue is the only reclaim work"
+    );
+    let queued_ref = staged.value_ref.root.clone();
+    assert!(database.evict_staged_large_value(staged.id).await.unwrap());
+    let queue_key = large_value_reclaim_key(&queued_ref).unwrap();
+    let node_key = large_value_node_key(&queued_ref).unwrap();
+    let node_before = database
+        .storage
+        .get(LARGE_VALUE_METADATA_CF.to_owned(), node_key.clone())
+        .await
+        .unwrap()
+        .expect("eviction retains node metadata for reclaim");
+    let mismatched_ref = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![0x6b; crate::large_values::INLINE_VALUE_MAX_BYTES + 2],
+    )
+    .unwrap()
+    .value_ref
+    .root;
+    let mismatched_value = crate::large_values::encode_node_ref(&mismatched_ref).unwrap();
+    database
+        .storage
+        .write_many(vec![OwnedWriteOperation::Set {
+            cf: LARGE_VALUE_METADATA_CF.to_owned(),
+            key: queue_key.clone(),
+            value: mismatched_value.clone(),
+        }])
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        database
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await,
+        Err(Error::InvalidLargeValueMetadata(message))
+            if message.contains("identify different nodes")
+    ));
+    assert_eq!(
+        chunks.len(),
+        1,
+        "corrupt reclaim work cannot delete the blob"
+    );
+    assert_eq!(
+        database
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), queue_key.clone())
+            .await
+            .unwrap(),
+        Some(mismatched_value.clone()),
+        "corrupt reclaim work remains for inspection rather than being consumed"
+    );
+    assert_eq!(
+        database
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), node_key.clone())
+            .await
+            .unwrap(),
+        Some(node_before.clone()),
+        "corrupt reclaim work cannot delete its metadata"
+    );
+
+    drop(database);
+    let mut reopened = Database::new(schema, storage).await.unwrap();
+    reopened.set_chunk_storage(chunks.clone());
+    assert!(matches!(
+        reopened
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await,
+        Err(Error::InvalidLargeValueMetadata(message))
+            if message.contains("identify different nodes")
+    ));
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(
+        reopened
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), queue_key)
+            .await
+            .unwrap(),
+        Some(mismatched_value)
+    );
+    assert_eq!(
+        reopened
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), node_key)
+            .await
+            .unwrap(),
+        Some(node_before)
+    );
+}
+
 // This facade-level test is intentionally below Jazz's public mutation API:
 // only a hostile peer can call the raw chunk/finalization split directly. It
 // proves finalization is its own admission boundary rather than trusting the

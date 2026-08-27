@@ -1150,12 +1150,20 @@ impl Database {
                 if reclaimed >= limit {
                     break 'batches;
                 }
-                let node_ref =
-                    crate::large_values::decode_node_ref(&encoded_ref).map_err(|error| {
+                let node_ref_from_key =
+                    crate::db::large_value_reclaim_node_ref_from_key(&queue_key)?;
+                let node_ref_from_value = crate::large_values::decode_node_ref(&encoded_ref)
+                    .map_err(|error| {
                         Error::InvalidLargeValueMetadata(format!(
                             "cannot decode reclaim entry: {error}"
                         ))
                     })?;
+                if node_ref_from_key != node_ref_from_value {
+                    return Err(Error::InvalidLargeValueMetadata(
+                        "reclaim entry key and value identify different nodes".to_owned(),
+                    ));
+                }
+                let node_ref = node_ref_from_key;
                 let node_key = large_value_node_key(&node_ref)?;
                 let Some(encoded_metadata) = self
                     .storage

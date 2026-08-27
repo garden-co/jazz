@@ -93,6 +93,20 @@ fn large_value_reclaim_key(node_ref: &crate::large_values::NodeRef) -> Result<Ve
     Ok(key)
 }
 
+/// Decode the identity embedded in a reclaim-work key. The queue key and its
+/// value deliberately duplicate the same canonical `NodeRef`; reclaim checks
+/// that agreement before treating either as authority to delete a blob.
+pub(crate) fn large_value_reclaim_node_ref_from_key(
+    key: &[u8],
+) -> Result<crate::large_values::NodeRef, Error> {
+    let encoded = key.strip_prefix(b"reclaim/").ok_or_else(|| {
+        Error::InvalidLargeValueMetadata("reclaim entry has an invalid key prefix".to_owned())
+    })?;
+    crate::large_values::decode_node_ref(encoded).map_err(|error| {
+        Error::InvalidLargeValueMetadata(format!("cannot decode reclaim key identity: {error}"))
+    })
+}
+
 /// Durable marker for a remotely hydrated immutable node whose byte write has
 /// happened but whose Groove reference metadata still needs installation.
 /// This lives in Groove's metadata plane rather than in the blob backend: a
@@ -143,31 +157,123 @@ fn canonical_large_value_children(
         .collect()
 }
 
-const LARGE_VALUE_METADATA_MAGIC: &[u8; 4] = b"GLVM";
-const LARGE_VALUE_METADATA_VERSION: u8 = 1;
-const LARGE_VALUE_ROOT_REFERENCES_TAG: u8 = 0;
-const LARGE_VALUE_NODE_REFERENCES_TAG: u8 = 1;
-const STAGED_LARGE_VALUE_TAG: u8 = 2;
-const PENDING_LARGE_VALUE_UPLOAD_TAG: u8 = 3;
+// The key namespace is the metadata record's discriminant: `root/`, `node/`,
+// `staged/`, and `upload/` cannot be confused. Values therefore use a plain
+// canonical Groove record, rather than a second private magic/version/tag
+// envelope. These identifiers are durable *one-based record slots*, not
+// declaration order. A retired slot stays in the physical layout as an empty
+// nullable placeholder; it is never compacted away.
+const ROOT_REF_DURABLE_FIELD: u16 = 1;
+const ROOT_REF_STAGED_FIELD: u16 = 2;
+const ROOT_REF_NODE_ACTIVE_FIELD: u16 = 3;
 
-fn large_value_root_references_descriptor() -> records::RecordDescriptor {
-    static DESCRIPTOR: OnceLock<records::RecordDescriptor> = OnceLock::new();
-    *DESCRIPTOR.get_or_init(|| {
-        records::RecordDescriptor::new([
-            ("durable", records::ValueType::U64),
-            ("staged", records::ValueType::U64),
-            ("node_active", records::ValueType::Bool),
+const NODE_REF_REFERENCES_FIELD: u16 = 1;
+const NODE_REF_UPLOAD_REFERENCES_FIELD: u16 = 2;
+const NODE_REF_CHILDREN_FIELD: u16 = 3;
+
+const STAGED_VALUE_ID_FIELD: u16 = 1;
+const STAGED_VALUE_REF_FIELD: u16 = 2;
+const STAGED_VALUE_ENCODED_BYTES_FIELD: u16 = 3;
+const STAGED_VALUE_NODE_COUNT_FIELD: u16 = 4;
+const STAGED_VALUE_CREATED_AT_MS_FIELD: u16 = 5;
+
+const PENDING_UPLOAD_ID_FIELD: u16 = 1;
+const PENDING_UPLOAD_DESCRIPTOR_FIELD: u16 = 2;
+const PENDING_UPLOAD_RECEIPT_ID_FIELD: u16 = 3;
+const PENDING_UPLOAD_ENCODED_BYTES_FIELD: u16 = 4;
+const PENDING_UPLOAD_NODE_COUNT_FIELD: u16 = 5;
+const PENDING_UPLOAD_CREATED_AT_MS_FIELD: u16 = 6;
+const PENDING_UPLOAD_CHUNKS_FIELD: u16 = 7;
+
+#[derive(Clone)]
+struct DurableMetadataRecordSchema {
+    slots: Vec<DurableMetadataRecordSlot>,
+    descriptor: records::RecordDescriptor,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DurableMetadataRecordSlot {
+    Known(u16),
+    Reserved(u16),
+}
+
+/// Construct a fixed engine-owned record layout from permanent, one-based
+/// positional field IDs. Sorting source declarations is a no-op, but an ID is
+/// also its actual ordinal: gaps become reserved nullable slots so renumbering
+/// a field changes the physical record schema rather than being normalized by
+/// a name sort.
+fn durable_metadata_record_schema(
+    fields: impl IntoIterator<Item = (u16, &'static str, records::ValueType)>,
+) -> DurableMetadataRecordSchema {
+    let mut fields = fields.into_iter().collect::<Vec<_>>();
+    fields.sort_by_key(|(id, _, _)| *id);
+    assert!(
+        fields.iter().all(|(id, _, _)| *id != 0),
+        "durable metadata record field IDs start at one"
+    );
+    assert!(
+        fields.windows(2).all(|fields| fields[0].0 != fields[1].0),
+        "durable metadata record has duplicate field IDs"
+    );
+    let max_field_id = fields
+        .last()
+        .expect("durable metadata record must have at least one field")
+        .0;
+    let mut fields = fields.into_iter().peekable();
+    let mut slots = Vec::with_capacity(usize::from(max_field_id));
+    let mut descriptor_fields = Vec::with_capacity(usize::from(max_field_id));
+    for slot_id in 1..=max_field_id {
+        match fields.peek() {
+            Some((id, _, _)) if *id == slot_id => {
+                let (_, name, value_type) = fields.next().expect("peeked field must exist");
+                slots.push(DurableMetadataRecordSlot::Known(slot_id));
+                descriptor_fields.push((format!("f{slot_id:04}_{name}"), value_type));
+            }
+            _ => {
+                slots.push(DurableMetadataRecordSlot::Reserved(slot_id));
+                descriptor_fields.push((
+                    format!("f{slot_id:04}_reserved"),
+                    records::ValueType::Nullable(Box::new(records::ValueType::raw_bytes())),
+                ));
+            }
+        }
+    }
+    debug_assert!(fields.next().is_none());
+    let descriptor = records::RecordDescriptor::new(descriptor_fields);
+    DurableMetadataRecordSchema { slots, descriptor }
+}
+
+fn large_value_root_references_schema() -> &'static DurableMetadataRecordSchema {
+    static SCHEMA: OnceLock<DurableMetadataRecordSchema> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        durable_metadata_record_schema([
+            (ROOT_REF_DURABLE_FIELD, "durable", records::ValueType::U64),
+            (ROOT_REF_STAGED_FIELD, "staged", records::ValueType::U64),
+            (
+                ROOT_REF_NODE_ACTIVE_FIELD,
+                "node_active",
+                records::ValueType::Bool,
+            ),
         ])
     })
 }
 
-fn large_value_node_references_descriptor() -> records::RecordDescriptor {
-    static DESCRIPTOR: OnceLock<records::RecordDescriptor> = OnceLock::new();
-    *DESCRIPTOR.get_or_init(|| {
-        records::RecordDescriptor::new([
-            ("references", records::ValueType::U64),
-            ("upload_references", records::ValueType::U64),
+fn large_value_node_references_schema() -> &'static DurableMetadataRecordSchema {
+    static SCHEMA: OnceLock<DurableMetadataRecordSchema> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        durable_metadata_record_schema([
             (
+                NODE_REF_REFERENCES_FIELD,
+                "references",
+                records::ValueType::U64,
+            ),
+            (
+                NODE_REF_UPLOAD_REFERENCES_FIELD,
+                "upload_references",
+                records::ValueType::U64,
+            ),
+            (
+                NODE_REF_CHILDREN_FIELD,
                 "children",
                 records::ValueType::Array(Box::new(records::ValueType::Record(Box::new(
                     crate::large_values::node_ref_descriptor(),
@@ -177,41 +283,73 @@ fn large_value_node_references_descriptor() -> records::RecordDescriptor {
     })
 }
 
-fn staged_large_value_descriptor() -> records::RecordDescriptor {
-    static DESCRIPTOR: OnceLock<records::RecordDescriptor> = OnceLock::new();
-    *DESCRIPTOR.get_or_init(|| {
-        records::RecordDescriptor::new([
-            ("id", records::ValueType::raw_bytes()),
+fn staged_large_value_schema() -> &'static DurableMetadataRecordSchema {
+    static SCHEMA: OnceLock<DurableMetadataRecordSchema> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        durable_metadata_record_schema([
+            (STAGED_VALUE_ID_FIELD, "id", records::ValueType::raw_bytes()),
             (
+                STAGED_VALUE_REF_FIELD,
                 "value_ref",
                 crate::large_values::large_value_ref_value_type().clone(),
             ),
-            ("encoded_bytes", records::ValueType::U64),
-            ("node_count", records::ValueType::U64),
-            ("created_at_ms", records::ValueType::U64),
+            (
+                STAGED_VALUE_ENCODED_BYTES_FIELD,
+                "encoded_bytes",
+                records::ValueType::U64,
+            ),
+            (
+                STAGED_VALUE_NODE_COUNT_FIELD,
+                "node_count",
+                records::ValueType::U64,
+            ),
+            (
+                STAGED_VALUE_CREATED_AT_MS_FIELD,
+                "created_at_ms",
+                records::ValueType::U64,
+            ),
         ])
     })
 }
 
-fn pending_large_value_upload_descriptor() -> records::RecordDescriptor {
-    static DESCRIPTOR: OnceLock<records::RecordDescriptor> = OnceLock::new();
-    *DESCRIPTOR.get_or_init(|| {
-        records::RecordDescriptor::new([
-            ("id", records::ValueType::raw_bytes()),
+fn pending_large_value_upload_schema() -> &'static DurableMetadataRecordSchema {
+    static SCHEMA: OnceLock<DurableMetadataRecordSchema> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        durable_metadata_record_schema([
             (
+                PENDING_UPLOAD_ID_FIELD,
+                "id",
+                records::ValueType::raw_bytes(),
+            ),
+            (
+                PENDING_UPLOAD_DESCRIPTOR_FIELD,
                 "descriptor",
                 records::ValueType::Nullable(Box::new(
                     crate::large_values::large_value_ref_value_type().clone(),
                 )),
             ),
             (
+                PENDING_UPLOAD_RECEIPT_ID_FIELD,
                 "receipt_id",
                 records::ValueType::Nullable(Box::new(records::ValueType::raw_bytes())),
             ),
-            ("encoded_bytes", records::ValueType::U64),
-            ("node_count", records::ValueType::U64),
-            ("created_at_ms", records::ValueType::U64),
             (
+                PENDING_UPLOAD_ENCODED_BYTES_FIELD,
+                "encoded_bytes",
+                records::ValueType::U64,
+            ),
+            (
+                PENDING_UPLOAD_NODE_COUNT_FIELD,
+                "node_count",
+                records::ValueType::U64,
+            ),
+            (
+                PENDING_UPLOAD_CREATED_AT_MS_FIELD,
+                "created_at_ms",
+                records::ValueType::U64,
+            ),
+            (
+                PENDING_UPLOAD_CHUNKS_FIELD,
                 "chunks",
                 records::ValueType::Array(Box::new(records::ValueType::Record(Box::new(
                     crate::large_values::node_ref_descriptor(),
@@ -222,53 +360,78 @@ fn pending_large_value_upload_descriptor() -> records::RecordDescriptor {
 }
 
 fn encode_large_value_metadata_record(
-    tag: u8,
-    descriptor: records::RecordDescriptor,
-    values: &[records::Value],
+    schema: &DurableMetadataRecordSchema,
+    input_values: impl IntoIterator<Item = (u16, records::Value)>,
     name: &'static str,
 ) -> Result<Vec<u8>, Error> {
-    let payload = descriptor.create(values).map_err(|error| {
-        Error::InvalidLargeValueMetadata(format!("cannot encode {name}: {error}"))
-    })?;
-    let mut encoded = Vec::with_capacity(6 + payload.len());
-    encoded.extend_from_slice(LARGE_VALUE_METADATA_MAGIC);
-    encoded.push(LARGE_VALUE_METADATA_VERSION);
-    encoded.push(tag);
-    encoded.extend_from_slice(&payload);
-    Ok(encoded)
+    let mut values = BTreeMap::<u16, records::Value>::new();
+    for (id, value) in input_values {
+        if values.insert(id, value).is_some() {
+            return Err(Error::InvalidLargeValueMetadata(format!(
+                "cannot encode {name}: duplicate field id {id}"
+            )));
+        }
+    }
+    let mut ordered = Vec::with_capacity(schema.slots.len());
+    for slot in &schema.slots {
+        match slot {
+            DurableMetadataRecordSlot::Known(id) => {
+                ordered.push(values.remove(id).ok_or_else(|| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot encode {name}: missing field id {id}"
+                    ))
+                })?)
+            }
+            DurableMetadataRecordSlot::Reserved(_) => ordered.push(records::Value::Nullable(None)),
+        }
+    }
+    if let Some((id, _)) = values.into_iter().next() {
+        return Err(Error::InvalidLargeValueMetadata(format!(
+            "cannot encode {name}: unknown field id {id}"
+        )));
+    }
+    schema
+        .descriptor
+        .create(&ordered)
+        .map_err(|error| Error::InvalidLargeValueMetadata(format!("cannot encode {name}: {error}")))
 }
 
 fn decode_large_value_metadata_record(
     encoded: &[u8],
-    expected_tag: u8,
-    descriptor: records::RecordDescriptor,
+    schema: &DurableMetadataRecordSchema,
     name: &'static str,
-) -> Result<Vec<records::Value>, Error> {
-    let Some((header, payload)) = encoded.split_at_checked(6) else {
-        return Err(Error::InvalidLargeValueMetadata(format!(
-            "cannot decode {name}: truncated metadata envelope"
-        )));
-    };
-    if &header[..4] != LARGE_VALUE_METADATA_MAGIC
-        || header[4] != LARGE_VALUE_METADATA_VERSION
-        || header[5] != expected_tag
-    {
-        return Err(Error::InvalidLargeValueMetadata(format!(
-            "cannot decode {name}: unknown metadata envelope"
-        )));
-    }
-    let values = descriptor.bind(payload).to_values().map_err(|error| {
+) -> Result<BTreeMap<u16, records::Value>, Error> {
+    let values = schema
+        .descriptor
+        .bind(encoded)
+        .to_values()
+        .map_err(|error| {
+            Error::InvalidLargeValueMetadata(format!("cannot decode {name}: {error}"))
+        })?;
+    let canonical = schema.descriptor.create(&values).map_err(|error| {
         Error::InvalidLargeValueMetadata(format!("cannot decode {name}: {error}"))
     })?;
-    let canonical = descriptor.create(&values).map_err(|error| {
-        Error::InvalidLargeValueMetadata(format!("cannot decode {name}: {error}"))
-    })?;
-    if canonical != payload {
+    if canonical != encoded {
         return Err(Error::InvalidLargeValueMetadata(format!(
             "cannot decode {name}: non-canonical record"
         )));
     }
-    Ok(values)
+    let mut decoded = BTreeMap::new();
+    for (slot, value) in schema.slots.iter().zip(values) {
+        match slot {
+            DurableMetadataRecordSlot::Known(id) => {
+                decoded.insert(*id, value);
+            }
+            DurableMetadataRecordSlot::Reserved(id) => {
+                if !matches!(value, records::Value::Nullable(None)) {
+                    return Err(Error::InvalidLargeValueMetadata(format!(
+                        "cannot decode {name}: reserved field id {id} is nonempty"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(decoded)
 }
 
 fn staged_large_value_id_value(id: crate::large_values::StagedLargeValueId) -> records::Value {
@@ -327,42 +490,70 @@ fn canonical_node_refs_from_value(
     Ok(refs)
 }
 
+fn take_metadata_field(
+    values: &mut BTreeMap<u16, records::Value>,
+    id: u16,
+    name: &'static str,
+) -> Result<records::Value, Error> {
+    values.remove(&id).ok_or_else(|| {
+        Error::InvalidLargeValueMetadata(format!("cannot decode {name}: missing field id {id}"))
+    })
+}
+
 fn encode_large_value_root_references(
     references: &LargeValueRootReferences,
 ) -> Result<Vec<u8>, Error> {
     encode_large_value_metadata_record(
-        LARGE_VALUE_ROOT_REFERENCES_TAG,
-        large_value_root_references_descriptor(),
-        &[
-            records::Value::U64(references.durable),
-            records::Value::U64(references.staged),
-            records::Value::Bool(references.node_active),
+        large_value_root_references_schema(),
+        [
+            (
+                ROOT_REF_DURABLE_FIELD,
+                records::Value::U64(references.durable),
+            ),
+            (
+                ROOT_REF_STAGED_FIELD,
+                records::Value::U64(references.staged),
+            ),
+            (
+                ROOT_REF_NODE_ACTIVE_FIELD,
+                records::Value::Bool(references.node_active),
+            ),
         ],
         "root references",
     )
 }
 
 fn decode_large_value_root_references(encoded: &[u8]) -> Result<LargeValueRootReferences, Error> {
-    let values = decode_large_value_metadata_record(
+    let mut values = decode_large_value_metadata_record(
         encoded,
-        LARGE_VALUE_ROOT_REFERENCES_TAG,
-        large_value_root_references_descriptor(),
+        large_value_root_references_schema(),
         "root references",
     )?;
-    let [
-        records::Value::U64(durable),
-        records::Value::U64(staged),
-        records::Value::Bool(node_active),
-    ] = values.as_slice()
+    let records::Value::U64(durable) =
+        take_metadata_field(&mut values, ROOT_REF_DURABLE_FIELD, "root references")?
+    else {
+        return Err(Error::InvalidLargeValueMetadata(
+            "cannot decode root references: invalid fields".to_owned(),
+        ));
+    };
+    let records::Value::U64(staged) =
+        take_metadata_field(&mut values, ROOT_REF_STAGED_FIELD, "root references")?
+    else {
+        return Err(Error::InvalidLargeValueMetadata(
+            "cannot decode root references: invalid fields".to_owned(),
+        ));
+    };
+    let records::Value::Bool(node_active) =
+        take_metadata_field(&mut values, ROOT_REF_NODE_ACTIVE_FIELD, "root references")?
     else {
         return Err(Error::InvalidLargeValueMetadata(
             "cannot decode root references: invalid fields".to_owned(),
         ));
     };
     Ok(LargeValueRootReferences {
-        durable: *durable,
-        staged: *staged,
-        node_active: *node_active,
+        durable,
+        staged,
+        node_active,
     })
 }
 
@@ -370,38 +561,60 @@ fn encode_large_value_node_references(
     references: &LargeValueNodeReferences,
 ) -> Result<Vec<u8>, Error> {
     encode_large_value_metadata_record(
-        LARGE_VALUE_NODE_REFERENCES_TAG,
-        large_value_node_references_descriptor(),
-        &[
-            records::Value::U64(references.references),
-            records::Value::U64(references.upload_references),
-            records::Value::Array(canonical_node_ref_values(references.children.clone())),
+        large_value_node_references_schema(),
+        [
+            (
+                NODE_REF_REFERENCES_FIELD,
+                records::Value::U64(references.references),
+            ),
+            (
+                NODE_REF_UPLOAD_REFERENCES_FIELD,
+                records::Value::U64(references.upload_references),
+            ),
+            (
+                NODE_REF_CHILDREN_FIELD,
+                records::Value::Array(canonical_node_ref_values(references.children.clone())),
+            ),
         ],
         "large-value node references",
     )
 }
 
 fn decode_large_value_node_references(encoded: &[u8]) -> Result<LargeValueNodeReferences, Error> {
-    let values = decode_large_value_metadata_record(
+    let mut values = decode_large_value_metadata_record(
         encoded,
-        LARGE_VALUE_NODE_REFERENCES_TAG,
-        large_value_node_references_descriptor(),
+        large_value_node_references_schema(),
         "large-value node references",
     )?;
-    let [
-        records::Value::U64(references),
-        records::Value::U64(upload_references),
-        children,
-    ] = values.as_slice()
+    let records::Value::U64(references) = take_metadata_field(
+        &mut values,
+        NODE_REF_REFERENCES_FIELD,
+        "large-value node references",
+    )?
     else {
         return Err(Error::InvalidLargeValueMetadata(
             "cannot decode large-value node references: invalid fields".to_owned(),
         ));
     };
+    let records::Value::U64(upload_references) = take_metadata_field(
+        &mut values,
+        NODE_REF_UPLOAD_REFERENCES_FIELD,
+        "large-value node references",
+    )?
+    else {
+        return Err(Error::InvalidLargeValueMetadata(
+            "cannot decode large-value node references: invalid fields".to_owned(),
+        ));
+    };
+    let children = take_metadata_field(
+        &mut values,
+        NODE_REF_CHILDREN_FIELD,
+        "large-value node references",
+    )?;
     Ok(LargeValueNodeReferences {
-        references: *references,
-        upload_references: *upload_references,
-        children: canonical_node_refs_from_value(children, "large-value node children")?,
+        references,
+        upload_references,
+        children: canonical_node_refs_from_value(&children, "large-value node children")?,
     })
 }
 
@@ -409,18 +622,32 @@ fn encode_staged_large_value(
     staged: &crate::large_values::StagedLargeValue,
 ) -> Result<Vec<u8>, Error> {
     encode_large_value_metadata_record(
-        STAGED_LARGE_VALUE_TAG,
-        staged_large_value_descriptor(),
-        &[
-            staged_large_value_id_value(staged.id),
-            crate::large_values::large_value_ref_value(&staged.value_ref).map_err(|error| {
-                Error::InvalidLargeValueMetadata(format!(
-                    "cannot encode staged large value: {error}"
-                ))
-            })?,
-            records::Value::U64(staged.accounting.encoded_bytes),
-            records::Value::U64(staged.accounting.node_count),
-            records::Value::U64(staged.created_at_ms),
+        staged_large_value_schema(),
+        [
+            (
+                STAGED_VALUE_ID_FIELD,
+                staged_large_value_id_value(staged.id),
+            ),
+            (
+                STAGED_VALUE_REF_FIELD,
+                crate::large_values::large_value_ref_value(&staged.value_ref).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot encode staged large value: {error}"
+                    ))
+                })?,
+            ),
+            (
+                STAGED_VALUE_ENCODED_BYTES_FIELD,
+                records::Value::U64(staged.accounting.encoded_bytes),
+            ),
+            (
+                STAGED_VALUE_NODE_COUNT_FIELD,
+                records::Value::U64(staged.accounting.node_count),
+            ),
+            (
+                STAGED_VALUE_CREATED_AT_MS_FIELD,
+                records::Value::U64(staged.created_at_ms),
+            ),
         ],
         "staged large value",
     )
@@ -429,36 +656,57 @@ fn encode_staged_large_value(
 fn decode_staged_large_value(
     encoded: &[u8],
 ) -> Result<crate::large_values::StagedLargeValue, Error> {
-    let values = decode_large_value_metadata_record(
+    let mut values = decode_large_value_metadata_record(
         encoded,
-        STAGED_LARGE_VALUE_TAG,
-        staged_large_value_descriptor(),
+        staged_large_value_schema(),
         "staged large value",
     )?;
-    let [
-        id,
-        value_ref,
-        records::Value::U64(encoded_bytes),
-        records::Value::U64(node_count),
-        records::Value::U64(created_at_ms),
-    ] = values.as_slice()
+    let id = take_metadata_field(&mut values, STAGED_VALUE_ID_FIELD, "staged large value")?;
+    let value_ref = take_metadata_field(&mut values, STAGED_VALUE_REF_FIELD, "staged large value")?;
+    let records::Value::U64(encoded_bytes) = take_metadata_field(
+        &mut values,
+        STAGED_VALUE_ENCODED_BYTES_FIELD,
+        "staged large value",
+    )?
+    else {
+        return Err(Error::InvalidLargeValueMetadata(
+            "cannot decode staged large value: invalid fields".to_owned(),
+        ));
+    };
+    let records::Value::U64(node_count) = take_metadata_field(
+        &mut values,
+        STAGED_VALUE_NODE_COUNT_FIELD,
+        "staged large value",
+    )?
+    else {
+        return Err(Error::InvalidLargeValueMetadata(
+            "cannot decode staged large value: invalid fields".to_owned(),
+        ));
+    };
+    let records::Value::U64(created_at_ms) = take_metadata_field(
+        &mut values,
+        STAGED_VALUE_CREATED_AT_MS_FIELD,
+        "staged large value",
+    )?
     else {
         return Err(Error::InvalidLargeValueMetadata(
             "cannot decode staged large value: invalid fields".to_owned(),
         ));
     };
     Ok(crate::large_values::StagedLargeValue {
-        id: staged_large_value_id_from_value(id)?,
-        value_ref: crate::large_values::large_value_ref_from_value(value_ref).map_err(|error| {
-            Error::InvalidLargeValueMetadata(format!(
-                "cannot decode staged large value descriptor: {error}"
-            ))
-        })?,
+        id: staged_large_value_id_from_value(&id)?,
+        value_ref: crate::large_values::large_value_ref_from_value(&value_ref).map_err(
+            |error| {
+                Error::InvalidLargeValueMetadata(format!(
+                    "cannot decode staged large value descriptor: {error}"
+                ))
+            },
+        )?,
         accounting: crate::large_values::StagedLargeValueAccounting {
-            encoded_bytes: *encoded_bytes,
-            node_count: *node_count,
+            encoded_bytes,
+            node_count,
         },
-        created_at_ms: *created_at_ms,
+        created_at_ms,
     })
 }
 
@@ -476,21 +724,41 @@ fn encode_pending_large_value_upload(
             ))
         })?;
     encode_large_value_metadata_record(
-        PENDING_LARGE_VALUE_UPLOAD_TAG,
-        pending_large_value_upload_descriptor(),
-        &[
-            staged_large_value_id_value(upload.id),
-            records::Value::Nullable(descriptor.map(Box::new)),
-            records::Value::Nullable(
-                upload
-                    .receipt_id
-                    .map(staged_large_value_id_value)
-                    .map(Box::new),
+        pending_large_value_upload_schema(),
+        [
+            (
+                PENDING_UPLOAD_ID_FIELD,
+                staged_large_value_id_value(upload.id),
             ),
-            records::Value::U64(upload.accounting.encoded_bytes),
-            records::Value::U64(upload.accounting.node_count),
-            records::Value::U64(upload.created_at_ms),
-            records::Value::Array(canonical_node_ref_values(upload.chunks.clone())),
+            (
+                PENDING_UPLOAD_DESCRIPTOR_FIELD,
+                records::Value::Nullable(descriptor.map(Box::new)),
+            ),
+            (
+                PENDING_UPLOAD_RECEIPT_ID_FIELD,
+                records::Value::Nullable(
+                    upload
+                        .receipt_id
+                        .map(staged_large_value_id_value)
+                        .map(Box::new),
+                ),
+            ),
+            (
+                PENDING_UPLOAD_ENCODED_BYTES_FIELD,
+                records::Value::U64(upload.accounting.encoded_bytes),
+            ),
+            (
+                PENDING_UPLOAD_NODE_COUNT_FIELD,
+                records::Value::U64(upload.accounting.node_count),
+            ),
+            (
+                PENDING_UPLOAD_CREATED_AT_MS_FIELD,
+                records::Value::U64(upload.created_at_ms),
+            ),
+            (
+                PENDING_UPLOAD_CHUNKS_FIELD,
+                records::Value::Array(canonical_node_ref_values(upload.chunks.clone())),
+            ),
         ],
         "pending large-value upload",
     )
@@ -499,26 +767,71 @@ fn encode_pending_large_value_upload(
 fn decode_pending_large_value_upload(
     encoded: &[u8],
 ) -> Result<crate::large_values::PendingLargeValueUpload, Error> {
-    let values = decode_large_value_metadata_record(
+    let mut values = decode_large_value_metadata_record(
         encoded,
-        PENDING_LARGE_VALUE_UPLOAD_TAG,
-        pending_large_value_upload_descriptor(),
+        pending_large_value_upload_schema(),
         "pending large-value upload",
     )?;
-    let [
-        id,
-        records::Value::Nullable(descriptor),
-        records::Value::Nullable(receipt_id),
-        records::Value::U64(encoded_bytes),
-        records::Value::U64(node_count),
-        records::Value::U64(created_at_ms),
-        chunks,
-    ] = values.as_slice()
+    let id = take_metadata_field(
+        &mut values,
+        PENDING_UPLOAD_ID_FIELD,
+        "pending large-value upload",
+    )?;
+    let records::Value::Nullable(descriptor) = take_metadata_field(
+        &mut values,
+        PENDING_UPLOAD_DESCRIPTOR_FIELD,
+        "pending large-value upload",
+    )?
     else {
         return Err(Error::InvalidLargeValueMetadata(
             "cannot decode pending large-value upload: invalid fields".to_owned(),
         ));
     };
+    let records::Value::Nullable(receipt_id) = take_metadata_field(
+        &mut values,
+        PENDING_UPLOAD_RECEIPT_ID_FIELD,
+        "pending large-value upload",
+    )?
+    else {
+        return Err(Error::InvalidLargeValueMetadata(
+            "cannot decode pending large-value upload: invalid fields".to_owned(),
+        ));
+    };
+    let records::Value::U64(encoded_bytes) = take_metadata_field(
+        &mut values,
+        PENDING_UPLOAD_ENCODED_BYTES_FIELD,
+        "pending large-value upload",
+    )?
+    else {
+        return Err(Error::InvalidLargeValueMetadata(
+            "cannot decode pending large-value upload: invalid fields".to_owned(),
+        ));
+    };
+    let records::Value::U64(node_count) = take_metadata_field(
+        &mut values,
+        PENDING_UPLOAD_NODE_COUNT_FIELD,
+        "pending large-value upload",
+    )?
+    else {
+        return Err(Error::InvalidLargeValueMetadata(
+            "cannot decode pending large-value upload: invalid fields".to_owned(),
+        ));
+    };
+    let records::Value::U64(created_at_ms) = take_metadata_field(
+        &mut values,
+        PENDING_UPLOAD_CREATED_AT_MS_FIELD,
+        "pending large-value upload",
+    )?
+    else {
+        return Err(Error::InvalidLargeValueMetadata(
+            "cannot decode pending large-value upload: invalid fields".to_owned(),
+        ));
+    };
+    let chunks = take_metadata_field(
+        &mut values,
+        PENDING_UPLOAD_CHUNKS_FIELD,
+        "pending large-value upload",
+    )?;
     let descriptor = descriptor
         .as_deref()
         .map(crate::large_values::large_value_ref_from_value)
@@ -533,15 +846,15 @@ fn decode_pending_large_value_upload(
         .map(staged_large_value_id_from_value)
         .transpose()?;
     Ok(crate::large_values::PendingLargeValueUpload {
-        id: staged_large_value_id_from_value(id)?,
+        id: staged_large_value_id_from_value(&id)?,
         descriptor,
         receipt_id,
         accounting: crate::large_values::StagedLargeValueAccounting {
-            encoded_bytes: *encoded_bytes,
-            node_count: *node_count,
+            encoded_bytes,
+            node_count,
         },
-        created_at_ms: *created_at_ms,
-        chunks: canonical_node_refs_from_value(chunks, "pending large-value upload chunks")?,
+        created_at_ms,
+        chunks: canonical_node_refs_from_value(&chunks, "pending large-value upload chunks")?,
     })
 }
 

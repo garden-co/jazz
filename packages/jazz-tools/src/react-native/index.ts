@@ -13,6 +13,7 @@ export { useAll, useAllSuspense, type UseAllResult } from "./use-all.js";
 export { useOne, useOneSuspense, type UseOneResult } from "./use-one.js";
 export {
   useLocalFirstAuth,
+  REACT_NATIVE_AUTH_SECRET_STORE_REQUIRED_ERROR,
   type LocalFirstAuth,
   type UseLocalFirstAuthOptions,
 } from "./use-local-first-auth.js";
@@ -26,4 +27,5 @@ export {
   type ReactNativeSqliteTransaction,
 } from "./storage.js";
 export type { QueryOptions, RuntimeSourcesConfig } from "../runtime/index.js";
+export type { AuthSecretStore } from "../runtime/auth-secret-store.js";
 export { schema } from "../index.js";
