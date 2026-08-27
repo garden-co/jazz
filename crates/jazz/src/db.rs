@@ -1998,6 +1998,11 @@ struct AuthorizationScopeLeaseRequest {
     /// Every local caller sharing this authority hydration.  The first id is
     /// the wire correlation id; later ids never cause another support view.
     waiters: BTreeSet<PermissionAdviceRequestId>,
+    /// The authority has accepted the one-shot wire intent. Until then the
+    /// upstream command remains pending and must retry after backpressure;
+    /// merely allocating this local lease must not make a later tick mistake
+    /// it for an already-sent hydration request.
+    intent_sent: bool,
     key: Option<crate::protocol::AuthorizationSupportScopeKey>,
     lease: Option<AuthorizationScopeLease>,
     owner: Option<AuthorizationScopeOwnerToken>,
