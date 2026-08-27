@@ -90,6 +90,7 @@ pub struct WebSocketTransport {
     outbound: BoundedOutbound,
     task: tokio::task::JoinHandle<()>,
     terminal: Option<oneshot::Receiver<NativeTransportTerminal>>,
+    terminal_publisher: Arc<Mutex<Option<oneshot::Sender<NativeTransportTerminal>>>>,
     protocol_version: u16,
     features: u64,
     session_context: Option<ConnectionSessionContext>,
@@ -446,8 +447,10 @@ impl WebSocketTransport {
         let inbound_budget = Arc::new(Semaphore::new(WS_CLIENT_MAX_QUEUED_BYTES));
         let (outbound, outbound_rx, outbound_backpressured) = BoundedOutbound::channel();
         let (terminal_tx, terminal) = oneshot::channel();
+        let terminal_publisher = Arc::new(Mutex::new(Some(terminal_tx)));
         let pump_inbound_error = Arc::clone(&inbound_error);
         let pump_inbound_notify = Arc::clone(&inbound_notify);
+        let pump_terminal_publisher = Arc::clone(&terminal_publisher);
         let task = tokio::spawn(async move {
             let terminal = run_ws_pump(
                 ws,
@@ -461,7 +464,13 @@ impl WebSocketTransport {
                 bootstrap_catalogue,
             )
             .await;
-            let _ = terminal_tx.send(terminal);
+            if let Some(publisher) = pump_terminal_publisher
+                .lock()
+                .expect("terminal publisher lock")
+                .take()
+            {
+                let _ = publisher.send(terminal);
+            }
         });
 
         Ok(Self {
@@ -471,6 +480,7 @@ impl WebSocketTransport {
             outbound,
             task,
             terminal: Some(terminal),
+            terminal_publisher,
             protocol_version: negotiated.protocol_version,
             features: negotiated.features,
             session_context,
@@ -499,6 +509,14 @@ impl WebSocketTransport {
 
 impl Drop for WebSocketTransport {
     fn drop(&mut self) {
+        if let Some(publisher) = self
+            .terminal_publisher
+            .lock()
+            .expect("terminal publisher lock")
+            .take()
+        {
+            let _ = publisher.send(NativeTransportTerminal::OwnerDropped);
+        }
         self.task.abort();
     }
 }
@@ -677,9 +695,7 @@ async fn run_ws_pump(
                 maybe_frame = outbound.recv() => {
                     let Some(first_frame) = maybe_frame else {
                         let _ = ws.close(None).await;
-                        return NativeTransportTerminal::Closed(
-                            "websocket transport owner closed".to_owned(),
-                        );
+                        return NativeTransportTerminal::OwnerDropped;
                     };
                     let mut batch = vec![first_frame];
                     let mut batch_bytes = POSTCARD_BATCH_LENGTH_RESERVE
@@ -740,7 +756,7 @@ async fn run_ws_pump(
                         Some(Ok(Message::Close(frame))) => {
                             let reason = format!("websocket peer closed: {frame:?}");
                             fail_inbound(&inbound_error, &inbound_notify, &reason);
-                            return NativeTransportTerminal::Closed(reason);
+                            return NativeTransportTerminal::PeerClosed(reason);
                         }
                         Some(Ok(_)) => {
                             let reason = "websocket peer sent a non-binary wire batch".to_owned();
@@ -757,7 +773,7 @@ async fn run_ws_pump(
                             let reason = "websocket peer closed before completing wire exchange"
                                 .to_owned();
                             fail_inbound(&inbound_error, &inbound_notify, &reason);
-                            return NativeTransportTerminal::Closed(reason);
+                            return NativeTransportTerminal::PeerClosed(reason);
                         }
                     };
                     let frames = match decode_inbound_batch(&bytes, bootstrap_catalogue) {
@@ -779,9 +795,7 @@ async fn run_ws_pump(
                         let Ok(budget) =
                             Arc::clone(&inbound_budget).acquire_many_owned(permits).await
                         else {
-                            return NativeTransportTerminal::Closed(
-                                "websocket transport owner closed".to_owned(),
-                            );
+                            return NativeTransportTerminal::OwnerDropped;
                         };
                         if inbound
                             .send(InboundFrame {
@@ -791,9 +805,7 @@ async fn run_ws_pump(
                             .await
                             .is_err()
                         {
-                            return NativeTransportTerminal::Closed(
-                                "websocket transport owner closed".to_owned(),
-                            );
+                            return NativeTransportTerminal::OwnerDropped;
                         }
                         // A maximum logical message can exceed the bounded
                         // channel. Wake on every frame so its consumer drains
@@ -991,6 +1003,7 @@ mod tests {
             outbound,
             task,
             terminal: None,
+            terminal_publisher: Arc::new(Mutex::new(None)),
             protocol_version: WIRE_PROTOCOL_VERSION,
             features: FEATURE_SYNC_MESSAGE_PAYLOAD,
             session_context: None,

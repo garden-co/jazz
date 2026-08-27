@@ -79,8 +79,10 @@ pub type NativeTransportTerminalFuture =
 /// Terminal outcome of an established native transport.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NativeTransportTerminal {
-    /// The peer or local socket stack closed the established connection.
-    Closed(String),
+    /// The transport owner dropped its established connection deliberately.
+    OwnerDropped,
+    /// The remote peer closed the established connection.
+    PeerClosed(String),
     /// The adapter stopped because transport input was invalid or I/O failed.
     Failed(NativeTransportError),
 }

@@ -135,14 +135,48 @@ async fn connected_native_transport_reports_idle_websocket_closure() {
         .await
         .expect("idle websocket closure resolves terminal future");
     let diagnosis = match reason {
-        NativeTransportTerminal::Closed(message) => message,
-        NativeTransportTerminal::Failed(error) => error.0,
+        NativeTransportTerminal::PeerClosed(message) => message,
+        other => panic!("peer shutdown must retain its peer-close terminal outcome, got {other:?}"),
     };
     assert!(
         !diagnosis.trim().is_empty(),
         "idle websocket closure returns a terminal diagnosis"
     );
     shutdown.await.expect("shutdown task");
+    task.abort();
+}
+
+#[tokio::test]
+async fn connected_native_transport_reports_owner_drop() {
+    let app_id = AppId::from_name("adapter-owner-drop-terminal");
+    let built = ServerBuilder::new(app_id)
+        .with_schema(schema())
+        .with_auth_config(auth("secret"))
+        .with_storage(StorageBackend::InMemory)
+        .build()
+        .await
+        .expect("build core");
+    let (url, _state, task) = serve_built(built).await;
+    let connected = NativeWebSocketConnector
+        .connect(NativeTransportRequest {
+            server_url: url,
+            app_id,
+            peer_identity: jazz::ids::AuthorSubject::SYSTEM,
+            auth: transport_auth("secret"),
+            wake: Arc::new(|| {}),
+        })
+        .await
+        .expect("connect native transport");
+    let transport = connected.transport;
+    let terminal = connected.terminal;
+
+    drop(transport);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), terminal)
+            .await
+            .expect("owner drop resolves terminal future"),
+        NativeTransportTerminal::OwnerDropped
+    );
     task.abort();
 }
 
