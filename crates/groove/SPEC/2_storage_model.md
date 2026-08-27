@@ -108,6 +108,33 @@ The backing partitions are still called "column families" in the reference
 implementation; at the specification level, higher layers should reason in
 terms of record stores.
 
+### Storage epoch manifest
+
+Every durable adapter has one fixed, top-level metadata location outside its
+ordinary ordered-KV data plane. Before creating a table, column family, page,
+or ordinary key, an opener MUST read the `StorageEpochManifest` there. The
+canonical manifest bytes begin with `JSM1` and contain the storage epoch,
+adapter ID and format version, the sorted set of required authoritative codec
+IDs, and sorted decode-relevant adapter parameters. Missing, truncated,
+noncanonical, corrupt, unknown, or inconsistent manifests fail closed before
+any mutation (`INV-STORAGE-31`).
+
+Epoch 1 is the first settled format. Stores written by pre-settlement alpha
+builds are unsupported; they are neither guessed nor silently reinterpreted.
+Within an epoch, authoritative codec bytes are immutable. An incompatible
+change requires a new top-level epoch. A future supported transition is an
+explicitly registered adjacent `N -> N+1` copy-on-write migration with a
+durable journal and an atomic manifest flip. While that journal is incomplete,
+application access is closed; reopen may resume or discard the unpublished
+target, but must expose either complete `N` or complete `N+1`, never a mixture.
+There is no synthetic migration into epoch 1.
+
+The adapter owns its physical manifest location (for example a RocksDB internal
+column family, SQLite metadata table, or IndexedDB root metadata), but it MUST
+return a successful open receipt only after validating this common contract.
+Memory storage has no durable manifest and is used solely for semantic
+conformance. Backend files are not interchange formats.
+
 The only ordering property groove requires from the backing store is
 lexicographic byte order. A range `ScanRequest` returns keys in that order and
 includes keys `>= start` while excluding keys `>= end` (`INV-STORAGE-1`). Batch
