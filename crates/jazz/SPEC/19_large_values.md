@@ -447,6 +447,12 @@ they do not create a JSON-specific storage model. All fields in one `applyDiffs`
 commit atomically. There is deliberately no page staleness/CAS promise in this
 API revision.
 
+Object-form partial selections apply to the root query only in this revision.
+Included relations may project complete fields by name, but object-form partial
+selections in an include builder fail explicitly until per-terminal demand
+propagation reaches structured relation outputs (#2090). They MUST NOT silently
+fall back to returning the complete primitive.
+
 The Rust/Jazz binding layer may retain internal primitives at its translation
 boundary, but authorization occurs before resolving a private physical cell and
 unmodified columns inherit their exact descriptor without hydration.

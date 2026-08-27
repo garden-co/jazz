@@ -107,6 +107,11 @@ The object form is schema-aware: byte ranges are for `bytes`, text ranges are
 for `string`, and `{ at }` is for `json`. Selecting a field by name continues
 to return the complete primitive.
 
+Partial object selections currently apply to the root query only. An included
+relation may select complete fields by name, but rejects object-form partial
+selections until Jazz can carry terminal-specific demand through relation
+evaluation ([#2090](https://github.com/garden-co/jazz/issues/2090)).
+
 Until exact chunk demand reaches every query terminal, Jazz may materialize the
 selected carrier column before applying the requested slice. It never needs to
 materialize unselected columns; exact chunk-demand propagation is tracked in
