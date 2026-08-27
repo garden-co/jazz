@@ -268,7 +268,10 @@ test("relay verification rejects a manifest-sealed XCFramework without its devic
     "ios-arm64/libjazz_native_relay.a",
     "ios-arm64_x86_64-simulator/libjazz_native_relay.a",
   ];
-  const info = (includeDevice, simulatorLibrary = "libjazz_native_relay.a") => `<?xml version="1.0" encoding="UTF-8"?>
+  const info = (
+    includeDevice,
+    simulatorLibrary = "libjazz_native_relay.a",
+  ) => `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict><key>AvailableLibraries</key><array>
 ${
