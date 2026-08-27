@@ -412,6 +412,10 @@ mod tests {
                 "494442545245450002f5cd4e6dc50a39de000100000004000000776964650111000000000000000000000001000000",
             ]
         );
+        assert_eq!(
+            to_hex(&encoded[4]),
+            include_str!("../fixtures/page-v2-leaf.hex").trim()
+        );
         for (page, encoded) in fixtures.iter().zip(encoded) {
             assert_eq!(decode_page(&encoded).unwrap(), *page);
         }
