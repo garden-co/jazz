@@ -236,23 +236,9 @@ export interface UpdateOptions extends TimestampOverrideOptions {
   base?: BranchBase;
 }
 
-type UpdateOptionsWithDiffs<TReplacements extends object, TDiffs> = UpdateOptions & {
-  /**
-   * Page-relative text/bytes splices or JSON edits to apply atomically with
-   * `replacements`. A column may appear in either input, but not both.
-   */
-  applyDiffs?: TDiffs | object;
-};
-
 type TypedUpdateOptionsWithDiffs<TReplacements extends object, TDiffs> = UpdateOptions & {
   applyDiffs?: TDiffs & { [TColumn in keyof TReplacements]?: never };
 };
-
-type LargeValueUpdateForTable<TTable> = TTable extends {
-  readonly _largeValueUpdateType: infer TDiffs;
-}
-  ? NonNullable<TDiffs>
-  : object;
 
 export interface DeleteOptions extends TimestampOverrideOptions {
   branch?: Branch;
