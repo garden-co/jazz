@@ -2951,6 +2951,24 @@ where
                             }
                             let read_view_key = opts.read_view_key();
                             let registration_key = (shape_id, read_view_key);
+                            if !shape_registrations.contains_key(&registration_key)
+                                && shape_registrations.len()
+                                    >= MAX_SHAPE_REGISTRATIONS_PER_PEER
+                            {
+                                let error = crate::node::Error::UnsupportedSyncMessage(
+                                    "peer shape registration limit exceeded",
+                                );
+                                reject_server_subscription_failure(
+                                    &mut *self.transport,
+                                    register_shape_rejection_subscription(
+                                        shape_id,
+                                        read_view_key,
+                                    ),
+                                    &error,
+                                )
+                                .map_err(transport_error)?;
+                                continue;
+                            }
                             if let Err(error) = ensure_supported_register_shape_options(
                                 &opts,
                                 *local_receiver,
@@ -3106,17 +3124,11 @@ where
                             }
                             let rejection_subscription =
                                 register_shape_rejection_subscription(shape_id, registration_key.1);
-                            let register_result = {
-                                self.node
-                                    .lock()
-                                    .await
-                                    .apply_sync_message(SyncMessage::RegisterShape {
-                                        shape_id,
-                                        ast,
-                                        opts: RegisterShapeOptions::default(),
-                                    })
-                                    .await
-                            };
+                            let register_result = self
+                                .node
+                                .lock()
+                                .await
+                                .register_shape_for_peer(connection_epoch, shape_id, ast);
                             if let Err(error) = register_result {
                                 queue_direct_control(&mut self.pending_control_responses,
                                     server_subscription_failure_rejection_message(
@@ -3644,6 +3656,28 @@ where
                                         }
                                     }
                                 }
+                            }
+                            let registration_key =
+                                (subscription.shape_id, subscription.read_view);
+                            let registration_still_served = served.keys().any(|active| {
+                                active.shape_id == subscription.shape_id
+                                    && active.read_view == subscription.read_view
+                            });
+                            if !registration_still_served
+                                && shape_registrations
+                                    .remove(&registration_key)
+                                    .is_some_and(|registration| registration.owns_node_shape())
+                                && !shape_registrations.iter().any(
+                                    |((shape_id, _), registration)| {
+                                        *shape_id == subscription.shape_id
+                                            && registration.owns_node_shape()
+                                    },
+                                )
+                            {
+                                self.node.borrow_mut().release_shape_for_peer(
+                                    connection_epoch,
+                                    subscription.shape_id,
+                                );
                             }
                         }
                         SyncMessage::FetchRowVersions { requests } => {

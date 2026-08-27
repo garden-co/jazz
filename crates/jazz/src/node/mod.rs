@@ -781,6 +781,15 @@ struct QueryServing {
     version_storage_sources_cache: BTreeMap<(String, VersionLayer), Vec<String>>,
     /// Registered validated query shapes keyed by stable shape ID.
     registered_shapes: BTreeMap<ShapeId, ValidatedQuery>,
+    /// Connection epochs retaining each peer-installed or peer-parked shape.
+    ///
+    /// One owner is recorded per peer regardless of repeated registration or
+    /// the number of read-view registrations sharing the shape.
+    peer_shape_owners: BTreeMap<ShapeId, BTreeSet<u64>>,
+    /// Shapes registered by the local runtime rather than a served peer.
+    ///
+    /// Local ownership pins a shared shape after the last remote owner leaves.
+    locally_registered_shapes: BTreeSet<ShapeId>,
     /// Registered query binding values keyed by shape and usage-site binding ID.
     // A wire subscription is identified by its usage binding handle *and* read
     // view. The same canonical binding id may legitimately be registered at

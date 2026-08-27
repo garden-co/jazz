@@ -15,34 +15,81 @@ where
         shape_id: ShapeId,
         ast: ShapeAst,
     ) -> Result<(), Error> {
-        if ast.version != ShapeAst::VERSION {
-            return Err(Error::InvalidStoredValue("unsupported query AST version"));
-        }
-        let schema = if ast.schema_version == self.catalogue.current_schema_version_id {
-            &self.catalogue.schema
-        } else {
-            let Some(schema) = self.catalogue.catalogue_schemas.get(&ast.schema_version) else {
-                self.sync_metrics.parked_catalogue_shapes += 1;
-                self.parking
-                    .parked_shape_registrations
-                    .insert(shape_id, ast);
-                return Ok(());
-            };
-            &schema.schema
-        };
-        let shape = match &ast.body {
-            ShapeBody::Query(query) => {
-                query.validate_with_schema_version(schema, ast.schema_version)?
-            }
-            ShapeBody::Relation(relation) => relation_query_to_query(relation)?
-                .validate_with_schema_version(schema, ast.schema_version)?,
-        };
-        if shape.shape_id() != shape_id {
-            return Err(Error::InvalidStoredValue("shape id does not match AST"));
-        }
-        self.query.registered_shapes.insert(shape_id, shape);
-        self.drain_parked_binding_deltas_for_shape(shape_id)?;
+        let shape = self.validate_shape_ast_for_registration(shape_id, &ast)?;
+        self.retain_validated_shape_registration(shape_id, ast, shape)?;
+        self.query.locally_registered_shapes.insert(shape_id);
         Ok(())
+    }
+
+    pub(crate) fn register_shape_for_peer(
+        &mut self,
+        peer: u64,
+        shape_id: ShapeId,
+        ast: ShapeAst,
+    ) -> Result<(), Error> {
+        if let Some(existing) = self.parking.parked_shape_registrations.get(&shape_id)
+            && existing != &ast
+        {
+            return Err(Error::InvalidStoredValue(
+                "conflicting parked shape registration",
+            ));
+        }
+        let shape = self.validate_shape_ast_for_registration(shape_id, &ast)?;
+        let already_owned = self
+            .query
+            .peer_shape_owners
+            .get(&shape_id)
+            .is_some_and(|owners| owners.contains(&peer));
+        if !already_owned {
+            let peer_shape_count = self
+                .query
+                .peer_shape_owners
+                .values()
+                .filter(|owners| owners.contains(&peer))
+                .count();
+            if peer_shape_count >= crate::protocol_limits::MAX_SHAPE_REGISTRATIONS_PER_PEER {
+                return Err(Error::UnsupportedSyncMessage(
+                    "peer shape registration limit exceeded",
+                ));
+            }
+            if !self.query.peer_shape_owners.contains_key(&shape_id)
+                && self.query.peer_shape_owners.len()
+                    >= crate::protocol_limits::MAX_RETAINED_PEER_SHAPES
+            {
+                return Err(Error::UnsupportedSyncMessage(
+                    "global shape registration limit exceeded",
+                ));
+            }
+        }
+
+        self.retain_validated_shape_registration(shape_id, ast, shape)?;
+        self.query
+            .peer_shape_owners
+            .entry(shape_id)
+            .or_default()
+            .insert(peer);
+        Ok(())
+    }
+
+    fn retain_validated_shape_registration(
+        &mut self,
+        shape_id: ShapeId,
+        ast: ShapeAst,
+        shape: Option<ValidatedQuery>,
+    ) -> Result<(), Error> {
+        let Some(shape) = shape else {
+            if self
+                .parking
+                .parked_shape_registrations
+                .insert(shape_id, ast)
+                .is_none()
+            {
+                self.sync_metrics.parked_catalogue_shapes += 1;
+            }
+            return Ok(());
+        };
+        self.query.registered_shapes.insert(shape_id, shape);
+        self.drain_parked_binding_deltas_for_shape(shape_id)
     }
 
     pub(crate) fn validate_shape_ast_for_registration(
@@ -87,11 +134,90 @@ where
             })
             .collect::<Vec<_>>();
         for (shape_id, ast) in ready {
+            let shape = self
+                .validate_shape_ast_for_registration(shape_id, &ast)?
+                .ok_or(Error::InvalidStoredValue(
+                    "catalogued shape registration remained unresolved",
+                ))?;
             self.parking.parked_shape_registrations.remove(&shape_id);
             self.sync_metrics.parked_catalogue_shapes_resolved += 1;
-            self.register_shape(shape_id, ast)?;
+            self.retain_validated_shape_registration(shape_id, ast, Some(shape))?;
         }
         Ok(())
+    }
+
+    pub(crate) fn release_shape_for_peer(&mut self, peer: u64, shape_id: ShapeId) {
+        let Some(owners) = self.query.peer_shape_owners.get_mut(&shape_id) else {
+            return;
+        };
+        owners.remove(&peer);
+        if owners.is_empty() {
+            self.query.peer_shape_owners.remove(&shape_id);
+        }
+        self.reclaim_unowned_shape(shape_id);
+    }
+
+    pub(crate) fn release_shapes_for_peer(&mut self, peer: u64) {
+        let shapes = self
+            .query
+            .peer_shape_owners
+            .iter()
+            .filter_map(|(shape_id, owners)| owners.contains(&peer).then_some(*shape_id))
+            .collect::<Vec<_>>();
+        for shape_id in shapes {
+            self.release_shape_for_peer(peer, shape_id);
+        }
+    }
+
+    fn reclaim_unowned_shape(&mut self, shape_id: ShapeId) {
+        if self.query.peer_shape_owners.contains_key(&shape_id)
+            || self.query.locally_registered_shapes.contains(&shape_id)
+        {
+            return;
+        }
+        self.parking.parked_shape_registrations.remove(&shape_id);
+        self.parking.parked_binding_deltas.remove(&shape_id);
+        self.query.registered_shapes.remove(&shape_id);
+        self.query.registered_bindings.remove(&shape_id);
+        self.query
+            .query_shape_cache
+            .retain(|(cached_shape, _, _), _| *cached_shape != shape_id);
+        self.query
+            .applied_view_update_generations
+            .retain(|key, _| key.shape_id != shape_id);
+        self.query
+            .settled_result_sets
+            .retain(|key, _| key.shape_id != shape_id);
+        self.query
+            .settled_result_row_index
+            .retain(|key, _| key.shape_id != shape_id);
+        self.query
+            .settled_program_facts
+            .retain(|key, _| key.shape_id != shape_id);
+        self.query
+            .settled_through_by_binding_view
+            .retain(|key, _| key.shape_id != shape_id);
+        self.query
+            .authorization_progress_by_binding_view
+            .retain(|key, _| key.shape_id != shape_id);
+        self.query
+            .known_state_declared_binding_views
+            .retain(|key| key.shape_id != shape_id);
+        self.query
+            .initial_hydration_binding_views
+            .retain(|key| key.shape_id != shape_id);
+        self.query
+            .deferred_publication_binding_views
+            .retain(|key| key.shape_id != shape_id);
+        self.query
+            .pending_authoritative_reset_binding_views
+            .retain(|key| key.shape_id != shape_id);
+        self.query
+            .pending_opening_binding_views
+            .retain(|key| key.shape_id != shape_id);
+        self.query
+            .pending_terminal_operations_by_binding_view
+            .retain(|key, _| key.shape_id != shape_id);
     }
 
     pub(in crate::node) fn apply_subscribe(&mut self, subscribe: Subscribe) -> Result<(), Error> {
@@ -117,7 +243,8 @@ where
         ast: ShapeAst,
         subscribe: Subscribe,
     ) -> Result<(), Error> {
-        self.register_shape(shape_id, ast)?;
+        let shape = self.validate_shape_ast_for_registration(shape_id, &ast)?;
+        self.retain_validated_shape_registration(shape_id, ast, shape)?;
         self.apply_subscribe(subscribe)
     }
 

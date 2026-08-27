@@ -53,6 +53,19 @@ pub const MAX_SHAPE_AST_BYTES: usize = 64 * 1024;
 /// vector. Server shells may make this configurable later for unusually large
 /// generated schemas.
 pub const MAX_SHAPE_REGISTRATION_BYTES: usize = MAX_SHAPE_AST_BYTES;
+/// Maximum retained shape-registration keys for one live peer.
+///
+/// At the 64 KiB registration byte ceiling this caps one peer's retained
+/// registration payloads at 8 MiB. Re-registering the same shape/read-view key
+/// is idempotent and does not consume another slot.
+pub const MAX_SHAPE_REGISTRATIONS_PER_PEER: usize = 128;
+
+/// Maximum distinct peer-owned shapes retained by one node.
+///
+/// Shared shapes consume one global slot regardless of owner count. The 1,024
+/// shape ceiling bounds worst-case AST retention at 64 MiB while leaving enough
+/// headroom for eight peers at their individual maxima.
+pub const MAX_RETAINED_PEER_SHAPES: usize = 1024;
 
 /// Maximum number of row-version records in one commit unit.
 ///
