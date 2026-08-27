@@ -331,6 +331,8 @@ where
     /// Dedicated auxiliary chunk traffic uses `PeerIoPump`'s bounded
     /// take/restore queue; this covers the legacy ordinary-wire responder.
     pub(super) pending_chunk_response: Option<ChunkResponseBatch>,
+    /// One subscriber control/rejection reply retained until byte admission.
+    pub(super) pending_control_response: Option<SyncMessage>,
     pub(super) link: ConnectionLink,
     pub(super) last_resume_bytes: Option<usize>,
     pub(super) auxiliary_pump: PeerIoPump,
@@ -2241,6 +2243,13 @@ where
                 )? {
                     return Ok(true);
                 }
+                if !flush_pending_control_response(
+                    self.transport.as_mut(),
+                    &mut self.pending_control_response,
+                    &self.scheduler,
+                )? {
+                    return Ok(true);
+                }
                 if let Some(message) = self.auxiliary_pump.take_outbound(64) {
                     if let Err(error) = self.transport.send(message.clone()) {
                         self.auxiliary_pump.restore_outbound(message);
@@ -2382,16 +2391,17 @@ where
                                         error.message.clone(),
                                     ),
                                 );
-                                send_unsupported_shape_capability_rejection(
-                                    &mut *self.transport,
-                                    register_shape_rejection_subscription(
-                                        shape_id,
-                                        read_view_key,
+                                self.pending_control_response = Some(
+                                    unsupported_shape_capability_rejection_message(
+                                        register_shape_rejection_subscription(
+                                            shape_id,
+                                            read_view_key,
+                                        ),
+                                        error.message,
                                     ),
-                                    error.message,
-                                )
-                                .map_err(transport_error)?;
-                                continue;
+                                );
+                                schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                return Ok(true);
                             }
                             let shape_validation = {
                                 let node = self.node.borrow();
@@ -2402,15 +2412,17 @@ where
                                 Ok(None) => None,
                                 Err(error) => {
                                     if is_server_shape_validation_failure(&error) {
-                                        reject_server_subscription_failure(
-                                            &mut *self.transport,
-                                            register_shape_rejection_subscription(
-                                                shape_id,
-                                                read_view_key,
+                                        self.pending_control_response = Some(
+                                            server_subscription_failure_rejection_message(
+                                                register_shape_rejection_subscription(
+                                                    shape_id,
+                                                    read_view_key,
+                                                ),
+                                                &error,
                                             ),
-                                            &error,
-                                        )
-                                        .map_err(transport_error)?;
+                                        );
+                                        schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                        return Ok(true);
                                     } else {
                                         drop_peer_request(&self.node);
                                     }
@@ -2459,25 +2471,27 @@ where
                                             binding_id: binding.binding_id(),
                                             read_view: read_view_key,
                                         };
-                                        send_unsupported_shape_capability_rejection(
-                                            &mut *self.transport,
-                                            subscription,
-                                            detail,
-                                        )
-                                        .map_err(transport_error)?;
-                                        continue;
+                                        self.pending_control_response = Some(
+                                            unsupported_shape_capability_rejection_message(
+                                                subscription,
+                                                detail,
+                                            ),
+                                        );
+                                        schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                        return Ok(true);
                                     } else if let Err(error) = supported {
-                                        reject_server_subscription_failure(
-                                            &mut *self.transport,
-                                            SubscriptionKey {
-                                                shape_id,
-                                                binding_id: binding.binding_id(),
-                                                read_view: read_view_key,
-                                            },
-                                            &error,
-                                        )
-                                        .map_err(transport_error)?;
-                                        continue;
+                                        self.pending_control_response = Some(
+                                            server_subscription_failure_rejection_message(
+                                                SubscriptionKey {
+                                                    shape_id,
+                                                    binding_id: binding.binding_id(),
+                                                    read_view: read_view_key,
+                                                },
+                                                &error,
+                                            ),
+                                        );
+                                        schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                        return Ok(true);
                                     }
                                 }
                             }
@@ -2494,16 +2508,17 @@ where
                                     SubscriberShapeRegistration::RejectedUnsupportedCapability(
                                         detail,
                                     ) => {
-                                        send_unsupported_shape_capability_rejection(
-                                            &mut *self.transport,
-                                            register_shape_rejection_subscription(
-                                                shape_id,
-                                                read_view_key,
+                                        self.pending_control_response = Some(
+                                            unsupported_shape_capability_rejection_message(
+                                                register_shape_rejection_subscription(
+                                                    shape_id,
+                                                    read_view_key,
+                                                ),
+                                                detail.clone(),
                                             ),
-                                            detail.clone(),
-                                        )
-                                        .map_err(transport_error)?;
-                                        continue;
+                                        );
+                                        schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                        return Ok(true);
                                     }
                                     _ => {}
                                 }
@@ -2522,13 +2537,14 @@ where
                                     .await
                             };
                             if let Err(error) = register_result {
-                                reject_server_subscription_failure(
-                                    &mut *self.transport,
-                                    rejection_subscription,
-                                    &error,
-                                )
-                                .map_err(transport_error)?;
-                                continue;
+                                self.pending_control_response = Some(
+                                    server_subscription_failure_rejection_message(
+                                        rejection_subscription,
+                                        &error,
+                                    ),
+                                );
+                                schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                return Ok(true);
                             }
                             let registration = if awaiting_catalogue_admission {
                                 SubscriberShapeRegistration::PendingCatalogueAdmission(opts)
@@ -2582,12 +2598,14 @@ where
                             };
                             let Some(shape) = self.node.borrow().registered_shape(shape_id) else {
                                 if pending_catalogue_admission {
-                                    self.transport
-                                        .send(SyncMessage::SubscribeRejected {
+                                    self.pending_control_response = Some(
+                                        SyncMessage::SubscribeRejected {
                                             subscription,
                                             reason: SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission,
-                                        })
-                                        .map_err(transport_error)?;
+                                        },
+                                    );
+                                    schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                    return Ok(true);
                                 } else {
                                     drop_peer_request(&self.node);
                                 }
@@ -2689,21 +2707,20 @@ where
                                 )
                                 .await;
                             if let Err(crate::node::Error::QueryCapability(detail)) = supported {
-                                send_unsupported_shape_capability_rejection(
-                                    &mut *self.transport,
-                                    subscription,
-                                    detail,
-                                )
-                                .map_err(transport_error)?;
-                                return Ok::<bool, Error>(true);
+                                self.pending_control_response = Some(
+                                    unsupported_shape_capability_rejection_message(
+                                        subscription,
+                                        detail,
+                                    ),
+                                );
+                                schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                return Ok(true);
                             } else if let Err(error) = supported {
-                                reject_server_subscription_failure(
-                                    &mut *self.transport,
-                                    subscription,
-                                    &error,
-                                )
-                                .map_err(transport_error)?;
-                                return Ok::<bool, Error>(true);
+                                self.pending_control_response = Some(
+                                    server_subscription_failure_rejection_message(subscription, &error),
+                                );
+                                schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                return Ok(true);
                             }
                             let coverage = coverage_key(&shape, &binding, opts.clone());
                             let group_subscription = SubscriptionKey {
@@ -3191,21 +3208,21 @@ where
                                     continue;
                                 }
                                 Err(crate::node::Error::QueryCapability(detail)) => {
-                                    send_unsupported_shape_capability_rejection(
-                                        &mut *self.transport,
-                                        subscription,
-                                        detail,
-                                    )
-                                    .map_err(transport_error)?;
+                                    self.transport
+                                        .send(unsupported_shape_capability_rejection_message(
+                                            subscription,
+                                            detail,
+                                        ))
+                                        .map_err(transport_error)?;
                                     continue;
                                 }
                                 Err(error) => {
-                                    reject_server_subscription_failure(
-                                        &mut *self.transport,
-                                        subscription,
-                                        &error,
-                                    )
-                                    .map_err(transport_error)?;
+                                    self.transport
+                                        .send(server_subscription_failure_rejection_message(
+                                            subscription,
+                                            &error,
+                                        ))
+                                        .map_err(transport_error)?;
                                     continue;
                                 }
                             };
@@ -3277,12 +3294,12 @@ where
                             }
                             Err(error) => {
                                 for subscription in group.subscribers.iter().copied() {
-                                    reject_server_subscription_failure(
-                                        &mut *self.transport,
-                                        subscription,
-                                        &error,
-                                    )
-                                    .map_err(transport_error)?;
+                                    self.transport
+                                        .send(server_subscription_failure_rejection_message(
+                                            subscription,
+                                            &error,
+                                        ))
+                                        .map_err(transport_error)?;
                                 }
                                 continue;
                             }
@@ -3363,12 +3380,12 @@ where
                     while let Some((subscription, detail)) =
                         deferred_subscribe_rejections.pop_front()
                     {
-                        send_unsupported_shape_capability_rejection(
-                            &mut *self.transport,
-                            subscription,
-                            detail,
-                        )
-                        .map_err(transport_error)?;
+                        self.transport
+                            .send(unsupported_shape_capability_rejection_message(
+                                subscription,
+                                detail,
+                            ))
+                            .map_err(transport_error)?;
                     }
                 }
                     Ok::<bool, Error>(false)
@@ -4390,6 +4407,33 @@ fn flush_pending_chunk_response(
         return Ok(true);
     };
     match transport.send(SyncMessage::ChunkResponseBatch(response.clone())) {
+        Ok(()) => Ok(true),
+        Err(TransportError::Backpressure) => {
+            *pending = Some(response);
+            schedule_tick_in(scheduler, TickUrgency::Deferred);
+            Ok(false)
+        }
+        Err(error) => {
+            *pending = Some(response);
+            Err(transport_error(error))
+        }
+    }
+}
+
+/// Retry a subscriber-control reply such as `SubscribeRejected`. These replies
+/// are generated while consuming a one-shot inbound registration, so treating
+/// a rejected byte admission as a completed reply would otherwise leave the
+/// requester waiting forever. One retained message bounds a stalled link; the
+/// subscriber tick stops as soon as it creates one.
+fn flush_pending_control_response(
+    transport: &mut dyn Transport,
+    pending: &mut Option<SyncMessage>,
+    scheduler: &SharedTickScheduler,
+) -> Result<bool, Error> {
+    let Some(response) = pending.take() else {
+        return Ok(true);
+    };
+    match transport.send(response.clone()) {
         Ok(()) => Ok(true),
         Err(TransportError::Backpressure) => {
             *pending = Some(response);

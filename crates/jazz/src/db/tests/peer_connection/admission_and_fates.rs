@@ -161,6 +161,51 @@ fn ordinary_wire_chunk_response_retries_after_bounded_transport_backpressure() {
     assert!(outbound.borrow().is_empty());
 }
 
+/// Subscription rejection follows the same ownership rule. A malformed or
+/// unsupported one-shot registration must not turn into a permanently pending
+/// caller when the first byte admission is temporarily full.
+#[test]
+fn subscriber_control_reply_retries_after_bounded_transport_backpressure() {
+    let identity = AuthorSubject::for_test_bytes([0xc4; 16]);
+    let schema = schema();
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let outbound = Rc::new(RefCell::new(VecDeque::new()));
+    let subscriber = server.accept_subscriber(
+        Box::new(BackpressureOnceTransport {
+            outbound: Rc::clone(&outbound),
+            failed: false,
+        }),
+        identity,
+    );
+    let rejection = SyncMessage::SubscribeRejected {
+        subscription: SubscriptionKey {
+            shape_id: ShapeId(uuid::Uuid::from_bytes([4; 16])),
+            binding_id: BindingId(uuid::Uuid::from_bytes([4; 16])),
+            read_view: ReadViewKey::default(),
+        },
+        reason: SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission,
+    };
+    subscriber.borrow_mut().pending_control_response = Some(rejection.clone());
+
+    subscriber
+        .borrow_mut()
+        .tick()
+        .expect("backpressure retains the subscriber control reply");
+    assert_eq!(
+        subscriber.borrow().pending_control_response,
+        Some(rejection.clone())
+    );
+    assert!(outbound.borrow().is_empty());
+
+    subscriber
+        .borrow_mut()
+        .tick()
+        .expect("later capacity accepts the retained control reply");
+    assert!(subscriber.borrow().pending_control_response.is_none());
+    assert_eq!(outbound.borrow_mut().pop_front(), Some(rejection));
+    assert!(outbound.borrow().is_empty());
+}
+
 #[test]
 fn catalogue_fingerprint_change_is_eager_only_on_trusted_backend_link() {
     // This stays internal because trust is authenticated by the host at the
