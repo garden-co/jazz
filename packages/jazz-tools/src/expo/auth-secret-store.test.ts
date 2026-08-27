@@ -78,4 +78,15 @@ describe("ExpoAuthSecretStore scoped keys", () => {
     const store = new ExpoAuthSecretStore({ secureStore });
     await expect(store.loadSecret()).rejects.toThrow(/43 unpadded/);
   });
+
+  it("fails closed for present empty or malformed values without generating over them", async () => {
+    for (const corrupt of ["", "jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="]) {
+      const { secureStore, setItemAsync } = recordingStore();
+      secureStore.getItemAsync = vi.fn(async () => corrupt);
+      const store = new ExpoAuthSecretStore({ secureStore });
+
+      await expect(store.getOrCreateSecret()).rejects.toThrow();
+      expect(setItemAsync).not.toHaveBeenCalled();
+    }
+  });
 });

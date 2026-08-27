@@ -157,6 +157,17 @@ describe("BrowserAuthSecretStore", () => {
     ).rejects.toThrow(/43 unpadded/);
   });
 
+  it("fails closed for every present corrupt value without overwriting it", async () => {
+    const key = authSecretStorageKey();
+    for (const corrupt of ["", "jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="]) {
+      storage.setItem(key, corrupt);
+      const corruptStore = new BrowserAuthSecretStore({ storage });
+
+      expect(() => corruptStore.getOrCreateSecret()).toThrow();
+      expect(storage.getItem(key)).toBe(corrupt);
+    }
+  });
+
   it("throws a clear error if used in a non-browser env (no localStorage)", async () => {
     const original = (globalThis as { localStorage?: Storage }).localStorage;
     delete (globalThis as { localStorage?: Storage }).localStorage;

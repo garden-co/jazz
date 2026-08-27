@@ -131,7 +131,7 @@ export class BrowserAuthSecretStore implements AuthSecretStore {
     if (!this.cachedPromise) {
       const storage = this.requireStorage();
       const existing = storage.getItem(this.key);
-      if (existing) {
+      if (existing !== null) {
         parseAuthSecret(existing);
         this.cachedPromise = Promise.resolve(existing);
       } else {

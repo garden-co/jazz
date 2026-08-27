@@ -38,6 +38,18 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     );
   });
 
+  it("rejects a server-only credential copied through a React Native client config", async () => {
+    const serverConfig = {
+      appId: "react-native-backend-secret-boundary",
+      driver: { type: "memory" as const },
+      backendSecret: "server-only",
+    };
+    const error = await createDb({ ...serverConfig } as never).catch((error: unknown) => error);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/createJazzContext/);
+  });
+
   it("routes explicit memory configuration through the Node WASM harness", async () => {
     client = await createJazzClient({
       appId: "react-native-memory-launch-test",

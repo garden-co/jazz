@@ -2731,6 +2731,7 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
   config: RuntimeConfig,
   runtimeSource: RuntimeSource<RuntimeConfig>,
 ): Promise<Db> {
+  assertNoClientBackendSecret(config);
   if (config.secret && config.cookieSession) {
     throw new Error("DbConfig error: secret and cookieSession are mutually exclusive");
   }
@@ -2801,12 +2802,16 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
 }
 
 export async function createDb(config: DbConfig): Promise<Db> {
-  if (Object.hasOwn(config as object, "backendSecret")) {
+  return await createDbWithRuntimeSource(config, new DefaultRuntimeSource());
+}
+
+/** Keep server-only admission credentials out of every client runtime factory. */
+function assertNoClientBackendSecret(config: object): void {
+  if (Object.hasOwn(config, "backendSecret")) {
     throw new Error(
       "DbConfig does not accept backendSecret. Use createJazzContext() from jazz-tools/backend on a trusted server instead.",
     );
   }
-  return await createDbWithRuntimeSource(config, new DefaultRuntimeSource());
 }
 
 function isBrowserRuntime(): boolean {

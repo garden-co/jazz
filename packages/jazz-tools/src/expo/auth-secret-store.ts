@@ -97,7 +97,7 @@ export class ExpoAuthSecretStore implements AuthSecretStore {
 
   private async getOrCreateSecretInternal(): Promise<string> {
     const existing = await this.store.getItemAsync(this.key);
-    if (existing) {
+    if (existing !== null) {
       parseAuthSecret(existing);
       return existing;
     }
