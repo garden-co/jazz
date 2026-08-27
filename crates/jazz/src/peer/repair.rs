@@ -1,10 +1,10 @@
 impl PeerState {
     /// Ingest a client mergeable commit unit at an edge boundary.
     ///
-    /// The edge first stores the unit as pending relay history, then gates fate
-    /// assignment on the first settled permission-scope subscription for the
-    /// affected tables and writer. If a scope was not settled before this call,
-    /// the unit remains pending and can be completed by
+    /// The edge gates admission on the first settled permission-scope
+    /// subscription for the affected tables and writer. If a scope was not
+    /// settled before this call, the unit remains outside edge history and can
+    /// be admitted exactly once by
     /// [`Self::drain_deferred_edge_fates`] after the registered scope settles.
     pub async fn ingest_edge_mergeable_commit_unit<S>(
         &mut self,
@@ -32,7 +32,6 @@ impl PeerState {
         )
         .await?
         {
-            node.ingest_relay_commit_unit(tx.clone(), versions.clone()).await?;
             if !self.deferred_edge_fates.contains_key(&tx.tx_id) {
                 for subscription in &scope_subscriptions {
                     self.retain_edge_scope_subscription(*subscription);
