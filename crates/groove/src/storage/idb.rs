@@ -34,6 +34,7 @@ where
     S: PageStore + Clone,
 {
     pub async fn open(store: S, column_families: &[&str]) -> Result<Self, Error> {
+        super::validate_physical_storage_names(column_families)?;
         Ok(Self {
             tree: Rc::new(RefCell::new(
                 IdbTree::open(store.clone(), Options::default()).await?,
@@ -434,6 +435,7 @@ where
 {
     fn reopen(self, column_families: Vec<String>) -> StorageFuture<'static, Result<Self, Error>> {
         Box::pin(async move {
+            super::validate_physical_storage_names(&column_families)?;
             self.column_families.borrow_mut().extend(column_families);
             Ok(self)
         })
@@ -444,6 +446,15 @@ where
 mod tests {
     use super::*;
     use idb_tree::{BoxFuture, Commit, MemoryPageStore, Metadata};
+
+    #[futures_test::test]
+    async fn open_rejects_nonportable_physical_name_before_tree_open() {
+        assert!(
+            IdbStorage::open(MemoryPageStore::default(), &["records\0evil"])
+                .await
+                .is_err()
+        );
+    }
 
     #[derive(Clone)]
     struct ConflictInjectingPageStore {
