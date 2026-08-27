@@ -100,9 +100,7 @@ struct ServerProcess {
 impl ServerProcess {
     async fn start(port: u16, data_dir: &Path, jwks_endpoint: &str) -> Self {
         let bound_port_file = data_dir.join("bound-port");
-        let mut cmd = Command::new(
-            std::env::var("CARGO_BIN_EXE_jazz-tools").expect("jazz-tools binary path"),
-        );
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_jazz-tools"));
         cmd.args([
             "server",
             APP_ID_STR,
