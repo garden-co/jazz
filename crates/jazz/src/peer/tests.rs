@@ -2749,6 +2749,12 @@ fn maintained_subscription_view_hit_metrics_and_footprint_update() {
         vec![],
         vec![("todos", row(0x51), tx_id)],
     );
+    let metrics = peer.maintained_subscription_view_metrics();
+    assert_eq!(
+        metrics.footprint.structured_app_rows, 0,
+        "flat updates must not rebuild the collector released after the reset"
+    );
+    assert_eq!(metrics.footprint.structured_app_rows_bytes, 0);
 
     let restored_tx = core
         .commit_mergeable_settled(
@@ -2761,6 +2767,9 @@ fn maintained_subscription_view_hit_metrics_and_footprint_update() {
         vec![("todos", row(0x51), restored_tx)],
         vec![],
     );
+    let metrics = peer.maintained_subscription_view_metrics();
+    assert_eq!(metrics.footprint.structured_app_rows, 0);
+    assert_eq!(metrics.footprint.structured_app_rows_bytes, 0);
 }
 
 #[test]
