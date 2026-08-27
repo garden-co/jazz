@@ -333,13 +333,7 @@ impl Database {
             .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
             .await?
         {
-            let upload: crate::large_values::PendingLargeValueUpload =
-                postcard::from_bytes(&encoded).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot decode pending large-value upload: {error}"
-                    ))
-                })?;
-            upload
+            decode_pending_large_value_upload(&encoded)?
         } else {
             if require_existing {
                 return Ok(false);
@@ -384,11 +378,7 @@ impl Database {
         let mut operations = vec![OwnedWriteOperation::Set {
             cf: LARGE_VALUE_METADATA_CF.to_owned(),
             key,
-            value: postcard::to_allocvec(&upload).map_err(|error| {
-                Error::InvalidLargeValueMetadata(format!(
-                    "cannot encode pending large-value upload: {error}"
-                ))
-            })?,
+            value: encode_pending_large_value_upload(&upload)?,
         }];
         for chunk in &chunks {
             if !new_members.remove(&chunk.node_ref) {
@@ -400,12 +390,7 @@ impl Database {
                 .get(LARGE_VALUE_METADATA_CF.to_owned(), node_key.clone())
                 .await?
             {
-                let mut metadata: LargeValueNodeReferences = postcard::from_bytes(&encoded)
-                    .map_err(|error| {
-                        Error::InvalidLargeValueMetadata(format!(
-                            "cannot decode pushed chunk metadata: {error}"
-                        ))
-                    })?;
+                let mut metadata = decode_large_value_node_references(&encoded)?;
                 metadata.upload_references =
                     metadata.upload_references.checked_add(1).ok_or_else(|| {
                         Error::InvalidLargeValueMetadata(
@@ -433,11 +418,7 @@ impl Database {
             operations.push(OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: node_key,
-                value: postcard::to_allocvec(&metadata).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot encode pushed chunk metadata: {error}"
-                    ))
-                })?,
+                value: encode_large_value_node_references(&metadata)?,
             });
         }
         // The pending-upload record and its per-node upload references are a
@@ -475,13 +456,13 @@ impl Database {
         Ok(false)
     }
 
-    fn descriptor_upload_id(
+    pub(super) fn descriptor_upload_id(
         value_ref: &crate::large_values::LargeValueRef,
     ) -> Result<crate::large_values::StagedLargeValueId, Error> {
-        let encoded = postcard::to_allocvec(value_ref).map_err(|error| {
+        let encoded = crate::large_values::encode_large_value_ref(value_ref).map_err(|error| {
             Error::InvalidLargeValueMetadata(format!("cannot encode upload descriptor: {error}"))
         })?;
-        let digest = blake3::derive_key("groove pending descriptor upload v1", &encoded);
+        let digest = blake3::derive_key("groove pending descriptor upload v2", &encoded);
         let mut id = [0_u8; 16];
         id.copy_from_slice(&digest[..16]);
         Ok(crate::large_values::StagedLargeValueId(id))
@@ -544,12 +525,7 @@ impl Database {
             .ok_or_else(|| {
                 Error::InvalidLargeValueMetadata("pending upload is missing".to_owned())
             })?;
-        let mut upload: crate::large_values::PendingLargeValueUpload =
-            postcard::from_bytes(&encoded).map_err(|error| {
-                Error::InvalidLargeValueMetadata(format!(
-                    "cannot decode pending large-value upload: {error}"
-                ))
-            })?;
+        let mut upload = decode_pending_large_value_upload(&encoded)?;
         if let Some(bound) = &upload.descriptor {
             if bound == value_ref {
                 return Ok(());
@@ -563,11 +539,7 @@ impl Database {
             .write_many(vec![OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key,
-                value: postcard::to_allocvec(&upload).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot encode bound pending large-value upload: {error}"
-                    ))
-                })?,
+                value: encode_pending_large_value_upload(&upload)?,
             }])
             .await?;
         Ok(())
@@ -859,12 +831,7 @@ impl Database {
         else {
             return Ok(None);
         };
-        let upload: crate::large_values::PendingLargeValueUpload = postcard::from_bytes(&encoded)
-            .map_err(|error| {
-            Error::InvalidLargeValueMetadata(format!(
-                "cannot decode pending large-value upload: {error}"
-            ))
-        })?;
+        let upload = decode_pending_large_value_upload(&encoded)?;
         if let Some(bound) = &upload.descriptor
             && bound != &value_ref
         {
@@ -904,11 +871,7 @@ impl Database {
                 .write_many(vec![OwnedWriteOperation::Set {
                     cf: LARGE_VALUE_METADATA_CF.to_owned(),
                     key: key.clone(),
-                    value: postcard::to_allocvec(&bound_upload).map_err(|error| {
-                        Error::InvalidLargeValueMetadata(format!(
-                            "cannot encode bound pending large-value upload: {error}"
-                        ))
-                    })?,
+                    value: encode_pending_large_value_upload(&bound_upload)?,
                 }])
                 .await?;
         }
@@ -937,12 +900,7 @@ impl Database {
             else {
                 continue;
             };
-            let mut metadata: LargeValueNodeReferences =
-                postcard::from_bytes(&encoded).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot decode upload node metadata: {error}"
-                    ))
-                })?;
+            let mut metadata = decode_large_value_node_references(&encoded)?;
             metadata.upload_references =
                 metadata.upload_references.checked_sub(1).ok_or_else(|| {
                     Error::InvalidLargeValueMetadata("upload reference count underflow".to_owned())
@@ -950,11 +908,7 @@ impl Database {
             operations.push(OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: node_key,
-                value: postcard::to_allocvec(&metadata).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot encode upload node metadata: {error}"
-                    ))
-                })?,
+                value: encode_large_value_node_references(&metadata)?,
             });
             if metadata.references == 0 && metadata.upload_references == 0 {
                 operations.push(OwnedWriteOperation::Set {
@@ -986,11 +940,7 @@ impl Database {
         let mut uploads = Vec::new();
         while let Some(batch) = cursor.next_batch().await? {
             for (_, encoded) in batch {
-                uploads.push(postcard::from_bytes(&encoded).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot decode pending large-value upload: {error}"
-                    ))
-                })?);
+                uploads.push(decode_pending_large_value_upload(&encoded)?);
             }
         }
         Ok(uploads)
@@ -1011,11 +961,7 @@ impl Database {
         else {
             return Ok(false);
         };
-        let upload = postcard::from_bytes(&encoded).map_err(|error| {
-            Error::InvalidLargeValueMetadata(format!(
-                "cannot decode pending large-value upload: {error}"
-            ))
-        })?;
+        let upload = decode_pending_large_value_upload(&encoded)?;
         self.release_pending_large_value_upload(key, upload).await?;
         Ok(true)
     }
@@ -1032,12 +978,7 @@ impl Database {
             .get(LARGE_VALUE_METADATA_CF.to_owned(), staged_key.clone())
             .await?
         {
-            let existing: crate::large_values::StagedLargeValue = postcard::from_bytes(&encoded)
-                .map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot decode existing staged root: {error}"
-                    ))
-                })?;
+            let existing = decode_staged_large_value(&encoded)?;
             if existing.value_ref == value_ref && existing.accounting == accounting {
                 return Ok(existing);
             }
@@ -1056,18 +997,14 @@ impl Database {
                 .try_into()
                 .unwrap_or(u64::MAX),
         };
-        let encoded = postcard::to_allocvec(&staged).map_err(|error| {
-            Error::InvalidLargeValueMetadata(format!("cannot encode staged root: {error}"))
-        })?;
+        let encoded = encode_staged_large_value(&staged)?;
         let root_key = large_value_root_key(&staged.value_ref.root)?;
         let mut references = match self
             .storage
             .get(LARGE_VALUE_METADATA_CF.to_owned(), root_key.clone())
             .await?
         {
-            Some(encoded) => postcard::from_bytes(&encoded).map_err(|error| {
-                Error::InvalidLargeValueMetadata(format!("cannot decode root references: {error}"))
-            })?,
+            Some(encoded) => decode_large_value_root_references(&encoded)?,
             None => LargeValueRootReferences::default(),
         };
         let activate_root = references.durable == 0 && references.staged == 0;
@@ -1077,9 +1014,7 @@ impl Database {
         references.staged = references.staged.checked_add(1).ok_or_else(|| {
             Error::InvalidLargeValueMetadata("staged root count overflow".to_owned())
         })?;
-        let references = postcard::to_allocvec(&references).map_err(|error| {
-            Error::InvalidLargeValueMetadata(format!("cannot encode root references: {error}"))
-        })?;
+        let references = encode_large_value_root_references(&references)?;
         let mut operations = vec![
             OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
@@ -1121,11 +1056,7 @@ impl Database {
         let mut staged = Vec::new();
         while let Some(batch) = cursor.next_batch().await? {
             for (_, encoded) in batch {
-                staged.push(postcard::from_bytes(&encoded).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot decode staged root receipt: {error}"
-                    ))
-                })?);
+                staged.push(decode_staged_large_value(&encoded)?);
             }
         }
         Ok(staged)
@@ -1147,12 +1078,7 @@ impl Database {
         else {
             return Ok(false);
         };
-        let staged: crate::large_values::StagedLargeValue = postcard::from_bytes(&encoded)
-            .map_err(|error| {
-                Error::InvalidLargeValueMetadata(format!(
-                    "cannot decode staged root for eviction: {error}"
-                ))
-            })?;
+        let staged = decode_staged_large_value(&encoded)?;
         let root_key = large_value_root_key(&staged.value_ref.root)?;
         let encoded = self
             .storage
@@ -1161,12 +1087,7 @@ impl Database {
             .ok_or_else(|| {
                 Error::InvalidLargeValueMetadata("staged root count is missing".to_owned())
             })?;
-        let mut references: LargeValueRootReferences =
-            postcard::from_bytes(&encoded).map_err(|error| {
-                Error::InvalidLargeValueMetadata(format!(
-                    "cannot decode staged root references: {error}"
-                ))
-            })?;
+        let mut references = decode_large_value_root_references(&encoded)?;
         references.staged = references.staged.checked_sub(1).ok_or_else(|| {
             Error::InvalidLargeValueMetadata("staged root count underflow".to_owned())
         })?;
@@ -1183,11 +1104,7 @@ impl Database {
             OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: root_key,
-                value: postcard::to_allocvec(&references).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot encode staged root references: {error}"
-                    ))
-                })?,
+                value: encode_large_value_root_references(&references)?,
             },
         ];
         if deactivate_root {
@@ -1250,12 +1167,7 @@ impl Database {
                         .await?;
                     continue;
                 };
-                let metadata: LargeValueNodeReferences = postcard::from_bytes(&encoded_metadata)
-                    .map_err(|error| {
-                        Error::InvalidLargeValueMetadata(format!(
-                            "cannot decode reclaim node references: {error}"
-                        ))
-                    })?;
+                let metadata = decode_large_value_node_references(&encoded_metadata)?;
                 if metadata.references != 0 || metadata.upload_references != 0 {
                     self.storage
                         .delete(LARGE_VALUE_METADATA_CF.to_owned(), queue_key)

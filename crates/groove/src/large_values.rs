@@ -2235,7 +2235,7 @@ fn stored_scalar_value_type(kind: LargeValueKind) -> &'static ValueType {
     value_type.get_or_init(|| ValueType::Enum(Box::new(stored_scalar_schema(kind).clone())))
 }
 
-fn node_ref_descriptor() -> RecordDescriptor {
+pub(crate) fn node_ref_descriptor() -> RecordDescriptor {
     static DESCRIPTOR: OnceLock<RecordDescriptor> = OnceLock::new();
     *DESCRIPTOR.get_or_init(|| {
         RecordDescriptor::new([
@@ -2245,7 +2245,7 @@ fn node_ref_descriptor() -> RecordDescriptor {
     })
 }
 
-fn node_ref_value(node_ref: &NodeRef) -> Value {
+pub(crate) fn node_ref_value(node_ref: &NodeRef) -> Value {
     let descriptor = node_ref_descriptor();
     Value::Record(crate::records::OwnedRecord::new(
         encode_node_ref(node_ref).expect("NodeRef fields always match their physical descriptor"),
@@ -2253,7 +2253,7 @@ fn node_ref_value(node_ref: &NodeRef) -> Value {
     ))
 }
 
-fn node_ref_from_value(value: &Value) -> Result<NodeRef, Error> {
+pub(crate) fn node_ref_from_value(value: &Value) -> Result<NodeRef, Error> {
     let Value::Record(record) = value else {
         return Err(Error::MalformedScalar);
     };
@@ -2304,28 +2304,7 @@ fn build_stored_scalar_schema(kind: LargeValueKind) -> EnumSchema {
             LargeValueKind::String | LargeValueKind::Json => ValueType::raw_string(),
         },
     )]);
-    let edit = RecordDescriptor::new([
-        ("offset", ValueType::U64),
-        ("delete_length", ValueType::U64),
-        ("insert_bytes", ValueType::raw_bytes()),
-        ("utf16_offset", ValueType::U64),
-        ("delete_utf16_length", ValueType::U64),
-        ("insert_utf16_length", ValueType::U64),
-    ]);
-    let chunked = RecordDescriptor::new([
-        ("format_version", ValueType::U8),
-        ("logical_hash", ValueType::raw_bytes()),
-        ("root", ValueType::Record(Box::new(node_ref_descriptor()))),
-        ("byte_length", ValueType::U64),
-        (
-            "utf16_length",
-            ValueType::Nullable(Box::new(ValueType::U64)),
-        ),
-        (
-            "edit_tail",
-            ValueType::Array(Box::new(ValueType::Record(Box::new(edit)))),
-        ),
-    ]);
+    let chunked = large_value_ref_payload_descriptor();
     EnumSchema::new(
         match kind {
             LargeValueKind::Bytes => "groove.internal.stored_scalar.bytes",
@@ -2351,6 +2330,118 @@ fn build_stored_scalar_schema(kind: LargeValueKind) -> EnumSchema {
         ],
     )
     .expect("fixed internal stored-scalar enum schema is valid")
+}
+
+fn large_value_edit_descriptor() -> RecordDescriptor {
+    static DESCRIPTOR: OnceLock<RecordDescriptor> = OnceLock::new();
+    *DESCRIPTOR.get_or_init(|| {
+        RecordDescriptor::new([
+            ("offset", ValueType::U64),
+            ("delete_length", ValueType::U64),
+            ("insert_bytes", ValueType::raw_bytes()),
+            ("utf16_offset", ValueType::U64),
+            ("delete_utf16_length", ValueType::U64),
+            ("insert_utf16_length", ValueType::U64),
+        ])
+    })
+}
+
+fn large_value_ref_payload_descriptor() -> RecordDescriptor {
+    static DESCRIPTOR: OnceLock<RecordDescriptor> = OnceLock::new();
+    *DESCRIPTOR.get_or_init(|| {
+        RecordDescriptor::new([
+            ("format_version", ValueType::U8),
+            ("logical_hash", ValueType::raw_bytes()),
+            ("root", ValueType::Record(Box::new(node_ref_descriptor()))),
+            ("byte_length", ValueType::U64),
+            (
+                "utf16_length",
+                ValueType::Nullable(Box::new(ValueType::U64)),
+            ),
+            (
+                "edit_tail",
+                ValueType::Array(Box::new(ValueType::Record(Box::new(
+                    large_value_edit_descriptor(),
+                )))),
+            ),
+        ])
+    })
+}
+
+const LARGE_VALUE_REF_BYTES_TAG: u8 = 0;
+const LARGE_VALUE_REF_STRING_TAG: u8 = 1;
+const LARGE_VALUE_REF_JSON_TAG: u8 = 2;
+
+fn large_value_ref_schema() -> &'static EnumSchema {
+    static SCHEMA: OnceLock<EnumSchema> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        let payload = large_value_ref_payload_descriptor();
+        let cases = [
+            (LARGE_VALUE_REF_BYTES_TAG, EnumCase::new("Bytes", payload)),
+            (LARGE_VALUE_REF_STRING_TAG, EnumCase::new("String", payload)),
+            (LARGE_VALUE_REF_JSON_TAG, EnumCase::new("Json", payload)),
+        ];
+        debug_assert!(
+            cases
+                .iter()
+                .enumerate()
+                .all(|(index, (tag, _))| usize::from(*tag) == index)
+        );
+        EnumSchema::new(
+            "groove.internal.large_value_ref",
+            cases.map(|(_, case)| case),
+        )
+        .expect("fixed internal large-value-ref enum schema is valid")
+    })
+}
+
+pub(crate) fn large_value_ref_value_type() -> &'static ValueType {
+    static VALUE_TYPE: OnceLock<ValueType> = OnceLock::new();
+    VALUE_TYPE.get_or_init(|| ValueType::Enum(Box::new(large_value_ref_schema().clone())))
+}
+
+pub(crate) fn large_value_ref_value(value: &LargeValueRef) -> Result<Value, Error> {
+    validate_descriptor(value)?;
+    let tag = u32::from(large_value_kind_tag(value.kind));
+    let payload = large_value_ref_schema()
+        .case(tag)
+        .map_err(|_| Error::MalformedScalar)?
+        .payload;
+    let value = EnumValue::create(tag, payload, &chunked_values(value))
+        .map_err(|_| Error::MalformedScalar)?;
+    Ok(Value::Enum(value))
+}
+
+pub(crate) fn large_value_ref_from_value(value: &Value) -> Result<LargeValueRef, Error> {
+    let Value::Enum(value) = value else {
+        return Err(Error::MalformedScalar);
+    };
+    let kind =
+        large_value_kind_from_tag(u8::try_from(value.tag()).map_err(|_| Error::MalformedScalar)?)?;
+    let values = value
+        .record()
+        .to_values()
+        .map_err(|_| Error::MalformedScalar)?;
+    decode_chunked_values(kind, &values)
+}
+
+pub(crate) fn encode_large_value_ref(value: &LargeValueRef) -> Result<Vec<u8>, Error> {
+    crate::records::encode_single_field_value(
+        &large_value_ref_value(value)?,
+        large_value_ref_value_type(),
+    )
+    .map_err(|_| Error::MalformedScalar)
+}
+
+#[cfg(test)]
+pub(crate) fn decode_large_value_ref(encoded: &[u8]) -> Result<LargeValueRef, Error> {
+    let value = crate::records::decode_single_field_value(encoded, large_value_ref_value_type())
+        .map_err(|_| Error::MalformedScalar)?;
+    let decoded = large_value_ref_from_value(&value)?;
+    if encode_large_value_ref(&decoded)? != encoded {
+        return Err(Error::MalformedScalar);
+    }
+    Ok(decoded)
 }
 
 fn primitive_value(kind: LargeValueKind, bytes: Vec<u8>) -> Value {
@@ -2385,14 +2476,7 @@ fn raw_bytes(value: &Value) -> Result<[u8; 32], Error> {
 }
 
 fn chunked_values(value: &LargeValueRef) -> Vec<Value> {
-    let edit = RecordDescriptor::new([
-        ("offset", ValueType::U64),
-        ("delete_length", ValueType::U64),
-        ("insert_bytes", ValueType::raw_bytes()),
-        ("utf16_offset", ValueType::U64),
-        ("delete_utf16_length", ValueType::U64),
-        ("insert_utf16_length", ValueType::U64),
-    ]);
+    let edit = large_value_edit_descriptor();
     vec![
         Value::U8(value.format_version),
         Value::Bytes(value.logical_hash.0.to_vec()),
@@ -2480,17 +2564,17 @@ fn decode_chunked_values(kind: LargeValueKind, values: &[Value]) -> Result<Large
 
 fn large_value_kind_tag(kind: LargeValueKind) -> u8 {
     match kind {
-        LargeValueKind::Bytes => 0,
-        LargeValueKind::String => 1,
-        LargeValueKind::Json => 2,
+        LargeValueKind::Bytes => LARGE_VALUE_REF_BYTES_TAG,
+        LargeValueKind::String => LARGE_VALUE_REF_STRING_TAG,
+        LargeValueKind::Json => LARGE_VALUE_REF_JSON_TAG,
     }
 }
 
 fn large_value_kind_from_tag(tag: u8) -> Result<LargeValueKind, Error> {
     match tag {
-        0 => Ok(LargeValueKind::Bytes),
-        1 => Ok(LargeValueKind::String),
-        2 => Ok(LargeValueKind::Json),
+        LARGE_VALUE_REF_BYTES_TAG => Ok(LargeValueKind::Bytes),
+        LARGE_VALUE_REF_STRING_TAG => Ok(LargeValueKind::String),
+        LARGE_VALUE_REF_JSON_TAG => Ok(LargeValueKind::Json),
         _ => Err(Error::MalformedScalar),
     }
 }

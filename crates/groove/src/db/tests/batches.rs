@@ -725,9 +725,6 @@ async fn raw_finalization_rejects_forged_text_coordinates_and_partial_json_tail(
             delete_utf16_length: 1,
             insert_utf16_length: 1,
         });
-    let forged_text: crate::large_values::LargeValueRef =
-        postcard::from_bytes(&postcard::to_allocvec(&forged_text).expect("encode peer descriptor"))
-            .expect("decode peer descriptor");
     let text_upload = crate::large_values::StagedLargeValueId([0xa1; 16]);
     database
         .stage_large_value_chunk_batch(text_upload, text.value_ref.kind, text.staged_chunks)
@@ -755,9 +752,6 @@ async fn raw_finalization_rejects_forged_text_coordinates_and_partial_json_tail(
             delete_utf16_length: 1,
             insert_utf16_length: 1,
         });
-    let forged_json: crate::large_values::LargeValueRef =
-        postcard::from_bytes(&postcard::to_allocvec(&forged_json).expect("encode peer descriptor"))
-            .expect("decode peer descriptor");
     let json_upload = crate::large_values::StagedLargeValueId([0xa2; 16]);
     database
         .stage_large_value_chunk_batch(json_upload, json.value_ref.kind, json.staged_chunks)
@@ -1163,7 +1157,7 @@ async fn repeated_child_dag_finalizes_once_per_node_and_reclaims_without_leaks()
             .await
             .unwrap()
             .expect("every finalized physical node has metadata");
-        let metadata: LargeValueNodeReferences = postcard::from_bytes(&encoded).unwrap();
+        let metadata = decode_large_value_node_references(&encoded).unwrap();
         assert_eq!(
             metadata.references, 1,
             "one active physical parent/root contributes one reference"
@@ -1235,7 +1229,7 @@ async fn shared_child_dag_counts_distinct_parent_edges_and_reclaims_once() {
             .await
             .unwrap()
             .expect("every finalized physical node has metadata");
-        let metadata: LargeValueNodeReferences = postcard::from_bytes(&encoded).unwrap();
+        let metadata = decode_large_value_node_references(&encoded).unwrap();
         assert_eq!(
             metadata.references,
             if index == 0 { 2 } else { 1 },
@@ -1302,12 +1296,12 @@ async fn resolver_installed_shared_dag_recursively_activates_and_reclaims_descen
             OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: staged_large_value_key(staged.id),
-                value: postcard::to_allocvec(&staged).unwrap(),
+                value: encode_staged_large_value(&staged).unwrap(),
             },
             OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: large_value_root_key(&staged.value_ref.root).unwrap(),
-                value: postcard::to_allocvec(&LargeValueRootReferences {
+                value: encode_large_value_root_references(&LargeValueRootReferences {
                     durable: 0,
                     staged: 1,
                     node_active: false,
@@ -1336,7 +1330,7 @@ async fn resolver_installed_shared_dag_recursively_activates_and_reclaims_descen
             .await
             .unwrap()
             .expect("resolver-installed active node has metadata");
-        let metadata: LargeValueNodeReferences = postcard::from_bytes(&encoded).unwrap();
+        let metadata = decode_large_value_node_references(&encoded).unwrap();
         assert_eq!(metadata.references, 1);
         assert!(metadata.children.len() <= 1);
     }
@@ -1408,7 +1402,7 @@ async fn resolver_branch_activation_composes_with_active_placeholder_children() 
             OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: large_value_root_key(&prepared.value_ref.root).unwrap(),
-                value: postcard::to_allocvec(&LargeValueRootReferences {
+                value: encode_large_value_root_references(&LargeValueRootReferences {
                     durable: 0,
                     staged: 1,
                     node_active: false,
@@ -1418,7 +1412,7 @@ async fn resolver_branch_activation_composes_with_active_placeholder_children() 
             OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: large_value_node_key(&prepared.value_ref.root).unwrap(),
-                value: postcard::to_allocvec(&LargeValueNodeReferences {
+                value: encode_large_value_node_references(&LargeValueNodeReferences {
                     references: 1,
                     upload_references: 0,
                     children: Vec::new(),
@@ -1440,7 +1434,7 @@ async fn resolver_branch_activation_composes_with_active_placeholder_children() 
             .unwrap(),
     );
 
-    let root: LargeValueNodeReferences = postcard::from_bytes(
+    let root = decode_large_value_node_references(
         &database
             .storage
             .get(
@@ -1454,7 +1448,7 @@ async fn resolver_branch_activation_composes_with_active_placeholder_children() 
     .unwrap();
     assert_eq!(root.references, 2, "the newly activated root is retained");
     assert_eq!(root.children, children);
-    let child: LargeValueNodeReferences = postcard::from_bytes(
+    let child = decode_large_value_node_references(
         &database
             .storage
             .get(
@@ -1522,7 +1516,7 @@ async fn pipelined_applied_batches_compose_large_value_root_references() {
     database.finish_persistence(first).unwrap();
     database.finish_persistence(second).unwrap();
 
-    let references: LargeValueRootReferences = postcard::from_bytes(
+    let references = decode_large_value_root_references(
         &database
             .storage
             .get(
@@ -1591,7 +1585,7 @@ async fn last_root_publication_blocks_descendant_install_until_its_refcount_writ
             OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: large_value_node_key(&prepared.value_ref.root).unwrap(),
-                value: postcard::to_allocvec(&LargeValueNodeReferences {
+                value: encode_large_value_node_references(&LargeValueNodeReferences {
                     references: 1,
                     upload_references: 0,
                     children: Vec::new(),
@@ -1601,7 +1595,8 @@ async fn last_root_publication_blocks_descendant_install_until_its_refcount_writ
             OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: large_value_node_key(&child).unwrap(),
-                value: postcard::to_allocvec(&LargeValueNodeReferences::default()).unwrap(),
+                value: encode_large_value_node_references(&LargeValueNodeReferences::default())
+                    .unwrap(),
             },
         ])
         .await
@@ -1648,7 +1643,7 @@ async fn last_root_publication_blocks_descendant_install_until_its_refcount_writ
         .await
         .unwrap()
         .unwrap();
-    let metadata: LargeValueNodeReferences = postcard::from_bytes(&encoded).unwrap();
+    let metadata = decode_large_value_node_references(&encoded).unwrap();
     assert_eq!(metadata.references, 0);
 }
 
@@ -1823,7 +1818,7 @@ async fn queued_resolver_before_last_root_delete_does_not_leak_child_reference()
             OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: large_value_node_key(&prepared.value_ref.root).unwrap(),
-                value: postcard::to_allocvec(&LargeValueNodeReferences {
+                value: encode_large_value_node_references(&LargeValueNodeReferences {
                     references: 1,
                     upload_references: 0,
                     children: Vec::new(),
@@ -1833,7 +1828,8 @@ async fn queued_resolver_before_last_root_delete_does_not_leak_child_reference()
             OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: large_value_node_key(&child).unwrap(),
-                value: postcard::to_allocvec(&LargeValueNodeReferences::default()).unwrap(),
+                value: encode_large_value_node_references(&LargeValueNodeReferences::default())
+                    .unwrap(),
             },
         ])
         .await
@@ -1883,7 +1879,7 @@ async fn queued_resolver_before_last_root_delete_does_not_leak_child_reference()
         .await
         .unwrap()
         .unwrap();
-    let metadata: LargeValueNodeReferences = postcard::from_bytes(&encoded).unwrap();
+    let metadata = decode_large_value_node_references(&encoded).unwrap();
     assert_eq!(metadata.references, 0);
 }
 
