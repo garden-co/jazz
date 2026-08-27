@@ -261,3 +261,29 @@ test("a dry package includes every staged native relay artifact class", async ()
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("release and preview assembly seal and publish the staged relay package", async () => {
+  const [packageBuild, alphaPublish, previewBuild, artifactScript, verifier] = await Promise.all([
+    readFile(new URL("../../../.github/workflows/build-jazz-packages.yml", import.meta.url), "utf8"),
+    readFile(new URL("../../../.github/workflows/publish-jazz-tools-alpha.yml", import.meta.url), "utf8"),
+    readFile(new URL("../../../.github/workflows/preview-build.yml", import.meta.url), "utf8"),
+    readFile(new URL("../../../crates/jazz-rn/scripts/build-relay-artifacts.sh", import.meta.url), "utf8"),
+    readFile(new URL("../../../crates/jazz-rn/scripts/verify-relay-artifacts.mjs", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(packageBuild, /build-jazz-rn-android/);
+  assert.match(packageBuild, /build-jazz-rn-ios/);
+  assert.match(packageBuild, /name: jazz-rn-relay-android/);
+  assert.match(packageBuild, /name: jazz-rn-relay-ios/);
+  assert.match(packageBuild, /name: pkg-jazz-rn/);
+  assert.match(packageBuild, /verify-relay-artifacts\.mjs android ios/);
+  assert.match(packageBuild, /Build jazz-rn TypeScript package/);
+  assert.match(alphaPublish, /pkg-jazz-rn/);
+  assert.match(alphaPublish, /Verify packed jazz-rn relay payload/);
+  assert.match(alphaPublish, /Publish jazz-rn \(alpha tag\)/);
+  assert.match(previewBuild, /name: pkg-jazz-rn/);
+  assert.match(previewBuild, /'\.\/crates\/jazz-rn'/);
+  assert.match(artifactScript, /sourceRevision/);
+  assert.match(verifier, /JAZZ_NATIVE_RELAY_SOURCE_REVISION/);
+  assert.match(verifier, /relay artifact inventory differs from its manifest/);
+});

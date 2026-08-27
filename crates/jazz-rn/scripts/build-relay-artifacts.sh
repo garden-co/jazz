@@ -18,22 +18,29 @@ fi
 write_manifest() {
   local destination=$1
   shift
-  node - "$destination" "$abi" "$@" <<'NODE'
+  local source_revision
+  source_revision=${JAZZ_NATIVE_RELAY_SOURCE_REVISION:-$(git -C "$root" rev-parse HEAD)}
+  node - "$destination" "$abi" "$source_revision" "$@" <<'NODE'
 const { createHash } = require("node:crypto");
 const { readdirSync, readFileSync, statSync, writeFileSync } = require("node:fs");
-const { join } = require("node:path");
-const [destination, abi, ...roots] = process.argv.slice(2);
+const { join, relative } = require("node:path");
+const [destination, abi, sourceRevision, ...roots] = process.argv.slice(2);
 const files = [];
-const visit = root => {
-  for (const name of readdirSync(root)) {
-    const path = join(root, name), stat = statSync(path);
-    if (stat.isDirectory()) visit(path);
-    else files.push([path, createHash("sha256").update(readFileSync(path)).digest("hex")]);
+const visit = (root, directory = root) => {
+  for (const name of readdirSync(directory).sort()) {
+    const path = join(directory, name), stat = statSync(path);
+    if (stat.isDirectory()) visit(root, path);
+    else if (stat.isFile()) {
+      files.push({
+        path: relative(root, path).split("\\").join("/"),
+        sha256: createHash("sha256").update(readFileSync(path)).digest("hex"),
+      });
+    } else throw new Error(`relay artifact is not a regular file: ${path}`);
   }
 };
 for (const root of roots) visit(root);
 if (!files.length) throw new Error("relay artifact build produced no static libraries");
-writeFileSync(destination, JSON.stringify({ nativeRelayAbi: Number(abi), files }, null, 2) + "\n");
+writeFileSync(destination, JSON.stringify({ format: 1, nativeRelayAbi: Number(abi), sourceRevision, files }, null, 2) + "\n");
 NODE
 }
 

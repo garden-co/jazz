@@ -26,6 +26,9 @@ on:
       create_jazz_artifact:
         description: Artifact name for the assembled create-jazz package.
         value: pkg-create-jazz
+      jazz_rn_artifact:
+        description: Artifact name for the assembled jazz-rn package with its Android and iOS relay artifacts.
+        value: pkg-jazz-rn
 
 env:
   CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
@@ -214,6 +217,71 @@ jobs:
             crates/jazz-napi/native-artifact-fingerprint.cjs
           if-no-files-found: error
 
+  build-jazz-rn-android:
+    name: Build jazz-rn Android relay artifacts
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+          sccache: "true"
+          sccache-key: release-jazz-rn-android-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+      - name: Install pinned Android NDK
+        run: sdkmanager --install "ndk;27.1.12297006"
+      - name: Build and verify Android relay archive slices
+        run: |
+          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
+            ANDROID_NDK_HOME="${ANDROID_SDK_ROOT}/ndk/27.1.12297006" \
+            pnpm --filter jazz-rn build:relay:android
+          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
+            node crates/jazz-rn/scripts/verify-relay-artifacts.mjs android
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-rn-relay-android
+          path: |
+            crates/jazz-rn/android/src/main/jniLibs
+            crates/jazz-rn/android/jazz-native-relay.manifest.json
+            crates/jazz-rn/native/include
+          if-no-files-found: error
+
+  build-jazz-rn-ios:
+    name: Build jazz-rn iOS relay XCFramework
+    runs-on: blacksmith-6vcpu-macos-15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+          sccache: "true"
+          sccache-key: release-jazz-rn-ios-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
+
+      - name: Build and verify iOS relay XCFramework
+        run: |
+          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
+            pnpm --filter jazz-rn build:relay:ios
+          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
+            node crates/jazz-rn/scripts/verify-relay-artifacts.mjs ios
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-rn-relay-ios
+          path: |
+            crates/jazz-rn/JazzNativeRelay.xcframework
+            crates/jazz-rn/ios/jazz-native-relay.manifest.json
+            crates/jazz-rn/native/include
+          if-no-files-found: error
+
   assemble-packages:
     name: Assemble npm packages
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -222,6 +290,8 @@ jobs:
       - build-macos
       - build-wasm
       - build-napi
+      - build-jazz-rn-android
+      - build-jazz-rn-ios
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -253,6 +323,21 @@ jobs:
           pattern: jazz-napi-binding-*
           path: crates/jazz-napi/artifacts
           merge-multiple: true
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-rn-relay-android
+          path: crates/jazz-rn
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-rn-relay-ios
+          path: crates/jazz-rn
+
+      - name: Verify staged jazz-rn relay artifacts
+        run: |
+          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
+            node crates/jazz-rn/scripts/verify-relay-artifacts.mjs android ios
 
       - name: Stage jazz-napi platform package artifacts
         run: |
@@ -297,6 +382,9 @@ jobs:
       - name: Build create-jazz TypeScript package
         run: pnpm --filter create-jazz build
 
+      - name: Build jazz-rn TypeScript package
+        run: pnpm --filter jazz-rn build
+
       - name: Verify jazz-tools publish artifacts
         run: |
           test -f packages/jazz-tools/dist/index.js
@@ -304,6 +392,11 @@ jobs:
           test -f packages/jazz-tools/dist/backend/index.js
           test -f packages/jazz-tools/dist/react/index.js
           test -f packages/jazz-tools/dist/permissions/index.js
+
+      - name: Verify jazz-rn publish artifacts
+        run: |
+          test -f crates/jazz-rn/lib/module/index.js
+          test -f crates/jazz-rn/lib/typescript/src/index.d.ts
 
       - name: Stage CLI binaries into jazz-tools npm package
         run: |
@@ -360,5 +453,14 @@ jobs:
           path: |
             packages/create-jazz
             !packages/create-jazz/node_modules
+          include-hidden-files: true
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pkg-jazz-rn
+          path: |
+            crates/jazz-rn
+            !crates/jazz-rn/node_modules
           include-hidden-files: true
           if-no-files-found: error
