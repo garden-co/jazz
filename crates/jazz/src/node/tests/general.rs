@@ -1287,9 +1287,14 @@ fn malformed_persisted_authored_column_ids_never_reenter_derived_current_state()
 #[test]
 fn stored_merge_heads_require_a_canonical_transaction_id_array() {
     let first = TxId::new(TxTime::from(2), node(1));
-    let second = TxId::new(TxTime::from(3), node(2));
+    let second = TxId::new(TxTime::from(2), node(2));
     let heads = BTreeSet::from([first, second]);
     assert_eq!(merge_heads_from_value(merge_heads_value(&heads)).unwrap(), heads);
+    assert_eq!(
+        merge_heads_value(&heads),
+        Value::Array(vec![tx_id_value(first), tx_id_value(second)]),
+        "same-time transaction IDs use their canonical node UUID tie-breaker"
+    );
 
     assert!(matches!(
         merge_heads_from_value(Value::Array(vec![
