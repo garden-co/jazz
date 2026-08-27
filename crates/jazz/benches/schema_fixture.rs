@@ -12,7 +12,7 @@ pub fn compile(builder: SchemaBuilder) -> JazzSchema {
     JazzSchema::new(&builder.build()).expect("benchmark public schema compiles")
 }
 
-/// Compare a UUID column with the authenticated session identity.
+/// Compare a text column with the authenticated session identity.
 ///
 /// Public schemas expose that identity as `session.user`; JWT `sub` is an
 /// authentication transport detail, not a policy-session field.
