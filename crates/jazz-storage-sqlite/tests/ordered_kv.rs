@@ -1,7 +1,6 @@
 use futures::executor::block_on;
 use groove::storage::{
-    Error, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, ScanRequest, StorageDelta,
-    collect_scan,
+    Error, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, ScanRequest, collect_scan,
 };
 use jazz_storage_sqlite::SqliteStorage;
 
@@ -164,53 +163,52 @@ fn ordered_prefix_range_atomic_batch_and_reopen_contract() {
 }
 
 #[test]
-fn conditional_delete_delta_matches_only_the_durable_value() {
+fn conditional_mutations_are_atomic_across_handles_and_aba_safe() {
     block_on(async {
         let dir = tempfile::tempdir().unwrap();
-        let storage = open(&dir);
-        let key = b"same-opaque-locator".to_vec();
-        let old = b"old authenticated bytes".to_vec();
-        let new = b"new authenticated bytes".to_vec();
-        storage
-            .set("records".into(), key.clone(), old.clone())
-            .await
-            .unwrap();
-
-        storage
-            .write_many(vec![OwnedWriteOperation::Delta {
-                cf: "records".into(),
-                key: key.clone(),
-                delta: StorageDelta::delete_if_value_matches(b"different bytes".to_vec()),
-            }])
-            .await
-            .unwrap();
+        let path = dir.path().join("jazz.sqlite");
+        let first = SqliteStorage::open(&path, &["records"]).unwrap();
+        let second = SqliteStorage::open(&path, &["records"]).unwrap();
+        let key = b"locator".to_vec();
         assert_eq!(
-            storage.get("records".into(), key.clone()).await.unwrap(),
-            Some(old.clone())
-        );
-
-        storage
-            .write_many(vec![OwnedWriteOperation::Delta {
-                cf: "records".into(),
-                key: key.clone(),
-                delta: StorageDelta::delete_if_value_matches(old),
-            }])
-            .await
-            .unwrap();
-        assert_eq!(
-            storage.get("records".into(), key.clone()).await.unwrap(),
+            first
+                .put_if_absent("records".into(), key.clone(), b"receipt-a".to_vec())
+                .await
+                .unwrap(),
             None
         );
-
-        storage
-            .write_many(vec![OwnedWriteOperation::Delta {
-                cf: "records".into(),
-                key: key.clone(),
-                delta: StorageDelta::set_if_absent(new.clone()),
-            }])
-            .await
-            .unwrap();
-        assert_eq!(storage.get("records".into(), key).await.unwrap(), Some(new));
+        assert_eq!(
+            second
+                .put_if_absent("records".into(), key.clone(), b"receipt-b".to_vec())
+                .await
+                .unwrap(),
+            Some(b"receipt-a".to_vec())
+        );
+        assert!(
+            !second
+                .compare_and_delete("records".into(), key.clone(), b"receipt-b".to_vec())
+                .await
+                .unwrap()
+        );
+        assert!(
+            first
+                .compare_and_delete("records".into(), key.clone(), b"receipt-a".to_vec())
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            second
+                .put_if_absent("records".into(), key.clone(), b"receipt-c".to_vec())
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(
+            !first
+                .compare_and_delete("records".into(), key.clone(), b"receipt-a".to_vec())
+                .await
+                .unwrap()
+        );
     });
 }
 

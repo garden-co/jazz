@@ -23,6 +23,7 @@ import type {
   PolicyValue,
   Value,
 } from "../drivers/types.js";
+import { analyzeRelations } from "./relation-analyzer.js";
 import { toValue } from "../runtime/value-converter.js";
 
 const map: Record<ScalarSqlType, ColumnType> = {
@@ -261,9 +262,12 @@ export function schemaToWasm(schema: Schema): WasmSchema {
   for (const table of schema.tables) {
     const columns: ColumnDescriptor[] = table.columns.map((col) => {
       const columnType = sqlTypeToWasm(col.sqlType);
-      if (col.mergeStrategy === "counter" && (col.sqlType !== "INTEGER" || col.nullable)) {
+      if (
+        col.mergeStrategy === "counter" &&
+        ((col.sqlType !== "INTEGER" && col.sqlType !== "BIGINT") || col.nullable)
+      ) {
         throw new Error(
-          "Counter merge strategy is only supported on non-nullable INTEGER columns.",
+          "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
         );
       }
       if (
@@ -297,5 +301,9 @@ export function schemaToWasm(schema: Schema): WasmSchema {
     };
   }
 
+  // Relation names become keys in the public row shape when an include is
+  // materialized. Validate their namespace while compiling a schema rather
+  // than allowing consumers to discover a collision later during lowering.
+  analyzeRelations(tables);
   return tables;
 }

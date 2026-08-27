@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
@@ -18,7 +19,10 @@ afterEach(async () => {
 });
 
 async function createWorkspace(): Promise<{ root: string }> {
-  const root = await mkdtemp(join(import.meta.dirname, ".catalogue-test-"));
+  // The browser suite verifies artifact provenance while the Node suite runs.
+  // A checkout-local test workspace would be an untracked input midway through
+  // that verification, so keep this fixture out of the repository.
+  const root = await mkdtemp(join(tmpdir(), "jazz-tools-catalogue-test-"));
   tempRoots.push(root);
   await mkdir(root, { recursive: true });
   await writeFile(join(root, "package.json"), '{ "type": "module" }\n');
