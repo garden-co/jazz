@@ -166,6 +166,23 @@ describe("BrowserAuthSecretStore", () => {
       expect(() => corruptStore.getOrCreateSecret()).toThrow();
       expect(storage.getItem(key)).toBe(corrupt);
     }
+  it("keeps labelled user and session dimensions distinct when the other is missing", async () => {
+    const userScoped = new BrowserAuthSecretStore({
+      storage,
+      appId: "chat-app",
+      userId: "shared-id",
+    });
+    const sessionScoped = new BrowserAuthSecretStore({
+      storage,
+      appId: "chat-app",
+      sessionId: "shared-id",
+    });
+
+    await userScoped.saveSecret("user-secret");
+    await sessionScoped.saveSecret("session-secret");
+
+    expect(await userScoped.loadSecret()).toBe("user-secret");
+    expect(await sessionScoped.loadSecret()).toBe("session-secret");
   });
 
   it("throws a clear error if used in a non-browser env (no localStorage)", async () => {
