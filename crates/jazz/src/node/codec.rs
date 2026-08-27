@@ -615,6 +615,16 @@ impl VersionRow {
         tx_time: TxTime,
         _storage_schema_version: Option<SchemaVersionId>,
     ) -> Result<Self, Error> {
+        if !version.branch_key().is_canonical() {
+            return Err(Error::InvalidMergeableCommit(
+                "row version branch key is not canonical",
+            ));
+        }
+        if version.parents().windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(Error::InvalidMergeableCommit(
+                "row version parents must be sorted and unique",
+            ));
+        }
         let (storage_table, values) = if let Some(deletion) = version.deletion() {
             (
                 table.register_storage_table(),

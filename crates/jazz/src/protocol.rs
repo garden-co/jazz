@@ -1961,8 +1961,8 @@ impl BranchKey {
     /// Canonical bytes used as the physical branch-local row-key prefix.
     pub fn canonical_bytes(&self) -> Vec<u8> {
         assert!(
-            self.values.windows(2).all(|pair| pair[0].0 < pair[1].0),
-            "branch keys require strictly ordered unique column names"
+            self.is_canonical(),
+            "branch keys require canonical ordered names and values"
         );
         let mut bytes = Vec::new();
         bytes.push(BRANCH_KEY_CODEC_VERSION);
@@ -1993,6 +1993,9 @@ impl BranchKey {
             let name = std::str::from_utf8(name)
                 .map_err(|_| BranchCodecError::InvalidEnvelope)?
                 .to_owned();
+            if name.is_empty() {
+                return Err(BranchCodecError::InvalidEnvelope);
+            }
             let value_len = take_branch_component_len(&mut cursor)?;
             let value = BranchColumnValue(take_branch_component(&mut cursor, value_len)?.to_vec());
             value.decode()?;
@@ -2005,6 +2008,15 @@ impl BranchKey {
             return Err(BranchCodecError::InvalidEnvelope);
         }
         Ok(Self { values })
+    }
+
+    /// Whether this key has the one portable ordering and value encoding.
+    pub fn is_canonical(&self) -> bool {
+        self.values.windows(2).all(|pair| pair[0].0 < pair[1].0)
+            && self
+                .values
+                .iter()
+                .all(|(name, value)| !name.is_empty() && value.decode().is_ok())
     }
 }
 
