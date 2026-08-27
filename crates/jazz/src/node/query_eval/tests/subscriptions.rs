@@ -117,6 +117,168 @@ fn maintained_policy_point_subscription_keeps_full_current_source_for_deletion_l
     );
 }
 
+/// A policy-bearing resource query retains exact scans for literal recursive
+/// access and edge rows, while its own current row source remains uncapped.
+///
+/// alice ──query resource policy──► resources full current source
+///       └──literal reachable filters──► exact access + edge sources
+#[test]
+fn policy_root_retains_reachable_point_access_paths() {
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("teams").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("resources")
+                    .column("name", PublicColumnType::Text)
+                    .column("owner", PublicColumnType::Uuid)
+                    .policies(PublicTablePolicies::new().with_select(
+                        PublicPolicyExpr::eq_session(
+                            "owner",
+                            vec!["claims".to_owned(), "sub".to_owned()],
+                        ),
+                    )),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("resourceAccess")
+                    .fk_column("resource", "resources")
+                    .fk_column("team", "teams"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("teamMemberships")
+                    .fk_column("member", "teams")
+                    .fk_column("parent", "teams"),
+            ),
+    );
+    let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([0xc4; 16]), schema.clone());
+    let access = row(0xc5);
+    let edge = row(0xc6);
+    let shape = Query::from("resources")
+        .reachable_via_with_access_filters(
+            "resourceAccess",
+            "resource",
+            "team",
+            param("team"),
+            [eq(col("id"), lit(Value::Uuid(access.0)))],
+            "teamMemberships",
+            "member",
+            "parent",
+            [eq(col("id"), lit(Value::Uuid(edge.0)))],
+        )
+        .validate_runtime(&schema)
+        .unwrap();
+    let binding = shape
+        .bind(BTreeMap::from([(
+            "team".to_owned(),
+            Value::Uuid(row(0xc7).0),
+        )]))
+        .unwrap();
+    let paths = node
+        .current_query_primary_key_access_paths(&shape, &binding)
+        .unwrap();
+    let reachable = &shape.query().reachable[0];
+
+    assert!(
+        !paths.contains_key(&root_source_id("resources")),
+        "the policy-bearing root must retain its complete current source"
+    );
+    assert!(
+        matches!(
+            paths.get(&reachable_access_source_id(reachable, "reachable:0")),
+            Some(CurrentAccessPath::PrimaryKey(values)) if values == &[Value::Uuid(access.0)]
+        ),
+        "the literal access edge remains independently safe to point-scan"
+    );
+    assert!(
+        matches!(
+            paths.get(&reachable_edge_source_id(reachable, "reachable:0")),
+            Some(CurrentAccessPath::PrimaryKey(values)) if values == &[Value::Uuid(edge.0)]
+        ),
+        "the literal recursive edge remains independently safe to point-scan"
+    );
+}
+
+#[test]
+fn maintained_policy_point_subscription_retracts_for_delete_and_owner_transfer() {
+    let schema = owner_policy_schema();
+    let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xc3; 16]), schema.clone());
+    let owner = author(0x72);
+    let other_owner = author(0x73);
+    node.set_session_claims(
+        owner,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.test_uuid()))]),
+    );
+    let shape = Query::from("issues")
+        .filter(eq(col("id"), lit(Value::Uuid(row(0x72).0))))
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let mut peer = PeerState::client_link(owner);
+
+    let target = row(0x72);
+    let initial_tx = commit_global_cells(
+        &mut node,
+        "issues",
+        target,
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("delete me".to_owned())),
+            ("assignee".to_owned(), Value::Uuid(owner.test_uuid())),
+            ("requiresAdmin".to_owned(), Value::Bool(false)),
+        ]),
+        1,
+        1,
+    );
+    let initial = peer.rehydrate_query(&mut node, &shape, &binding).unwrap();
+    assert!(matches!(
+        initial,
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { result_member_adds, .. })
+            if result_member_adds.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, tx_id)| row_uuid == target && tx_id == initial_tx)
+    ));
+    commit_global_cells(
+        &mut node,
+        "issues",
+        target,
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("transferred".to_owned())),
+            ("assignee".to_owned(), Value::Uuid(other_owner.test_uuid())),
+            ("requiresAdmin".to_owned(), Value::Bool(false)),
+        ]),
+        2,
+        2,
+    );
+    let transfer_update = peer.query_update(&mut node, &shape, &binding).unwrap();
+    assert!(matches!(
+        transfer_update,
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { result_member_removes, .. })
+            if result_member_removes.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, tx_id)| row_uuid == target && tx_id == initial_tx)
+    ));
+
+    let restored_tx = commit_global_cells(
+        &mut node,
+        "issues",
+        target,
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("transfer me".to_owned())),
+            ("assignee".to_owned(), Value::Uuid(owner.test_uuid())),
+            ("requiresAdmin".to_owned(), Value::Bool(false)),
+        ]),
+        3,
+        3,
+    );
+    let regrant = peer.query_update(&mut node, &shape, &binding).unwrap();
+    assert!(matches!(
+        regrant,
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { result_member_adds, .. })
+            if result_member_adds.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, tx_id)| row_uuid == target && tx_id == restored_tx)
+    ));
+    delete_global(&mut node, "issues", target, 4, 4);
+    let delete_update = peer.query_update(&mut node, &shape, &binding).unwrap();
+    assert!(matches!(
+        delete_update,
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { result_member_removes, .. })
+            if result_member_removes.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, tx_id)| row_uuid == target && tx_id == restored_tx)
+    ));
+}
+
 #[test]
 fn query_subscription_result_sets_track_bindings_and_rehydrate() {
     let (_server_dir, mut server) = open_node();
