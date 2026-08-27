@@ -51,6 +51,9 @@ const ROCKSDB_DEFAULT_BLOCK_BYTES: usize = 16 * 1024;
 const ROCKSDB_LARGE_BLOCK_BYTES: usize = 64 * 1024;
 const ROCKSDB_APPEND_TARGET_FILE_BYTES: u64 = 128 * 1024 * 1024;
 const ROCKSDB_OVERWRITE_TARGET_FILE_BYTES: u64 = 64 * 1024 * 1024;
+// `WalNoSync` trades per-commit fsync latency for a bounded loss window. A
+// successful boundary syncs the WAL after this many committed write batches.
+const ROCKSDB_WAL_SYNC_WRITE_BATCHES: usize = 64;
 
 const CLASS_HISTORY_CF: &str = "__groove_class_history";
 const CLASS_REGISTER_CF: &str = "__groove_class_register";
@@ -70,7 +73,8 @@ pub enum Durability {
     /// Sync every write batch through the OS for the strongest local durability.
     #[default]
     FullSync,
-    /// Keep WAL atomicity but do not fsync every commit, like SQLite WAL/NORMAL.
+    /// Keep WAL atomicity without fsyncing every commit. The WAL is synced
+    /// after 64 committed write batches and at explicit durability boundaries.
     WalNoSync,
 }
 
@@ -223,10 +227,13 @@ struct WriteFlushCadence {
 impl RocksDbStorage {
     /// Open with the default durability tier.
     ///
-    /// Default is [`Durability::WalNoSync`] (WAL on, no per-commit fsync —
-    /// crash-safe, never corrupts, bounded power-loss window; cf. Postgres
-    /// `synchronous_commit=off`). Callers that need strict per-commit power-loss
-    /// durability opt in via [`Self::open_with_durability`] with
+    /// Default is [`Durability::WalNoSync`]: the WAL preserves batch atomicity,
+    /// while a real synchronous WAL flush every 64 committed write batches
+    /// bounds the power-loss window without fsyncing every commit. Explicit
+    /// durability boundaries and close also synchronously flush all preceding
+    /// writes. RocksDB's background WAL byte syncing only smooths write I/O; it
+    /// is not the durable receipt. Callers that need strict per-commit
+    /// power-loss durability opt in via [`Self::open_with_durability`] with
     /// [`Durability::FullSync`].
     pub fn open(path: impl AsRef<Path>, column_families: &[&str]) -> Result<Self, Error> {
         Self::open_with_durability_and_codec_profile(
@@ -309,6 +316,8 @@ impl RocksDbStorage {
             final_options.set_use_fsync(true);
         }
         if matches!(durability, Durability::WalNoSync) {
+            // This schedules incremental background writeback to smooth I/O.
+            // It is not a persistence boundary; `flush_wal(true)` below is.
             final_options.set_wal_bytes_per_sync(1 << 20);
         }
         let descriptors = opened_column_families
@@ -349,7 +358,12 @@ impl RocksDbStorage {
             db,
             write_options,
             mutation_gate: Mutex::new(()),
-            write_flush_cadence: RefCell::new(None),
+            write_flush_cadence: RefCell::new(
+                matches!(durability, Durability::WalNoSync).then_some(WriteFlushCadence {
+                    every: ROCKSDB_WAL_SYNC_WRITE_BATCHES,
+                    pending: 0,
+                }),
+            ),
             #[cfg(test)]
             last_wal_flush_sync: Cell::new(None),
         })
@@ -933,23 +947,23 @@ impl OrderedKvStorage for RocksDbStorage {
                 }
             }
 
-            let should_flush = match self.write_flush_cadence.borrow_mut().as_mut() {
-                Some(cadence) => {
-                    cadence.pending += 1;
-                    if cadence.pending == cadence.every {
-                        cadence.pending = 0;
-                        true
-                    } else {
-                        false
-                    }
-                }
-                None => return self.db.write_opt(&batch, &self.write_options).storage(),
-            };
-            let mut write_options = WriteOptions::default();
-            write_options.disable_wal(false);
-            self.db.write_opt(&batch, &write_options).storage()?;
+            self.db.write_opt(&batch, &self.write_options).storage()?;
+            let should_flush =
+                self.write_flush_cadence
+                    .borrow_mut()
+                    .as_mut()
+                    .is_some_and(|cadence| {
+                        cadence.pending = cadence.pending.saturating_add(1);
+                        cadence.pending >= cadence.every
+                    });
             if should_flush {
+                // Only a successful synchronous WAL flush completes the
+                // durability boundary. Keep the pending debt on failure so the
+                // error is exposed and the next batch retries the boundary.
                 self.flush_wal(true)?;
+                if let Some(cadence) = self.write_flush_cadence.borrow_mut().as_mut() {
+                    cadence.pending = 0;
+                }
             }
             Ok(())
         })
