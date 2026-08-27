@@ -31,6 +31,7 @@ Invariant digest:
 - `INV-LENS-19`: Policy evaluation under lenses MUST translate data into the pinned permission evaluation schema and MUST NOT translate policy bundles.
 - `INV-LENS-20`: Published physical lineages and authored schema variants MUST NOT be automatically garbage-collected.
 - `INV-LENS-21`: A compatible table rename MUST retain its `PhysicalTableId`; deletion history and combined-current state therefore continue under that id without copying, rewriting, or rescanning unrelated lineages.
+- `INV-LENS-22`: A content version's explicit authored-column presence MUST be stored only as a nullable, strictly increasing array of nonzero local `PhysicalColumnId`s; the exact authored schema/table mapping converts it to or from logical wire names, and malformed or unmapped ids MUST fail before any derived current row is persisted.
 
 ## Details
 
@@ -150,6 +151,24 @@ descriptor registry are durable local storage state and are recovered before
 any payload is decoded. They never appear in a public value or on the wire.
 An alias or mapping remains retained while any retained history, current row,
 branch-local row, snapshot, or rejected payload can name it.
+
+Every content-history row also has nullable `authored_columns` metadata. When
+present, its sole durable spelling is a Groove `Array<U64>` containing strictly
+increasing, nonzero local `PhysicalColumnId`s. It is not JSON-in-bytes, a
+logical-name payload, or an alternate serialized collection. The same typed
+field is copied into derived ahead/global content-current carriers only after
+resolving every id through the row's exact authored schema and logical table;
+zero, noncanonical order, type mismatch, or an absent mapping fails closed
+before the derived write. `None` is the deliberately conservative
+legacy/lens-payload fallback: every present cell is treated as authored.
+
+`VersionRecord` remains portable and carries logical authored column names.
+Local authoring and incoming wire ingest map those names to the receiving
+node's physical ids; exporting a stored row maps the ids back through its
+stored schema/table mapping. A compatible `RenameColumn` therefore retains one
+physical id while `v1.title` and `v2.name` remain their respective authored
+wire names. This epoch intentionally does not accept the former JSON-in-bytes
+storage spelling.
 
 Jazz registers a schema variant and every projection needed for its logical
 views before activating a catalogue bundle or accepting a row under that
