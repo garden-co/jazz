@@ -2229,14 +2229,27 @@ where
                                 let admitted = *self.admitted_upstream_authority.borrow();
                                 let current_authority_receipt_eligible =
                                     authority_receipt_eligible
-                                        && expected_scope_authority.as_ref().is_none_or(
-                                            |expected| {
-                                                admitted.is_some_and(|admitted| {
-                                                    admitted.same_admitted_link(*expected)
-                                                })
-                                            },
-                                        );
-                                if let SyncMessage::FateUpdate { tx_id, .. } = &message {
+                                        && expected_scope_authority.is_some_and(|expected| {
+                                            admitted.is_some_and(|admitted| {
+                                                admitted.same_admitted_link(expected)
+                                            })
+                                        });
+                                let routed_fate = matches!(
+                                    &message,
+                                    SyncMessage::FateUpdate { tx_id, .. }
+                                        if self.edge_fate_routes.borrow().contains_key(tx_id)
+                                );
+                                // The Edge outbox is tied to an authenticated
+                                // selected authority. Ordinary direct uploads
+                                // keep their legacy featureless-link receipt
+                                // behavior, which has no routed Edge fate to
+                                // discharge.
+                                let outbox_release_receipt_eligible =
+                                    current_authority_receipt_eligible
+                                        || (!routed_fate
+                                            && authority_receipt_eligible
+                                            && expected_scope_authority.is_none());
+                                if let SyncMessage::FateUpdate { tx_id: _, .. } = &message {
                                     // Authenticated authority links must match the
                                     // currently admitted connection, not merely
                                     // deliver a direct, unstaged frame.
@@ -2247,10 +2260,7 @@ where
                                     // transaction's local state. Ordinary Core
                                     // client links have no edge route and retain
                                     // their normal fate transport.
-                                    let routed = self.edge_fate_routes.borrow().contains_key(tx_id);
-                                    if routed
-                                        && !current_authority_receipt_eligible
-                                    {
+                                    if routed_fate && !current_authority_receipt_eligible {
                                         drop_peer_request(&self.node);
                                         continue;
                                     }
@@ -2268,7 +2278,7 @@ where
                                         global_time,
                                         durability,
                                         ..
-                                    } if current_authority_receipt_eligible
+                                    } if outbox_release_receipt_eligible
                                         && (matches!(fate, Fate::Rejected(_))
                                             || (matches!(fate, Fate::Accepted)
                                                 && global_time.is_some()

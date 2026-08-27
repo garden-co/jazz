@@ -2495,6 +2495,93 @@ fn outbox_release_requires_current_admitted_authority_receipt() {
     );
 }
 
+/// A routed Edge upload has no direct-receipt compatibility path: the frame
+/// must identify the selected authenticated authority session before it can
+/// settle or prune the upload.
+#[test]
+fn featureless_upstream_cannot_release_routed_edge_outbox() {
+    let schema = schema();
+    let identity = AuthorSubject::for_test_bytes([0xa5; 16]);
+    let edge_node = NodeUuid::from_bytes([0xe5; 16]);
+    let authority_node = NodeUuid::from_bytes([0xa5; 16]);
+    let edge = open_core(0xe5, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xc5, identity, &schema);
+    let (client_transport, edge_transport) = duplex();
+    let _client_upstream = block_on(client.connect_upstream(client_transport));
+    let _edge_client = edge
+        .server
+        .accept_edge_authority_subscriber_with_claims_and_trust(
+            edge_transport,
+            identity,
+            BTreeMap::new(),
+            CommitUnitTrust::TrustedBackend,
+        );
+    let write = client
+        .insert(
+            "todos",
+            cells("featureless receipt", false, identity),
+            Default::default(),
+        )
+        .unwrap();
+    let tx_id = write.mergeable_tx_id();
+    client.tick().unwrap();
+    edge.tick().unwrap();
+    client.tick().unwrap();
+    assert!(
+        edge.server.edge_fate_routes.borrow().contains_key(&tx_id),
+        "the edge-accepted client write must retain a routed authority obligation"
+    );
+
+    let (edge_featureless_transport, mut featureless_authority) = duplex();
+    let _featureless = block_on(edge.server.connect_upstream(edge_featureless_transport));
+    assert!(
+        edge.server.admitted_upstream_authority.borrow().is_none(),
+        "a duplex without session context must not become an admitted authority"
+    );
+    featureless_authority
+        .send(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(1)),
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    edge.tick().unwrap();
+    assert!(
+        edge.server
+            .outbox
+            .borrow()
+            .iter()
+            .any(|pending| pending.tx_id == tx_id),
+        "a featureless authority frame must not prune a routed Edge upload"
+    );
+
+    let current_authority = open_core(0xa5, AuthorSubject::SYSTEM, &schema);
+    let (edge_current_transport, current_transport) =
+        duplex_with_admitted_session_context(identity, edge_node, 12, authority_node, 22);
+    let _edge_current = block_on(edge.server.connect_upstream(edge_current_transport));
+    let current = current_authority.accept_subscriber(current_transport, identity);
+    current
+        .borrow_mut()
+        .transport
+        .send(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(2)),
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    edge.tick().unwrap();
+    assert!(
+        edge.server
+            .outbox
+            .borrow()
+            .iter()
+            .all(|pending| pending.tx_id != tx_id),
+        "the selected admitted authority's matching receipt releases the upload"
+    );
+}
+
 #[test]
 fn public_permission_advice_accepts_an_explicit_zero_clause_receipt() {
     let schema = schema();
