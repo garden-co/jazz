@@ -5,7 +5,7 @@
     "format": "oxfmt --ignore-path .oxfmtignore .",
     "format:check": "oxfmt --check --ignore-path .oxfmtignore . && cargo fmt --check",
     "lint": "oxlint . --ignore-path .oxlintignore && cargo clippy --workspace -- -D warnings",
-    "test:tooling": "sh dev/scripts/clippy-staged.test.sh",
+    "test:tooling": "sh dev/scripts/clippy-staged.test.sh && bash dev/scripts/publish-crates-alpha.test.sh",
     "test:focused-rust": "bash dev/gates/test/dev-t.test.sh",
     "test:vercel-preview-skip": "node --test dev/scripts/skip-new-core-vercel-preview.test.mjs",
     "test:turbo-cache-inputs": "node dev/gates/test/turbo-cache-inputs.test.mjs",

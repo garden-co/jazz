@@ -4,7 +4,6 @@ import { useState, type FormEvent } from "react";
 import type { DbConfig } from "jazz-tools";
 import { JazzProvider, useAll, useDb, useSession } from "jazz-tools/react";
 import { app } from "../schema";
-import { authorForSession } from "./lib/identity";
 
 // This only bounds files selected through this component. `s.bytes()` has no
 // corresponding schema or policy size constraint, so it must not be treated as
@@ -21,11 +20,7 @@ const allowedAttachmentTypes = new Set([
 /** Rendered inside the external-auth provider in the Next dashboard. */
 export function BandChat() {
   const session = useSession();
-  return session?.user_id ? (
-    <RoomWorkspace author={authorForSession(session.issuer, session.user_id)} />
-  ) : (
-    <p>Loading identity…</p>
-  );
+  return session?.user ? <RoomWorkspace author={session.user} /> : <p>Loading identity…</p>;
 }
 
 /** Browser receipt entrypoint. The production dashboard never uses local-first auth here. */

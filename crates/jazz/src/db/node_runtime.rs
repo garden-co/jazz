@@ -388,6 +388,18 @@ where
         schedule_tick_in(&self.scheduler, urgency);
     }
 
+    /// Obtain the host-owned waker that survives this short owner turn.
+    ///
+    /// It is passed only into Groove's non-blocking query-progress poll. A
+    /// later cold-storage completion therefore asks the host for one new tick
+    /// instead of making this runtime poll while the storage is still cold.
+    pub(super) fn query_runtime_waker(&self) -> Option<Waker> {
+        self.scheduler
+            .borrow()
+            .as_ref()
+            .and_then(|scheduler| scheduler.query_runtime_waker())
+    }
+
     /// Enqueue a stream-finalization command without touching the async node
     /// mutex. This is the only operation a stream's `Drop` implementation may
     /// perform. A closed node has already retired its runtime, so later
@@ -683,10 +695,12 @@ where
     }
 
     pub(super) async fn refresh_subscriptions(&self) -> Result<usize, Error> {
+        let progress_waker = self.query_runtime_waker();
         refresh_subscriptions_in(
             &self.node,
             &self.subscriptions,
             &self.active_authority_view_receipts,
+            progress_waker.as_ref(),
         )
         .await
     }
@@ -796,8 +810,8 @@ where
                 // this newly connected successor has not seen it.
                 let mut routes = self.edge_fate_routes.borrow_mut();
                 let routed_txs = routes.keys().copied().collect::<Vec<_>>();
-                for pending in routes.values_mut() {
-                    for route in pending.iter_mut() {
+                for obligation in routes.values_mut() {
+                    for route in obligation.routes.iter_mut() {
                         route.authority = Some(context);
                     }
                 }
@@ -956,6 +970,8 @@ where
             connection_epoch,
             startup_error: None,
             released_outbox_tx_ids: Vec::new(),
+            pending_chunk_response: None,
+            pending_control_responses: VecDeque::new(),
             link: ConnectionLink::Upstream(UpstreamConnectionState {
                 local_receiver,
                 pending,
@@ -967,6 +983,7 @@ where
                 large_value_uploads: transferred_large_value_uploads,
                 awaiting_large_value_uploads: BTreeMap::new(),
                 failed_large_value_uploads: BTreeSet::new(),
+                pending_row_version_fetches: VecDeque::new(),
                 pending_row_version_repairs: VecDeque::new(),
                 scope_view_cuts: BTreeMap::new(),
                 scope_receipts: BTreeMap::new(),
@@ -1011,6 +1028,20 @@ where
             claims,
             CommitUnitTrust::Session,
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn accept_test_subscriber_with_claims(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
+        let admitted = self
+            .node
+            .borrow_mut()
+            .set_test_provider_claims(identity, claims.clone());
+        self.accept_subscriber_with_claims(transport, identity, admitted)
     }
 
     /// Accept a subscriber connection with an explicit commit-upload trust mode.
@@ -1188,6 +1219,8 @@ where
             connection_epoch,
             startup_error,
             released_outbox_tx_ids: Vec::new(),
+            pending_chunk_response: None,
+            pending_control_responses: VecDeque::new(),
             link: ConnectionLink::Subscriber(SubscriberConnectionState {
                 peer,
                 ingest_context,
@@ -1233,22 +1266,51 @@ where
         let mut connection_ref = connection.borrow_mut();
         let connection_epoch = connection_ref.connection_epoch;
         let upstream_upload_destination = connection_ref.upstream_upload_destination;
+        let mut reconnect_permission_advice = Vec::new();
         let (authority, upstream_epoch, transferable_uploads, retired_relay_subscriptions) =
             match &mut connection_ref.link {
                 ConnectionLink::Upstream(UpstreamConnectionState {
                     expected_scope_authority,
                     large_value_uploads,
                     awaiting_large_value_uploads,
+                    pending,
+                    scope_lease_manager,
                     ..
-                }) => (
-                    *expected_scope_authority,
-                    Some(connection_epoch),
-                    Some(peer_connection::take_reconnectable_large_value_uploads(
-                        large_value_uploads,
-                        awaiting_large_value_uploads,
-                    )),
-                    Vec::new(),
-                ),
+                }) => {
+                    // Permission-advice futures outlive one transport. Rebuild
+                    // their link-local scope bookkeeping on the successor,
+                    // one command per live waiter so identical actions can
+                    // coalesce under its fresh authority context and wire id.
+                    let live_waiters = self.permission_advice_waiters.borrow();
+                    let mut queued = BTreeSet::new();
+                    for command in pending.iter() {
+                        let PendingUpstreamCommand::AuthorizationScopeIntent { request_id, action } =
+                            command
+                        else {
+                            continue;
+                        };
+                        if live_waiters.contains_key(request_id) && queued.insert(*request_id) {
+                            reconnect_permission_advice.push((*request_id, action.clone()));
+                        }
+                    }
+                    for request in scope_lease_manager.requests.values() {
+                        for request_id in &request.waiters {
+                            if live_waiters.contains_key(request_id) && queued.insert(*request_id) {
+                                reconnect_permission_advice
+                                    .push((*request_id, request.action.clone()));
+                            }
+                        }
+                    }
+                    (
+                        *expected_scope_authority,
+                        Some(connection_epoch),
+                        Some(peer_connection::take_reconnectable_large_value_uploads(
+                            large_value_uploads,
+                            awaiting_large_value_uploads,
+                        )),
+                        Vec::new(),
+                    )
+                }
                 ConnectionLink::Subscriber(SubscriberConnectionState {
                     peer,
                     served,
@@ -1308,6 +1370,19 @@ where
                 retired_relay_subscriptions
                     .into_iter()
                     .map(|(subscription, _)| PendingUpstreamCommand::Unsubscribe(subscription)),
+            );
+            self.schedule_tick(TickUrgency::Immediate);
+        }
+        if !reconnect_permission_advice.is_empty() {
+            self.upstream_subscriptions.borrow_mut().extend(
+                reconnect_permission_advice
+                    .into_iter()
+                    .map(
+                        |(request_id, action)| PendingUpstreamCommand::AuthorizationScopeIntent {
+                            request_id,
+                            action,
+                        },
+                    ),
             );
             self.schedule_tick(TickUrgency::Immediate);
         }
@@ -1373,14 +1448,16 @@ where
                 *self.admitted_upstream_authority.borrow_mut() = handoff;
                 let mut routes = self.edge_fate_routes.borrow_mut();
                 if let Some(handoff) = handoff {
-                    routes.retain(|_, pending| {
-                        pending.retain(|route| route.queue.upgrade().is_some());
-                        for route in pending.iter_mut() {
+                    routes.retain(|_, obligation| {
+                        obligation
+                            .routes
+                            .retain(|route| route.queue.upgrade().is_some());
+                        for route in obligation.routes.iter_mut() {
                             if route.authority == Some(authority) {
                                 route.authority = Some(handoff);
                             }
                         }
-                        !pending.is_empty()
+                        !obligation.routes.is_empty()
                     });
                     let routed_txs = routes.keys().copied().collect::<Vec<_>>();
                     drop(routes);
@@ -1418,14 +1495,16 @@ where
                     // No successor yet: preserve bounded live downstream
                     // routes for a later admitted authority.  Clearing them
                     // after an Edge acceptance would strand the caller.
-                    routes.retain(|_, pending| {
-                        pending.retain(|route| route.queue.upgrade().is_some());
-                        for route in pending.iter_mut() {
+                    routes.retain(|_, obligation| {
+                        obligation
+                            .routes
+                            .retain(|route| route.queue.upgrade().is_some());
+                        for route in obligation.routes.iter_mut() {
                             if route.authority == Some(authority) {
                                 route.authority = None;
                             }
                         }
-                        !pending.is_empty()
+                        !obligation.routes.is_empty()
                     });
                     self.schedule_tick(TickUrgency::Immediate);
                 }
@@ -1439,14 +1518,17 @@ where
         self.drain_subscription_finalizations().await?;
         self.deliver_pending_mutation_errors();
         let mut stats = DbTickStats::default();
+        let progress_waker = self.query_runtime_waker();
         let chunk_completion_generation = self.chunk_resolver.completion_generation();
         if self.chunk_resolver.has_pending_local_demand()
             || chunk_completion_generation != self.observed_chunk_completion_generation.get()
+            || self.node.lock().await.has_pending_query_runtime()
         {
             stats.subscription_events += Box::pin(refresh_subscriptions_in(
                 &self.node,
                 &self.subscriptions,
                 &self.active_authority_view_receipts,
+                progress_waker.as_ref(),
             ))
             .await?;
             self.observed_chunk_completion_generation
@@ -1616,6 +1698,7 @@ pub(super) async fn refresh_subscriptions_in<S>(
     node: &SharedNodeState<S>,
     subscriptions: &SubscriptionList,
     active_authority_view_receipts: &ActiveAuthorityViewReceipts,
+    progress_waker: Option<&Waker>,
 ) -> Result<usize, Error>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
@@ -1628,7 +1711,10 @@ where
         .await
         .take_pending_authoritative_reset_binding_views();
     let mut consumed_authoritative_resets = BTreeSet::new();
-    node.lock().await.drive_ready_query_runtime().await?;
+    node.lock()
+        .await
+        .drive_ready_query_runtime_with_waker(progress_waker)
+        .await?;
     let live_subscriptions = subscriptions.borrow().clone();
     for weak in &live_subscriptions {
         let Some(state) = weak.upgrade() else {
@@ -2489,8 +2575,9 @@ where
                             terminal_operations,
                         } => {
                             let state_ref = &mut refresh;
-                            let previous_snapshot = state_ref.snapshot.clone();
-                            let previous_snapshot_index = state_ref.snapshot_index.clone();
+                            let previous = authoritative_membership_changed.then(|| {
+                                (state_ref.snapshot.clone(), state_ref.snapshot_index.clone())
+                            });
                             let mut event = apply_maintained_update_to_snapshot(
                                 &mut state_ref.snapshot,
                                 &mut state_ref.snapshot_index,
@@ -2506,6 +2593,9 @@ where
                                 None,
                             )?;
                             if authoritative_membership_changed {
+                                let (previous_snapshot, previous_snapshot_index) = previous.expect(
+                                    "authoritative membership changes retain prior snapshot",
+                                );
                                 order_maintained_snapshot_roots(
                                     &node.borrow(),
                                     &shape.query(),

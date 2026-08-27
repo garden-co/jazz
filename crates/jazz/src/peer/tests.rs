@@ -1,11 +1,16 @@
 use super::*;
-use crate::legacy_test_future::{ResultFutureExt as _, SettledNodeTestExt as _};
+use crate::legacy_test_future::{
+    FutureResolveExt as _, OptionFutureExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
+};
 
 use std::collections::BTreeMap;
 
 use crate::ids::{NodeUuid, RowUuid};
 use crate::node::MergeableCommit;
-use crate::protocol::{ProgramFactEntry, RealRowMemberEntry, SyncMessage, VersionRecord};
+use crate::protocol::{
+    BranchSelector, BranchViewBase, ProgramFactEntry, RealRowMemberEntry, SyncMessage,
+    VersionRecord,
+};
 use crate::query::{
     Aggregate, ArraySubquery, OrderDirection, Query, col, eq, gt, is_null, lit, ne, not, param,
 };
@@ -80,6 +85,12 @@ fn fast_cursor_membership_mismatch_detects_pre_cursor_changes() {
         &previous,
         &BTreeSet::from([direct, revoked, new_post_cursor_row]),
     ));
+}
+
+#[test]
+fn peer_state_remains_send_for_threaded_simulations() {
+    fn assert_send<T: Send>() {}
+    assert_send::<PeerState>();
 }
 
 #[test]
@@ -604,9 +615,10 @@ fn priority_cells(title: impl Into<String>, priority: u64) -> BTreeMap<String, V
 }
 
 fn public_session_eq(column: &str, path: &[&str]) -> PublicPolicyExpr {
+    let path = path.iter().map(|segment| (*segment).to_owned()).collect();
     PublicPolicyExpr::eq_session(
         column,
-        path.iter().map(|segment| (*segment).to_owned()).collect(),
+        path,
     )
 }
 
@@ -622,7 +634,7 @@ fn access_policy_schema() -> JazzSchema {
         "docAccess",
         vec![
             public_session_eq("doc", &["__jazz_outer_row", "id"]),
-            public_session_eq("userID", &["user_id"]),
+            public_session_eq("userID", &["claims", "sub"]),
         ],
     );
     public_peer_schema(
@@ -660,7 +672,7 @@ fn aggregate_access_policy_schema() -> JazzSchema {
         "docAccess",
         vec![
             public_session_eq("doc", &["__jazz_outer_row", "id"]),
-            public_session_eq("userID", &["user_id"]),
+            public_session_eq("userID", &["claims", "sub"]),
         ],
     );
     public_peer_schema(
@@ -783,7 +795,7 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
     // The support rehydrate must temporarily evaluate the writer's bound
     // session claim even while the peer normally serves as another user.
     let (_bound_dir, mut bound_edge) = open_node_with_schema(node(0xa6), schema.clone());
-    bound_edge.set_session_claims(
+    bound_edge.set_test_provider_claims(
         writer,
         BTreeMap::from([("session_id".to_owned(), Value::Uuid(writer.test_uuid()))]),
     );
@@ -821,7 +833,7 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
     // A present but ill-typed claim remains a real binding error; only an
     // absent claim receives the fail-closed empty-proof treatment.
     let (_wrong_type_dir, mut wrong_type_edge) = open_node_with_schema(node(0xa7), schema);
-    wrong_type_edge.set_session_claims(
+    wrong_type_edge.set_test_provider_claims(
         writer,
         BTreeMap::from([(
             "session_id".to_owned(),
@@ -854,11 +866,49 @@ fn edge_ingest_turns_missing_prepared_seed_claim_into_deferred_empty_support() {
     let mut peer = PeerState::edge_client(writer);
 
     let outcome = peer
-        .ingest_edge_mergeable_commit_unit(&mut edge, tx, versions, 10)
+        .ingest_edge_mergeable_commit_unit(&mut edge, tx.clone(), versions, 10)
         .expect("missing prepared seed claim must be a deferred empty support proof");
     let updates = edge.persist_and_settle_outcome(outcome).unwrap();
     assert!(updates.is_empty());
     assert_eq!(peer.deferred_edge_fate_count(), 1);
+    assert!(
+        edge.transaction_state(tx.tx_id).is_none(),
+        "a pending support proof must not admit a client commit into edge history"
+    );
+}
+
+#[test]
+fn deferred_edge_ingest_rejects_a_conflicting_retransmit() {
+    let schema = session_seed_write_policy_schema();
+    let writer = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let resource = row(0xc2);
+    let (_writer_dir, mut writer_node) = open_node_with_schema(node(0xc3), schema.clone());
+    let (tx, versions) = resource_commit_unit(&mut writer_node, writer, resource);
+    let (_edge_dir, mut edge) = open_node_with_schema(node(0xc4), schema);
+    let mut peer = PeerState::edge_client(writer);
+
+    let _ = peer
+        .ingest_edge_mergeable_commit_unit(&mut edge, tx.clone(), versions.clone(), 10)
+        .expect("missing support claim parks the first commit unit");
+    assert_eq!(peer.deferred_edge_fate_count(), 1);
+
+    let _ = peer
+        .ingest_edge_mergeable_commit_unit(&mut edge, tx.clone(), versions.clone(), 10)
+        .expect("an identical deferred retransmit remains idempotent");
+    assert_eq!(peer.deferred_edge_fate_count(), 1);
+
+    let mut conflicting = tx.clone();
+    conflicting.n_total_writes = conflicting.n_total_writes.saturating_add(1);
+    assert!(matches!(
+        peer.ingest_edge_mergeable_commit_unit(&mut edge, conflicting, versions, 10)
+            .resolve(),
+        Err(Error::ConflictingCommitUnit(tx_id)) if tx_id == tx.tx_id
+    ));
+    assert_eq!(peer.deferred_edge_fate_count(), 1);
+    assert!(
+        edge.transaction_state(tx.tx_id).is_none(),
+        "a conflicting retry must not enter history while the original remains deferred"
+    );
 }
 
 fn scored_doc_cells(title: impl Into<String>, score: u64) -> BTreeMap<String, Value> {
@@ -1294,6 +1344,171 @@ fn maintained_subscription_view_default_rehydrate_installs_subscription() {
     peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
 
     assert!(maintained_subscription_id(&peer, subscription).is_some());
+}
+
+/// A BranchView subscription keeps base membership through a runtime rehydrate.
+///
+/// alice writes two base rows; bob subscribes to a head-over-base BranchView;
+/// alice deletes one row in the head; then bob rebuilds the maintained runtime
+/// and receives only that row's removal.
+///
+/// alice (base) ──rows──► bob (BranchView: head over base)
+/// alice (head) ──delete + runtime rehydrate──► bob (one removal)
+#[test]
+fn maintained_branch_view_reconcile_retains_undeleted_base_members() {
+    let schema = public_peer_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("branch_id", PublicColumnType::Uuid)
+            .column("title", PublicColumnType::Text)
+            .branch_by("branch_id"),
+    ));
+    let (_dir, mut core) = open_node_with_schema(node(0x98), schema.clone());
+    let base = BranchSelector::new([(
+        "branch_id",
+        Value::Uuid(uuid::Uuid::from_bytes([0x99; 16])),
+    )]);
+    let head = BranchSelector::new([(
+        "branch_id",
+        Value::Uuid(uuid::Uuid::from_bytes([0x9a; 16])),
+    )]);
+    let deleted_row = row(0x9b);
+    let retained_row = row(0x9c);
+    for (sequence, row_uuid, title) in [
+        (1, deleted_row, "deleted"),
+        (2, retained_row, "retained"),
+    ] {
+        let tx_id = core
+            .commit_mergeable_settled(
+                MergeableCommit::new("todos", row_uuid, 1_000 + sequence)
+                    .branch(base.clone())
+                    .cells(title_cells(title)),
+            )
+            .unwrap();
+        accept_global(&mut core, tx_id, sequence);
+    }
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let read_view =
+        ReadViewSpec::branch_view(head.clone(), Some(BranchViewBase::Current(base.clone())));
+    let opts = RegisterShapeOptions {
+        read_view: read_view.clone(),
+        ..RegisterShapeOptions::default()
+    };
+    let subscription = subscription_key_with_opts(&shape, &binding, &opts);
+    let branch_rows = core
+        .query_relation_snapshot_for_serving_in_read_view(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            AuthorSubject::SYSTEM,
+            &read_view,
+        )
+        .unwrap()
+        .rows;
+    assert_eq!(
+        branch_rows
+            .iter()
+            .map(crate::node::CurrentRow::row_uuid)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([deleted_row, retained_row])
+    );
+    assert!(
+        core.query_relation_snapshot_for_serving_in_read_view(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            AuthorSubject::SYSTEM,
+            &ReadViewSpec::default(),
+        )
+        .unwrap()
+        .rows
+        .is_empty(),
+        "default/current reads address the empty shared branch key"
+    );
+
+    let mut peer = PeerState::new();
+    let initial = peer
+        .rehydrate_query_with_opts(&mut core, &shape, &binding, opts.clone())
+        .unwrap();
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        reset_result_set,
+        result_member_adds,
+        ..
+    }) = initial
+    else {
+        panic!("expected initial BranchView update");
+    };
+    assert!(reset_result_set);
+    assert_eq!(
+        result_member_adds
+            .iter()
+            .filter_map(ResultMemberEntry::as_row)
+            .map(|(_, row_uuid, _)| row_uuid)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([deleted_row, retained_row])
+    );
+
+    let deletion_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", deleted_row, 2_000)
+                .branch(head)
+                .authored_columns(BTreeSet::from(["branch_id".to_owned()]))
+                .deletion(DeletionEvent::Deleted),
+    )
+    .unwrap();
+    accept_global(&mut core, deletion_tx, 3);
+    let stale_runtime_token = core.groove_runtime_token().checked_add(1).unwrap();
+    peer.publication_states
+        .get_mut(&subscription)
+        .unwrap()
+        .groove_runtime_token = Some(stale_runtime_token);
+    let update = peer
+        .query_update_for_subscription(&mut core, subscription, &shape, &binding)
+        .unwrap();
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        reset_result_set,
+        result_member_adds,
+        result_member_removes,
+        ..
+    }) = update
+    else {
+        panic!("expected deletion-witness reconcile update");
+    };
+    assert!(!reset_result_set);
+    assert!(result_member_adds.is_empty());
+    assert_eq!(
+        result_member_removes
+            .iter()
+            .filter_map(ResultMemberEntry::as_row)
+            .map(|(_, row_uuid, _)| row_uuid)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([deleted_row]),
+        "authoritative reconcile must not remove the retained BranchView base member"
+    );
+
+    let fresh_rows = core
+        .query_relation_snapshot_for_serving_in_read_view(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            AuthorSubject::SYSTEM,
+            &read_view,
+        )
+        .unwrap()
+        .rows
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(fresh_rows, BTreeSet::from([retained_row]));
+    let mut fresh_peer = PeerState::new();
+    fresh_peer
+        .rehydrate_query_with_opts(&mut core, &shape, &binding, opts)
+        .unwrap();
+    assert_eq!(
+        row_result_set(&peer, subscription),
+        row_result_set(&fresh_peer, subscription),
+        "authoritative reconcile must match a fresh BranchView rehydrate by full result identity"
+    );
 }
 
 #[test]
@@ -2604,9 +2819,12 @@ fn aggregate_policy_oracle_matches_visible_rows_per_identity() {
     for (identity, expected_count, expected_sum) in
         [(admin, 2, Some(30)), (member, 2, Some(40)), (spy, 0, None)]
     {
-        core.set_session_claims(
+        core.set_test_provider_claims(
             identity,
-            BTreeMap::from([("user_id".to_owned(), Value::Uuid(identity.test_uuid()))]),
+            BTreeMap::from([(
+                crate::query::provider_claim_key("sub"),
+                Value::Uuid(identity.test_uuid()),
+            )]),
         );
         let rows = core
             .query_rows_with_prepared_plan_for_identity(
@@ -2719,8 +2937,46 @@ fn maintained_subscription_view_hit_metrics_and_footprint_update() {
     let metrics = peer.maintained_subscription_view_metrics();
     assert_eq!(metrics.hits_out, 1);
     assert_eq!(metrics.footprint.result_rows, 1);
+    assert_eq!(metrics.footprint.structured_app_rows, 0);
+    assert_eq!(metrics.footprint.structured_app_rows_bytes, 0);
     assert!(metrics.footprint.version_identities >= 1);
     assert!(metrics.footprint.version_tx_entries >= 1);
+
+    // Flat subscriptions release this duplicate collector after the reset, but
+    // membership/version witnesses must still publish a later removal and a
+    // restoration of the same logical row.
+    let removed_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x51), 1_001).cells(title_cells("other")),
+        )
+        .unwrap();
+    accept_global(&mut core, removed_tx, 2);
+    assert_view_update_rows(
+        peer.query_update(&mut core, &shape, &binding).unwrap(),
+        vec![],
+        vec![("todos", row(0x51), tx_id)],
+    );
+    let metrics = peer.maintained_subscription_view_metrics();
+    assert_eq!(
+        metrics.footprint.structured_app_rows, 0,
+        "flat updates must not rebuild the collector released after the reset"
+    );
+    assert_eq!(metrics.footprint.structured_app_rows_bytes, 0);
+
+    let restored_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x51), 1_002).cells(title_cells("match")),
+        )
+        .unwrap();
+    accept_global(&mut core, restored_tx, 3);
+    assert_view_update_rows(
+        peer.query_update(&mut core, &shape, &binding).unwrap(),
+        vec![("todos", row(0x51), restored_tx)],
+        vec![],
+    );
+    let metrics = peer.maintained_subscription_view_metrics();
+    assert_eq!(metrics.footprint.structured_app_rows, 0);
+    assert_eq!(metrics.footprint.structured_app_rows_bytes, 0);
 }
 
 #[test]
@@ -3401,9 +3657,12 @@ fn maintained_subscription_view_policy_view_exclusive_delta_ships_identity_scope
     accept_global(&mut core, grant_b, 3);
 
     let mut peer = PeerState::client_link(user_a);
-    core.set_session_claims(
+    core.set_test_provider_claims(
         user_a,
-        BTreeMap::from([("user_id".to_owned(), Value::Uuid(user_a.test_uuid()))]),
+        BTreeMap::from([(
+            crate::query::provider_claim_key("sub"),
+            Value::Uuid(user_a.test_uuid()),
+        )]),
     );
     peer.set_ship_complete_exclusive_payloads(true);
     core.reset_query_engine_read_metrics();
@@ -3634,9 +3893,12 @@ fn current_rows_update_installs_maintained_subscription_for_relay_and_edge_clien
     assert!(view_update_added_rows(relay_update).contains(&doc));
 
     let mut edge_owner = PeerState::edge_client(owner);
-    core.set_session_claims(
+    core.set_test_provider_claims(
         owner,
-        BTreeMap::from([("user_id".to_owned(), Value::Uuid(owner.test_uuid()))]),
+        BTreeMap::from([(
+            crate::query::provider_claim_key("sub"),
+            Value::Uuid(owner.test_uuid()),
+        )]),
     );
     let edge_update = edge_owner.current_rows_update(&mut core, "docs").unwrap();
     assert!(maintained_subscription_id(&edge_owner, subscription).is_some());
@@ -3647,9 +3909,12 @@ fn current_rows_update_installs_maintained_subscription_for_relay_and_edge_clien
     assert!(view_update_added_rows(edge_update).contains(&doc));
 
     let mut edge_other = PeerState::edge_client(other);
-    core.set_session_claims(
+    core.set_test_provider_claims(
         other,
-        BTreeMap::from([("user_id".to_owned(), Value::Uuid(other.test_uuid()))]),
+        BTreeMap::from([(
+            crate::query::provider_claim_key("sub"),
+            Value::Uuid(other.test_uuid()),
+        )]),
     );
     let other_update = edge_other.current_rows_update(&mut core, "docs").unwrap();
     assert!(maintained_subscription_id(&edge_other, subscription).is_some());
@@ -3697,9 +3962,12 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
     accept_global(&mut core, first_grant, 2);
 
     let mut peer = PeerState::client_link(user);
-    core.set_session_claims(
+    core.set_test_provider_claims(
         user,
-        BTreeMap::from([("user_id".to_owned(), Value::Uuid(user.test_uuid()))]),
+        BTreeMap::from([(
+            crate::query::provider_claim_key("sub"),
+            Value::Uuid(user.test_uuid()),
+        )]),
     );
     let first_update = peer.current_rows_update(&mut core, "docs").unwrap();
     let version_bundles = version_bundles_for_update(&first_update);

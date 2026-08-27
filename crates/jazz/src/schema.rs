@@ -1439,9 +1439,9 @@ pub(crate) struct Policy;
 
 #[cfg(test)]
 impl Policy {
-    /// Owner-only policy equivalent to `column == claim("author")`.
+    /// Owner-only policy equivalent to `column == claim("user")`.
     pub(crate) fn owner_only(table: impl Into<String>, column: impl Into<String>) -> Option<Query> {
-        Some(Query::from(table).filter(eq(col(column), claim("author"))))
+        Some(Query::from(table).filter(eq(col(column), claim("user"))))
     }
 }
 

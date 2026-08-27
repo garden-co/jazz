@@ -231,6 +231,73 @@ fn maintained_view_allows_join_policy_slice() {
     peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
 }
 
+/// Contract: a prepared maintained subscription must preserve both semantic
+/// authorization occurrences for a root row that is admitted through either
+/// of two independently matching relationship branches.
+///
+/// Actors: the serving core owns the data; `reader` opens a title-bound
+/// subscription; the same todo matches both owner and editor policy branches.
+/// The public effect is one readable todo, while the maintained result carrier
+/// must retain the UNION arm that distinguishes the two branch occurrences.
+#[test]
+fn prepared_maintained_owner_or_editor_policy_keeps_union_arm_occurrences() {
+    let reader = user(0xa1);
+    let todo = row(0xa0);
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("owner_match", PublicColumnType::Boolean)
+                    .column("editor_match", PublicColumnType::Boolean),
+            ),
+    );
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", todo, 10).cells(BTreeMap::from([
+            ("title".to_owned(), Value::String("shared".to_owned())),
+            ("owner_match".to_owned(), Value::Bool(true)),
+            ("editor_match".to_owned(), Value::Bool(true)),
+        ])),
+    );
+
+    let mut query = Query::from("todos");
+    query.filters = vec![crate::query::Predicate::Any(Vec::new())];
+    query.policy_branches = vec![
+        crate::query::PolicyBranch {
+            filters: vec![eq(col("owner_match"), lit(true)), eq(col("title"), param("title"))],
+            joins: Vec::new(),
+            reachable: Vec::new(),
+            inherits: Vec::new(),
+        },
+        crate::query::PolicyBranch {
+            filters: vec![eq(col("editor_match"), lit(true)), eq(col("title"), param("title"))],
+            joins: Vec::new(),
+            reachable: Vec::new(),
+            inherits: Vec::new(),
+        },
+    ];
+    let shape = query
+        .validate_runtime(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape
+        .bind(BTreeMap::from([("title".to_owned(), Value::String("shared".to_owned()))]))
+        .unwrap();
+    let mut peer = PeerState::client_link(reader);
+    let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let (adds, removes) = canonical_view_update_rows(&update);
+    assert_eq!(
+        adds.into_iter()
+            .map(|(_table, row_uuid, _tx_id)| row_uuid)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([todo]),
+        "the two authorization occurrences materialize as one public todo",
+    );
+    assert!(removes.is_empty());
+}
+
 #[test]
 fn maintained_view_retained_claim_param_equality_matches_literal_recompute() {
     let schema = owner_read_schema("todos");
@@ -373,7 +440,7 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
                         PublicTablePolicies::new()
                             .with_select(PublicPolicyExpr::eq_session(
                                 "userID",
-                                vec!["user_id".to_owned()],
+                                vec!["claims".to_owned(), "user_id".to_owned()],
                             )),
                     ),
             ),
@@ -381,7 +448,7 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let reader = user(0xa1);
     let other = user(0xb2);
-    core.set_session_claims(
+    core.set_test_provider_claims(
         reader,
         BTreeMap::from([("user_id".to_owned(), Value::Uuid(reader.test_uuid()))]),
     );
@@ -831,7 +898,7 @@ fn retained_user_param_filter_graph_matches_literal_filter() {
     ));
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let owner = user(0xa1);
-    core.set_session_claims(owner, BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.test_uuid()))]));
+    core.set_test_provider_claims(owner, BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.test_uuid()))]));
     accept_global(
         &mut core,
         MergeableCommit::new("docs", row(0xd1), 10).cells(BTreeMap::from([
@@ -905,7 +972,7 @@ fn session_sub_claim_remains_an_application_owned_value() {
             ("owner".to_owned(), Value::Uuid(other.test_uuid())),
         ])),
     );
-    core.set_session_claims(owner, BTreeMap::from([("sub".to_owned(), Value::Uuid(other.test_uuid()))]));
+    core.set_test_provider_claims(owner, BTreeMap::from([("sub".to_owned(), Value::Uuid(other.test_uuid()))]));
 
     let shape = Query::from("docs")
         .validate(&core.catalogue.schema)

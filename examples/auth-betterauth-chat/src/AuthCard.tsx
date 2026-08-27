@@ -61,7 +61,7 @@ export function AuthCard({ loggedIn, role, onSignIn, onSignUp, onSignOut }: Auth
     <aside className="auth-card">
       <div className="status-card" data-testid="auth-status">
         <div className="status-copy">
-          <span className="status-name">{loggedIn ? session?.user_id : "Anonymous"}</span>
+          <span className="status-name">{loggedIn ? session?.user : "Anonymous"}</span>
         </div>
         {role ? <span className="admin-badge">{role}</span> : null}
       </div>

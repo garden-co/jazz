@@ -10,6 +10,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use futures::task::{ArcWake, waker};
+
 use crate::db::{
     Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, Error as CoreDbError,
     ErrorCode as CoreDbErrorCode, ExclusiveTxOps, LocalUpdates as CoreLocalUpdates,
@@ -709,6 +711,21 @@ struct TickState {
     notify: tokio::sync::Notify,
 }
 
+/// Thread-safe wake bridge retained by cold Groove storage futures.
+///
+/// It does not poll the database itself. It only records one Immediate owner
+/// turn when an actually pending operation becomes ready.
+struct QueryRuntimeWake {
+    state: Arc<TickState>,
+}
+
+impl ArcWake for QueryRuntimeWake {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        arc_self.state.immediate.store(true, Ordering::Release);
+        arc_self.state.notify.notify_one();
+    }
+}
+
 impl TickSchedulerImpl {
     fn take(&self) -> Option<TickUrgency> {
         if self.state.immediate.swap(false, Ordering::AcqRel) {
@@ -757,6 +774,12 @@ impl TickScheduler for TickSchedulerImpl {
 
     fn schedule_tick_after(&self, delay_ms: u64) {
         self.wake_after(delay_ms);
+    }
+
+    fn query_runtime_waker(&self) -> Option<std::task::Waker> {
+        Some(waker(Arc::new(QueryRuntimeWake {
+            state: Arc::clone(&self.state),
+        })))
     }
 }
 
@@ -1232,13 +1255,14 @@ impl ClientDb {
         .await
     }
 
-    fn disconnect_upstream(&self) -> bool {
-        self.inner.borrow_mut().disconnect_upstream()
-    }
-
     #[cfg(feature = "testing")]
     async fn reconnect_upstream(&self) -> Result<bool> {
         ClientDbInner::reconnect_upstream(&self.inner).await
+    }
+
+    #[cfg(feature = "testing")]
+    fn disconnect_upstream(&self) -> bool {
+        self.inner.borrow_mut().disconnect_upstream()
     }
 
     fn ensure_tick_driver_running(&self) -> Result<()> {
@@ -1986,7 +2010,9 @@ fn core_storage(schema: &crate::schema::JazzSchema, context: &AppContext) -> Res
         .map(String::as_str)
         .collect::<Vec<_>>();
     match context.storage {
-        ClientStorage::Memory => Ok(CoreStorage::new(CoreMemoryStorage::new(&refs))),
+        ClientStorage::Memory => Ok(CoreStorage::new(
+            CoreMemoryStorage::new(&refs).expect("valid memory storage families"),
+        )),
         ClientStorage::Persistent => {
             let factory = context.storage_factory.as_ref().ok_or_else(|| {
                 JazzError::Connection(
@@ -2054,24 +2080,25 @@ fn session_claims_to_core_claims(session: &Session) -> Result<HashMap<String, Co
     };
     let mut core_claims = HashMap::new();
     for (name, value) in claims {
-        core_claims.insert(name, json_claim_to_core_value(value)?);
+        core_claims.insert(
+            crate::query::provider_claim_key(&name),
+            json_claim_to_core_value(value)?,
+        );
     }
-    core_claims.insert("sub".to_owned(), CoreValue::String(session.user_id.clone()));
-    core_claims.insert("iss".to_owned(), CoreValue::String(session.issuer.clone()));
     core_claims.insert(
-        "issuer".to_owned(),
-        CoreValue::String(session.issuer.clone()),
+        crate::query::provider_claim_key("sub"),
+        CoreValue::String(session.user_id.clone()),
     );
     core_claims.insert(
-        "user_id".to_owned(),
-        CoreValue::String(session.user_id.clone()),
+        crate::query::provider_claim_key("iss"),
+        CoreValue::String(session.issuer.clone()),
     );
     core_claims.insert(
         "authMode".to_owned(),
         CoreValue::String(auth_mode_claim_value(session.auth_mode).to_owned()),
     );
     core_claims.insert(
-        "author".to_owned(),
+        "user".to_owned(),
         CoreValue::String(session.author_subject()?.canonical().to_owned()),
     );
     Ok(core_claims)
@@ -3436,6 +3463,18 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
 
+    #[test]
+    fn query_runtime_waker_enqueues_one_immediate_owner_turn() {
+        let scheduler = TickSchedulerImpl::default();
+        assert_eq!(scheduler.take(), None);
+        let waker = scheduler
+            .query_runtime_waker()
+            .expect("client scheduler provides cold-query wake bridge");
+        waker.wake_by_ref();
+        assert_eq!(scheduler.take(), Some(TickUrgency::Immediate));
+        assert_eq!(scheduler.take(), None, "waking does not create a hot loop");
+    }
+
     /// Product read tiers lower to the unchanged facade durability contract,
     /// keeping write durability independent of the read API migration.
     #[test]
@@ -3565,30 +3604,35 @@ mod tests {
     }
 
     #[test]
-    fn client_session_preserves_provider_subject_and_adds_logical_author() {
+    fn client_session_preserves_provider_subject_and_adds_logical_user_identity() {
         let session = Session::new(CoreAuthorSubject::LOCAL_FIRST_ISSUER, "trusted-user")
             .with_auth_mode(crate::tools::public_api::session::AuthMode::LocalFirst)
             .with_claims(json!({
                 "sub": "spoofed-subject",
                 "user_id": "spoofed-user",
+                "user": "provider-user",
                 "authMode": "external",
             }));
 
         let claims = session_claims_to_core_claims(&session).unwrap();
         assert_eq!(
-            claims.get("sub"),
+            claims.get(&crate::query::provider_claim_key("sub")),
             Some(&CoreValue::String("trusted-user".to_owned()))
         );
         assert_eq!(
-            claims.get("user_id"),
-            Some(&CoreValue::String("trusted-user".to_owned()))
+            claims.get(&crate::query::provider_claim_key("user_id")),
+            Some(&CoreValue::String("spoofed-user".to_owned()))
+        );
+        assert_eq!(
+            claims.get(&crate::query::provider_claim_key("user")),
+            Some(&CoreValue::String("provider-user".to_owned()))
         );
         assert_eq!(
             claims.get("authMode"),
             Some(&CoreValue::String("local-first".to_owned()))
         );
         assert_eq!(
-            claims.get("author"),
+            claims.get("user"),
             Some(&CoreValue::String(
                 CoreAuthorSubject::reserved(CoreAuthorSubject::LOCAL_FIRST_ISSUER, "trusted-user")
                     .unwrap()

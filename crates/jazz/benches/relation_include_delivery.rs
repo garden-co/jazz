@@ -289,7 +289,7 @@ fn open_db(scale: usize, sample: usize) -> Db<MemoryStorage> {
     block_on(Db::open(
         DbConfig::new(
             schema,
-            MemoryStorage::new(&refs),
+            MemoryStorage::new(&refs).expect("valid memory storage families"),
             DbIdentity {
                 node: NodeUuid::from_bytes([(scale as u8).wrapping_add(sample as u8); 16]),
                 author: AuthorSubject::for_test_bytes([0xa1; 16]),

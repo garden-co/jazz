@@ -28,10 +28,10 @@ type Role = "reader" | "writer" | "contributor" | "admin";
 s.definePermissions(app, ({ policy, session, anyOf, allOf }) => {
   // Re-usable helpers to improve readability.
   const isMember = (workspaceId: RowRefValue) =>
-    policy.workspaceMembers.exists.where({ workspaceId, user_id: session.user_id });
+    policy.workspaceMembers.exists.where({ workspaceId, user_id: session.user });
 
   const hasRole = (workspaceId: RowRefValue, role: Role) =>
-    policy.workspaceMembers.exists.where({ workspaceId, user_id: session.user_id, role });
+    policy.workspaceMembers.exists.where({ workspaceId, user_id: session.user, role });
 
   const isAdmin = (workspaceId: RowRefValue) => hasRole(workspaceId, "admin");
 
@@ -52,7 +52,7 @@ s.definePermissions(app, ({ policy, session, anyOf, allOf }) => {
     anyOf([
       hasRole(doc.workspaceId, "writer"),
       hasRole(doc.workspaceId, "admin"),
-      allOf([{ $createdBy: session.author }, hasRole(doc.workspaceId, "contributor")]),
+      allOf([{ $createdBy: session.user }, hasRole(doc.workspaceId, "contributor")]),
     ]),
   );
 
@@ -61,7 +61,7 @@ s.definePermissions(app, ({ policy, session, anyOf, allOf }) => {
     anyOf([
       hasRole(doc.workspaceId, "writer"),
       isAdmin(doc.workspaceId),
-      allOf([{ $createdBy: session.author }, hasRole(doc.workspaceId, "contributor")]),
+      allOf([{ $createdBy: session.user }, hasRole(doc.workspaceId, "contributor")]),
     ]),
   );
 
@@ -81,8 +81,8 @@ s.definePermissions(app, ({ policy, session, anyOf, allOf }) => {
     anyOf([
       isAdmin(member.workspaceId),
       allOf([
-        { user_id: session.user_id, role: "admin" },
-        policy.workspaces.exists.where({ id: member.workspaceId, $createdBy: session.author }),
+        { user_id: session.user, role: "admin" },
+        policy.workspaces.exists.where({ id: member.workspaceId, $createdBy: session.user }),
       ]),
     ]),
   );
@@ -91,7 +91,7 @@ s.definePermissions(app, ({ policy, session, anyOf, allOf }) => {
 
   // Admins can remove any member; members can leave on their own
   policy.workspaceMembers.allowDelete.where((member) =>
-    anyOf([isAdmin(member.workspaceId), { user_id: session.user_id }]),
+    anyOf([isAdmin(member.workspaceId), { user_id: session.user }]),
   );
 });
 // #endregion group-permissions

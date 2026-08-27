@@ -43,7 +43,7 @@ async fn rebac_update_denied_by_using_policy_inner() {
 
     // UPDATE policy: USING (owner_id = @user_id) WITH CHECK (owner_id = @user_id)
     // This means: you can only update rows you own, and the result must still be owned by you
-    let owner_is_session = pe::eq("owner_id", pe::session("user_id"));
+    let owner_is_session = pe::eq("owner_id", pe::session(vec!["claims", "sub"]));
     let docs_policies = permissions(|p| {
         p.allow_read().where_(owner_is_session.clone());
         p.allow_update()
@@ -141,7 +141,7 @@ async fn synced_soft_delete_should_use_delete_policy_inner() {
         p.allow_read().always();
         p.allow_insert().always();
         p.allow_delete().where_(pe::exists(
-            pe::table("admins").where_(pe::rel::eq_session("user_id", "user_id")),
+            pe::table("admins").where_(pe::rel::eq_session("user_id", vec!["claims", "sub"])),
         ));
     });
     let schema = SchemaBuilder::new()
@@ -151,7 +151,7 @@ async fn synced_soft_delete_should_use_delete_policy_inner() {
                 .policies(permissions(|p| {
                     p.allow_read().always();
                     p.allow_insert()
-                        .where_(pe::eq("user_id", pe::session("user_id")));
+                        .where_(pe::eq("user_id", pe::session(vec!["claims", "sub"])));
                 })),
         )
         .table(

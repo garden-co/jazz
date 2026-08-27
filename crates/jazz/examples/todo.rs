@@ -48,7 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let storage = MemoryStorage::new(&column_family_refs);
+    let storage = MemoryStorage::new(&column_family_refs).expect("valid memory storage families");
 
     let db = block_on(Db::open(DbConfig {
         schema,

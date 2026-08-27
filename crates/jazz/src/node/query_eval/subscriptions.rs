@@ -194,6 +194,10 @@ where
         if let Some(binding_view_key) = binding_view_key
             && !self.registered_binding_resolves_to_binding_view_key(binding_view_key)
         {
+            // Registered bindings are the receipt ownership record. Once the
+            // last downstream usage site releases this exact binding view,
+            // revoke its authority-selected membership rather than retaining
+            // a browser cache after scope teardown.
             self.clear_settled_result_view(binding_view_key);
             self.query.settled_program_facts.remove(&binding_view_key);
             self.query
@@ -217,6 +221,16 @@ where
             .values()
             .map(BTreeMap::len)
             .sum()
+    }
+
+    #[cfg(feature = "testing")]
+    /// Internal receipt-lifetime coverage needs to observe canonical caches:
+    /// public reads intentionally treat a Local overlay as best-effort.
+    pub fn settled_authoritative_receipt_counts_for_test(&self) -> (usize, usize) {
+        (
+            self.query.settled_result_sets.len(),
+            self.query.settled_program_facts.len(),
+        )
     }
 
     fn registered_binding_resolves_to_binding_view_key(
@@ -344,12 +358,15 @@ where
     pub(crate) fn settled_result_transitions_for_subscription(
         &self,
         subscription: SubscriptionKey,
+        source_binding_view: Option<BindingViewKey>,
         previous_member_result_set: &BTreeSet<ResultMemberEntry>,
         previous_program_fact_set: &BTreeSet<ProgramFactEntry>,
         result_table_filter: Option<&str>,
         output_tables: &BTreeMap<String, TableSchema>,
     ) -> Result<Option<super::maintained_subscription_view::ResultTransitions>, Error> {
-        let binding_view_key = self.binding_view_key_for_subscription(subscription)?;
+        let binding_view_key = source_binding_view
+            .map(Ok)
+            .unwrap_or_else(|| self.binding_view_key_for_subscription(subscription))?;
         // Settled binding views are shared by canonical query binding, while a
         // table read policy is identity-scoped. Never relay a synthetic
         // aggregate from that shared cache across an identity boundary; the

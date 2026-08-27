@@ -46,10 +46,7 @@ fn row(seed: u8) -> RowUuid {
 fn schema() -> JazzSchema {
     let document_policy = exists(
         MEMBERSHIPS,
-        vec![
-            outer_eq("team", "team"),
-            session_eq("user", &["claims", "sub"]),
-        ],
+        vec![outer_eq("team", "team"), session_eq("user", &["user"])],
     );
     compile_schema(
         &SchemaBuilder::new()
@@ -61,11 +58,8 @@ fn schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new(MEMBERSHIPS)
                     .fk_column("team", TEAMS)
-                    .column("user", PublicColumnType::Uuid)
-                    .policies(read_and_allow_all_writes(session_eq(
-                        "user",
-                        &["claims", "sub"],
-                    ))),
+                    .column("user", PublicColumnType::Text)
+                    .policies(read_and_allow_all_writes(session_eq("user", &["user"]))),
             )
             .table(
                 TableSchemaBuilder::new(DOCUMENTS)
@@ -94,12 +88,6 @@ fn open_db() -> Db<TestStorage> {
         .with_id_source(SeededRowIdSource::new(0x8100)),
     ))
     .expect("open authorization scope re-entry db");
-    for identity in [writer(), reader(), maintainer()] {
-        db.set_identity_claims(
-            identity,
-            BTreeMap::from([("sub".to_owned(), Value::Uuid(identity.test_uuid()))]),
-        );
-    }
     db
 }
 
@@ -133,7 +121,10 @@ fn insert_membership(db: &Db<TestStorage>, id: RowUuid, team: RowUuid, user: Aut
         MEMBERSHIPS,
         BTreeMap::from([
             ("team".to_owned(), Value::Uuid(team.0)),
-            ("user".to_owned(), Value::Uuid(user.test_uuid())),
+            (
+                "user".to_owned(),
+                Value::String(user.canonical().to_owned()),
+            ),
         ]),
         InsertOptions {
             row_id: Some(id),

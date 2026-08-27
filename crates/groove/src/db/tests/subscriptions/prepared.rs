@@ -4,7 +4,7 @@ use super::*;
 
 #[futures_test::test]
 async fn prepared_subscription_reports_incremental_eq_field_filter_deltas() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.clone())]);
     let routing_field = "__routing";
@@ -65,7 +65,7 @@ async fn prepared_subscription_reports_incremental_eq_field_filter_deltas() {
 
 #[futures_test::test]
 async fn prepared_binding_source_reuse_validates_descriptor() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let string_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.clone())]);
     let string_graph = GraphBuilder::binding_source("shared_params", string_descriptor)
@@ -101,7 +101,7 @@ async fn prepared_binding_source_reuse_validates_descriptor() {
 
 #[futures_test::test]
 async fn graph_prepared_subscription_can_hide_internal_routing_fields() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.clone())]);
     let binding = GraphBuilder::binding_source("hidden_title_eq_param", binding_descriptor);
@@ -178,7 +178,7 @@ async fn graph_prepared_subscription_can_hide_internal_routing_fields() {
 
 #[futures_test::test]
 async fn prepared_subscription_uses_route_terminal_with_clean_public_projection() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.clone())]);
     let output_graph = GraphBuilder::table("albums")
@@ -368,7 +368,7 @@ async fn prepared_routed_collect_by_filters_flat_input_per_binding() {
         }
     }
 
-    let storage = MemoryStorage::new(&["routed_tree"]);
+    let storage = MemoryStorage::new(&["routed_tree"]).expect("valid memory storage families");
     let mut database = Database::new(routed_collect_tree_schema(), storage)
         .await
         .unwrap();
@@ -495,7 +495,7 @@ async fn prepared_routed_collect_by_filters_flat_input_per_binding() {
 
 #[futures_test::test]
 async fn prepared_subscription_routes_nullable_uuid_and_string_binding_keys() {
-    let storage = MemoryStorage::new(&["docs"]);
+    let storage = MemoryStorage::new(&["docs"]).expect("valid memory storage families");
     let mut database = Database::new(nullable_routed_docs_schema(), storage)
         .await
         .unwrap();
@@ -595,7 +595,7 @@ async fn prepared_subscription_routes_nullable_uuid_and_string_binding_keys() {
 
 #[futures_test::test]
 async fn prepared_nullable_binding_arg_max_emits_initial_snapshot() {
-    let storage = MemoryStorage::new(&["docs"]);
+    let storage = MemoryStorage::new(&["docs"]).expect("valid memory storage families");
     let mut database = Database::new(nullable_routed_docs_schema(), storage)
         .await
         .unwrap();
@@ -669,7 +669,7 @@ async fn prepared_nullable_binding_arg_max_emits_initial_snapshot() {
 
 #[futures_test::test]
 async fn prepared_subscription_routes_null_nullable_binding_keys() {
-    let storage = MemoryStorage::new(&["docs"]);
+    let storage = MemoryStorage::new(&["docs"]).expect("valid memory storage families");
     let mut database = Database::new(nullable_routed_docs_schema(), storage)
         .await
         .unwrap();
@@ -768,7 +768,7 @@ async fn prepared_subscription_routes_null_nullable_binding_keys() {
 
 #[futures_test::test]
 async fn prepared_subscription_rejects_routing_graph_missing_clean_output_fields() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.clone())]);
     let output_graph = GraphBuilder::table("albums")
@@ -798,7 +798,7 @@ async fn prepared_subscription_rejects_routing_graph_missing_clean_output_fields
 
 #[futures_test::test]
 async fn prepared_subscription_with_separate_routing_hydrates_existing_rows_on_first_bind() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let mut batch = database.open_batch();
     batch.insert(
@@ -857,7 +857,7 @@ async fn prepared_subscription_with_separate_routing_hydrates_existing_rows_on_f
 #[futures_test::test]
 async fn prepared_recursive_subscription_with_separate_routing_hydrates_existing_rows_on_first_bind()
  {
-    let storage = MemoryStorage::new(&["edges"]);
+    let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
     let mut database = Database::new(edges_schema(), storage).await.unwrap();
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 1, 1, 2);
@@ -922,7 +922,7 @@ async fn prepared_recursive_subscription_with_separate_routing_hydrates_existing
 
 #[futures_test::test]
 async fn prepared_recursive_subscription_joins_new_closure_to_preexisting_downstream_rows() {
-    let storage = MemoryStorage::new(&["edges", "docs"]);
+    let storage = MemoryStorage::new(&["edges", "docs"]).expect("valid memory storage families");
     let mut database = Database::new(edges_docs_schema(), storage).await.unwrap();
     let mut batch = database.open_batch();
     batch.insert("docs", vec![Value::U64(11), Value::U64(3)]);
@@ -959,7 +959,7 @@ async fn prepared_recursive_subscription_joins_new_closure_to_preexisting_downst
 
 #[futures_test::test]
 async fn routed_prepared_recursive_subscription_joins_new_closure_to_preexisting_downstream_rows() {
-    let storage = MemoryStorage::new(&["edges", "docs"]);
+    let storage = MemoryStorage::new(&["edges", "docs"]).expect("valid memory storage families");
     let mut database = Database::new(edges_docs_schema(), storage).await.unwrap();
     let mut batch = database.open_batch();
     batch.insert("docs", vec![Value::U64(11), Value::U64(3)]);
@@ -1073,7 +1073,7 @@ async fn routed_recursive_sibling_terminals_each_replay_positive_table_deltas() 
         ])
     }
 
-    let storage = MemoryStorage::new(&["edges", "docs"]);
+    let storage = MemoryStorage::new(&["edges", "docs"]).expect("valid memory storage families");
     let mut database = Database::new(edges_docs_schema(), storage).await.unwrap();
     let mut batch = database.open_batch();
     batch.insert("docs", vec![Value::U64(11), Value::U64(3)]);
@@ -1126,7 +1126,7 @@ async fn routed_recursive_sibling_terminals_each_replay_positive_table_deltas() 
 
 #[futures_test::test]
 async fn prepared_recursive_subscription_joins_two_simultaneous_closure_deltas() {
-    let storage = MemoryStorage::new(&["edges", "docs"]);
+    let storage = MemoryStorage::new(&["edges", "docs"]).expect("valid memory storage families");
     let mut database = Database::new(edges_docs_schema(), storage).await.unwrap();
     let mut batch = database.open_batch();
     batch.insert("docs", vec![Value::U64(11), Value::U64(3)]);
@@ -1196,7 +1196,8 @@ async fn prepared_recursive_subscription_joins_two_simultaneous_closure_deltas()
 #[futures_test::test]
 async fn prepared_recursive_grant_shape_joins_resource_and_access_added_in_one_tick() {
     async fn run(split_ticks: bool) -> Vec<(Vec<Value>, i64)> {
-        let storage = MemoryStorage::new(&["group_edges", "access_edges", "resources"]);
+        let storage = MemoryStorage::new(&["group_edges", "access_edges", "resources"])
+            .expect("valid memory storage families");
         let mut database = Database::new(grant_shape_schema(), storage).await.unwrap();
         let shape = prepare_grant_shape(&mut database).await;
         let subscription = database
@@ -1230,7 +1231,8 @@ async fn prepared_recursive_grant_shape_joins_resource_and_access_added_in_one_t
 #[futures_test::test]
 async fn prepared_recursive_grant_shape_joins_membership_step_and_resource_in_one_tick() {
     async fn run(split_ticks: bool) -> Vec<(Vec<Value>, i64)> {
-        let storage = MemoryStorage::new(&["group_edges", "access_edges", "resources"]);
+        let storage = MemoryStorage::new(&["group_edges", "access_edges", "resources"])
+            .expect("valid memory storage families");
         let mut database = Database::new(grant_shape_schema(), storage).await.unwrap();
         let shape = prepare_grant_shape(&mut database).await;
         let subscription = database
@@ -1265,7 +1267,7 @@ async fn prepared_recursive_grant_shape_joins_membership_step_and_resource_in_on
 
 #[futures_test::test]
 async fn prepared_subscription_with_routing_can_route_output_that_already_depends_on_binding() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let mut batch = database.open_batch();
     batch.insert(
@@ -1327,7 +1329,7 @@ async fn prepared_subscription_with_routing_can_route_output_that_already_depend
 
 #[futures_test::test]
 async fn prepared_subscription_reports_incremental_contains_field_filter_deltas() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let binding_descriptor = RecordDescriptor::new([("needle", ColumnType::String.clone())]);
     let routing_field = "__routing";

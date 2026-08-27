@@ -17,7 +17,7 @@ use jazz::db::{
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::query::Query;
+use jazz::query::{OrderDirection, Query};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
@@ -47,7 +47,7 @@ fn open_db(seed: u64) -> BenchDb {
     block_on(Db::open(
         DbConfig::new(
             schema,
-            MemoryStorage::new(&refs),
+            MemoryStorage::new(&refs).expect("valid memory storage families"),
             DbIdentity {
                 node: NodeUuid::from_bytes([seed as u8; 16]),
                 author: AuthorSubject::for_test_uuid(AUTHOR_UUID),
@@ -92,9 +92,30 @@ fn content_update(index: usize) -> BTreeMap<String, Value> {
     ])
 }
 
+fn payload_only_update(index: usize) -> BTreeMap<String, Value> {
+    BTreeMap::from([(
+        "content".to_owned(),
+        Value::String(format!("Updated payload {index}")),
+    )])
+}
+
 fn all_documents_query(db: &BenchDb) -> jazz::db::PreparedQuery {
     db.prepare_query(&Query::from("documents"))
         .expect("prepare documents query")
+}
+
+fn documents_by_created_at_query(db: &BenchDb) -> jazz::db::PreparedQuery {
+    db.prepare_query(&Query::from("documents").order_by("created_at", OrderDirection::Asc))
+        .expect("prepare ordered documents query")
+}
+
+fn first_documents_by_created_at_query(db: &BenchDb) -> jazz::db::PreparedQuery {
+    db.prepare_query(
+        &Query::from("documents")
+            .order_by("created_at", OrderDirection::Asc)
+            .limit(50),
+    )
+    .expect("prepare limited ordered documents query")
 }
 
 fn update_write_path_with_and_without_observer(c: &mut Criterion) {
@@ -173,9 +194,102 @@ fn update_write_path_with_and_without_observer(c: &mut Criterion) {
     group.finish();
 }
 
+fn update_payload_with_ordered_observer(c: &mut Criterion) {
+    let mut group = c.benchmark_group("observer_write_path/update_ordered_payload");
+
+    for scale in [100usize, 1_000, 10_000] {
+        group.throughput(Throughput::Elements(1));
+        group.bench_with_input(
+            BenchmarkId::new("stable_sort_key", scale),
+            &scale,
+            |b, &scale| {
+                let db = open_db(3);
+                let rows = seed_documents(&db, scale);
+                let query = documents_by_created_at_query(&db);
+                let mut subscription =
+                    block_on(db.subscribe(&query, ReadOpts::default())).expect("subscribe");
+                match block_on(subscription.next_event()) {
+                    Some(SubscriptionEvent::Delta {
+                        reset: true, added, ..
+                    }) => assert_eq!(added.len(), scale),
+                    other => panic!("expected ordered reset event, got {other:?}"),
+                }
+
+                let mut row_index = 0usize;
+                let mut update_index = 0usize;
+                b.iter(|| {
+                    update_index += 1;
+                    let row = rows[row_index % rows.len()];
+                    row_index += 1;
+                    db.update(
+                        "documents",
+                        row,
+                        payload_only_update(update_index),
+                        Default::default(),
+                    )
+                    .expect("ordered payload update should succeed");
+                    match block_on(subscription.next_event()) {
+                        Some(SubscriptionEvent::Delta { updated, .. }) => updated.len(),
+                        other => panic!("expected ordered subscription delta, got {other:?}"),
+                    }
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn update_payload_inside_finite_ordered_window(c: &mut Criterion) {
+    let mut group = c.benchmark_group("observer_write_path/update_finite_ordered_payload");
+
+    for scale in [100usize, 1_000, 10_000] {
+        group.throughput(Throughput::Elements(1));
+        group.bench_with_input(
+            BenchmarkId::new("limit_50_stable_sort_key", scale),
+            &scale,
+            |b, &scale| {
+                let db = open_db(4);
+                let rows = seed_documents(&db, scale);
+                let query = first_documents_by_created_at_query(&db);
+                let mut subscription =
+                    block_on(db.subscribe(&query, ReadOpts::default())).expect("subscribe");
+                match block_on(subscription.next_event()) {
+                    Some(SubscriptionEvent::Delta {
+                        reset: true, added, ..
+                    }) => assert_eq!(added.len(), 50),
+                    other => panic!("expected limited ordered reset event, got {other:?}"),
+                }
+
+                let mut update_index = 0usize;
+                b.iter(|| {
+                    update_index += 1;
+                    db.update(
+                        "documents",
+                        rows[0],
+                        payload_only_update(update_index),
+                        Default::default(),
+                    )
+                    .expect("finite ordered payload update should succeed");
+                    match block_on(subscription.next_event()) {
+                        Some(SubscriptionEvent::Delta { updated, .. }) => updated.len(),
+                        other => {
+                            panic!("expected limited ordered subscription delta, got {other:?}")
+                        }
+                    }
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 fn guarded_benches(c: &mut Criterion) {
     jazz_benchmark_guard::refuse_contaminated_measurement();
     update_write_path_with_and_without_observer(c);
+    update_payload_with_ordered_observer(c);
+    update_payload_inside_finite_ordered_window(c);
 }
 
 criterion_group! {

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../../src/";
 import { createDb, Db, type QueryBuilder } from "../../src/runtime/db.js";
+import { ReadTier } from "../../src/runtime/client.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import {
@@ -413,6 +414,81 @@ describe("Db disconnect/reconnect", () => {
   });
 
   describe("worker mode", () => {
+    it("propagates explicit offline state across tabs in one worker namespace", async () => {
+      const label = uniqueDbName("worker-namespace-disconnect");
+      const server = await publishSyncServerSchemaAndPermissions(label);
+      const secret = generateAuthSecret();
+      const dbName = uniqueDbName(label);
+      const owner = ctx.track(
+        await createDb({
+          appId: server.appId,
+          driver: { type: "persistent", dbName },
+          serverUrl: server.serverUrl,
+          secret,
+        }),
+      );
+      await owner.all(app.todos, { tier: "edge" });
+      await owner.disconnect();
+
+      const title = "namespace-wide offline write";
+      const write = owner.insert(todos, { title, done: true });
+      await withWorkerOperationTimeout(
+        write.wait({ tier: "local" }),
+        "worker namespace: owner local write did not resolve while disconnected",
+      );
+
+      // Attach only after the namespace is already offline. This is the
+      // important race: the late tab must await its init-state handshake
+      // before classifying RemoteIfPossible as Local rather than Edge.
+      const editor = ctx.track(
+        await createDb({
+          appId: server.appId,
+          driver: { type: "persistent", dbName },
+          serverUrl: server.serverUrl,
+          secret,
+        }),
+      );
+
+      // The editor did not issue disconnect(), but it shares the durable
+      // worker and must therefore make the same explicit-offline read choice.
+      // An Edge read would exclude this not-yet-settled row.
+      const localFallback = await withWorkerOperationTimeout(
+        editor.all(todoByTitle(title), { tier: ReadTier.RemoteIfPossible }),
+        "worker namespace: editor did not use local fallback after owner disconnect",
+      );
+      expect(localFallback).toHaveLength(1);
+      expect(localFallback[0]?.title).toBe(title);
+
+      const snapshots: Todo[][] = [];
+      const unsubscribe = ctx.trackSubscription(
+        editor.subscribe(todoByTitle(title), (rows) => snapshots.push(rows), {
+          tier: ReadTier.RemoteIfPossible,
+        }),
+      );
+      await waitForCondition(
+        () => Promise.resolve(snapshots.some((rows) => rows.some((row) => row.title === title))),
+        WORKER_OPERATION_TIMEOUT_MS,
+        "worker namespace: late editor subscription did not use local fallback",
+      );
+
+      const edgeWait = write.wait({ tier: "edge" });
+      await expectStillPending(
+        edgeWait,
+        PENDING_ASSERTION_MS,
+        "worker namespace: editor edge wait settled while the shared worker was offline",
+      );
+
+      // Any attached tab can reconnect the namespace. The queued editor write
+      // must retain its ordinary fate route and settle after that reconnect.
+      await editor.reconnect();
+      await withTimeout(
+        edgeWait,
+        SYNC_OPERATION_TIMEOUT_MS,
+        "worker namespace: editor write did not settle after reconnect",
+      );
+      unsubscribe();
+    }, 60_000);
+
     it("syncs writes made while disconnected after reconnect", async () => {
       const { db, peer } = await createDbPair(ctx, createWorkerDb);
 
