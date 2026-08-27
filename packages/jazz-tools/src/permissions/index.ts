@@ -2434,6 +2434,7 @@ function compileRules(
   relationsByTable: Map<string, Relation[]>,
 ): CompiledPermissions {
   const compiled: CompiledPermissions = {};
+  const updateRuleAsymmetry = new Map<string, boolean>();
   for (const ruleLike of rules) {
     const rule = isUpdateRuleBuilder(ruleLike) ? ruleLike.toRule() : ruleLike;
     if (!compiled[rule.table]) {
@@ -2456,8 +2457,8 @@ function compileRules(
           ),
         });
         break;
-      case "update":
-        tablePolicies.update = mergeOperationPolicy(tablePolicies.update, {
+      case "update": {
+        const incoming = {
           using: compileCondition(rule.using, rule.table, fkReferencesByTable, relationsByTable),
           with_check: compileCondition(
             rule.withCheck,
@@ -2465,8 +2466,25 @@ function compileRules(
             fkReferencesByTable,
             relationsByTable,
           ),
-        });
+        };
+        const previousIsAsymmetric = updateRuleAsymmetry.get(rule.table);
+        const isAsymmetric =
+          JSON.stringify(incoming.using) !== JSON.stringify(incoming.with_check);
+        if (
+          previousIsAsymmetric !== undefined &&
+          (previousIsAsymmetric || isAsymmetric)
+        ) {
+          throw new Error(
+            `Multiple asymmetric update rules for table "${rule.table}" are unsupported because their USING and WITH CHECK clauses would be ORed independently. Combine the alternatives into one update rule, or use symmetric update rules.`,
+          );
+        }
+        updateRuleAsymmetry.set(
+          rule.table,
+          previousIsAsymmetric === true || isAsymmetric,
+        );
+        tablePolicies.update = mergeOperationPolicy(tablePolicies.update, incoming);
         break;
+      }
       case "delete":
         tablePolicies.delete = mergeOperationPolicy(tablePolicies.delete, {
           using: compileCondition(rule.using, rule.table, fkReferencesByTable, relationsByTable),

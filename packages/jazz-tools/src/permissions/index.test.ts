@@ -471,6 +471,32 @@ describe("permissions DSL", () => {
     );
   });
 
+  it("still OR-merges multiple symmetric update rules", () => {
+    const compiled = definePermissions(app, ({ policy }) => [
+      policy.todos.allowUpdate.where({ archived: false }),
+      policy.todos.allowUpdate.where({ done: true }),
+    ]);
+
+    expect(compiled.todos!.update?.using).toEqual({
+      type: "Or",
+      exprs: [
+        {
+          type: "Cmp",
+          column: "archived",
+          op: "Eq",
+          value: { type: "Literal", value: false },
+        },
+        {
+          type: "Cmp",
+          column: "done",
+          op: "Eq",
+          value: { type: "Literal", value: true },
+        },
+      ],
+    });
+    expect(compiled.todos!.update?.with_check).toEqual(compiled.todos!.update?.using);
+  });
+
   it("compiles provenance magic column policies", () => {
     const compiled = definePermissions(app, ({ policy, session }) => [
       policy.todos.allowRead.where({ $createdBy: session.user }),
