@@ -312,6 +312,33 @@ impl RuntimeSchema {
         table: &TableSchema,
         key: &BranchKey,
     ) -> Result<BTreeMap<String, Value>, String> {
+        Self::validate_branch_key_for_table(table, key)
+    }
+
+    /// Decode one persisted branch coordinate using the table that owns it.
+    ///
+    /// The binary envelope is only self-describing enough to reject malformed
+    /// bytes. The table's branch declaration is the authority for component
+    /// names, scalar types, and stable-enum domains, so recovery must perform
+    /// this second validation before a physical coordinate can influence a
+    /// query or cache.
+    pub(crate) fn decode_persisted_branch_key(
+        table: &TableSchema,
+        bytes: &[u8],
+    ) -> Result<BranchKey, String> {
+        let key = BranchKey::from_canonical_bytes(bytes)
+            .map_err(|_| format!("invalid persisted branch key for {}", table.name))?;
+        Self::validate_branch_key_for_table(table, &key)?;
+        Ok(key)
+    }
+
+    /// Validate an exact branch coordinate against its owning table
+    /// declaration. Shared by admission and persisted-state recovery so their
+    /// type/domain rules cannot drift.
+    pub(crate) fn validate_branch_key_for_table(
+        table: &TableSchema,
+        key: &BranchKey,
+    ) -> Result<BTreeMap<String, Value>, String> {
         let mut bindings = table.branch_by.iter().collect::<Vec<_>>();
         bindings.sort();
         if key.values.len() != bindings.len() {
@@ -1571,12 +1598,16 @@ fn contribution_component_column() -> GrooveColumnType {
             [
                 EnumCase::new(
                     "column",
-                    RecordDescriptor::new([("name", ValueType::String)]),
+                    // The public/wire contribution coordinate names a logical
+                    // column.  Its durable payload is instead this node's
+                    // stable physical-column identity; names are resolved at
+                    // the storage boundary through the retained catalogue.
+                    RecordDescriptor::new([("physical_column_id", ValueType::U64)]),
                 ),
                 EnumCase::new(
                     "operation",
                     RecordDescriptor::new([
-                        ("column", ValueType::String),
+                        ("physical_column_id", ValueType::U64),
                         ("identity", ValueType::Bytes),
                     ]),
                 ),
@@ -1593,7 +1624,7 @@ fn contribution_component_column() -> GrooveColumnType {
 fn contribution_coordinate_column() -> GrooveColumnType {
     GrooveColumnType::Record(Box::new(RecordDescriptor::new([
         ("branch_key", ValueType::Bytes),
-        ("table", ValueType::String),
+        ("physical_table_id", ValueType::U64),
         ("row_uuid", ValueType::Uuid),
         (
             "layer",
@@ -2263,7 +2294,7 @@ mod tests {
                 .iter()
                 .map(|field| field.name.as_deref().unwrap())
                 .collect::<Vec<_>>(),
-            ["column", "identity"]
+            ["physical_column_id", "identity"]
         );
     }
 
@@ -2332,6 +2363,55 @@ mod tests {
         assert!(
             serde_json::from_value::<ColumnSchema>(spoofed_kind).is_err(),
             "semantic kind must be structurally compatible with its public column type"
+        );
+    }
+
+    #[test]
+    fn persisted_branch_keys_require_the_owning_table_type_and_enum_domain() {
+        let uuid_schema = RuntimeSchema::new([TableSchema::new(
+            "todos",
+            [ColumnSchema::new("branch", ColumnType::Uuid)],
+        )
+        .with_branch_column("branch")]);
+        let uuid_table = &uuid_schema.tables[0];
+        let (valid, _) = uuid_schema
+            .project_branch_selector(
+                uuid_table,
+                &BranchSelector::new([("branch", Value::Uuid(uuid::Uuid::from_bytes([0x42; 16])))]),
+            )
+            .unwrap();
+        assert_eq!(
+            RuntimeSchema::decode_persisted_branch_key(uuid_table, &valid.canonical_bytes())
+                .unwrap(),
+            valid
+        );
+
+        let wrong_scalar = BranchKey {
+            values: vec![(
+                "branch".to_owned(),
+                BranchColumnValue::from(Value::String("not-a-uuid".to_owned())),
+            )],
+        };
+        assert!(
+            RuntimeSchema::decode_persisted_branch_key(uuid_table, &wrong_scalar.canonical_bytes())
+                .is_err()
+        );
+
+        let phase = ScalarEnumSchema::new("phase", ["draft", "ready"]).unwrap();
+        let enum_schema = RuntimeSchema::new([TableSchema::new(
+            "todos",
+            [ColumnSchema::new("phase", ColumnType::EnumTag(phase))],
+        )
+        .with_branch_column("phase")]);
+        let invalid_enum = BranchKey {
+            values: vec![("phase".to_owned(), BranchColumnValue(vec![1, 8, u8::MAX]))],
+        };
+        assert!(
+            RuntimeSchema::decode_persisted_branch_key(
+                &enum_schema.tables[0],
+                &invalid_enum.canonical_bytes()
+            )
+            .is_err()
         );
     }
 }

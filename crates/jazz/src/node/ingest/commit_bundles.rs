@@ -1123,6 +1123,9 @@ where
             let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
             let global_time = first.global_time.expect("checked above");
             applied_global_times.push(global_time);
+            let contribution_merge = self.contribution_merge_storage_value(
+                tx.contribution_merge.as_ref(),
+            )?;
             batch.insert(
                 "jazz_transactions",
                 // A reset may bulk-load only the view-authorized rows of an
@@ -1136,6 +1139,7 @@ where
                     first.global_time,
                     first.durability,
                     view_scoped,
+                    contribution_merge,
                 ),
             );
 

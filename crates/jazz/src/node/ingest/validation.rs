@@ -157,6 +157,10 @@ where
         view_scoped_cardinality: bool,
         staged_content_versions: Option<&mut Vec<VersionRow>>,
     ) -> Result<Vec<VersionRow>, Error> {
+        // Provenance operation identities participate in merge deduplication.
+        // Validate them before accepting staged values or writing any derived
+        // transaction/current state, on every local, remote, and view ingress.
+        self.validate_contribution_merge_operation_identities(&tx)?;
         let large_value_descriptors = version_indirect_descriptors(&versions);
         for staged_id in self
             .current_staged_ids_for_descriptors(&large_value_descriptors, false)
@@ -177,6 +181,9 @@ where
         } else {
             &tx
         };
+        let contribution_merge = self.contribution_merge_storage_value(
+            storage_tx.contribution_merge.as_ref(),
+        )?;
         let tx_values = transaction_values_with_cardinality_scope(
             tx_node_alias,
             storage_tx,
@@ -184,6 +191,7 @@ where
             global_time,
             durability,
             view_scoped_cardinality && !preserve_authoritative_cardinality,
+            contribution_merge,
         );
         if tx_already_known {
             batch.update("jazz_transactions", tx_values);
@@ -638,6 +646,7 @@ where
             return self.apply_fate_update(tx.tx_id, fate, None, None).await;
         }
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
+        let contribution_merge = self.contribution_merge_storage_value(tx.contribution_merge.as_ref())?;
         let mut batch = self.database.open_batch();
         batch.insert(
             "jazz_transactions",
@@ -647,6 +656,7 @@ where
                 fate.clone(),
                 None,
                 DurabilityTier::Local,
+                contribution_merge,
             ),
         );
         let applied = self.database.apply_batch(batch).await?;
