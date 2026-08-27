@@ -57,6 +57,13 @@ Invariant digest:
   does not weaken the exact node-and-author definition above outside the paired
   browser client/worker boundary.
 
+  A terminal server or protocol transport failure is not an authority fate. A
+  durable browser worker MUST relay it only to currently initialized foreground
+  peers so their active Edge/Global waits and remote subscriptions reject with
+  that transport error; Local durability remains valid. The worker MUST NOT
+  fabricate `Rejected`, roll back local data, invoke `onMutationError`, or
+  replay that transient foreground error to a peer attached later.
+
 ## Details
 
 ### 13.1 Two audiences

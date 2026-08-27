@@ -29,6 +29,14 @@ async function committedBatchId(receipt: WriteReceipt): Promise<BatchId> {
   return await receipt.batchId;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 describe("NativeRuntimeAdapter server transport", () => {
   afterEach(() => {
     globalThis.WebSocket = previousWebSocket;
@@ -264,6 +272,158 @@ describe("NativeRuntimeAdapter server transport", () => {
     await wait;
 
     expect(transportTicks).toBeGreaterThanOrEqual(2);
+  });
+
+  it("rejects active remote waits and subscriptions for a relayed terminal error without inventing a rejection", async () => {
+    const remoteSettlement = new Promise<void>(() => {});
+    const subscription = {
+      closed: false,
+      readAll: () => [],
+      close() {
+        this.closed = true;
+        return true;
+      },
+    };
+    let nativeMutationError: ((event: unknown) => void) | undefined;
+    const write = {
+      batchId: "00000000000070008000000000000008",
+      payload: new Uint8Array(),
+      rowId: new Uint8Array(16),
+      wait: (tier: string) => (tier === "local" ? Promise.resolve() : remoteSettlement),
+      writeState: () => ({}),
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            insertEncoded: () => write,
+            prepareQuery: () => ({}),
+            subscribe: () => subscription,
+            onMutationError: (callback: (event: unknown) => void) => {
+              nativeMutationError = callback;
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const mutationErrors = vi.fn();
+    runtime.onMutationError(mutationErrors);
+    expect(nativeMutationError).toBeTypeOf("function");
+    const authoritativeRejection = {
+      code: "permission_denied",
+      reason: "authority rejected the mutation",
+      transaction: {
+        transactionId: "00000000000070008000000000000008",
+        kind: "mergeable",
+        sealed: true,
+        latestSettlement: {
+          kind: "rejected",
+          transactionId: "00000000000070008000000000000008",
+          code: "permission_denied",
+          reason: "authority rejected the mutation",
+        },
+      },
+    };
+    nativeMutationError?.(authoritativeRejection);
+    expect(mutationErrors).toHaveBeenCalledWith(authoritativeRejection);
+    mutationErrors.mockClear();
+
+    const inserted = runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "still locally durable" } },
+      null,
+      "00000000-0000-0000-0000-000000000008",
+    );
+    const batchId = await committedBatchId(inserted);
+    await expect(runtime.waitForTransaction(batchId, "local")).resolves.toBeUndefined();
+
+    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "global");
+    const updates = vi.fn();
+    runtime.executeSubscription(handle, updates);
+    const edgeWait = runtime.waitForTransaction(batchId, "edge");
+    const globalWait = runtime.waitForTransaction(batchId, "global");
+    await Promise.resolve();
+
+    runtime.reportRemoteServerTransportError(new Error("Protocol: terminal upstream failure"));
+
+    await expect(edgeWait).rejects.toThrow("Protocol: terminal upstream failure");
+    await expect(globalWait).rejects.toThrow("Protocol: terminal upstream failure");
+    expect(subscription.closed).toBe(true);
+    expect(updates).toHaveBeenCalledWith(expect.any(Error));
+    const firstUpdate = updates.mock.calls[0];
+    if (!firstUpdate) throw new Error("terminal transport error did not wake subscription");
+    expect((firstUpdate[0] as Error).message).toBe("Protocol: terminal upstream failure");
+    // Unlike the authoritative rejection above, a transport failure has no
+    // fate and must not use the mutation-rejection callback path.
+    expect(mutationErrors).not.toHaveBeenCalled();
+  });
+
+  it("delivers a terminal error to armed Edge and Global waits before reconnect clears transport state", async () => {
+    const remoteSettlement = deferred<void>();
+    const remoteWaitsArmed = deferred<void>();
+    let remoteWaits = 0;
+    const write = {
+      batchId: "00000000000070008000000000000009",
+      payload: new Uint8Array(),
+      rowId: new Uint8Array(16),
+      wait: (tier: string) => {
+        if (tier === "local") return Promise.resolve();
+        remoteWaits += 1;
+        if (remoteWaits === 2) remoteWaitsArmed.resolve();
+        return remoteSettlement.promise;
+      },
+      writeState: () => ({}),
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            insertEncoded: () => write,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const inserted = runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "terminal beats reconnect clear" } },
+      null,
+      "00000000-0000-0000-0000-000000000009",
+    );
+    const batchId = await committedBatchId(inserted);
+    const edgeWait = runtime.waitForTransaction(batchId, "edge");
+    const globalWait = runtime.waitForTransaction(batchId, "global");
+
+    // This event barrier proves both remote waits reached the terminal waiter
+    // registration point before the failure and replacement race begins.
+    await remoteWaitsArmed.promise;
+    expect(
+      (runtime as unknown as { serverTransportErrorWaiters: unknown[] })
+        .serverTransportErrorWaiters,
+    ).toHaveLength(2);
+
+    runtime.reportRemoteServerTransportError(new Error("Protocol: terminal before reconnect"));
+    const replacement = runtime.disconnect({ rejectWaiters: false });
+    remoteSettlement.resolve();
+    await replacement;
+
+    await expect(edgeWait).rejects.toThrow("Protocol: terminal before reconnect");
+    await expect(globalWait).rejects.toThrow("Protocol: terminal before reconnect");
   });
 
   it("retries a pending edge wait when a websocket frame arrives without a native callback", async () => {
