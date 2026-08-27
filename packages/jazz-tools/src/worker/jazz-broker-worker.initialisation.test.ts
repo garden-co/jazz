@@ -178,6 +178,10 @@ class TestPort {
     this.eventWaiters.push({ predicate, resolve: waiter.resolve });
     return waiter.promise;
   }
+
+  hasEvent(predicate: (event: BrowserFollowerPortEvent) => boolean): boolean {
+    return this.events.some(predicate);
+  }
 }
 
 function deferred<T>() {
@@ -508,5 +512,35 @@ describe("broker worker context initialization", () => {
     late.port.emitMessage({ type: "init", id: 1, sessionClaims: {} });
     expect(await offline).toMatchObject({ explicitlyDisconnected: true });
     await initialized;
+  });
+
+  it("cancels a closed peer's offline server wait", async () => {
+    const initOptions = { ...options("closed-offline-waiter"), serverUrl: "ws://server.test" };
+    const owner = await connect(initOptions, "owner-tab");
+    const editor = await connect(initOptions, "editor-tab");
+    await initializeFollower(owner.port, 1);
+    await initializeFollower(editor.port, 1);
+
+    owner.port.emitMessage({ type: "disconnect", id: 2 });
+    await owner.port.waitForEvent((event) => event.type === "result" && event.id === 2);
+
+    // The waiter parks on namespace state while explicitly offline. Closing its
+    // port must cancel that wait, rather than retaining it until a later peer
+    // reconnects and then posting a stale result to the dead port.
+    editor.port.emitMessage({ type: "wait-server", id: 2 });
+    await Promise.resolve();
+    const closed = editor.port.waitForEvent((event) => event.type === "result" && event.id === 3);
+    editor.port.emitMessage({ type: "close", id: 3 });
+    await closed;
+
+    owner.port.emitMessage({
+      type: "reconnect",
+      id: 3,
+      authJson: "{}",
+      sessionClaims: {},
+    });
+    await owner.port.waitForEvent((event) => event.type === "result" && event.id === 3);
+    await Promise.resolve();
+    expect(editor.port.hasEvent((event) => event.type === "result" && event.id === 2)).toBe(false);
   });
 });

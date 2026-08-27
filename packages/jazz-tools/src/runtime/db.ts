@@ -2212,12 +2212,15 @@ export class Db {
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
     const client = this.getClient(query._schema);
-    // A late-attaching browser tab learns the namespace-wide explicit-offline
-    // state through its follower init handshake. Wait for that local-only
-    // handshake before deciding whether RemoteIfPossible means Local or Edge;
-    // otherwise a tab opened after another tab disconnects snapshots `false`
-    // and can incorrectly park on a remote read.
-    if (options?.tier === ReadTier.RemoteIfPossible) await this.ensureReady("local");
+    // A newly attached browser-worker follower has no authoritative
+    // namespace-wide explicit-offline state until its init handshake resolves.
+    // Established runtimes return null here, preserving their synchronous
+    // operation-start tier snapshot even if disconnect happens later.
+    const initialOfflineState =
+      options?.tier === ReadTier.RemoteIfPossible
+        ? this.connection.initialExplicitOfflineState()
+        : null;
+    if (initialOfflineState) await initialOfflineState;
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
     const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
@@ -2323,14 +2326,21 @@ export class Db {
     session?: Session,
     statusReady = false,
   ): () => void {
-    // See all(): a newly attached browser peer has no authoritative explicit
-    // offline state until its init RPC completes. Delay only this tier's
-    // subscription setup, preserving synchronous LocalFirst subscriptions.
-    if (!statusReady && options?.tier === ReadTier.RemoteIfPossible) {
+    // Constructing a browser follower starts its init handshake. Do that before
+    // asking whether this is a newly attaching peer.
+    const client = this.getClient(query._schema);
+    // See all(): only a newly attached browser peer delays this tier's
+    // subscription setup until it knows the shared worker's state. All other
+    // runtimes, including established browser peers, start synchronously.
+    const initialOfflineState =
+      !statusReady && options?.tier === ReadTier.RemoteIfPossible
+        ? this.connection.initialExplicitOfflineState()
+        : null;
+    if (initialOfflineState) {
       let unsubscribed = false;
       let unsubscribe = () => {};
       const readyAbort = new AbortController();
-      void this.ensureReady("local", readyAbort.signal)
+      void initialOfflineState
         .then(() => {
           if (unsubscribed || readyAbort.signal.aborted) return;
           const installed = this.subscribeDelta(query, callback, options, session, true);
@@ -2354,7 +2364,6 @@ export class Db {
       };
     }
     const manager = new SubscriptionManager<T>();
-    const client = this.getClient(query._schema);
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
     const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
