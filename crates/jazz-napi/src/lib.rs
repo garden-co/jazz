@@ -1493,7 +1493,12 @@ impl NapiDb {
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let updated_at_ms = updated_at_ms.map(|value| value as u64);
+        // This binding-only ABI must retain the ordinary write-option
+        // timestamp contract. A direct `as u64` would turn NaN, fractions,
+        // negatives, and unsafe JavaScript numbers into unrelated HLC input.
+        let updated_at_ms = updated_at_ms
+            .map(|value| checked_u64(value, "updatedAtMs"))
+            .transpose()?;
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),

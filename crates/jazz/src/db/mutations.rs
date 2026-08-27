@@ -212,7 +212,7 @@ fn checked_range(from: u64, to: u64, length: u64, coordinate: &str) -> Result<()
     Ok(())
 }
 
-fn apply_json_set(
+pub(super) fn apply_json_set(
     value: &mut serde_json::Value,
     pointer: &str,
     replacement: serde_json::Value,
@@ -261,9 +261,7 @@ fn apply_json_set(
                 .get_mut(token)
                 .ok_or_else(|| Error::new(ErrorCode::Query, "JSON set path does not exist"))?,
             serde_json::Value::Array(array) => {
-                let index = token.parse::<usize>().map_err(|_| {
-                    Error::new(ErrorCode::Query, "JSON array pointer token is not an index")
-                })?;
+                let index = json_pointer_array_index(token)?;
                 array
                     .get_mut(index)
                     .ok_or_else(|| Error::new(ErrorCode::Query, "JSON set path does not exist"))?
@@ -284,9 +282,7 @@ fn apply_json_set(
             *target = replacement;
         }
         serde_json::Value::Array(array) => {
-            let index = last.parse::<usize>().map_err(|_| {
-                Error::new(ErrorCode::Query, "JSON array pointer token is not an index")
-            })?;
+            let index = json_pointer_array_index(last)?;
             let target = array
                 .get_mut(index)
                 .ok_or_else(|| Error::new(ErrorCode::Query, "JSON set path does not exist"))?;
@@ -300,6 +296,26 @@ fn apply_json_set(
         }
     }
     Ok(())
+}
+
+/// RFC 6901's `array-index` grammar rejects leading zeroes except for the
+/// single index `0`. Keeping the mutation parser aligned with query reads
+/// avoids a pointer that reads as missing but updates an array member.
+fn json_pointer_array_index(token: &str) -> Result<usize, Error> {
+    if token == "0" {
+        return Ok(0);
+    }
+    if !matches!(token.as_bytes().first(), Some(b'1'..=b'9'))
+        || !token.bytes().all(|character| character.is_ascii_digit())
+    {
+        return Err(Error::new(
+            ErrorCode::Query,
+            "JSON array pointer token is not an index",
+        ));
+    }
+    token
+        .parse::<usize>()
+        .map_err(|_| Error::new(ErrorCode::Query, "JSON array pointer token is not an index"))
 }
 
 fn apply_inline_splices(

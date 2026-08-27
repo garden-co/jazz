@@ -653,12 +653,15 @@ export interface TableMeta<
   TRelations extends TableRelationMap = {},
   TStreamingInit = never,
   TStreamingUpdate = never,
+  TLargeValueSelection = never,
 > {
   readonly name: TName;
   readonly row: TRow;
   readonly init: TInit;
   readonly streamingInit: TStreamingInit;
   readonly streamingUpdate: TStreamingUpdate;
+  /** Typed object-form large-value projection descriptors. */
+  readonly largeValueSelection: TLargeValueSelection;
   readonly where: TWhere;
   readonly relations: TRelations;
 }
@@ -670,7 +673,8 @@ export type AnyTableMeta = TableMeta<
   Record<string, unknown>,
   TableRelationMap,
   unknown,
-  unknown
+  unknown,
+  Record<string, LargeValuePage | undefined>
 >;
 
 type TableNameFromMeta<TMeta extends AnyTableMeta> = TMeta["name"];
@@ -678,6 +682,7 @@ type TableRowFromMeta<TMeta extends AnyTableMeta> = TMeta["row"];
 type TableInitFromMeta<TMeta extends AnyTableMeta> = TMeta["init"];
 type TableStreamingInitFromMeta<TMeta extends AnyTableMeta> = TMeta["streamingInit"];
 type TableStreamingUpdateFromMeta<TMeta extends AnyTableMeta> = TMeta["streamingUpdate"];
+type TableLargeValueSelectionFromMeta<TMeta extends AnyTableMeta> = TMeta["largeValueSelection"];
 type TableWhereFromMeta<TMeta extends AnyTableMeta> = TMeta["where"];
 type TableRelationsFromMeta<TMeta extends AnyTableMeta> = TMeta["relations"];
 type RelationNameFromMeta<TMeta extends AnyTableMeta> = Extract<
@@ -793,17 +798,27 @@ export type TableLargeValueUpdate<
   >;
 }>;
 
-type PageForValue<T> =
-  NonNullable<T> extends Uint8Array
+type PageForBuilder<TBuilder extends AnyTypedColumnBuilder> =
+  ColumnBuilderSqlType<TBuilder> extends "BYTEA"
     ? BytePage
-    : NonNullable<T> extends string
+    : ColumnBuilderSqlType<TBuilder> extends "TEXT"
       ? TextPage | Utf8TextPage
-      : JsonPointer;
+      : ColumnBuilderSqlType<TBuilder> extends { kind: "JSON" }
+        ? JsonPointer
+        : never;
+
+type TableLargeValueSelection<
+  TSchema extends SchemaLike,
+  TTable extends TableName<TSchema>,
+> = Simplify<{
+  [TColumn in ColumnName<TSchema, TTable>]?: PageForBuilder<
+    BuilderForColumn<TSchema, TTable, TColumn>
+  >;
+}>;
 
 /** Object-form partial projection accepted by `select`. */
-export type LargeValueSelection<TMeta extends AnyTableMeta> = {
-  [TColumn in BaseColumnNameFromMeta<TMeta>]?: PageForValue<TableRowFromMeta<TMeta>[TColumn]>;
-};
+export type LargeValueSelection<TMeta extends AnyTableMeta> =
+  TableLargeValueSelectionFromMeta<TMeta>;
 
 type TableOrderableFromMeta<TMeta extends AnyTableMeta> =
   | BaseColumnNameFromMeta<TMeta>
@@ -830,7 +845,8 @@ export type SchemaTable<TTable extends string, TSchema extends SchemaLike> =
         TableWhereInput<TSchema, TTable>,
         SchemaRelations<TTable, TSchema>,
         TableStreamingInit<TSchema, TTable>,
-        TableStreamingUpdate<TSchema, TTable>
+        TableStreamingUpdate<TSchema, TTable>,
+        TableLargeValueSelection<TSchema, TTable>
       >
     : never;
 
@@ -1026,13 +1042,13 @@ export class TypedTableQueryBuilder<
   }
 
   select<
-    FirstSelection extends TableSelectableFromMeta<TMeta> | Record<string, LargeValuePage>,
+    FirstSelection extends TableSelectableFromMeta<TMeta> | LargeValueSelection<TMeta>,
     RestSelection extends readonly TableSelectableFromMeta<TMeta>[] = [],
   >(
     first: FirstSelection,
-    ...rest: FirstSelection extends Record<string, LargeValuePage> ? [] : RestSelection
+    ...rest: FirstSelection extends LargeValueSelection<TMeta> ? [] : RestSelection
   ): MetaQueryHandle<TMeta, TInclude, FirstSelection | RestSelection[number], TRequired>;
-  select<NewSelection extends TableSelectableFromMeta<TMeta> | Record<string, LargeValuePage>>(
+  select<NewSelection extends TableSelectableFromMeta<TMeta> | LargeValueSelection<TMeta>>(
     ...selection: [NewSelection] | [NewSelection, ...NewSelection[]]
   ): MetaQueryHandle<TMeta, TInclude, NewSelection, TRequired> {
     const clone = this._clone<TInclude, NewSelection, TRequired>();
@@ -1298,11 +1314,13 @@ export interface Query<
   select<
     FirstSelection extends
       | TableSelectableFromMeta<SchemaMeta<TTable, TSchema>>
-      | Record<string, LargeValuePage>,
+      | LargeValueSelection<SchemaMeta<TTable, TSchema>>,
     RestSelection extends readonly TableSelectableFromMeta<SchemaMeta<TTable, TSchema>>[] = [],
   >(
     first: FirstSelection,
-    ...rest: FirstSelection extends Record<string, LargeValuePage> ? [] : RestSelection
+    ...rest: FirstSelection extends LargeValueSelection<SchemaMeta<TTable, TSchema>>
+      ? []
+      : RestSelection
   ): Query<TTable, TInclude, FirstSelection | RestSelection[number], TSchema, TRequired>;
   include<NewInclude extends BuilderInclude<SchemaMeta<TTable, TSchema>>>(
     relations: NewInclude,

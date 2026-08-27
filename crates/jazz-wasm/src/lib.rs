@@ -1064,7 +1064,10 @@ impl WasmDb {
         match &self.inner {
             WasmDbInner::Memory(db) => wasm_write_memory(
                 Rc::clone(db),
-                match updated_at_ms.map(|value| value as u64) {
+                match updated_at_ms
+                    .map(|value| checked_js_u64(value, "updatedAtMs"))
+                    .transpose()?
+                {
                     Some(now_ms) => block_on(db.update_with_large_value_mutations_at_ms(
                         &table, row_id, patch, mutations, now_ms,
                     )),
@@ -1077,7 +1080,10 @@ impl WasmDb {
             #[cfg(target_arch = "wasm32")]
             WasmDbInner::Browser(db) => wasm_write_browser(
                 Rc::clone(db),
-                match updated_at_ms.map(|value| value as u64) {
+                match updated_at_ms
+                    .map(|value| checked_js_u64(value, "updatedAtMs"))
+                    .transpose()?
+                {
                     Some(now_ms) => block_on(db.update_with_large_value_mutations_at_ms(
                         &table, row_id, patch, mutations, now_ms,
                     )),
