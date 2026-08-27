@@ -52,7 +52,7 @@ fn inherited_non_null_policy_with_depth(
 }
 
 fn recursive_folder_select_policy(max_depth: Option<usize>) -> PolicyExpr {
-    let owner_policy = pe::eq("owner_id", pe::session("user_id"));
+    let owner_policy = pe::eq("owner_id", pe::session(vec!["claims", "sub"]));
     let inherited_policy =
         inherited_non_null_policy_with_depth(Operation::Select, "parent_id", max_depth);
 
@@ -111,7 +111,7 @@ fn reachable_teams_relation() -> RelExpr {
                 predicate: PredicateExpr::Cmp {
                     left: scoped_column("team_memberships", "user_id"),
                     op: PredicateCmpOp::Eq,
-                    right: ValueRef::SessionRef(vec!["user_id".into()]),
+                    right: ValueRef::SessionRef(vec!["user".to_owned()]),
                 },
             }),
             columns: vec![ProjectColumn {
@@ -240,7 +240,7 @@ fn recursive_step_magic_column_policy_schema() -> Schema {
                     p.allow_insert().always();
                     p.allow_read().always();
                     p.allow_update()
-                        .where_old(pe::eq("owner_id", pe::session("user_id")))
+                        .where_old(pe::eq("owner_id", pe::session(vec!["claims", "sub"])))
                         .where_new(pe::always());
                 })),
         )

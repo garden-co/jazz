@@ -7,7 +7,7 @@ use groove::storage::MemoryStorage;
 #[futures_test::test]
 async fn query_graph_can_filter_project_and_join_inline_values() {
     let schema = DatabaseSchema::new([]);
-    let storage = MemoryStorage::new(&[]);
+    let storage = MemoryStorage::new(&[]).expect("valid memory storage families");
     let mut database = Database::new(schema, storage).await.unwrap();
 
     let album_desc = RecordDescriptor::new([

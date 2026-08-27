@@ -4,7 +4,8 @@ use super::*;
 
 #[futures_test::test]
 async fn arg_max_by_hydrates_and_tracks_winner_changes() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -55,7 +56,8 @@ async fn arg_max_by_hydrates_and_tracks_winner_changes() {
 
 #[futures_test::test]
 async fn arg_max_by_suppresses_non_winner_and_net_zero_deltas() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_arg_max())
@@ -85,7 +87,8 @@ async fn arg_max_by_suppresses_non_winner_and_net_zero_deltas() {
 
 #[futures_test::test]
 async fn arg_max_by_handles_multi_delta_same_group_and_tie_by_pk_order() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_arg_max())
@@ -106,7 +109,8 @@ async fn arg_max_by_handles_multi_delta_same_group_and_tie_by_pk_order() {
 
 #[futures_test::test]
 async fn arg_min_by_hydrates_initial_snapshot_winner() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -135,7 +139,8 @@ async fn arg_min_by_hydrates_initial_snapshot_winner() {
 
 #[futures_test::test]
 async fn arg_min_by_tracks_lower_insert_and_current_winner_delete() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_arg_min())
@@ -176,7 +181,8 @@ async fn arg_min_by_tracks_lower_insert_and_current_winner_delete() {
 
 #[futures_test::test]
 async fn arg_min_by_handles_same_tick_replacement_and_tie_by_pk_order() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_arg_min())
@@ -207,7 +213,8 @@ async fn arg_min_by_handles_same_tick_replacement_and_tie_by_pk_order() {
 
 #[futures_test::test]
 async fn top_by_hydrates_limit_two() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -235,8 +242,101 @@ async fn top_by_hydrates_limit_two() {
 }
 
 #[futures_test::test]
+async fn top_by_releases_departed_groups_from_runtime_state() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
+    let subscription = database
+        .subscribe_one_sink(history_top_by_stamp_asc(1))
+        .await
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    for row in 1..=1_024 {
+        batch.insert("history", history_values(row, 1, 1, "temporary"));
+    }
+    database.commit_batch(batch).await.unwrap();
+    let _initial = subscription.recv().unwrap();
+    assert_eq!(database.ivm_runtime.top_by_retained_group_count(), 1_024);
+
+    let mut batch = database.open_batch();
+    for row in 1..=1_024 {
+        batch.delete("history", history_key(row, 1, 1));
+    }
+    database.commit_batch(batch).await.unwrap();
+    let _removed = subscription.recv().unwrap();
+
+    assert_eq!(database.ivm_runtime.top_by_retained_group_count(), 0);
+}
+
+#[futures_test::test]
+async fn unbounded_top_by_propagates_payload_replacement_with_stable_order_key() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 1, "before"));
+    batch.insert("history", history_values(1, 20, 1, "second"));
+    database.commit_batch(batch).await.unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(history_top_by_stamp_asc_unbounded())
+        .await
+        .unwrap();
+    let _initial = subscription.recv().unwrap();
+
+    let mut batch = database.open_batch();
+    batch.update("history", history_values(1, 10, 1, "after"));
+    database.commit_batch(batch).await.unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [
+            (history_values(1, 10, 1, "before"), -1),
+            (history_values(1, 10, 1, "after"), 1),
+        ]
+    );
+}
+
+#[futures_test::test]
+async fn finite_top_by_applies_stable_payload_replacement_only_inside_window() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 1, "inside"));
+    batch.insert("history", history_values(1, 20, 1, "outside"));
+    database.commit_batch(batch).await.unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(history_top_by_stamp_asc(1))
+        .await
+        .unwrap();
+    let _initial = subscription.recv().unwrap();
+
+    let mut batch = database.open_batch();
+    batch.update("history", history_values(1, 10, 1, "inside-after"));
+    database.commit_batch(batch).await.unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [
+            (history_values(1, 10, 1, "inside"), -1),
+            (history_values(1, 10, 1, "inside-after"), 1),
+        ]
+    );
+
+    let mut batch = database.open_batch();
+    batch.update("history", history_values(1, 20, 1, "outside-after"));
+    database.commit_batch(batch).await.unwrap();
+    assert!(subscription.try_recv().is_err());
+}
+
+#[futures_test::test]
 async fn top_by_finite_zero_stays_empty() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -257,7 +357,8 @@ async fn top_by_finite_zero_stays_empty() {
 
 #[futures_test::test]
 async fn top_by_boundary_insert_and_delete_updates_window() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_top_by_stamp_asc(2))
@@ -297,7 +398,8 @@ async fn top_by_boundary_insert_and_delete_updates_window() {
 
 #[futures_test::test]
 async fn top_by_suppresses_outside_window_changes() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_top_by_stamp_asc(2))
@@ -324,7 +426,8 @@ async fn top_by_suppresses_outside_window_changes() {
 
 #[futures_test::test]
 async fn top_by_descending_order_keeps_largest_values() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -353,7 +456,8 @@ async fn top_by_descending_order_keeps_largest_values() {
 
 #[futures_test::test]
 async fn top_by_offset_keeps_requested_window() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -385,7 +489,7 @@ async fn top_by_offset_keeps_requested_window() {
 
 #[futures_test::test]
 async fn top_by_orders_nullable_sort_keys_null_first() {
-    let storage = MemoryStorage::new(&["scores"]);
+    let storage = MemoryStorage::new(&["scores"]).expect("valid memory storage families");
     let mut database = Database::new(nullable_scores_schema(), storage)
         .await
         .unwrap();
@@ -438,7 +542,8 @@ async fn top_by_orders_nullable_sort_keys_null_first() {
 
 #[futures_test::test]
 async fn top_by_uses_stable_tie_field() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_top_by_stamp_asc(1))
@@ -483,7 +588,8 @@ fn union_history_top_by(offset: u64, limit: u64) -> GraphBuilder {
 
 #[futures_test::test]
 async fn top_by_counts_duplicate_multiplicity_toward_window_occupancy() {
-    let storage = MemoryStorage::new(&["history", "history_shadow"]);
+    let storage =
+        MemoryStorage::new(&["history", "history_shadow"]).expect("valid memory storage families");
     let mut database = Database::new(two_history_tables_schema(), storage)
         .await
         .unwrap();
@@ -506,7 +612,8 @@ async fn top_by_counts_duplicate_multiplicity_toward_window_occupancy() {
 
 #[futures_test::test]
 async fn top_by_offset_splits_duplicate_copies_across_boundary() {
-    let storage = MemoryStorage::new(&["history", "history_shadow"]);
+    let storage =
+        MemoryStorage::new(&["history", "history_shadow"]).expect("valid memory storage families");
     let mut database = Database::new(two_history_tables_schema(), storage)
         .await
         .unwrap();
@@ -537,7 +644,8 @@ async fn top_by_offset_splits_duplicate_copies_across_boundary() {
 
 #[futures_test::test]
 async fn top_by_emits_weighted_diff_when_duplicate_copy_enters_window() {
-    let storage = MemoryStorage::new(&["history", "history_shadow"]);
+    let storage =
+        MemoryStorage::new(&["history", "history_shadow"]).expect("valid memory storage families");
     let mut database = Database::new(two_history_tables_schema(), storage)
         .await
         .unwrap();
@@ -578,7 +686,8 @@ async fn top_by_emits_weighted_diff_when_duplicate_copy_enters_window() {
 
 #[futures_test::test]
 async fn top_by_replaces_window_tie_with_distinct_record_on_delete() {
-    let storage = MemoryStorage::new(&["history", "history_shadow"]);
+    let storage =
+        MemoryStorage::new(&["history", "history_shadow"]).expect("valid memory storage families");
     let mut database = Database::new(two_history_tables_schema(), storage)
         .await
         .unwrap();
@@ -611,7 +720,8 @@ async fn top_by_replaces_window_tie_with_distinct_record_on_delete() {
 
 #[futures_test::test]
 async fn top_by_maintains_weighted_window_across_duplicate_lifecycle() {
-    let storage = MemoryStorage::new(&["history", "history_shadow"]);
+    let storage =
+        MemoryStorage::new(&["history", "history_shadow"]).expect("valid memory storage families");
     let mut database = Database::new(two_history_tables_schema(), storage)
         .await
         .unwrap();
@@ -748,4 +858,116 @@ async fn top_by_maintains_weighted_window_across_duplicate_lifecycle() {
             (history_values(3, 20, 1, "gamma"), 1),
         ]
     );
+}
+
+#[futures_test::test]
+async fn top_by_incremental_window_matches_fresh_hydration_across_seeded_updates() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
+    let graph = history_top_by_stamp_asc_offset(1, 2);
+    let subscription = database.subscribe_one_sink(graph.clone()).await.unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+    let mut materialized = std::collections::BTreeMap::new();
+    let mut known = std::collections::BTreeMap::<(u64, u64, u64), String>::new();
+
+    // Seed a full window in one partition so the oracle cannot accidentally
+    // spend its whole generated trace below the offset boundary.
+    let mut batch = database.open_batch();
+    for (stamp, title) in [(1, "seed-first"), (2, "seed-second"), (3, "seed-third")] {
+        known.insert((1, stamp, 1), title.to_owned());
+        batch.insert("history", history_values(1, stamp, 1, title));
+    }
+    database.commit_batch(batch).await.unwrap();
+    apply_top_by_deltas(&mut materialized, subscription.recv().unwrap());
+    let mut seed = 0x70_b9_u64;
+
+    for step in 0..72 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let key = (
+            (seed >> 4) % 3 + 1,
+            (seed >> 12) % 8 + 1,
+            (seed >> 20) % 3 + 1,
+        );
+        let mut batch = database.open_batch();
+        match ((seed >> 28) % 3, known.get(&key)) {
+            (0, None) => {
+                let title = format!("insert-{step}");
+                known.insert(key, title.clone());
+                batch.insert("history", history_values(key.0, key.1, key.2, &title));
+            }
+            (1, Some(_)) => {
+                let title = format!("replace-{step}");
+                known.insert(key, title.clone());
+                batch.update("history", history_values(key.0, key.1, key.2, &title));
+            }
+            (_, Some(_)) => {
+                known.remove(&key);
+                batch.delete("history", history_key(key.0, key.1, key.2));
+            }
+            _ => continue,
+        }
+        database.commit_batch(batch).await.unwrap();
+
+        while let Ok(deltas) = subscription.try_recv() {
+            apply_top_by_deltas(&mut materialized, deltas);
+        }
+
+        // A separately hydrated consumer must agree with the explicit reference
+        // model, as must the incrementally maintained consumer.
+        let hydrated = database.subscribe_one_sink(graph.clone()).await.unwrap();
+        let mut expected = std::collections::BTreeMap::new();
+        apply_top_by_deltas(&mut expected, hydrated.recv().unwrap());
+        assert!(database.unsubscribe(hydrated.id()));
+        let oracle = top_by_offset_window_oracle(&known);
+        assert_eq!(
+            expected, oracle,
+            "fresh hydration disagreed with the reference window after seed step {step}"
+        );
+        assert_eq!(
+            materialized, oracle,
+            "incremental TopBy differed from fresh hydration after seed step {step}"
+        );
+    }
+}
+
+fn top_by_offset_window_oracle(
+    known: &std::collections::BTreeMap<(u64, u64, u64), String>,
+) -> std::collections::BTreeMap<(u64, u64, u64, String), i64> {
+    let mut per_row = std::collections::BTreeMap::<u64, Vec<(u64, u64, String)>>::new();
+    for (&(row, stamp, node), title) in known {
+        per_row
+            .entry(row)
+            .or_default()
+            .push((stamp, node, title.clone()));
+    }
+    let mut window = std::collections::BTreeMap::new();
+    for (row, records) in &mut per_row {
+        records.sort();
+        for (stamp, node, title) in records.iter().skip(1).take(2) {
+            window.insert((*row, *stamp, *node, title.clone()), 1);
+        }
+    }
+    window
+}
+
+fn apply_top_by_deltas(
+    materialized: &mut std::collections::BTreeMap<(u64, u64, u64, String), i64>,
+    deltas: RecordDeltas,
+) {
+    for (values, weight) in deltas.to_values().unwrap() {
+        let [
+            Value::U64(row),
+            Value::U64(stamp),
+            Value::U64(node),
+            Value::String(title),
+        ] = values.as_slice()
+        else {
+            panic!("expected history delta, got {values:?}");
+        };
+        *materialized
+            .entry((*row, *stamp, *node, title.clone()))
+            .or_default() += weight;
+    }
+    materialized.retain(|_, weight| *weight != 0);
 }

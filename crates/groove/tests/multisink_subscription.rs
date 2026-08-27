@@ -26,9 +26,12 @@ fn albums_schema() -> DatabaseSchema {
 }
 
 async fn database() -> Database {
-    Database::new(albums_schema(), MemoryStorage::new(&["albums"]))
-        .await
-        .unwrap()
+    Database::new(
+        albums_schema(),
+        MemoryStorage::new(&["albums"]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap()
 }
 
 async fn insert_album(db: &mut Database, id: u64, title: &str, year: u64) {
@@ -80,9 +83,12 @@ fn route_descriptor() -> RecordDescriptor {
 }
 
 async fn project_database() -> Database {
-    Database::new(project_schema(), MemoryStorage::new(&["docs", "comments"]))
-        .await
-        .unwrap()
+    Database::new(
+        project_schema(),
+        MemoryStorage::new(&["docs", "comments"]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap()
 }
 
 fn project_bindings() -> GraphBuilder {

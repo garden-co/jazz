@@ -13,7 +13,12 @@ export class AttachedBrowserWorkerConnection implements BrowserWorkerConnection 
     dbName: string,
     callbacks: Pick<
       BrowserWorkerConnectionContext,
-      "onAuthFailure" | "onAuthRestored" | "onFailure" | "onStorageReset" | "onStorageInvalidated"
+      | "onAuthFailure"
+      | "onAuthRestored"
+      | "onExplicitOfflineChange"
+      | "onFailure"
+      | "onStorageReset"
+      | "onStorageInvalidated"
     >,
   ) {
     this.connection = new MessagePortBrowserFollowerConnection(

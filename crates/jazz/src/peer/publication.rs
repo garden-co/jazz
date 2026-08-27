@@ -907,7 +907,7 @@ impl PeerState {
                 )
                 .await,
         };
-        let (receiver, maintained, terminal_schemas, transitions, tables, initial_received) =
+        let (receiver, mut maintained, terminal_schemas, transitions, tables, initial_received) =
             match opened {
             Ok(opened) => opened,
             Err(Error::AuthorizationSupportMissingClaim(_))
@@ -935,6 +935,11 @@ impl PeerState {
             }
             Err(error) => return Err(error),
             };
+        let retains_structured_terminal = !shape.query().array_subqueries.is_empty()
+            || !shape.query().order_by.is_empty();
+        if !retains_structured_terminal {
+            maintained.discard_structured_app_rows();
+        }
         if !initial_received {
             let maintained_subscription = MaintainedSubscriptionViewSubscription {
                 subscription: receiver,

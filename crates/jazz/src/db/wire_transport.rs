@@ -525,6 +525,10 @@ where
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         let now_ms = self.reassembly_now_ms();
         self.reassembler.expire(now_ms);
+        // A retained frame belongs to the one logical message that was already
+        // accepted by `send_encoded_frames`. Do not admit a second message
+        // until that bounded backlog flushes: callers retain/retry an
+        // `Err(Backpressure)` message at their semantic boundary.
         self.flush_pending_outbound()?;
         let payload = match encode_sync_message_for_features(&message, self.features) {
             Ok(payload) => payload,

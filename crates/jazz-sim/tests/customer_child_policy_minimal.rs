@@ -80,8 +80,8 @@ fn schema() -> JazzSchema {
         "target_id",
         &[("administrator", PublicValue::Boolean(false))],
         GROUP,
-        "id",
-        &["user_id"],
+        "identity",
+        &["user"],
         "id",
     );
     let child_policy = seeded_recursive_access_policy(
@@ -95,13 +95,17 @@ fn schema() -> JazzSchema {
         "target_id",
         &[("administrator", PublicValue::Boolean(false))],
         GROUP,
-        "id",
-        &["user_id"],
+        "identity",
+        &["user"],
         "id",
     );
     compile_public_schema(
         SchemaBuilder::new()
-            .table(PublicTableSchema::builder(GROUP).column("label", PublicColumnType::Text))
+            .table(
+                PublicTableSchema::builder(GROUP)
+                    .column("label", PublicColumnType::Text)
+                    .column("identity", PublicColumnType::Text),
+            )
             .table(
                 PublicTableSchema::builder(GROUP_ENTRY)
                     .fk_column("member_id", GROUP)
@@ -158,7 +162,7 @@ fn db_config(
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     DbConfig {
         schema,
-        storage: MemoryStorage::new(&refs),
+        storage: MemoryStorage::new(&refs).expect("valid memory storage families"),
         identity: DbIdentity {
             node: node_uuid,
             author,
@@ -188,22 +192,13 @@ fn open_history_complete_db(
     .expect("open db")
 }
 
-fn raw_claims(author: AuthorSubject) -> BTreeMap<String, Value> {
-    let sub = author.test_uuid().to_string();
-    BTreeMap::from([
-        ("iss".to_owned(), Value::String("urn:jazz:test".to_owned())),
-        (
-            "issuer".to_owned(),
-            Value::String("urn:jazz:test".to_owned()),
-        ),
-        ("sub".to_owned(), Value::String(sub.clone())),
-        ("user_id".to_owned(), Value::String(sub)),
-    ])
+fn session_claims() -> BTreeMap<String, Value> {
+    BTreeMap::new()
 }
 
 fn install_db_claims(db: &Db<MemoryStorage>, author: AuthorSubject) {
     if author != AuthorSubject::SYSTEM {
-        db.set_identity_claims(author, raw_claims(author));
+        db.set_identity_claims(author, session_claims());
     }
 }
 
@@ -270,13 +265,22 @@ fn child_policy_reaches_client_through_relay() {
         &core,
         GROUP,
         member_group,
-        BTreeMap::from([("label".to_owned(), Value::String("member".to_owned()))]),
+        BTreeMap::from([
+            ("label".to_owned(), Value::String("member".to_owned())),
+            (
+                "identity".to_owned(),
+                Value::String(member.canonical().to_owned()),
+            ),
+        ]),
     );
     insert(
         &core,
         GROUP,
         reachable_group,
-        BTreeMap::from([("label".to_owned(), Value::String("reachable".to_owned()))]),
+        BTreeMap::from([
+            ("label".to_owned(), Value::String("reachable".to_owned())),
+            ("identity".to_owned(), Value::String("unrelated".to_owned())),
+        ]),
     );
     insert(
         &core,

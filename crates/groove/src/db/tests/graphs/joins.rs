@@ -4,7 +4,7 @@ use super::*;
 
 #[futures_test::test]
 async fn duplicate_table_subscriptions_share_graph_nodes_and_gc_eagerly() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
 
     let first = database
@@ -38,7 +38,8 @@ async fn duplicate_table_subscriptions_share_graph_nodes_and_gc_eagerly() {
 #[futures_test::test]
 async fn commits_do_not_scale_with_unrelated_resident_graph_size() {
     async fn commit_with_unrelated_graphs(graph_count: u64) -> std::time::Duration {
-        let storage = MemoryStorage::new(&["albums", "archived_albums"]);
+        let storage = MemoryStorage::new(&["albums", "archived_albums"])
+            .expect("valid memory storage families");
         let mut database = Database::new(two_album_tables_schema(), storage)
             .await
             .unwrap();
@@ -81,7 +82,8 @@ async fn commits_do_not_scale_with_unrelated_resident_graph_size() {
 #[futures_test::test]
 async fn subscription_install_does_not_sweep_unrelated_resident_graphs() {
     async fn install_with_unrelated_graphs(graph_count: u64) -> std::time::Duration {
-        let storage = MemoryStorage::new(&["albums", "archived_albums"]);
+        let storage = MemoryStorage::new(&["albums", "archived_albums"])
+            .expect("valid memory storage families");
         let mut database = Database::new(two_album_tables_schema(), storage)
             .await
             .unwrap();
@@ -125,7 +127,8 @@ async fn subscription_install_does_not_sweep_unrelated_resident_graphs() {
 
 #[futures_test::test]
 async fn union_subscriptions_receive_deltas_from_multiple_tables() {
-    let storage = MemoryStorage::new(&["albums", "archived_albums"]);
+    let storage =
+        MemoryStorage::new(&["albums", "archived_albums"]).expect("valid memory storage families");
     let mut database = Database::new(two_album_tables_schema(), storage)
         .await
         .unwrap();
@@ -162,7 +165,7 @@ async fn union_subscriptions_receive_deltas_from_multiple_tables() {
 
 #[futures_test::test]
 async fn union_all_subscriptions_preserve_duplicate_derivations() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let album_titles = GraphBuilder::table("albums").project(["title"]);
     let subscription_id = database
@@ -188,7 +191,7 @@ async fn union_all_subscriptions_preserve_duplicate_derivations() {
 
 #[futures_test::test]
 async fn filter_subscriptions_emit_only_matching_rows() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_one_sink(
@@ -216,7 +219,7 @@ async fn filter_subscriptions_emit_only_matching_rows() {
 
 #[futures_test::test]
 async fn project_subscriptions_emit_projected_records() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_one_sink(GraphBuilder::table("albums").project(["title"]))
@@ -237,7 +240,7 @@ async fn project_subscriptions_emit_projected_records() {
 
 #[futures_test::test]
 async fn duplicate_projected_subscriptions_share_graph_nodes_and_gc_eagerly() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let graph = GraphBuilder::table("albums")
         .filter(PredicateExpr::eq(
@@ -275,7 +278,8 @@ async fn duplicate_projected_subscriptions_share_graph_nodes_and_gc_eagerly() {
 
 #[futures_test::test]
 async fn join_subscriptions_match_left_deltas_against_maintained_right_state() {
-    let storage = MemoryStorage::new(&["albums", "artists"]);
+    let storage =
+        MemoryStorage::new(&["albums", "artists"]).expect("valid memory storage families");
     let mut database = Database::new(albums_artists_schema(), storage)
         .await
         .unwrap();
@@ -325,7 +329,8 @@ async fn join_subscriptions_match_left_deltas_against_maintained_right_state() {
 
 #[futures_test::test]
 async fn join_subscriptions_match_array_key_elements() {
-    let storage = MemoryStorage::new(&["files", "file_parts"]);
+    let storage =
+        MemoryStorage::new(&["files", "file_parts"]).expect("valid memory storage families");
     let mut database = Database::new(files_parts_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_one_sink(GraphBuilder::join(
@@ -384,7 +389,8 @@ async fn join_subscriptions_match_array_key_elements() {
 
 #[futures_test::test]
 async fn unnest_subscription_emits_one_row_per_array_element() {
-    let storage = MemoryStorage::new(&["files", "file_parts"]);
+    let storage =
+        MemoryStorage::new(&["files", "file_parts"]).expect("valid memory storage families");
     let mut database = Database::new(files_parts_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(
@@ -441,7 +447,8 @@ async fn unnest_subscription_emits_one_row_per_array_element() {
 
 #[futures_test::test]
 async fn join_subscriptions_match_persisted_array_key_elements() {
-    let storage = MemoryStorage::new(&["files", "file_parts"]);
+    let storage =
+        MemoryStorage::new(&["files", "file_parts"]).expect("valid memory storage families");
     let mut database = Database::new(files_parts_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_one_sink(GraphBuilder::join(
@@ -537,7 +544,8 @@ async fn join_subscriptions_match_persisted_array_key_elements() {
 
 #[futures_test::test]
 async fn join_subscriptions_match_nullable_array_key_elements() {
-    let storage = MemoryStorage::new(&["files", "file_parts"]);
+    let storage =
+        MemoryStorage::new(&["files", "file_parts"]).expect("valid memory storage families");
     let mut database = Database::new(nullable_files_parts_schema(), storage)
         .await
         .unwrap();
@@ -595,7 +603,7 @@ async fn join_subscriptions_match_nullable_array_key_elements() {
 
 #[futures_test::test]
 async fn index_subscriptions_expand_array_key_elements() {
-    let storage = MemoryStorage::new(&["files", "indices"]);
+    let storage = MemoryStorage::new(&["files", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(indexed_files_schema(), storage)
         .await
         .unwrap();
@@ -639,7 +647,8 @@ async fn index_subscriptions_expand_array_key_elements() {
 
 #[futures_test::test]
 async fn query_graph_joins_related_tables_through_database_facade() {
-    let storage = MemoryStorage::new(&["albums", "artists"]);
+    let storage =
+        MemoryStorage::new(&["albums", "artists"]).expect("valid memory storage families");
     let mut database = Database::new(albums_artists_schema(), storage)
         .await
         .unwrap();
@@ -727,7 +736,8 @@ async fn query_graph_joins_related_tables_through_database_facade() {
 
 #[futures_test::test]
 async fn join_subscriptions_match_right_deltas_against_maintained_left_state() {
-    let storage = MemoryStorage::new(&["albums", "artists"]);
+    let storage =
+        MemoryStorage::new(&["albums", "artists"]).expect("valid memory storage families");
     let mut database = Database::new(albums_artists_schema(), storage)
         .await
         .unwrap();
@@ -777,7 +787,8 @@ async fn join_subscriptions_match_right_deltas_against_maintained_left_state() {
 
 #[futures_test::test]
 async fn join_subscriptions_emit_update_and_delete_deltas_from_maintained_state() {
-    let storage = MemoryStorage::new(&["albums", "artists"]);
+    let storage =
+        MemoryStorage::new(&["albums", "artists"]).expect("valid memory storage families");
     let mut database = Database::new(albums_artists_schema(), storage)
         .await
         .unwrap();
@@ -861,7 +872,8 @@ async fn join_subscriptions_emit_update_and_delete_deltas_from_maintained_state(
 
 #[futures_test::test]
 async fn anti_join_subscriptions_emit_left_rows_without_right_matches() {
-    let storage = MemoryStorage::new(&["albums", "artists"]);
+    let storage =
+        MemoryStorage::new(&["albums", "artists"]).expect("valid memory storage families");
     let mut database = Database::new(albums_artists_schema(), storage)
         .await
         .unwrap();
@@ -894,7 +906,8 @@ async fn anti_join_subscriptions_emit_left_rows_without_right_matches() {
 
 #[futures_test::test]
 async fn semi_join_subscriptions_emit_left_rows_with_right_matches() {
-    let storage = MemoryStorage::new(&["albums", "artists"]);
+    let storage =
+        MemoryStorage::new(&["albums", "artists"]).expect("valid memory storage families");
     let mut database = Database::new(albums_artists_schema(), storage)
         .await
         .unwrap();
@@ -936,7 +949,8 @@ async fn semi_join_subscriptions_emit_left_rows_with_right_matches() {
 
 #[futures_test::test]
 async fn semi_join_retracts_and_restores_on_right_threshold_transitions() {
-    let storage = MemoryStorage::new(&["albums", "artists"]);
+    let storage =
+        MemoryStorage::new(&["albums", "artists"]).expect("valid memory storage families");
     let mut database = Database::new(albums_artists_schema(), storage)
         .await
         .unwrap();
@@ -985,7 +999,8 @@ async fn semi_join_retracts_and_restores_on_right_threshold_transitions() {
 
 #[futures_test::test]
 async fn semi_join_hydration_snapshot_filters_missing_right_matches() {
-    let storage = MemoryStorage::new(&["albums", "artists"]);
+    let storage =
+        MemoryStorage::new(&["albums", "artists"]).expect("valid memory storage families");
     let mut database = Database::new(albums_artists_schema(), storage)
         .await
         .unwrap();
@@ -1030,7 +1045,8 @@ async fn semi_join_hydration_snapshot_filters_missing_right_matches() {
 
 #[futures_test::test]
 async fn anti_join_retracts_and_restores_on_right_threshold_transitions() {
-    let storage = MemoryStorage::new(&["albums", "artists"]);
+    let storage =
+        MemoryStorage::new(&["albums", "artists"]).expect("valid memory storage families");
     let mut database = Database::new(albums_artists_schema(), storage)
         .await
         .unwrap();
@@ -1078,7 +1094,7 @@ async fn anti_join_retracts_and_restores_on_right_threshold_transitions() {
 
 #[futures_test::test]
 async fn anti_join_only_changes_when_right_count_crosses_zero() {
-    let storage = MemoryStorage::new(&["albums", "blocks"]);
+    let storage = MemoryStorage::new(&["albums", "blocks"]).expect("valid memory storage families");
     let mut database = Database::new(albums_blockers_schema(), storage)
         .await
         .unwrap();
@@ -1129,7 +1145,8 @@ async fn anti_join_only_changes_when_right_count_crosses_zero() {
 
 #[futures_test::test]
 async fn anti_join_hydration_snapshot_filters_existing_right_matches() {
-    let storage = MemoryStorage::new(&["albums", "artists"]);
+    let storage =
+        MemoryStorage::new(&["albums", "artists"]).expect("valid memory storage families");
     let mut database = Database::new(albums_artists_schema(), storage)
         .await
         .unwrap();
@@ -1177,7 +1194,8 @@ async fn anti_join_hydration_snapshot_filters_existing_right_matches() {
 
 #[futures_test::test]
 async fn anti_join_filters_identical_descriptors_before_projection() {
-    let storage = MemoryStorage::new(&["edges", "blockers"]);
+    let storage =
+        MemoryStorage::new(&["edges", "blockers"]).expect("valid memory storage families");
     let mut database = Database::new(edges_blockers_schema(), storage)
         .await
         .unwrap();
@@ -1208,7 +1226,8 @@ async fn anti_join_filters_identical_descriptors_before_projection() {
 
 #[futures_test::test]
 async fn anti_join_hydration_snapshot_filters_many_existing_identical_descriptor_blockers() {
-    let storage = MemoryStorage::new(&["edges", "blockers"]);
+    let storage =
+        MemoryStorage::new(&["edges", "blockers"]).expect("valid memory storage families");
     let mut database = Database::new(edges_blockers_schema(), storage)
         .await
         .unwrap();
@@ -1268,7 +1287,8 @@ async fn anti_join_hydration_snapshot_filters_many_existing_identical_descriptor
 
 #[futures_test::test]
 async fn anti_join_retracts_identical_descriptor_projection_when_blocker_arrives() {
-    let storage = MemoryStorage::new(&["edges", "blockers"]);
+    let storage =
+        MemoryStorage::new(&["edges", "blockers"]).expect("valid memory storage families");
     let mut database = Database::new(edges_blockers_schema(), storage)
         .await
         .unwrap();
@@ -1301,7 +1321,8 @@ async fn anti_join_retracts_identical_descriptor_projection_when_blocker_arrives
 
 #[futures_test::test]
 async fn anti_join_remembers_blocker_inserted_before_matching_left_key_exists() {
-    let storage = MemoryStorage::new(&["edges", "blockers"]);
+    let storage =
+        MemoryStorage::new(&["edges", "blockers"]).expect("valid memory storage families");
     let mut database = Database::new(edges_blockers_schema(), storage)
         .await
         .unwrap();
@@ -1339,7 +1360,8 @@ async fn anti_join_remembers_blocker_inserted_before_matching_left_key_exists() 
 
 #[futures_test::test]
 async fn anti_join_retracts_when_right_update_moves_onto_left_key() {
-    let storage = MemoryStorage::new(&["edges", "blockers"]);
+    let storage =
+        MemoryStorage::new(&["edges", "blockers"]).expect("valid memory storage families");
     let mut database = Database::new(edges_blockers_schema(), storage)
         .await
         .unwrap();
@@ -1376,7 +1398,8 @@ async fn anti_join_retracts_when_right_update_moves_onto_left_key() {
 
 #[futures_test::test]
 async fn anti_join_resubscribe_hydrates_from_storage_after_unretained_changes() {
-    let storage = MemoryStorage::new(&["edges", "blockers"]);
+    let storage =
+        MemoryStorage::new(&["edges", "blockers"]).expect("valid memory storage families");
     let mut database = Database::new(edges_blockers_schema(), storage)
         .await
         .unwrap();

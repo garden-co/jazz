@@ -1,5 +1,5 @@
 import { useEffect, type ReactNode } from "react";
-import type { Session } from "../runtime/context.js";
+import type { PublicSession } from "../runtime/context.js";
 import type { DbConfig } from "../runtime/db.js";
 import { jazzDevPluginActive, startInspectorOnce } from "../dev-tools/auto-attach.js";
 import {
@@ -30,7 +30,7 @@ export { JazzClientProvider, type JazzClientProviderProps } from "../react-core/
 
 interface JazzClientContextValue {
   db: CreatedJazzClient["db"];
-  session: Session | null;
+  session: PublicSession | null;
   shutdown: CreatedJazzClient["shutdown"];
 }
 

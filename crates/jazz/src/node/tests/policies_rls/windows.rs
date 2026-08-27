@@ -9,18 +9,18 @@ fn maintained_subscription_view_top_by_partitions_windows_by_policy_claim_bindin
             .policies(
                 PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
                     "owner",
-                    vec!["user_id".to_owned()],
+                    vec!["claims".to_owned(), "user_id".to_owned()],
                 )),
             ),
     ));
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let owner_a = user(0xa1);
     let owner_b = user(0xb2);
-    core.set_session_claims(
+    core.set_test_provider_claims(
         owner_a,
         BTreeMap::from([("user_id".to_owned(), Value::Uuid(owner_a.test_uuid()))]),
     );
-    core.set_session_claims(
+    core.set_test_provider_claims(
         owner_b,
         BTreeMap::from([("user_id".to_owned(), Value::Uuid(owner_b.test_uuid()))]),
     );
@@ -77,7 +77,7 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
             "id",
             [PublicPolicyExpr::eq_session(
                 "reader",
-                vec!["user_id".to_owned()],
+                vec!["claims".to_owned(), "user_id".to_owned()],
             )],
         ),
         public_literal_eq("published", PublicValue::Boolean(true)),
@@ -97,7 +97,7 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
             ),
     );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
-    core.set_session_claims(
+    core.set_test_provider_claims(
         reader,
         BTreeMap::from([("user_id".to_owned(), Value::Uuid(reader.test_uuid()))]),
     );

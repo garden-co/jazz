@@ -614,7 +614,10 @@ fn resource_access_policy() -> PolicyExpr {
                                 column: "identity_key".to_owned(),
                             },
                             op: RelPredicateCmpOp::Eq,
-                            right: RelValueRef::SessionRef(vec!["user_id".to_owned()]),
+                            right: RelValueRef::SessionRef(vec![
+                                "claims".to_owned(),
+                                "sub".to_owned(),
+                            ]),
                         },
                     }),
                     step: Box::new(RelExpr::Project {
@@ -709,7 +712,10 @@ fn mapping_rule_access_policy() -> PolicyExpr {
                                 column: "identity_key".to_owned(),
                             },
                             op: RelPredicateCmpOp::Eq,
-                            right: RelValueRef::SessionRef(vec!["user_id".to_owned()]),
+                            right: RelValueRef::SessionRef(vec![
+                                "claims".to_owned(),
+                                "sub".to_owned(),
+                            ]),
                         },
                     }),
                     step: Box::new(RelExpr::Project {

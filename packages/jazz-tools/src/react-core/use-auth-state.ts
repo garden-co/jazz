@@ -5,7 +5,7 @@ import type { AuthMode } from "../runtime/context.js";
 
 export interface AuthStateInfo {
   authMode: AuthMode;
-  userId: string | null;
+  user: string | null;
   claims: Record<string, unknown>;
   error?: AuthFailureReason;
 }
@@ -22,7 +22,7 @@ export function useAuthState(): AuthStateInfo {
 
   return {
     authMode: state.authMode,
-    userId: state.session?.user_id ?? null,
+    user: state.session?.user ?? null,
     claims: state.session?.claims ?? EMPTY_CLAIMS,
     error: state.error,
   };

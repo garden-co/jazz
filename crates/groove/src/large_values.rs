@@ -2834,6 +2834,13 @@ pub(crate) fn decode_node_untyped_authenticated(
     expected_hash: ContentHash,
     encoded: &[u8],
 ) -> Result<ChunkNode, Error> {
+    // This path is also used while installing durable metadata, before a row
+    // descriptor supplies the schema-derived kind. Keep the resource ceiling
+    // ahead of authentication so an oversized stored object cannot make us
+    // hash it merely because it has no descriptor yet.
+    if encoded.len() > MAX_ENCODED_NODE_BYTES {
+        return Err(Error::MalformedNode);
+    }
     if object_hash(encoded) != expected_hash {
         return Err(Error::ObjectHashMismatch);
     }
@@ -3452,6 +3459,92 @@ pub(crate) fn utf16_range_attempt(
     } else {
         Ok(outputs.into_iter().flatten().collect())
     }
+}
+
+/// Resolve a final logical UTF-16 boundary to its final logical byte offset
+/// without materializing the preceding text.  Prefix lengths are computed from
+/// authenticated branch metrics, with only the logarithmically many boundary
+/// leaves requested.  The binary search is over UTF-8 code-point boundaries so
+/// a position inside a surrogate pair fails rather than being rounded.
+pub(crate) fn utf16_offset_to_byte_attempt(
+    value: &LargeValueRef,
+    offset: u64,
+    inputs: &mut EvaluationInputs,
+) -> Result<u64, IvmRuntimeError> {
+    let total = value.utf16_length.ok_or(Error::MalformedScalar)?;
+    if offset > total {
+        return Err(Error::MalformedScalar.into());
+    }
+    if offset == 0 {
+        return Ok(0);
+    }
+    if offset == total {
+        return Ok(value.byte_length);
+    }
+
+    let mut low = 0_u64;
+    let mut high = value.byte_length;
+    while low < high {
+        let midpoint = low + (high - low) / 2;
+        let boundary = utf8_boundary_at_or_before_attempt(value, midpoint, inputs)?;
+        let units = utf16_length_for_byte_range_attempt(value, 0..boundary, inputs)?;
+        if units < offset {
+            low = utf8_next_boundary_attempt(value, boundary, inputs)?;
+        } else {
+            high = boundary;
+        }
+    }
+    let units = utf16_length_for_byte_range_attempt(value, 0..low, inputs)?;
+    if units != offset {
+        return Err(Error::MalformedScalar.into());
+    }
+    Ok(low)
+}
+
+fn utf8_boundary_at_or_before_attempt(
+    value: &LargeValueRef,
+    offset: u64,
+    inputs: &mut EvaluationInputs,
+) -> Result<u64, IvmRuntimeError> {
+    if offset == 0 || offset == value.byte_length {
+        return Ok(offset);
+    }
+    let start = offset.saturating_sub(3);
+    let bytes = byte_range_attempt(value, start..offset.saturating_add(1), inputs)?;
+    let mut index = bytes.len().checked_sub(1).ok_or(Error::MalformedScalar)?;
+    while bytes[index] & 0b1100_0000 == 0b1000_0000 {
+        index = index.checked_sub(1).ok_or(Error::MalformedScalar)?;
+    }
+    start
+        .checked_add(u64::try_from(index).map_err(|_| Error::MetricOverflow)?)
+        .ok_or(Error::MetricOverflow.into())
+}
+
+fn utf8_next_boundary_attempt(
+    value: &LargeValueRef,
+    boundary: u64,
+    inputs: &mut EvaluationInputs,
+) -> Result<u64, IvmRuntimeError> {
+    if boundary >= value.byte_length {
+        return Ok(value.byte_length);
+    }
+    let end = boundary.saturating_add(4).min(value.byte_length);
+    let bytes = byte_range_attempt(value, boundary..end, inputs)?;
+    let first = *bytes.first().ok_or(Error::MalformedScalar)?;
+    let width = match first {
+        0x00..=0x7f => 1,
+        0xc2..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf4 => 4,
+        _ => return Err(Error::InvalidUtf8.into()),
+    };
+    let next = boundary.checked_add(width).ok_or(Error::MetricOverflow)?;
+    if next > value.byte_length
+        || usize::try_from(width).map_err(|_| Error::MetricOverflow)? > bytes.len()
+    {
+        return Err(Error::InvalidUtf8.into());
+    }
+    Ok(next)
 }
 
 fn map_final_utf16_range_to_base(
@@ -5529,6 +5622,20 @@ mod tests {
         assert_eq!(
             decode_authenticated_node(object_hash(&encoded), &encoded),
             Err(Error::MalformedNode)
+        );
+    }
+
+    #[test]
+    fn untyped_authenticated_decode_rejects_oversized_bytes_before_hashing() {
+        // This is intentionally an internal receipt: durable chunk-install
+        // metadata authenticates nodes before any descriptor exists, so the
+        // public row API cannot exercise this resource boundary directly.
+        let encoded = vec![0; MAX_ENCODED_NODE_BYTES + 1];
+        let matching_hash = object_hash(&encoded);
+        assert_eq!(
+            decode_node_untyped_authenticated(matching_hash, &encoded),
+            Err(Error::MalformedNode),
+            "the size ceiling must win even when the oversized payload's hash matches"
         );
     }
 

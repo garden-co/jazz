@@ -13,6 +13,11 @@ on:
         required: false
         type: string
         default: '[{"os":"blacksmith-4vcpu-ubuntu-2404","target":"x86_64-unknown-linux-gnu","platform":"linux-x64-gnu","use_sccache":true},{"os":"blacksmith-6vcpu-macos-15","target":"x86_64-apple-darwin","platform":"darwin-x64","use_sccache":false},{"os":"blacksmith-6vcpu-macos-15","target":"aarch64-apple-darwin","platform":"darwin-arm64","use_sccache":false},{"os":"blacksmith-2vcpu-windows-2025","target":"x86_64-pc-windows-msvc","platform":"win32-x64-msvc","use_sccache":false}]'
+      include_rn:
+        description: Build and stage jazz-rn's Android and iOS relay artifacts. Keep false for ordinary package previews; releases opt in explicitly.
+        required: false
+        type: boolean
+        default: false
     outputs:
       tools_artifact:
         description: Artifact name for the assembled jazz-tools package.
@@ -26,9 +31,13 @@ on:
       create_jazz_artifact:
         description: Artifact name for the assembled create-jazz package.
         value: pkg-create-jazz
+      jazz_rn_artifact:
+        description: Artifact name for the assembled jazz-rn package with its Android and iOS relay artifacts, or empty when RN packaging is disabled.
+        value: ${{ jobs.assemble-jazz-rn.outputs.artifact }}
 
 env:
   CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
+  JAZZ_RN_CARGO_NDK_VERSION: 4.1.2
 
 jobs:
   build-linux:
@@ -214,6 +223,75 @@ jobs:
             crates/jazz-napi/native-artifact-fingerprint.cjs
           if-no-files-found: error
 
+  build-jazz-rn-android:
+    name: Build jazz-rn Android relay artifacts
+    if: inputs.include_rn
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+          sccache: "true"
+          sccache-key: release-jazz-rn-android-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk@${{ env.JAZZ_RN_CARGO_NDK_VERSION }} --locked
+
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+      - name: Install pinned Android NDK
+        run: sdkmanager --install "ndk;27.1.12297006"
+      - name: Build and verify Android relay archive slices
+        run: |
+          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
+            JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" \
+            ANDROID_NDK_HOME="${ANDROID_SDK_ROOT}/ndk/27.1.12297006" \
+            pnpm --filter jazz-rn build:relay:android
+          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
+            JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" \
+            node crates/jazz-rn/scripts/verify-relay-artifacts.mjs android
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-rn-relay-android
+          path: |
+            crates/jazz-rn/android/src/main/jniLibs
+            crates/jazz-rn/android/jazz-native-relay.manifest.json
+            crates/jazz-rn/native/include
+          if-no-files-found: error
+
+  build-jazz-rn-ios:
+    name: Build jazz-rn iOS relay XCFramework
+    if: inputs.include_rn
+    runs-on: blacksmith-6vcpu-macos-15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+          sccache: "true"
+          sccache-key: release-jazz-rn-ios-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
+
+      - name: Build and verify iOS relay XCFramework
+        run: |
+          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
+            pnpm --filter jazz-rn build:relay:ios
+          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
+            node crates/jazz-rn/scripts/verify-relay-artifacts.mjs ios
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-rn-relay-ios
+          path: |
+            crates/jazz-rn/JazzNativeRelay.xcframework
+            crates/jazz-rn/ios/jazz-native-relay.manifest.json
+            crates/jazz-rn/native/include
+          if-no-files-found: error
+
   assemble-packages:
     name: Assemble npm packages
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -360,5 +438,79 @@ jobs:
           path: |
             packages/create-jazz
             !packages/create-jazz/node_modules
+          include-hidden-files: true
+          if-no-files-found: error
+
+  assemble-jazz-rn:
+    name: Assemble jazz-rn npm package
+    needs:
+      - build-jazz-rn-android
+      - build-jazz-rn-ios
+    # A skipped optional platform build must not make the normal package
+    # assembly skip. Conversely, require both relay receipts whenever RN was
+    # explicitly requested.
+    if: >-
+      ${{
+        always() &&
+        inputs.include_rn &&
+        needs.build-jazz-rn-android.result == 'success' &&
+        needs.build-jazz-rn-ios.result == 'success'
+      }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    outputs:
+      artifact: ${{ steps.artifact.outputs.name }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-toolchain: ""
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-rn-relay-android
+          path: crates/jazz-rn
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-rn-relay-ios
+          path: crates/jazz-rn
+
+      - name: Verify staged jazz-rn relay artifacts
+        run: |
+          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
+            node crates/jazz-rn/scripts/verify-relay-artifacts.mjs android ios
+
+      - name: Build jazz-rn TypeScript package
+        run: pnpm --filter jazz-rn build
+
+      - name: Verify packed jazz-rn relay payload
+        run: |
+          TEMPORARY_DIRECTORY=$(mktemp -d)
+          pnpm --filter jazz-rn pack --pack-destination "${TEMPORARY_DIRECTORY}"
+          TARBALL=$(ls "${TEMPORARY_DIRECTORY}"/jazz-rn-*.tgz | head -n 1)
+          tar -xzf "${TARBALL}" -C "${TEMPORARY_DIRECTORY}"
+          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
+            JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" \
+            node crates/jazz-rn/scripts/verify-relay-artifacts.mjs \
+              --package-root "${TEMPORARY_DIRECTORY}/package" android ios
+
+      - name: Verify jazz-rn publish artifacts
+        run: |
+          test -f crates/jazz-rn/lib/module/index.js
+          test -f crates/jazz-rn/lib/typescript/src/index.d.ts
+
+      - id: artifact
+        run: echo "name=pkg-jazz-rn" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pkg-jazz-rn
+          path: |
+            crates/jazz-rn
+            !crates/jazz-rn/node_modules
           include-hidden-files: true
           if-no-files-found: error

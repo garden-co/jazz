@@ -9,7 +9,7 @@ import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-sou
 import { Db, type DbConfig } from "../runtime/db.js";
 import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
 import { SYSTEM_READ_SESSION } from "../runtime/system-identity.js";
-import { canonicalAuthorSubject } from "../runtime/author-id.js";
+import { canonicalAuthorSubject, withCanonicalUser } from "../runtime/author-id.js";
 import { authorBytesForSession } from "../runtime/author-id.js";
 import type { AuthState } from "../runtime/auth-state.js";
 import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
@@ -309,7 +309,7 @@ export class JazzContext {
       backendScoped
         ? {
             authMode: session?.authMode ?? "external",
-            session: session ?? null,
+            session: session ? withCanonicalUser(session) : null,
           }
         : undefined,
     );

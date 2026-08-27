@@ -1,6 +1,6 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { schema as s } from "../../src/index.js";
-import type { QueryBuilder, TableProxy } from "../../src/runtime/db.js";
+import type { Db, QueryBuilder, TableProxy } from "../../src/runtime/db.js";
 import type { Query, Table } from "../../src/typed-app.js";
 
 interface ProjectRecord {
@@ -80,6 +80,17 @@ const graphSchema = {
 type GraphAppSchema = s.Schema<typeof graphSchema>;
 const graphApp: s.App<GraphAppSchema> = s.defineApp(graphSchema);
 
+const largeValueUpdateSchema = {
+  documents: s.table({
+    title: s.string(),
+    payload: s.bytes(),
+    metadata: s.json(),
+    done: s.boolean(),
+  }),
+};
+type LargeValueUpdateAppSchema = s.Schema<typeof largeValueUpdateSchema>;
+const largeValueUpdateApp: s.App<LargeValueUpdateAppSchema> = s.defineApp(largeValueUpdateSchema);
+
 const largeSchema = {
   accounts: s.table({
     name: s.string(),
@@ -120,6 +131,36 @@ describe("typed app prototype", () => {
       orderBy: [],
       hops: [],
     });
+  });
+
+  it("serializes partial large-value select descriptors", () => {
+    const query = app.todos.select({
+      attachment: { from: 1_000_000, to: 2_000_000 },
+      title: { fromUtf8: 4, toUtf8: 67 },
+    });
+
+    expect(JSON.parse(query._build())).toMatchObject({
+      table: "todos",
+      select: {
+        attachment: { from: 1_000_000, to: 2_000_000 },
+        title: { fromUtf8: 4, toUtf8: 67 },
+      },
+    });
+    expectTypeOf(query).toMatchTypeOf<
+      QueryBuilder<{ id: string; attachment: Uint8Array; title: string }>
+    >();
+
+    if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
+      // The object form is a schema-derived partial projection, rather than a
+      // generic descriptor bag. In particular, JSON pointers cannot leak onto
+      // an arbitrary scalar just because its JS representation is primitive.
+      // @ts-expect-error BOOLEAN columns do not support partial projections.
+      app.todos.select({ done: { at: "/" } });
+      // @ts-expect-error bytes use byte ranges, not text UTF-8 coordinates.
+      app.todos.select({ attachment: { fromUtf8: 0, toUtf8: 1 } });
+      // @ts-expect-error TEXT cannot use the JSON-pointer projection form.
+      app.todos.select({ title: { at: "/" } });
+    }
   });
 
   it("serializes nested include builders as query objects", () => {
@@ -453,6 +494,76 @@ describe("typed app prototype", () => {
         done: null,
       };
       void invalidDefaultedNull;
+    }
+  });
+
+  it("infers update payloads with column-specific large-value descriptors", () => {
+    type DocumentUpdate = s.LargeValueUpdateOf<typeof largeValueUpdateApp.documents>;
+    const update = {
+      title: {
+        within: { from: 0, to: 4 },
+        splices: [{ at: 1, delete: 2, insert: "ee" }],
+      },
+      payload: {
+        within: { from: 0, to: 3 },
+        splices: [{ at: 1, delete: 1, insert: new Uint8Array([9]) }],
+      },
+      metadata: {
+        edits: [{ op: "set", at: "/selected/answer", value: 43 }],
+      },
+    } satisfies DocumentUpdate;
+
+    const utf8TextUpdate = {
+      title: {
+        within: { fromUtf8: 0, toUtf8: 4 },
+        splices: [{ atUtf8: 0, deleteUtf8: 4, insert: "text" }],
+      },
+    } satisfies DocumentUpdate;
+
+    void update;
+    void utf8TextUpdate;
+
+    if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
+      // Whole-column updates continue to use the ordinary Db.update API; the
+      // narrow LargeValueUpdateOf surface intentionally accepts only diffs.
+      const db = null as unknown as Pick<Db, "update" | "upsert">;
+      db.update(largeValueUpdateApp.documents, "00000000-0000-0000-0000-000000000001", {
+        done: true,
+      });
+      db.upsert(largeValueUpdateApp.documents, "00000000-0000-0000-0000-000000000001", {
+        // @ts-expect-error partial descriptors belong exclusively to applyDiffs
+        title: { within: { from: 0, to: 1 }, splices: [{ at: 0, delete: 0, insert: "x" }] },
+      });
+
+      const byteUpdateWithText = {
+        payload: {
+          within: { from: 0, to: 1 },
+          splices: [
+            {
+              at: 0,
+              delete: 0,
+              // @ts-expect-error byte splice inserts must be Uint8Array
+              insert: "x",
+            },
+          ],
+        },
+      } satisfies DocumentUpdate;
+      void byteUpdateWithText;
+
+      const textUpdateWithBytes = {
+        title: {
+          within: { fromUtf8: 0, toUtf8: 1 },
+          splices: [
+            {
+              atUtf8: 0,
+              deleteUtf8: 0,
+              // @ts-expect-error text splice inserts must be strings
+              insert: new Uint8Array([1]),
+            },
+          ],
+        },
+      } satisfies DocumentUpdate;
+      void textUpdateWithBytes;
     }
   });
 

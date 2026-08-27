@@ -20,8 +20,8 @@ describe("createDb — anonymous mode", () => {
       driver: { type: "memory" },
       serverUrl: "ws://example.invalid",
     });
-    const first = db.getAuthState().session?.user_id;
-    const second = db.getAuthState().session?.user_id;
+    const first = db.getAuthState().session?.user;
+    const second = db.getAuthState().session?.user;
     expect(first).toBe(second);
     expect(first).toBeTruthy();
     await db.shutdown();

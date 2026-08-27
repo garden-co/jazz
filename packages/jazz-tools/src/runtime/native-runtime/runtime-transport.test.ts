@@ -116,7 +116,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new TextEncoder().encode('["urn:jazz:runtime-host","local-cache"]'),
+      new TextEncoder().encode('["https://jazz.test","local-cache"]'),
       1,
       true,
     );

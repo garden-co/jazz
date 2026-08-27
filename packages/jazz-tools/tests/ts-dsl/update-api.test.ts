@@ -140,6 +140,34 @@ describe("TS Update API", () => {
     });
   });
 
+  it("validates large-value update descriptor coordinates before native writes", () => {
+    expect(() =>
+      db.applyDiffs(app.table_with_defaults, "00000000-0000-0000-0000-000000000001", {
+        string: {
+          within: { from: 2, to: 1 },
+          splices: [],
+        },
+      }),
+    ).toThrow('Large-value page for "string" must have from <= to.');
+
+    expect(() =>
+      db.applyDiffs(app.table_with_defaults, "00000000-0000-0000-0000-000000000001", {
+        bytes: {
+          within: { from: 0, to: 1 },
+          splices: [{ at: 0, delete: 0, insert: "x" }],
+        },
+      } as never),
+    ).toThrow('Byte splice insert for "bytes" must be a Uint8Array.');
+
+    expect(() =>
+      db.applyDiffs(app.table_with_defaults, "00000000-0000-0000-0000-000000000001", {
+        json: {
+          edits: [{ op: "remove", at: "/name" }],
+        },
+      } as never),
+    ).toThrow('JSON update "json" supports only { op: "set", at, value } edits.');
+  });
+
   it("trying to update an already-deleted row fails", async () => {
     const project = insertProject(db);
     db.delete(app.projects, project.id);

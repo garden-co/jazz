@@ -4,7 +4,7 @@ use super::*;
 
 #[futures_test::test]
 async fn query_subscriptions_receive_filtered_projected_messages() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_query(select_query(
@@ -38,7 +38,7 @@ async fn query_subscriptions_receive_filtered_projected_messages() {
 
 #[futures_test::test]
 async fn query_projection_aliases_drive_output_schema() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_query(select_query(
@@ -68,7 +68,7 @@ async fn query_projection_aliases_drive_output_schema() {
 
 #[futures_test::test]
 async fn query_subscriptions_can_read_from_simple_ctes() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let cte = Cte::new(
         "recent",
@@ -112,7 +112,7 @@ async fn query_subscriptions_can_read_from_simple_ctes() {
 
 #[futures_test::test]
 async fn query_subscriptions_support_literal_on_left_predicates() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_query(select_query(
@@ -146,7 +146,8 @@ async fn query_subscriptions_support_literal_on_left_predicates() {
 
 #[futures_test::test]
 async fn query_subscriptions_support_multi_key_inner_joins() {
-    let storage = MemoryStorage::new(&["albums", "artists"]);
+    let storage =
+        MemoryStorage::new(&["albums", "artists"]).expect("valid memory storage families");
     let mut database = Database::new(tenant_albums_artists_schema(), storage)
         .await
         .unwrap();
@@ -211,7 +212,8 @@ async fn query_subscriptions_support_multi_key_inner_joins() {
 
 #[futures_test::test]
 async fn query_subscriptions_support_qualified_wildcards_after_join() {
-    let storage = MemoryStorage::new(&["albums", "artists"]);
+    let storage =
+        MemoryStorage::new(&["albums", "artists"]).expect("valid memory storage families");
     let mut database = Database::new(albums_artists_schema(), storage)
         .await
         .unwrap();

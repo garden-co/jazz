@@ -179,7 +179,7 @@ fn maintained_view_capture_schema() -> JazzSchema {
             .policies(
                 PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
                     "owner",
-                    vec!["user_id".to_owned()],
+                    vec!["claims".to_owned(), "sub".to_owned()],
                 )),
             ),
     ))
@@ -187,9 +187,12 @@ fn maintained_view_capture_schema() -> JazzSchema {
 
 fn install_test_provider_claims(core: &mut NodeState<RocksDbStorage>, identity: AuthorSubject) {
     if matches!(identity, AuthorSubject::Authenticated(_)) {
-        core.set_session_claims(
+        core.set_test_provider_claims(
             identity,
-            BTreeMap::from([("user_id".to_owned(), Value::Uuid(identity.test_uuid()))]),
+            BTreeMap::from([(
+                crate::query::provider_claim_key("sub"),
+                Value::Uuid(identity.test_uuid()),
+            )]),
         );
     }
 }
@@ -819,7 +822,7 @@ fn maintained_view_multitable_capture_schema() -> JazzSchema {
     let owner_read = || {
         PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
             "owner",
-            vec!["user_id".to_owned()],
+            vec!["claims".to_owned(), "sub".to_owned()],
         ))
     };
     build_public_test_schema(
@@ -877,7 +880,7 @@ fn recursive_rls_capture_schema() -> JazzSchema {
         &[],
         "teams",
         "id",
-        &["user_id"],
+        &["claims", "sub"],
         "id",
     );
     build_public_test_schema(

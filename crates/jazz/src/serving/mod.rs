@@ -346,7 +346,9 @@ impl ShellDb {
                 let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
                 let mut config = DbConfig::new(
                     schema,
-                    BoxedStorage::new(MemoryStorage::new(&refs)),
+                    BoxedStorage::new(
+                        MemoryStorage::new(&refs).expect("valid memory storage families"),
+                    ),
                     identity,
                 );
                 if let Some(seed) = row_id_seed {
@@ -696,7 +698,9 @@ impl InMemoryServerShell {
                 let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
                 let mut db_config = DbConfig::new(
                     config.schema,
-                    BoxedStorage::new(MemoryStorage::new(&refs)),
+                    BoxedStorage::new(
+                        MemoryStorage::new(&refs).expect("valid memory storage families"),
+                    ),
                     config.identity,
                 );
                 if let Some(row_id_seed) = config.row_id_seed {

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { authorForNativeOpenConfig } from "./native-codec.js";
 import { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 
 const schema = {};
@@ -9,6 +10,15 @@ const proof = {
   appId: "proof-app",
   claimedAuthor: JSON.stringify(["urn:jazz:local-first", "alice"]),
 };
+
+function fakeTransport() {
+  return {
+    close: vi.fn(() => true),
+    recvWireFrames: vi.fn(() => []),
+    sendWireFrame: vi.fn(),
+    tick: vi.fn(() => 0),
+  };
+}
 
 function fakeDb() {
   // The constructor returns a full NativeDb even though this narrow ABI test
@@ -48,6 +58,16 @@ function fakeDb() {
 }
 
 describe("self-signed native open ABI", () => {
+  it("keeps reserved authors out of the ordinary config while retaining external authors", () => {
+    for (const issuer of ["urn:jazz:local-first", "urn:jazz:anonymous"]) {
+      const reserved = new TextEncoder().encode(JSON.stringify([issuer, "alice"]));
+      expect(new TextDecoder().decode(authorForNativeOpenConfig(reserved, proof))).toBe(
+        '["https://jazz.invalid","self-signed-open"]',
+      );
+    }
+    expect(authorForNativeOpenConfig(author)).toBe(author);
+  });
+
   it("fails explicitly against an old native artifact instead of falling back to its raw open", () => {
     const oldArtifact = { openMemory: vi.fn(() => fakeDb()) };
 
@@ -81,6 +101,50 @@ describe("self-signed native open ABI", () => {
       proof.appId,
       proof.claimedAuthor,
     );
+    void runtime.close();
+  });
+
+  it("uses only proof-verified subscriber admission for a reserved worker identity", () => {
+    const ordinaryAdmission = vi.fn();
+    const proofAdmission = vi.fn(fakeTransport);
+    const runtime = NativeRuntimeAdapter.fromDb(
+      {
+        ...fakeDb(),
+        acceptSubscriber: ordinaryAdmission,
+        acceptSubscriberWithSelfSignedProof: proofAdmission,
+      },
+      schema,
+      node,
+      new TextEncoder().encode(proof.claimedAuthor),
+      1,
+      false,
+      { selfSignedClientProof: proof },
+    );
+
+    runtime.acceptPeer({ role: "writer" });
+
+    expect(ordinaryAdmission).not.toHaveBeenCalled();
+    expect(proofAdmission).toHaveBeenCalledWith(
+      { role: "writer" },
+      proof.token,
+      proof.appId,
+      proof.claimedAuthor,
+    );
+    void runtime.close();
+  });
+
+  it("fails closed if a worker artifact lacks proof-verified subscriber admission", () => {
+    const runtime = NativeRuntimeAdapter.fromDb(
+      { ...fakeDb(), acceptSubscriber: vi.fn() },
+      schema,
+      node,
+      new TextEncoder().encode(proof.claimedAuthor),
+      1,
+      false,
+      { selfSignedClientProof: proof },
+    );
+
+    expect(() => runtime.acceptPeer()).toThrow(/does not support self-signed subscriber admission/);
     void runtime.close();
   });
 

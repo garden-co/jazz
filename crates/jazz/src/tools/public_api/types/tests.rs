@@ -403,7 +403,7 @@ fn schema_hash_ignores_policies() {
                 .column("owner_id", ColumnType::Uuid)
                 .policies(TablePolicies::new().with_select(PolicyExpr::eq_session(
                     "owner_id",
-                    vec!["user_id".to_string()],
+                    vec!["claims".to_string(), "user_id".to_string()],
                 ))),
         )
         .build();

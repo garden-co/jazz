@@ -33,7 +33,7 @@ export function TodoList() {
   const db = useDb();
   const { data: todos = [] } = useAll(todosQuery);
   const session = useSession();
-  const sessionUserId = session?.user_id ?? null;
+  const sessionUserId = session?.user ?? null;
   // #endregion reading-reactive-hooks-expo
 
   // #region writing-use-db-expo
