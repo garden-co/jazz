@@ -358,7 +358,7 @@ impl RunningServer {
                 "serve-loopback-websocket-schema",
                 &schema_hex(schema),
                 "--in-memory",
-                "--admin-secret",
+                "--auth-static-bearer",
                 "test-admin-secret",
             ])
             .stdin(Stdio::piped())
@@ -420,15 +420,16 @@ fn help_lists_dev_server_commands() {
             && line.contains("--in-memory")
             && line.contains("--memory")
             && line.contains("--auth-static-bearer <token>")
-            && line.contains("--admin-secret <token>")
             && line.contains("--auth-jwt-ed-public-key-pem <pem>")
+            && line.contains("--jwt-issuer <issuer>")
+            && line.contains("--jwt-audience <audience>")
     }));
     assert!(lines.iter().any(|line| {
         line.contains(" server <APP_ID>")
             && line.contains("--port <port>")
             && line.contains("--data-dir <dir>")
             && line.contains("--in-memory")
-            && line.contains("--admin-secret <token>")
+            && line.contains("--auth-static-bearer <token>")
     }));
     assert!(lines.iter().any(|line| {
         line.contains(" serve <schema-source-json-hex>")
@@ -511,7 +512,13 @@ fn server_command_reports_missing_app_id_with_usage() {
 #[test]
 fn server_command_reports_wired_loopback_shape() {
     let mut child = jazz_server_command()
-        .args(["server", "app-a", "--in-memory", "--admin-secret", "secret"])
+        .args([
+            "server",
+            "app-a",
+            "--in-memory",
+            "--auth-static-bearer",
+            "secret",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -593,7 +600,7 @@ fn server_command_defaults_to_data_dir_and_accepts_aliases() {
             data_dir.to_str().expect("temp path is utf-8"),
             "--ws-path",
             "/custom-ws",
-            "--admin-secret",
+            "--auth-static-bearer",
             "secret",
         ])
         .stdin(Stdio::piped())
