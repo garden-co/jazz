@@ -2719,12 +2719,17 @@ where
                             shape_registrations.insert(registration_key, registration);
                         }
                         SyncMessage::Subscribe(subscribe) => {
+                            // Subscription admission has a substantially larger async state
+                            // machine than ordinary peer messages. Keep that state on the heap
+                            // so a commit uploaded on this same connection does not carry the
+                            // inactive Subscribe arm on a normal two-megabyte executor stack.
+                            let should_continue = Box::pin(async {
                             if let Err(message) =
                                 validate_known_state_declaration(&subscribe.known_state)
                             {
                                 let _ = message;
                                 drop_peer_request(&self.node);
-                                continue;
+                                return Ok::<bool, Error>(true);
                             }
                             let shape_id = subscribe.shape_id;
                             let subscription = subscribe.subscription;
@@ -2735,7 +2740,7 @@ where
                                 shape_registrations.get(&registration_key).cloned()
                             else {
                                 drop_peer_request(&self.node);
-                                continue;
+                                return Ok::<bool, Error>(true);
                             };
                             let pending_catalogue_admission = matches!(
                                 &registration,
@@ -2755,7 +2760,7 @@ where
                                             detail,
                                         ),
                                     );
-                                    continue;
+                                    return Ok::<bool, Error>(true);
                                 }
                                 SubscriberShapeRegistration::Registered(opts)
                                 | SubscriberShapeRegistration::PendingCatalogueAdmission(opts) => {
@@ -2776,7 +2781,7 @@ where
                                 } else {
                                     drop_peer_request(&self.node);
                                 }
-                                continue;
+                                return Ok::<bool, Error>(true);
                             };
                             if pending_catalogue_admission {
                                 shape_registrations.insert(
@@ -2794,7 +2799,7 @@ where
                                 Ok(binding) => binding,
                                 Err(_) => {
                                     drop_peer_request(&self.node);
-                                    continue;
+                                    return Ok::<bool, Error>(true);
                                 }
                             };
                             if ensure_supported_register_shape_options(
@@ -2805,7 +2810,7 @@ where
                             .is_err()
                             {
                                 drop_peer_request(&self.node);
-                                continue;
+                                return Ok::<bool, Error>(true);
                             }
                             let scope_purpose = if let Some(purpose) = scope_purpose {
                                 let expected_result =
@@ -2817,7 +2822,7 @@ where
                                     Ok(expected) => expected,
                                     Err(_) => {
                                         drop_peer_request(&self.node);
-                                        continue;
+                                        return Ok::<bool, Error>(true);
                                     }
                                 };
                                 let exact_support = subscription.shape_id == shape.shape_id()
@@ -2836,7 +2841,7 @@ where
                                     );
                                 if !exact_support {
                                     drop_peer_request(&self.node);
-                                    continue;
+                                    return Ok::<bool, Error>(true);
                                 }
                                 Some(AuthorizedScopePurpose {
                                     key: expected.key,
@@ -2858,7 +2863,7 @@ where
                                 && existing != purpose
                             {
                                 drop_peer_request(&self.node);
-                                continue;
+                                return Ok::<bool, Error>(true);
                             }
                             let supported = self
                                 .node
@@ -2871,10 +2876,11 @@ where
                                     subscriber_permission_subject(*ingest_context),
                                     &opts.read_view,
                                     QueryAuthorizationMode::TrustedServing,
-                                )
-                                .await;
+                            )
+                            .await;
                             if let Err(crate::node::Error::QueryCapability(detail)) = supported {
-                                queue_direct_control(&mut self.pending_control_responses,
+                                queue_direct_control(
+                                    &mut self.pending_control_responses,
                                     unsupported_shape_capability_rejection_message(
                                         subscription,
                                         detail,
@@ -2882,14 +2888,18 @@ where
                                 );
                                 schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                                 flush_subscriber_controls_or_stop!(self, peer);
-                                return Ok(true);
+                                return Ok::<bool, Error>(true);
                             } else if let Err(error) = supported {
-                                queue_direct_control(&mut self.pending_control_responses,
-                                    server_subscription_failure_rejection_message(subscription, &error),
+                                queue_direct_control(
+                                    &mut self.pending_control_responses,
+                                    server_subscription_failure_rejection_message(
+                                        subscription,
+                                        &error,
+                                    ),
                                 );
                                 schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                                 flush_subscriber_controls_or_stop!(self, peer);
-                                return Ok(true);
+                                return Ok::<bool, Error>(true);
                             }
                             let coverage = coverage_key(&shape, &binding, opts.clone());
                             let group_subscription = SubscriptionKey {
@@ -2992,7 +3002,7 @@ where
                                     )
                                 {
                                     drop_peer_request(&self.node);
-                                    continue;
+                                    return Ok::<bool, Error>(true);
                                 }
                                 scope_purposes.insert(subscription, purpose);
                             }
@@ -3093,6 +3103,12 @@ where
                             }
                             schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                             scheduled_immediate = true;
+                            Ok::<bool, Error>(false)
+                            })
+                            .await?;
+                            if should_continue {
+                                continue;
+                            }
                         }
                         SyncMessage::Unsubscribe { subscription } => {
                             self.node.borrow_mut().apply_unsubscribe(subscription);
