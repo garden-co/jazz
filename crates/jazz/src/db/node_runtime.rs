@@ -388,6 +388,18 @@ where
         schedule_tick_in(&self.scheduler, urgency);
     }
 
+    /// Obtain the host-owned waker that survives this short owner turn.
+    ///
+    /// It is passed only into Groove's non-blocking query-progress poll. A
+    /// later cold-storage completion therefore asks the host for one new tick
+    /// instead of making this runtime poll while the storage is still cold.
+    pub(super) fn query_runtime_waker(&self) -> Option<Waker> {
+        self.scheduler
+            .borrow()
+            .as_ref()
+            .and_then(|scheduler| scheduler.query_runtime_waker())
+    }
+
     /// Enqueue a stream-finalization command without touching the async node
     /// mutex. This is the only operation a stream's `Drop` implementation may
     /// perform. A closed node has already retired its runtime, so later
@@ -683,10 +695,12 @@ where
     }
 
     pub(super) async fn refresh_subscriptions(&self) -> Result<usize, Error> {
+        let progress_waker = self.query_runtime_waker();
         refresh_subscriptions_in(
             &self.node,
             &self.subscriptions,
             &self.active_authority_view_receipts,
+            progress_waker.as_ref(),
         )
         .await
     }
@@ -1504,14 +1518,17 @@ where
         self.drain_subscription_finalizations().await?;
         self.deliver_pending_mutation_errors();
         let mut stats = DbTickStats::default();
+        let progress_waker = self.query_runtime_waker();
         let chunk_completion_generation = self.chunk_resolver.completion_generation();
         if self.chunk_resolver.has_pending_local_demand()
             || chunk_completion_generation != self.observed_chunk_completion_generation.get()
+            || self.node.lock().await.has_pending_query_runtime()
         {
             stats.subscription_events += Box::pin(refresh_subscriptions_in(
                 &self.node,
                 &self.subscriptions,
                 &self.active_authority_view_receipts,
+                progress_waker.as_ref(),
             ))
             .await?;
             self.observed_chunk_completion_generation
@@ -1681,6 +1698,7 @@ pub(super) async fn refresh_subscriptions_in<S>(
     node: &SharedNodeState<S>,
     subscriptions: &SubscriptionList,
     active_authority_view_receipts: &ActiveAuthorityViewReceipts,
+    progress_waker: Option<&Waker>,
 ) -> Result<usize, Error>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
@@ -1693,7 +1711,10 @@ where
         .await
         .take_pending_authoritative_reset_binding_views();
     let mut consumed_authoritative_resets = BTreeSet::new();
-    node.lock().await.drive_ready_query_runtime().await?;
+    node.lock()
+        .await
+        .drive_ready_query_runtime_with_waker(progress_waker)
+        .await?;
     let live_subscriptions = subscriptions.borrow().clone();
     for weak in &live_subscriptions {
         let Some(state) = weak.upgrade() else {

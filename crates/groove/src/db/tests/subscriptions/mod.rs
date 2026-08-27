@@ -2,6 +2,93 @@
 
 use super::*;
 
+/// A non-blocking owner turn must leave a real wake route behind for cold
+/// hydration. Merely noticing pending work on a later manually-driven tick is
+/// insufficient for event-driven hosts: no unrelated transport activity is
+/// required to resume this subscription.
+#[futures_test::test]
+async fn cold_hydration_wakes_the_supplied_owner_once_without_polling() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use futures::task::{ArcWake, waker};
+
+    struct WakeCount(AtomicUsize);
+
+    impl ArcWake for WakeCount {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    let (storage, control) = TestStorage::controlled(&["albums"]);
+    let mut database = Database::new(albums_schema(), storage.clone())
+        .await
+        .unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("wake bridge".to_owned())],
+    );
+    database.commit_batch(batch).await.unwrap();
+    storage.evict_all();
+    control.pause_on(TestStorageOperation::ScanOpen);
+
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .await
+        .unwrap();
+    let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let owner_waker = waker(Arc::clone(&wakes));
+    database
+        .drive_ready_progress_with_waker(Some(&owner_waker))
+        .await
+        .unwrap();
+    assert!(database.has_pending_progress());
+    assert_eq!(wakes.0.load(Ordering::Acquire), 0);
+
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    assert_eq!(
+        wakes.0.load(Ordering::Acquire),
+        1,
+        "storage readiness schedules exactly one following owner turn"
+    );
+    let mut observed_wakes = wakes.0.load(Ordering::Acquire);
+    for _ in 0..32 {
+        database
+            .drive_ready_progress_with_waker(Some(&owner_waker))
+            .await
+            .unwrap();
+        if !database.has_pending_progress() {
+            break;
+        }
+        let next_wakes = wakes.0.load(Ordering::Acquire);
+        assert!(
+            next_wakes > observed_wakes,
+            "each further cold operation requests its own owner turn instead of polling hot"
+        );
+        observed_wakes = next_wakes;
+    }
+    assert!(!database.has_pending_progress());
+    assert_eq!(
+        expect_try_recv_vals(&subscription),
+        vec![(
+            vec![Value::U64(1), Value::String("wake bridge".to_owned())],
+            1
+        )]
+    );
+    let idle_wakes = wakes.0.load(Ordering::Acquire);
+    database
+        .drive_ready_progress_with_waker(Some(&owner_waker))
+        .await
+        .unwrap();
+    assert_eq!(
+        wakes.0.load(Ordering::Acquire),
+        idle_wakes,
+        "quiescent runtimes retain no storage wake and do not schedule a hot follow-up"
+    );
+}
+
 #[futures_test::test]
 async fn subscribe_sends_empty_hydration_snapshot_without_writes() {
     let storage = MemoryStorage::new(&["albums"]);

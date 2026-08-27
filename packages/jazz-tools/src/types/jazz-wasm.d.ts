@@ -100,6 +100,8 @@ declare module "jazz-wasm" {
 
   export class WasmDb {
     static openMemory(schema: Uint8Array, config: Uint8Array): WasmDb;
+    /** Explicit trusted-backend ABI; raw open config cannot select SYSTEM. */
+    static openMemoryAsBackend(schema: Uint8Array, config: Uint8Array): WasmDb;
     static openMemoryWithSelfSignedProof(
       schema: Uint8Array,
       config: Uint8Array,
@@ -129,6 +131,19 @@ declare module "jazz-wasm" {
       column: string,
       mutation?: "insert" | "update" | "upsert",
       author?: Uint8Array,
+      updatedAtMs?: number,
+      head?: unknown,
+      base?: unknown,
+    ): StreamingMutation;
+    /** Backend-only provenance-preserving streaming mutation. */
+    beginStreamingMutationAttributedEncoded(
+      table: string,
+      rowId: Uint8Array,
+      cells: Uint8Array,
+      column: string,
+      mutation: "insert" | "update" | "upsert" | undefined,
+      author: Uint8Array | null | undefined,
+      attribution: Uint8Array,
       updatedAtMs?: number,
       head?: unknown,
       base?: unknown,
@@ -170,7 +185,33 @@ declare module "jazz-wasm" {
     static destroyBrowserStorage(namespace: string): Promise<void>;
 
     registerSchema(schema: Uint8Array): WasmDb;
+    insertWithIdEncodedAttributed(
+      table: string,
+      rowId: Uint8Array,
+      cells: Uint8Array,
+      author: Uint8Array,
+    ): WasmWrite;
+    updateEncodedAttributed(
+      table: string,
+      rowId: Uint8Array,
+      patch: Uint8Array,
+      author: Uint8Array,
+    ): WasmWrite;
+    upsertEncodedAttributed(
+      table: string,
+      rowId: Uint8Array,
+      cells: Uint8Array,
+      author: Uint8Array,
+    ): WasmWrite;
+    deleteAttributed(table: string, rowId: Uint8Array, author: Uint8Array): WasmWrite;
+    restoreEncodedAttributed(
+      table: string,
+      rowId: Uint8Array,
+      cells: Uint8Array,
+      author: Uint8Array,
+    ): WasmWrite;
     beginTransaction(openBatchId: string, kind: string, author?: Uint8Array | null): void;
+    beginTransactionAttributed(openBatchId: string, attribution: Uint8Array): void;
     commitTransaction(openBatchId: string, kind?: string | null): WasmWrite;
     rollbackTransaction(openBatchId: string): void;
     attachMergeableTx(openBatchId: string): WasmTx;
