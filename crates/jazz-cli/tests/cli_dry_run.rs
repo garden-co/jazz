@@ -30,8 +30,12 @@ use tungstenite::protocol::Message;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{WebSocket, connect};
 
+mod support;
+
+use support::cargo_binary;
+
 fn jazz_server_command() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_jazz-server"));
+    let mut command = Command::new(cargo_binary("jazz-server"));
     command
         .env_remove("JAZZ_SERVER_LISTEN")
         .env_remove("JAZZ_SERVER_PORT")
@@ -51,7 +55,7 @@ fn jazz_server_command() -> Command {
 }
 
 fn jazz_tools_command() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_jazz-tools"));
+    let mut command = Command::new(cargo_binary("jazz-tools"));
     command
         .env_remove("JAZZ_SERVER_PORT")
         .env_remove("JAZZ_SERVER_DATA_DIR")

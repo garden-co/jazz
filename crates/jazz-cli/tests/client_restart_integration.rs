@@ -20,7 +20,7 @@ use tempfile::TempDir;
 
 mod support;
 
-use support::publish_allow_all_permissions;
+use support::{cargo_binary, publish_allow_all_permissions};
 
 const APP_ID_STR: &str = "00000000-0000-0000-0000-000000000001";
 const BACKEND_SECRET: &str = "backend-secret-for-integration-tests";
@@ -100,7 +100,7 @@ struct ServerProcess {
 impl ServerProcess {
     async fn start(port: u16, data_dir: &Path, jwks_endpoint: &str) -> Self {
         let bound_port_file = data_dir.join("bound-port");
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_jazz-tools"));
+        let mut cmd = Command::new(cargo_binary("jazz-tools"));
         cmd.args([
             "server",
             APP_ID_STR,
