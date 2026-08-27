@@ -74,6 +74,23 @@ export type NativeSelfSignedClientProof = {
   claimedAuthor: string;
 };
 
+// The proof-bearing native open ABI is the only authority that may derive a
+// first-party reserved author. Its ordinary config field is still decoded by
+// the untrusted ingress first, so it must carry a harmless external placeholder
+// rather than the verified local-first/anonymous identity supplied by the
+// proof. The runtime keeps the real author separately for peer attribution.
+const SELF_SIGNED_OPEN_CONFIG_AUTHOR = new TextEncoder().encode(
+  '["https://jazz.invalid","self-signed-open"]',
+);
+
+/** Choose the untrusted config author for a native database open. */
+export function authorForNativeOpenConfig(
+  author: Uint8Array,
+  selfSignedClientProof?: NativeSelfSignedClientProof,
+): Uint8Array {
+  return selfSignedClientProof ? SELF_SIGNED_OPEN_CONFIG_AUTHOR : author;
+}
+
 export async function readSubscriptionSnapshot(
   reader: ReadableStreamDefaultReader<SubscriptionStreamChunk>,
 ): Promise<SubscriptionSnapshotChunk> {
@@ -125,10 +142,11 @@ export function openConfig(
   sourceId?: number,
   historyComplete = false,
   initialSyncFlushEvery?: number,
+  selfSignedClientProof?: NativeSelfSignedClientProof,
 ): Uint8Array {
   const writer = new PostcardWriter();
   writer.bytes(node);
-  writer.string(canonicalOpenAuthor(author));
+  writer.string(canonicalOpenAuthor(authorForNativeOpenConfig(author, selfSignedClientProof)));
   if (sourceId == null) {
     writer.none();
   } else {
