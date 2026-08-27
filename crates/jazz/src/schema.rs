@@ -176,15 +176,12 @@ impl RuntimeSchema {
             let value = encoded
                 .decode()
                 .map_err(|_| format!("invalid branch column {column_name} encoding"))?;
-            if BranchColumnValue::from(value.clone()) != *encoded {
-                return Err(format!(
-                    "non-canonical branch column {column_name} encoding"
-                ));
-            }
             RecordDescriptor::new([("value", column.column_type.clone())])
                 .create(std::slice::from_ref(&value))
                 .map_err(|_| format!("invalid branch column {column_name} value"))?;
-            values.push((column_name.clone(), encoded.clone()));
+            let encoded = BranchColumnValue::encode_typed(&value, &column.column_type)
+                .map_err(|_| format!("invalid branch column {column_name} value"))?;
+            values.push((column_name.clone(), encoded));
             cells.insert(column_name.clone(), value);
         }
         values.sort_by(|left, right| left.0.cmp(&right.0));
@@ -243,7 +240,12 @@ impl RuntimeSchema {
                 .find(|(name, _)| name == column_name)
                 .map(|(_, value)| value)
                 .cloned()
-                .or_else(|| column.default.clone().map(BranchColumnValue::from));
+                .or_else(|| {
+                    column.default.as_ref().map(|value| {
+                        BranchColumnValue::encode_typed(value, &column.column_type)
+                            .expect("validated branch default")
+                    })
+                });
             selected == stored.as_ref()
         }) && stored
             .values
@@ -282,7 +284,12 @@ impl RuntimeSchema {
                     .iter()
                     .find(|(name, _)| name == column_name)
                     .map(|(_, value)| value.clone())
-                    .or_else(|| column.default.clone().map(BranchColumnValue::from))
+                    .or_else(|| {
+                        column.default.as_ref().map(|value| {
+                            BranchColumnValue::encode_typed(value, &column.column_type)
+                                .expect("validated branch default")
+                        })
+                    })
                     .ok_or_else(|| {
                         format!(
                             "older branch key is missing {column_name} without a migration default"
@@ -328,9 +335,12 @@ impl RuntimeSchema {
                 .find(|column| column.name == *column_name)
                 .ok_or_else(|| format!("unknown branch column on {}", table.name))?;
             let value = encoded
-                .decode()
+                .decode_as(&column.column_type)
                 .map_err(|_| format!("invalid branch column {column_name} encoding"))?;
-            if BranchColumnValue::from(value.clone()) != *encoded {
+            if BranchColumnValue::encode_typed(&value, &column.column_type)
+                .map_err(|_| format!("invalid branch column {column_name} value"))?
+                != *encoded
+            {
                 return Err(format!(
                     "non-canonical branch column {column_name} encoding"
                 ));
@@ -361,7 +371,12 @@ impl RuntimeSchema {
                 .iter()
                 .find(|(name, _)| name == column_name)
                 .map(|(_, value)| value.clone())
-                .or_else(|| column.default.clone().map(BranchColumnValue::from))
+                .or_else(|| {
+                    column.default.as_ref().map(|value| {
+                        BranchColumnValue::encode_typed(value, &column.column_type)
+                            .expect("validated branch default")
+                    })
+                })
                 .ok_or_else(|| {
                     format!("branch key is missing {column_name} without a migration default")
                 })?;
@@ -1710,6 +1725,34 @@ mod tests {
             [ColumnSchema::new("branch", ColumnType::String)],
         )
         .with_branch_column("branch")]);
+    }
+
+    #[test]
+    fn branch_selector_projection_uses_the_declared_enum_codec() {
+        let phase = ScalarEnumSchema::new("phase", ["draft", "ready"]).unwrap();
+        let schema = RuntimeSchema::new([TableSchema::new(
+            "todos",
+            [ColumnSchema::new(
+                "phase",
+                ColumnType::EnumTag(phase.clone()),
+            )],
+        )
+        .with_branch_column("phase")]);
+        let table = &schema.tables[0];
+
+        let (key, cells) = schema
+            .project_branch_selector(
+                table,
+                &BranchSelector::new([("phase", Value::String("ready".to_owned()))]),
+            )
+            .unwrap();
+
+        assert_eq!(key.values[0].1.0, [1, 8, 1]);
+        assert_eq!(cells["phase"], Value::String("ready".to_owned()));
+        assert_eq!(
+            schema.validate_authored_branch_key(table, &key).unwrap()["phase"],
+            Value::EnumTag(1)
+        );
     }
 
     #[test]
