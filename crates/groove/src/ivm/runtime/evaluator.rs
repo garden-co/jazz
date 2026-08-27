@@ -93,6 +93,41 @@ pub(super) struct TopByIncrementalState {
     groups: CollectByGroups,
 }
 
+impl TopByIncrementalState {
+    /// Remove only groups touched by this update so a long-lived subscription
+    /// does not retain one empty map for every departed group.
+    fn remove_empty_touched_groups<I>(&mut self, groups: I)
+    where
+        I: IntoIterator<Item = Vec<u8>>,
+    {
+        for group in groups {
+            if self.groups.get(&group).is_some_and(BTreeMap::is_empty) {
+                self.groups.remove(&group);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod top_by_state_tests {
+    use super::*;
+
+    #[test]
+    fn top_by_state_releases_many_departed_groups() {
+        let mut state = TopByIncrementalState::default();
+        let departed = (0_u16..1_024)
+            .map(|group| group.to_be_bytes().to_vec())
+            .collect::<Vec<_>>();
+        for group in &departed {
+            state.groups.insert(group.clone(), BTreeMap::new());
+        }
+
+        state.remove_empty_touched_groups(departed);
+
+        assert!(state.groups.is_empty());
+    }
+}
+
 pub(super) fn operator_state_for(operator: &OpType) -> OperatorState {
     match operator {
         OpType::Join(_) => OperatorState::Join(JoinState),
@@ -1734,6 +1769,9 @@ impl TickEvaluator<'_> {
                 }
             }
         }
+        state
+            .value_mut()
+            .remove_empty_touched_groups(touched_groups.keys().cloned());
         state.mark_forward_as_of(sub_tick)?;
         for group_prefix in touched_groups.keys() {
             let before = before.get(group_prefix).cloned().unwrap_or_default();
