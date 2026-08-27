@@ -170,6 +170,18 @@ physical id while `v1.title` and `v2.name` remain their respective authored
 wire names. This epoch intentionally does not accept the former JSON-in-bytes
 storage spelling.
 
+Contribution-merge provenance is likewise logical on the transaction/wire
+surface, but its durable `jazz_transactions` component payload uses the
+standard Groove `column` enum record with a single nonzero `U64`
+`physical_column_id`. The storage boundary resolves a logical `(table, column)`
+to that local id when writing and resolves the id back to the appropriate
+logical name when reading. A compatible lens rename retains the same id;
+recovery consults retained mappings when the active spelling has changed.
+Zero, unknown, ambiguous, malformed, or noncanonical contribution payloads
+fail closed before recovery makes the node resident. This is local storage
+identity only: API and wire records never expose physical ids or a private
+postcard contribution encoding.
+
 Jazz registers a schema variant and every projection needed for its logical
 views before activating a catalogue bundle or accepting a row under that
 alias. Variant registration is append-only: extending a lineage with a new

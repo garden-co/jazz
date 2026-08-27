@@ -1598,7 +1598,11 @@ fn contribution_component_column() -> GrooveColumnType {
             [
                 EnumCase::new(
                     "column",
-                    RecordDescriptor::new([("name", ValueType::String)]),
+                    // The public/wire contribution coordinate names a logical
+                    // column.  Its durable payload is instead this node's
+                    // stable physical-column identity; names are resolved at
+                    // the storage boundary through the retained catalogue.
+                    RecordDescriptor::new([("physical_column_id", ValueType::U64)]),
                 ),
                 EnumCase::new(
                     "operation",

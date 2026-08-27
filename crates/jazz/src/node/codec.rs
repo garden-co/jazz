@@ -251,7 +251,7 @@ groove::define_record! {
 }
 
 groove::define_record! {
-    struct ContributionMergeStorageRecord {
+    pub(super) struct ContributionMergeStorageRecord {
         0 => source: Vec<u8>,
         1 => target: Vec<u8>,
         2 => substitutions: Vec<Value>,
@@ -259,14 +259,14 @@ groove::define_record! {
 }
 
 groove::define_record! {
-    struct ContributionSubstitutionStorageRecord {
+    pub(super) struct ContributionSubstitutionStorageRecord {
         0 => target: OwnedRecord,
         1 => sources: Vec<Value>,
     }
 }
 
 groove::define_record! {
-    struct ContributionDotStorageRecord {
+    pub(super) struct ContributionDotStorageRecord {
         0 => tx_time: u64,
         1 => tx_node: uuid::Uuid,
         2 => coordinate: OwnedRecord,
@@ -274,7 +274,7 @@ groove::define_record! {
 }
 
 groove::define_record! {
-    struct ContributionCoordinateStorageRecord {
+    pub(super) struct ContributionCoordinateStorageRecord {
         0 => branch_key: Vec<u8>,
         1 => table: String,
         2 => row_uuid: uuid::Uuid,
@@ -284,8 +284,8 @@ groove::define_record! {
 }
 
 groove::define_record! {
-    struct ContributionColumnStorageRecord {
-        0 => name: String,
+    pub(super) struct ContributionColumnStorageRecord {
+        0 => physical_column_id: u64,
     }
 }
 
@@ -1063,7 +1063,10 @@ fn contribution_merge_descriptor() -> &'static records::RecordDescriptor {
     &DESCRIPTOR
 }
 
-fn record_field_type(descriptor: &records::RecordDescriptor, index: usize) -> &records::ValueType {
+pub(super) fn record_field_type(
+    descriptor: &records::RecordDescriptor,
+    index: usize,
+) -> &records::ValueType {
     &descriptor
         .fields()
         .get(index)
@@ -1086,9 +1089,11 @@ fn array_element_type(value_type: &records::ValueType) -> &records::ValueType {
 }
 
 fn contribution_component_storage_value(
+    coordinate: &ContributionCoordinate,
     component: &ContributionComponent,
     value_type: &records::ValueType,
-) -> records::EnumValue {
+    resolve_column_id: &mut impl FnMut(&str, &str) -> Result<PhysicalColumnId, Error>,
+) -> Result<records::EnumValue, Error> {
     let records::ValueType::Enum(schema) = value_type else {
         unreachable!("contribution component uses a Groove payload enum")
     };
@@ -1106,121 +1111,146 @@ fn contribution_component_storage_value(
         .payload;
     let record = match component {
         ContributionComponent::Column(name) => {
-            ContributionColumnStorageRecord::encode(payload, name.clone())
-                .expect("typed contribution column matches its descriptor")
+            let id = resolve_column_id(&coordinate.table, name)?;
+            if id.0 == 0 {
+                return Err(Error::InvalidStoredValue(
+                    "contribution physical column id must be nonzero",
+                ));
+            }
+            ContributionColumnStorageRecord::encode(payload, id.0)?
                 .record()
                 .clone()
         }
         ContributionComponent::Operation(identity) => {
-            ContributionOperationStorageRecord::encode(payload, identity.clone())
-                .expect("typed contribution operation matches its descriptor")
+            ContributionOperationStorageRecord::encode(payload, identity.clone())?
                 .record()
                 .clone()
         }
-        ContributionComponent::Register => OwnedRecord::new(
-            payload
-                .create(&[])
-                .expect("typed contribution register matches its descriptor"),
-            *payload,
-        ),
+        ContributionComponent::Register => OwnedRecord::new(payload.create(&[])?, *payload),
     };
-    records::EnumValue::new(tag, record)
+    Ok(records::EnumValue::new(tag, record))
 }
 
 fn contribution_coordinate_storage_record(
     coordinate: &ContributionCoordinate,
     descriptor: &records::RecordDescriptor,
-) -> OwnedRecord {
-    ContributionCoordinateStorageRecord::encode(
+    resolve_column_id: &mut impl FnMut(&str, &str) -> Result<PhysicalColumnId, Error>,
+) -> Result<OwnedRecord, Error> {
+    let record = ContributionCoordinateStorageRecord::encode(
         descriptor,
         coordinate.branch_key.canonical_bytes(),
         coordinate.table.clone(),
         coordinate.row_uuid.0,
         coordinate.layer,
         contribution_component_storage_value(
+            coordinate,
             &coordinate.component,
             record_field_type(descriptor, 4),
-        ),
-    )
-    .expect("typed contribution coordinate matches its descriptor")
+            resolve_column_id,
+        )?,
+    )?
     .record()
-    .clone()
+    .clone();
+    Ok(record)
 }
 
 fn contribution_dot_storage_record(
     dot: &ContributionDot,
     descriptor: &records::RecordDescriptor,
-) -> OwnedRecord {
+    resolve_column_id: &mut impl FnMut(&str, &str) -> Result<PhysicalColumnId, Error>,
+) -> Result<OwnedRecord, Error> {
     let coordinate = nested_record_descriptor(record_field_type(descriptor, 2));
-    ContributionDotStorageRecord::encode(
+    let record = ContributionDotStorageRecord::encode(
         descriptor,
         dot.tx_id.time.0,
         dot.tx_id.node.0,
-        contribution_coordinate_storage_record(&dot.coordinate, coordinate),
-    )
-    .expect("typed contribution dot matches its descriptor")
+        contribution_coordinate_storage_record(&dot.coordinate, coordinate, resolve_column_id)?,
+    )?
     .record()
-    .clone()
+    .clone();
+    Ok(record)
 }
 
 fn contribution_substitution_storage_record(
     substitution: &ContributionSubstitution,
     descriptor: &records::RecordDescriptor,
-) -> OwnedRecord {
+    resolve_column_id: &mut impl FnMut(&str, &str) -> Result<PhysicalColumnId, Error>,
+) -> Result<OwnedRecord, Error> {
     let target = nested_record_descriptor(record_field_type(descriptor, 0));
     let source = nested_record_descriptor(array_element_type(record_field_type(descriptor, 1)));
-    ContributionSubstitutionStorageRecord::encode(
+    let record = ContributionSubstitutionStorageRecord::encode(
         descriptor,
-        contribution_coordinate_storage_record(&substitution.target, target),
+        contribution_coordinate_storage_record(&substitution.target, target, resolve_column_id)?,
         substitution
             .sources
             .iter()
-            .map(|dot| Value::Record(contribution_dot_storage_record(dot, source)))
-            .collect(),
-    )
-    .expect("typed contribution substitution matches its descriptor")
+            .map(|dot| {
+                contribution_dot_storage_record(dot, source, resolve_column_id).map(Value::Record)
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    )?
     .record()
-    .clone()
+    .clone();
+    Ok(record)
 }
 
 pub(super) fn contribution_merge_storage_value(
     provenance: Option<&ContributionMergeProvenance>,
-) -> Value {
+    mut resolve_column_id: impl FnMut(&str, &str) -> Result<PhysicalColumnId, Error>,
+) -> Result<Value, Error> {
     let descriptor = contribution_merge_descriptor();
-    let record = provenance.map(|provenance| {
-        let substitution =
-            nested_record_descriptor(array_element_type(record_field_type(descriptor, 2)));
-        ContributionMergeStorageRecord::encode(
-            descriptor,
-            provenance.source.canonical_bytes(),
-            provenance.target.canonical_bytes(),
-            provenance
-                .substitutions
-                .iter()
-                .map(|item| {
-                    Value::Record(contribution_substitution_storage_record(item, substitution))
-                })
-                .collect(),
-        )
-        .expect("typed contribution provenance matches its descriptor")
-        .record()
-        .clone()
-    });
-    records::RecordField::to_value(&record)
+    let record = provenance
+        .map(|provenance| -> Result<OwnedRecord, Error> {
+            let substitution =
+                nested_record_descriptor(array_element_type(record_field_type(descriptor, 2)));
+            Ok(ContributionMergeStorageRecord::encode(
+                descriptor,
+                provenance.source.canonical_bytes(),
+                provenance.target.canonical_bytes(),
+                provenance
+                    .substitutions
+                    .iter()
+                    .map(|item| {
+                        contribution_substitution_storage_record(
+                            item,
+                            substitution,
+                            &mut resolve_column_id,
+                        )
+                        .map(Value::Record)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )?
+            .record()
+            .clone())
+        })
+        .transpose()?;
+    Ok(records::RecordField::to_value(&record))
 }
 
 fn contribution_component_from_storage(
     value: records::EnumValue,
     schema: &records::EnumSchema,
+    table: &str,
+    resolve_column_name: &mut impl FnMut(&str, PhysicalColumnId) -> Result<String, Error>,
 ) -> Result<ContributionComponent, Error> {
     let case = schema.case(value.tag()).map_err(|_| {
         Error::InvalidStoredValue("transaction contribution component tag is invalid")
     })?;
     let payload = value.into_record();
     match case.name.as_str() {
-        "column" => Ok(ContributionComponent::Column(
-            ContributionColumnStorageRecord::new(payload).name()?,
-        )),
+        "column" => {
+            let id = PhysicalColumnId(
+                ContributionColumnStorageRecord::new(payload).physical_column_id()?,
+            );
+            if id.0 == 0 {
+                return Err(Error::InvalidStoredValue(
+                    "stored contribution physical column id must be nonzero",
+                ));
+            }
+            Ok(ContributionComponent::Column(resolve_column_name(
+                table, id,
+            )?))
+        }
         "operation" => Ok(ContributionComponent::Operation(
             ContributionOperationStorageRecord::new(payload).identity()?,
         )),
@@ -1236,6 +1266,7 @@ fn contribution_component_from_storage(
 
 fn contribution_coordinate_from_storage(
     record: OwnedRecord,
+    resolve_column_name: &mut impl FnMut(&str, PhysicalColumnId) -> Result<String, Error>,
 ) -> Result<ContributionCoordinate, Error> {
     let records::ValueType::Enum(component_schema) = record_field_type(record.descriptor(), 4)
     else {
@@ -1245,36 +1276,49 @@ fn contribution_coordinate_from_storage(
     };
     let component_schema = component_schema.clone();
     let record = ContributionCoordinateStorageRecord::new(record);
+    let table = record.table()?;
     let branch_key = BranchKey::from_canonical_bytes(&record.branch_key()?)
         .map_err(|_| Error::InvalidStoredValue("transaction contribution branch key is invalid"))?;
     Ok(ContributionCoordinate {
         branch_key,
-        table: record.table()?,
+        table: table.clone(),
         row_uuid: RowUuid(record.row_uuid()?),
         layer: record.layer()?,
-        component: contribution_component_from_storage(record.component()?, &component_schema)?,
+        component: contribution_component_from_storage(
+            record.component()?,
+            &component_schema,
+            &table,
+            resolve_column_name,
+        )?,
     })
 }
 
-fn contribution_dot_from_storage(record: OwnedRecord) -> Result<ContributionDot, Error> {
+fn contribution_dot_from_storage(
+    record: OwnedRecord,
+    resolve_column_name: &mut impl FnMut(&str, PhysicalColumnId) -> Result<String, Error>,
+) -> Result<ContributionDot, Error> {
     let record = ContributionDotStorageRecord::new(record);
     Ok(ContributionDot {
         tx_id: TxId::new(TxTime(record.tx_time()?), NodeUuid(record.tx_node()?)),
-        coordinate: contribution_coordinate_from_storage(record.coordinate()?)?,
+        coordinate: contribution_coordinate_from_storage(
+            record.coordinate()?,
+            resolve_column_name,
+        )?,
     })
 }
 
 fn contribution_substitution_from_storage(
     record: OwnedRecord,
+    resolve_column_name: &mut impl FnMut(&str, PhysicalColumnId) -> Result<String, Error>,
 ) -> Result<ContributionSubstitution, Error> {
     let record = ContributionSubstitutionStorageRecord::new(record);
     Ok(ContributionSubstitution {
-        target: contribution_coordinate_from_storage(record.target()?)?,
+        target: contribution_coordinate_from_storage(record.target()?, resolve_column_name)?,
         sources: record
             .sources()?
             .into_iter()
             .map(|source| match source {
-                Value::Record(record) => contribution_dot_from_storage(record),
+                Value::Record(record) => contribution_dot_from_storage(record, resolve_column_name),
                 _ => Err(Error::InvalidStoredValue(
                     "transaction contribution dot must be a record",
                 )),
@@ -1285,6 +1329,7 @@ fn contribution_substitution_from_storage(
 
 pub(super) fn contribution_merge_from_storage_record(
     record: OwnedRecord,
+    mut resolve_column_name: impl FnMut(&str, PhysicalColumnId) -> Result<String, Error>,
 ) -> Result<ContributionMergeProvenance, Error> {
     let descriptor = contribution_merge_descriptor();
     if record.descriptor() != descriptor {
@@ -1304,7 +1349,9 @@ pub(super) fn contribution_merge_from_storage_record(
             .substitutions()?
             .into_iter()
             .map(|substitution| match substitution {
-                Value::Record(record) => contribution_substitution_from_storage(record),
+                Value::Record(record) => {
+                    contribution_substitution_from_storage(record, &mut resolve_column_name)
+                }
                 _ => Err(Error::InvalidStoredValue(
                     "transaction contribution substitution must be a record",
                 )),
@@ -1323,8 +1370,17 @@ pub(super) fn transaction_values(
     fate: Fate,
     global_time: Option<GlobalTime>,
     durability: DurabilityTier,
+    contribution_merge: Value,
 ) -> Vec<Value> {
-    transaction_values_with_cardinality_scope(node_alias, tx, fate, global_time, durability, false)
+    transaction_values_with_cardinality_scope(
+        node_alias,
+        tx,
+        fate,
+        global_time,
+        durability,
+        false,
+        contribution_merge,
+    )
 }
 
 pub(super) fn transaction_values_with_cardinality_scope(
@@ -1334,6 +1390,7 @@ pub(super) fn transaction_values_with_cardinality_scope(
     global_time: Option<GlobalTime>,
     durability: DurabilityTier,
     view_scoped_cardinality: bool,
+    contribution_merge: Value,
 ) -> Vec<Value> {
     vec![
         Value::U64(tx.tx_id.time.0),
@@ -1353,7 +1410,7 @@ pub(super) fn transaction_values_with_cardinality_scope(
                 .clone()
                 .map(|value| Box::new(Value::String(value))),
         ),
-        contribution_merge_storage_value(tx.contribution_merge.as_ref()),
+        contribution_merge,
         Value::Nullable(
             tx.permission_subject
                 .map(|id| Box::new(Value::String(id.canonical().to_owned()))),

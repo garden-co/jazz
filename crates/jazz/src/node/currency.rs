@@ -1079,7 +1079,7 @@ where
                 &record,
                 TransactionRowRecord::FIELD_CONTRIBUTION_MERGE_IDX,
             )?
-            .map(contribution_merge_from_storage_record)
+            .map(|record| self.contribution_merge_from_storage_record(record))
             .transpose()?,
         };
         let fate = fate_from_encoded_fields(record)?;
