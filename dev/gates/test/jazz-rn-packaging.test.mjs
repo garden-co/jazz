@@ -169,10 +169,12 @@ test("jazz-rn reserves a thin binary relay TurboModule boundary for matching nat
   assert.match(relay, /matching native development or release build/);
   assert.match(codegenGate, /for platform in android ios/);
   assert.match(codegenGate, /NativeJazzRelay/);
-  assert.match(codegenGate, /com\/facebook\/fbreact\/specs\/NativeJazzRelaySpec\.java/);
+  assert.match(codegenGate, /android-gradle/);
+  assert.match(codegenGate, /codegenConfig\.android\.javaPackageName/);
+  assert.match(codegenGate, /generate-specs-cli\.js/);
   assert.match(codegenGate, /class NativeJazzRelaySpec/);
   assert.match(androidRelay, /JazzRelayBridge/);
-  assert.match(androidRelay, /import com\.facebook\.fbreact\.specs\.NativeJazzRelaySpec/);
+  assert.match(androidRelay, /package com\.jazzrn;/);
   assert.match(androidRelay, /class JazzRelayModule extends NativeJazzRelaySpec/);
   assert.match(androidRelay, /double getAbiVersion\(\)/);
   assert.match(androidRelay, /E_JAZZ_RELAY_UNAVAILABLE/);
