@@ -5,9 +5,26 @@ use super::*;
 type SourceRecord = (Vec<u8>, Bytes);
 pub(super) type WindowedRecord = (Bytes, i64);
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum TopBySortKey {
+    Null,
+    U8(u8),
+    U16(u16),
+    U32(u32),
+    U64(u64),
+    I32(i32),
+    I64(i64),
+    F64(u64),
+    Bool(bool),
+    String(String),
+    Bytes(Vec<u8>),
+    Uuid([u8; 16]),
+    EnumTag(u8),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct TopBySortPart {
-    pub(super) key: Vec<u8>,
+    key: TopBySortKey,
     pub(super) direction: TopByDirection,
 }
 
@@ -961,28 +978,29 @@ fn collect_by_sort_key_for_fields(
                 .cloned()
                 .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(*field_idx))?;
             Ok(TopBySortPart {
-                key: encode_top_by_sort_value(&field.value_type, value)?,
+                key: top_by_sort_value(&field.value_type, value)?,
                 direction: *direction,
             })
         })
         .collect()
 }
 
-fn encode_top_by_sort_value(
+fn top_by_sort_value(
     value_type: &ValueType,
     mut value: Value,
-) -> Result<Vec<u8>, IvmRuntimeError> {
+) -> Result<TopBySortKey, IvmRuntimeError> {
     if !collect_by_ordered_scalar(value_type) {
         return Err(IvmRuntimeError::InvalidTopBy(
             "sort field value must be an orderable scalar".to_owned(),
         ));
     }
-    let mut key = Vec::new();
     if is_sql_null_value(&value) {
-        key.push(0);
-        return Ok(key);
+        return Ok(TopBySortKey::Null);
     }
-    key.push(1);
+    let mut value_type = value_type;
+    while let ValueType::Nullable(inner) = value_type {
+        value_type = inner;
+    }
     loop {
         match value {
             Value::Nullable(Some(inner)) => value = *inner,
@@ -992,12 +1010,34 @@ fn encode_top_by_sort_value(
             }
         }
     }
-    if let Value::F64(number) = &mut value {
-        if *number == 0.0 {
-            *number = 0.0;
+    let key = match (value_type, value) {
+        (ValueType::U8, Value::U8(value)) => TopBySortKey::U8(value),
+        (ValueType::U16, Value::U16(value)) => TopBySortKey::U16(value),
+        (ValueType::U32, Value::U32(value)) => TopBySortKey::U32(value),
+        (ValueType::U64, Value::U64(value)) => TopBySortKey::U64(value),
+        (ValueType::I32, Value::I32(value)) => TopBySortKey::I32(value),
+        (ValueType::I64, Value::I64(value)) => TopBySortKey::I64(value),
+        (ValueType::F64, Value::F64(value)) if !value.is_nan() => {
+            let value = if value == 0.0 { 0.0 } else { value };
+            let bits = value.to_bits();
+            let ordered = if bits & (1 << 63) == 0 {
+                bits ^ (1 << 63)
+            } else {
+                !bits
+            };
+            TopBySortKey::F64(ordered)
         }
-    }
-    encode_key_part(&mut key, &value)?;
+        (ValueType::Bool, Value::Bool(value)) => TopBySortKey::Bool(value),
+        (ValueType::String, Value::String(value)) => TopBySortKey::String(value),
+        (ValueType::Bytes, Value::Bytes(value)) => TopBySortKey::Bytes(value),
+        (ValueType::Uuid, Value::Uuid(value)) => TopBySortKey::Uuid(*value.as_bytes()),
+        (ValueType::EnumTag(_), Value::EnumTag(value)) => TopBySortKey::EnumTag(value),
+        _ => {
+            return Err(IvmRuntimeError::InvalidTopBy(
+                "sort field value must match its orderable scalar type".to_owned(),
+            ));
+        }
+    };
     Ok(key)
 }
 
