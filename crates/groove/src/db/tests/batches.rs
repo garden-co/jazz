@@ -2607,7 +2607,8 @@ async fn zero_byte_upload_child_is_rejected_before_frontier_or_metadata_admissio
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let backend = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let managed = Rc::new(crate::chunks::ManagedChunkStorage::new(backend.clone()));
     let mut database = Database::new(schema, storage).await.unwrap();
