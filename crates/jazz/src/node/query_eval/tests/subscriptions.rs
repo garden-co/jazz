@@ -118,6 +118,88 @@ fn maintained_policy_point_subscription_keeps_full_current_source_for_deletion_l
 }
 
 #[test]
+fn maintained_policy_point_subscription_retracts_for_delete_and_owner_transfer() {
+    let schema = owner_policy_schema();
+    let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xc3; 16]), schema.clone());
+    let owner = author(0x72);
+    let other_owner = author(0x73);
+    node.set_session_claims(
+        owner,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.test_uuid()))]),
+    );
+    let shape = Query::from("issues")
+        .filter(eq(col("id"), lit(Value::Uuid(row(0x72).0))))
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let mut peer = PeerState::client_link(owner);
+
+    let target = row(0x72);
+    let initial_tx = commit_global_cells(
+        &mut node,
+        "issues",
+        target,
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("delete me".to_owned())),
+            ("assignee".to_owned(), Value::Uuid(owner.test_uuid())),
+            ("requiresAdmin".to_owned(), Value::Bool(false)),
+        ]),
+        1,
+        1,
+    );
+    let initial = peer.rehydrate_query(&mut node, &shape, &binding).unwrap();
+    assert!(matches!(
+        initial,
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { result_member_adds, .. })
+            if result_member_adds.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, tx_id)| row_uuid == target && tx_id == initial_tx)
+    ));
+    commit_global_cells(
+        &mut node,
+        "issues",
+        target,
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("transferred".to_owned())),
+            ("assignee".to_owned(), Value::Uuid(other_owner.test_uuid())),
+            ("requiresAdmin".to_owned(), Value::Bool(false)),
+        ]),
+        2,
+        2,
+    );
+    let transfer_update = peer.query_update(&mut node, &shape, &binding).unwrap();
+    assert!(matches!(
+        transfer_update,
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { result_member_removes, .. })
+            if result_member_removes.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, tx_id)| row_uuid == target && tx_id == initial_tx)
+    ));
+
+    let restored_tx = commit_global_cells(
+        &mut node,
+        "issues",
+        target,
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("transfer me".to_owned())),
+            ("assignee".to_owned(), Value::Uuid(owner.test_uuid())),
+            ("requiresAdmin".to_owned(), Value::Bool(false)),
+        ]),
+        3,
+        3,
+    );
+    let regrant = peer.query_update(&mut node, &shape, &binding).unwrap();
+    assert!(matches!(
+        regrant,
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { result_member_adds, .. })
+            if result_member_adds.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, tx_id)| row_uuid == target && tx_id == restored_tx)
+    ));
+    delete_global(&mut node, "issues", target, 4, 4);
+    let delete_update = peer.query_update(&mut node, &shape, &binding).unwrap();
+    assert!(matches!(
+        delete_update,
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { result_member_removes, .. })
+            if result_member_removes.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, tx_id)| row_uuid == target && tx_id == restored_tx)
+    ));
+}
+
+#[test]
 fn query_subscription_result_sets_track_bindings_and_rehydrate() {
     let (_server_dir, mut server) = open_node();
     let (_reader_dir, mut reader) = open_node();
