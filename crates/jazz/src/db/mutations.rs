@@ -2380,29 +2380,11 @@ where
     ) -> Result<(RowCells, Option<TxId>, BTreeSet<String>), Error> {
         let table_schema = self.table_schema(table)?;
         self.ensure_row_not_deleted(table, row).await?;
-        if table_schema
+        let is_partial = table_schema
             .columns
             .iter()
-            .all(|column| patch.contains_key(&column.name))
-        {
-            // A full-row write does not observe user data. Its causal parent is
-            // storage bookkeeping, so obtain only that parent with system
-            // authority rather than evaluating the writer's read policy.
-            let parent = match self.local_current_row(table, row).await? {
-                Some(existing) => {
-                    self.node
-                        .node
-                        .lock()
-                        .await
-                        .current_row_tx_id(&existing)
-                        .await
-                }
-                None => None,
-            };
-            let authored_columns = patch.keys().cloned().collect();
-            return Ok((patch, parent, authored_columns));
-        }
-        if identity == AuthorSubject::SYSTEM || table_schema.read_policy.is_none() {
+            .any(|column| !patch.contains_key(&column.name));
+        if is_partial && (identity == AuthorSubject::SYSTEM || table_schema.read_policy.is_none()) {
             // The serving query below proves that a partial writer may observe
             // the cells it inherits. SYSTEM and policy-free tables are
             // unconditionally visible, so that query cannot change the answer.

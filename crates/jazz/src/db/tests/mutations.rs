@@ -334,6 +334,49 @@ fn db_facade_mutation_lifecycle_writes_reads_deletes_and_restores() {
     assert_eq!(rows[0].cell(table, "done"), Some(Value::Bool(true)));
 }
 
+/// A policy-free partial update inherits its omitted cells directly from the
+/// physical winner; it must not prepare a serving query merely to prove
+/// unconditional read visibility.
+#[test]
+fn policy_free_partial_update_skips_the_serving_read_query() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let write = db
+        .insert(
+            "todos",
+            doctest_support::todo_cells("original", false),
+            Default::default(),
+        )
+        .unwrap();
+    let row = write.row_uuid();
+    doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
+
+    db.node.node.borrow_mut().reset_query_engine_read_metrics();
+    let write = db
+        .update(
+            "todos",
+            row,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            Default::default(),
+        )
+        .unwrap();
+    doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
+
+    let metrics = db.node.node.borrow().query_engine_read_metrics().clone();
+    assert_eq!(
+        metrics.source_primary_key_scans, 0,
+        "policy-free partial updates must not prepare a physical serving query"
+    );
+    assert_eq!(metrics.source_full_scans, 0);
+    let rows = prepared_read(&db, &db.table("todos"));
+    assert_eq!(rows.len(), 1);
+    let table = &doctest_support::schema().tables[0];
+    assert_eq!(
+        rows[0].cell(table, "title"),
+        Some(Value::String("original".to_owned()))
+    );
+    assert_eq!(rows[0].cell(table, "done"), Some(Value::Bool(true)));
+}
+
 #[test]
 fn full_row_replacement_cannot_bless_an_inherited_large_value_descriptor() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
