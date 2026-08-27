@@ -141,7 +141,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
         serverUrl: config.serverUrl,
         env: config.env,
         jwtToken: config.jwtToken,
-        backendSecret: config.backendSecret,
+        backendSecret: this.config.backendSecret,
         adminSecret: config.adminSecret,
         cookieSession: config.cookieSession,
         tier: nodeTier,
@@ -282,7 +282,6 @@ export class JazzContext {
       env: this.config.env,
       jwtToken: this.config.jwtToken,
       adminSecret: this.config.adminSecret,
-      backendSecret: this.config.backendSecret,
     };
   }
 

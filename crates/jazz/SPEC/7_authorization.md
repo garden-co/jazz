@@ -124,13 +124,15 @@ reach token minting. English BIP-39 recovery is a direct 24-word/checksum
 encoding of the 256 entropy bits (with NFKD/whitespace-normalized input), not
 a PBKDF or passphrase-derived seed.
 
-Platform adapters differ only in their secure store. Their logical key is a
-versioned hash of canonical JSON `{appId, profile}` and never embeds a raw
-external subject, PII, or connection/session identifier. `backendSecret` is a
-separate deployment admission credential: it is never persisted by Jazz or
-Groove, never client-side, and cannot alter authorship or storage identity.
-Changing the root creates a new local-first author. Future root formats use a
-new prefix and a verified atomic key-store migration.
+Browser and Expo secure-store adapters share the same codec; plain React
+Native must receive an explicit native secure-store adapter. Their logical key
+is a versioned hash of byte-exact canonical JSON `{appId, profile}` and never
+embeds a raw external subject, PII, or connection/session identifier.
+`backendSecret` is a separate deployment admission credential: it is never
+persisted by Jazz or Groove, never accepted by client `DbConfig`, and cannot
+alter authorship or storage identity. Changing the root creates a new
+local-first author. Future root formats use a new prefix and a verified atomic
+key-store migration.
 
 Policy evaluation is **fail-closed**: it denies whenever it cannot determine that
 a policy predicate is satisfied (`INV-RLS-14`). With the interpreter removed,

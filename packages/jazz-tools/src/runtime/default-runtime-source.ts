@@ -77,18 +77,18 @@ function runtimeAuthorFromConfig(config: DbConfig) {
   const session = sessionFromConfig(config);
   if (session) return session;
 
-  // A sessionless default runtime is an explicitly trusted backend open. Its
+  // A sessionless default runtime may be an explicitly trusted admin open. Its
   // raw config still needs a syntactically valid, untrusted author because the
-  // native constructor validates that input before its separate backend ABI
+  // native constructor validates that input before its separate admin ABI
   // derives SYSTEM. This placeholder never becomes the runtime's author.
-  if (config.backendSecret || config.adminSecret) {
+  if (config.adminSecret) {
     return { issuer: "https://jazz.invalid", user_id: "backend-open" };
   }
-  throw new Error("Default runtime requires a verified session or backend credential");
+  throw new Error("Default runtime requires a verified session or admin credential");
 }
 
 function isBackendRuntime(config: DbConfig): boolean {
-  return !sessionFromConfig(config) && Boolean(config.backendSecret || config.adminSecret);
+  return !sessionFromConfig(config) && Boolean(config.adminSecret);
 }
 
 export function selfSignedClientProofFromConfig(
@@ -203,7 +203,6 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       env: config.env,
       jwtToken: config.jwtToken,
       cookieSession: config.cookieSession,
-      backendSecret: config.backendSecret,
       adminSecret: config.adminSecret,
       tier: "local",
     };
@@ -383,7 +382,6 @@ function runtimeAuth(config: DbConfig): Record<string, unknown> {
   return {
     jwt_token: config.jwtToken ?? null,
     ...(config.adminSecret ? { admin_secret: config.adminSecret } : {}),
-    ...(config.backendSecret ? { backend_secret: config.backendSecret } : {}),
     ...(config.cookieSession ? { backend_session: config.cookieSession } : {}),
   };
 }

@@ -3,7 +3,6 @@ import {
   authSecretStorageKey,
   BrowserAuthSecretStore,
   generateAuthSecret,
-  localFirstSeed,
   parseAuthSecret,
 } from "./auth-secret-store.js";
 
@@ -33,9 +32,18 @@ describe("generateAuthSecret", () => {
     expect(a).not.toBe(b);
   });
 
-  it("keeps token derivation rooted in the encoded 32 bytes, not its format prefix", () => {
-    const secret = "jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-    expect(localFirstSeed(secret)).toBe("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+  it("rejects unversioned, padded, and noncanonical payloads", () => {
+    expect(() => parseAuthSecret("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")).toThrow(
+      /jazz-auth-v1/,
+    );
+    expect(() =>
+      parseAuthSecret("jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
+    ).toThrow(/43 unpadded/);
+    // The final base64url sextet has unused bits for a 32-byte payload. This
+    // different spelling decodes to the same bytes but must not be accepted.
+    expect(() =>
+      parseAuthSecret("jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB"),
+    ).toThrow(/canonical/);
   });
 });
 
@@ -187,6 +195,22 @@ describe("BrowserAuthSecretStore", () => {
   it("has a stable cross-platform scope-key fixture", () => {
     expect(authSecretStorageKey({ appId: "band-chat", profile: "default" })).toBe(
       "jazz-auth-store-v1-xtjm7t8x0cqlJ-wMiSiH7DwnziSS30JOh-Op-rlyVWE",
+    );
+  });
+
+  it("keeps distinct app/profile identifiers distinct byte-for-byte", () => {
+    expect(authSecretStorageKey({ appId: "band-chat", profile: "default" })).not.toBe(
+      authSecretStorageKey({ appId: " band-chat", profile: "default" }),
+    );
+    expect(authSecretStorageKey({ appId: "café" })).not.toBe(
+      authSecretStorageKey({ appId: "cafe\u0301" }),
+    );
+    expect(authSecretStorageKey({ profile: "" })).not.toBe(authSecretStorageKey());
+  });
+
+  it("rejects non-string untyped scope values instead of silently colliding", () => {
+    expect(() => authSecretStorageKey({ appId: 42 as unknown as string })).toThrow(
+      /appId must be a string or null/,
     );
   });
 });

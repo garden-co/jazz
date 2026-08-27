@@ -7,7 +7,11 @@ vi.mock("expo-secure-store", () => ({
   setItemAsync: vi.fn(),
 }));
 import { ExpoAuthSecretStore, type ExpoSecureStoreLike } from "./auth-secret-store.js";
-import { authSecretStorageKey, generateAuthSecret } from "../runtime/auth-secret-store.js";
+import {
+  authSecretStorageKey,
+  generateAuthSecret,
+  parseAuthSecret,
+} from "../runtime/auth-secret-store.js";
 
 function recordingStore() {
   const getItemAsync = vi.fn<ExpoSecureStoreLike["getItemAsync"]>(async () => null);
@@ -52,5 +56,26 @@ describe("ExpoAuthSecretStore scoped keys", () => {
     await new ExpoAuthSecretStore({ secureStore }).loadSecret();
 
     expect(getItemAsync).toHaveBeenCalledWith(authSecretStorageKey());
+  });
+
+  it("loads the fixed browser/recovery secret representation byte-for-byte", async () => {
+    const { secureStore, setItemAsync } = recordingStore();
+    const secret = "jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const store = new ExpoAuthSecretStore({ secureStore, appId: "shared-app", profile: "default" });
+
+    await store.saveSecret(secret);
+    expect(setItemAsync).toHaveBeenCalledWith(
+      authSecretStorageKey({ appId: "shared-app", profile: "default" }),
+      secret,
+    );
+    expect(parseAuthSecret(secret)).toEqual(new Uint8Array(32));
+  });
+
+  it("rejects malformed stored secrets before returning them to native auth", async () => {
+    const { secureStore } = recordingStore();
+    secureStore.getItemAsync = async () =>
+      "jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    const store = new ExpoAuthSecretStore({ secureStore });
+    await expect(store.loadSecret()).rejects.toThrow(/43 unpadded/);
   });
 });

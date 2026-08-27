@@ -15,7 +15,8 @@ An account, in local-first auth, is a secret: a single 32-byte seed.
 The portable representation is exactly `jazz-auth-v1:<43 unpadded base64url characters>`. It is a
 versioned encoding of those 32 bytes—not an additional key derivation. Future formats will use a new
 prefix and an explicit verified key-store migration. Rotating this root creates a new author; it
-cannot preserve the existing local-first identity.
+cannot preserve the existing local-first identity. App/profile scope strings are encoded exactly in
+the storage-key preimage; only BIP-39 recovery phrases receive Unicode and whitespace normalization.
 
 There is no registry mapping "user X → public key Y" sitting on a server somewhere. The seed
 deterministically produces a keypair, and the user ID is a deterministic function of the resulting

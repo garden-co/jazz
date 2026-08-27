@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
 import type { DbConfig } from "./db.js";
 import type { Session } from "./context.js";
+import { formatAuthSecret } from "./auth-secret-codec.js";
+
+const SECRET = formatAuthSecret(new Uint8Array(32));
 
 const cookieSession: Session = {
   user_id: "alice",
@@ -15,7 +18,7 @@ describe("DbConfig auth validation", () => {
     // @ts-expect-error Exercise the runtime guard for untyped JavaScript callers.
     const config: DbConfig = {
       appId: "test-app",
-      secret: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      secret: SECRET,
       jwtToken: "some-jwt",
     };
     await expect(createDb(config)).rejects.toThrow("mutually exclusive");
@@ -36,7 +39,7 @@ describe("DbConfig auth validation", () => {
     const { createDb } = await import("./db.js");
     const config = {
       appId: "test-app",
-      secret: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      secret: SECRET,
       cookieSession,
     } as unknown as DbConfig;
 
@@ -47,7 +50,7 @@ describe("DbConfig auth validation", () => {
     const { createDb } = await import("./db.js");
     const db = await createDb({
       appId: "test-app",
-      secret: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      secret: SECRET,
     });
     expect(db).toBeDefined();
     expect(db.getConfig()).toMatchObject({ jwtToken: expect.any(String) });
@@ -62,7 +65,7 @@ describe("getLocalFirstIdentityProof", () => {
     const { createDb } = await import("./db.js");
     const db = await createDb({
       appId: "test-app",
-      secret: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      secret: SECRET,
     });
 
     const token = db.getLocalFirstIdentityProof({ audience: "test-audience" });
@@ -81,5 +84,19 @@ describe("getLocalFirstIdentityProof", () => {
     const token = db.getLocalFirstIdentityProof({ audience: "test-audience" });
     expect(token).toBeNull();
     await db.shutdown();
+  });
+
+  it("rejects an unversioned secret before runtime or author minting", async () => {
+    const { createDb } = await import("./db.js");
+    await expect(
+      createDb({ appId: "test-app", secret: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" }),
+    ).rejects.toThrow(/jazz-auth-v1/);
+  });
+
+  it("rejects backend admission credentials on the public client factory", async () => {
+    const { createDb } = await import("./db.js");
+    await expect(
+      createDb({ appId: "test-app", backendSecret: "server-only" } as unknown as DbConfig),
+    ).rejects.toThrow(/createJazzContext/);
   });
 });

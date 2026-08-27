@@ -57,19 +57,10 @@ export function parseAuthSecret(secret: string): Uint8Array {
   return bytes;
 }
 
-/**
- * The stable byte-for-byte seed handed to the self-signed-token implementation.
- * Internal callers that still supply an untyped seed retain their existing
- * low-level behavior; all stored/exported roots are parsed strictly above.
- */
-export function localFirstSeed(secret: string): string {
-  if (!secret.startsWith(AUTH_SECRET_PREFIX)) return secret;
+/** @internal Stable seed text for self-signed token minting. */
+export function authSecretSeedForMinting(secret: string): string {
   parseAuthSecret(secret);
   return secret.slice(AUTH_SECRET_PREFIX.length);
-}
-
-export function generateCanonicalAuthSecret(randomBytes: Uint8Array): string {
-  return formatAuthSecret(randomBytes);
 }
 
 export interface AuthSecretScope {
@@ -79,10 +70,15 @@ export interface AuthSecretScope {
   profile?: string | null;
 }
 
-function normalizedScopePart(value: string | null | undefined): string | null {
-  if (typeof value !== "string") return null;
-  const normalized = value.normalize("NFKD").trim();
-  return normalized.length === 0 ? null : normalized;
+function scopePart(value: string | null | undefined, name: string): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string") {
+    throw new AuthSecretFormatError(`Jazz auth secret scope ${name} must be a string or null`);
+  }
+  // Scope strings are application identities, not human recovery phrases. Their
+  // exact UTF-16 values are semantic: trimming or Unicode normalization could
+  // silently make two independently configured apps share one root.
+  return value;
 }
 
 /**
@@ -91,8 +87,8 @@ function normalizedScopePart(value: string | null | undefined): string | null {
  */
 export function authSecretStorageKey(scope: AuthSecretScope = {}): string {
   const canonicalScope = JSON.stringify({
-    appId: normalizedScopePart(scope.appId),
-    profile: normalizedScopePart(scope.profile),
+    appId: scopePart(scope.appId, "appId"),
+    profile: scopePart(scope.profile, "profile"),
   });
   return `${STORE_KEY_PREFIX}${bytesToBase64url(sha256(new TextEncoder().encode(canonicalScope)))}`;
 }

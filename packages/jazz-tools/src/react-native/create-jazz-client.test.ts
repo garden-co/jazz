@@ -3,10 +3,12 @@ import { schema as s } from "../index.js";
 import {
   createDb,
   createJazzClient,
+  REACT_NATIVE_AUTH_SECRET_STORE_REQUIRED_ERROR,
   REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR,
   REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR,
   type JazzClient,
   type ReactNativeSqliteStorageDriver,
+  useLocalFirstAuth,
 } from "./index.js";
 
 const app = s.defineApp({
@@ -27,6 +29,12 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     );
     expect(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR).toBe(
       "ReactNativeDbConfig.sqliteStorage is proposal-only and cannot be used by the v2 runtime; remove sqliteStorage (memory mode remains unverified scaffolding)",
+    );
+  });
+
+  it("never falls back to browser localStorage for a React Native auth root", () => {
+    expect(() => useLocalFirstAuth({} as never)).toThrow(
+      REACT_NATIVE_AUTH_SECRET_STORE_REQUIRED_ERROR,
     );
   });
 

@@ -11,7 +11,6 @@ export interface AuthSecretStore {
 import {
   authSecretStorageKey,
   formatAuthSecret,
-  localFirstSeed,
   parseAuthSecret,
   type AuthSecretScope,
 } from "./auth-secret-codec.js";
@@ -20,7 +19,6 @@ export {
   authSecretStorageKey,
   AuthSecretFormatError,
   formatAuthSecret,
-  localFirstSeed,
   parseAuthSecret,
 } from "./auth-secret-codec.js";
 

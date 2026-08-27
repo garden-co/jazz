@@ -9,11 +9,12 @@ Local-first auth lets users start using your app immediately without signing up.
 This secret (and therefore the account) lives wherever the user uses the app. To log in from other devices, the user needs to use the same secret.
 
 Jazz stores and exports that root only as `jazz-auth-v1:` followed by 43 unpadded base64url
-characters: exactly 32 random bytes. Browser, Expo, and native adapters share this representation;
-they differ only in their secure-storage mechanism. Their default storage key is a versioned hash of
-canonical `{ appId, profile }` scope data, so it contains neither a raw external subject nor a
-transient session identifier. `backendSecret` is unrelated deployment-only admission material: never
-put it in a client bundle or a Jazz local store.
+characters: exactly 32 random bytes. Browser and Expo adapters share this representation while
+using their platform's storage mechanism. Plain React Native requires an explicitly injected native
+secure-store adapter rather than falling back to browser storage. Their default storage key is a
+versioned hash of byte-exact canonical `{ appId, profile }` scope data, so it contains neither a raw
+external subject nor a transient session identifier. `backendSecret` is unrelated deployment-only
+admission material: never put it in a client bundle or a Jazz local store.
 
 | Mode          | Identity source        | Server needed? | Best for                                               |
 | ------------- | ---------------------- | -------------- | ------------------------------------------------------ |
