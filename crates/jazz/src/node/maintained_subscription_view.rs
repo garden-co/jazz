@@ -48,7 +48,7 @@ struct VersionDecodePlan {
     authored_columns_idx: usize,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct MaintainedSubscriptionView {
     result_weights: BTreeMap<ResultMemberEntry, i64>,
     result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
@@ -57,8 +57,26 @@ pub(crate) struct MaintainedSubscriptionView {
     /// touching the rendered trees for other roots.
     structured_app_rows: BTreeMap<RowUuid, BTreeMap<Vec<u8>, i64>>,
     structured_app_row_descriptor: Option<RecordDescriptor>,
+    /// Whether this maintained subscription retains the recursive app-row
+    /// collector. Flat unordered subscriptions release it after their reset;
+    /// subsequent terminal deltas must not rebuild the duplicate state.
+    retains_structured_app_rows: bool,
     versions: WeightedVersionIndex,
     replacements: ReplacementIndex,
+}
+
+impl Default for MaintainedSubscriptionView {
+    fn default() -> Self {
+        Self {
+            result_weights: BTreeMap::new(),
+            result_payloads: BTreeMap::new(),
+            structured_app_rows: BTreeMap::new(),
+            structured_app_row_descriptor: None,
+            retains_structured_app_rows: true,
+            versions: WeightedVersionIndex::default(),
+            replacements: ReplacementIndex::default(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -388,7 +406,9 @@ impl MaintainedSubscriptionView {
                     }
                 }
                 NetEvent::StructuredAppRow(root, record) => {
-                    self.apply_structured_app_row_delta(root, record, weight);
+                    if self.retains_structured_app_rows {
+                        self.apply_structured_app_row_delta(root, record, weight);
+                    }
                 }
             }
         }
@@ -553,6 +573,7 @@ impl MaintainedSubscriptionView {
     pub(crate) fn discard_structured_app_rows(&mut self) {
         self.structured_app_rows.clear();
         self.structured_app_row_descriptor = None;
+        self.retains_structured_app_rows = false;
     }
 
     fn apply_structured_app_row_delta(&mut self, root: RowUuid, record: OwnedRecord, weight: i64) {
@@ -2522,6 +2543,40 @@ mod tests {
         assert!(second.adds.is_empty());
         assert_eq!(second.removes, vec![member]);
         assert!(maintained.result_weights.is_empty());
+    }
+
+    #[test]
+    fn discarded_structured_app_row_collector_does_not_retain_later_deltas() {
+        let descriptor =
+            RecordDescriptor::new([("row_uuid", ValueType::Uuid), ("title", ValueType::String)]);
+        let record = OwnedRecord::new(
+            descriptor
+                .create(&[
+                    Value::Uuid(row(1).0),
+                    Value::String("later terminal row".to_owned()),
+                ])
+                .unwrap(),
+            descriptor,
+        );
+        let mut maintained = MaintainedSubscriptionView::default();
+
+        maintained.discard_structured_app_rows();
+        maintained
+            .apply_decoded_deltas(
+                [(
+                    DecodedMaintainedEvent::StructuredAppRow {
+                        root: row(1),
+                        record,
+                    },
+                    1,
+                )],
+                &aliases(),
+            )
+            .unwrap();
+
+        assert!(maintained.structured_app_rows().is_empty());
+        assert_eq!(maintained.footprint().structured_app_rows, 0);
+        assert_eq!(maintained.footprint().structured_app_rows_bytes, 0);
     }
 
     #[test]
