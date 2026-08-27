@@ -4,6 +4,8 @@ import test from "node:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { workspaceDependencyInputs } from "../../artifacts/provenance.mjs";
 import {
   acquireArtifactBuildLock,
   buildTestArtifacts,
@@ -522,6 +524,24 @@ test("Turbo invalidates each native artifact only for its Cargo closure", () => 
   const cli = turbo.tasks["build:crates"];
   assert.equal(napi.dependsOn, undefined);
   assert.equal(wasm.dependsOn, undefined);
+  const root = fileURLToPath(new URL("../../..", import.meta.url));
+  for (const [task, rootManifest, localRoot] of [
+    [napi, "crates/jazz-napi/Cargo.toml", true],
+    [wasm, "crates/jazz-wasm/Cargo.toml", true],
+    [fastWasm, "crates/jazz-wasm/Cargo.toml", true],
+    [cli, "crates/jazz-cli/Cargo.toml", false],
+  ]) {
+    const rootCrate = rootManifest.slice(0, -"/Cargo.toml".length);
+    const expected = workspaceDependencyInputs(root, rootManifest)
+      .filter((path) => !localRoot || path !== rootCrate)
+      .map((path) => `$TURBO_ROOT$/${path}/**`)
+      .sort();
+    const actual = task.inputs
+      .filter((input) => /^\$TURBO_ROOT\$\/crates\/[^/]+\/\*\*$/.test(input))
+      .sort();
+    assert.deepEqual(actual, expected);
+    assert.equal(task.inputs.includes("$TURBO_ROOT$/crates/**/*.rs"), false);
+  }
   for (const [task, inputs] of [
     [
       napi,
@@ -531,31 +551,12 @@ test("Turbo invalidates each native artifact only for its Cargo closure", () => 
         "$TURBO_ROOT$/crates/jazz-napi/build.rs",
         "$TURBO_ROOT$/crates/jazz-napi/scripts/**",
         "$TURBO_ROOT$/crates/jazz-napi/src/**/*.rs",
-      ].concat(["jazz-otel", "jazz", "groove"].map((crate) => `$TURBO_ROOT$/crates/${crate}/**`)),
+      ],
     ],
-    [
-      wasm,
-      ["package.json", "Cargo.toml", "src/**/*.rs"].concat(
-        ["jazz", "groove"].map((crate) => `$TURBO_ROOT$/crates/${crate}/**`),
-      ),
-    ],
-    [
-      fastWasm,
-      ["package.json", "Cargo.toml", "src/**/*.rs"].concat(
-        ["jazz", "groove"].map((crate) => `$TURBO_ROOT$/crates/${crate}/**`),
-      ),
-    ],
-    [
-      cli,
-      ["jazz-cli", "jazz", "groove"].flatMap((crate) => [
-        `$TURBO_ROOT$/crates/${crate}/Cargo.toml`,
-        `$TURBO_ROOT$/crates/${crate}/src/**/*.rs`,
-      ]),
-    ],
-  ]) {
+    [wasm, ["package.json", "Cargo.toml", "src/**/*.rs"]],
+    [fastWasm, ["package.json", "Cargo.toml", "src/**/*.rs"]],
+  ])
     for (const input of inputs) assert.ok(task.inputs.includes(input), input);
-    assert.equal(task.inputs.includes("$TURBO_ROOT$/crates/**/*.rs"), false);
-  }
   for (const generatedInput of [
     "$TURBO_ROOT$/crates/jazz-napi/*.node",
     "$TURBO_ROOT$/crates/jazz-napi/.jazz-artifact-manifest.json",
