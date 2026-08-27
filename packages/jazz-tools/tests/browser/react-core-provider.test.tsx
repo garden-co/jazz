@@ -718,7 +718,7 @@ function SessionPairView() {
 
 function DbAuthStateView() {
   const db = useDb<{
-    getAuthState(): { session: Session | null };
+    getAuthState(): { session: PublicSession | null };
   }>();
   const session = db.getAuthState().session;
   return <div data-testid="db-session">{session ? session.user : "null"}</div>;
@@ -832,7 +832,7 @@ function createAuthAwareDb(initialSession: PublicSession | null) {
     };
   });
 
-  const toAuthState = (s: Session | null): AuthState =>
+  const toAuthState = (s: PublicSession | null): AuthState =>
     s ? { authMode: s.authMode, session: s } : { authMode: "external", session: null };
 
   return {
