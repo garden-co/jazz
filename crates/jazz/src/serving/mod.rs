@@ -37,7 +37,10 @@ use futures::lock::Mutex as LocalMutex;
 pub mod auth_admission;
 mod server_runtime;
 
-pub use server_runtime::{ServerRuntimeActivity, ServerRuntimeFrameStream, ServerRuntimeHandle};
+pub use server_runtime::{
+    ServerRuntimeActivity, ServerRuntimeFrameStream, ServerRuntimeHandle, ServerUpstreamConnection,
+    ServerUpstreamTerminalReason,
+};
 
 /// Result type returned by server shell helpers.
 pub type Result<T> = std::result::Result<T, ConfigError>;
@@ -186,6 +189,8 @@ pub struct InMemoryServerShell {
     role: NodeRole,
     sessions: Vec<Option<ServerSessionState>>,
     upstream_connections: Vec<ShellPeerConnection>,
+    wire_upstream_connections: BTreeMap<u64, ShellPeerConnection>,
+    next_wire_upstream_connection_id: u64,
     resume_cursors: BTreeMap<u64, (AuthorSubject, ResumeCursor)>,
     next_resume_token: u64,
     runtime_schema_state: RuntimeSchemaState,
@@ -290,6 +295,7 @@ struct WireQueues {
 pub(super) struct ServerUpstreamIo {
     pub(super) transport: SharedWireTransport,
     pub(super) pump: crate::db::PeerIoPump,
+    pub(super) connection_id: u64,
     pub(super) protocol_version: u16,
     pub(super) features: crate::wire::WireFeatures,
 }
@@ -595,18 +601,23 @@ impl ShellDb {
         }
     }
 
-    fn accept_edge_authority_subscriber_with_claims(
+    fn accept_edge_authority_subscriber_with_claims_and_trust(
         &self,
         transport: Box<dyn crate::db::Transport>,
         identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
+        trust: CommitUnitTrust,
     ) -> ShellPeerConnection {
         match self {
             Self::Memory(db) => ShellPeerConnection::Memory(
-                db.accept_edge_authority_subscriber_with_claims(transport, identity, claims),
+                db.accept_edge_authority_subscriber_with_claims_and_trust(
+                    transport, identity, claims, trust,
+                ),
             ),
             Self::Durable(db) => ShellPeerConnection::Durable(
-                db.accept_edge_authority_subscriber_with_claims(transport, identity, claims),
+                db.accept_edge_authority_subscriber_with_claims_and_trust(
+                    transport, identity, claims, trust,
+                ),
             ),
         }
     }
@@ -740,6 +751,8 @@ impl InMemoryServerShell {
             role,
             sessions: Vec::new(),
             upstream_connections: Vec::new(),
+            wire_upstream_connections: BTreeMap::new(),
+            next_wire_upstream_connection_id: 1,
             resume_cursors: BTreeMap::new(),
             next_resume_token: 1,
             runtime_schema_state: RuntimeSchemaState::default(),
@@ -784,6 +797,8 @@ impl InMemoryServerShell {
             role: NodeRole::Edge,
             sessions: Vec::new(),
             upstream_connections: Vec::new(),
+            wire_upstream_connections: BTreeMap::new(),
+            next_wire_upstream_connection_id: 1,
             resume_cursors: BTreeMap::new(),
             next_resume_token: 1,
             runtime_schema_state: RuntimeSchemaState::default(),
@@ -820,6 +835,8 @@ impl InMemoryServerShell {
             role: NodeRole::Edge,
             sessions: Vec::new(),
             upstream_connections: Vec::new(),
+            wire_upstream_connections: BTreeMap::new(),
+            next_wire_upstream_connection_id: 1,
             resume_cursors: BTreeMap::new(),
             next_resume_token: 1,
             runtime_schema_state: RuntimeSchemaState::default(),
@@ -1146,12 +1163,17 @@ impl InMemoryServerShell {
             None,
             session_context,
         ));
+        // Only public sessions are Edge authority writes. Trusted native and
+        // backend links retain ordinary local Edge admission, which remains
+        // available while the Core authority is disconnected.
         let connection = if self.role == NodeRole::Edge && trust == CommitUnitTrust::Session {
-            self.db.accept_edge_authority_subscriber_with_claims(
-                transport_adapter,
-                identity,
-                claims,
-            )
+            self.db
+                .accept_edge_authority_subscriber_with_claims_and_trust(
+                    transport_adapter,
+                    identity,
+                    claims,
+                    trust,
+                )
         } else {
             self.db.accept_subscriber_with_claims_and_trust(
                 transport_adapter,
@@ -1202,13 +1224,27 @@ impl InMemoryServerShell {
         ));
         let connection = self.db.connect_upstream(adapter);
         let pump = connection.io_pump();
-        self.upstream_connections.push(connection);
+        let connection_id = self.next_wire_upstream_connection_id;
+        self.next_wire_upstream_connection_id = self
+            .next_wire_upstream_connection_id
+            .checked_add(1)
+            .expect("wire upstream connection id exhausted");
+        self.wire_upstream_connections
+            .insert(connection_id, connection);
         ServerUpstreamIo {
             transport,
             pump,
+            connection_id,
             protocol_version,
             features,
         }
+    }
+
+    pub(super) fn disconnect_upstream_wire_io(&mut self, connection_id: u64) -> bool {
+        let Some(connection) = self.wire_upstream_connections.remove(&connection_id) else {
+            return false;
+        };
+        self.db.detach_connection(&connection)
     }
 
     /// Disconnect a subscriber session while preserving an in-process cursor.

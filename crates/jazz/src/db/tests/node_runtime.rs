@@ -742,6 +742,132 @@ fn edge_later_client_upload_flushes_earlier_upstream_in_same_tick() {
 }
 
 #[test]
+fn pending_global_state_does_not_complete_remote_wait_or_prune_upload() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let client = open_db(0xc1, author, &schema);
+    let write = client
+        .insert(
+            "todos",
+            cells("pending global", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let tx_id = write.mergeable_tx_id();
+
+    client
+        .node
+        .node
+        .borrow_mut()
+        .apply_sync_message_settled(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Pending,
+            global_time: None,
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    let state = client.write_state(tx_id).unwrap();
+    assert_eq!(state.fate, Fate::Pending);
+    assert_eq!(state.durability, DurabilityTier::Global);
+    assert!(
+        client
+            .node
+            .transaction_wait_outcome(tx_id, DurabilityTier::Global)
+            .is_none(),
+        "a hydration-only durability claim must not complete a remote transaction wait"
+    );
+    assert_eq!(
+        client
+            .node
+            .transaction_wait_outcome(tx_id, DurabilityTier::Local)
+            .expect("local persistence completes independently of authority fate")
+            .unwrap(),
+        tx_id
+    );
+
+    client.tick().unwrap();
+    assert!(
+        client
+            .node
+            .outbox
+            .borrow()
+            .iter()
+            .any(|pending| pending.tx_id == tx_id),
+        "Pending+Global must retain the canonical upload until an Accepted fate"
+    );
+}
+
+#[test]
+fn global_wait_requires_authority_timestamp_after_accepted_global_durability() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let client = open_db(0xc1, author, &schema);
+    let write = client
+        .insert(
+            "todos",
+            cells("authority timestamp", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    let tx_id = write.mergeable_tx_id();
+
+    client
+        .node
+        .node
+        .borrow_mut()
+        .apply_sync_message_settled(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_time: None,
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    let state = client.write_state(tx_id).unwrap();
+    assert_eq!(state.fate, Fate::Accepted);
+    assert_eq!(state.global_time, None);
+    assert_eq!(state.durability, DurabilityTier::Global);
+    assert!(
+        client
+            .node
+            .transaction_wait_outcome(tx_id, DurabilityTier::Global)
+            .is_none(),
+        "Accepted+Global without an authority timestamp cannot complete Global wait"
+    );
+    assert_eq!(
+        client
+            .node
+            .transaction_wait_outcome(tx_id, DurabilityTier::Edge)
+            .expect("Accepted Edge durability does not require a Global timestamp")
+            .unwrap(),
+        tx_id
+    );
+
+    client
+        .node
+        .node
+        .borrow_mut()
+        .apply_sync_message_settled(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(7)),
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    assert_eq!(
+        client.write_state(tx_id).unwrap().global_time,
+        Some(GlobalTime(7))
+    );
+    assert_eq!(
+        client
+            .node
+            .transaction_wait_outcome(tx_id, DurabilityTier::Global)
+            .expect("authority timestamp completes Global wait")
+            .unwrap(),
+        tx_id
+    );
+}
+
+#[test]
 fn write_state_waiter_resolves_on_remote_fate_update() {
     let schema = schema();
     let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
@@ -1986,11 +2112,12 @@ fn upload_cursor_hole_replays_only_the_missing_entry_on_that_upstream() {
 }
 
 /// Upload entries remain replayable until an applied terminal fate either
-/// rejects them or reaches Global durability.  An Accepted fate at Local or
-/// Edge is only progress: reconnect must resend it until a later Global fate
-/// releases the shared outbox entry.
+/// rejects them or carries accepted Global durability plus authority time. An
+/// Accepted fate at Local, Edge, or Global-without-time is only progress:
+/// reconnect must resend it until a later time-bearing Global fate releases the
+/// shared outbox entry.
 #[test]
-fn accepted_upload_releases_outbox_only_after_global_durability() {
+fn accepted_upload_releases_outbox_only_after_global_durability_and_authority_time() {
     let schema = schema();
     let author = AuthorSubject::for_test_bytes([0xe3; 16]);
     let client = open_db(0xe3, author, &schema);
@@ -2049,8 +2176,29 @@ fn accepted_upload_releases_outbox_only_after_global_durability() {
             global_time: None,
             durability: Some(DurabilityTier::Global),
         })
-        .expect("return global acceptance");
-    client.tick().expect("apply terminal global acceptance");
+        .expect("return timeless global acceptance");
+    client.tick().expect("apply timeless global acceptance");
+    assert!(
+        client
+            .node
+            .outbox
+            .borrow()
+            .iter()
+            .any(|pending| pending.tx_id == tx_id),
+        "Accepted+Global without authority time must retain the shared outbox upload"
+    );
+
+    authority
+        .send(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(7)),
+            durability: Some(DurabilityTier::Global),
+        })
+        .expect("return time-bearing global acceptance");
+    client
+        .tick()
+        .expect("apply terminal time-bearing global acceptance");
     assert!(
         !client
             .node
@@ -2058,7 +2206,7 @@ fn accepted_upload_releases_outbox_only_after_global_durability() {
             .borrow()
             .iter()
             .any(|pending| pending.tx_id == tx_id),
-        "Global acceptance releases the upload from the shared outbox"
+        "time-bearing Global acceptance releases the upload from the shared outbox"
     );
 }
 

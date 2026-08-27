@@ -542,6 +542,97 @@ where
         Ok(versions)
     }
 
+    /// Return the versions authored by one transaction for one physical row.
+    ///
+    /// Unlike [`Self::query_versions_for_tx`], this deliberately visits only
+    /// the requested table's physical history sources. It still uses the
+    /// transaction index rather than a branch-local primary key so callers
+    /// validating a causal parent can observe versions from every branch.
+    pub(super) async fn query_versions_for_tx_physical_row(
+        &mut self,
+        tx_id: TxId,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Vec<VersionRow>, Error> {
+        let requested_table_id = self.physical_table_id_for_schema(schema_version, table)?;
+        if let Some(cached) = self.query.tx_versions_cache.get(&tx_id) {
+            let table_aliases = self
+                .catalogue
+                .physical_mappings
+                .iter()
+                .flat_map(|(schema_version, mapping)| {
+                    let schema_alias = self.catalogue.schema_version_aliases.get(schema_version);
+                    mapping.tables.iter().filter_map(move |(table, mapping)| {
+                        (mapping.table_id == requested_table_id)
+                            .then(|| schema_alias.copied().map(|alias| (alias, table.clone())))
+                            .flatten()
+                    })
+                })
+                .collect::<BTreeSet<_>>();
+            let mut versions = Vec::new();
+            for (schema_alias, table) in table_aliases {
+                versions.extend(cached.versions_for_schema_table_row(
+                    schema_alias,
+                    &table,
+                    row_uuid,
+                ));
+            }
+            return Ok(versions);
+        }
+        let Some(tx) = self.query_transaction(tx_id).await? else {
+            return Ok(Vec::new());
+        };
+        let mut versions = Vec::new();
+        for storage_table in [
+            physical_history_table_name(requested_table_id),
+            SHARED_DELETION_HISTORY_TABLE.to_owned(),
+        ] {
+            let raws = self
+                .database
+                .index_scan_raw(
+                    &storage_table,
+                    "by_tx",
+                    &[Value::U64(tx_id.time.0), Value::U64(tx.node_alias.0)],
+                )
+                .await?
+                .into_iter()
+                .map(|raw| raw.owned_record())
+                .collect::<Vec<_>>();
+            for raw in raws {
+                if storage_table == SHARED_DELETION_HISTORY_TABLE
+                    && PhysicalTableId(
+                        raw.borrowed()
+                            .get_u64(SharedDeletionHistoryRowRecord::FIELD_PHYSICAL_TABLE_ID_IDX)?,
+                    ) != requested_table_id
+                {
+                    continue;
+                }
+                let row_uuid_index = if storage_table == SHARED_DELETION_HISTORY_TABLE {
+                    SharedDeletionHistoryRowRecord::FIELD_ROW_UUID_IDX
+                } else {
+                    HistoryRowRecord::FIELD_ROW_UUID_IDX
+                };
+                if RowUuid(raw.borrowed().get_uuid(row_uuid_index)?) != row_uuid {
+                    continue;
+                }
+                let requested_table = if storage_table == SHARED_DELETION_HISTORY_TABLE {
+                    ""
+                } else {
+                    table
+                };
+                let version =
+                    self.decode_history_owned_record(requested_table, &storage_table, raw)?;
+                if self.physical_table_id_for_version(&version)? == requested_table_id {
+                    #[cfg(test)]
+                    record_parent_version_lookup_materialized_rows(1);
+                    versions.push(version);
+                }
+            }
+        }
+        Ok(versions)
+    }
+
     pub(super) async fn query_versions_for_tx_rows_by_alias(
         &mut self,
         tx_id: TxId,

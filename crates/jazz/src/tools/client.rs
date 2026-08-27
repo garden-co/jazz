@@ -1795,7 +1795,7 @@ impl ClientDbInner {
         tier: DurabilityTier,
         timeout: Duration,
     ) -> Result<()> {
-        let desired = core_tier(tier);
+        let desired = core_write_tier(tier);
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             inner.borrow().ensure_tick_driver_running()?;
@@ -1814,21 +1814,23 @@ impl ClientDbInner {
                 .backend()?
                 .write_state(tx_id)
                 .map_err(|error| JazzError::Sync(error.to_string()))?;
-            if let CoreFate::Rejected(reason) = state.fate {
+            if let CoreFate::Rejected(reason) = &state.fate {
                 return Err(JazzError::Sync(transaction_rejected_before_tier_message(
-                    tier, &reason,
+                    tier, reason,
                 )));
             }
-            if state.durability >= desired {
+            if crate::db::transaction_satisfies_wait(
+                &state.fate,
+                state.global_time,
+                state.durability,
+                desired,
+            ) {
                 return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(JazzError::Sync(format!(
                     "timed out waiting for transaction to reach {tier:?}"
                 )));
-            }
-            if state.durability >= desired {
-                return Ok(());
             }
             let (db, tick_driver_error_notify) = {
                 let inner = inner.borrow();
@@ -2408,7 +2410,15 @@ fn core_batch_id(tx_id: CoreTxId) -> TransactionId {
     TransactionId::from_committed_tx(tx_id)
 }
 
-fn core_tier(tier: DurabilityTier) -> CoreDurabilityTier {
+fn core_write_tier(tier: DurabilityTier) -> CoreDurabilityTier {
+    match tier {
+        DurabilityTier::Local => CoreDurabilityTier::Local,
+        DurabilityTier::EdgeServer => CoreDurabilityTier::Edge,
+        DurabilityTier::GlobalServer => CoreDurabilityTier::Global,
+    }
+}
+
+fn core_legacy_read_tier(tier: DurabilityTier) -> CoreDurabilityTier {
     match tier {
         DurabilityTier::Local => CoreDurabilityTier::Local,
         DurabilityTier::EdgeServer | DurabilityTier::GlobalServer => CoreDurabilityTier::Global,
@@ -2506,7 +2516,7 @@ impl JazzClient {
     fn core_read_opts(durability_tier: Option<DurabilityTier>) -> CoreReadOpts {
         CoreReadOpts {
             tier: durability_tier
-                .map(core_tier)
+                .map(core_legacy_read_tier)
                 .unwrap_or(CoreDurabilityTier::Local),
             local_updates: CoreLocalUpdates::Immediate,
             propagation: CorePropagation::Full,
@@ -3491,6 +3501,27 @@ mod tests {
             ReadTier::RemoteIfPossible.legacy_durability_tier(),
             DurabilityTier::EdgeServer,
             "the native facade has no explicit offline boundary"
+        );
+        assert_eq!(
+            core_legacy_read_tier(DurabilityTier::Local),
+            CoreDurabilityTier::Local
+        );
+        assert_eq!(
+            core_legacy_read_tier(DurabilityTier::EdgeServer),
+            CoreDurabilityTier::Global,
+            "legacy EdgeServer reads retain the ordinary settled remote view"
+        );
+        assert_eq!(
+            core_write_tier(DurabilityTier::Local),
+            CoreDurabilityTier::Local
+        );
+        assert_eq!(
+            core_write_tier(DurabilityTier::EdgeServer),
+            CoreDurabilityTier::Edge
+        );
+        assert_eq!(
+            core_write_tier(DurabilityTier::GlobalServer),
+            CoreDurabilityTier::Global
         );
     }
 

@@ -208,6 +208,13 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       this.runtime.reportRemoteMutationError(message.event);
       return;
     }
+    if (message.type === "transport-error") {
+      // Keep this distinct from a fate rejection. The runtime records the
+      // error before any later port teardown so active Edge/Global waits and
+      // remote subscriptions wake, while Local durability stays valid.
+      this.runtime.reportRemoteServerTransportError(new Error(message.message));
+      return;
+    }
     if (message.type === "storage-reset") {
       for (const [id, pending] of this.pending) {
         if (pending.type !== "finish-storage-reset") continue;

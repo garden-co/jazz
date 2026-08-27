@@ -66,6 +66,7 @@ const mocks = vi.hoisted(() => {
           discard: vi.fn(),
           onAuthFailure: vi.fn(),
           onMutationError: vi.fn(),
+          onServerTransportError: vi.fn(),
           onPeerTransportWork: vi.fn(() => () => {}),
           progressPeerTransport: vi.fn(async () => undefined),
           retirePeerTransport: vi.fn(async () => undefined),
@@ -515,6 +516,45 @@ describe("broker worker context initialization", () => {
     late.port.emitMessage({ type: "init", id: 1, sessionClaims: {} });
     expect(await offline).toMatchObject({ explicitlyDisconnected: true });
     await initialized;
+  });
+
+  it("relays a terminal server error only to active followers and never replays it", async () => {
+    const initOptions = { ...options("terminal-error-continuity"), serverUrl: "ws://server.test" };
+    const owner = await connect(initOptions, "owner-tab");
+    const successor = await connect(initOptions, "successor-tab");
+    await initializeFollower(owner.port, 1);
+    await initializeFollower(successor.port, 1);
+
+    const late = await connect(initOptions, "late-tab");
+    const runtime = mocks.runtimes[0]!;
+    const callback = runtime.onServerTransportError.mock.calls[0]?.[0] as
+      | ((error: Error) => void)
+      | undefined;
+    expect(callback).toBeTypeOf("function");
+    callback?.(new Error("Protocol: terminal maintained view failure"));
+
+    for (const port of [owner.port, successor.port]) {
+      await expect(port.waitForEvent((event) => event.type === "transport-error")).resolves.toEqual(
+        {
+          type: "transport-error",
+          message: "Protocol: terminal maintained view failure",
+        },
+      );
+    }
+    expect(late.port.hasEvent((event) => event.type === "transport-error")).toBe(false);
+
+    owner.port.emitMessage({
+      type: "reconnect",
+      id: 2,
+      authJson: "{}",
+      sessionClaims: {},
+    });
+    await owner.port.waitForEvent((event) => event.type === "result" && event.id === 2);
+    await initializeFollower(late.port, 1);
+    // A reconnect/admission completed after the terminal observation starts a
+    // successor runtime, not a recipient for an old foreground error.
+    await Promise.resolve();
+    expect(late.port.hasEvent((event) => event.type === "transport-error")).toBe(false);
   });
 
   it("cancels a closed peer's offline server wait", async () => {

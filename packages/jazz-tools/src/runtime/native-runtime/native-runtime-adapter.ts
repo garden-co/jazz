@@ -655,6 +655,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly subscriptions = new Map<number, SubscriptionState>();
   private authFailureCallback: ((reason: string) => void) | null = null;
   private mutationErrorCallback: ((event: MutationErrorEvent) => void) | null = null;
+  private serverTransportErrorCallback: ((error: Error) => void) | null = null;
   private readonly deliveredMutationErrors = new Set<string>();
   private serverTransport: Transport | null = null;
   private peerUpstreamAttached = false;
@@ -676,13 +677,13 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly auxiliaryTraceListeners = new Set<(entries: AuxiliaryRelayTrace[]) => void>();
   private peerTransportActivityEpoch = 0;
   private peerTransportProcessedActivityEpoch = 0;
-  // A non-durable follower needs one worker response before trusting native
-  // coverage. Once that response covered a prepared query, reattaching the
-  // same query may already be covered and legitimately emit no new frame.
-  // The response epoch that confirmed each prepared query for an effective
-  // serving authorization context. This lets a reattachment reuse its own
-  // confirmation, but never lets it skip worker activity that arrived after
-  // that confirmation or borrow coverage confirmed for another subject/claim set.
+  // A non-durable follower needs a worker response before trusting native
+  // coverage. Full-propagation one-shot reads detach their query, so a later
+  // attachment must not reuse the prior attachment's confirmation: the
+  // upstream can have changed while no transport was attached. The recorded
+  // epoch distinguishes that reattachment from its initial attachment.
+  // Local-only reattachments may reuse their own confirmation when no newer
+  // worker frame has arrived, scoped to the serving authorization context.
   private readonly peerCoveredQueries = new Map<PreparedQuery, Map<string, number>>();
   private coreTickScheduled = false;
   private coreTickRunning = false;
@@ -2129,6 +2130,23 @@ export class NativeRuntimeAdapter implements Runtime {
     this.db.onMutationError((event) => this.deliverMutationError(event));
   }
 
+  /**
+   * Observe a terminal upstream transport/protocol failure. This has no fate
+   * semantics: it only wakes remote waits and subscriptions that are active
+   * in this runtime.
+   */
+  onServerTransportError(callback: (error: Error) => void): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.onServerTransportError(callback);
+    this.serverTransportErrorCallback = callback;
+  }
+
+  /** Record a terminal error relayed from a durable browser-worker upstream. */
+  reportRemoteServerTransportError(error: Error): void {
+    if (this !== this.ownerRuntime)
+      return this.ownerRuntime.reportRemoteServerTransportError(error);
+    this.handleServerTransportError(error);
+  }
+
   reportRemoteMutationError(event: MutationErrorEvent): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.reportRemoteMutationError(event);
     this.deliverMutationError(event);
@@ -2475,12 +2493,17 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!this.db.queryAttachmentIsCovered) return attachment;
     const coverageKey = this.coverageKey(session);
     const confirmedPeerActivityEpoch = this.peerCoveredQueries.get(query)?.get(coverageKey);
+    const mayReusePeerConfirmation = this.nonDurableClient && !readPropagationIsFull(optionsJson);
+    const requiresFreshPeerConfirmation =
+      this.nonDurableClient &&
+      readPropagationIsFull(optionsJson) &&
+      confirmedPeerActivityEpoch != null;
     // A prior confirmation can recover a reattachment only if no newer worker
     // frame has arrived. Otherwise the old coverage state could be exposed to
     // a query whose authorization (for example, an authorship-scoped policy)
     // is about to change.
     if (
-      this.nonDurableClient &&
+      mayReusePeerConfirmation &&
       confirmedPeerActivityEpoch != null &&
       this.peerTransportActivityEpoch <= confirmedPeerActivityEpoch &&
       this.db.queryAttachmentIsCovered(attachment)
@@ -2492,6 +2515,7 @@ export class NativeRuntimeAdapter implements Runtime {
       : undefined;
     const pendingPeerActivityEpoch =
       this.nonDurableClient &&
+      !requiresFreshPeerConfirmation &&
       this.peerTransportActivityEpoch > this.peerTransportProcessedActivityEpoch
         ? this.peerTransportActivityEpoch
         : undefined;
@@ -2502,11 +2526,11 @@ export class NativeRuntimeAdapter implements Runtime {
       session?.identity,
       minimumPeerActivityEpoch,
       pendingPeerActivityEpoch,
-      confirmedPeerActivityEpoch != null,
+      mayReusePeerConfirmation && confirmedPeerActivityEpoch != null,
     );
     if (this.nonDurableClient && this.db.queryAttachmentIsCovered(attachment)) {
       const confirmations = this.peerCoveredQueries.get(query) ?? new Map<string, number>();
-      confirmations.set(coverageKey, this.peerTransportActivityEpoch);
+      confirmations.set(coverageKey, this.peerTransportProcessedActivityEpoch);
       this.peerCoveredQueries.set(query, confirmations);
     }
     return attachment;
@@ -2590,15 +2614,15 @@ export class NativeRuntimeAdapter implements Runtime {
       await this.waitForCoreIdle();
       if (this.closed) return;
       if (this.db.queryAttachmentIsCovered) {
-        const peerHasResponded =
+        const peerActivityWasProcessed =
           minimumPeerActivityEpoch == null ||
-          this.peerTransportActivityEpoch > minimumPeerActivityEpoch ||
+          this.peerTransportProcessedActivityEpoch > minimumPeerActivityEpoch ||
           (exactContextWasConfirmed &&
             minimumPeerActivityEpoch > 0 &&
             this.peerTransportProcessedActivityEpoch >= minimumPeerActivityEpoch) ||
           (pendingPeerActivityEpoch != null &&
             this.peerTransportProcessedActivityEpoch >= pendingPeerActivityEpoch);
-        if (peerHasResponded && this.db.queryAttachmentIsCovered(attachment)) return;
+        if (peerActivityWasProcessed && this.db.queryAttachmentIsCovered(attachment)) return;
       }
       try {
         await this.readRowsForHostAsync(query, opts, identity);
@@ -3259,9 +3283,11 @@ export class NativeRuntimeAdapter implements Runtime {
     if (generation !== this.serverConnectionGeneration) return;
     const message = errorMessage(error);
     if (this.serverTransportError && message === "websocket closed") return;
+    const isFirstTerminalError = this.serverTransportError === null;
     this.serverTransportError = error instanceof Error ? error : new Error(message);
     this.failActiveSubscriptions(this.serverTransportError);
     this.resolveServerTransportErrorWaiters(this.serverTransportError);
+    if (isFirstTerminalError) this.serverTransportErrorCallback?.(this.serverTransportError);
   }
 
   private finishServerConnectionAttempt(attempt: ServerConnectionAttempt, error: Error): void {

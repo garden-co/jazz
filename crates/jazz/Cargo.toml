@@ -166,6 +166,10 @@ name = "four_tier"
 required-features = ["testing"]
 
 [[test]]
+name = "browser_relay_durability"
+required-features = ["testing"]
+
+[[test]]
 name = "threaded_four_tier"
 required-features = ["testing"]
 
