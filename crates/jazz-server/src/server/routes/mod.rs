@@ -145,7 +145,9 @@ mod tests {
     use axum::routing::{get, post};
     use futures::{SinkExt as _, StreamExt as _};
     use jazz::ids::AuthorSubject;
-    use jazz::tools::public_schema::{ColumnType, PolicyExpr, Schema, SchemaBuilder, TableSchema};
+    use jazz::tools::public_schema::{
+        ColumnType, PolicyExpr, Schema, SchemaBuilder, TablePolicies, TableSchema,
+    };
     use serde_json::Value;
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
     use tower::ServiceExt;
@@ -1563,6 +1565,153 @@ mod tests {
                 .using
                 .as_ref(),
             Some(&winning_policy)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chained_permissions_runtime_reconciliation_never_installs_stale_head() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+        let schema_hash = SchemaHash::compute(&schema);
+        let state = make_state_with_schema(schema).await;
+        let users = TableName::new("users");
+        let permissions = |policy| {
+            let mut table_policies = TablePolicies::default();
+            table_policies.select.using = Some(policy);
+            std::collections::HashMap::from([(users.clone(), table_policies)])
+        };
+
+        state
+            .catalogue
+            .publish_permissions_bundle(
+                &state.catalogue_store,
+                schema_hash,
+                permissions(PolicyExpr::True),
+                None,
+            )
+            .expect("persist H1");
+        let h1 = state
+            .catalogue
+            .current_permissions_head(&state.catalogue_store)
+            .expect("read H1")
+            .expect("H1 exists")
+            .bundle_object_id;
+
+        // Freeze H1 after it reads the durable head but before it queues its
+        // runtime install. H2 is then a valid chained publication. Without the
+        // bridge mutex, H2 can install first and H1 resumes last, regressing
+        // the runtime policy despite the durable head remaining H2.
+        let (h1_read_tx, h1_read_rx) = std::sync::mpsc::sync_channel(1);
+        let (resume_h1_tx, resume_h1_rx) = std::sync::mpsc::sync_channel(1);
+        state.set_runtime_catalogue_after_permissions_read_hook_for_test(Box::new(move || {
+            h1_read_tx.send(()).expect("signal H1 durable read");
+            resume_h1_rx.recv().expect("resume H1 bridge");
+        }));
+        let first_state = state.clone();
+        let first_bridge = tokio::spawn(async move {
+            crate::server::runtime_catalogue::publish_runtime_catalogue(&first_state, &[], &[])
+                .await
+        });
+        tokio::task::spawn_blocking(move || h1_read_rx.recv())
+            .await
+            .expect("join H1 read waiter")
+            .expect("observe H1 durable read");
+
+        state
+            .catalogue
+            .publish_permissions_bundle(
+                &state.catalogue_store,
+                schema_hash,
+                permissions(PolicyExpr::False),
+                Some(h1),
+            )
+            .expect("persist H2 after H1");
+        let (h2_read_tx, h2_read_rx) = std::sync::mpsc::sync_channel(1);
+        state.set_runtime_catalogue_after_permissions_read_hook_for_test(Box::new(move || {
+            h2_read_tx.send(()).expect("signal H2 durable read");
+        }));
+        let (second_started_tx, second_started_rx) = std::sync::mpsc::sync_channel(1);
+        let (start_second_tx, start_second_rx) = std::sync::mpsc::sync_channel(1);
+        state.set_runtime_catalogue_before_publication_hook_for_test(Box::new(move || {
+            second_started_tx
+                .send(())
+                .expect("signal H2 bridge attempt");
+            start_second_rx.recv().expect("start H2 bridge");
+        }));
+        let second_state = state.clone();
+        let second_bridge = tokio::spawn(async move {
+            crate::server::runtime_catalogue::publish_runtime_catalogue(&second_state, &[], &[])
+                .await
+        });
+
+        tokio::task::spawn_blocking(move || second_started_rx.recv())
+            .await
+            .expect("join H2 bridge waiter")
+            .expect("observe H2 bridge attempt");
+        start_second_tx.send(()).expect("start H2 bridge");
+        assert!(
+            matches!(
+                h2_read_rx.recv_timeout(Duration::from_millis(100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "H2 must wait for H1's runtime bridge to release publication order"
+        );
+
+        resume_h1_tx.send(()).expect("resume H1 bridge");
+        first_bridge
+            .await
+            .expect("join H1 bridge")
+            .expect("bridge H1");
+        second_bridge
+            .await
+            .expect("join H2 bridge")
+            .expect("bridge H2");
+
+        let current = state
+            .catalogue
+            .current_permissions(&state.catalogue_store)
+            .expect("read durable permissions")
+            .expect("durable H2");
+        assert_eq!(current.head.version, 2);
+        assert_eq!(
+            current
+                .permissions
+                .get(&users)
+                .expect("durable users permissions")
+                .select
+                .using
+                .as_ref(),
+            Some(&PolicyExpr::False)
+        );
+
+        let runtime_snapshot = state
+            .runtime()
+            .expect("runtime shell started")
+            .trusted_catalogue_snapshot_for_test()
+            .await
+            .expect("read runtime catalogue");
+        let active_schema = runtime_snapshot
+            .schemas
+            .iter()
+            .find(|schema| schema.id == runtime_snapshot.current_write_schema.schema)
+            .expect("active runtime schema");
+        assert_eq!(
+            active_schema
+                .schema
+                .public_schema()
+                .get(&users)
+                .expect("runtime users table")
+                .policies
+                .select
+                .using
+                .as_ref(),
+            Some(&PolicyExpr::False),
+            "runtime policy must converge to the durable H2 head"
         );
     }
 
