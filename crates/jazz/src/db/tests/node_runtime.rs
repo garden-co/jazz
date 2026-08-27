@@ -1888,6 +1888,163 @@ fn rejected_upload_is_not_replayed_after_reconnect() {
     );
 }
 
+/// Each upstream owns an independent upload cursor.  A fate cleanup can make
+/// one cursor non-contiguous relative to the shared oldest-first outbox; that
+/// link must fall back to the complete set difference rather than treating its
+/// newest uploaded entry as proof that the missing middle entry was sent.
+///
+/// upstream A: [first, middle, last]
+/// upstream B: [first,      -, last] ──tick──► [middle]
+#[test]
+fn upload_cursor_hole_replays_only_the_missing_entry_on_that_upstream() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xe2; 16]);
+    let client = open_db(0xe2, author, &schema);
+    let (first_transport, mut first_authority) = duplex();
+    let _first = crate::db::block_on(client.connect_upstream(first_transport));
+    let (second_transport, mut second_authority) = duplex();
+    let _second = crate::db::block_on(client.connect_upstream(second_transport));
+
+    let writes = ["first", "middle", "last"]
+        .into_iter()
+        .map(|title| {
+            client
+                .insert("todos", cells(title, false, author), Default::default())
+                .expect("stage upload")
+        })
+        .collect::<Vec<_>>();
+    let tx_ids = writes
+        .iter()
+        .map(|write| write.mergeable_tx_id())
+        .collect::<Vec<_>>();
+
+    client
+        .tick()
+        .expect("send every new entry to both upstreams");
+    for authority in [&mut first_authority, &mut second_authority] {
+        let sent = std::iter::from_fn(|| authority.try_recv())
+            .filter_map(|message| match message {
+                SyncMessage::CommitUnit { tx, .. } => Some(tx.tx_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sent, tx_ids, "initial cursor is contiguous per upstream");
+    }
+
+    let connections = client.node.connections.borrow().clone();
+    assert_eq!(
+        connections.len(),
+        2,
+        "fixture attached two independent links"
+    );
+    let mut second = crate::db::block_on(connections[1].lock());
+    let crate::db::peer_connection::ConnectionLink::Upstream(state) = &mut second.link else {
+        panic!("second fixture link is upstream");
+    };
+    assert!(
+        state.uploaded.remove(&tx_ids[1]),
+        "plant one middle cursor hole while retaining both surrounding receipts"
+    );
+    drop(second);
+
+    client
+        .tick()
+        .expect("conservatively repair the cursor hole");
+    assert!(
+        std::iter::from_fn(|| first_authority.try_recv())
+            .all(|message| !matches!(message, SyncMessage::CommitUnit { .. })),
+        "the independent complete cursor must not duplicate uploads"
+    );
+    let repaired = std::iter::from_fn(|| second_authority.try_recv())
+        .filter_map(|message| match message {
+            SyncMessage::CommitUnit { tx, .. } => Some(tx.tx_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        repaired,
+        vec![tx_ids[1]],
+        "the hole fallback sends precisely the missing middle upload once"
+    );
+}
+
+/// Upload entries remain replayable until an applied terminal fate either
+/// rejects them or reaches Global durability.  An Accepted fate at Local or
+/// Edge is only progress: reconnect must resend it until a later Global fate
+/// releases the shared outbox entry.
+#[test]
+fn accepted_upload_releases_outbox_only_after_global_durability() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xe3; 16]);
+    let client = open_db(0xe3, author, &schema);
+    let (client_transport, mut authority) = duplex();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let write = client
+        .insert(
+            "todos",
+            cells("accepted in stages", false, author),
+            Default::default(),
+        )
+        .expect("stage upload");
+    let tx_id = write.mergeable_tx_id();
+
+    assert!(
+        client
+            .node
+            .outbox
+            .borrow()
+            .iter()
+            .any(|pending| pending.tx_id == tx_id),
+        "the initial Pending/retryable upload remains in the outbox"
+    );
+
+    client.tick().expect("send initial upload");
+    assert!(
+        std::iter::from_fn(|| authority.try_recv()).any(
+            |message| matches!(message, SyncMessage::CommitUnit { tx, .. } if tx.tx_id == tx_id)
+        )
+    );
+    for durability in [DurabilityTier::Local, DurabilityTier::Edge] {
+        authority
+            .send(SyncMessage::FateUpdate {
+                tx_id,
+                fate: Fate::Accepted,
+                global_time: None,
+                durability: Some(durability),
+            })
+            .expect("return non-global acceptance");
+        client.tick().expect("apply non-global acceptance");
+        assert!(
+            client
+                .node
+                .outbox
+                .borrow()
+                .iter()
+                .any(|pending| pending.tx_id == tx_id),
+            "{durability:?} acceptance is not terminal for upload replay"
+        );
+    }
+
+    authority
+        .send(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_time: None,
+            durability: Some(DurabilityTier::Global),
+        })
+        .expect("return global acceptance");
+    client.tick().expect("apply terminal global acceptance");
+    assert!(
+        !client
+            .node
+            .outbox
+            .borrow()
+            .iter()
+            .any(|pending| pending.tx_id == tx_id),
+        "Global acceptance releases the upload from the shared outbox"
+    );
+}
+
 #[test]
 fn local_missing_upload_body_still_kills_sync_driver() {
     let schema = schema();
