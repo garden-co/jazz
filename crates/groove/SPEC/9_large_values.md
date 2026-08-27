@@ -65,8 +65,8 @@ are permanently reserved so persisted values from the superseded private
 length-prefixed record. Its payloads use only Groove's canonical primitive,
 record, array, nullable, and enum codecs;
 there is no private tag byte or postcard envelope for a scalar descriptor.
-Every engine-owned record field has a permanent numeric identity independent
-of declaration order: `NodeRef = { 1: object_hash, 2: locator }`, edits are
+Every engine-owned record field has a permanent, one-based numeric record-slot
+identity independent of source declaration order: `NodeRef = { 1: object_hash, 2: locator }`, edits are
 `{ 1: offset, 2: delete_length, 3: insert_bytes, 4: utf16_offset,
 5: delete_utf16_length, 6: insert_utf16_length }`, and `LargeValueRef` is
 `{ 1: format_version, 2: logical_hash, 3: root, 4: byte_length,
@@ -538,15 +538,22 @@ contains `{ 1: id:bytes16, 2: value_ref:LargeValueRef,
 3: encoded_bytes:u64, 4: node_count:u64, 5: created_at_ms:u64 }`; and
 `upload/<StagingId>` contains `{ 1: id:bytes16, 2: descriptor:LargeValueRef?,
 3: receipt_id:bytes16?, 4: encoded_bytes:u64, 5: node_count:u64,
-6: created_at_ms:u64, 7: chunks:[NodeRef] }`. Numeric field IDs are permanent
-and source declaration order is not semantic. Each value is exactly its normal
+6: created_at_ms:u64, 7: chunks:[NodeRef] }`. Numeric field IDs are permanent,
+one-based physical record slots and source declaration order is not semantic.
+If a future layout retires or skips an ID, it MUST retain every gap as a
+reserved `Nullable<bytes>` record slot encoded exactly as `null`; readers MUST
+reject a nonempty reserved slot and writers MUST NOT compact it away. Thus
+renumbering a field (for example `children:3` to `children:4`) changes the
+record layout and cannot be silently normalized by declaration-name sorting.
+Each value is exactly its normal
 Groove record encoding: there is no metadata magic prefix, private type tag,
 or serde/postcard envelope. Key prefixes are fixed engine-owned namespaces and
 must select their sole expected record shape; malformed, truncated, trailing,
 non-canonical, or mismatched records fail before any lifecycle/GC mutation.
 `reclaim/<NodeRef>` repeats that exact canonical `NodeRef` record as its value
-so reclamation cannot retarget a queue entry; `install/<NodeRef>` is an empty
-presence marker whose key alone carries the identity.
+so reclamation MUST compare key and value before any lifecycle/GC mutation and
+cannot retarget a queue entry; `install/<NodeRef>` is an empty presence marker
+whose key alone carries the identity.
 
 `INV-LARGE-9`: physical-record mutation and descriptor-reference deltas MUST be
 crash-consistent and idempotent. A node/blob MUST NOT be reclaimed while its
