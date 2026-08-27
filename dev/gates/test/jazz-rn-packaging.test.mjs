@@ -392,6 +392,45 @@ ${
   }
 });
 
+test("alpha verification preserves a reusable preview's sealed source commit across a merge commit", () => {
+  const selector = new URL(
+    "../../../dev/artifacts/release-artifact-source-revision.mjs",
+    import.meta.url,
+  );
+  const previewCommit = "a".repeat(40);
+  const mergeCommit = "b".repeat(40);
+  const select = (reuse) =>
+    execFileSync(process.execPath, [selector.pathname], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GITHUB_SHA: mergeCommit,
+        JAZZ_REUSE_PREVIEW_ARTIFACTS: reuse ? "true" : "false",
+        JAZZ_RELEASE_PR_HEAD_SHA: previewCommit,
+      },
+    }).trim();
+
+  // The release workflow has already established that these commits have the
+  // same source tree. Their identities intentionally differ: the latter is a
+  // merge commit, while the former is what the preview manifest sealed.
+  assert.equal(select(true), previewCommit);
+  assert.equal(select(false), mergeCommit);
+  assert.throws(
+    () =>
+      execFileSync(process.execPath, [selector.pathname], {
+        encoding: "utf8",
+        stdio: "ignore",
+        env: {
+          ...process.env,
+          GITHUB_SHA: mergeCommit,
+          JAZZ_REUSE_PREVIEW_ARTIFACTS: "true",
+          JAZZ_RELEASE_PR_HEAD_SHA: "not-a-commit",
+        },
+      }),
+    (error) => error?.status === 1,
+  );
+});
+
 test("release, preview, and labeled platform gates seal and link the staged relay package", async () => {
   const [packageBuild, alphaPublish, previewBuild, rnWorkflow, artifactScript, verifier] =
     await Promise.all([
@@ -440,6 +479,8 @@ test("release, preview, and labeled platform gates seal and link the staged rela
   assert.match(packageBuild, /verify-relay-artifacts\.mjs android ios/);
   assert.match(packageBuild, /Build jazz-rn TypeScript package/);
   assert.match(alphaPublish, /pkg-jazz-rn/);
+  assert.match(alphaPublish, /JAZZ_REUSE_PREVIEW_ARTIFACTS/);
+  assert.match(alphaPublish, /release-artifact-source-revision\.mjs/);
   assert.match(alphaPublish, /Verify packed jazz-rn relay payload/);
   assert.match(alphaPublish, /Publish jazz-rn \(alpha tag\)/);
   assert.match(
