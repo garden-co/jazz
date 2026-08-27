@@ -24,7 +24,7 @@ use serde::Serialize;
 use groove::storage::{
     BoxedStorage, ColumnFamilyName, Error, KeyValue, OrderedKvStorage, OwnedWriteOperation,
     ReopenableStorage, ScanBounds, ScanDirection, ScanRequest, StorageCursor, StorageFactory,
-    StorageFuture, StorageScan, Value,
+    StorageFuture, StorageScan, Value, validate_physical_storage_names,
 };
 
 trait RocksResultExt<T> {
@@ -230,6 +230,7 @@ impl RocksDbStorage {
         column_families: &[&str],
         durability: Durability,
     ) -> Result<Self, Error> {
+        validate_physical_storage_names(column_families)?;
         let path = path.as_ref().to_path_buf();
         if column_families.contains(&ROCKSDB_INTERNAL_CF) {
             return Err(Error::InvalidStorageLayout(
@@ -925,6 +926,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
         assert!(storage.write_flush_cadence.borrow().is_none());
+    }
+
+    #[test]
+    fn open_rejects_nul_column_family_without_creating_or_panicking() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("must-not-exist");
+        let result = RocksDbStorage::open(&path, &["records\0evil"]);
+        assert!(result.is_err());
+        assert!(
+            !path.exists(),
+            "invalid family name created a RocksDB store"
+        );
     }
 
     #[test]

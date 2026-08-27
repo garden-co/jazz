@@ -9,6 +9,14 @@ fn open(dir: &tempfile::TempDir) -> SqliteStorage {
 }
 
 #[test]
+fn open_rejects_nul_column_family_before_creating_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("must-not-exist.sqlite");
+    assert!(SqliteStorage::open(&path, &["records\0evil"]).is_err());
+    assert!(!path.exists());
+}
+
+#[test]
 fn scan_request_conforms_for_prefix_range_direction_and_limits() {
     block_on(async {
         let dir = tempfile::tempdir().unwrap();

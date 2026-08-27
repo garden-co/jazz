@@ -176,10 +176,20 @@ pub struct MemoryStorage {
 
 impl MemoryStorage {
     /// Construct storage with the supplied column families.
+    ///
+    /// For fallible construction with the portable physical-name contract, use
+    /// [`Self::try_new`]. This infallible convenience constructor predates that
+    /// contract and remains for lightweight tests and examples.
     pub fn new(column_families: &[&str]) -> Self {
         let storage = Self::default();
         storage.ensure_column_families(column_families);
         storage
+    }
+
+    /// Construct storage after validating portable physical family names.
+    pub fn try_new(column_families: &[&str]) -> Result<Self, Error> {
+        super::validate_physical_storage_names(column_families)?;
+        Ok(Self::new(column_families))
     }
 
     fn ensure_column_families(&self, column_families: &[&str]) {
@@ -430,6 +440,7 @@ impl OrderedKvStorage for MemoryStorage {
 impl ReopenableStorage for MemoryStorage {
     fn reopen(self, column_families: Vec<String>) -> StorageFuture<'static, Result<Self, Error>> {
         Box::pin(async move {
+            super::validate_physical_storage_names(&column_families)?;
             let column_families = column_families
                 .iter()
                 .map(String::as_str)
@@ -444,6 +455,12 @@ impl ReopenableStorage for MemoryStorage {
 mod tests {
     use super::*;
     use crate::storage::collect_scan;
+
+    #[test]
+    fn fallible_open_uses_portable_physical_name_contract() {
+        assert!(MemoryStorage::try_new(&["records"]).is_ok());
+        assert!(MemoryStorage::try_new(&["records\0evil"]).is_err());
+    }
 
     #[futures_test::test]
     async fn lazy_reverse_prefix_scan_keeps_its_prefix_across_batches() {

@@ -46,6 +46,38 @@ pub type KeyValue = (Vec<u8>, Vec<u8>);
 /// bound here makes schema admission portable across those backends.
 pub const MAX_APPLICATION_STORAGE_NAME_BYTES: usize = u16::MAX as usize;
 
+/// Validate a physical column-family name accepted by a storage backend.
+///
+/// This is deliberately narrower than [`validate_application_storage_name`]:
+/// engine-owned families also pass through backend open calls. It captures the
+/// portable framing/FFI requirements that every backend must enforce before it
+/// opens, reopens, or mutates its storage.
+pub fn validate_physical_storage_name(name: &str) -> Result<(), Error> {
+    if name.len() > MAX_APPLICATION_STORAGE_NAME_BYTES {
+        return Err(Error::InvalidStorageLayout(format!(
+            "storage name exceeds the {MAX_APPLICATION_STORAGE_NAME_BYTES}-byte limit: {} bytes",
+            name.len()
+        )));
+    }
+    if name.contains('\0') {
+        return Err(Error::InvalidStorageLayout(
+            "storage name contains an embedded NUL".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a complete backend-open family set before the backend has touched
+/// its durable state.
+pub fn validate_physical_storage_names(
+    names: impl IntoIterator<Item = impl AsRef<str>>,
+) -> Result<(), Error> {
+    for name in names {
+        validate_physical_storage_name(name.as_ref())?;
+    }
+    Ok(())
+}
+
 /// Validate a table or direct-record-store name supplied by an application.
 ///
 /// Names are case-sensitive, matching every supported backend. The lowercase
@@ -56,23 +88,12 @@ pub const MAX_APPLICATION_STORAGE_NAME_BYTES: usize = u16::MAX as usize;
 /// engine state on another. Embedded NUL is rejected because RocksDB passes
 /// family names through C strings.
 pub fn validate_application_storage_name(name: &str) -> Result<(), Error> {
-    if name.len() > MAX_APPLICATION_STORAGE_NAME_BYTES {
-        return Err(Error::InvalidStorageLayout(format!(
-            "application storage name exceeds the {MAX_APPLICATION_STORAGE_NAME_BYTES}-byte limit: {} bytes",
-            name.len()
-        )));
-    }
+    validate_physical_storage_name(name)?;
 
     if name.starts_with("__groove_") || matches!(name, "indices" | "default") {
         return Err(Error::InvalidStorageLayout(format!(
             "application storage name is reserved by Groove: {name:?}"
         )));
-    }
-
-    if name.contains('\0') {
-        return Err(Error::InvalidStorageLayout(
-            "application storage name contains an embedded NUL".to_owned(),
-        ));
     }
 
     Ok(())
@@ -2026,6 +2047,16 @@ pub(crate) mod conformance {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn physical_storage_names_reject_nonportable_forms() {
+        assert!(validate_physical_storage_name("rows").is_ok());
+        assert!(validate_physical_storage_name("rows\0evil").is_err());
+        assert!(
+            validate_physical_storage_name(&"a".repeat(MAX_APPLICATION_STORAGE_NAME_BYTES + 1))
+                .is_err()
+        );
+    }
     use crate::records::{ScalarEnumSchema, Value, ValueType};
     use std::cell::Cell;
     use std::error::Error as _;

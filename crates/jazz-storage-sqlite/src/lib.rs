@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use groove::storage::{
     Error, KeyValue, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, ScanBounds,
     ScanDirection, ScanRequest, StorageCursor, StorageFactory, StorageFuture, StorageScan, Value,
+    validate_physical_storage_names,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -115,6 +116,7 @@ impl SqliteStorage {
         column_families: &[&str],
         durability: Durability,
     ) -> Result<Self, Error> {
+        validate_physical_storage_names(column_families)?;
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path
             .parent()
