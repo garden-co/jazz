@@ -204,7 +204,7 @@ where
                         }
                         ContributionComponent::Register => None,
                     } {
-                        let authored = version.authored_columns(&table)?;
+                        let authored = node.authored_columns_for_version(version)?;
                         if !authored.as_ref().is_none_or(|columns| columns.contains(column))
                             || version.cell(&table, column)?.is_none()
                         {
@@ -284,7 +284,7 @@ where
                                 .iter()
                                 .filter(|version| version.layer() == VersionLayer::Content)
                             {
-                                let authored = version.authored_columns(&table)?;
+                                let authored = self.authored_columns_for_version(version)?;
                                 if !authored
                                     .as_ref()
                                     .is_none_or(|columns| columns.contains(&column.name))
@@ -334,7 +334,7 @@ where
                                 .iter()
                                 .filter(|version| version.layer() == VersionLayer::Content)
                             {
-                                let authored = version.authored_columns(&table)?;
+                                let authored = self.authored_columns_for_version(version)?;
                                 if !authored
                                     .as_ref()
                                     .is_none_or(|columns| columns.contains(&column.name))

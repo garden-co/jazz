@@ -342,6 +342,7 @@ impl VersionRecord {
         stored: &VersionRow,
         table: &TableSchema,
         schema_version: SchemaVersionId,
+        authored_columns: Option<BTreeSet<String>>,
     ) -> Result<Self, Error> {
         // Wire records remain the replicated immutable projection. Content and
         // register rows now live in different storage tables, so projection at
@@ -351,7 +352,6 @@ impl VersionRecord {
             .iter()
             .map(|column| stored.cell(table, &column.name))
             .collect::<Result<Vec<_>, _>>()?;
-        let authored_columns = stored.authored_columns(table)?;
         VersionRecord::encode(
             table,
             schema_version,
@@ -520,7 +520,7 @@ pub(super) struct VersionRowParts {
     pub(super) updated_by: AuthorSubject,
     pub(super) updated_at: TxTime,
     pub(super) cells: BTreeMap<String, Value>,
-    pub(super) authored_columns: Option<BTreeSet<String>>,
+    pub(super) authored_columns: Option<BTreeSet<PhysicalColumnId>>,
     pub(super) deletion: Option<DeletionEvent>,
 }
 
@@ -560,6 +560,7 @@ impl VersionRow {
     pub(super) fn from_wire_with_schema_version(
         table: &TableSchema,
         version: &VersionRecord,
+        authored_columns: Option<BTreeSet<PhysicalColumnId>>,
         tx_node_alias: NodeAlias,
         schema_version_alias: SchemaVersionAlias,
         tx_time: TxTime,
@@ -582,6 +583,7 @@ impl VersionRow {
                 history_values_from_wire(
                     table,
                     version,
+                    authored_columns,
                     tx_node_alias,
                     schema_version_alias,
                     tx_time,
@@ -779,26 +781,17 @@ impl VersionRow {
     }
 
     /// `None` is the deliberate legacy/lens fallback: every present cell is
-    /// treated as authored by merge code.
-    pub(super) fn authored_columns(
-        &self,
-        table: &TableSchema,
-    ) -> Result<Option<BTreeSet<String>>, Error> {
+    /// treated as authored by merge code. Exact sets use strictly increasing
+    /// node-local physical column ids; alternate set spellings are invalid.
+    pub(super) fn authored_column_ids(&self) -> Result<Option<BTreeSet<PhysicalColumnId>>, Error> {
         if self.is_register_record() {
             return Ok(None);
         }
-        let field = HistoryRowRecord::USER_CELLS + table.columns.len();
-        if field >= self.record.descriptor().fields().len() {
+        let Some(field) = self.record.descriptor().field_index("authored_columns") else {
             return Ok(None);
-        }
+        };
         let value = nullable_value(self.record.borrowed().get_idx(field)?)?;
-        value
-            .map(|value| match value {
-                Value::Bytes(bytes) => serde_json::from_slice(&bytes)
-                    .map_err(|_| Error::InvalidStoredValue("invalid authored columns")),
-                _ => Err(Error::InvalidStoredValue("authored columns must be bytes")),
-            })
-            .transpose()
+        value.map(authored_column_ids_from_value).transpose()
     }
 
     pub(super) fn is_register_record(&self) -> bool {
@@ -1281,6 +1274,49 @@ pub(super) fn canonical_versions(mut versions: Vec<VersionRecord>) -> Vec<Versio
     versions
 }
 
+pub(super) fn authored_column_ids_from_value(
+    value: Value,
+) -> Result<BTreeSet<PhysicalColumnId>, Error> {
+    // This is an intentional pre-v1 storage cut. Do not accept the former
+    // JSON-in-Bytes representation: durable rows have one schema-declared,
+    // canonical native representation.
+    let Value::Array(values) = value else {
+        return Err(Error::InvalidStoredValue(
+            "authored columns must be an array of physical column ids",
+        ));
+    };
+    let mut ids = BTreeSet::new();
+    let mut previous = None;
+    for value in values {
+        let Value::U64(id) = value else {
+            return Err(Error::InvalidStoredValue(
+                "authored columns must contain physical column ids",
+            ));
+        };
+        if id == 0 {
+            return Err(Error::InvalidStoredValue(
+                "authored physical column ids must be nonzero",
+            ));
+        }
+        if previous.is_some_and(|previous| previous >= id) {
+            return Err(Error::InvalidStoredValue(
+                "authored physical column ids must be strictly increasing",
+            ));
+        }
+        previous = Some(id);
+        ids.insert(PhysicalColumnId(id));
+    }
+    Ok(ids)
+}
+
+fn authored_column_ids_value(columns: Option<&BTreeSet<PhysicalColumnId>>) -> Value {
+    Value::Nullable(columns.map(|columns| {
+        Box::new(Value::Array(
+            columns.iter().map(|column| Value::U64(column.0)).collect(),
+        ))
+    }))
+}
+
 pub(super) fn history_values_from_parts(
     table: &TableSchema,
     version: &VersionRowParts,
@@ -1308,23 +1344,14 @@ pub(super) fn history_values_from_parts(
             version.cells.get(&column.name).cloned().map(Box::new),
         ));
     }
-    values.push(Value::Nullable(
-        version
-            .authored_columns
-            .as_ref()
-            .map(|columns| {
-                serde_json::to_vec(columns)
-                    .expect("serializing an ordered set of strings cannot fail")
-            })
-            .map(Box::new)
-            .map(|bytes| Box::new(Value::Bytes(*bytes))),
-    ));
+    values.push(authored_column_ids_value(version.authored_columns.as_ref()));
     Ok(values)
 }
 
 fn history_values_from_wire(
     table: &TableSchema,
     version: &VersionRecord,
+    authored_columns: Option<BTreeSet<PhysicalColumnId>>,
     tx_node_alias: NodeAlias,
     schema_version_alias: SchemaVersionAlias,
     tx_time: TxTime,
@@ -1363,12 +1390,7 @@ fn history_values_from_wire(
         }
         values.push(Value::Nullable(value.map(Box::new)));
     }
-    values.push(Value::Nullable(
-        version
-            .authored_columns()
-            .map(|columns| serde_json::to_vec(columns).expect("serializing authored columns"))
-            .map(|bytes| Box::new(Value::Bytes(bytes))),
-    ));
+    values.push(authored_column_ids_value(authored_columns.as_ref()));
     Ok(values)
 }
 
@@ -1505,11 +1527,8 @@ pub(super) fn global_current_values(
             nullable_value(version.record.borrowed().get_idx(field)?)?.map(Box::new),
         ));
     }
-    values.push(Value::Nullable(
-        version
-            .authored_columns(table)?
-            .map(|columns| serde_json::to_vec(&columns).expect("serializing authored columns"))
-            .map(|bytes| Box::new(Value::Bytes(bytes))),
+    values.push(authored_column_ids_value(
+        version.authored_column_ids()?.as_ref(),
     ));
     Ok(values)
 }

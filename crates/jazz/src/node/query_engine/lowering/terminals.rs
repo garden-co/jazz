@@ -2392,7 +2392,7 @@ fn deletion_witness_fields_for_tagged_rows(
         ProjectField::named("parents"),
         ProjectField::null_typed(
             "authored_columns",
-            ValueType::Nullable(Box::new(ValueType::Bytes)),
+            ValueType::Nullable(Box::new(ValueType::Array(Box::new(ValueType::U64)))),
         ),
         ProjectField::named("created_by"),
         ProjectField::named("created_at"),

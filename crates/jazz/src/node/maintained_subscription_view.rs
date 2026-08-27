@@ -7,9 +7,10 @@ use groove::records::{
 };
 
 use super::codec::{
-    VersionLayer, VersionRow, VersionRowParts, deletion_event_from_value,
-    history_values_from_parts, nullable_value, owned_record_from_storage_values_with_descriptor,
-    register_values_from_parts, tx_ids_from_value, version_tx_id_from_aliases,
+    VersionLayer, VersionRow, VersionRowParts, authored_column_ids_from_value,
+    deletion_event_from_value, history_values_from_parts, nullable_value,
+    owned_record_from_storage_values_with_descriptor, register_values_from_parts,
+    tx_ids_from_value, version_tx_id_from_aliases,
 };
 use super::query_engine::{
     AggregateResultSchema, AppRowCarrier, AppRowSchema, OutputTerminalSchema, ProgramFactKey,
@@ -1515,14 +1516,7 @@ fn decode_typed_version_witness(
     }
     let authored_columns = if layer == VersionLayer::Content {
         nullable_value(record.get_idx(plan.authored_columns_idx)?)?
-            .map(|value| match value {
-                Value::Bytes(bytes) => serde_json::from_slice(&bytes).map_err(|_| {
-                    super::Error::InvalidStoredValue("authored columns must be valid JSON")
-                }),
-                _ => Err(super::Error::InvalidStoredValue(
-                    "authored columns must be bytes",
-                )),
-            })
+            .map(authored_column_ids_from_value)
             .transpose()?
     } else {
         None
@@ -2067,8 +2061,8 @@ mod tests {
 
     use super::*;
     use crate::ids::{NodeUuid, SchemaVersionAlias};
-    use crate::node::Error;
     use crate::node::codec::{VersionRow, VersionRowParts};
+    use crate::node::{Error, PhysicalColumnId};
     use crate::protocol::ResultRowEntry;
     use crate::schema::{ColumnSchema, TableSchema};
     use crate::time::TxTime;
@@ -2477,7 +2471,7 @@ mod tests {
                 updated_by: AuthorSubject::SYSTEM,
                 updated_at: TxTime(time),
                 cells: BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
-                authored_columns: Some(BTreeSet::from(["title".to_owned()])),
+                authored_columns: Some(BTreeSet::from([PhysicalColumnId(1)])),
                 deletion: None,
             },
             None,

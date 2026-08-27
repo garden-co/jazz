@@ -436,6 +436,11 @@ where
                     .clone()
                     .unwrap_or_else(|| cells.keys().cloned().collect()),
             );
+            let authored_column_ids = self.authored_column_ids_for_names(
+                write_schema_version,
+                &table_schema.name,
+                authored_columns.as_ref(),
+            )?;
             let history_descriptor = if commit.deletion.is_none() {
                 Some(
                     self.prepared_physical_write_plan(
@@ -463,7 +468,7 @@ where
                     updated_by: commit.made_by,
                     updated_at: provenance_at,
                     cells,
-                    authored_columns,
+                    authored_columns: authored_column_ids,
                     deletion: commit.deletion,
                 },
                 (write_schema_version != self.catalogue.current_schema_version_id)

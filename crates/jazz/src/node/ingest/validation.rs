@@ -217,9 +217,15 @@ where
             let source_table_schema = self.table_in_schema(version.table(), author_schema)?;
             let table_schema = source_table_schema;
             let schema_version_alias = self.ensure_schema_version_alias(author_schema).await?;
+            let authored_column_ids = self.authored_column_ids_for_names(
+                author_schema,
+                version.table(),
+                version.authored_columns(),
+            )?;
             let stored = VersionRow::from_wire_with_schema_version(
                 &table_schema,
                 &version,
+                authored_column_ids,
                 tx_node_alias,
                 schema_version_alias,
                 tx.tx_id.time,
