@@ -74,7 +74,14 @@ impl ChunkStorage for ManagedChunkStorage {
             let Some((hash, bytes)) = self.backend.get_exact(locator).await? else {
                 return Err(ChunkStorageError::Unavailable);
             };
-            if hash != expected_hash || object_hash(&bytes) != expected_hash {
+            // Stored byte-KV implementations are policy blind and can retain
+            // corrupted historical data. Enforce the node ceiling before the
+            // integrity hash, just as remote resolution and descriptor-bound
+            // decoding do.
+            if bytes.len() > crate::large_values::MAX_ENCODED_NODE_BYTES
+                || hash != expected_hash
+                || object_hash(&bytes) != expected_hash
+            {
                 return Err(ChunkStorageError::Integrity);
             }
             Ok(bytes)
@@ -110,7 +117,8 @@ impl ChunkStorage for ManagedChunkStorage {
                     )
                     .await?;
                 if let Some((hash, ref bytes)) = existing
-                    && (hash != chunk.node_ref.object_hash
+                    && (bytes.len() > crate::large_values::MAX_ENCODED_NODE_BYTES
+                        || hash != chunk.node_ref.object_hash
                         || object_hash(bytes) != chunk.node_ref.object_hash)
                 {
                     return Err(ChunkStorageError::LocatorConflict);
@@ -614,7 +622,10 @@ impl ChunkKvStorage for OrderedChunkStorage {
                 return Ok(());
             };
             let (hash, bytes) = Self::decode(existing.clone())?;
-            if hash != expected_hash || object_hash(&bytes) != expected_hash {
+            if bytes.len() > crate::large_values::MAX_ENCODED_NODE_BYTES
+                || hash != expected_hash
+                || object_hash(&bytes) != expected_hash
+            {
                 return Err(ChunkStorageError::Integrity);
             }
             storage
@@ -2159,6 +2170,80 @@ mod tests {
         }]));
         assert_eq!(result, Err(ChunkStorageError::Integrity));
         assert!(storage.is_empty());
+    }
+
+    #[test]
+    fn managed_storage_rejects_oversized_persisted_bytes_before_hashing() {
+        // This is intentionally an internal receipt: it injects corrupted
+        // byte-KV state below the public row API to prove that a persisted
+        // chunk cannot bypass the resource ceiling merely by carrying its
+        // correct object hash.
+        struct OversizedBackend {
+            locator: Locator,
+            hash: ContentHash,
+            bytes: Bytes,
+        }
+
+        impl ChunkKvStorage for OversizedBackend {
+            fn get_exact(
+                &self,
+                locator: Locator,
+            ) -> ChunkFuture<'_, Result<Option<(ContentHash, Bytes)>, ChunkStorageError>>
+            {
+                let value = (locator == self.locator).then(|| (self.hash, self.bytes.clone()));
+                Box::pin(async move { Ok(value) })
+            }
+
+            fn put_if_absent(
+                &self,
+                _locator: Locator,
+                _hash: ContentHash,
+                _bytes: Bytes,
+            ) -> ChunkFuture<'_, Result<Option<(ContentHash, Bytes)>, ChunkStorageError>>
+            {
+                Box::pin(async { unreachable!("read-only test backend") })
+            }
+
+            fn delete_exact(
+                &self,
+                _locator: Locator,
+                _expected_hash: ContentHash,
+            ) -> ChunkFuture<'_, Result<(), ChunkStorageError>> {
+                Box::pin(async { unreachable!("read-only test backend") })
+            }
+        }
+
+        let locator = Locator::from_seed(b"oversized-persisted-chunk");
+        let bytes = Bytes::from(vec![0; crate::large_values::MAX_ENCODED_NODE_BYTES + 1]);
+        let hash = object_hash(&bytes);
+        let storage = ManagedChunkStorage::new(Rc::new(OversizedBackend {
+            locator,
+            hash,
+            bytes,
+        }));
+        assert_eq!(
+            block_on(storage.get(locator, hash)),
+            Err(ChunkStorageError::Integrity)
+        );
+    }
+
+    #[test]
+    fn remote_provider_rejects_oversized_bytes_before_hashing_or_caching() {
+        let bytes = Bytes::from(vec![0; crate::large_values::MAX_ENCODED_NODE_BYTES + 1]);
+        let hash = object_hash(&bytes);
+        let provider = Rc::new(CountingProvider {
+            calls: Cell::new(0),
+            bytes,
+        });
+        let chunks = OwnedChunkProvider::new(provider.clone());
+        let request = ChunkRequest {
+            object_hash: hash.0,
+            locator: Locator::from_seed(b"oversized-remote-chunk"),
+        };
+
+        assert_eq!(block_on(chunks.get(request)), Err(ChunkError::Integrity));
+        assert_eq!(provider.calls.get(), 1);
+        assert_eq!(chunks.cache_stats().entries, 0);
     }
 
     #[test]
