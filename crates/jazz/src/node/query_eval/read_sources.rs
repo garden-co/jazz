@@ -1870,20 +1870,22 @@ where
                         projection_target.clone(),
                         static_scan_for_prefix(prefix.clone(), 3),
                     ),
-                Some(CurrentAccessPath::Index {
-                    column,
-                    prefix,
-                    intersections,
-                    source_limit,
-                }) => self.node.physical_ahead_current_source_for_index_scan(
-                    read_table,
-                    self.read_view.read_schema,
-                    column,
-                    prefix,
-                    intersections,
-                    (!exclude_deleted).then_some(*source_limit).flatten(),
-                    &projection_target,
-                ),
+                Some(CurrentAccessPath::Index { .. }) => {
+                    // A Local-ahead winner can change the indexed column and
+                    // therefore no longer be present under the settled
+                    // candidate's prefix.  Scan the ahead current table in
+                    // full before arg-max so that every possible dominating
+                    // row participates.  The settled side remains safely
+                    // index-bounded through this same access-path mechanism.
+                    self.node.query_engine_read_metrics.source_full_scans += 1;
+                    self.node
+                        .physical_current_source_graph_with_projection_target(
+                            self.read_view.read_schema,
+                            &request.source.table,
+                            PhysicalCurrentClass::Ahead,
+                            projection_target,
+                        )
+                }
                 _ => self
                     .node
                     .physical_current_source_graph_with_projection_target(
@@ -3023,7 +3025,13 @@ where
         if table.has_any_policy() {
             return Ok(paths);
         }
-        if let Some(CurrentAccessPath::Index { source_limit, .. }) = paths.get_mut(&root) {
+        // A Local ahead winner can remove an otherwise matching settled row,
+        // making a prefix cap miss a later settled candidate that must fill
+        // the public limit after arg-max. Only the Global physical winner is
+        // stable enough for this source bound.
+        if tier == DurabilityTier::Global
+            && let Some(CurrentAccessPath::Index { source_limit, .. }) = paths.get_mut(&root)
+        {
             *source_limit = Some(limit);
         }
         Ok(paths)
@@ -3189,68 +3197,6 @@ where
             .collect::<Result<Vec<_>, Error>>()?;
         Ok(GraphBuilder::variant_index_intersection_scan(
             storage_table,
-            physical_current_index_name(column_id),
-            scan,
-            intersections,
-            projection_target,
-        ))
-    }
-
-    fn physical_ahead_current_source_for_index_scan(
-        &self,
-        table: &TableSchema,
-        schema_version: SchemaVersionId,
-        column: &str,
-        prefix: &[Value],
-        intersections: &[(String, Vec<Value>)],
-        source_limit: Option<usize>,
-        projection_target: &str,
-    ) -> Result<GraphBuilder, Error> {
-        let mapping = self
-            .catalogue
-            .physical_mappings
-            .get(&schema_version)
-            .and_then(|mapping| mapping.tables.get(&table.name))
-            .ok_or(Error::InvalidStoredValue(
-                "physical current index table mapping missing",
-            ))?;
-        let column_id = mapping
-            .columns
-            .get(column)
-            .copied()
-            .ok_or(Error::InvalidStoredValue(
-                "physical current index column mapping missing",
-            ))?;
-        let scan = match source_limit {
-            Some(max_items) => StaticScanSpec::PrefixLimit {
-                prefix: prefix.iter().cloned().map(LiteralValue::from).collect(),
-                max_items,
-            },
-            None => {
-                StaticScanSpec::Prefix(prefix.iter().cloned().map(LiteralValue::from).collect())
-            }
-        };
-        let intersections = intersections
-            .iter()
-            .map(|(column, prefix)| {
-                let column_id =
-                    mapping
-                        .columns
-                        .get(column)
-                        .copied()
-                        .ok_or(Error::InvalidStoredValue(
-                            "physical ahead intersected index column mapping missing",
-                        ))?;
-                Ok((
-                    physical_current_index_name(column_id),
-                    StaticScanSpec::Prefix(
-                        prefix.iter().cloned().map(LiteralValue::from).collect(),
-                    ),
-                ))
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
-        Ok(GraphBuilder::variant_index_intersection_scan(
-            physical_ahead_current_table_name(mapping.table_id),
             physical_current_index_name(column_id),
             scan,
             intersections,
