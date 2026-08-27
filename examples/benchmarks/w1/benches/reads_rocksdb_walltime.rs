@@ -1,4 +1,4 @@
-use jazz_example_w1_benchmark::Fixture;
+use jazz_example_benchmark_w1::Fixture;
 use jazz_storage_rocksdb::RocksDbStorage;
 
 fn main() {

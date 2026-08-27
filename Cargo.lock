@@ -2103,6 +2103,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-example-benchmark-w1"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+ "jazz-storage-rocksdb",
+ "tempfile",
+]
+
+[[package]]
 name = "jazz-example-big-label-benchmark"
 version = "0.1.0"
 dependencies = [
@@ -2145,13 +2155,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "jazz-example-w1-benchmark"
+name = "jazz-example-world-tour-benchmark"
 version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
  "jazz",
- "jazz-storage-rocksdb",
- "tempfile",
 ]
 
 [[package]]
