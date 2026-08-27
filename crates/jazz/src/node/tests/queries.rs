@@ -106,6 +106,32 @@ fn query_rows_by_uuid_for_identity(
     (rows, node.query_engine_read_metrics().clone())
 }
 
+#[test]
+fn history_complete_query_ignores_stale_settled_result_membership() {
+    let schema = access_path_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
+    let (_core_dir, mut core) = open_history_complete_node_with_schema(node(9), schema);
+    let (first, second, _owner) = seed_access_path_docs(&mut writer, &mut core);
+    let query = Query::from("docs");
+    let shape = query.validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let binding_view = crate::protocol::BindingViewKey::new(
+        shape.shape_id(),
+        binding.binding_id(),
+        crate::protocol::ReadViewKey::default(),
+    );
+    core.query
+        .settled_result_sets
+        .insert(binding_view, BTreeSet::new());
+
+    assert!(core.is_history_complete());
+    assert_eq!(
+        query_rows_by_uuid(&mut core, query, DurabilityTier::Global).0,
+        vec![first, second],
+        "a history-complete authority must read canonical physical state rather than its downstream settled-result cache"
+    );
+}
+
 /// This is intentionally an internal receipt for the physical access-path
 /// counter. Row visibility itself is asserted through the normal query API;
 /// no public surface exposes whether the source was an index or full scan.

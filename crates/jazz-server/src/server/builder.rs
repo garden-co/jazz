@@ -1,15 +1,15 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use jazz::groove::storage::StorageFactory;
 use jazz::ids::AuthorSubject;
 use jazz::node::EdgeCacheBudget;
 use jazz::schema::JazzSchema;
-use jazz::serving::{NodeRole, StorageConfig};
-use tracing::info;
+use jazz::serving::{NodeRole, ServerUpstreamTerminalReason, StorageConfig};
+use tracing::{error, info};
 
 use crate::middleware::AuthConfig;
 use crate::middleware::auth::{
@@ -17,11 +17,13 @@ use crate::middleware::auth::{
 };
 use crate::server::routes;
 use crate::server::{
-    CatalogueKvStorage, CatalogueMemoryStorage, DynCatalogueStorage, ServerState, ServerTopology,
-    StoredCatalogue,
+    CatalogueKvStorage, CatalogueMemoryStorage, DynCatalogueStorage, EdgeUpstreamHealth,
+    ServerState, ServerTopology, StoredCatalogue,
 };
 use jazz::tools::AppId;
-use jazz::tools::native_transport_connector::{NativeTransportConnector, NativeTransportRequest};
+use jazz::tools::native_transport_connector::{
+    NativeTransportConnector, NativeTransportError, NativeTransportRequest, NativeTransportTerminal,
+};
 #[allow(deprecated)]
 use jazz::tools::public_schema::Schema;
 #[cfg(test)]
@@ -30,6 +32,9 @@ use jazz::tools::sync::DurabilityTier;
 const CATALOGUE_ROCKSDB_DIR: &str = "catalogue.rocksdb";
 const SERVER_SHELL_ROCKSDB_DIR: &str = "server-shell.rocksdb";
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+const EDGE_RECONNECT_BASE_DELAY: Duration = Duration::from_millis(100);
+const EDGE_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(5);
+const EDGE_RECONNECT_STABLE_AFTER: Duration = Duration::from_secs(30);
 
 pub struct BuiltServer {
     #[cfg_attr(not(test), allow(dead_code))]
@@ -238,6 +243,8 @@ impl ServerBuilder {
             // offline. Blank edges have no such generation and stay behind
             // RetryLater until authenticated bootstrap completes.
             dynamic_edge_catalogue_ready: AtomicBool::new(dynamic_edge_catalogue_ready),
+            edge_upstream_health: std::sync::RwLock::new(EdgeUpstreamHealth::NotConfigured),
+            edge_upstream_task: std::sync::Mutex::new(None),
             shutdown: crate::server::ShutdownController::new(self.shutdown_timeout),
         });
 
@@ -406,6 +413,50 @@ fn test_schema_branches(schema: Option<&Schema>) -> Vec<String> {
     schema.map(|_| "main".to_string()).into_iter().collect()
 }
 
+#[derive(Debug)]
+enum EdgeConnectorOutcome {
+    Retryable(String),
+    Reconnect(String),
+    Fatal(String),
+    Stopped,
+}
+
+fn native_transport_outcome(error: NativeTransportError) -> EdgeConnectorOutcome {
+    EdgeConnectorOutcome::Retryable(error.to_string())
+}
+
+fn connected_transport_outcome(reason: ServerUpstreamTerminalReason) -> EdgeConnectorOutcome {
+    match reason {
+        ServerUpstreamTerminalReason::NativeTransport(NativeTransportTerminal::PeerClosed(
+            reason,
+        )) => EdgeConnectorOutcome::Reconnect(reason),
+        ServerUpstreamTerminalReason::NativeTransport(NativeTransportTerminal::OwnerDropped) => {
+            EdgeConnectorOutcome::Stopped
+        }
+        ServerUpstreamTerminalReason::NativeTransport(NativeTransportTerminal::Failed(error)) => {
+            EdgeConnectorOutcome::Reconnect(error.to_string())
+        }
+        ServerUpstreamTerminalReason::TransportFailed(reason) => {
+            EdgeConnectorOutcome::Reconnect(reason)
+        }
+        ServerUpstreamTerminalReason::ProtocolFailed(reason) => EdgeConnectorOutcome::Fatal(reason),
+        // A local owner cancellation is shutdown/control flow, not a remote
+        // close that should create another connection generation.
+        ServerUpstreamTerminalReason::Cancelled => EdgeConnectorOutcome::Stopped,
+        ServerUpstreamTerminalReason::RuntimeStopped => {
+            EdgeConnectorOutcome::Fatal("server shell upstream driver stopped".to_owned())
+        }
+    }
+}
+
+fn edge_reconnect_delay(attempt: u32) -> Duration {
+    let multiplier = 1_u32 << attempt.saturating_sub(1).min(6);
+    EDGE_RECONNECT_BASE_DELAY
+        .checked_mul(multiplier)
+        .unwrap_or(EDGE_RECONNECT_MAX_DELAY)
+        .min(EDGE_RECONNECT_MAX_DELAY)
+}
+
 fn spawn_edge_upstream_connector(
     state: Arc<ServerState>,
     upstream_url: String,
@@ -414,90 +465,238 @@ fn spawn_edge_upstream_connector(
     edge_cache_budget: Option<EdgeCacheBudget>,
     connector: Arc<dyn NativeTransportConnector>,
 ) {
-    tokio::spawn(async move {
-        let retry_delay = Duration::from_millis(100);
+    state.set_edge_upstream_health(EdgeUpstreamHealth::Connecting);
+    let weak_state = Arc::downgrade(&state);
+    let shutdown = state.shutdown.clone();
+    let task = tokio::spawn(async move {
+        let mut recovery_attempts = 0_u32;
         loop {
-            if state.shutdown.is_shutting_down() {
-                return;
-            }
             let auth = jazz::tools::websocket_prelude_auth::AuthConfig {
                 admin_secret: Some(admin_secret.clone()),
                 ..Default::default()
             };
-            // Revalidate every reconnect, including a durable reopen. The
-            // regular sync socket can then carry application/fate traffic only
-            // after the exact authority catalogue and local IVM registry are
-            // complete for this process generation.
-            let snapshot = match connector
-                .bootstrap_catalogue(NativeTransportRequest {
-                    server_url: upstream_url.clone(),
-                    app_id,
-                    peer_identity: AuthorSubject::SYSTEM,
-                    auth: auth.clone(),
-                    wake: Arc::new(|| {}),
-                })
-                .await
-            {
-                Ok(snapshot) => snapshot,
-                Err(error) => {
-                    info!("edge catalogue bootstrap pending: {}", error);
-                    tokio::time::sleep(retry_delay).await;
-                    continue;
-                }
+            let bootstrap = connector.bootstrap_catalogue(NativeTransportRequest {
+                server_url: upstream_url.clone(),
+                app_id,
+                peer_identity: AuthorSubject::SYSTEM,
+                auth: auth.clone(),
+                wake: Arc::new(|| {}),
+            });
+            let snapshot = tokio::select! {
+                biased;
+                _ = shutdown.wait_requested() => return,
+                result = bootstrap => match result {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        let outcome = native_transport_outcome(error);
+                        if !handle_edge_connector_outcome(
+                            &weak_state,
+                            &shutdown,
+                            outcome,
+                            &mut recovery_attempts,
+                        ).await {
+                            return;
+                        }
+                        continue;
+                    }
+                },
+            };
+
+            let Some(state) = weak_state.upgrade() else {
+                return;
             };
             let shell = match state.runtime() {
-                Some(shell) => match state.refresh_dynamic_edge_catalogue(&shell, snapshot).await {
-                    Ok(()) => shell,
-                    Err(error) => {
-                        info!("edge catalogue replay pending: {}", error);
-                        tokio::time::sleep(retry_delay).await;
-                        continue;
+                Some(shell) => {
+                    let refresh = state.refresh_dynamic_edge_catalogue(&shell, snapshot);
+                    let refreshed = tokio::select! {
+                        biased;
+                        _ = shutdown.wait_requested() => return,
+                        result = refresh => result,
+                    };
+                    match refreshed {
+                        Ok(()) => shell,
+                        Err(error) => {
+                            drop(state);
+                            if !handle_edge_connector_outcome(
+                                &weak_state,
+                                &shutdown,
+                                EdgeConnectorOutcome::Fatal(format!(
+                                    "edge catalogue refresh failed: {error}"
+                                )),
+                                &mut recovery_attempts,
+                            )
+                            .await
+                            {
+                                return;
+                            }
+                            continue;
+                        }
                     }
-                },
+                }
                 None => match state.start_dynamic_edge_shell(snapshot, edge_cache_budget) {
                     Ok(shell) => shell,
+                    Err(_) if shutdown.is_shutting_down() => return,
                     Err(error) => {
-                        info!("edge catalogue bootstrap pending: {}", error);
-                        tokio::time::sleep(retry_delay).await;
+                        drop(state);
+                        if !handle_edge_connector_outcome(
+                            &weak_state,
+                            &shutdown,
+                            EdgeConnectorOutcome::Fatal(format!(
+                                "edge catalogue bootstrap failed: {error}"
+                            )),
+                            &mut recovery_attempts,
+                        )
+                        .await
+                        {
+                            return;
+                        }
                         continue;
                     }
                 },
             };
+            drop(state);
+
             let wake_shell = shell.clone();
             let wake = Arc::new(move || wake_shell.notify_activity());
-            match connector
-                .connect(NativeTransportRequest {
-                    server_url: upstream_url.clone(),
-                    app_id,
-                    peer_identity: AuthorSubject::SYSTEM,
-                    auth,
-                    wake,
-                })
-                .await
-            {
-                Ok(transport) => {
-                    if shell
-                        .connect_upstream_wire(
-                            transport.transport,
-                            transport.protocol_version,
-                            transport.features,
-                            transport.session_context,
-                        )
-                        .await
-                        .is_ok()
-                    {
-                        state.mark_dynamic_edge_catalogue_ready();
-                        shell.notify_activity();
-                        return;
+            let connect = connector.connect(NativeTransportRequest {
+                server_url: upstream_url.clone(),
+                app_id,
+                peer_identity: AuthorSubject::SYSTEM,
+                auth,
+                wake,
+            });
+            let connected = tokio::select! {
+                biased;
+                _ = shutdown.wait_requested() => return,
+                result = connect => match result {
+                    Ok(connected) => connected,
+                    Err(error) => {
+                        let outcome = native_transport_outcome(error);
+                        if !handle_edge_connector_outcome(
+                            &weak_state,
+                            &shutdown,
+                            outcome,
+                            &mut recovery_attempts,
+                        ).await {
+                            return;
+                        }
+                        continue;
                     }
+                },
+            };
+            let connection = tokio::select! {
+                biased;
+                _ = shutdown.wait_requested() => return,
+                result = shell.connect_upstream_wire(
+                    connected.transport,
+                    connected.terminal,
+                    connected.protocol_version,
+                    connected.features,
+                    connected.session_context,
+                ) => match result {
+                    Ok(connection) => connection,
+                    Err(error) => {
+                        if !handle_edge_connector_outcome(
+                            &weak_state,
+                            &shutdown,
+                            EdgeConnectorOutcome::Fatal(format!(
+                                "edge upstream attachment failed: {error}"
+                            )),
+                            &mut recovery_attempts,
+                        ).await {
+                            return;
+                        }
+                        continue;
+                    }
+                },
+            };
+
+            let Some(state) = weak_state.upgrade() else {
+                return;
+            };
+            if let Err(error) = state.mark_dynamic_edge_catalogue_ready() {
+                if shutdown.is_shutting_down() {
+                    return;
                 }
-                Err(error) => {
-                    info!("edge upstream connection pending: {}", error);
-                }
+                state.set_edge_upstream_health(EdgeUpstreamHealth::Failed {
+                    reason: error.clone(),
+                });
+                error!(%error, "edge upstream lifecycle failed");
+                return;
             }
-            tokio::time::sleep(retry_delay).await;
+            state.set_edge_upstream_health(EdgeUpstreamHealth::Connected);
+            shell.notify_activity();
+            drop(state);
+
+            let connected_at = Instant::now();
+            let terminal = tokio::select! {
+                biased;
+                _ = shutdown.wait_requested() => return,
+                terminal = connection.terminal() => terminal,
+            };
+            if connected_at.elapsed() >= EDGE_RECONNECT_STABLE_AFTER {
+                recovery_attempts = 0;
+            }
+            let outcome = connected_transport_outcome(terminal);
+            if !handle_edge_connector_outcome(
+                &weak_state,
+                &shutdown,
+                outcome,
+                &mut recovery_attempts,
+            )
+            .await
+            {
+                return;
+            }
         }
     });
+    state.own_edge_upstream_task(task);
+}
+
+async fn handle_edge_connector_outcome(
+    state: &std::sync::Weak<ServerState>,
+    shutdown: &crate::server::ShutdownController,
+    outcome: EdgeConnectorOutcome,
+    recovery_attempts: &mut u32,
+) -> bool {
+    let (reason, reconnect) = match outcome {
+        EdgeConnectorOutcome::Stopped => {
+            if let Some(state) = state.upgrade() {
+                state.set_edge_upstream_health(EdgeUpstreamHealth::Stopped);
+            }
+            return false;
+        }
+        EdgeConnectorOutcome::Fatal(reason) => {
+            if let Some(state) = state.upgrade() {
+                state.set_edge_upstream_health(EdgeUpstreamHealth::Failed {
+                    reason: reason.clone(),
+                });
+            }
+            error!(%reason, "edge upstream lifecycle stopped");
+            return false;
+        }
+        EdgeConnectorOutcome::Retryable(reason) => (reason, false),
+        EdgeConnectorOutcome::Reconnect(reason) => (reason, true),
+    };
+    *recovery_attempts = recovery_attempts.saturating_add(1);
+    let delay = edge_reconnect_delay(*recovery_attempts);
+    if let Some(state) = state.upgrade() {
+        state.set_edge_upstream_health(EdgeUpstreamHealth::Reconnecting {
+            reason: reason.clone(),
+        });
+    } else {
+        return false;
+    }
+    if reconnect {
+        info!(%reason, ?delay, "edge upstream disconnected; reconnecting");
+    } else {
+        info!(%reason, ?delay, "edge upstream unavailable; retrying");
+    }
+    tokio::select! {
+        biased;
+        _ = shutdown.wait_requested() => false,
+        _ = tokio::time::sleep(delay) => true,
+    }
 }
 
 async fn build_jwt_verifier(auth_config: &AuthConfig) -> Result<Option<Arc<JwtVerifier>>, String> {
@@ -633,8 +832,13 @@ mod tests {
     use jazz::groove::storage::OrderedKvStorage;
     use jazz::tools::AppId;
     use jazz::tools::metadata::{MetadataKey, ObjectType};
+    use jazz::tools::native_transport_connector::{
+        ConnectedNativeTransport, NativeCatalogueBootstrapFuture, NativeTransportFuture,
+    };
     use jazz::tools::public_schema::SchemaHash;
     use jazz::tools::schema_lens::LensTransform;
+    use jazz::wire::{TransportError, WireTransport};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn dynamic_bootstrap_schema() -> jazz::tools::public_schema::Schema {
         jazz::tools::public_schema::SchemaBuilder::new()
@@ -655,6 +859,428 @@ mod tests {
             entry.encode_storage_row().expect("encode catalogue entry"),
         ))
         .expect("write raw catalogue entry");
+    }
+
+    struct NoopWireTransport;
+
+    impl WireTransport for NoopWireTransport {
+        fn send_frame(&mut self, _frame: Vec<u8>) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    struct ClosingConnector {
+        snapshot: jazz::protocol::CatalogueSnapshot,
+        connect_count: AtomicUsize,
+    }
+
+    impl NativeTransportConnector for ClosingConnector {
+        fn connect(&self, _request: NativeTransportRequest) -> NativeTransportFuture {
+            let connection = self.connect_count.fetch_add(1, Ordering::SeqCst);
+            let terminal = if connection == 0 {
+                Box::pin(std::future::ready(NativeTransportTerminal::PeerClosed(
+                    "idle websocket closed".to_owned(),
+                )))
+                    as jazz::tools::native_transport_connector::NativeTransportTerminalFuture
+            } else {
+                Box::pin(std::future::pending())
+            };
+            Box::pin(async move {
+                Ok(ConnectedNativeTransport {
+                    transport: Box::new(NoopWireTransport),
+                    protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
+                    features: jazz::wire::FEATURE_NONE,
+                    session_context: None,
+                    terminal,
+                })
+            })
+        }
+
+        fn bootstrap_catalogue(
+            &self,
+            _request: NativeTransportRequest,
+        ) -> NativeCatalogueBootstrapFuture {
+            let snapshot = self.snapshot.clone();
+            Box::pin(async move { Ok(snapshot) })
+        }
+    }
+
+    struct OwnerDroppingConnector {
+        snapshot: jazz::protocol::CatalogueSnapshot,
+        connect_count: AtomicUsize,
+    }
+
+    impl NativeTransportConnector for OwnerDroppingConnector {
+        fn connect(&self, _request: NativeTransportRequest) -> NativeTransportFuture {
+            self.connect_count.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {
+                Ok(ConnectedNativeTransport {
+                    transport: Box::new(NoopWireTransport),
+                    protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
+                    features: jazz::wire::FEATURE_NONE,
+                    session_context: None,
+                    terminal: Box::pin(std::future::ready(NativeTransportTerminal::OwnerDropped)),
+                })
+            })
+        }
+
+        fn bootstrap_catalogue(
+            &self,
+            _request: NativeTransportRequest,
+        ) -> NativeCatalogueBootstrapFuture {
+            let snapshot = self.snapshot.clone();
+            Box::pin(async move { Ok(snapshot) })
+        }
+    }
+
+    struct PendingTerminalConnector {
+        snapshot: jazz::protocol::CatalogueSnapshot,
+        connect_count: AtomicUsize,
+    }
+
+    impl NativeTransportConnector for PendingTerminalConnector {
+        fn connect(&self, _request: NativeTransportRequest) -> NativeTransportFuture {
+            self.connect_count.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {
+                Ok(ConnectedNativeTransport {
+                    transport: Box::new(NoopWireTransport),
+                    protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
+                    features: jazz::wire::FEATURE_NONE,
+                    session_context: None,
+                    terminal: Box::pin(std::future::pending()),
+                })
+            })
+        }
+
+        fn bootstrap_catalogue(
+            &self,
+            _request: NativeTransportRequest,
+        ) -> NativeCatalogueBootstrapFuture {
+            let snapshot = self.snapshot.clone();
+            Box::pin(async move { Ok(snapshot) })
+        }
+    }
+
+    struct MalformedWireTransport {
+        returned_frame: bool,
+    }
+
+    impl WireTransport for MalformedWireTransport {
+        fn send_frame(&mut self, _frame: Vec<u8>) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+            if self.returned_frame {
+                None
+            } else {
+                self.returned_frame = true;
+                Some(vec![0xff])
+            }
+        }
+    }
+
+    struct FatalProtocolConnector {
+        snapshot: jazz::protocol::CatalogueSnapshot,
+    }
+
+    impl NativeTransportConnector for FatalProtocolConnector {
+        fn connect(&self, _request: NativeTransportRequest) -> NativeTransportFuture {
+            Box::pin(async {
+                Ok(ConnectedNativeTransport {
+                    transport: Box::new(MalformedWireTransport {
+                        returned_frame: false,
+                    }),
+                    protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
+                    features: jazz::wire::FEATURE_NONE,
+                    session_context: None,
+                    terminal: Box::pin(std::future::pending()),
+                })
+            })
+        }
+
+        fn bootstrap_catalogue(
+            &self,
+            _request: NativeTransportRequest,
+        ) -> NativeCatalogueBootstrapFuture {
+            let snapshot = self.snapshot.clone();
+            Box::pin(async move { Ok(snapshot) })
+        }
+    }
+
+    struct PendingBootstrapConnector;
+
+    impl NativeTransportConnector for PendingBootstrapConnector {
+        fn connect(&self, _request: NativeTransportRequest) -> NativeTransportFuture {
+            Box::pin(std::future::pending())
+        }
+
+        fn bootstrap_catalogue(
+            &self,
+            _request: NativeTransportRequest,
+        ) -> NativeCatalogueBootstrapFuture {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[test]
+    fn edge_reconnect_delay_is_exponential_and_capped() {
+        assert_eq!(edge_reconnect_delay(1), Duration::from_millis(100));
+        assert_eq!(edge_reconnect_delay(2), Duration::from_millis(200));
+        assert_eq!(edge_reconnect_delay(6), Duration::from_millis(3_200));
+        assert_eq!(edge_reconnect_delay(7), EDGE_RECONNECT_MAX_DELAY);
+        assert_eq!(edge_reconnect_delay(u32::MAX), EDGE_RECONNECT_MAX_DELAY);
+    }
+
+    #[tokio::test]
+    async fn idle_upstream_terminal_reconnects_and_reaches_connected_again() {
+        let app_id = AppId::from_name("edge-idle-upstream-reconnect");
+        let auth = AuthConfig {
+            admin_secret: Some("bootstrap-secret".to_owned()),
+            ..Default::default()
+        };
+        let core = ServerBuilder::new(app_id)
+            .with_schema(dynamic_bootstrap_schema())
+            .with_auth_config(auth.clone())
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build authority core");
+        let snapshot = core
+            .state
+            .runtime()
+            .expect("core has shell")
+            .trusted_catalogue_snapshot_for_test()
+            .await
+            .expect("read authority snapshot");
+        let connector = Arc::new(ClosingConnector {
+            snapshot,
+            connect_count: AtomicUsize::new(0),
+        });
+        let edge = ServerBuilder::new(app_id)
+            .with_auth_config(auth)
+            .with_storage(StorageBackend::InMemory)
+            .with_upstream_url("ws://127.0.0.1:9")
+            .with_native_transport_connector(connector.clone())
+            .build()
+            .await
+            .expect("build edge");
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if connector.connect_count.load(Ordering::SeqCst) >= 2
+                    && edge.state.edge_upstream_health() == EdgeUpstreamHealth::Connected
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("edge reconnects after idle terminal");
+
+        assert!(connector.connect_count.load(Ordering::SeqCst) >= 2);
+        edge.shutdown().await;
+        core.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn owner_drop_stops_connected_edge_upstream_without_reconnect() {
+        let app_id = AppId::from_name("edge-owner-drop-stopped-health");
+        let auth = AuthConfig {
+            admin_secret: Some("bootstrap-secret".to_owned()),
+            ..Default::default()
+        };
+        let core = ServerBuilder::new(app_id)
+            .with_schema(dynamic_bootstrap_schema())
+            .with_auth_config(auth.clone())
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build authority core");
+        let snapshot = core
+            .state
+            .runtime()
+            .expect("core has shell")
+            .trusted_catalogue_snapshot_for_test()
+            .await
+            .expect("read authority snapshot");
+        let connector = Arc::new(OwnerDroppingConnector {
+            snapshot,
+            connect_count: AtomicUsize::new(0),
+        });
+        let edge = ServerBuilder::new(app_id)
+            .with_auth_config(auth)
+            .with_storage(StorageBackend::InMemory)
+            .with_upstream_url("ws://127.0.0.1:9")
+            .with_native_transport_connector(connector.clone())
+            .build()
+            .await
+            .expect("build edge");
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if edge.state.edge_upstream_health() == EdgeUpstreamHealth::Stopped {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owner drop publishes stopped health");
+        assert_eq!(
+            connector.connect_count.load(Ordering::SeqCst),
+            1,
+            "owner drop must stop the connector rather than opening a replacement transport"
+        );
+
+        edge.shutdown().await;
+        core.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_connected_edge_upstream_without_reconnect() {
+        let app_id = AppId::from_name("edge-connected-cancellation-stopped-health");
+        let auth = AuthConfig {
+            admin_secret: Some("bootstrap-secret".to_owned()),
+            ..Default::default()
+        };
+        let core = ServerBuilder::new(app_id)
+            .with_schema(dynamic_bootstrap_schema())
+            .with_auth_config(auth.clone())
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build authority core");
+        let snapshot = core
+            .state
+            .runtime()
+            .expect("core has shell")
+            .trusted_catalogue_snapshot_for_test()
+            .await
+            .expect("read authority snapshot");
+        let connector = Arc::new(PendingTerminalConnector {
+            snapshot,
+            connect_count: AtomicUsize::new(0),
+        });
+        let edge = ServerBuilder::new(app_id)
+            .with_auth_config(auth)
+            .with_storage(StorageBackend::InMemory)
+            .with_upstream_url("ws://127.0.0.1:9")
+            .with_native_transport_connector(connector.clone())
+            .build()
+            .await
+            .expect("build edge");
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if edge.state.edge_upstream_health() == EdgeUpstreamHealth::Connected {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("edge reaches connected before cancellation");
+        edge.shutdown().await;
+        assert_eq!(
+            edge.state.edge_upstream_health(),
+            EdgeUpstreamHealth::Stopped,
+            "cancelling the attached driver publishes stopped health"
+        );
+        assert_eq!(
+            connector.connect_count.load(Ordering::SeqCst),
+            1,
+            "cancellation must not open a replacement transport"
+        );
+        core.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn fatal_upstream_protocol_error_stops_connector_with_visible_health_failure() {
+        let app_id = AppId::from_name("edge-fatal-upstream-health");
+        let auth = AuthConfig {
+            admin_secret: Some("bootstrap-secret".to_owned()),
+            ..Default::default()
+        };
+        let core = ServerBuilder::new(app_id)
+            .with_schema(dynamic_bootstrap_schema())
+            .with_auth_config(auth.clone())
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build authority core");
+        let snapshot = core
+            .state
+            .runtime()
+            .expect("core has shell")
+            .trusted_catalogue_snapshot_for_test()
+            .await
+            .expect("read authority snapshot");
+        let edge = ServerBuilder::new(app_id)
+            .with_auth_config(auth)
+            .with_storage(StorageBackend::InMemory)
+            .with_upstream_url("ws://127.0.0.1:9")
+            .with_native_transport_connector(Arc::new(FatalProtocolConnector { snapshot }))
+            .build()
+            .await
+            .expect("build edge");
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if matches!(
+                    edge.state.edge_upstream_health(),
+                    EdgeUpstreamHealth::Failed { .. }
+                ) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fatal protocol outcome becomes visible");
+        let health = edge.state.edge_upstream_health();
+        assert!(
+            matches!(
+                &health,
+                EdgeUpstreamHealth::Failed { reason }
+                    if reason.contains("malformed auxiliary wire frame")
+            ),
+            "fatal protocol reason remains available to health reporting"
+        );
+
+        edge.shutdown().await;
+        core.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_pending_edge_bootstrap_before_shell_publication() {
+        let app_id = AppId::from_name("edge-shutdown-cancels-bootstrap");
+        let edge = ServerBuilder::new(app_id)
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("bootstrap-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .with_upstream_url("ws://127.0.0.1:9")
+            .with_native_transport_connector(Arc::new(PendingBootstrapConnector))
+            .build()
+            .await
+            .expect("build edge");
+
+        let phase = tokio::time::timeout(Duration::from_secs(1), edge.shutdown())
+            .await
+            .expect("shutdown cancels pending bootstrap");
+        assert_eq!(phase, crate::server::ShutdownPhase::StorageClosed);
+        assert!(edge.state.runtime().is_none());
+        assert_eq!(
+            edge.state.edge_upstream_health(),
+            EdgeUpstreamHealth::Stopped
+        );
     }
 
     #[tokio::test]
@@ -1095,6 +1721,26 @@ mod tests {
                 .await
                 .expect("builder retries after repaired catalogue");
         }
+    }
+
+    #[test]
+    fn owner_drop_stops_the_connector_while_peer_close_reconnects() {
+        assert!(matches!(
+            connected_transport_outcome(ServerUpstreamTerminalReason::NativeTransport(
+                NativeTransportTerminal::OwnerDropped,
+            )),
+            EdgeConnectorOutcome::Stopped
+        ));
+        assert!(matches!(
+            connected_transport_outcome(ServerUpstreamTerminalReason::Cancelled),
+            EdgeConnectorOutcome::Stopped
+        ));
+        assert!(matches!(
+            connected_transport_outcome(ServerUpstreamTerminalReason::NativeTransport(
+                NativeTransportTerminal::PeerClosed("peer closed".to_owned()),
+            )),
+            EdgeConnectorOutcome::Reconnect(reason) if reason == "peer closed"
+        ));
     }
 
     #[tokio::test]

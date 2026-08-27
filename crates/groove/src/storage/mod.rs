@@ -15,6 +15,7 @@
 mod idb;
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 mod key_codec;
+mod manifest;
 mod memory;
 #[cfg(any(test, feature = "test"))]
 mod test;
@@ -29,6 +30,10 @@ use crate::records::{Record, RecordDescriptor};
 use thiserror::Error;
 
 pub use idb::IdbStorage;
+pub use manifest::{
+    AdapterFormat, ManifestOpenReceipt, MigrationJournal, MigrationRegistry, STORAGE_EPOCH_1,
+    StorageEpochManifest, StorageMigration,
+};
 pub use memory::MemoryStorage;
 #[cfg(any(test, feature = "test"))]
 pub use test::{TestStorage, TestStorageControl, TestStorageOperation, YieldingStorage};

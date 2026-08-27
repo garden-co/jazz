@@ -167,6 +167,10 @@ where
             .borrow()
             .applied_view_update_generation(binding_view);
         let coverage = coverage_key(shape, binding, upstream_opts.clone());
+        // Edge/Global one-shots may borrow a still-live maintained stream:
+        // refreshing that exact wire subscription cannot be confused with a
+        // detached predecessor. Otherwise they own a fresh subscription key.
+        // Local-only usage retains the existing coverage-reuse semantics.
         if self
             .node
             .upstream_coverage_refcounts
@@ -183,6 +187,13 @@ where
                 .query_coverage_registrations
                 .borrow()
                 .contains_key(&subscription)
+            && (!requires_current_authority_receipt
+                || self
+                    .node
+                    .upstream_subscription_owners
+                    .borrow()
+                    .get(&subscription)
+                    .is_some_and(|owners| owners.iter().any(|owner| owner.strong_count() > 0)))
         {
             *self
                 .node
@@ -303,17 +314,24 @@ where
     pub fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> bool {
         let node = self.node.node.borrow();
         let active_receipts = self.node.active_authority_view_receipts.borrow();
+        let has_current_authority_receipt = active_receipts.as_ref().is_some_and(|receipts| {
+            attachment
+                .required_after
+                .iter()
+                .all(|(binding_view, _)| receipts.binding_views.contains(binding_view))
+                && attachment
+                    .subscriptions
+                    .iter()
+                    .all(|subscription| receipts.subscriptions.contains(subscription))
+        });
         let covered = attachment
             .required_after
             .iter()
             .all(|(binding_view, required_after)| {
                 node.applied_view_update_generation(*binding_view) > *required_after
                     && !node.opening_pending_for_binding_view(*binding_view)
-                    && (!attachment.requires_current_authority_receipt
-                        || active_receipts
-                            .as_ref()
-                            .is_some_and(|receipts| receipts.binding_views.contains(binding_view)))
-            });
+            })
+            && (!attachment.requires_current_authority_receipt || has_current_authority_receipt);
         drop(node);
         drop(active_receipts);
         if covered {
@@ -348,6 +366,16 @@ where
 
     /// Detach a one-shot query coverage request.
     pub fn detach_query(&self, attachment: QueryAttachment) {
+        if let Some(receipts) = self
+            .node
+            .active_authority_view_receipts
+            .borrow_mut()
+            .as_mut()
+        {
+            for subscription in &attachment.registrations {
+                receipts.subscriptions.remove(subscription);
+            }
+        }
         let mut removed_subscriptions = Vec::new();
         let mut registrations = self.node.query_coverage_registrations.borrow_mut();
         for subscription in attachment.registrations {

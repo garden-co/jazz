@@ -222,6 +222,15 @@ async function initialize(context: RuntimeContext): Promise<void> {
         post(peer.port, { type: "mutation-error", event: received }),
       );
     });
+    context.runtime.onServerTransportError((error) => {
+      // Transport failures are foreground events, not authority fates or
+      // durable notifications. Only peers that have completed admission own a
+      // tab runtime capable of rejecting an active remote wait.
+      for (const peer of context.peers.values()) {
+        if (!peer.subscriber || !peer.pump) continue;
+        post(peer.port, { type: "transport-error", message: error.message });
+      }
+    });
     if (options.logLevel === "trace") {
       context.disposeAuxiliaryTrace = context.runtime.onAuxiliaryTrace((entries) => {
         broadcast(context, {

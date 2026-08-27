@@ -702,6 +702,39 @@ pub struct PeerIoPump {
     role: PeerIoPumpRole,
 }
 
+/// One encoded auxiliary frame whose source obligation remains owned by this
+/// pump until the binding commits the handoff. Dropping the reservation restores
+/// the exact request/response batch to the front of its lane.
+pub(crate) struct ReservedOutboundWireFrame {
+    pump: PeerIoPump,
+    message: Option<SyncMessage>,
+    frame: Option<Vec<u8>>,
+}
+
+impl ReservedOutboundWireFrame {
+    pub(crate) fn take_frame(&mut self) -> Vec<u8> {
+        self.frame
+            .take()
+            .expect("reserved auxiliary wire frame is handed to the transport once")
+    }
+
+    pub(crate) fn commit(mut self) {
+        let message = self
+            .message
+            .take()
+            .expect("reserved auxiliary outbound batch is committed once");
+        self.pump.acknowledge_outbound(&message);
+    }
+}
+
+impl Drop for ReservedOutboundWireFrame {
+    fn drop(&mut self) {
+        if let Some(message) = self.message.take() {
+            self.pump.restore_outbound(message);
+        }
+    }
+}
+
 impl PeerIoPump {
     fn new(
         resolver: PeerChunkResolver,
@@ -885,14 +918,45 @@ impl PeerIoPump {
         negotiated_features: crate::wire::WireFeatures,
         session: Option<crate::wire::WireSession>,
     ) -> Result<Option<Vec<u8>>, String> {
-        let mut frames = self.take_outbound_wire_frames(
+        let Some(mut reservation) =
+            self.reserve_outbound_wire_frame(protocol_version, negotiated_features, session)?
+        else {
+            return Ok(None);
+        };
+        let frame = reservation.take_frame();
+        reservation.commit();
+        Ok(Some(frame))
+    }
+
+    /// Reserve one complete auxiliary wire frame for a binding-owned send.
+    /// The caller must commit after its transport accepted the frame or restore
+    /// it after a rejected send; dropping it also restores the original batch.
+    pub(crate) fn reserve_outbound_wire_frame(
+        &self,
+        protocol_version: u16,
+        negotiated_features: crate::wire::WireFeatures,
+        session: Option<crate::wire::WireSession>,
+    ) -> Result<Option<ReservedOutboundWireFrame>, String> {
+        let Some(message) = self.take_outbound(1) else {
+            return Ok(None);
+        };
+        let frame = match Self::encode_outbound_wire_frame(
+            message.clone(),
             protocol_version,
             negotiated_features,
             session,
-            1,
-            crate::protocol_limits::MAX_WIRE_FRAME_BYTES,
-        )?;
-        Ok(frames.pop())
+        ) {
+            Ok(frame) => frame,
+            Err(error) => {
+                self.restore_outbound(message);
+                return Err(error);
+            }
+        };
+        Ok(Some(ReservedOutboundWireFrame {
+            pump: self.clone(),
+            message: Some(message),
+            frame: Some(frame),
+        }))
     }
 
     /// Drain a bounded FIFO prefix of the auxiliary lane into complete wire
@@ -1489,6 +1553,11 @@ const MAX_EDGE_FATE_ROUTES_PER_TX: usize = 8;
 struct AuthorityViewReceipts {
     connection_epoch: u64,
     confirmation_floor: GlobalTime,
+    /// Exact query-coverage subscriptions confirmed on this authority link.
+    ///
+    /// Binding-view generations are shared by equal query shapes, so they
+    /// cannot distinguish a late update for a detached predecessor.
+    subscriptions: BTreeSet<SubscriptionKey>,
     binding_views: BTreeSet<BindingViewKey>,
 }
 
@@ -2094,11 +2163,54 @@ struct PendingUpload {
     unit: Option<SyncMessage>,
 }
 
+/// Queue an upload, letting an exact canonical unit supersede either a tx-id
+/// recovery marker or an earlier same-transaction reconstruction.
+fn queue_pending_upload_in(outbox: &Outbox, tx_id: TxId, unit: Option<SyncMessage>) -> bool {
+    let mut outbox = outbox.borrow_mut();
+    if let Some(pending) = outbox
+        .entries
+        .iter_mut()
+        .find(|pending| pending.tx_id == tx_id)
+    {
+        let Some(unit) = unit else {
+            return false;
+        };
+        if pending.unit.as_ref() == Some(&unit) {
+            return false;
+        }
+        // A reconnect can reconstruct an upload after its route is registered
+        // but before subscriber ingest queues the exact inbound unit. The
+        // canonical payload must win even when both entries have a body.
+        pending.unit = Some(unit);
+        return true;
+    }
+    outbox.push(PendingUpload { tx_id, unit });
+    true
+}
+
+/// Whether a transaction has reached the requested application-visible wait
+/// boundary. Local persistence precedes authority fate assignment, while
+/// remote durability is successful only after an Accepted fate.
+pub(crate) fn transaction_satisfies_wait(
+    fate: &Fate,
+    global_time: Option<GlobalTime>,
+    durability: DurabilityTier,
+    tier: DurabilityTier,
+) -> bool {
+    durability >= tier
+        && (tier <= DurabilityTier::Local || matches!(fate, Fate::Accepted))
+        && (tier < DurabilityTier::Global || global_time.is_some())
+}
+
 /// Application-visible fate and durability for a local write transaction.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct WriteState {
     /// Latest authority fate observed by this `Db`.
     pub fate: Fate,
+    /// Authority-assigned Global timestamp, once observed.
+    ///
+    /// Global durability is not a completed Global wait without this receipt.
+    pub global_time: Option<GlobalTime>,
     /// Highest durability tier observed by this `Db`.
     pub durability: DurabilityTier,
 }
@@ -3555,10 +3667,19 @@ where
                 ErrorCode::NotObserved,
                 format!("write has not been accepted at requested tier {tier:?}"),
             )),
-            Fate::Pending | Fate::Accepted if state.durability < tier => Err(Error::new(
-                ErrorCode::NotObserved,
-                format!("write has not reached requested tier {tier:?}"),
-            )),
+            Fate::Pending | Fate::Accepted
+                if !transaction_satisfies_wait(
+                    &state.fate,
+                    state.global_time,
+                    state.durability,
+                    tier,
+                ) =>
+            {
+                Err(Error::new(
+                    ErrorCode::NotObserved,
+                    format!("write has not reached requested tier {tier:?}"),
+                ))
+            }
             Fate::Pending | Fate::Accepted => Ok(self.tx_id),
         }
     }
@@ -3571,14 +3692,19 @@ where
                 "database handle was dropped",
             ));
         };
-        let Some((fate, _, durability)) = node.lock().await.transaction_state(self.tx_id).await
+        let Some((fate, global_time, durability)) =
+            node.lock().await.transaction_state(self.tx_id).await
         else {
             return Err(Error::new(
                 ErrorCode::NotObserved,
                 format!("transaction {:?} is not known locally", self.tx_id),
             ));
         };
-        Ok(WriteState { fate, durability })
+        Ok(WriteState {
+            fate,
+            global_time,
+            durability,
+        })
     }
 }
 
