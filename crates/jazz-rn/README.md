@@ -37,11 +37,14 @@ nor CocoaPods, so Gradle configuration/build and `pod install` must run on the
 respective Blacksmith runners before claiming platform or device support.
 The shared host codec now stages trusted native scope admission/revocation via
 random 256-bit capabilities, client open-close, bounded `Pump`, directional
-bounded peer-frame send/drain, and handle/queue diagnostics. The thin JNI and
-Objective-C++ wrappers forward the
-opaque command channel when their staged artifacts are present; platform-owned
-scope admission remains part of the device integration. This is still a
-platform checkpoint, not device support: there is no assembled release-package
+bounded peer-frame send/drain, and handle/queue diagnostics. Kotlin and
+Swift/Objective-C application authentication code supplies the complete strict
+scope configuration to a dedicated native entrypoint; Rust validates and
+normalizes it, then returns only the opaque 32-byte capability. The generic
+TurboModule `execute` channel never accepts scope configuration, claims, or
+bearer tokens. On auth switch, trusted code revokes the old capability (closing
+all of its relay/client aliases) before admitting the new scope. This is still
+a platform checkpoint, not device support: there is no assembled release-package
 or Expo development-build receipt yet.
 
 The shared artifact seam is `jazz_native_relay_abi_version` from
