@@ -828,13 +828,12 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 listener.all(app.tracks.where({ id: streamedTrack.value.id }), { tier: "edge" }),
               ).resolves.toEqual([]);
               await owner.reconnect();
-              streamedTrackId = (
-                await withTimeout(
-                  streamedTrack.wait({ tier: "edge" }),
-                  15_000,
-                  "streamed audio track did not settle at edge",
-                )
-              ).id;
+              await withTimeout(
+                streamedTrack.wait({ tier: "edge" }),
+                15_000,
+                "streamed audio track did not settle at edge",
+              );
+              streamedTrackId = streamedTrack.value.id;
               // The metadata adapter has a hard page bound. Seed one more
               // row than it is allowed to return so the bound is observable,
               // while retaining this first row as the streamed-audio case.

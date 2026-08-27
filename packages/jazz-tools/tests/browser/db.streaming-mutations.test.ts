@@ -34,6 +34,8 @@ describe("browser streaming mutations", () => {
       }),
       done: false,
     });
+    await expect(inserted.wait({ tier: "local" })).resolves.toBeUndefined();
+    expect(inserted.value).toEqual({ id: expect.any(String) });
     await db.updateStreaming(app.todos, inserted.value.id, {
       title: (async function* () {
         yield "updated";
