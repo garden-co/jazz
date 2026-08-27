@@ -1431,6 +1431,76 @@ fn exists_rel_rejects_nested_outer_correlation_off_the_join_key() {
 }
 
 #[test]
+fn exists_rel_rejects_multiple_join_conditions_in_write_policy() {
+    let column = |scope: &str, name: &str| PublicRelColumnRef {
+        scope: Some(scope.to_owned()),
+        column: name.to_owned(),
+    };
+    let policy = PublicPolicyExpr::ExistsRel {
+        rel: PublicRelExpr::Filter {
+            input: Box::new(PublicRelExpr::Join {
+                left: Box::new(PublicRelExpr::TableScan {
+                    table: "blocks".into(),
+                    alias: Some("blocks".to_owned()),
+                }),
+                right: Box::new(PublicRelExpr::Filter {
+                    input: Box::new(PublicRelExpr::TableScan {
+                        table: "members".into(),
+                        alias: Some("members".to_owned()),
+                    }),
+                    predicate: PublicRelPredicateExpr::Cmp {
+                        left: column("members", "subject"),
+                        op: PublicRelPredicateCmpOp::Eq,
+                        right: PublicRelValueRef::SessionRef(vec!["user_id".to_owned()]),
+                    },
+                }),
+                on: vec![
+                    PublicRelJoinCondition {
+                        left: column("blocks", "workspace"),
+                        right: column("members", "workspace"),
+                    },
+                    PublicRelJoinCondition {
+                        left: column("blocks", "owner"),
+                        right: column("members", "subject"),
+                    },
+                ],
+                join_kind: PublicRelJoinKind::Inner,
+            }),
+            predicate: PublicRelPredicateExpr::Cmp {
+                left: column("blocks", "id"),
+                op: PublicRelPredicateCmpOp::Eq,
+                right: PublicRelValueRef::OuterColumn(PublicRelColumnRef::unscoped("block")),
+            },
+        },
+    };
+    let public = PublicSchemaBuilder::new()
+        .table(PublicTableSchemaBuilder::new("workspaces"))
+        .table(
+            PublicTableSchemaBuilder::new("members")
+                .fk_column("workspace", "workspaces")
+                .column("subject", PublicColumnType::Uuid),
+        )
+        .table(
+            PublicTableSchemaBuilder::new("blocks")
+                .fk_column("workspace", "workspaces")
+                .column("owner", PublicColumnType::Uuid),
+        )
+        .table(
+            PublicTableSchemaBuilder::new("tasks")
+                .fk_column("block", "blocks")
+                .policies(PublicTablePolicies::new().with_insert(policy)),
+        )
+        .build();
+
+    let error = crate::schema::JazzSchema::new(&public)
+        .expect_err("multiple join conditions must fail closed instead of dropping one");
+    assert_eq!(
+        error.to_string(),
+        "$.tasks.policies.insert.with_check: core schema ExistsRel joins support exactly one column equality"
+    );
+}
+
+#[test]
 fn exists_rel_fails_closed_for_outer_correlation_beyond_one_nested_join() {
     let column = |scope: &str, name: &str| PublicRelColumnRef {
         scope: Some(scope.to_owned()),
