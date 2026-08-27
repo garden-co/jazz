@@ -732,9 +732,7 @@ where
                     ));
                 }
             };
-            let member = postcard::from_bytes::<ResultMemberEntry>(member_bytes).map_err(|_| {
-                Error::InvalidStoredValue("settled result member payload must decode")
-            })?;
+            let member = result_member_from_storage_bytes(member_bytes)?;
             recovered_members.push((binding_view_key, member));
         }
         drop(store);
