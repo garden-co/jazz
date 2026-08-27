@@ -13,21 +13,25 @@ use support::{
 };
 use uuid::Uuid;
 
-fn test_author_id(subject: &str) -> ObjectId {
+fn test_user_id(subject: &str) -> String {
     let uuid = Uuid::parse_str(subject)
         .unwrap_or_else(|_| Uuid::new_v5(&Uuid::NAMESPACE_URL, subject.as_bytes()));
-    ObjectId::from_uuid(uuid)
+    uuid.to_string()
 }
 
-fn test_user_id(subject: &str) -> String {
-    test_author_id(subject).uuid().to_string()
+fn test_author_id(subject: &str) -> String {
+    Session::new("urn:jazz:test", test_user_id(subject))
+        .author_subject()
+        .expect("test user identity")
+        .canonical()
+        .to_owned()
 }
 
 fn inherited_update_schema() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("organizations")
-                .column("owner_id", ColumnType::Uuid)
+                .column("owner_id", ColumnType::Text)
                 .column("name", ColumnType::Text)
                 .policies(
                     TablePolicies::new()
@@ -43,7 +47,7 @@ fn inherited_update_schema() -> jazz::tools::Schema {
         .table(
             TableSchema::builder("parents")
                 .fk_column("organization_id", "organizations")
-                .column("owner_id", ColumnType::Uuid)
+                .column("owner_id", ColumnType::Text)
                 .column("name", ColumnType::Text)
                 .policies(
                     TablePolicies::new()
@@ -84,7 +88,7 @@ fn inherited_select_schema() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("organizations")
-                .column("owner_id", ColumnType::Uuid)
+                .column("owner_id", ColumnType::Text)
                 .column("name", ColumnType::Text)
                 .policies(
                     TablePolicies::new()
@@ -97,7 +101,7 @@ fn inherited_select_schema() -> jazz::tools::Schema {
         .table(
             TableSchema::builder("folders")
                 .fk_column("organization_id", "organizations")
-                .column("owner_id", ColumnType::Uuid)
+                .column("owner_id", ColumnType::Text)
                 .column("name", ColumnType::Text)
                 .policies(
                     TablePolicies::new()
@@ -146,7 +150,7 @@ fn reverse_inherited_select_schema() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("organizations")
-                .column("owner_id", ColumnType::Uuid)
+                .column("owner_id", ColumnType::Text)
                 .policies(
                     TablePolicies::new()
                         .with_select(PolicyExpr::eq_session("owner_id", vec!["user".to_owned()]))
@@ -433,7 +437,7 @@ async fn inherited_select_policy_exposes_child_row_through_multi_hop_parent_chai
             let (organization_id, _, organization_tx) = alice_session
                 .insert(
                     "organizations",
-                    row_input!("owner_id" => alice_owner_id, "name" => "Alice org"),
+                    row_input!("owner_id" => alice_owner_id.clone(), "name" => "Alice org"),
                 )
                 .expect("alice inserts organization");
             let (folder_id, _, folder_tx) = alice_session
@@ -441,7 +445,7 @@ async fn inherited_select_policy_exposes_child_row_through_multi_hop_parent_chai
                     "folders",
                     row_input!(
                         "organization_id" => organization_id,
-                        "owner_id" => ObjectId::new(),
+                        "owner_id" => "unrelated",
                         "name" => "Inherited folder"
                     ),
                 )
@@ -590,7 +594,7 @@ async fn inherited_select_policy_expands_both_forward_parent_branches() {
             let (organization_id, _, organization_tx) = alice_session
                 .insert(
                     "organizations",
-                    row_input!("owner_id" => alice_owner_id, "name" => "Alice org"),
+                    row_input!("owner_id" => alice_owner_id.clone(), "name" => "Alice org"),
                 )
                 .expect("insert alice-owned organization");
             let (primary_folder_id, _, primary_folder_tx) = alice_session
@@ -598,7 +602,7 @@ async fn inherited_select_policy_expands_both_forward_parent_branches() {
                     "folders",
                     row_input!(
                         "organization_id" => organization_id,
-                        "owner_id" => ObjectId::new(),
+                        "owner_id" => "unrelated-primary",
                         "name" => "Primary inherited folder"
                     ),
                 )
@@ -608,7 +612,7 @@ async fn inherited_select_policy_expands_both_forward_parent_branches() {
                     "folders",
                     row_input!(
                         "organization_id" => organization_id,
-                        "owner_id" => ObjectId::new(),
+                        "owner_id" => "unrelated-alternate",
                         "name" => "Alternate inherited folder"
                     ),
                 )
@@ -703,7 +707,7 @@ async fn inherited_update_policy_allows_update_through_parent() {
             let (organization_id, _, organization_tx) = alice_session
                 .insert(
                     "organizations",
-                    row_input!("owner_id" => alice_owner_id, "name" => "Alice org"),
+                    row_input!("owner_id" => alice_owner_id.clone(), "name" => "Alice org"),
                 )
                 .expect("alice inserts organization");
             let (parent_id, _, parent_tx) = alice_session
@@ -711,7 +715,7 @@ async fn inherited_update_policy_allows_update_through_parent() {
                     "parents",
                     row_input!(
                         "organization_id" => organization_id,
-                        "owner_id" => alice_owner_id,
+                        "owner_id" => alice_owner_id.clone(),
                         "name" => "Alice parent"
                     ),
                 )
@@ -814,7 +818,7 @@ async fn inherited_update_policy_allows_multi_hop_update_chain() {
             let (organization_id, _, organization_tx) = alice_session
                 .insert(
                     "organizations",
-                    row_input!("owner_id" => alice_owner_id, "name" => "Alice org"),
+                    row_input!("owner_id" => alice_owner_id.clone(), "name" => "Alice org"),
                 )
                 .expect("alice inserts organization");
             let (parent_id, _, parent_tx) = alice_session
@@ -822,7 +826,7 @@ async fn inherited_update_policy_allows_multi_hop_update_chain() {
                     "parents",
                     row_input!(
                         "organization_id" => organization_id,
-                        "owner_id" => ObjectId::new(),
+                        "owner_id" => "unrelated",
                         "name" => "Project"
                     ),
                 )
@@ -910,7 +914,7 @@ async fn inherited_update_policy_allows_reparenting_when_old_and_new_parents_gra
             let (organization_id, _, organization_tx) = alice_session
                 .insert(
                     "organizations",
-                    row_input!("owner_id" => alice_owner_id, "name" => "Alice org"),
+                    row_input!("owner_id" => alice_owner_id.clone(), "name" => "Alice org"),
                 )
                 .expect("alice inserts organization");
             let (parent_a, _, parent_a_tx) = alice_session
@@ -918,7 +922,7 @@ async fn inherited_update_policy_allows_reparenting_when_old_and_new_parents_gra
                     "parents",
                     row_input!(
                         "organization_id" => organization_id,
-                        "owner_id" => alice_owner_id,
+                        "owner_id" => alice_owner_id.clone(),
                         "name" => "Parent A"
                     ),
                 )

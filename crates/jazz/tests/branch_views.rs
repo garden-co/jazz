@@ -88,13 +88,6 @@ fn policy_with_all_writes(read: PolicyExpr) -> TablePolicies {
         .with_delete(read)
 }
 
-fn set_test_user_claims(db: &Db<MemoryStorage>, identity: AuthorSubject) {
-    db.set_identity_claims(
-        identity,
-        BTreeMap::from([("user_id".to_owned(), Value::Uuid(identity.test_uuid()))]),
-    );
-}
-
 fn open_db() -> (Db<MemoryStorage>, JazzSchema) {
     let schema = compile_schema(
         &SchemaBuilder::new()
@@ -537,7 +530,7 @@ fn open_policy_db() -> (Db<MemoryStorage>, JazzSchema) {
                 TableSchemaBuilder::new("branches")
                     .fk_column("branch_key", "branches")
                     .column("name", ColumnType::Text)
-                    .column("owner", ColumnType::Uuid)
+                    .column("owner", ColumnType::Text)
                     .policies(allow_all_policies()),
             )
             .table(
@@ -571,8 +564,6 @@ fn branch_column_reference_policy_controls_effective_reads() {
     let (db, _schema) = open_policy_db();
     let owner = AuthorSubject::for_test_bytes([0x76; 16]);
     let outsider = AuthorSubject::for_test_bytes([0x77; 16]);
-    set_test_user_claims(&db, owner);
-    set_test_user_claims(&db, outsider);
     let branch = RowUuid::from_bytes([0x78; 16]);
     let selector = BranchSelector::new([("branch_id", Value::Uuid(branch.0))]);
     db.insert(
@@ -580,7 +571,10 @@ fn branch_column_reference_policy_controls_effective_reads() {
         BTreeMap::from([
             ("branch_key".to_owned(), Value::Uuid(branch.0)),
             ("name".to_owned(), Value::String("draft".to_owned())),
-            ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
+            (
+                "owner".to_owned(),
+                Value::String(owner.canonical().to_owned()),
+            ),
         ]),
         jazz::db::InsertOptions {
             row_id: Some(branch),
@@ -618,7 +612,7 @@ fn branch_column_reference_policy_controls_effective_reads() {
         .prepare_query(&Query::from("todos").join_via_row_id(
             "branches",
             "branch_id",
-            [eq(col("owner"), jazz::query::lit(owner.test_uuid()))],
+            [eq(col("owner"), jazz::query::lit(owner.canonical()))],
         ))
         .unwrap();
     assert_eq!(
@@ -668,7 +662,7 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
                     .column("branch_id", ColumnType::Uuid)
                     .fk_column("branch_key", "branches")
                     .column("name", ColumnType::Text)
-                    .column("owner", ColumnType::Uuid)
+                    .column("owner", ColumnType::Text)
                     .branch_by("branch_id")
                     .policies(allow_all_policies()),
             )
@@ -693,8 +687,6 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
     .unwrap();
     let before = AuthorSubject::for_test_bytes([0xad; 16]);
     let after = AuthorSubject::for_test_bytes([0xae; 16]);
-    set_test_user_claims(&db, before);
-    set_test_user_claims(&db, after);
     let base_branch = RowUuid::from_bytes([0xaa; 16]);
     let head_branch = RowUuid::from_bytes([0xab; 16]);
     let base = BranchSelector::new([("branch_id", Value::Uuid(base_branch.0))]);
@@ -705,7 +697,10 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
             BTreeMap::from([
                 ("branch_key".to_owned(), Value::Uuid(branch.0)),
                 ("name".to_owned(), Value::String("branch".to_owned())),
-                ("owner".to_owned(), Value::Uuid(before.test_uuid())),
+                (
+                    "owner".to_owned(),
+                    Value::String(before.canonical().to_owned()),
+                ),
             ]),
             jazz::db::InsertOptions {
                 row_id: Some(branch),
@@ -738,7 +733,10 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
     db.update(
         "branches",
         head_branch,
-        BTreeMap::from([("owner".to_owned(), Value::Uuid(after.test_uuid()))]),
+        BTreeMap::from([(
+            "owner".to_owned(),
+            Value::String(after.canonical().to_owned()),
+        )]),
         jazz::db::UpdateOptions {
             target: jazz::db::WriteTarget::BranchView {
                 head: base.clone(),
@@ -766,7 +764,7 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
         .find(|table| table.name == "branches")
         .unwrap();
     assert!(branch_rows.iter().all(|row| {
-        row.cell(branch_table, "owner") == Some(Value::Uuid(before.test_uuid()))
+        row.cell(branch_table, "owner") == Some(Value::String(before.canonical().to_owned()))
             && row.cell(branch_table, "branch_id") == Some(Value::Uuid(head_branch.0))
     }));
     let system_rows = block_on(db.all(&query, opts.clone())).unwrap();
@@ -803,8 +801,6 @@ fn branch_view_subscription_tracks_reference_policy_revoke_and_grant() {
     let (db, _schema) = open_policy_db();
     let owner = AuthorSubject::for_test_bytes([0xb5; 16]);
     let outsider = AuthorSubject::for_test_bytes([0xb6; 16]);
-    set_test_user_claims(&db, owner);
-    set_test_user_claims(&db, outsider);
     let branch = RowUuid::from_bytes([0xb7; 16]);
     let selector = BranchSelector::new([("branch_id", Value::Uuid(branch.0))]);
     db.insert(
@@ -812,7 +808,10 @@ fn branch_view_subscription_tracks_reference_policy_revoke_and_grant() {
         BTreeMap::from([
             ("branch_key".to_owned(), Value::Uuid(branch.0)),
             ("name".to_owned(), Value::String("draft".to_owned())),
-            ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
+            (
+                "owner".to_owned(),
+                Value::String(owner.canonical().to_owned()),
+            ),
         ]),
         jazz::db::InsertOptions {
             row_id: Some(branch),
@@ -848,7 +847,10 @@ fn branch_view_subscription_tracks_reference_policy_revoke_and_grant() {
     db.update(
         "branches",
         branch,
-        BTreeMap::from([("owner".to_owned(), Value::Uuid(outsider.test_uuid()))]),
+        BTreeMap::from([(
+            "owner".to_owned(),
+            Value::String(outsider.canonical().to_owned()),
+        )]),
         Default::default(),
     )
     .unwrap();
@@ -861,7 +863,10 @@ fn branch_view_subscription_tracks_reference_policy_revoke_and_grant() {
     db.update(
         "branches",
         branch,
-        BTreeMap::from([("owner".to_owned(), Value::Uuid(owner.test_uuid()))]),
+        BTreeMap::from([(
+            "owner".to_owned(),
+            Value::String(owner.canonical().to_owned()),
+        )]),
         Default::default(),
     )
     .unwrap();

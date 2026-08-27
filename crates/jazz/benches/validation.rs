@@ -88,8 +88,7 @@ impl ValidationBench {
         for idx in 0..config.clients {
             let (dir, mut client) = open_node(node(idx as u8 + 1), schema.clone());
             let identity = author(idx);
-            let claims =
-                BTreeMap::from([("user_id".to_owned(), Value::Uuid(identity.test_uuid()))]);
+            let claims = BTreeMap::new();
             client.admit_test_session_claims(identity, claims.clone());
             core.admit_test_session_claims(identity, claims);
             client_dirs.push(dir);
@@ -547,7 +546,7 @@ fn schema() -> JazzSchema {
         SchemaBuilder::new().table(
             TableSchemaBuilder::new(TABLE)
                 .column("title", ColumnType::Text)
-                .column("owner", ColumnType::Uuid)
+                .column("owner", ColumnType::Text)
                 .policies(schema_fixture::write_operations(owner)),
         ),
     )
@@ -613,7 +612,10 @@ fn commit_parts(unit: &SyncMessage) -> (Transaction, Vec<VersionRecord>) {
 fn cells(title: &str, owner: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.to_owned())),
-        ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
+        (
+            "owner".to_owned(),
+            Value::String(owner.canonical().to_owned()),
+        ),
     ])
 }
 

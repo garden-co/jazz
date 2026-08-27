@@ -2089,9 +2089,9 @@ fn seed_fixture(
                 (
                     "isUserTeam".to_owned(),
                     if team == simple_team || team == admin_team {
-                        Value::Nullable(Some(Box::new(Value::Uuid(team.0))))
+                        Value::String(AuthorSubject::for_test_uuid(team.0).canonical().to_owned())
                     } else {
-                        Value::Nullable(None)
+                        Value::String("unrelated".to_owned())
                     },
                 ),
                 (
@@ -2253,9 +2253,9 @@ fn seed_fixture_db(config: &Config, core: &CoreDb) -> Fixture {
                 (
                     "isUserTeam".to_owned(),
                     if team == simple_team || team == admin_team {
-                        Value::Nullable(Some(Box::new(Value::Uuid(team.0))))
+                        Value::String(AuthorSubject::for_test_uuid(team.0).canonical().to_owned())
                     } else {
-                        Value::Nullable(None)
+                        Value::String("unrelated".to_owned())
                     },
                 ),
                 (
@@ -2370,7 +2370,7 @@ fn schema() -> JazzSchema {
         "parent",
         &[("onlyAdmins", PublicValue::Boolean(false))],
         TEAMS,
-        "id",
+        "isUserTeam",
         &["user"],
         "id",
     );
@@ -2381,7 +2381,7 @@ fn schema() -> JazzSchema {
                 PublicTableSchema::builder(TEAMS)
                     .column("name", PublicColumnType::Text)
                     .column("isAdmin", PublicColumnType::Boolean)
-                    .nullable_column("isUserTeam", PublicColumnType::Uuid)
+                    .column("isUserTeam", PublicColumnType::Text)
                     .fk_column("org", ORGS),
             )
             .table(
