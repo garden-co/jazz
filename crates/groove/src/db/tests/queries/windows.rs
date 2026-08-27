@@ -563,9 +563,10 @@ async fn top_by_rejects_record_array_sort_fields_before_evaluation() {
             "ranked",
             vec![
                 Value::U64(id),
-                Value::Array(vec![Value::Record(
+                Value::Array(vec![Value::Record(crate::records::OwnedRecord::new(
                     child.create(&[Value::U64(rank)]).unwrap(),
-                )]),
+                    child,
+                ))]),
             ],
         );
     }
