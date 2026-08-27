@@ -263,7 +263,8 @@ pub enum PrimaryKeyValue {
 }
 
 impl PrimaryKeyValue {
-    pub(super) fn into_bytes(self) -> Vec<u8> {
+    /// Encode this logical primary key exactly as Groove stores it.
+    pub fn into_bytes(self) -> Vec<u8> {
         let mut bytes = Vec::new();
         match self {
             Self::U8(value) => encode_primary_key_part(&mut bytes, &Value::U8(value))
