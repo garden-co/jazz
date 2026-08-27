@@ -728,6 +728,11 @@ impl PeerState {
             .and_then(|state| state.maintained_subscription_view.as_ref())
             .map(|maintained| maintained.tables.clone())
             .unwrap_or_default();
+        let source_binding_view = self
+            .publication_states
+            .get(&subscription)
+            .and_then(|state| state.maintained_subscription_view.as_ref())
+            .and_then(|maintained| maintained.source_binding_view);
         let aggregate_is_policy_scoped = shape.query().aggregate.is_some()
             && node
                 .table(shape.query().table.as_str())?
@@ -799,6 +804,7 @@ impl PeerState {
             && result_table_filter.is_none()
             && let Some(settled) = node.settled_result_transitions_for_subscription(
                 subscription,
+                source_binding_view,
                 &previous_member_result_set,
                 &previous_program_fact_set,
                 result_table_filter,
@@ -887,6 +893,16 @@ impl PeerState {
             node.reset_storage_read_metrics();
         }
         let opened = match purpose {
+            // A local relay's Edge child is the browser half of a durable
+            // worker receipt. Reuse the worker's authority-selected Global
+            // membership as the source, so the child does not reapply a
+            // root offset/limit over an already-windowed result.
+            RehydratePurpose::Query
+                if self.role == PeerRole::Relay && tier == DurabilityTier::Edge =>
+            {
+                node.open_seeded_relay_edge_subscription_view(shape, binding, self.identity(), read_view)
+                    .await
+            }
             RehydratePurpose::Query => {
                 node.open_seeded_maintained_subscription_view(
                     shape,
@@ -907,6 +923,19 @@ impl PeerState {
                 )
                 .await,
         };
+        let source_binding_view = (self.role == PeerRole::Relay && tier == DurabilityTier::Edge)
+            .then(|| {
+                crate::protocol::BindingViewKey::new(
+                    shape.shape_id(),
+                    binding.binding_id(),
+                    RegisterShapeOptions {
+                        tier: DurabilityTier::Global,
+                        read_view: read_view.clone(),
+                        ..RegisterShapeOptions::default()
+                    }
+                    .read_view_key(),
+                )
+            });
         let (receiver, mut maintained, terminal_schemas, transitions, tables, initial_received) =
             match opened {
             Ok(opened) => opened,
@@ -946,6 +975,7 @@ impl PeerState {
                 maintained,
                 terminal_schemas,
                 tables,
+                source_binding_view,
                 initial_received: false,
             };
             let state = self.publication_states.entry(subscription).or_default();
@@ -1151,6 +1181,7 @@ impl PeerState {
             maintained,
             terminal_schemas,
             tables,
+            source_binding_view,
             initial_received: true,
         };
         let state = self.publication_states.entry(subscription).or_default();

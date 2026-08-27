@@ -16,7 +16,7 @@ use super::super::node::maintained_subscription_view::{
     MaintainedSubscriptionView, MaintainedTerminalSchemas,
 };
 use super::super::protocol::{
-    KnownStateCompleteness, KnownStateDeclaration, ProgramFactEntry, ReadViewSpec,
+    BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, ProgramFactEntry, ReadViewSpec,
     RegisterShapeOptions, ResultMemberEntry, SubscriptionKey, VersionRecord,
 };
 use super::super::query::{Binding, ValidatedQuery};
@@ -156,6 +156,8 @@ pub(super) struct MaintainedSubscriptionViewSubscription {
     pub(super) maintained: MaintainedSubscriptionView,
     pub(super) terminal_schemas: MaintainedTerminalSchemas,
     pub(super) tables: BTreeMap<String, TableSchema>,
+    /// Authoritative source membership for an Edge child of a durable relay.
+    pub(super) source_binding_view: Option<BindingViewKey>,
     pub(super) initial_received: bool,
 }
 
