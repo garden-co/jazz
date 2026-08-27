@@ -35,7 +35,7 @@ export default s.definePermissions(app, ({ policy, session, anyOf, allOf, allowe
 
   policy.session_members.allowRead.where((row) => isMember(row.session_id));
   policy.session_members.allowInsert.where((row) =>
-    policy.sessions.exists.where({ id: row.session_id, $createdBy: session.author }),
+    policy.sessions.exists.where({ id: row.session_id, $createdBy: session.user }),
   );
   policy.session_members.allowUpdate.where((row) => isOwner(row.session_id));
   policy.session_members.allowDelete.where((row) => isOwner(row.session_id));
@@ -61,5 +61,5 @@ export default s.definePermissions(app, ({ policy, session, anyOf, allOf, allowe
   policy.presence.allowUpdate.where((row) =>
     allOf([isMember(row.session_id), allowedTo.update("profile_id")]),
   );
-  policy.presence.allowDelete.where({ $createdBy: session.author });
+  policy.presence.allowDelete.where({ $createdBy: session.user });
 });
