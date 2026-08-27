@@ -38,6 +38,39 @@ pub type Key = [u8];
 pub type Value = Vec<u8>;
 pub type KeyValue = (Vec<u8>, Vec<u8>);
 
+/// Maximum UTF-8 byte length of an application-owned storage name.
+///
+/// The bound is part of the cross-backend storage contract: IndexedDB frames
+/// a column-family name with an unsigned 16-bit length, while the native
+/// backends store the same logical names directly. Keeping one smaller-layer
+/// bound here makes a schema portable before any durable backend is opened.
+pub const MAX_APPLICATION_STORAGE_NAME_BYTES: usize = u16::MAX as usize;
+
+/// Validate a table or direct-record-store name supplied by an application.
+///
+/// Names are case-sensitive, matching every supported backend. The lowercase
+/// `__groove_` plane belongs to Groove (including the class layout and
+/// large-value metadata); `indices` and RocksDB's `default` family are also
+/// engine-owned. Reserving them here, rather than independently in backends,
+/// prevents a schema from opening successfully on one backend while aliasing
+/// engine state on another.
+pub fn validate_application_storage_name(name: &str) -> Result<(), Error> {
+    if name.len() > MAX_APPLICATION_STORAGE_NAME_BYTES {
+        return Err(Error::InvalidStorageLayout(format!(
+            "application storage name exceeds the {MAX_APPLICATION_STORAGE_NAME_BYTES}-byte limit: {} bytes",
+            name.len()
+        )));
+    }
+
+    if name.starts_with("__groove_") || matches!(name, "indices" | "default") {
+        return Err(Error::InvalidStorageLayout(format!(
+            "application storage name is reserved by Groove: {name:?}"
+        )));
+    }
+
+    Ok(())
+}
+
 /// The key interval for an ordered scan.
 ///
 /// `Prefix` includes every key beginning with the supplied bytes. `Range` is
