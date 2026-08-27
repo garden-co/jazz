@@ -20,14 +20,21 @@ where
         let Some(parent_tx) = self.query_transaction(parent).await? else {
             return Ok(ParentCoordinateValidation::Inconclusive);
         };
-        let parent_versions = self.query_versions_for_tx(parent).await?;
-        if parent_versions.is_empty() {
-            return Ok(ParentCoordinateValidation::Inconclusive);
-        }
-        for candidate in &parent_versions {
+        let coordinate_versions = self
+            .query_versions_for_tx_physical_coordinate(
+                parent,
+                coordinate.physical_table_id,
+                coordinate.row_uuid,
+            )
+            .await?;
+        for candidate in &coordinate_versions {
             if self.version_row_matches_parent_coordinate(candidate, coordinate)? {
                 return Ok(ParentCoordinateValidation::Exact);
             }
+        }
+        let parent_versions = self.query_versions_for_tx(parent).await?;
+        if parent_versions.is_empty() {
+            return Ok(ParentCoordinateValidation::Inconclusive);
         }
         let parent_is_complete = !parent_tx.view_scoped_cardinality
             && usize::try_from(parent_tx.tx.n_total_writes)

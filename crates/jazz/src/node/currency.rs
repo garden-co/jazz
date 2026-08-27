@@ -543,6 +543,50 @@ where
         Ok(versions)
     }
 
+    pub(super) async fn query_versions_for_tx_physical_coordinate(
+        &mut self,
+        tx_id: TxId,
+        physical_table_id: PhysicalTableId,
+        row_uuid: RowUuid,
+    ) -> Result<Vec<VersionRow>, Error> {
+        if let Some(cached) = self.query.tx_versions_cache.get(&tx_id) {
+            let aliases = self
+                .catalogue
+                .physical_mappings
+                .iter()
+                .flat_map(|(schema_version, mapping)| {
+                    let schema_alias = self.catalogue.schema_version_aliases.get(schema_version);
+                    mapping.tables.iter().filter_map(move |(table, mapping)| {
+                        (mapping.table_id == physical_table_id)
+                            .then(|| schema_alias.copied().map(|alias| (alias, table.clone())))
+                            .flatten()
+                    })
+                })
+                .collect::<BTreeSet<_>>();
+            let mut versions = Vec::new();
+            for (schema_alias, table) in aliases {
+                versions.extend(cached.versions_for_schema_table_row(
+                    schema_alias,
+                    &table,
+                    row_uuid,
+                ));
+            }
+            return Ok(versions);
+        }
+        let versions = self.query_versions_for_tx(tx_id).await?;
+        let mut matching = Vec::new();
+        for version in versions {
+            if version.row_uuid() == row_uuid
+                && self.physical_table_id_for_version(&version)? == physical_table_id
+            {
+                #[cfg(test)]
+                record_parent_version_lookup_materialized_rows(1);
+                matching.push(version);
+            }
+        }
+        Ok(matching)
+    }
+
     pub(super) async fn query_versions_for_tx_rows_by_alias(
         &mut self,
         tx_id: TxId,

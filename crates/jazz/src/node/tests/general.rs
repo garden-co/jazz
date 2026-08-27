@@ -1769,9 +1769,9 @@ fn known_parent_must_match_exact_physical_table_for_local_and_replicated_version
         row_uuid,
         vec![parent],
         AuthorSubject::SYSTEM,
-        TxTime(12),
+        12,
         AuthorSubject::SYSTEM,
-        TxTime(12),
+        12,
         &BTreeMap::from([("body".to_owned(), v("replicated wrong table"))]),
         None,
     )
@@ -1890,9 +1890,9 @@ fn unknown_parent_constraint_rejects_cross_table_parent_after_reopen() {
         row_uuid,
         Vec::new(),
         AuthorSubject::SYSTEM,
-        TxTime(40),
+        40,
         AuthorSubject::SYSTEM,
-        TxTime(40),
+        40,
         &title_cells("wrong physical table"),
         None,
     )

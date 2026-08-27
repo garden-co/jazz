@@ -83,9 +83,9 @@ fn known_history_parent_must_match_exact_branch_for_local_and_replicated_version
         row_uuid,
         vec![parent],
         owner,
-        TxTime(12),
+        12,
         owner,
-        TxTime(12),
+        12,
         &remote_cells,
         None,
     )

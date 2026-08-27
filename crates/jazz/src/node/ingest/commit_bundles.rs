@@ -1108,14 +1108,13 @@ where
         self.prepare_authored_schema_variants_for_commit(&eligible_versions).await?;
 
         let mut complete_parents = Vec::new();
-        for tx_bundles in &eligible {
-            let first = tx_bundles[0];
+        for (tx_bundles, tx, _) in &eligible {
             let versions = tx_bundles
                 .iter()
                 .flat_map(|bundle| bundle.versions.iter().cloned())
                 .collect::<Vec<_>>();
-            if let Some(versions) = self.complete_parent_versions(first.tx, &versions).await? {
-                complete_parents.push((first.tx.tx_id, versions));
+            if let Some(versions) = self.complete_parent_versions(tx, &versions).await? {
+                complete_parents.push((tx.tx_id, versions));
             }
         }
         let complete_parent_tx_ids = complete_parents
