@@ -290,8 +290,9 @@ groove::define_record! {
 }
 
 groove::define_record! {
-    struct ContributionOperationStorageRecord {
-        0 => identity: Vec<u8>,
+    pub(super) struct ContributionOperationStorageRecord {
+        0 => physical_column_id: u64,
+        1 => identity: Vec<u8>,
     }
 }
 
@@ -1099,7 +1100,7 @@ fn contribution_component_storage_value(
     };
     let case_name = match component {
         ContributionComponent::Column(_) => "column",
-        ContributionComponent::Operation(_) => "operation",
+        ContributionComponent::Operation { .. } => "operation",
         ContributionComponent::Register => "register",
     };
     let tag = schema
@@ -1121,8 +1122,14 @@ fn contribution_component_storage_value(
                 .record()
                 .clone()
         }
-        ContributionComponent::Operation(identity) => {
-            ContributionOperationStorageRecord::encode(payload, identity.clone())?
+        ContributionComponent::Operation { column, identity } => {
+            let id = resolve_column_id(&coordinate.table, column)?;
+            if id.0 == 0 {
+                return Err(Error::InvalidStoredValue(
+                    "contribution physical column id must be nonzero",
+                ));
+            }
+            ContributionOperationStorageRecord::encode(payload, id.0, identity.clone())?
                 .record()
                 .clone()
         }
@@ -1249,7 +1256,7 @@ pub(super) fn contribution_merge_storage_value(
     Ok(records::RecordField::to_value(&record))
 }
 
-fn contribution_component_from_storage(
+pub(super) fn contribution_component_from_storage(
     value: records::EnumValue,
     schema: &records::EnumSchema,
     table: &str,
@@ -1273,9 +1280,19 @@ fn contribution_component_from_storage(
                 table, id,
             )?))
         }
-        "operation" => Ok(ContributionComponent::Operation(
-            ContributionOperationStorageRecord::new(payload).identity()?,
-        )),
+        "operation" => {
+            let payload = ContributionOperationStorageRecord::new(payload);
+            let id = PhysicalColumnId(payload.physical_column_id()?);
+            if id.0 == 0 {
+                return Err(Error::InvalidStoredValue(
+                    "stored contribution physical column id must be nonzero",
+                ));
+            }
+            Ok(ContributionComponent::Operation {
+                column: resolve_column_name(table, id)?,
+                identity: payload.identity()?,
+            })
+        }
         "register" if payload.descriptor().fields().is_empty() => {
             payload.to_values()?;
             Ok(ContributionComponent::Register)

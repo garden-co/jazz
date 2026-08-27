@@ -989,6 +989,9 @@ where
     ) -> Result<BTreeSet<TxId>, Error> {
         let mut bundles_by_tx = BTreeMap::<TxId, Vec<VersionBundleRef<'_>>>::new();
         for bundle in bundles {
+            // This helper is also called directly by reset fast paths; do not
+            // rely on their outer ViewUpdate preflight for durable admission.
+            self.admit_contribution_merge_for_storage(bundle.tx)?;
             validate_received_view_bundle_global_time_durability(
                 bundle.global_time,
                 bundle.durability,

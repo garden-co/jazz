@@ -1082,6 +1082,10 @@ where
             .map(|record| self.contribution_merge_from_storage_record(record))
             .transpose()?,
         };
+        // Recovery and ordinary durable reads must fail closed on malformed
+        // strategy-defined contribution identities before they can influence
+        // a later merge calculation.
+        self.validate_contribution_merge_operation_identities(&tx)?;
         let fate = fate_from_encoded_fields(record)?;
         Ok(StoredTransaction {
             tx,

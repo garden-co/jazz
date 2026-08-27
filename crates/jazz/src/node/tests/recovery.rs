@@ -277,14 +277,122 @@ fn contribution_provenance_persists_column_components_as_physical_ids() {
 }
 
 #[test]
-fn contribution_provenance_record_has_frozen_complete_groove_bytes() {
-    // Freeze the complete nested record, not individual leaves: a field order,
-    // enum-tag, nullable wrapper, or nested-record layout change must be an
-    // intentional storage-format decision.
+fn contribution_operation_payloads_use_physical_columns_and_canonical_groove_bytes() {
+    let schema = contribution_operation_schema();
+    let (_dir, core) = open_node_with_schema(node(0x31), schema.clone());
+    let tx_id = TxId::new(TxTime::from(10), node(0x31));
+    let cases = [
+        (
+            "text_members",
+            records::ValueType::String,
+            v("one"),
+            &[2, 2, b'o', b'n', b'e'][..],
+        ),
+        (
+            "u64_members",
+            records::ValueType::U64,
+            Value::U64(0x0102_0304_0506_0708),
+            &[2, 8, 7, 6, 5, 4, 3, 2, 1][..],
+        ),
+        (
+            "uuid_members",
+            records::ValueType::Uuid,
+            Value::Uuid(uuid::Uuid::from_bytes([0x5a; 16])),
+            &[
+                2, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a,
+                0x5a, 0x5a, 0x5a, 0x5a, 0x5a,
+            ][..],
+        ),
+    ];
+    let provenance = ContributionMergeProvenance::canonical(
+        BranchKey::default(),
+        BranchKey::default(),
+        cases
+            .iter()
+            .enumerate()
+            .map(|(index, (column, value_type, value, _))| {
+                let identity = records::RecordDescriptor::new([("element", value_type.clone())])
+                    .create(std::slice::from_ref(value))
+                    .unwrap();
+                let coordinate = ContributionCoordinate {
+                    branch_key: BranchKey::default(),
+                    table: "sets".to_owned(),
+                    row_uuid: row(0x40 + index as u8),
+                    layer: MergeAspect::Content,
+                    component: ContributionComponent::Operation {
+                        column: (*column).to_owned(),
+                        identity,
+                    },
+                };
+                ContributionSubstitution {
+                    target: coordinate.clone(),
+                    sources: vec![ContributionDot { tx_id, coordinate }],
+                }
+            })
+            .collect(),
+    )
+    .unwrap();
+    let stored = core
+        .contribution_merge_storage_value(Some(&provenance))
+        .unwrap();
+    let payloads = stored_contribution_operation_payloads(stored);
+    for ((column, _value_type, _value, golden_identity), (physical_column_id, payload)) in
+        cases.iter().zip(payloads)
+    {
+        let expected_column_id = core.catalogue.physical_mappings[&schema.version_id()].tables
+            ["sets"]
+            .columns[*column]
+            .0;
+        let mut expected = expected_column_id.to_le_bytes().to_vec();
+        expected.extend_from_slice(golden_identity);
+        assert_eq!(physical_column_id, expected_column_id);
+        assert_eq!(payload, expected, "{column} operation payload is physical-id then identity");
+    }
+
+    let counter = ContributionCoordinate {
+        branch_key: BranchKey::default(),
+        table: "sets".to_owned(),
+        row_uuid: row(0x50),
+        layer: MergeAspect::Content,
+        component: ContributionComponent::Operation {
+            column: "count".to_owned(),
+            identity: Vec::new(),
+        },
+    };
+    let counter_provenance = ContributionMergeProvenance::canonical(
+        BranchKey::default(),
+        BranchKey::default(),
+        vec![ContributionSubstitution {
+            target: counter.clone(),
+            sources: vec![ContributionDot {
+                tx_id,
+                coordinate: counter,
+            }],
+        }],
+    )
+    .unwrap();
+    let payloads = stored_contribution_operation_payloads(
+        core.contribution_merge_storage_value(Some(&counter_provenance))
+            .unwrap(),
+    );
+    assert_eq!(payloads.len(), 1);
+    let (counter_id, counter_payload) = &payloads[0];
+    assert_eq!(
+        counter_payload,
+        &[counter_id.to_le_bytes().as_slice(), &[2]].concat(),
+        "counter payload is its physical column ID followed by an exact empty identity"
+    );
+}
+
+#[test]
+fn unknown_durable_contribution_component_tag_is_rejected_by_the_storage_decoder() {
     let schema = schema();
     let (_dir, core) = open_node_with_schema(node(1), schema);
     let stored = core
-        .contribution_merge_storage_value(Some(&complete_contribution_provenance()))
+        .contribution_merge_storage_value(Some(&canonical_contribution_provenance(TxId::new(
+            TxTime::from(10),
+            node(1),
+        ))))
         .unwrap();
     let Value::Nullable(Some(record)) = stored else {
         panic!("fixture stores contribution provenance")
@@ -292,51 +400,286 @@ fn contribution_provenance_record_has_frozen_complete_groove_bytes() {
     let Value::Record(record) = *record else {
         panic!("fixture contribution provenance is a record")
     };
-    assert_eq!(hex::encode(record.raw()), "0e000000140000000201000000000201000000000300000084000000fa0000003000000001000000000000001010101010101010101010101010101000230000000201000000000001000000000000000100000000002800000000000101010101010101010101010101010101000000000000001010101010101010101010101010101000230000000201000000000001000000000000002f00000001000000000000001111111111111111111111111111111100230000000201000000000102617070656e640100000000002c00000000000101010101010101010101010101010101000000000000001111111111111111111111111111111100230000000201000000000102617070656e642800000001000000000000001212121212121212121212121212121200230000000201000000000201000000000030000000000001010101010101010101010101010101010000000000000012121212121212121212121212121212002300000002010000000002");
+    let merge = ContributionMergeStorageRecord::new(record);
+    let Value::Record(substitution) = merge.substitutions().unwrap().remove(0) else {
+        panic!("fixture substitution is a record")
+    };
+    let substitution = ContributionSubstitutionStorageRecord::new(substitution);
+    let coordinate = substitution.target().unwrap();
+    let descriptor = coordinate.descriptor().clone();
+    let records::ValueType::Enum(component_schema) = record_field_type(&descriptor, 4) else {
+        panic!("fixture contribution component is an enum")
+    };
+    let coordinate = ContributionCoordinateStorageRecord::new(coordinate);
+    let payload = coordinate.component().unwrap().into_record();
+    let error = crate::node::codec::contribution_component_from_storage(
+        records::EnumValue::new(127, payload),
+        component_schema,
+        "todos",
+        &mut |_table, _physical_column| Ok("title".to_owned()),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::InvalidStoredValue("transaction contribution component tag is invalid")
+    ));
 }
 
-fn complete_contribution_provenance() -> ContributionMergeProvenance {
-    let coordinate = |row_uuid, component| ContributionCoordinate {
+fn contribution_operation_schema() -> JazzSchema {
+    JazzSchema::new_with_branch_columns([TableSchema::new(
+        "sets",
+        [
+            ColumnSchema::new(
+                "text_members",
+                ColumnType::Array(Box::new(ColumnType::String)),
+            ),
+            ColumnSchema::new(
+                "u64_members",
+                ColumnType::Array(Box::new(ColumnType::U64)),
+            ),
+            ColumnSchema::new(
+                "uuid_members",
+                ColumnType::Array(Box::new(ColumnType::Uuid)),
+            ),
+            ColumnSchema::new("count", ColumnType::U64),
+        ],
+    )
+    .with_column_merge_strategy("text_members", MergeStrategy::GSet)
+    .with_column_merge_strategy("u64_members", MergeStrategy::GSet)
+    .with_column_merge_strategy("uuid_members", MergeStrategy::GSet)
+    .with_column_merge_strategy("count", MergeStrategy::Counter)])
+}
+
+fn stored_contribution_operation_payloads(value: Value) -> Vec<(u64, Vec<u8>)> {
+    let Value::Nullable(Some(record)) = value else {
+        panic!("fixture stores contribution provenance")
+    };
+    let Value::Record(record) = *record else {
+        panic!("fixture contribution provenance is a record")
+    };
+    let record = ContributionMergeStorageRecord::new(record);
+    record
+        .substitutions()
+        .unwrap()
+        .into_iter()
+        .map(|substitution| {
+            let Value::Record(substitution) = substitution else {
+                panic!("fixture substitution is a record")
+            };
+            let substitution = ContributionSubstitutionStorageRecord::new(substitution);
+            let coordinate = ContributionCoordinateStorageRecord::new(substitution.target().unwrap());
+            let component = coordinate.component().unwrap();
+            let payload = ContributionOperationStorageRecord::new(component.into_record());
+            (payload.physical_column_id().unwrap(), payload.record().raw().to_vec())
+        })
+        .collect()
+}
+
+fn operation_provenance(tx_id: TxId, column: &str, identity: Vec<u8>) -> ContributionMergeProvenance {
+    let coordinate = ContributionCoordinate {
         branch_key: BranchKey::default(),
-        table: "todos".to_owned(),
-        row_uuid,
+        table: "sets".to_owned(),
+        row_uuid: row(0x60),
         layer: MergeAspect::Content,
-        component,
+        component: ContributionComponent::Operation {
+            column: column.to_owned(),
+            identity,
+        },
     };
     ContributionMergeProvenance::canonical(
         BranchKey::default(),
         BranchKey::default(),
-        vec![
-            ContributionSubstitution {
-                target: coordinate(row(0x10), ContributionComponent::Column("title".to_owned())),
-                sources: vec![ContributionDot {
-                    tx_id: TxId::new(TxTime::from(10), node(1)),
-                    coordinate: coordinate(
-                        row(0x10),
-                        ContributionComponent::Column("title".to_owned()),
-                    ),
-                }],
-            },
-            ContributionSubstitution {
-                target: coordinate(row(0x11), ContributionComponent::Operation(b"append".to_vec())),
-                sources: vec![ContributionDot {
-                    tx_id: TxId::new(TxTime::from(11), node(1)),
-                    coordinate: coordinate(
-                        row(0x11),
-                        ContributionComponent::Operation(b"append".to_vec()),
-                    ),
-                }],
-            },
-            ContributionSubstitution {
-                target: coordinate(row(0x12), ContributionComponent::Register),
-                sources: vec![ContributionDot {
-                    tx_id: TxId::new(TxTime::from(12), node(1)),
-                    coordinate: coordinate(row(0x12), ContributionComponent::Register),
-                }],
-            },
-        ],
+        vec![ContributionSubstitution {
+            target: coordinate.clone(),
+            sources: vec![ContributionDot {
+                tx_id,
+                coordinate,
+            }],
+        }],
     )
     .unwrap()
+}
+
+fn operation_transaction(tx_id: TxId, provenance: ContributionMergeProvenance) -> Transaction {
+    Transaction {
+        tx_id,
+        kind: TxKind::Mergeable,
+        n_total_writes: 1,
+        made_by: AuthorSubject::SYSTEM,
+        permission_subject: None,
+        base_snapshot: None,
+        row_read_set: None,
+        absent_read_set: None,
+        predicate_read_set: None,
+        user_metadata_json: None,
+        contribution_merge: Some(provenance),
+    }
+}
+
+fn operation_version(schema: &JazzSchema, column: &str, value: Value) -> VersionRecord {
+    VersionRecord::from_cells(
+        &schema.tables[0],
+        schema.version_id(),
+        row(0x60),
+        Vec::new(),
+        AuthorSubject::SYSTEM,
+        1,
+        AuthorSubject::SYSTEM,
+        1,
+        &BTreeMap::from([(column.to_owned(), value)]),
+        None,
+    )
+    .unwrap()
+}
+
+#[test]
+fn ingress_rejects_noncanonical_and_wrong_strategy_operation_identities_before_persistence() {
+    let schema = contribution_operation_schema();
+    let (_dir, mut core) = open_node_with_schema(node(0x31), schema.clone());
+    let invalid_cases = [
+        (
+            "text_members",
+            Vec::new(),
+            Value::Array(vec![v("one")]),
+            "g-set contribution operation identity must be canonical",
+        ),
+        (
+            "count",
+            vec![0],
+            Value::U64(1),
+            "counter contribution operation identity must be empty",
+        ),
+    ];
+    for (index, (column, identity, value, expected)) in invalid_cases.into_iter().enumerate() {
+        let tx_id = TxId::new(TxTime::from(20 + index as u64), node(0x31));
+        let error = core
+            .ingest_commit_unit_settled(
+                operation_transaction(tx_id, operation_provenance(tx_id, column, identity)),
+                vec![operation_version(&schema, column, value)],
+                u64::MAX - SKEW_TOLERANCE_MS,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::InvalidStoredValue(message) if message == expected
+        ), "unexpected operation-identity admission error: {error:?}");
+        assert!(
+            core.query_transaction(tx_id).unwrap().is_none(),
+            "invalid operation identity must be rejected before it reaches durable transaction state"
+        );
+    }
+}
+
+#[test]
+fn local_rejected_and_bulk_view_ingress_share_operation_admission_before_mutation() {
+    let schema = schema();
+    let invalid_tx_id = TxId::new(TxTime::from(40), node(0x31));
+    let invalid_provenance = || {
+        let coordinate = ContributionCoordinate {
+            branch_key: BranchKey::default(),
+            table: "todos".to_owned(),
+            row_uuid: row(0x61),
+            layer: MergeAspect::Content,
+            component: ContributionComponent::Operation {
+                column: "title".to_owned(),
+                identity: vec![0],
+            },
+        };
+        ContributionMergeProvenance::canonical(
+            BranchKey::default(),
+            BranchKey::default(),
+            vec![ContributionSubstitution {
+                target: coordinate.clone(),
+                sources: vec![ContributionDot {
+                    tx_id: invalid_tx_id,
+                    coordinate,
+                }],
+            }],
+        )
+        .unwrap()
+    };
+    let invalid_transaction = || operation_transaction(invalid_tx_id, invalid_provenance());
+
+    let (_local_dir, mut local) = open_node_with_schema(node(0x31), schema.clone());
+    let local_result = local
+        .commit_mergeable_many_at_with_schema_versions_and_provenance(
+            vec![((schema.version_id()), MergeableCommit::new("todos", row(0x61), 40)
+                .cells(title_cells("local")))],
+            invalid_tx_id.time,
+            Some(invalid_provenance()),
+        )
+        .resolve();
+    let error = match local_result {
+        Err(error) => error,
+        Ok(_) => panic!("invalid local provenance must not publish a transaction"),
+    };
+    assert!(matches!(
+        error,
+        Error::InvalidStoredValue("lww contribution column must not use an operation identity")
+    ));
+    assert!(local.query_transaction(invalid_tx_id).unwrap().is_none());
+
+    let (_rejected_dir, mut rejected) = open_node_with_schema(node(0x31), schema.clone());
+    let error = rejected
+        .ingest_rejected_transaction(
+            invalid_transaction(),
+            Fate::Rejected(RejectionReason::MalformedCommit("fixture".to_owned())),
+        )
+        .resolve()
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::InvalidStoredValue("lww contribution column must not use an operation identity")
+    ));
+    assert!(rejected.query_transaction(invalid_tx_id).unwrap().is_none());
+
+    let (_view_dir, mut view) = open_node_with_schema(node(0x31), schema);
+    let bundle = VersionBundle {
+        tx: invalid_transaction(),
+        versions: vec![version_record(row(0x61), Vec::new(), title_cells("view"), None)],
+        scope: crate::protocol::VersionBundleScope::CompleteTransaction,
+        fate: Fate::Accepted,
+        global_time: Some(GlobalTime(40)),
+        durability: DurabilityTier::Local,
+    };
+    let error = view
+        .ingest_reset_view_bundle_refs_in_bulk(&[bundle.as_ref()], None)
+        .resolve()
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::InvalidStoredValue("lww contribution column must not use an operation identity")
+    ));
+    assert!(view.query_transaction(invalid_tx_id).unwrap().is_none());
+}
+
+#[test]
+fn ingress_rejects_operation_coordinates_outside_the_content_layer() {
+    let schema = contribution_operation_schema();
+    let (_dir, mut core) = open_node_with_schema(node(0x31), schema.clone());
+    let tx_id = TxId::new(TxTime::from(45), node(0x31));
+    let mut provenance = operation_provenance(tx_id, "count", Vec::new());
+    let substitution = &mut provenance.substitutions[0];
+    for coordinate in std::iter::once(&mut substitution.target).chain(
+        substitution
+            .sources
+            .iter_mut()
+            .map(|source| &mut source.coordinate),
+    ) {
+        coordinate.layer = MergeAspect::Deletion;
+    }
+    let error = core
+        .ingest_commit_unit_settled(
+            operation_transaction(tx_id, provenance),
+            vec![operation_version(&schema, "count", Value::U64(1))],
+            u64::MAX - SKEW_TOLERANCE_MS,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::InvalidStoredValue("contribution operation must belong to the content layer")
+    ));
+    assert!(core.query_transaction(tx_id).unwrap().is_none());
 }
 
 #[test]
@@ -830,6 +1173,28 @@ fn reopen_rejects_duplicate_contribution_substitution_targets() {
     assert!(matches!(
         error,
         Error::InvalidStoredValue("transaction contribution provenance must be canonical")
+    ));
+}
+
+#[test]
+fn reopen_rejects_operation_identity_with_the_wrong_column_strategy_before_residency() {
+    // This is a planted durable transaction: normal ingress cannot create an
+    // operation for an LWW column. Recovery must nevertheless validate the
+    // decoded operation before rebuilding any resident or derived state.
+    let error = reopen_with_noncanonical_contribution_provenance(|provenance| {
+        let substitution = &mut provenance.substitutions[0];
+        for coordinate in std::iter::once(&mut substitution.target)
+            .chain(substitution.sources.iter_mut().map(|source| &mut source.coordinate))
+        {
+            coordinate.component = ContributionComponent::Operation {
+                column: "title".to_owned(),
+                identity: vec![0],
+            };
+        }
+    });
+    assert!(matches!(
+        error,
+        Error::InvalidStoredValue("lww contribution column must not use an operation identity")
     ));
 }
 

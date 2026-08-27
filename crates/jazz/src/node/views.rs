@@ -1086,6 +1086,11 @@ where
             for bundle in
                 version_bundle_refs_for_carriers(&update.version_bundles, &update.version_carriers)?
             {
+                // This preflight runs before bulk-reset selection, alias
+                // allocation, clock advancement, or receiver staging. The
+                // shared transaction boundary keeps view payloads from being
+                // a durable-ingress bypass for operation provenance.
+                self.admit_contribution_merge_for_storage(bundle.tx)?;
                 self.validate_view_payload_versions(bundle.versions)?;
             }
         }
