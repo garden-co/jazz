@@ -6,6 +6,7 @@
 //! node-level read layer over groove tables.
 
 use super::*;
+use crate::schema::RuntimeSchema;
 
 impl<S> NodeState<S>
 where
@@ -837,7 +838,8 @@ where
             };
             let logical_table = self.table_in_schema(&stored_table, schema_version)?;
             let descriptor = logical_table.register_storage_table().record_schema();
-            let branch_key = BranchKey::from_canonical_bytes(
+            let branch_key = RuntimeSchema::decode_persisted_branch_key(
+                &logical_table,
                 record
                     .borrowed()
                     .get_bytes(SharedDeletionHistoryRowRecord::FIELD_BRANCH_KEY_IDX)?,
@@ -855,19 +857,19 @@ where
         }
         let record_view = record.borrowed();
         let is_deletion = record_view.descriptor().field_index("_deletion").is_some();
+        let schema_alias = SchemaVersionAlias(record_view.get_u64(if is_deletion {
+            RegisterRowRecord::FIELD_SCHEMA_VERSION_IDX
+        } else {
+            HistoryRowRecord::FIELD_SCHEMA_VERSION_IDX
+        })?);
+        let schema_version =
+            self.schema_version_for_alias(schema_alias)
+                .ok_or(Error::InvalidStoredValue(
+                    "version storage schema version alias must exist",
+                ))?;
         let table = if !storage_table.starts_with("jazz_physical_") {
             requested_table.to_owned()
         } else {
-            let alias = SchemaVersionAlias(record_view.get_u64(if is_deletion {
-                RegisterRowRecord::FIELD_SCHEMA_VERSION_IDX
-            } else {
-                HistoryRowRecord::FIELD_SCHEMA_VERSION_IDX
-            })?);
-            let schema_version =
-                self.schema_version_for_alias(alias)
-                    .ok_or(Error::InvalidStoredValue(
-                        "version storage schema version alias must exist",
-                    ))?;
             self.catalogue
                 .physical_mappings
                 .get(&schema_version)
@@ -885,6 +887,7 @@ where
                     "physical version storage logical table mapping missing",
                 ))?
         };
+        let table_schema = self.table_in_schema(&table, schema_version)?;
         let record = record.borrowed();
         let tx_node_alias = if is_deletion {
             NodeAlias(record.get_u64(RegisterRowRecord::FIELD_TX_NODE_ID_IDX)?)
@@ -906,11 +909,14 @@ where
         let _ = TxId::new(tx_time, tx_node);
         Ok(VersionRow {
             table: groove::Intern::new(table),
-            branch_key: BranchKey::from_canonical_bytes(record.get_bytes(if is_deletion {
-                RegisterRowRecord::FIELD_BRANCH_KEY_IDX
-            } else {
-                HistoryRowRecord::FIELD_BRANCH_KEY_IDX
-            })?)
+            branch_key: RuntimeSchema::decode_persisted_branch_key(
+                &table_schema,
+                record.get_bytes(if is_deletion {
+                    RegisterRowRecord::FIELD_BRANCH_KEY_IDX
+                } else {
+                    HistoryRowRecord::FIELD_BRANCH_KEY_IDX
+                })?,
+            )
             .map_err(|_| Error::InvalidStoredValue("invalid stored branch key"))?,
             record: OwnedRecord::new(record.raw().to_vec(), record.descriptor()),
         })

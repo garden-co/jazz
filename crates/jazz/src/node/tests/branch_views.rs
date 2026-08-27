@@ -702,6 +702,120 @@ fn malformed_branch_key_rejects_multi_key_commit_without_residue() {
     assert!(node.query_table_versions("todos").unwrap().is_empty());
 }
 
+#[test]
+fn branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen() {
+    let schema = branch_view_schema();
+    let branch = branch_selector(0x70);
+    let row_uuid = row(0x71);
+    let cells = || {
+        BTreeMap::from([
+            ("title".to_owned(), v("branch receipt")),
+            ("owner".to_owned(), Value::Uuid(uuid::Uuid::nil())),
+        ])
+    };
+
+    // Memory uses the same physical row projections as durable backends. This
+    // first receipt catches a writer that only updates one implementation.
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = MemoryStorage::new(&refs).unwrap();
+    let mut memory = NodeState::new_history_complete(node(0x70), schema.clone(), storage).unwrap();
+    memory
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 10)
+                .branch(branch.clone())
+                .cells(cells()),
+        )
+        .unwrap();
+    memory
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 20)
+                .branch(branch.clone())
+                .deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    assert_eq!(
+        memory
+            .query_row_versions_in_branch("todos", &schema.project_branch_view_selector(&schema.tables[0], &branch).unwrap().0, row_uuid)
+            .unwrap()
+            .len(),
+        2,
+        "history and deletion projections share the same exact branch coordinate"
+    );
+
+    let (dir, mut rocks) =
+        open_history_complete_node_with_schema(NodeUuid::from_bytes([0x72; 16]), schema.clone());
+    rocks
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 10)
+                .branch(branch.clone())
+                .cells(cells()),
+        )
+        .unwrap();
+    rocks
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, 20)
+                .branch(branch.clone())
+                .deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+
+    let key = schema
+        .project_branch_view_selector(&schema.tables[0], &branch)
+        .unwrap()
+        .0;
+    let table_id = rocks.catalogue.physical_mappings[&schema.version_id()].tables["todos"].table_id;
+    let prefix = vec![Value::Bytes(key.canonical_bytes())];
+    assert_eq!(
+        rocks
+            .database
+            .primary_key_scan_raw(&physical_history_table_name(table_id), &prefix)
+            .unwrap()
+            .len(),
+        1,
+        "content history is addressed by the canonical branch prefix"
+    );
+    assert_eq!(
+        rocks
+            .database
+            .primary_key_scan_raw(
+                SHARED_DELETION_HISTORY_TABLE,
+                &[Value::Bytes(key.canonical_bytes()), Value::U64(table_id.0)],
+            )
+            .unwrap()
+            .len(),
+        1,
+        "deletion history is addressed by the same canonical branch prefix"
+    );
+    assert_eq!(
+        rocks
+            .database
+            .primary_key_scan_raw(&physical_global_current_table_name(table_id), &prefix)
+            .unwrap()
+            .len(),
+        1,
+        "current and index-backed query projections retain that branch prefix"
+    );
+    drop(rocks);
+
+    let mut reopened = reopen_history_complete_node_at(&dir, NodeUuid::from_bytes([0x72; 16]), schema.clone());
+    assert_eq!(
+        reopened
+            .query_row_versions_in_branch("todos", &key, row_uuid)
+            .unwrap()
+            .len(),
+        2,
+        "reopen decodes the exact branch coordinate for both layers"
+    );
+    assert!(
+        reopened
+            .visible_current_cells_in_branch("todos", &branch, row_uuid)
+            .unwrap()
+            .is_none(),
+        "the reopened deletion current projection still masks the content row"
+    );
+}
+
 // This is necessarily an internal protocol-boundary regression test: public
 // mutation APIs canonicalize branch selectors and therefore cannot construct
 // the adversarial VersionRecord values a remote peer may send.
