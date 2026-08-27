@@ -335,7 +335,7 @@ pub type TestStorage = YieldingStorage<MemoryStorage>;
 
 impl YieldingStorage<MemoryStorage> {
     pub fn new(column_families: &[&str]) -> Self {
-        Self::wrap(MemoryStorage::new(column_families))
+        Self::wrap(MemoryStorage::new(column_families).expect("valid memory storage families"))
     }
 
     pub fn controlled(column_families: &[&str]) -> (Self, TestStorageControl) {

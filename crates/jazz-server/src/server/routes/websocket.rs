@@ -1427,7 +1427,7 @@ mod tests {
         let db = Db::open(
             DbConfig::new(
                 schema,
-                CoreMemoryStorage::new(&refs),
+                CoreMemoryStorage::new(&refs).expect("valid memory storage families"),
                 DbIdentity {
                     node: NodeUuid::from_bytes([0x41; 16]),
                     author: AuthorSubject::for_test_bytes([0x41; 16]),
@@ -1523,7 +1523,7 @@ mod tests {
         let db = Db::open(
             DbConfig::new(
                 schema,
-                CoreMemoryStorage::new(&refs),
+                CoreMemoryStorage::new(&refs).expect("valid memory storage families"),
                 DbIdentity {
                     node: NodeUuid::from_bytes([0x72; 16]),
                     author: AuthorSubject::for_test_bytes([0x72; 16]),
@@ -1946,7 +1946,7 @@ mod tests {
             let db = Db::open(
                 DbConfig::new(
                     schema,
-                    CoreMemoryStorage::new(&refs),
+                    CoreMemoryStorage::new(&refs).expect("valid memory storage families"),
                     DbIdentity {
                         node: NodeUuid::from_bytes([node_seed; 16]),
                         author,

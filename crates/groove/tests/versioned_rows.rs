@@ -23,7 +23,8 @@ fn versioned_schema() -> DatabaseSchema {
 
 async fn open_database() -> Result<Database, Error> {
     let schema = versioned_schema();
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     Database::new(schema, storage).await
 }
 
@@ -64,7 +65,8 @@ async fn active_variant_projection_accepts_an_appended_case_without_rebuilding()
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     .with_variant(1, ["title", "id"]);
     let schema = DatabaseSchema::new([table]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let mut database = Database::new(schema, storage).await?;
     let output = RecordDescriptor::new([("id", ValueType::U64), ("title", ValueType::String)]);
     database.define_variant_projection("items", "reader-v1", output)?;
@@ -158,7 +160,8 @@ async fn active_variant_projection_accepts_an_appended_case_without_rebuilding()
 async fn ignored_variant_projection_case_is_distinct_from_an_unregistered_case()
 -> Result<(), Box<dyn std::error::Error>> {
     let schema = versioned_schema();
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let mut database = Database::new(schema.clone(), storage).await?;
     let output = RecordDescriptor::new([("id", ValueType::U64), ("title", ValueType::String)]);
     database.define_variant_projection("items", "v1-only", output)?;
@@ -238,7 +241,8 @@ fn indexed_versioned_schema(unique_email: bool) -> DatabaseSchema {
 async fn variant_indices_span_versions_skip_missing_fields_and_survive_reopen()
 -> Result<(), Box<dyn std::error::Error>> {
     let schema = indexed_versioned_schema(false);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let mut database = Database::new(schema.clone(), storage).await?;
     let active_subscription = database
         .subscribe_one_sink(GraphBuilder::index("items", "items_by_active"))
@@ -368,7 +372,8 @@ async fn variant_indices_span_versions_skip_missing_fields_and_survive_reopen()
 async fn unique_variant_index_rejects_conflicts_across_versions()
 -> Result<(), Box<dyn std::error::Error>> {
     let schema = indexed_versioned_schema(true);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let mut database = Database::new(schema.clone(), storage).await?;
     let mut batch = database.open_batch();
     batch.insert(
@@ -421,7 +426,8 @@ async fn active_variant_index_accepts_a_live_schema_version_without_rebuilding()
     .with_index(IndexSchema::new("items_by_active", ["active"]))
     .with_variant(1, ["email", "id"]);
     let schema = DatabaseSchema::new([table]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let mut database = Database::new(schema, storage).await?;
     let subscription = database
         .subscribe_one_sink(GraphBuilder::index("items", "items_by_active"))
@@ -485,7 +491,7 @@ async fn live_variant_index_backfills_existing_rows_without_perturbing_subscript
     let schema = DatabaseSchema::new([table.clone()]);
     let mut column_families = schema.column_families();
     column_families.push("indices");
-    let storage = MemoryStorage::new(&column_families);
+    let storage = MemoryStorage::new(&column_families).expect("valid memory storage families");
     let mut database = Database::new(schema.clone(), storage).await?;
     let projection = RecordDescriptor::new([("id", ValueType::U64), ("email", ValueType::String)]);
     database.define_variant_projection("items", "reader", projection)?;
@@ -717,7 +723,8 @@ async fn explicit_registries_cannot_claim_reserved_version_zero() {
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     .with_variant(0, ["id"])]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     assert!(matches!(
         Database::new(schema, storage).await,
         Err(Error::ReservedTableVariant(table)) if table == "items"

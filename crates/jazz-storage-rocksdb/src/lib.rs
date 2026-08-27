@@ -544,6 +544,7 @@ impl RocksDbClassProfile {
 impl ReopenableStorage for RocksDbStorage {
     fn reopen(self, column_families: Vec<String>) -> StorageFuture<'static, Result<Self, Error>> {
         Box::pin(async move {
+            validate_physical_storage_names(&column_families)?;
             if column_families
                 .iter()
                 .all(|name| self.column_families.contains(name))
@@ -866,7 +867,7 @@ fn advance_prefix_upper_bound(prefix: &mut [u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use groove::storage::OrderedKvStorage;
+    use groove::storage::{OrderedKvStorage, ReopenableStorage};
     use std::future::Future;
     use std::pin::pin;
     use std::task::{Context, Poll, Waker};
@@ -932,11 +933,31 @@ mod tests {
     fn open_rejects_nul_column_family_without_creating_or_panicking() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("must-not-exist");
-        let result = RocksDbStorage::open(&path, &["records\0evil"]);
-        assert!(result.is_err());
+        let too_long = "a".repeat(groove::storage::MAX_APPLICATION_STORAGE_NAME_BYTES + 1);
+        for invalid in ["records\0evil", too_long.as_str()] {
+            assert!(RocksDbStorage::open(&path, &[invalid]).is_err());
+        }
         assert!(
             !path.exists(),
-            "invalid family name created a RocksDB store"
+            "invalid family name created a RocksDB store or panicked"
+        );
+    }
+
+    #[test]
+    fn reopen_fast_path_rejects_invalid_existing_family_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let invalid = "records\0evil";
+        let mut storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        // Simulate a legacy/injected in-memory family catalogue: this used to
+        // take the all-existing early return before physical-name validation.
+        storage.column_families.insert(invalid.to_owned());
+        assert!(ready(storage.reopen(vec![invalid.to_owned()])).is_err());
+        assert!(
+            !DB::list_cf(&Options::default(), dir.path())
+                .unwrap()
+                .iter()
+                .any(|name| name == invalid),
+            "reopen must reject before creating an invalid physical family"
         );
     }
 
@@ -1108,7 +1129,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let rocks = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
-        let memory = MemoryStorage::new(&["records"]);
+        let memory = MemoryStorage::new(&["records"]).expect("valid memory storage families");
         assert_eq!(
             ready(rocks.put_if_absent(
                 "records".to_owned(),

@@ -258,7 +258,7 @@ fn open_db() -> (BenchDb, TableSchema) {
     let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let db = block_on(Db::open(DbConfig::new(
         schema,
-        MemoryStorage::new(&family_refs),
+        MemoryStorage::new(&family_refs).expect("valid memory storage families"),
         DbIdentity {
             node: NodeUuid::from_bytes([0x51; 16]),
             author: AuthorSubject::SYSTEM,

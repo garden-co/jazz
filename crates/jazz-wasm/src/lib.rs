@@ -1369,8 +1369,12 @@ impl WasmDb {
         validate_untrusted_open_author(&config)?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let db =
-            block_on(open_db(schema, MemoryStorage::new(&refs), config)).map_err(to_js_error)?;
+        let db = block_on(open_db(
+            schema,
+            MemoryStorage::new(&refs).expect("valid memory storage families"),
+            config,
+        ))
+        .map_err(to_js_error)?;
         db.set_deferred_local_persistence(true);
         Ok(Self {
             inner: WasmDbInner::Memory(Rc::new(db)),
@@ -1391,7 +1395,7 @@ impl WasmDb {
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
         let db = block_on(open_backend_db(
             schema,
-            MemoryStorage::new(&refs),
+            MemoryStorage::new(&refs).expect("valid memory storage families"),
             config,
             identity,
         ))
@@ -1421,8 +1425,12 @@ impl WasmDb {
             verify_self_signed_runtime_author(&token, &app_id, &claimed_author)?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let db =
-            block_on(open_db(schema, MemoryStorage::new(&refs), config)).map_err(to_js_error)?;
+        let db = block_on(open_db(
+            schema,
+            MemoryStorage::new(&refs).expect("valid memory storage families"),
+            config,
+        ))
+        .map_err(to_js_error)?;
         db.set_deferred_local_persistence(true);
         Ok(Self {
             inner: WasmDbInner::Memory(Rc::new(db)),
@@ -4294,7 +4302,7 @@ mod dynamic_schema_view_tests {
         let db = Rc::new(
             Db::open(DbConfig::new(
                 schema,
-                MemoryStorage::new(&refs),
+                MemoryStorage::new(&refs).expect("valid memory storage families"),
                 DbIdentity {
                     node: jazz::ids::NodeUuid::from_bytes([0x63; 16]),
                     author: AuthorSubject::for_test_bytes([0xc3; 16]),
@@ -4699,7 +4707,7 @@ mod dynamic_schema_view_tests {
         let owner = Rc::new(
             block_on(Db::open(DbConfig::new(
                 schema.clone(),
-                MemoryStorage::new(&refs),
+                MemoryStorage::new(&refs).expect("valid memory storage families"),
                 DbIdentity {
                     node: jazz::ids::NodeUuid::from_bytes([0x45; 16]),
                     author: AuthorSubject::for_test_bytes([0xa5; 16]),
@@ -4826,7 +4834,7 @@ mod dynamic_schema_view_tests {
             let other_owner = Rc::new(
                 block_on(Db::open(DbConfig::new(
                     schema.clone(),
-                    MemoryStorage::new(&refs),
+                    MemoryStorage::new(&refs).expect("valid memory storage families"),
                     DbIdentity {
                         node: jazz::ids::NodeUuid::from_bytes([0x47; 16]),
                         author: alice,

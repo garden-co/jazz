@@ -2550,7 +2550,8 @@ mod tests {
     fn ordered_managed_storage_equal_restaging_is_not_new_storage() {
         // This is intentionally an internal receipt: staging/accounting is
         // below public row APIs, and it needs the durable ordered chunk plane.
-        let storage = crate::storage::MemoryStorage::new(&[crate::db::LARGE_VALUE_METADATA_CF]);
+        let storage = crate::storage::MemoryStorage::new(&[crate::db::LARGE_VALUE_METADATA_CF])
+            .expect("valid memory storage families");
         let layout = Rc::new(
             block_on(LayoutStorage::new(
                 storage,
@@ -2580,7 +2581,8 @@ mod tests {
 
     #[test]
     fn ordered_chunk_storage_rejects_unreceipted_mappings() {
-        let storage = crate::storage::MemoryStorage::new(&[crate::db::LARGE_VALUE_METADATA_CF]);
+        let storage = crate::storage::MemoryStorage::new(&[crate::db::LARGE_VALUE_METADATA_CF])
+            .expect("valid memory storage families");
         let layout = Rc::new(
             block_on(LayoutStorage::new(
                 storage,
@@ -2610,7 +2612,8 @@ mod tests {
         // The durable ordered adapter is itself a ChunkKvStorage boundary.
         // It must reject oversized raw metadata before converting the stored
         // slice into a fresh Bytes allocation for ManagedChunkStorage.
-        let storage = crate::storage::MemoryStorage::new(&[crate::db::LARGE_VALUE_METADATA_CF]);
+        let storage = crate::storage::MemoryStorage::new(&[crate::db::LARGE_VALUE_METADATA_CF])
+            .expect("valid memory storage families");
         let layout = Rc::new(
             block_on(LayoutStorage::new(
                 storage,
