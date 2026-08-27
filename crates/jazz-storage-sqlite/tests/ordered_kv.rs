@@ -3,6 +3,9 @@ use groove::storage::{
     Error, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, ScanRequest, collect_scan,
 };
 use jazz_storage_sqlite::SqliteStorage;
+use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::path::Path;
 
 fn open(dir: &tempfile::TempDir) -> SqliteStorage {
     SqliteStorage::open(dir.path().join("jazz.sqlite"), &["records"]).unwrap()
@@ -244,6 +247,208 @@ fn rejects_wrong_format_and_closed_store() {
             Err(Error::InvalidStorageLayout(_))
         ));
     });
+}
+
+#[test]
+fn physical_header_ddl_and_jazz_blobs_are_pinned_across_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("jazz.sqlite");
+    let storage = SqliteStorage::open(&path, &["records"]).unwrap();
+    drop(storage);
+
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let application_id: i64 = connection
+        .pragma_query_value(None, "application_id", |row| row.get(0))
+        .unwrap();
+    let user_version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(application_id, 0x4a41_5a5a, "SQLite header identifies Jazz");
+    assert_eq!(user_version, 1, "SQLite header pins the v1 DDL");
+    assert_eq!(
+        connection
+            .query_row("SELECT value FROM meta WHERE key = 'ddl_id'", [], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })
+            .unwrap(),
+        b"jazz-groove-ordered-kv-ddl-v1"
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT value FROM meta WHERE key = 'format'", [], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })
+            .unwrap(),
+        b"jazz-groove-ordered-kv"
+    );
+    assert!(
+        connection
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'epoch_manifest'",
+                [],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .unwrap()
+            .starts_with(b"JSM1"),
+        "the shared epoch manifest is stored as a raw, canonical metadata blob"
+    );
+    let ddl = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name = 'kv'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap();
+    assert!(ddl.contains("PRIMARY KEY (cf, k)"));
+    assert!(ddl.contains("WITHOUT ROWID"));
+    drop(connection);
+
+    SqliteStorage::open(&path, &["records"]).expect("exact physical v1 store reopens");
+}
+
+#[test]
+fn rejects_wrong_sqlite_header_before_changing_foreign_store() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("foreign.sqlite");
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch("CREATE TABLE foreign_data (value BLOB)")
+        .unwrap();
+    let before: String = connection
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        SqliteStorage::open(&path, &["records"]),
+        Err(Error::InvalidStorageLayout(_))
+    ));
+
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let after: String = connection
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .unwrap();
+    assert_eq!(after, before, "foreign store was rejected before WAL setup");
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM foreign_data", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+fn directory_bytes(path: &Path) -> BTreeMap<OsString, Vec<u8>> {
+    std::fs::read_dir(path)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            (entry.file_name(), std::fs::read(entry.path()).unwrap())
+        })
+        .collect()
+}
+
+fn assert_table_free_foreign_header_is_not_claimed(
+    expected_application_id: i64,
+    expected_user_version: i64,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("foreign-empty.sqlite");
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .pragma_update(None, "application_id", expected_application_id)
+        .unwrap();
+    connection
+        .pragma_update(None, "user_version", expected_user_version)
+        .unwrap();
+    let before_mode: String = connection
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .unwrap();
+    drop(connection);
+    let before_bytes = std::fs::read(&path).unwrap();
+    let before_directory = directory_bytes(directory.path());
+
+    assert!(matches!(
+        SqliteStorage::open(&path, &["records"]),
+        Err(Error::InvalidStorageLayout(_))
+    ));
+    assert_eq!(std::fs::read(&path).unwrap(), before_bytes);
+    assert_eq!(directory_bytes(directory.path()), before_directory);
+
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let application_id: i64 = connection
+        .pragma_query_value(None, "application_id", |row| row.get(0))
+        .unwrap();
+    let user_version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(application_id, expected_application_id);
+    assert_eq!(user_version, expected_user_version);
+    let after_mode: String = connection
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .unwrap();
+    assert_eq!(after_mode, before_mode, "rejection precedes WAL setup");
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0,
+        "rejection creates no Jazz tables"
+    );
+}
+
+#[test]
+fn rejects_table_free_foreign_application_id_without_claiming_it() {
+    assert_table_free_foreign_header_is_not_claimed(0x1122_3344, 0);
+}
+
+#[test]
+fn rejects_table_free_foreign_user_version_without_claiming_it() {
+    assert_table_free_foreign_header_is_not_claimed(0, 7);
+}
+
+#[test]
+fn rejects_wrong_sqlite_user_version_and_ddl_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("jazz.sqlite");
+    let storage = SqliteStorage::open(&path, &["records"]).unwrap();
+    drop(storage);
+
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection.pragma_update(None, "user_version", 2).unwrap();
+    drop(connection);
+    assert!(matches!(
+        SqliteStorage::open(&path, &["records"]),
+        Err(Error::InvalidStorageLayout(_))
+    ));
+
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection.pragma_update(None, "user_version", 1).unwrap();
+    connection
+        .execute("UPDATE meta SET value = x'00' WHERE key = 'ddl_id'", [])
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        SqliteStorage::open(&path, &["records"]),
+        Err(Error::InvalidStorageLayout(_))
+    ));
+
+    let path = directory.path().join("bad-epoch-manifest.sqlite");
+    let storage = SqliteStorage::open(&path, &["records"]).unwrap();
+    drop(storage);
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "UPDATE meta SET value = x'4a534d310002' WHERE key = 'epoch_manifest'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        SqliteStorage::open(&path, &["records"]),
+        Err(Error::InvalidStorageLayout(_))
+    ));
 }
 
 #[test]
