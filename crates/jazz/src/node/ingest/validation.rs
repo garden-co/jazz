@@ -174,6 +174,37 @@ where
         Ok(())
     }
 
+    /// One atomic preflight boundary for every bulk path. All accepted-child
+    /// constraints are validated, and their matching deletes are staged,
+    /// before the caller may add or persist any parent rows in the batch.
+    pub(super) async fn preflight_complete_parent_batch(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        complete_parents: &[(TxId, Vec<VersionRecord>)],
+    ) -> Result<(), Error> {
+        for (parent, versions) in complete_parents {
+            self.preflight_complete_parent_constraints(batch, *parent, versions)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Complete the other half of bulk parent ingestion after atomic
+    /// persistence. Exact Pending edges remain available to the child's later
+    /// fate update; mismatches reject and cascade exactly as on the ordinary
+    /// one-transaction ingest path.
+    pub(super) async fn settle_completed_parent_batch(
+        &mut self,
+        complete_parents: &BTreeSet<TxId>,
+    ) -> Result<(), Error> {
+        for parent in complete_parents {
+            self.invalidate_tx_version_tables_cache(*parent);
+            self.reject_mismatched_pending_children_for_parent(*parent)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Resolve durable constraints left by children that referenced a parent
     /// before this node received it. A parent transaction can carry many row
     /// versions, so transaction existence alone is never sufficient.

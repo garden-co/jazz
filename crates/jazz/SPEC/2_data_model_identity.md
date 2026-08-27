@@ -221,7 +221,9 @@ that completion is persisted. An exact match clears the constraint for an
 already-accepted child; a mismatch is a typed connection/repair error and does
 not rewrite that child's immutable accepted fate. Pending children retain the
 edge so the ordinary rejection-cascade machinery settles them after the parent
-becomes complete.
+becomes complete. These preflight and post-persistence rules apply identically
+to ordinary ingest, initial-reset bulk loading, and coalesced receiver batches;
+bulk loading is not a weaker history-admission boundary.
 
 `BranchKey` bytes use the frozen engine-owned codec in SPEC 11: a versioned,
 length-delimited, strictly increasing `(column name, canonical typed value

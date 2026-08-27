@@ -962,10 +962,9 @@ where
         }
         if let Some(complete_parent_versions) = self.complete_parent_versions(&tx, &versions).await?
         {
-            self.preflight_complete_parent_constraints(
+            self.preflight_complete_parent_batch(
                 batch,
-                tx.tx_id,
-                &complete_parent_versions,
+                &[(tx.tx_id, complete_parent_versions)],
             )
             .await?;
         }
@@ -1107,10 +1106,28 @@ where
             .cloned()
             .collect::<Vec<_>>();
         self.prepare_authored_schema_variants_for_commit(&eligible_versions).await?;
-        self.sync_metrics.receiver_bulk_ingest_commits += 1;
-        self.sync_metrics.receiver_bulk_bundle_ingests += eligible.len() as u64;
+
+        let mut complete_parents = Vec::new();
+        for tx_bundles in &eligible {
+            let first = tx_bundles[0];
+            let versions = tx_bundles
+                .iter()
+                .flat_map(|bundle| bundle.versions.iter().cloned())
+                .collect::<Vec<_>>();
+            if let Some(versions) = self.complete_parent_versions(first.tx, &versions).await? {
+                complete_parents.push((first.tx.tx_id, versions));
+            }
+        }
+        let complete_parent_tx_ids = complete_parents
+            .iter()
+            .map(|(tx_id, _)| *tx_id)
+            .collect::<BTreeSet<_>>();
 
         let mut batch = self.database.open_batch();
+        self.preflight_complete_parent_batch(&mut batch, &complete_parents)
+            .await?;
+        self.sync_metrics.receiver_bulk_ingest_commits += 1;
+        self.sync_metrics.receiver_bulk_bundle_ingests += eligible.len() as u64;
         let version_count = eligible
             .iter()
             .flat_map(|(tx_bundles, _, _)| tx_bundles)
@@ -1268,6 +1285,8 @@ where
         for global_time in applied_global_times {
             self.record_applied_global_time(global_time);
         }
+        self.settle_completed_parent_batch(&complete_parent_tx_ids)
+            .await?;
         Ok(loaded_tx_ids)
     }
 }
