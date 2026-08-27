@@ -2377,13 +2377,13 @@ impl NapiDb {
     )]
     pub fn on_mutation_error(
         &self,
-        callback: ThreadsafeFunction<JsonValue, ()>,
+        callback: ThreadsafeFunction<JsonValue, (), JsonValue, napi::Status, false>,
     ) -> napi::Result<()> {
         let callback: CoreMutationErrorCallback = Rc::new(move |event| {
             let Ok(event) = serde_json::to_value(event) else {
                 return;
             };
-            let _ = callback.call(Ok(event), ThreadsafeFunctionCallMode::NonBlocking);
+            let _ = callback.call(event, ThreadsafeFunctionCallMode::NonBlocking);
         });
         let db = self.inner.borrow();
         let db = db
