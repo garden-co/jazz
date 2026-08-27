@@ -83,11 +83,11 @@ export class JazzRecordPlayerStore {
     }));
   }
 
-  /** `author` is the invitee's canonical Jazz author, not an auth-provider id. */
-  async invite(playlistId: string, author: string, role: InvitationRole): Promise<string> {
+  /** `user` is the invitee's canonical Jazz session user, not an auth-provider id. */
+  async invite(playlistId: string, user: string, role: InvitationRole): Promise<string> {
     return this.db.insert(app.invitations, {
       playlist_id: playlistId,
-      subject: author,
+      subject: user,
       role,
       status: "pending",
     }).value.id;

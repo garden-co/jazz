@@ -23,10 +23,11 @@ test("browser and provider gates select disjoint receipts", () => {
   assert.doesNotMatch(provider, /tests\/browser\/topology\.e2e\.test\.ts/);
 });
 
-test("the maintained package gate includes every non-topology receipt", () => {
+test("the maintained package gate includes every RecordPlayer receipt", () => {
   assert.match(packageJson.scripts.test, /test:unit/);
   assert.match(packageJson.scripts.test, /test:provider/);
   assert.match(packageJson.scripts.test, /test:selection/);
+  assert.match(packageJson.scripts.test, /test:topology/);
   assert.equal(
     packageJson.scripts["test:topology"],
     "vitest run --config vitest.config.browser.ts",

@@ -76,9 +76,17 @@ describe("RecordPlayer scenario receipt", () => {
     const runtimeQuery = JSON.parse(translateQuery(capturedQuery!._build(), app.wasmSchema));
     expect(runtimeQuery.table).toBe("tracks");
     // `id` is an implicit row key in the runtime query contract, so only
-    // ordinary metadata columns appear in `select_columns`.
-    expect(runtimeQuery.select_columns).toEqual(["album_id", "title", "ordinal", "duration_ms"]);
-    expect(runtimeQuery.select_columns).not.toContain("audio_bytes");
+    // ordinary metadata columns appear in `select_columns`. The descriptor
+    // shape also makes the requested full-value materialization explicit.
+    expect(runtimeQuery.select_columns).toEqual([
+      { column: "album_id", kind: "full" },
+      { column: "title", kind: "full" },
+      { column: "ordinal", kind: "full" },
+      { column: "duration_ms", kind: "full" },
+    ]);
+    expect(runtimeQuery.select_columns.map((selection) => selection.column)).not.toContain(
+      "audio_bytes",
+    );
     expect(runtimeQuery.order_by).toEqual([{ column: "ordinal", direction: "Asc" }]);
     expect(runtimeQuery.limit).toBe(ALBUM_TRACK_LIMIT);
   });

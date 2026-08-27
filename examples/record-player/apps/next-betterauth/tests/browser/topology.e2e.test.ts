@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createDb, schema as s, type Db } from "jazz-tools";
+import { createDb, schema as s, type Db, userIdentity } from "jazz-tools";
 import type { RowRefValue } from "jazz-tools/permissions";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
@@ -39,13 +39,13 @@ const acknowledgementPermissions = s.definePermissions(acknowledgementApp, ({ po
 
 // Keep this intentionally separate from RecordPlayer's relational policies:
 // it is the smallest external-JWT receipt for a row routed to a recipient by
-// an application-owned canonical author rather than by `$createdBy`.
+// an application-owned canonical session user rather than by `$createdBy`.
 const recipientApp = s.defineApp({
   invitations: s.table({ subject: s.string(), label: s.string() }),
 });
 const recipientPermissions = s.definePermissions(recipientApp, ({ policy, session, anyOf }) => {
   policy.invitations.allowRead.where(
-    anyOf([{ subject: session.author }, { label: "unmatched control branch" }]),
+    anyOf([{ subject: session.user }, { label: "unmatched control branch" }]),
   );
   policy.invitations.allowInsert.always();
 });
@@ -86,53 +86,51 @@ const relationalRecipientApp = s.defineApp({
 });
 const relationalRecipientPermissions = {
   ...betterAuthPermissions,
-  ...s.definePermissions(
-  relationalRecipientApp,
-  ({ policy, session, anyOf, allowedTo }) => {
+  ...s.definePermissions(relationalRecipientApp, ({ policy, session, anyOf, allowedTo }) => {
     policy.albums.allowRead.where({});
-    policy.albums.allowInsert.always();
+    policy.albums.allowInsert.where({ $createdBy: session.user });
     policy.tracks.allowRead.where({});
-    policy.tracks.allowInsert.always();
+    policy.tracks.allowInsert.where({ $createdBy: session.user });
     const canEditPlaylist = (playlistId: RowRefValue) =>
       anyOf([
-        { $createdBy: session.author },
+        { $createdBy: session.user },
         policy.invitations.exists.where({
           playlist_id: playlistId,
-          subject: session.author,
+          subject: session.user,
           role: "editor",
           status: "accepted",
         }),
       ]);
     const canReadPlaylist = (playlistId: RowRefValue) =>
       anyOf([
-        { $createdBy: session.author },
+        { $createdBy: session.user },
         policy.invitations.exists.where({
           playlist_id: playlistId,
-          subject: session.author,
+          subject: session.user,
           status: "accepted",
         }),
       ]);
     policy.playlists.allowRead.where((playlist) => canReadPlaylist(playlist.id));
     policy.playlists.allowInsert.always();
-    policy.playlists.allowUpdate.where({ $createdBy: session.author });
+    policy.playlists.allowUpdate.where({ $createdBy: session.user });
     policy.playlist_entries.allowRead.where(allowedTo.read("playlist_id"));
     policy.playlist_entries.allowInsert.where((entry) => canEditPlaylist(entry.playlist_id));
     policy.playlist_entries.allowUpdate.where((entry) => canEditPlaylist(entry.playlist_id));
     policy.playlist_entries.allowDelete.where((entry) => canEditPlaylist(entry.playlist_id));
     policy.invitations.allowRead.where((invite) =>
       anyOf([
-        { subject: session.author },
-        policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.author }),
+        { subject: session.user },
+        policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
       ]),
     );
     policy.invitations.allowInsert.where((invite) =>
-      policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.author }),
+      policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
     );
     policy.invitations.allowUpdate.where((invite) =>
-      policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.author }),
+      policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
     );
     policy.invitations.allowUpdate
-      .whereOld({ subject: session.author, status: "pending" })
+      .whereOld({ subject: session.user, status: "pending" })
       .whereNew((invite) =>
         policy.invitations.exists.where({
           id: invite.id,
@@ -142,18 +140,17 @@ const relationalRecipientPermissions = {
           status: "pending",
         }),
       )
-      .whereNew({ subject: session.author, status: "accepted" });
+      .whereNew({ subject: session.user, status: "accepted" });
     policy.invitations.allowDelete.where((invite) =>
-      policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.author }),
+      policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user }),
     );
-    policy.playback_positions.allowRead.where({ $createdBy: session.author });
+    policy.playback_positions.allowRead.where({ $createdBy: session.user });
     policy.playback_positions.allowInsert.always();
     policy.playback_positions.allowUpdate
-      .whereOld({ $createdBy: session.author })
-      .whereNew({ $createdBy: session.author });
-    policy.playback_positions.allowDelete.where({ $createdBy: session.author });
-  },
-  ),
+      .whereOld({ $createdBy: session.user })
+      .whereNew({ $createdBy: session.user });
+    policy.playback_positions.allowDelete.where({ $createdBy: session.user });
+  }),
 };
 
 describe("RecordPlayer authenticated playlist topology", () => {
@@ -176,8 +173,8 @@ describe("RecordPlayer authenticated playlist topology", () => {
       getJazzServerJwtForUser("record-player-recipient-editor", undefined, server.appId),
       getJazzServerJwtForUser("record-player-recipient-listener", undefined, server.appId),
     ]);
-    const recipientAuthor = canonicalAuthor(recipientToken);
-    const secondRecipientAuthor = canonicalAuthor(secondRecipientToken);
+    const recipientAuthor = canonicalUser(recipientToken);
+    const secondRecipientAuthor = canonicalUser(secondRecipientToken);
     const owner = await openClient(server, "recipient-owner", ownerToken);
     const recipient = await openClient(
       server,
@@ -240,7 +237,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
       getJazzServerJwtForUser("record-player-acceptance-owner", undefined, server.appId),
       getJazzServerJwtForUser("record-player-acceptance-recipient", undefined, server.appId),
     ]);
-    const recipientAuthor = canonicalAuthor(recipientToken);
+    const recipientAuthor = canonicalUser(recipientToken);
     const owner = await openClient(server, "acceptance-owner", ownerToken);
     const recipient = await openClient(server, "acceptance-recipient", recipientToken);
     const playlist = await owner
@@ -353,7 +350,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
       getJazzServerJwtForUser("record-player-scalar-owner", undefined, server.appId),
       getJazzServerJwtForUser("record-player-scalar-recipient", undefined, server.appId),
     ]);
-    const recipientAuthor = canonicalAuthor(recipientToken);
+    const recipientAuthor = canonicalUser(recipientToken);
     const owner = await openClient(server, "scalar-owner", ownerToken);
     const recipient = await openClient(server, "scalar-recipient", recipientToken);
     const invite = await owner
@@ -395,8 +392,8 @@ describe("RecordPlayer authenticated playlist topology", () => {
       getJazzServerJwtForUser("record-player-relation-recipient", undefined, server.appId),
       getJazzServerJwtForUser("record-player-relation-listener", undefined, server.appId),
     ]);
-    const recipientAuthor = canonicalAuthor(recipientToken);
-    const secondRecipientAuthor = canonicalAuthor(secondRecipientToken);
+    const recipientAuthor = canonicalUser(recipientToken);
+    const secondRecipientAuthor = canonicalUser(secondRecipientToken);
     const owner = await openClient(server, "relation-owner", ownerToken);
     const recipient = await openClient(server, "relation-recipient", recipientToken);
     const secondRecipient = await openClient(server, "relation-listener", secondRecipientToken);
@@ -497,7 +494,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 getJazzServerJwtForUser("record-player-phase-recipient", undefined, server.appId),
                 getJazzServerJwtForUser("record-player-phase-listener", undefined, server.appId),
               ]);
-              const recipientAuthor = canonicalAuthor(recipientToken);
+              const recipientAuthor = canonicalUser(recipientToken);
               const owner = await openClient(server, "phase-owner", ownerToken);
               const recipient = await openClient(
                 server,
@@ -622,8 +619,8 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 getJazzServerJwtForUser("record-player-listener", undefined, server.appId),
               ]);
               editorToken = issuedEditorToken;
-              editorAuthor = canonicalAuthor(issuedEditorToken);
-              listenerAuthor = canonicalAuthor(listenerToken);
+              editorAuthor = canonicalUser(issuedEditorToken);
+              listenerAuthor = canonicalUser(listenerToken);
               editorDbName = uniqueDbName("record-player-editor-persistent");
               console.info("[record-player-topology] open owner edge");
               owner = await openClient(server, "owner", ownerToken);
@@ -1326,13 +1323,13 @@ async function openClient(
 
 /**
  * External authentication retains its own raw `sub`; Jazz authorization uses
- * the canonical issuer-scoped author derived from that JWT. Invitations store
+ * the canonical issuer-scoped session user derived from that JWT. Invitations store
  * precisely that value, so a same-`sub` token from another issuer cannot read
  * or accept a grant.
  */
-function canonicalAuthor(token: string): string {
+function canonicalUser(token: string): string {
   const claims = JSON.parse(atob(token.split(".")[1]!)) as { iss: string; sub: string };
-  return JSON.stringify([claims.iss, claims.sub]);
+  return userIdentity(claims.iss, claims.sub);
 }
 
 function audioStream(chunks: readonly Uint8Array[]): ReadableStream<Uint8Array> {

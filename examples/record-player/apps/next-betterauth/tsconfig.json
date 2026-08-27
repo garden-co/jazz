@@ -26,5 +26,10 @@
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts"
   ],
-  "exclude": ["node_modules", "tests/browser"]
+  "exclude": [
+    "node_modules",
+    "tests/browser",
+    "vitest.config.browser.ts",
+    "vitest.config.provider.ts"
+  ]
 }
