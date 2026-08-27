@@ -1,29 +1,5 @@
 use super::*;
 
-/// Validate application-selected physical names before an open can touch a
-/// durable backend. Groove itself adds metadata/index families afterwards;
-/// only schema-provided table and direct-store names belong here.
-fn validate_application_storage_names(schema: &DatabaseSchema) -> Result<(), Error> {
-    let mut seen = BTreeSet::new();
-    for name in schema.tables.iter().map(|table| table.name.as_str()).chain(
-        schema
-            .direct_record_stores
-            .iter()
-            .map(|store| store.name.as_str()),
-    ) {
-        crate::storage::validate_application_storage_name(name).map_err(|error| {
-            Error::InvalidApplicationStorageName {
-                name: name.to_owned(),
-                reason: error.to_string(),
-            }
-        })?;
-        if !seen.insert(name) {
-            return Err(Error::DuplicateApplicationStorageName(name.to_owned()));
-        }
-    }
-    Ok(())
-}
-
 fn is_retryable_upload_error(error: &Error) -> bool {
     matches!(
         error,
@@ -89,7 +65,9 @@ impl Database {
         S: ReopenableStorage + 'static,
     {
         // This must precede `LayoutStorage::new`, whose marker initialization
-        // can otherwise create durable engine state for an invalid schema.
+        // can otherwise create durable engine state for an invalid schema. The
+        // caller has already opened the backend; this guards Groove's own
+        // marker/mutation path.
         validate_application_storage_names(&schema)?;
         validate_durable_key_schema(&schema)?;
         let mut ivm_runtime = IvmRuntime::new(schema)?;
