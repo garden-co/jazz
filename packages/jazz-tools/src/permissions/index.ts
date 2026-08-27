@@ -2478,10 +2478,7 @@ function compileRules(
             `Multiple asymmetric update rules for table "${rule.table}" are unsupported because their USING and WITH CHECK clauses would be ORed independently. Combine the alternatives into one update rule, or use symmetric update rules.`,
           );
         }
-        updateRuleAsymmetry.set(
-          rule.table,
-          previousIsAsymmetric === true || isAsymmetric,
-        );
+        updateRuleAsymmetry.set(rule.table, previousIsAsymmetric ?? isAsymmetric);
         tablePolicies.update = mergeOperationPolicy(tablePolicies.update, incoming);
         break;
       }
