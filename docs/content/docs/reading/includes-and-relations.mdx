@@ -80,6 +80,38 @@ Use `select(...)` to narrow a row to `id` plus the columns you pick. You can com
   </Tab>
 </Tabs>
 
+### Partial large values
+
+For a bytes, text, or JSON column, the object form of `select(...)` returns
+just the requested primitive slice or JSON subtree. The range end is exclusive.
+Text coordinates use JavaScript UTF-16 code units by default, so they match
+`String.prototype.slice`; use `fromUtf8` and `toUtf8` when interoperating with
+a byte-oriented protocol. Jazz rejects a range that would split a UTF-8 code
+point or UTF-16 surrogate pair rather than rounding it.
+
+```ts
+const [document] = await db.all(
+  app.documents.where({ id: documentId }).select({
+    bytes: { from: 1_000_000, to: 2_000_000 },
+    text: { from: 4, to: 124 },
+    utf8Text: { fromUtf8: 4, toUtf8: 67 },
+    metadata: { at: "/chapters/0/title" },
+  }),
+);
+
+// document.bytes is Uint8Array; text and utf8Text are strings; metadata is
+// the decoded JSON value at that RFC 6901 pointer.
+```
+
+The object form is schema-aware: byte ranges are for `bytes`, text ranges are
+for `string`, and `{ at }` is for `json`. Selecting a field by name continues
+to return the complete primitive.
+
+Until exact chunk demand reaches every query terminal, Jazz may materialize the
+selected carrier column before applying the requested slice. It never needs to
+materialize unselected columns; exact chunk-demand propagation is tracked in
+[#2090](https://github.com/garden-co/jazz/issues/2090).
+
 ## Missing references
 
 Jazz is distributed and supports offline edits, so a referenced row won't always be available locally&hairsp;—&hairsp;it might not have synced yet, or another peer might have deleted it.
