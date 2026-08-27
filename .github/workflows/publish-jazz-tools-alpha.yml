@@ -661,17 +661,14 @@ jobs:
 
       - name: Verify packed jazz-rn relay payload
         run: |
-          TMP_DIR=$(mktemp -d)
-          pnpm --filter jazz-rn pack --pack-destination "${TMP_DIR}"
-          TARBALL=$(ls "${TMP_DIR}"/jazz-rn-*.tgz | head -n 1)
-          tar -tf "${TARBALL}" | grep -q 'package/native/include/jazz_native_relay.h'
-          tar -tf "${TARBALL}" | grep -q 'package/android/src/main/jniLibs/arm64-v8a/libjazz_native_relay.a'
-          tar -tf "${TARBALL}" | grep -q 'package/android/src/main/jniLibs/armeabi-v7a/libjazz_native_relay.a'
-          tar -tf "${TARBALL}" | grep -q 'package/android/src/main/jniLibs/x86/libjazz_native_relay.a'
-          tar -tf "${TARBALL}" | grep -q 'package/android/src/main/jniLibs/x86_64/libjazz_native_relay.a'
-          tar -tf "${TARBALL}" | grep -q 'package/JazzNativeRelay.xcframework/Info.plist'
-          tar -tf "${TARBALL}" | grep -q 'package/android/jazz-native-relay.manifest.json'
-          tar -tf "${TARBALL}" | grep -q 'package/ios/jazz-native-relay.manifest.json'
+          TEMPORARY_DIRECTORY=$(mktemp -d)
+          pnpm --filter jazz-rn pack --pack-destination "${TEMPORARY_DIRECTORY}"
+          TARBALL=$(ls "${TEMPORARY_DIRECTORY}"/jazz-rn-*.tgz | head -n 1)
+          tar -xzf "${TARBALL}" -C "${TEMPORARY_DIRECTORY}"
+          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
+            JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" \
+            node crates/jazz-rn/scripts/verify-relay-artifacts.mjs \
+              --package-root "${TEMPORARY_DIRECTORY}/package" android ios
 
       - name: Verify packed jazz-tools manifest
         run: |

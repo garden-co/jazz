@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { createRequire } from "node:module";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -263,6 +264,133 @@ test("a dry package includes every staged native relay artifact class", async ()
   }
 });
 
+test("relay verification rejects a manifest-sealed XCFramework without its device slice", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "jazz-rn-verify-"));
+  const sourceRoot = new URL("../../../", import.meta.url);
+  const sourceRevision = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: sourceRoot,
+    encoding: "utf8",
+  }).trim();
+  const nativeRelayAbi = Number(
+    /pub const NATIVE_RELAY_ABI_VERSION: u16 = (\d+);/.exec(
+      readFileSync(
+        new URL("../../../crates/jazz-native-relay/src/lib.rs", import.meta.url),
+        "utf8",
+      ),
+    )?.[1],
+  );
+  const verifier = new URL(
+    "../../../crates/jazz-rn/scripts/verify-relay-artifacts.mjs",
+    import.meta.url,
+  );
+  const packageRoot = join(directory, "package");
+  const androidRoot = join(packageRoot, "android/src/main/jniLibs");
+  const iosRoot = join(packageRoot, "JazzNativeRelay.xcframework");
+  const androidFiles = [
+    "arm64-v8a/libjazz_native_relay.a",
+    "armeabi-v7a/libjazz_native_relay.a",
+    "x86/libjazz_native_relay.a",
+    "x86_64/libjazz_native_relay.a",
+  ];
+  const iosFiles = [
+    "Info.plist",
+    "ios-arm64/libjazz_native_relay.a",
+    "ios-arm64_x86_64-simulator/libjazz_native_relay.a",
+  ];
+  const info = (includeDevice) => `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>AvailableLibraries</key><array>
+${
+  includeDevice
+    ? "<dict><key>LibraryIdentifier</key><string>ios-arm64</string><key>LibraryPath</key><string>libjazz_native_relay.a</string><key>SupportedPlatform</key><string>ios</string></dict>"
+    : ""
+}
+<dict><key>LibraryIdentifier</key><string>ios-arm64_x86_64-simulator</string><key>LibraryPath</key><string>libjazz_native_relay.a</string><key>SupportedPlatform</key><string>ios</string><key>SupportedPlatformVariant</key><string>simulator</string></dict>
+</array></dict></plist>`;
+  const writeArtifactFiles = async (root, files) => {
+    for (const file of files) {
+      const destination = join(root, file);
+      await mkdir(dirname(destination), { recursive: true });
+      await writeFile(destination, file === "Info.plist" ? info(true) : `fixture:${file}\n`);
+    }
+  };
+  const writeManifest = async (root, destination, extra = {}) => {
+    const files = [];
+    const visit = async (current, relative = "") => {
+      for (const entry of await (
+        await import("node:fs/promises")
+      ).readdir(current, {
+        withFileTypes: true,
+      })) {
+        const nextRelative = relative ? `${relative}/${entry.name}` : entry.name;
+        const next = join(current, entry.name);
+        if (entry.isDirectory()) await visit(next, nextRelative);
+        else {
+          files.push({
+            path: nextRelative,
+            sha256: createHash("sha256")
+              .update(await readFile(next))
+              .digest("hex"),
+          });
+        }
+      }
+    };
+    await visit(root);
+    await mkdir(dirname(destination), { recursive: true });
+    await writeFile(
+      destination,
+      `${JSON.stringify(
+        { format: 1, nativeRelayAbi, sourceRevision, ...extra, files },
+        null,
+        2,
+      )}\n`,
+    );
+  };
+
+  try {
+    await writeArtifactFiles(androidRoot, androidFiles);
+    await writeArtifactFiles(iosRoot, iosFiles);
+    await mkdir(join(packageRoot, "native/include"), { recursive: true });
+    await writeFile(
+      join(packageRoot, "native/include/jazz_native_relay.h"),
+      readFileSync(
+        new URL("../../../crates/jazz-native-relay/include/jazz_native_relay.h", import.meta.url),
+      ),
+    );
+    await writeManifest(androidRoot, join(packageRoot, "android/jazz-native-relay.manifest.json"), {
+      toolchain: { cargoNdk: "4.1.2" },
+    });
+    await writeManifest(iosRoot, join(packageRoot, "ios/jazz-native-relay.manifest.json"));
+    const environment = {
+      ...process.env,
+      JAZZ_NATIVE_RELAY_SOURCE_REVISION: sourceRevision,
+      JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION: "4.1.2",
+    };
+    execFileSync(
+      process.execPath,
+      [verifier.pathname, "--package-root", packageRoot, "android", "ios"],
+      {
+        env: environment,
+        stdio: "pipe",
+      },
+    );
+
+    await writeFile(join(iosRoot, "Info.plist"), info(false));
+    await writeManifest(iosRoot, join(packageRoot, "ios/jazz-native-relay.manifest.json"));
+    assert.throws(
+      () =>
+        execFileSync(
+          process.execPath,
+          [verifier.pathname, "--package-root", packageRoot, "android", "ios"],
+          { env: environment, stdio: "pipe" },
+        ),
+      /missing its device static-library slice/,
+      "a hash-valid manifest with only the simulator library is not releasable",
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("release, preview, and labeled platform gates seal and link the staged relay package", async () => {
   const [packageBuild, alphaPublish, previewBuild, rnWorkflow, artifactScript, verifier] =
     await Promise.all([
@@ -320,10 +448,23 @@ test("release, preview, and labeled platform gates seal and link the staged rela
   assert.match(previewBuild, /types: \[labeled, unlabeled, synchronize, reopened\]/);
   assert.match(previewBuild, /'preview-build'/);
   assert.match(previewBuild, /'rn-preview-release'/);
+  assert.match(previewBuild, /include_rn:[\s\S]*rn-preview-release/);
   assert.match(
     previewBuild,
-    /include_rn: \$\{\{ contains\(github\.event\.pull_request\.labels\.\*\.name, 'rn-preview-release'\) \}\}/,
+    /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
+    "native preview packaging must not treat a maintainer-applied label as trust for fork code",
   );
+  for (const guardedPreviewExpression of [
+    previewBuildWorkflow.jobs.build.if,
+    previewBuildWorkflow.jobs.build.with.include_rn,
+    previewBuildWorkflow.jobs["publish-pkg-pr-new"].if,
+  ]) {
+    assert.match(
+      guardedPreviewExpression,
+      /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
+      "a fork with only rn-preview-release must skip native build and privileged publication",
+    );
+  }
   assert.match(previewBuild, /name: pkg-jazz-rn/);
   assert.match(previewBuild, /'\.\/crates\/jazz-rn'/);
   assert.doesNotMatch(
@@ -350,14 +491,20 @@ test("release, preview, and labeled platform gates seal and link the staged rela
     /ordinary preview-build runs must neither download nor publish jazz-rn/,
   );
 
-  const previewMode = (labels) => ({
-    runs: labels.includes("preview-build") || labels.includes("rn-preview-release"),
-    includesRn: labels.includes("rn-preview-release"),
+  const previewMode = (labels, sameRepository) => ({
+    runs:
+      labels.includes("preview-build") || (labels.includes("rn-preview-release") && sameRepository),
+    includesRn: labels.includes("rn-preview-release") && sameRepository,
   });
-  assert.deepEqual(previewMode([]), { runs: false, includesRn: false });
-  assert.deepEqual(previewMode(["preview-build"]), { runs: true, includesRn: false });
-  assert.deepEqual(previewMode(["rn-preview-release"]), { runs: true, includesRn: true });
-  assert.deepEqual(previewMode(["preview-build", "rn-preview-release", "react-native"]), {
+  assert.deepEqual(previewMode([], true), { runs: false, includesRn: false });
+  assert.deepEqual(previewMode(["preview-build"], false), { runs: true, includesRn: false });
+  assert.deepEqual(previewMode(["rn-preview-release"], true), { runs: true, includesRn: true });
+  assert.deepEqual(previewMode(["rn-preview-release"], false), { runs: false, includesRn: false });
+  assert.deepEqual(previewMode(["preview-build", "rn-preview-release", "react-native"], false), {
+    runs: true,
+    includesRn: false,
+  });
+  assert.deepEqual(previewMode(["preview-build", "rn-preview-release", "react-native"], true), {
     runs: true,
     includesRn: true,
   });
@@ -372,10 +519,7 @@ test("release, preview, and labeled platform gates seal and link the staged rela
     false,
     "the reusable package build defaults to its fast, non-RN path",
   );
-  assert.equal(
-    previewBuildWorkflow.jobs.build.with.include_rn,
-    "${{ contains(github.event.pull_request.labels.*.name, 'rn-preview-release') }}",
-  );
+  assert.match(previewBuildWorkflow.jobs.build.with.include_rn, /rn-preview-release/);
   assert.match(rnWorkflow, /Android relay linked AAR/);
   assert.match(rnWorkflow, /:app:assembleDebug/);
   assert.match(rnWorkflow, /iOS relay linked app/);
@@ -383,5 +527,9 @@ test("release, preview, and labeled platform gates seal and link the staged rela
   assert.match(rnWorkflow, /xcodebuild/);
   assert.match(artifactScript, /sourceRevision/);
   assert.match(verifier, /JAZZ_NATIVE_RELAY_SOURCE_REVISION/);
+  assert.match(verifier, /AvailableLibraries/);
+  assert.match(verifier, /requiredRoles/);
+  assert.match(packageBuild, /cargo-ndk@\$\{\{ env\.JAZZ_RN_CARGO_NDK_VERSION \}\}/);
+  assert.match(packageBuild, /--package-root/);
   assert.match(verifier, /relay artifact inventory differs from its manifest/);
 });

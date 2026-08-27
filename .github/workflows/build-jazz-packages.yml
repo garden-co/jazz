@@ -37,6 +37,7 @@ on:
 
 env:
   CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
+  JAZZ_RN_CARGO_NDK_VERSION: 4.1.2
 
 jobs:
   build-linux:
@@ -238,7 +239,7 @@ jobs:
           sccache-key: release-jazz-rn-android-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
 
       - name: Install cargo-ndk
-        run: cargo install cargo-ndk --locked
+        run: cargo install cargo-ndk@${{ env.JAZZ_RN_CARGO_NDK_VERSION }} --locked
 
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
       - name: Install pinned Android NDK
@@ -246,9 +247,11 @@ jobs:
       - name: Build and verify Android relay archive slices
         run: |
           JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
+            JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" \
             ANDROID_NDK_HOME="${ANDROID_SDK_ROOT}/ndk/27.1.12297006" \
             pnpm --filter jazz-rn build:relay:android
           JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
+            JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" \
             node crates/jazz-rn/scripts/verify-relay-artifacts.mjs android
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -483,6 +486,17 @@ jobs:
 
       - name: Build jazz-rn TypeScript package
         run: pnpm --filter jazz-rn build
+
+      - name: Verify packed jazz-rn relay payload
+        run: |
+          TEMPORARY_DIRECTORY=$(mktemp -d)
+          pnpm --filter jazz-rn pack --pack-destination "${TEMPORARY_DIRECTORY}"
+          TARBALL=$(ls "${TEMPORARY_DIRECTORY}"/jazz-rn-*.tgz | head -n 1)
+          tar -xzf "${TARBALL}" -C "${TEMPORARY_DIRECTORY}"
+          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
+            JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" \
+            node crates/jazz-rn/scripts/verify-relay-artifacts.mjs \
+              --package-root "${TEMPORARY_DIRECTORY}/package" android ios
 
       - name: Verify jazz-rn publish artifacts
         run: |

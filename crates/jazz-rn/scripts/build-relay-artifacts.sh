@@ -20,11 +20,12 @@ write_manifest() {
   shift
   local source_revision
   source_revision=${JAZZ_NATIVE_RELAY_SOURCE_REVISION:-$(git -C "$root" rev-parse HEAD)}
-  node - "$destination" "$abi" "$source_revision" "$@" <<'NODE'
+  local cargo_ndk_version=${JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION:-}
+  node - "$destination" "$abi" "$source_revision" "$cargo_ndk_version" "$@" <<'NODE'
 const { createHash } = require("node:crypto");
 const { readdirSync, readFileSync, statSync, writeFileSync } = require("node:fs");
 const { join, relative } = require("node:path");
-const [destination, abi, sourceRevision, ...roots] = process.argv.slice(2);
+const [destination, abi, sourceRevision, cargoNdkVersion, ...roots] = process.argv.slice(2);
 const files = [];
 const visit = (root, directory = root) => {
   for (const name of readdirSync(directory).sort()) {
@@ -40,7 +41,8 @@ const visit = (root, directory = root) => {
 };
 for (const root of roots) visit(root);
 if (!files.length) throw new Error("relay artifact build produced no static libraries");
-writeFileSync(destination, JSON.stringify({ format: 1, nativeRelayAbi: Number(abi), sourceRevision, files }, null, 2) + "\n");
+const toolchain = cargoNdkVersion ? { cargoNdk: cargoNdkVersion } : undefined;
+writeFileSync(destination, JSON.stringify({ format: 1, nativeRelayAbi: Number(abi), sourceRevision, toolchain, files }, null, 2) + "\n");
 NODE
 }
 
@@ -56,6 +58,16 @@ case "$platform" in
       exit 1
     }
     stage="$package/android/src/main/jniLibs"
+    detected_cargo_ndk_version=$(cargo ndk --version | sed -nE 's/.* ([0-9]+\.[0-9]+\.[0-9]+)$/\1/p')
+    if [[ -z "$detected_cargo_ndk_version" ]]; then
+      echo "could not determine cargo-ndk version" >&2
+      exit 1
+    fi
+    if [[ -n "${JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION:-}" && "$JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION" != "$detected_cargo_ndk_version" ]]; then
+      echo "cargo-ndk version $detected_cargo_ndk_version does not match requested $JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION" >&2
+      exit 1
+    fi
+    export JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="$detected_cargo_ndk_version"
     stage_header
     rm -rf "$stage"
     mkdir -p "$stage"
