@@ -1695,6 +1695,20 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
 /// ```
 #[test]
 fn browser_relay_keeps_offset_window_membership_when_materializing_locally() {
+    // This receipt seeds and propagates several independently maintained
+    // browser/worker/core views. Give only its test thread the normal 2 MiB
+    // stack plus a 4 MiB margin, rather than changing the process-wide test
+    // stack or production runtime configuration.
+    std::thread::Builder::new()
+        .name("browser-relay-window-receipt".to_owned())
+        .stack_size(6 * 1024 * 1024)
+        .spawn(browser_relay_keeps_offset_window_membership_on_large_stack)
+        .expect("spawn browser relay window receipt")
+        .join()
+        .expect("browser relay window receipt panicked");
+}
+
+fn browser_relay_keeps_offset_window_membership_on_large_stack() {
     let schema = schema();
     let alice = AuthorSubject::for_test_bytes([0xc2; 16]);
     let main_thread = open_db(0x1c, alice, &schema);
