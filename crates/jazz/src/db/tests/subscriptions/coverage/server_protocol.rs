@@ -686,26 +686,48 @@ fn assert_active_subscription_key_reuse(reuse: ActiveSubscriptionKeyReuse) {
     );
 }
 
+/// A canonical replay keeps its existing subscription usage instead of creating a second producer.
+/// alice's client replays its `A` request to the server: `alice ──Subscribe(A)──► server`.
+/// Wire and internal-state inspection are necessary here because the contract is no extra reset,
+/// maintained runtime, or coverage group—effects that public row state alone cannot distinguish.
 #[test]
 fn active_subscription_key_exact_canonical_replay_refreshes_existing_usage() {
     assert_active_subscription_key_reuse(ActiveSubscriptionKeyReuse::ExactReplay);
 }
 
+/// A reused key with a changed binding is rejected before it can alter the live `A` subscription.
+/// alice first subscribes to `A`, then sends `B`: `alice ──Subscribe(A)──► server ◄──Subscribe(B)── alice`.
+/// Wire and internal-state inspection prove reject-before-side-effects: no reply, replacement
+/// producer, or changed coverage is observable through the client row view alone.
 #[test]
 fn active_subscription_key_drops_changed_binding_before_side_effects() {
     assert_active_subscription_key_reuse(ActiveSubscriptionKeyReuse::ChangedBinding);
 }
 
+/// A replay with changed known state refreshes the already-live canonical subscription without rebinding it.
+/// alice opens `A`, then supplies a known-state declaration: `alice ──Subscribe(A)──► server ◄──Subscribe(A, known)── alice`.
+/// Wire and internal-state inspection are needed to prove the replay causes neither another reset
+/// nor another maintained usage, distinctions that final rows cannot expose.
 #[test]
 fn active_subscription_key_changed_known_state_refreshes_existing_usage() {
     assert_active_subscription_key_reuse(ActiveSubscriptionKeyReuse::ChangedKnownState);
 }
 
+/// A reused key with a different query shape is rejected before it can replace the live subscription.
+/// alice opens the title-`A` shape, then submits the done-`true` shape under that key:
+/// `alice ──Subscribe(title=A)──► server ◄──Subscribe(done=true)── alice`.
+/// Wire and internal-state inspection establish reject-before-side-effects because client rows
+/// cannot reveal a transient replacement, duplicate producer, or conflicting coverage group.
 #[test]
 fn active_subscription_key_drops_mismatched_shape_before_side_effects() {
     assert_active_subscription_key_reuse(ActiveSubscriptionKeyReuse::MismatchedShape);
 }
 
+/// An ordinary whole-table subscription cannot take the key owned by the server's current-row producer.
+/// alice opens current rows, then sends an ordinary whole-table subscribe with that key:
+/// `server ──current rows──► alice ──ordinary Subscribe(same key)──► server`.
+/// Wire and internal-state inspection are required to show no second producer or coverage is
+/// installed; the final row set would otherwise look identical.
 #[test]
 fn current_row_subscription_key_rejects_ordinary_whole_table_collision() {
     let schema = schema();
@@ -820,6 +842,11 @@ fn current_row_subscription_key_rejects_ordinary_whole_table_collision() {
     );
 }
 
+/// The current-row producer refuses a key already owned by an ordinary whole-table subscription.
+/// alice starts the ordinary subscription, then the server tries to serve current rows:
+/// `alice ──ordinary Subscribe(key)──► server ──serve_current_rows(key)──► alice`.
+/// Wire and internal-state inspection prove the refusal leaves the ordinary owner and its runtime
+/// intact without a transient current-row producer, which public rows alone cannot establish.
 #[test]
 fn current_row_subscription_key_refuses_existing_ordinary_owner() {
     let schema = schema();
