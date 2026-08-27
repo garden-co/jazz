@@ -99,6 +99,25 @@ fn maintained_physical_point_hydration_uses_only_its_current_row_source() {
 }
 
 #[test]
+fn maintained_policy_point_subscription_keeps_full_current_source_for_deletion_liveness() {
+    let schema = owner_policy_schema();
+    let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([0xc2; 16]), schema.clone());
+    let target = row(0x71);
+    let shape = Query::from("issues")
+        .filter(eq(col("id"), lit(Value::Uuid(target.0))))
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+
+    assert!(
+        node.current_query_primary_key_access_paths(&shape, &binding)
+            .unwrap()
+            .is_empty(),
+        "policy-scoped maintained rows must retain their full source so deletion markers can remove them"
+    );
+}
+
+#[test]
 fn query_subscription_result_sets_track_bindings_and_rehydrate() {
     let (_server_dir, mut server) = open_node();
     let (_reader_dir, mut reader) = open_node();
