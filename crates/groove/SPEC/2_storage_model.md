@@ -15,6 +15,9 @@ Invariant digest:
 - `INV-STORAGE-2`: A prefix `ScanRequest` MUST return exactly keys beginning with the supplied byte prefix in the requested lexicographic direction, including prefixes whose finite upper bound cannot be computed.
 - `INV-STORAGE-29`: An explicit ordered scan request's finite item bound MUST cap the complete cursor result in the requested direction; adapters MUST stop reading beyond that bound rather than treating it as a caller-side collection hint.
 - `INV-STORAGE-30`: Application table and direct-record-store names MUST have one case-sensitive, collision-free namespace that excludes Groove's engine-owned names; every physical column-family ingress MUST reject embedded NUL and names beyond the portable UTF-8 byte bound before durable mutation.
+- `INV-STORAGE-31`: A durable adapter MUST validate its epoch-pinned physical manifest before mutating a pre-existing store; engine files are not interchange, and backend commit/WAL sync—not maintenance flushes or checkpoints—is the durability boundary.
+- `INV-STORAGE-32`: An atomic batch acknowledgement MUST distinguish committed, definitely-uncommitted, and possibly-committed outcomes; cancellation after an attempt begins is conservatively possibly committed.
+- `INV-STORAGE-33`: A payload `EnumValue` MUST persist its declaration-order `u32` case tag as a minimal little-endian base-128 varint followed immediately by the selected case's canonical record payload; unknown, truncated, overflowing, and non-minimal tags are invalid.
 - `INV-STORAGE-4`: `write_many` MUST apply all `Set`/`Delete` operations atomically at the storage-operation level, and a missing column family in the operation list MUST leave earlier valid operations unapplied.
 - `INV-STORAGE-5`: `ReopenableStorage::reopen` MUST preserve existing data while adding newly requested column families.
 - `INV-STORAGE-6`: Table records MUST be stored as values in the table column family named by `TableSchema::name`, keyed by the encoded primary key derived from the row record.
@@ -52,6 +55,17 @@ canonical bounded `u32` case tag and that case's record payload. Tags are dense 
 declaration order; appending a case is compatible, while changing an existing case,
 its tag, or payload descriptor is not. Scalar enum columns use the same declaration
 and registry rules with zero-payload cases, encoded as their compact discriminant.
+
+**Payload-enum wire envelope (epoch 1).** The selected case tag is the minimal
+unsigned little-endian base-128 (`LEB128`) representation of its `u32` declaration
+index, followed immediately by that case's canonical record payload. Thus tags
+`0..=127` have one byte, `128` begins `80 01`, and no length, version, or alternate
+tag encoding is present. The decoder rejects an empty or unterminated tag, a fifth
+byte whose payload exceeds `0x0f`, a non-minimal multi-byte spelling, an unknown
+case tag, or any payload that is not canonical for the selected case. This envelope
+is permanent at the Groove storage boundary: adding a new case is compatible, but
+renumbering/reordering cases, changing an existing payload descriptor, or adding a
+migration/dual-read path is outside this format cut.
 
 Groove's standalone registry model deliberately has no distributed-schema
 semantics: its discriminant is meaningful only together with the descriptor that
@@ -108,6 +122,45 @@ The backing partitions are still called "column families" in the reference
 implementation; at the specification level, higher layers should reason in
 terms of record stores.
 
+### Storage epoch manifest
+
+Every durable adapter has one fixed, top-level metadata location outside its
+ordinary ordered-KV data plane. Before creating a table, column family, page,
+or ordinary key, an opener MUST read the `StorageEpochManifest` there. The
+canonical manifest bytes begin with `JSM1` and contain the storage epoch,
+adapter ID and format version, the sorted set of required authoritative codec
+IDs, and sorted decode-relevant adapter parameters. The epoch-1 payload registry
+is exactly `groove.ordered-kv.v1`; omission, addition, or substitution of a
+codec ID is invalid even when the rest of the manifest is canonical. The
+manifest envelope is the root boundary rather than an entry in its own
+registry. Adding an authoritative opaque byte payload requires a stable ID, a
+corpus entry, and a new epoch rather than an adapter-local postcard/`Bytes`
+exception. Missing, truncated,
+noncanonical, corrupt, unknown, or inconsistent manifests fail closed before
+any mutation (`INV-STORAGE-31`).
+
+Epoch 1 is the first settled format. Stores written by pre-settlement alpha
+builds are unsupported; they are neither guessed nor silently reinterpreted.
+Within an epoch, authoritative codec bytes are immutable. An incompatible
+change requires a new top-level epoch. A future supported transition is an
+explicitly registered adjacent `N -> N+1` copy-on-write migration with a
+durable journal and an atomic manifest flip. While that journal is incomplete,
+application access is closed; reopen may resume or discard the unpublished
+target, but must expose either complete `N` or complete `N+1`, never a mixture.
+There is no synthetic migration into epoch 1.
+
+The adapter owns its physical manifest location (for example a RocksDB internal
+column family, SQLite metadata table, or IndexedDB root metadata), but it MUST
+return a successful open receipt only after validating this common contract.
+Memory storage has no durable manifest and is used solely for semantic
+conformance. Backend files are not interchange formats.
+
+**Implementation-status note.** RocksDB and SQLite persist and validate this
+shared `JSM1` manifest. IndexedDB currently validates its adapter-private
+`jazz-idb-tree` page metadata but does not yet persist the shared epoch
+manifest; therefore it is not covered by the epoch-1 physical-open receipt.
+That remaining acceptance item stays explicitly tracked by #2160.
+
 The only ordering property groove requires from the backing store is
 lexicographic byte order. A range `ScanRequest` returns keys in that order and
 includes keys `>= start` while excluding keys `>= end` (`INV-STORAGE-1`). Batch
@@ -118,6 +171,48 @@ have left the batch unapplied from a failure that may have followed a durable
 commit. Backends must classify an uncertain acknowledgement conservatively as
 possibly committed; only a definitely-uncommitted outcome permits callers to
 roll back in-process state or retry the same batch.
+
+**Commit receipts and cancellation.** A portable atomic-batch submission has
+three acknowledgement classes: `Committed`, `Uncommitted(error)`, and
+`PossiblyCommitted(error)` (`INV-STORAGE-32`). `Uncommitted` is permitted only
+when the adapter proves the error happened before its atomic commit boundary
+(for example, complete local validation before beginning a native write).
+An adapter that receives a native failure without that proof must report
+`PossiblyCommitted`, even if the backend normally makes the failure unlikely.
+Dropping/cancelling a submission future after it has begun produces no receipt;
+callers must treat that case as possibly committed. Dropping it before the
+first poll begins no attempt and is uncommitted. This is an acknowledgement
+classification, not a request to make asynchronous storage operations
+uncancellable.
+
+Groove's resident-publication lifecycle applies that distinction directly. A
+cancelled persistence future may return its publication to `Applied` only while
+it is still waiting for its ordered turn and has not started the storage
+submission. Once submission starts, cancellation permanently marks the
+database unusable and wakes every later publication waiting for its ordered
+turn so each observes the terminal order failure rather than hanging. An
+explicit `PossiblyCommitted` result does the same before
+the host settles its receipt, so holding or dropping that receipt cannot expose
+a retry window. A proven `Uncommitted` result is the only result for which an
+implementation may retry or roll back; conservatively poisoning instead
+remains valid when the higher layer has no complete rollback operation.
+
+This poison is instance-local, not a durable marker. Discarding the poisoned
+`Database` and reopening the backend creates a fresh instance that may make
+new operations against the durable state it finds. Reopen does not classify the
+abandoned submission retroactively and MUST NOT replay it as a retry; it only
+restores the state for which storage has a definite durable receipt.
+
+**Worked cancellation/reopen receipt.** Suppose durable state contains row A.
+The live database makes row B resident, begins B's atomic submission, and its
+host drops that persistence future. The live instance is poisoned: it may not
+read, write, retry B, or report B as locally durable. After discarding that
+instance, reopening the same backend observes A and whatever byte state the
+backend definitively contains; it does not synthesize another attempt for B.
+The reopened instance may write a new row C normally. In the controlled
+pre-write cancellation receipt, reopening therefore observes A, not B, and
+then persists C; a backend that had actually committed B is still safe because
+the former instance never retries or rolls back B.
 
 `put_if_absent` and `compare_and_delete` are atomic at the persistence scope
 (`INV-STORAGE-28`). A backend either serializes them across every concurrently
@@ -157,6 +252,46 @@ the RocksDB C-string boundary. Backend discovery and import paths validate the
 same physical contract before admitting requested families or replacing live
 in-memory state.
 
+### Durable backend physical boundary
+
+The portable ordered-KV contract is logical; a durable adapter additionally has
+one fixed, adapter-local manifest owned by the storage epoch. The manifest
+names the storage epoch, adapter format version, required codec identities, and
+every decode-relevant parameter. A missing, unknown, or internally inconsistent
+manifest fails closed **before mutation**. It is not legal to discover a
+plausible layout and adopt it, nor to fall back to a current decoder for an
+unknown epoch (`INV-STORAGE-31`). The shared epoch manifest specifies the
+cross-adapter fields; this section freezes the native adapter descriptors that
+it carries.
+
+RocksDB v3 uses the internal `__groove_storage_internal_v3` column family and
+the `value-format` key with raw value `raw-v3`. Its Jazz/Groove-owned families
+are `__groove_class_history`, `__groove_class_register`,
+`__groove_class_global_current`, `__groove_class_ahead_current`,
+`__groove_class_changes`, `__groove_class_indices`, and
+`__groove_class_meta`; application names cannot collide with them, any
+`__groove_*` name, `indices`, or RocksDB's `default`. Keys in every family use
+RocksDB's bytewise comparator (unsigned lexicographic bytes). The adapter uses
+ordinary put/delete batches only: RocksDB merge operands and their compaction
+interpretation are outside the Groove format and MUST NOT encode a logical
+delta. The manifest deliberately does **not** freeze SST, block, memtable,
+compaction, or WAL file bytes. A successfully WAL-synced write is durable;
+close-time memtable flush is performance maintenance, not a second commit.
+
+SQLite v1 freezes header `application_id = 0x4a415a5a` (`JAZZ`),
+`user_version = 1`, the `meta`, `column_families`, and `kv` DDL, and the Jazz
+metadata blobs `format = jazz-groove-ordered-kv`, big-endian
+`format_version = 1`, and `ddl_id = jazz-groove-ordered-kv-ddl-v1`. The tables
+are `STRICT`; `kv` is `WITHOUT ROWID` with primary key `(cf, k)`. SQLite page
+and WAL bytes are not part of the format. A successful SQLite transaction
+commit is the durability boundary; WAL checkpointing is maintenance and never
+authorizes a different visible state.
+
+Backend stores are never file-level interchange. A separately versioned,
+canonical logical export/import transfers global identities and authoritative
+history, then rebuilds derived state on the receiving backend. It cannot bypass
+epoch validation or make an unknown physical manifest decodable.
+
 An ordered cursor is **not** a snapshot-isolation primitive. A backend may
 observe committed changes between batches; in particular, `MemoryStorage`
 reacquires its map for every lazy cursor batch to keep memory proportional to
@@ -174,6 +309,54 @@ ordering, prefix upper-bound handling, and failed-batch atomicity on the host
 memory backend. The wasm-only IndexedDB adapter compiles against an in-memory B-tree
 fixture; coverage of persistence across closing and reopening a real IndexedDB
 namespace remains a browser-harness gap.
+
+### IndexedDB page-store physical format
+
+IndexedDB is one durable adapter, not a second logical Groove layout. Its
+database name, the `pages` and `metadata` object-store names, and the `current`
+metadata key are fixed within a storage epoch. `current` is a structured-clone
+record with magic `jazz-idb-tree`, format version `2`, a power-of-two page size
+between 1024 and `2^31` bytes, generation, nullable root page id, and next page
+id. Missing, malformed, or unknown magic/version metadata fails closed before
+a mutation; a new incompatible layout uses a new epoch instead of guessing at
+these bytes. Browser page ids are JavaScript safe integers, so root, child, and
+next ids are bounded to `0..=2^53-1`; exhaustion fails instead of rounding an
+identity. The stored page size is validated before page write or decode.
+
+The IndexedDB B-tree page body is adapter-private but durable. A page is exactly
+`"IDBTREE\\0" | version:u8(2) | xxh3_64(payload):u64le | payload`. The first
+payload byte is a fixed page tag: leaf `0`, internal `1`, or overflow `2`. All
+collection and byte lengths are `u32le`; page ids and logical overflow lengths
+are `u64le`. The logical overflow length stays `u64` in memory until a host
+materializes bytes, so native and wasm32 accept the same canonical page. No
+`usize`, serde/postcard layout, omitted option field, or trailing payload byte
+is durable.
+
+Leaf entries are strictly key-ordered. Internal keys are strictly ordered and
+their explicit child count is exactly one larger than their key count. Overflow
+next tags are exactly `0` (none) or `1 | page_id:u64le`. Unknown tags, malformed
+lengths, checksum failures, and noncanonical trailing bytes fail closed. Exact
+Rust/TypeScript fixtures include a logical overflow length above `u32` to pin
+this cross-architecture contract.
+
+Every logical operation keeps one page-identity ownership set across its
+structural root-to-leaf walk and every overflow edge it follows. Repeated page
+ids are cycle or shared-subgraph corruption—including two leaf values naming
+the same overflow head—not deduplication.
+
+Tree writes are copy-on-write: the changed leaf and every changed ancestor get
+fresh page ids, then one IndexedDB transaction writes the new immutable closure
+and replaces `current` after checking the observed generation. A crash before
+publication leaves at most unreachable new pages; a published root never names
+a torn or missing child. Reclamation is a separate reachability operation and
+may delete only pages proven unreachable from the published root, never pages
+merely replaced by an in-flight write. Reopening observes either the old root
+and complete closure or the new root and complete closure.
+Before persistence, one logical write—including every operation in a
+`write_many` call—is also locally atomic. If page construction or validation
+fails, the tree restores its prior root and allocation frontier and discards
+every newly staged page; a later successful flush cannot publish those orphans
+or an earlier operation from the failed batch.
 
 ### 2.2 Records: logical fields, physical bytes
 
@@ -349,12 +532,28 @@ order-preserving member encodings: integer tuple members are big-endian, `Bool`
 is `0|1`, `Uuid` is raw bytes, enum values are their `u8` discriminants, and
 nested fixed-width tuple/nullable members recurse (`INV-STORAGE-9`).
 
+A record decoder MUST consume exactly the descriptor-defined record span: a
+truncated fixed field, offset table, or variable payload; an out-of-range or
+non-monotonic offset; a trailing byte in a fixed-only record; an invalid scalar;
+or a non-canonical nested record is invalid, not an alternate representation.
+
+`F64` record values use their IEEE-754 bits little-endian; positive and negative
+infinity are valid, while every NaN bit pattern is invalid on encode, decode, and
+structural validation before a caller-supplied raw `VariantRecord` can enter durable
+storage. Ordered-index `F64` uses the separately specified order transform in §2.8.
+
 **Nullable values** (`INV-STORAGE-10`): a fixed-width null is flag `0` plus a
 zero-filled reserved width; a variable-width null is the flag byte alone.
 
+A present value has flag `1`; no other flag is valid. The reserved bytes of a
+fixed-width null MUST be zero, so there is exactly one byte representation of
+null for each declared type.
+
 **Arrays** (`INV-STORAGE-11`): fixed-width arrays concatenate elements with no
-count; variable-width arrays encode `count: u32`, offsets for all but the last
-element, then the payloads.
+count; variable-width arrays encode `count: u32` little-endian, offsets for all
+but the last element, then payloads. Array offsets are little-endian absolute
+positions from the beginning of that array payload. Zero elements encode as the
+four-byte zero count with no payload; an empty fixed-width array encodes empty.
 
 ### 2.8 Primary key encoding (normative reference)
 
@@ -369,6 +568,29 @@ key-column declaration order, so it orders by the first key column, then the
 second, and so on. Valid key types are the integer widths, `Bool`, `String`,
 `Bytes`, and `Uuid`; `F64`, arrays, record-valued types (including recursively
 nested records), and nullable values are not valid key parts.
+
+The epoch-1 tags are frozen: `U8=00`, `U16=01`, `U32=02`, `U64=03`,
+`I64=0d`, `I32=0e`, `Bool=05`, `String=06`, `Bytes=07`, `Uuid=0a`, and
+fixed-width `Tuple=0b`. Signed integer payloads flip their sign bit before
+big-endian emission. A direct record-store key may use only the supported
+declared key types and fixed tuples thereof; a tuple payload recursively uses
+the same tagged encoding for each member in declaration order. Every key decoder is type-directed
+and MUST consume the entire key: unknown/wrong tags, truncated payloads,
+`Bool` payloads other than `00|01`, malformed NUL escapes, invalid UTF-8
+strings, and trailing bytes are rejected. These primary-key bytes are also the
+suffix bytes of a non-unique durable index (`INV-STORAGE-22`).
+
+**Ordered index parts.** Durable index logical keys use the same tags and
+payloads, extended only for indexable values: `F64=04` uses the IEEE bits with
+the positive-sign flip / negative-bit inversion transform; `Nullable(None)=08`
+and `Nullable(Some(x))=09` followed by the recursively encoded `x`; and a
+tuple is `0b` followed by its parts. `String` and `Bytes` use `00 ff` for an
+embedded NUL and `00 00` terminator. Arrays, records, payload enums, and large
+values are not index key parts. Non-unique keys append exactly `ff` followed by
+the complete typed primary-key bytes; unique keys append nothing. Index decoders
+MUST reject malformed or trailing logical-key bytes rather than accepting a
+prefix as a key. Positive and negative infinity are valid ordered `F64` values;
+every NaN bit pattern is invalid on both encode and decode (`INV-STORAGE-12`).
 
 ### 2.9 Canonical row storage
 

@@ -196,6 +196,24 @@ where
             let record = raw.record();
             let alias = record.get_u64(NodeAliasRowRecord::FIELD_ID_IDX)?;
             let uuid = NodeUuid(record.get_uuid(NodeAliasRowRecord::FIELD_UUID_IDX)?);
+            if let Some(existing) = self.node_aliases.get(&uuid) {
+                if *existing != NodeAlias(alias) {
+                    return Err(Error::InvalidStoredValue(
+                        "node UUID has conflicting durable aliases",
+                    ));
+                }
+            }
+            if self
+                .node_aliases
+                .iter()
+                .any(|(existing_uuid, existing_alias)| {
+                    *existing_alias == NodeAlias(alias) && *existing_uuid != uuid
+                })
+            {
+                return Err(Error::InvalidStoredValue(
+                    "node alias maps to multiple durable UUIDs",
+                ));
+            }
             self.node_aliases.insert(uuid, NodeAlias(alias));
         }
         let alias_to_node = self
@@ -347,6 +365,10 @@ where
                 TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_TIME_IDX)?),
                 parent_node,
             );
+            // Validate the persisted row-version coordinate even though the
+            // in-memory rejection graph only needs TxIds. Otherwise a corrupt
+            // pending constraint could silently survive reopen.
+            let _ = pending_edge_coordinate_from_record(record)?;
             pending_edges.push((child, parent));
         }
         for (child, parent) in pending_edges {

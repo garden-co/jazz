@@ -134,6 +134,211 @@ fn receiver_batch_ingests_non_reset_complete_bundles_once() {
     assert_eq!(reader.sync_metrics().receiver_per_bundle_ingests, 0);
 }
 
+fn complete_parent_receiver_update(
+    subscription: SubscriptionKey,
+    tx: Transaction,
+    version: VersionRecord,
+    reset_result_set: bool,
+) -> ViewUpdateParts {
+    let tx_id = tx.tx_id;
+    let row_uuid = version.row_uuid();
+    ViewUpdateParts {
+        subscription,
+        settled_through: GlobalTime(1),
+        defer_settlement: false,
+        reset_result_set,
+        version_carriers: Vec::new(),
+        version_bundles: vec![VersionBundle {
+            scope: crate::protocol::VersionBundleScope::CompleteTransaction,
+            tx,
+            versions: vec![version],
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(1)),
+            durability: DurabilityTier::Global,
+        }],
+        peer_complete_tx_payload_refs: Vec::new(),
+        authorization_progress: None,
+        opening_pending: false,
+        result_member_adds: vec![ResultMemberEntry::row((
+            "todos".to_owned().into(),
+            row_uuid,
+            tx_id,
+        ))],
+        result_member_removes: Vec::new(),
+        terminal_operations: Vec::new(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    }
+}
+
+fn accepted_view_scoped_child_for_parent(
+    reader: &mut NodeState<RocksDbStorage>,
+    parent: TxId,
+    child: TxId,
+    row_uuid: RowUuid,
+) {
+    reader
+        .ingest_view_scoped_transaction_with_current_indexes(
+            Transaction {
+                tx_id: child,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorSubject::SYSTEM,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![version_record(
+                row_uuid,
+                vec![parent],
+                title_cells("accepted partial child"),
+                None,
+            )],
+            Fate::Accepted,
+            None,
+            DurabilityTier::Edge,
+        )
+        .unwrap();
+}
+
+#[test]
+fn initial_reset_preflights_accepted_partial_child_parent_constraints_atomically() {
+    for (case, parent_row, succeeds) in [
+        (0x90, row(0x91), true),
+        (0x92, row(0x93), false),
+    ] {
+        let (_dir, mut reader) = open_node_with_uuid(node(case));
+        let parent = TxId::new(TxTime::from(70), node(case + 1));
+        let child = TxId::new(TxTime::from(80), node(case + 2));
+        let child_row = if succeeds { parent_row } else { row(0x94) };
+        accepted_view_scoped_child_for_parent(&mut reader, parent, child, child_row);
+        let subscription = reader.whole_table_subscription_key("todos").unwrap();
+        let parent_tx = Transaction {
+            tx_id: parent,
+            kind: TxKind::Mergeable,
+            n_total_writes: 1,
+            made_by: AuthorSubject::SYSTEM,
+            permission_subject: None,
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json: None,
+            contribution_merge: None,
+        };
+        let update = complete_parent_receiver_update(
+            subscription,
+            parent_tx,
+            version_record(
+                parent_row,
+                Vec::new(),
+                title_cells("complete reset parent"),
+                None,
+            ),
+            true,
+        );
+
+        let result = reader.apply_view_updates_in_batch(vec![update]).resolve();
+        if succeeds {
+            result.unwrap();
+            assert!(reader.query_transaction(parent).unwrap().is_some());
+            assert!(reader
+                .database
+                .primary_key_scan_raw("jazz_pending_edges", &[])
+                .unwrap()
+                .is_empty());
+        } else {
+            assert!(matches!(
+                result,
+                Err(Error::ConflictingCommitUnit(conflicting)) if conflicting == parent
+            ));
+            assert!(
+                reader.query_transaction(parent).unwrap().is_none(),
+                "contradictory reset parent must not persist"
+            );
+            assert_eq!(
+                reader
+                    .database
+                    .primary_key_scan_raw("jazz_pending_edges", &[])
+                    .unwrap()
+                    .len(),
+                1,
+                "failed reset must retain the accepted-child constraint"
+            );
+            assert_eq!(reader.transaction_record(child).unwrap().fate, Fate::Accepted);
+        }
+    }
+}
+
+#[test]
+fn receiver_batch_settles_pending_parent_constraints_and_survives_reopen() {
+    for (case, parent_row_matches) in [(0x95, true), (0x98, false)] {
+        let schema = schema();
+        let dir = tempfile::tempdir().unwrap();
+        let mut reader = open_node_at(&dir, schema.clone());
+        let parent = TxId::new(TxTime::from(70), node(case + 1));
+        let child_row = row(case + 2);
+        let child = reader
+            .commit_mergeable_settled(
+                MergeableCommit::new("todos", child_row, 80)
+                    .parents(vec![parent])
+                    .cells(title_cells("pending child")),
+            )
+            .unwrap();
+        let parent_row = if parent_row_matches {
+            child_row
+        } else {
+            row(case + 3)
+        };
+        let subscription = reader.whole_table_subscription_key("todos").unwrap();
+        let update = complete_parent_receiver_update(
+            subscription,
+            Transaction {
+                tx_id: parent,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorSubject::SYSTEM,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            version_record(
+                parent_row,
+                Vec::new(),
+                title_cells("complete receiver parent"),
+                None,
+            ),
+            false,
+        );
+        reader.apply_view_updates_in_batch(vec![update]).unwrap();
+
+        let expected = if parent_row_matches {
+            Fate::Pending
+        } else {
+            Fate::Rejected(RejectionReason::CausalityViolation)
+        };
+        assert_eq!(reader.transaction_record(child).unwrap().fate, expected);
+        reader.database.close().unwrap();
+        drop(reader);
+        let mut reader = reopen_node_at(&dir, node(1), schema);
+        assert_eq!(reader.transaction_record(child).unwrap().fate, expected);
+        let edge_count = reader
+            .database
+            .primary_key_scan_raw("jazz_pending_edges", &[])
+            .unwrap()
+            .len();
+        assert_eq!(edge_count, usize::from(parent_row_matches));
+    }
+}
+
 #[test]
 fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));

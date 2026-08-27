@@ -51,6 +51,7 @@ import {
   resolveClientInternalSessionSync,
 } from "./client-session.js";
 import { canonicalAuthorSubject } from "./author-id.js";
+import { authSecretSeedForMinting } from "./auth-secret-codec.js";
 import {
   getDbInternalSession,
   getTrustedReservedSession,
@@ -90,8 +91,8 @@ export type DbConfig = {
   env?: string;
   /** Admin secret for catalogue sync */
   adminSecret?: string;
-  /** Backend secret for backend-scoped sync auth with cookieSession. */
-  backendSecret?: string;
+  /** @internal Server-only admission credential; client DbConfig must never carry it. */
+  backendSecret?: never;
   /** IndexedDB database name for browser persistence (default: appId). */
   dbName?: string;
   /**
@@ -2730,6 +2731,7 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
   config: RuntimeConfig,
   runtimeSource: RuntimeSource<RuntimeConfig>,
 ): Promise<Db> {
+  assertNoClientBackendSecret(config);
   if (config.secret && config.cookieSession) {
     throw new Error("DbConfig error: secret and cookieSession are mutually exclusive");
   }
@@ -2739,6 +2741,11 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
   if (config.jwtToken && config.cookieSession) {
     throw new Error("DbConfig error: jwtToken and cookieSession are mutually exclusive");
   }
+
+  // Validate a durable root before loading a runtime or creating any author-
+  // adjacent state. This makes malformed/legacy input fail deterministically
+  // even when a platform artifact cannot be loaded.
+  const parsedLocalFirstSeed = config.secret ? authSecretSeedForMinting(config.secret) : null;
 
   let resolvedConfig: DbConfig = { ...config };
   await runtimeSource.load(config);
@@ -2750,10 +2757,9 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
   } = config;
 
   // Local-first auth: resolve seed and mint a JWT
-  let localFirstSecret: string | null = null;
-  if (config.secret) {
-    const secret = config.secret;
-    localFirstSecret = secret;
+  const localFirstSecret = parsedLocalFirstSeed;
+  if (localFirstSecret) {
+    const secret = localFirstSecret;
 
     if (!config.jwtToken) {
       const jwtToken = runtimeSource.mintLocalFirstToken(
@@ -2797,6 +2803,15 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
 
 export async function createDb(config: DbConfig): Promise<Db> {
   return await createDbWithRuntimeSource(config, new DefaultRuntimeSource());
+}
+
+/** Keep server-only admission credentials out of every client runtime factory. */
+function assertNoClientBackendSecret(config: object): void {
+  if (Object.hasOwn(config, "backendSecret")) {
+    throw new Error(
+      "DbConfig does not accept backendSecret. Use createJazzContext() from jazz-tools/backend on a trusted server instead.",
+    );
+  }
 }
 
 function isBrowserRuntime(): boolean {

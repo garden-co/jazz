@@ -238,7 +238,8 @@ where
                 "history schema version alias must exist",
             ))?;
         let table = self.table_in_schema(version.table(), schema_version)?;
-        VersionRecord::from_stored(version, &table, schema_version)
+        let authored_columns = self.authored_columns_for_version(version)?;
+        VersionRecord::from_stored(version, &table, schema_version, authored_columns)
     }
 
     pub(crate) async fn row_version_payloads_for_refs(

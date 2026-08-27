@@ -283,6 +283,7 @@ fn non_durable_browser_client_waits_for_worker_local_ack() {
         jazz::db::WriteState {
             fate: Fate::Pending,
             durability: DurabilityTier::Local,
+            global_time: None,
         }
     );
     main_thread.tick().expect("apply worker acknowledgement");
@@ -295,6 +296,7 @@ fn non_durable_browser_client_waits_for_worker_local_ack() {
         jazz::db::WriteState {
             fate: Fate::Pending,
             durability: DurabilityTier::Local,
+            global_time: None,
         }
     );
 }
@@ -456,20 +458,22 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
     main_thread.tick().expect("apply core fate through worker");
 
     assert_eq!(global_wait.get(), Some(true));
-    assert_eq!(
+    assert!(matches!(
         main_thread.write_state(tx_id).expect("main global state"),
         jazz::db::WriteState {
             fate: Fate::Accepted,
             durability: DurabilityTier::Global,
+            global_time: Some(_),
         }
-    );
-    assert_eq!(
+    ));
+    assert!(matches!(
         worker.write_state(tx_id).expect("worker global state"),
         jazz::db::WriteState {
             fate: Fate::Accepted,
             durability: DurabilityTier::Global,
+            global_time: Some(_),
         }
-    );
+    ));
 
     let todos = main_thread
         .prepare_query(&main_thread.table("todos"))
@@ -520,15 +524,16 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
     core.tick().expect("accept update at core");
     worker.tick().expect("forward update fate");
     main_thread.tick().expect("apply update fate");
-    assert_eq!(
+    assert!(matches!(
         main_thread
             .write_state(update_tx)
             .expect("updated global state"),
         jazz::db::WriteState {
             fate: Fate::Accepted,
             durability: DurabilityTier::Global,
+            global_time: Some(_),
         }
-    );
+    ));
 }
 
 /// A fresh main-thread Db hydrates its application-owned subscription from the
@@ -1329,13 +1334,14 @@ fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
     seeder.tick().expect("upload seeded row");
     core.tick().expect("accept seeded row");
     seeder.tick().expect("apply seeded-row fate");
-    assert_eq!(
+    assert!(matches!(
         seeder.write_state(seeded_tx).expect("seeded write state"),
         jazz::db::WriteState {
             fate: Fate::Accepted,
             durability: DurabilityTier::Global,
+            global_time: Some(_),
         }
-    );
+    ));
 
     // Match browser-worker initialization order: accept the main-thread relay
     // first, then attach the worker's server transport.
@@ -2230,13 +2236,14 @@ fn browser_relay_replays_causal_ancestors_before_pending_write_fates() {
     worker.tick().expect("upload base row");
     core.tick().expect("accept base row");
     worker.tick().expect("apply base-row fate");
-    assert_eq!(
+    assert!(matches!(
         worker.write_state(base_tx).expect("base write state"),
         jazz::db::WriteState {
             fate: Fate::Accepted,
             durability: DurabilityTier::Global,
+            global_time: Some(_),
         }
-    );
+    ));
     assert!(worker.detach_connection(&worker_upstream));
     assert!(core.detach_connection(&core_subscriber));
 
@@ -2298,6 +2305,7 @@ fn browser_relay_replays_causal_ancestors_before_pending_write_fates() {
         jazz::db::WriteState {
             fate: Fate::Pending,
             durability: DurabilityTier::Local,
+            global_time: None,
         }
     );
 }
@@ -2418,6 +2426,7 @@ fn reopened_worker_replays_pending_commit_before_later_fate() {
         jazz::db::WriteState {
             fate: Fate::Pending,
             durability: DurabilityTier::Local,
+            global_time: None,
         }
     );
     let todos = second_main

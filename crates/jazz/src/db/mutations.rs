@@ -2266,8 +2266,8 @@ where
         let (branch, parents) = match target {
             WriteTarget::Root => {
                 self.ensure_row_not_deleted(table, row).await?;
-                let (parents, _) = self.row_layer_parents(table, row).await?;
-                (BranchSelector::default(), parents)
+                let (_, deletion_parents) = self.row_layer_parents(table, row).await?;
+                (BranchSelector::default(), deletion_parents)
             }
             WriteTarget::BranchView { head, base } => {
                 let mut node = self.node.node.lock().await;
@@ -2278,10 +2278,10 @@ where
                     let deletion = node
                         .local_deletion_winner_tx_id_in_branch(table, &head, row)
                         .await?;
-                    let content = node
-                        .local_content_winner_tx_id_in_branch(table, &head, row)
-                        .await?;
-                    deletion.or(content).into_iter().collect()
+                    // A deletion is a write to the independent deletion
+                    // register. Content state proves visibility, but must not
+                    // become a history parent of that register.
+                    deletion.into_iter().collect()
                 } else {
                     if node
                         .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)

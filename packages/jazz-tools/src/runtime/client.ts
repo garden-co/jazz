@@ -26,7 +26,6 @@ import {
   resolveRuntimeConfigWasmUrl,
 } from "./runtime-config.js";
 import { httpUrlToWs } from "./url.js";
-import { PostcardWriter } from "./native-runtime/native-codec.js";
 import { assertNativeArtifactCompatibility } from "./native-artifact-compatibility.js";
 
 type RuntimeSerializedSession = Pick<Session, "issuer" | "user_id" | "claims" | "authMode"> & {
@@ -45,7 +44,12 @@ function serializeRuntimeSession(session: Session): RuntimeSerializedSession {
 }
 
 function encodeBranchColumnValue(value: Value): Uint8Array {
-  const writer = new PostcardWriter();
+  const envelope = (tag: number, payload: Uint8Array): Uint8Array => {
+    const encoded = new Uint8Array(2 + payload.length);
+    encoded.set([1, tag]); // frozen branch-column codec version and scalar tag
+    encoded.set(payload, 2);
+    return encoded;
+  };
   switch (value.type) {
     case "Integer":
       if (
@@ -55,9 +59,11 @@ function encodeBranchColumnValue(value: Value): Uint8Array {
       ) {
         throw new Error("branch Integer values must be signed 32-bit integers");
       }
-      writer.enumUnit(15); // groove::Value::I32
-      writer.i64(value.value);
-      break;
+      {
+        const payload = new Uint8Array(4);
+        new DataView(payload.buffer).setInt32(0, value.value, true);
+        return envelope(4, payload); // Groove I32
+      }
     case "BigInt": {
       if (typeof value.value === "number" && !Number.isSafeInteger(value.value)) {
         throw new Error("branch BigInt values supplied as numbers must be safe integers");
@@ -66,31 +72,32 @@ function encodeBranchColumnValue(value: Value): Uint8Array {
       if (integer < -(1n << 63n) || integer > (1n << 63n) - 1n) {
         throw new Error("branch BigInt values must be signed 64-bit integers");
       }
-      writer.enumUnit(14); // groove::Value::I64
-      writer.i64(integer);
-      break;
+      const payload = new Uint8Array(8);
+      new DataView(payload.buffer).setBigInt64(0, integer, true);
+      return envelope(5, payload); // Groove I64
     }
     case "Uuid": {
-      writer.enumUnit(9); // groove::Value::Uuid
       const hex = value.value.replaceAll("-", "");
       if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new Error(`invalid branch UUID ${value.value}`);
-      writer.bytes(
+      return envelope(
+        7, // Groove UUID
         Uint8Array.from({ length: 16 }, (_, index) =>
           Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16),
         ),
       );
-      break;
     }
-    case "Text":
-      writer.enumUnit(6); // groove::Value::String
-      writer.string(value.value);
-      break;
+    case "Text": {
+      const text = new TextEncoder().encode(value.value);
+      const payload = new Uint8Array(1 + text.length);
+      payload[0] = 2; // Groove stored-scalar Primitive case
+      payload.set(text, 1);
+      return envelope(6, payload); // Groove String
+    }
     default:
       throw new Error(
         `branch columns currently require Integer, BigInt, Text, or Uuid values; got ${value.type}`,
       );
   }
-  return writer.finish();
 }
 
 type WireBranchSelector = { values: Record<string, number[]> };

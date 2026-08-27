@@ -22,7 +22,7 @@ Invariant digest:
 - `INV-TX-3`: A commit unit whose `Transaction.n_total_writes` does not equal the delivered version count MUST be rejected by the fate authority as `RejectionReason::MalformedCommit(...)` and MUST NOT ingest version rows.
 - `INV-TX-4`: Duplicate commit units with identical payloads MUST be idempotent and return the already-known fate; duplicate units with conflicting payloads MUST fail as `Error::ConflictingCommitUnit`.
 - `INV-TX-5`: The authority MUST park a commit unit with missing parent/schema/content prerequisites and MUST decide it only after all prerequisites are present.
-- `INV-TX-6`: A commit unit MUST be rejected with `RejectionReason::CausalityViolation` if its `tx_id.time` is less than or equal to any parent transaction's `tx_id.time`, and its versions MUST NOT enter history.
+- `INV-TX-6`: A commit unit MUST be rejected with `RejectionReason::CausalityViolation` if its `tx_id.time` is less than or equal to any same-row/layer history parent's `tx_id.time`, and its versions MUST NOT enter history.
 - `INV-TX-7`: A commit unit whose `tx_id.time.physical_ms()` exceeds the authority admission clock by more than `SKEW_TOLERANCE_MS` MUST be rejected as `RejectionReason::ClientClockTooFarAhead` and MUST NOT leave visible version rows.
 - `INV-TX-8`: Rejection MUST cascade to known pending descendants and later arriving children of rejected ancestors as `RejectionReason::Cascade { root }`, preserving the original root transaction id.
 - `INV-TX-9`: Originating nodes MUST retain rejected local payloads in retry storage and remove the rejected versions from normal history; non-origin authorities MUST NOT retain foreign rejected retry payloads.
@@ -36,7 +36,7 @@ Invariant digest:
 - `INV-TX-17`: Exclusive authority validation MUST reject when an absent row read has become globally present.
 - `INV-TX-18`: Exclusive authority validation MUST reject predicate phantoms by comparing the `(RowUuid, TxId)` output set at `base_snapshot.global_base` against current global output for the same shape and binding.
 - `INV-TX-19`: Exclusive predicate validation MUST be sensitive to `binding_id`/`binding_values` and MUST use the inline query shape without requiring prior shape registration.
-- `INV-TX-20`: Exclusive write validation MUST be first-committer-wins: each written row's current global content tx id MUST equal the single recorded parent, or absence when no parent is recorded.
+- `INV-TX-20`: Exclusive write validation MUST be first-committer-wins: each written version's current global winner in that version's own content/deletion layer MUST equal the single recorded parent, or absence when no parent is recorded. Row and predicate read validation remains against the observed visible content/deletion state (`INV-TX-16/17/18`); a version parent is not that read precondition.
 - `INV-TX-21`: Accepted global transactions MUST maintain per-layer global-current tables/change stream.
 - `INV-TX-22`: Downstream incomplete exclusive bundles MUST be stored but remain invisible for subscription views whose required exclusive payload is incomplete; they MAY become visible for a maintained subscription view once that view's required exclusive versions are present, even before all `n_total_writes` versions are known.
 - `INV-TX-24`: A caller-generated `OpenTransactionId` MUST name mutable work unchanged across local and worker runtimes, MUST be terminal after commit or rollback, and MUST never be accepted by an API requiring the post-commit `TransactionId`; only successful commit transitions `OpenTransactionId` to `TransactionId`.
@@ -155,6 +155,13 @@ and change stream (`INV-TX-21`, ch. 4). Crucially, **local durability does not
 imply upstream survival**: a committed local transaction that has not reached an
 upstream tier can be lost if local storage is destroyed (`INV-TX-12`).
 
+`Global` is therefore not a durability flag in isolation. An application
+`Global` wait completes only after it has observed all three parts of authority
+settlement for that transaction: `Fate::Accepted`, `DurabilityTier::Global`,
+and an authority-assigned `GlobalTime`. Hydration or propagation that supplies
+only a `Global` durability claim cannot complete that wait (`INV-API-15`, ch.
+13).
+
 _Further invariants._ `INV-TX-10` — applying a fate update never moves
 `global_time` backward and raises `durability` only monotonically.
 
@@ -219,9 +226,15 @@ It decides only once all prerequisites are present; a
 duplicate parked unit parks only once (`INV-TX-5`).
 
 After prerequisites are present, the authority rejects units that violate
-causality or clock-skew limits. A unit whose `tx_id.time` is not strictly
-greater than every parent's time is rejected as `CausalityViolation`
-(`INV-TX-6`). A unit whose `physical_ms` is more than `SKEW_TOLERANCE_MS` (~30
+history causality or clock-skew limits. A version parent is an exact prior
+version of the same physical table, branch key, row, and content/deletion
+layer. It is not a general mergeable-transaction dependency or an observed
+state precondition: mergeable transactions carry no read set or arbitrary
+causal dependency graph. A caller that needs "only if I observed X" uses an
+exclusive transaction and its read set (§3.7).
+
+A unit whose `tx_id.time` is not strictly greater than every such history
+parent's time is rejected as `CausalityViolation` (`INV-TX-6`). A unit whose `physical_ms` is more than `SKEW_TOLERANCE_MS` (~30
 seconds) ahead of the authority's clock is rejected as
 `ClientClockTooFarAhead` (`INV-TX-7`). In both cases, no visible version rows
 remain. Write-policy authorization (ch. 7) and, for exclusive units, the
@@ -234,15 +247,36 @@ Exclusive serializability comes from validating the assumptions captured by the
 transaction's read set. For an exclusive unit, the authority re-checks the
 recorded reads against current global state:
 
-- a recorded **row read** must still be the globally-current content/deletion
-  version, or the unit is rejected as `ExclusiveConflict` (`INV-TX-16`);
+- a recorded **row read** must still be the globally-current visible
+  content/deletion version, or the unit is rejected as `ExclusiveConflict`
+  (`INV-TX-16`): reading visible content `C` conflicts if a later deletion
+  `D` hides `C`, even though `C` remains the content-register winner. This is
+  separate from a write's own-layer CAS below and is covered by
+  `exclusive_row_read_conflicts_when_a_later_delete_hides_the_content`;
 - an **absent read** must still be absent (`INV-TX-17`);
 - a **predicate read** must not have gained or lost rows — checked by comparing
   the `(RowUuid, TxId)` output set for that shape+binding at
   the complete dotted `base_snapshot` against the current output (`INV-TX-18`);
-- each **write** is first-committer-wins: the row's current global content `TxId`
-  must equal the single recorded parent (or absence when none was recorded)
-  (`INV-TX-20`).
+- each **write** is first-committer-wins in its **written history layer**: a
+  content version compares its parent to the row's current global content
+  `TxId`, while a deletion or restore version compares its parent to the
+  current global deletion-register `TxId` (or absence when no parent is
+  recorded) (`INV-TX-20`). This is deliberately separate from row and
+  predicate read validation above: those protect the observed visible
+  content/deletion state, whereas a version parent is only a same-coordinate
+  history edge. For example, after content version `C`, a first delete `D` has
+  no parent because the deletion register is empty; authority accepts it when
+  that register is still empty even though content `C` is globally current. A
+  later restore must parent `D` and is checked against the deletion register.
+  Deletion visibility does not erase `C`: an atomic content replacement plus
+  restore from that deleted snapshot parents content `C` and deletion `D`
+  independently.
+  `exclusive_delete_compares_the_deletion_register_not_content` proves this
+  first-delete path,
+  `exclusive_replacement_and_restore_parent_their_own_registers` proves the
+  two-register atomic restore path, while
+  `known_parent_must_match_exact_row_coordinate_and_layer` proves cross-row
+  and cross-layer parent encodings are rejected.
 
 _Further invariants._ `INV-TX-19` — predicate validation is sensitive to
 `binding_id`/`binding_values` and uses the inline shape without requiring a prior

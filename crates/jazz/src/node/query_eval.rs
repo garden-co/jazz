@@ -1441,7 +1441,8 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
     ) -> Result<Option<BindingViewKey>, Error> {
-        if !self.can_use_prepared_current_query_plan(shape)
+        if self.is_history_complete()
+            || !self.can_use_prepared_current_query_plan(shape)
             || self.query_uses_heterogeneous_physical_lineage(shape)
         {
             return Ok(None);

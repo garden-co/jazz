@@ -6,6 +6,7 @@
 //! node-level read layer over groove tables.
 
 use super::*;
+use crate::schema::RuntimeSchema;
 
 impl<S> NodeState<S>
 where
@@ -542,6 +543,50 @@ where
         Ok(versions)
     }
 
+    pub(super) async fn query_versions_for_tx_physical_coordinate(
+        &mut self,
+        tx_id: TxId,
+        physical_table_id: PhysicalTableId,
+        row_uuid: RowUuid,
+    ) -> Result<Vec<VersionRow>, Error> {
+        if let Some(cached) = self.query.tx_versions_cache.get(&tx_id) {
+            let aliases = self
+                .catalogue
+                .physical_mappings
+                .iter()
+                .flat_map(|(schema_version, mapping)| {
+                    let schema_alias = self.catalogue.schema_version_aliases.get(schema_version);
+                    mapping.tables.iter().filter_map(move |(table, mapping)| {
+                        (mapping.table_id == physical_table_id)
+                            .then(|| schema_alias.copied().map(|alias| (alias, table.clone())))
+                            .flatten()
+                    })
+                })
+                .collect::<BTreeSet<_>>();
+            let mut versions = Vec::new();
+            for (schema_alias, table) in aliases {
+                versions.extend(cached.versions_for_schema_table_row(
+                    schema_alias,
+                    &table,
+                    row_uuid,
+                ));
+            }
+            return Ok(versions);
+        }
+        let versions = self.query_versions_for_tx(tx_id).await?;
+        let mut matching = Vec::new();
+        for version in versions {
+            if version.row_uuid() == row_uuid
+                && self.physical_table_id_for_version(&version)? == physical_table_id
+            {
+                #[cfg(test)]
+                record_parent_version_lookup_materialized_rows(1);
+                matching.push(version);
+            }
+        }
+        Ok(matching)
+    }
+
     pub(super) async fn query_versions_for_tx_rows_by_alias(
         &mut self,
         tx_id: TxId,
@@ -746,7 +791,8 @@ where
             };
             let logical_table = self.table_in_schema(&stored_table, schema_version)?;
             let descriptor = logical_table.register_storage_table().record_schema();
-            let branch_key = BranchKey::from_canonical_bytes(
+            let branch_key = RuntimeSchema::decode_persisted_branch_key(
+                &logical_table,
                 record
                     .borrowed()
                     .get_bytes(SharedDeletionHistoryRowRecord::FIELD_BRANCH_KEY_IDX)?,
@@ -756,27 +802,29 @@ where
                 .chain(shared[2..].iter().cloned())
                 .collect::<Vec<_>>();
             let logical = OwnedRecord::new(descriptor.create(&logical_values)?, descriptor);
-            return Ok(VersionRow {
+            let version = VersionRow {
                 table: groove::Intern::new(table),
                 branch_key,
                 record: logical,
-            });
+            };
+            version.validate_canonical()?;
+            return Ok(version);
         }
         let record_view = record.borrowed();
         let is_deletion = record_view.descriptor().field_index("_deletion").is_some();
+        let schema_alias = SchemaVersionAlias(record_view.get_u64(if is_deletion {
+            RegisterRowRecord::FIELD_SCHEMA_VERSION_IDX
+        } else {
+            HistoryRowRecord::FIELD_SCHEMA_VERSION_IDX
+        })?);
+        let schema_version =
+            self.schema_version_for_alias(schema_alias)
+                .ok_or(Error::InvalidStoredValue(
+                    "version storage schema version alias must exist",
+                ))?;
         let table = if !storage_table.starts_with("jazz_physical_") {
             requested_table.to_owned()
         } else {
-            let alias = SchemaVersionAlias(record_view.get_u64(if is_deletion {
-                RegisterRowRecord::FIELD_SCHEMA_VERSION_IDX
-            } else {
-                HistoryRowRecord::FIELD_SCHEMA_VERSION_IDX
-            })?);
-            let schema_version =
-                self.schema_version_for_alias(alias)
-                    .ok_or(Error::InvalidStoredValue(
-                        "version storage schema version alias must exist",
-                    ))?;
             self.catalogue
                 .physical_mappings
                 .get(&schema_version)
@@ -794,6 +842,7 @@ where
                     "physical version storage logical table mapping missing",
                 ))?
         };
+        let table_schema = self.table_in_schema(&table, schema_version)?;
         let record = record.borrowed();
         let tx_node_alias = if is_deletion {
             NodeAlias(record.get_u64(RegisterRowRecord::FIELD_TX_NODE_ID_IDX)?)
@@ -813,16 +862,21 @@ where
             TxTime(record.get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?)
         };
         let _ = TxId::new(tx_time, tx_node);
-        Ok(VersionRow {
+        let version = VersionRow {
             table: groove::Intern::new(table),
-            branch_key: BranchKey::from_canonical_bytes(record.get_bytes(if is_deletion {
-                RegisterRowRecord::FIELD_BRANCH_KEY_IDX
-            } else {
-                HistoryRowRecord::FIELD_BRANCH_KEY_IDX
-            })?)
+            branch_key: RuntimeSchema::decode_persisted_branch_key(
+                &table_schema,
+                record.get_bytes(if is_deletion {
+                    RegisterRowRecord::FIELD_BRANCH_KEY_IDX
+                } else {
+                    HistoryRowRecord::FIELD_BRANCH_KEY_IDX
+                })?,
+            )
             .map_err(|_| Error::InvalidStoredValue("invalid stored branch key"))?,
             record: OwnedRecord::new(record.raw().to_vec(), record.descriptor()),
-        })
+        };
+        version.validate_canonical()?;
+        Ok(version)
     }
 
     pub(super) async fn query_transaction(
@@ -978,15 +1032,17 @@ where
             user_metadata_json: record
                 .get_nullable_string(TransactionRowRecord::FIELD_USER_METADATA_IDX)?
                 .map(str::to_owned),
-            contribution_merge: record
-                .get_nullable_bytes(TransactionRowRecord::FIELD_CONTRIBUTION_MERGE_IDX)?
-                .map(|bytes| {
-                    postcard::from_bytes(bytes).map_err(|_| {
-                        Error::InvalidStoredValue("transaction contribution provenance must decode")
-                    })
-                })
-                .transpose()?,
+            contribution_merge: <Option<OwnedRecord> as records::RecordField>::read(
+                &record,
+                TransactionRowRecord::FIELD_CONTRIBUTION_MERGE_IDX,
+            )?
+            .map(|record| self.contribution_merge_from_storage_record(record))
+            .transpose()?,
         };
+        // Recovery and ordinary durable reads must fail closed on malformed
+        // strategy-defined contribution identities before they can influence
+        // a later merge calculation.
+        self.validate_contribution_merge_operation_identities(&tx)?;
         let fate = fate_from_encoded_fields(record)?;
         Ok(StoredTransaction {
             tx,

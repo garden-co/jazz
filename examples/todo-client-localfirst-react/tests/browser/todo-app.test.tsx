@@ -299,13 +299,13 @@ describe("React Todo App E2E", () => {
       appId: APP_ID,
       serverUrl,
       adminSecret: ADMIN_SECRET,
-      auth: { localFirstSecret: "Tb9eLjnS22z-_s9FK0EtiFIIRDe4EAygLAdni55RvAs" },
+      auth: { localFirstSecret: "jazz-auth-v1:Tb9eLjnS22z-_s9FK0EtiFIIRDe4EAygLAdni55RvAs" },
     });
     const el2 = await mountApp({
       appId: APP_ID,
       serverUrl,
       adminSecret: ADMIN_SECRET,
-      auth: { localFirstSecret: "VDOGX2nez-5T9Lgk4VfYMT33Qsa6J4loRAoKLZpvxBg" },
+      auth: { localFirstSecret: "jazz-auth-v1:VDOGX2nez-5T9Lgk4VfYMT33Qsa6J4loRAoKLZpvxBg" },
     });
 
     // Let both app instances finish server/event-stream setup before mutating.
@@ -343,13 +343,13 @@ describe("React Todo App E2E", () => {
     const el1 = await mountApp({
       appId: APP_ID,
       serverUrl,
-      auth: { localFirstSecret: "disAKUpEX273joMo4f1NTW-tDTpc4bzPy_l5tvNLXnc" },
+      auth: { localFirstSecret: "jazz-auth-v1:disAKUpEX273joMo4f1NTW-tDTpc4bzPy_l5tvNLXnc" },
       driver: { type: "memory" },
     });
     const el2 = await mountApp({
       appId: APP_ID,
       serverUrl,
-      auth: { localFirstSecret: "TqNBXTv_Mv7HBp3FZ6KtHJwBWvnkI7YcOlrS57d3eEs" },
+      auth: { localFirstSecret: "jazz-auth-v1:TqNBXTv_Mv7HBp3FZ6KtHJwBWvnkI7YcOlrS57d3eEs" },
       driver: { type: "memory" },
     });
 

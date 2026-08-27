@@ -10,7 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Deref;
 
 use groove::records::{
-    RecordDescriptor, ScalarEnumSchema, SystemVariantRegistry, Value, ValueType,
+    EnumCase, EnumSchema, RecordDescriptor, ScalarEnumSchema, SystemVariantRegistry, Value,
+    ValueType,
 };
 use groove::schema::{
     ColumnType as GrooveColumnType, DatabaseSchema as GrooveDatabaseSchema,
@@ -176,15 +177,12 @@ impl RuntimeSchema {
             let value = encoded
                 .decode()
                 .map_err(|_| format!("invalid branch column {column_name} encoding"))?;
-            if BranchColumnValue::from(value.clone()) != *encoded {
-                return Err(format!(
-                    "non-canonical branch column {column_name} encoding"
-                ));
-            }
             RecordDescriptor::new([("value", column.column_type.clone())])
                 .create(std::slice::from_ref(&value))
                 .map_err(|_| format!("invalid branch column {column_name} value"))?;
-            values.push((column_name.clone(), encoded.clone()));
+            let encoded = BranchColumnValue::encode_typed(&value, &column.column_type)
+                .map_err(|_| format!("invalid branch column {column_name} value"))?;
+            values.push((column_name.clone(), encoded));
             cells.insert(column_name.clone(), value);
         }
         values.sort_by(|left, right| left.0.cmp(&right.0));
@@ -243,7 +241,12 @@ impl RuntimeSchema {
                 .find(|(name, _)| name == column_name)
                 .map(|(_, value)| value)
                 .cloned()
-                .or_else(|| column.default.clone().map(BranchColumnValue::from));
+                .or_else(|| {
+                    column.default.as_ref().map(|value| {
+                        BranchColumnValue::encode_typed(value, &column.column_type)
+                            .expect("validated branch default")
+                    })
+                });
             selected == stored.as_ref()
         }) && stored
             .values
@@ -282,7 +285,12 @@ impl RuntimeSchema {
                     .iter()
                     .find(|(name, _)| name == column_name)
                     .map(|(_, value)| value.clone())
-                    .or_else(|| column.default.clone().map(BranchColumnValue::from))
+                    .or_else(|| {
+                        column.default.as_ref().map(|value| {
+                            BranchColumnValue::encode_typed(value, &column.column_type)
+                                .expect("validated branch default")
+                        })
+                    })
                     .ok_or_else(|| {
                         format!(
                             "older branch key is missing {column_name} without a migration default"
@@ -301,6 +309,33 @@ impl RuntimeSchema {
     /// peer change the physical branch coordinate independently of row cells.
     pub(crate) fn validate_authored_branch_key(
         &self,
+        table: &TableSchema,
+        key: &BranchKey,
+    ) -> Result<BTreeMap<String, Value>, String> {
+        Self::validate_branch_key_for_table(table, key)
+    }
+
+    /// Decode one persisted branch coordinate using the table that owns it.
+    ///
+    /// The binary envelope is only self-describing enough to reject malformed
+    /// bytes. The table's branch declaration is the authority for component
+    /// names, scalar types, and stable-enum domains, so recovery must perform
+    /// this second validation before a physical coordinate can influence a
+    /// query or cache.
+    pub(crate) fn decode_persisted_branch_key(
+        table: &TableSchema,
+        bytes: &[u8],
+    ) -> Result<BranchKey, String> {
+        let key = BranchKey::from_canonical_bytes(bytes)
+            .map_err(|_| format!("invalid persisted branch key for {}", table.name))?;
+        Self::validate_branch_key_for_table(table, &key)?;
+        Ok(key)
+    }
+
+    /// Validate an exact branch coordinate against its owning table
+    /// declaration. Shared by admission and persisted-state recovery so their
+    /// type/domain rules cannot drift.
+    pub(crate) fn validate_branch_key_for_table(
         table: &TableSchema,
         key: &BranchKey,
     ) -> Result<BTreeMap<String, Value>, String> {
@@ -328,9 +363,12 @@ impl RuntimeSchema {
                 .find(|column| column.name == *column_name)
                 .ok_or_else(|| format!("unknown branch column on {}", table.name))?;
             let value = encoded
-                .decode()
+                .decode_as(&column.column_type)
                 .map_err(|_| format!("invalid branch column {column_name} encoding"))?;
-            if BranchColumnValue::from(value.clone()) != *encoded {
+            if BranchColumnValue::encode_typed(&value, &column.column_type)
+                .map_err(|_| format!("invalid branch column {column_name} value"))?
+                != *encoded
+            {
                 return Err(format!(
                     "non-canonical branch column {column_name} encoding"
                 ));
@@ -361,7 +399,12 @@ impl RuntimeSchema {
                 .iter()
                 .find(|(name, _)| name == column_name)
                 .map(|(_, value)| value.clone())
-                .or_else(|| column.default.clone().map(BranchColumnValue::from))
+                .or_else(|| {
+                    column.default.as_ref().map(|value| {
+                        BranchColumnValue::encode_typed(value, &column.column_type)
+                            .expect("validated branch default")
+                    })
+                })
                 .ok_or_else(|| {
                     format!("branch key is missing {column_name} without a migration default")
                 })?;
@@ -1025,11 +1068,12 @@ impl TableSchema {
                 storage_column_type(user_column).nullable(),
             )
         }));
-        // Absent on legacy records. When present, this is a serialized set of
-        // user columns explicitly authored by this version.
+        // Absent on legacy records. When present, this is a strictly ordered
+        // set of node-local physical column ids explicitly authored by this
+        // version. Logical names remain a wire/schema-boundary concern.
         columns.push(column(
             "authored_columns",
-            GrooveColumnType::Bytes.nullable(),
+            GrooveColumnType::U64.array_of().nullable(),
         ));
 
         GrooveTableSchema::new(name, columns)
@@ -1108,7 +1152,7 @@ impl TableSchema {
         }));
         content_columns.push(column(
             "authored_columns",
-            GrooveColumnType::Bytes.nullable(),
+            GrooveColumnType::U64.array_of().nullable(),
         ));
         let mut content_table = GrooveTableSchema::new(
             format!("jazz_{}_global_current", self.name),
@@ -1173,7 +1217,7 @@ impl TableSchema {
         }));
         content_columns.push(column(
             "authored_columns",
-            GrooveColumnType::Bytes.nullable(),
+            GrooveColumnType::U64.array_of().nullable(),
         ));
         vec![
             GrooveTableSchema::new(format!("jazz_{}_ahead_current", self.name), content_columns)
@@ -1291,13 +1335,17 @@ fn catalogue_table() -> GrooveTableSchema {
     GrooveTableSchema::new(
         "jazz_catalogue",
         [
-            column("kind", GrooveColumnType::Bytes),
+            // The only hard-coded catalogue schema is a small, epoch-pinned
+            // kernel. Its record kind is a permanent numeric discriminator;
+            // all ordinary Jazz system and application descriptors live in
+            // the catalogue itself.
+            column("kind", GrooveColumnType::U64),
             column("id", GrooveColumnType::Uuid),
             column("payload", GrooveColumnType::Bytes),
         ],
     )
     .with_primary_key(PrimaryKey::composite([
-        PrimaryKeyColumn::bytes("kind"),
+        PrimaryKeyColumn::integer("kind", IntegerKeyType::U64),
         PrimaryKeyColumn::uuid("id"),
     ]))
 }
@@ -1405,7 +1453,7 @@ fn merge_heads_table() -> GrooveTableSchema {
             column("physical_table_id", GrooveColumnType::U64),
             column("branch_key", GrooveColumnType::Bytes),
             column("row_uuid", GrooveColumnType::Uuid),
-            column("heads", GrooveColumnType::Bytes),
+            column("heads", tx_id_column().array_of()),
         ],
     )
     .with_primary_key(PrimaryKey::composite([
@@ -1423,6 +1471,10 @@ fn pending_edges_table() -> GrooveTableSchema {
             column("child_node_id", GrooveColumnType::U64),
             column("parent_time", GrooveColumnType::U64),
             column("parent_node_id", GrooveColumnType::U64),
+            column("physical_table_id", GrooveColumnType::U64),
+            column("branch_key", GrooveColumnType::Bytes),
+            column("row_uuid", GrooveColumnType::Uuid),
+            column("layer", GrooveColumnType::Bytes),
         ],
     )
     .with_primary_key(PrimaryKey::composite([
@@ -1430,6 +1482,10 @@ fn pending_edges_table() -> GrooveTableSchema {
         PrimaryKeyColumn::integer("child_node_id", IntegerKeyType::U64),
         PrimaryKeyColumn::integer("parent_time", IntegerKeyType::U64),
         PrimaryKeyColumn::integer("parent_node_id", IntegerKeyType::U64),
+        PrimaryKeyColumn::integer("physical_table_id", IntegerKeyType::U64),
+        PrimaryKeyColumn::bytes("branch_key"),
+        PrimaryKeyColumn::uuid("row_uuid"),
+        PrimaryKeyColumn::bytes("layer"),
     ]))
 }
 
@@ -1523,7 +1579,7 @@ fn transactions_table() -> GrooveTableSchema {
             column("absent_read_set", GrooveColumnType::Bytes.nullable()),
             column("predicate_read_set", GrooveColumnType::Bytes.nullable()),
             column("user_metadata", GrooveColumnType::String.nullable()),
-            column("contribution_merge", GrooveColumnType::Bytes.nullable()),
+            column("contribution_merge", contribution_merge_column()),
             column("permission_subject", GrooveColumnType::String.nullable()),
             column("merge_strategy", GrooveColumnType::String.nullable()),
             // upstream-decided: written only by fate/state application.
@@ -1545,6 +1601,88 @@ fn transactions_table() -> GrooveTableSchema {
         PrimaryKeyColumn::integer("node_id", IntegerKeyType::U64),
     ]))
     .with_index(GrooveIndexSchema::new("by_global_time", ["global_time"]))
+}
+
+fn contribution_component_column() -> GrooveColumnType {
+    GrooveColumnType::Enum(Box::new(
+        EnumSchema::new(
+            "jazz_contribution_component",
+            [
+                EnumCase::new(
+                    "column",
+                    // The public/wire contribution coordinate names a logical
+                    // column.  Its durable payload is instead this node's
+                    // stable physical-column identity; names are resolved at
+                    // the storage boundary through the retained catalogue.
+                    RecordDescriptor::new([("physical_column_id", ValueType::U64)]),
+                ),
+                EnumCase::new(
+                    "operation",
+                    RecordDescriptor::new([
+                        ("physical_column_id", ValueType::U64),
+                        ("identity", ValueType::Bytes),
+                    ]),
+                ),
+                EnumCase::new(
+                    "register",
+                    RecordDescriptor::new(std::iter::empty::<(String, ValueType)>()),
+                ),
+            ],
+        )
+        .expect("valid contribution component enum"),
+    ))
+}
+
+fn contribution_coordinate_column() -> GrooveColumnType {
+    GrooveColumnType::Record(Box::new(RecordDescriptor::new([
+        ("branch_key", ValueType::Bytes),
+        ("physical_table_id", ValueType::U64),
+        ("row_uuid", ValueType::Uuid),
+        (
+            "layer",
+            storage_enum("jazz_contribution_layer", &["content", "deletion"]),
+        ),
+        ("component", contribution_component_column()),
+    ])))
+}
+
+fn contribution_dot_column() -> GrooveColumnType {
+    GrooveColumnType::Record(Box::new(RecordDescriptor::new([
+        ("tx_time", ValueType::U64),
+        ("tx_node", ValueType::Uuid),
+        ("coordinate", contribution_coordinate_column()),
+    ])))
+}
+
+fn contribution_merge_column() -> GrooveColumnType {
+    GrooveColumnType::Record(Box::new(RecordDescriptor::new([
+        ("source", ValueType::Bytes),
+        ("target", ValueType::Bytes),
+        (
+            "substitutions",
+            GrooveColumnType::Record(Box::new(RecordDescriptor::new([
+                ("target", contribution_coordinate_column()),
+                ("sources", contribution_dot_column().array_of()),
+            ])))
+            .array_of(),
+        ),
+    ])))
+    .nullable()
+}
+
+/// Bound physical type used by the transaction codec. Constructing the
+/// single-column table applies the same durable registry paths as the real
+/// `jazz_transactions.contribution_merge` column.
+pub(crate) fn contribution_merge_storage_type() -> GrooveColumnType {
+    GrooveTableSchema::new(
+        "jazz_transactions",
+        [column("contribution_merge", contribution_merge_column())],
+    )
+    .columns
+    .into_iter()
+    .next()
+    .expect("contribution merge storage column")
+    .column_type
 }
 
 fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
@@ -1710,6 +1848,34 @@ mod tests {
             [ColumnSchema::new("branch", ColumnType::String)],
         )
         .with_branch_column("branch")]);
+    }
+
+    #[test]
+    fn branch_selector_projection_uses_the_declared_enum_codec() {
+        let phase = ScalarEnumSchema::new("phase", ["draft", "ready"]).unwrap();
+        let schema = RuntimeSchema::new([TableSchema::new(
+            "todos",
+            [ColumnSchema::new(
+                "phase",
+                ColumnType::EnumTag(phase.clone()),
+            )],
+        )
+        .with_branch_column("phase")]);
+        let table = &schema.tables[0];
+
+        let (key, cells) = schema
+            .project_branch_selector(
+                table,
+                &BranchSelector::new([("phase", Value::String("ready".to_owned()))]),
+            )
+            .unwrap();
+
+        assert_eq!(key.values[0].1.0, [1, 8, 1]);
+        assert_eq!(cells["phase"], Value::String("ready".to_owned()));
+        assert_eq!(
+            schema.validate_authored_branch_key(table, &key).unwrap()["phase"],
+            Value::EnumTag(1)
+        );
     }
 
     #[test]
@@ -1927,6 +2093,22 @@ mod tests {
         );
     }
 
+    // This is intentionally an internal schema test: the physical encoding of
+    // a derived index is not exposed by the public API. The declared type is
+    // the durable contract that keeps Rust/serde layout out of stored rows.
+    #[test]
+    fn merge_heads_use_the_native_transaction_id_array_type() {
+        let table = merge_heads_table();
+        assert_eq!(
+            table
+                .columns
+                .iter()
+                .find(|column| column.name == "heads")
+                .map(|column| &column.column_type),
+            Some(&tx_id_column().array_of())
+        );
+    }
+
     // This is intentionally an internal schema test: physical-key boundedness
     // is not observable through the public API until deletion ingestion routes
     // through the shared table. It guards the storage contract that makes the
@@ -2002,6 +2184,8 @@ mod tests {
         let current_tables = schema.tables[0].global_current_storage_tables();
         let global_current = &current_tables[0];
         let register_global_current = &current_tables[1];
+        let ahead_tables = schema.tables[0].ahead_current_storage_tables();
+        let ahead_current = &ahead_tables[0];
 
         for table in [&history, &register, global_current, register_global_current] {
             for name in ["created_by", "updated_by"] {
@@ -2016,6 +2200,19 @@ mod tests {
                     table.name
                 );
             }
+        }
+
+        for table in [&history, global_current, ahead_current] {
+            assert_eq!(
+                table
+                    .columns
+                    .iter()
+                    .find(|column| column.name == "authored_columns")
+                    .map(|column| &column.column_type),
+                Some(&GrooveColumnType::U64.array_of().nullable()),
+                "authored_columns must remain a native physical-id array in {}",
+                table.name
+            );
         }
 
         assert!(
@@ -2063,6 +2260,69 @@ mod tests {
                 .map(|column| column.column.as_str())
                 .collect::<Vec<_>>(),
             vec!["branch_key", "row_uuid"]
+        );
+    }
+
+    #[test]
+    fn contribution_merge_uses_native_nested_records_and_groove_enums() {
+        // Internal storage-shape coverage is necessary here because the public
+        // transaction API intentionally hides Groove's durable descriptor.
+        let transactions = transactions_table();
+        let column = transactions
+            .columns
+            .iter()
+            .find(|column| column.name == "contribution_merge")
+            .unwrap();
+        let GrooveColumnType::Nullable(provenance) = &column.column_type else {
+            panic!("contribution provenance must be nullable");
+        };
+        let GrooveColumnType::Record(provenance) = provenance.as_ref() else {
+            panic!("contribution provenance must be a native record");
+        };
+        assert_eq!(
+            provenance
+                .fields()
+                .iter()
+                .map(|field| field.name.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["source", "target", "substitutions"]
+        );
+
+        let GrooveColumnType::Array(substitution) = &provenance.fields()[2].value_type else {
+            panic!("contribution substitutions must be an array");
+        };
+        let GrooveColumnType::Record(substitution) = substitution.as_ref() else {
+            panic!("contribution substitutions must contain records");
+        };
+        let GrooveColumnType::Record(coordinate) = &substitution.fields()[0].value_type else {
+            panic!("contribution target must be a coordinate record");
+        };
+        let GrooveColumnType::EnumTag(layer) = &coordinate.fields()[3].value_type else {
+            panic!("contribution layer must be a Groove enum");
+        };
+        assert_eq!(layer.variants, ["content", "deletion"]);
+        let GrooveColumnType::Enum(component) = &coordinate.fields()[4].value_type else {
+            panic!("contribution component must be a Groove payload enum");
+        };
+        assert_eq!(
+            component
+                .cases
+                .iter()
+                .map(|case| case.name.as_str())
+                .collect::<Vec<_>>(),
+            ["column", "operation", "register"]
+        );
+        assert_eq!(component.tag("column").unwrap(), 0);
+        assert_eq!(component.tag("operation").unwrap(), 1);
+        assert_eq!(component.tag("register").unwrap(), 2);
+        assert_eq!(
+            component.cases[1]
+                .payload
+                .fields()
+                .iter()
+                .map(|field| field.name.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["physical_column_id", "identity"]
         );
     }
 
@@ -2131,6 +2391,55 @@ mod tests {
         assert!(
             serde_json::from_value::<ColumnSchema>(spoofed_kind).is_err(),
             "semantic kind must be structurally compatible with its public column type"
+        );
+    }
+
+    #[test]
+    fn persisted_branch_keys_require_the_owning_table_type_and_enum_domain() {
+        let uuid_schema = RuntimeSchema::new([TableSchema::new(
+            "todos",
+            [ColumnSchema::new("branch", ColumnType::Uuid)],
+        )
+        .with_branch_column("branch")]);
+        let uuid_table = &uuid_schema.tables[0];
+        let (valid, _) = uuid_schema
+            .project_branch_selector(
+                uuid_table,
+                &BranchSelector::new([("branch", Value::Uuid(uuid::Uuid::from_bytes([0x42; 16])))]),
+            )
+            .unwrap();
+        assert_eq!(
+            RuntimeSchema::decode_persisted_branch_key(uuid_table, &valid.canonical_bytes())
+                .unwrap(),
+            valid
+        );
+
+        let wrong_scalar = BranchKey {
+            values: vec![(
+                "branch".to_owned(),
+                BranchColumnValue::from(Value::String("not-a-uuid".to_owned())),
+            )],
+        };
+        assert!(
+            RuntimeSchema::decode_persisted_branch_key(uuid_table, &wrong_scalar.canonical_bytes())
+                .is_err()
+        );
+
+        let phase = ScalarEnumSchema::new("phase", ["draft", "ready"]).unwrap();
+        let enum_schema = RuntimeSchema::new([TableSchema::new(
+            "todos",
+            [ColumnSchema::new("phase", ColumnType::EnumTag(phase))],
+        )
+        .with_branch_column("phase")]);
+        let invalid_enum = BranchKey {
+            values: vec![("phase".to_owned(), BranchColumnValue(vec![1, 8, u8::MAX]))],
+        };
+        assert!(
+            RuntimeSchema::decode_persisted_branch_key(
+                &enum_schema.tables[0],
+                &invalid_enum.canonical_bytes()
+            )
+            .is_err()
         );
     }
 }

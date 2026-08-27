@@ -65,6 +65,18 @@ are permanently reserved so persisted values from the superseded private
 length-prefixed record. Its payloads use only Groove's canonical primitive,
 record, array, nullable, and enum codecs;
 there is no private tag byte or postcard envelope for a scalar descriptor.
+Every engine-owned record field has a permanent, one-based numeric record-slot
+identity independent of source declaration order: `NodeRef = { 1: object_hash, 2: locator }`, edits are
+`{ 1: offset, 2: delete_length, 3: insert_bytes, 4: utf16_offset,
+5: delete_utf16_length, 6: insert_utf16_length }`, and `LargeValueRef` is
+`{ 1: format_version, 2: logical_hash, 3: root, 4: byte_length,
+5: utf16_length, 6: edit_tail }`. Changing an ID is a format change, not a
+refactor. Implementations normalize source declarations by ID, then materialize
+each ID as its actual record ordinal. A skipped or retired ID remains a
+reserved `Nullable<bytes>` slot encoded exactly as `null`; readers reject a
+nonempty reserved slot and writers never compact it away. Thus source reorder
+is harmless, while renumbering `locator:2` to `locator:3`, an edit field, or a
+reference field changes canonical physical bytes and rejects the old layout.
 `bytes` uses the bytes primitive and `string` uses the string primitive. JSON
 retains Groove's existing canonical JSON-as-string logical representation, so
 its primitive backing is string as well. The ordinary enum schema is
@@ -157,7 +169,7 @@ hash excludes retrieval identities. Unchanged nodes may retain their locators
 across versions, while an independently created equal value may have a different
 retrieval graph and the same logical identity.
 
-The current immutable-node format is version 2. Every leaf and branch embeds
+The current immutable-node format is version 1. Every leaf and branch embeds
 both that format and its semantic kind. Decoding MUST reject either field when
 it differs from the expected descriptor context. The locator-independent
 logical hash commits to the format and kind as well as the leaf bytes or branch
@@ -165,8 +177,138 @@ child descriptors. Groove derives that logical identity from the grouping
 fingerprint with a reversible full-width kind/format domain mask, allowing
 localized consolidation to recover canonical grouping without persisting a
 second hash in each child descriptor. Consequently, identical UTF-8 or JSON-compatible bytes do
-not share logical identities across bytes, text, and JSON values. Candidate
-format-1 nodes fail closed; there is no compatibility decoder.
+not share logical identities across bytes, text, and JSON values.
+
+### V1 codec dispatch and permanent layout
+
+`LargeValueRef.format_version` selects the immutable-node codec before any
+descriptor-guided traversal, upload-frontier walk, finalization, edit-tail
+replay, materialization, or upload export interprets a node. The selected codec
+MUST reject a node whose embedded format differs. A decoder MUST NOT try the
+current codec after an unknown, malformed, or mismatched format fails.
+
+V1 is the only supported case in the format dispatch table. Its stored-scalar
+arm remains the schema-known `Primitive = 2 | Chunked = 3` enum: schema lowers
+the bytes/string/JSON kind, so neither arm adds a client-controlled kind tag.
+V1's permanent numeric identities are:
+
+```text
+ChunkNode = enum { Leaf = 0, Branch = 1 }
+Leaf        = { 1: format:u8, 2: kind:u8, 3: bytes:bytes }
+Branch      = { 1: format:u8, 2: kind:u8, 3: children:[BranchChild] }
+BranchChild = {
+  1: object_hash:bytes32, 2: locator:bytes32, 3: byte_length:u64,
+  4: utf16_length:u64?, 5: logical_hash:bytes32
+}
+```
+
+These records use ordinary normative Groove enum/record/scalar encoding. V1
+has no serde/postcard envelope or private node tag. Exact v1 fixtures cover a
+leaf node and object hash, an indirect descriptor with a bounded edit tail, and
+the schema-known stored-scalar wrapper. Each fixture decodes to the stated
+semantic value and byte-identically re-encodes; trailing, alternate, unknown,
+or descriptor/node-version-mismatched bytes fail before child discovery,
+locator disclosure, upload accounting, or metadata mutation. A future format
+MUST add one explicit dispatch case and its own reviewed fixtures; it cannot
+reinterpret v1 bytes or use a fallback decoder.
+
+The following v1 fixtures are authoritative hex, where `object` is
+`object_hash(encoded_node)` and `logical` is the locator-independent node
+logical hash. They are repeated verbatim by
+`large_values::tests::v1_codec_golden_bytes_decode_semantically_and_reject_alternates`.
+
+| semantic value     | canonical node bytes         | object                                                             | logical / metrics                                                                         |
+| ------------------ | ---------------------------- | ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------- |
+| bytes `v1-fixture` | `00010076312d66697874757265` | `84e5cf641223d7cd2110f4d1b891d150af05976427192759fd8aba94df9b638e` | `357c7ae2a6895ca8c8f21120af72cc37cdc43d2929f506cb17a543c03e90da65`; bytes `10`            |
+| string `v1-🙂`     | `00010176312df09f9982`       | `8ca733330fa66126ffe0096382780f11b272047aea7be36fc5c23b6f16d8680a` | `9e87a0d9054fae5cbe72f01ea5ee76cf97c0073ae4955797470365ab08952661`; bytes `7`, UTF-16 `5` |
+| JSON `{"n":-0}`    | `0001027b226e223a2d307d`     | `a9865ebcd28c3e1868f670948dd798c1ff5287c025efe5d26b344c261e628dcc` | `4be873c1509bff9e7e4a861e5e405c29088d67a49cd685ec82be6f4fb4532a28`; bytes/UTF-16 `8`      |
+
+For the bytes leaf above, locator `44` repeated 32 times, logical hash
+`357c…da65`, and the no-op bounded tail `Replace { offset:9, delete:1,
+insert:"e", utf16:* = 0 }`, the descriptor fixture is:
+
+```text
+00010a000000000000000000000000000000003a0000007e000000357c7ae2a6895ca8c8f21120af72cc37cdc43d2929f506cb17a543c03e90da652400000084e5cf641223d7cd2110f4d1b891d150af05976427192759fd8aba94df9b638e4444444444444444444444444444444444444444444444444444444444444444010000000900000000000000010000000000000000000000000000000000000000000000000000000000000065
+```
+
+The same value wrapped in the bytes schema's ordinary `Chunked = 3` scalar arm
+is exactly the preceding bytes with its leading `00` enum tag replaced by `03`.
+
+`INV-LARGE-11`: descriptor-led format dispatch and canonical v1 fixture
+validation MUST fail closed before a malformed physical representation can
+change lifecycle state or disclose an authenticated child capability.
+
+V1 dispatch is joint: the outer descriptor's `format_version` is selected
+before its root record, every nested edit record, or the `Chunked = 3`
+stored-scalar payload is interpreted. The schema-known scalar kind still
+supplies bytes/string/JSON context; it is not a version selector and never
+supplies a client-controlled kind tag. A future version therefore needs one
+reviewed descriptor/edit/scalar decoder as well as its node decoder. It MUST
+NOT reuse V1's edit-coordinate validation simply because the outer enum tag is
+unchanged.
+
+The raw dispatch preflight reads only the canonical outer enum tag and the
+first fixed `format_version:u8` payload byte. It does not bind a descriptor or
+node record, calculate variable-field spans, decode a root `NodeRef`, decode
+branch children, or decode an edit before selecting the codec. The same node
+selector is used by descriptor-free metadata observation and descriptor-led
+upload admission. Therefore an unknown/future version with a truncated or
+deliberately non-V1 nested layout fails as `UnsupportedFormat`, rather than as
+a V1 malformed record. Once V1 is selected, the full current
+descriptor/edit/scalar or node payload is decoded and exactly
+re-encoded; V1 malformed or trailing bytes still fail closed.
+
+Staged-root receipts and pending-upload journals store the canonical complete
+`LargeValueRef` encoding as an opaque `bytes` metadata field (nullable bytes
+for an unbound pending descriptor), not as a nested generic descriptor value.
+On every recovery/read path Groove runs that byte field through the same raw
+preflight and codec decoder before it interprets root or edit fields. The
+`future_descriptor_metadata_fails_before_v1_binding_without_mutation` reopen
+receipt installs a future outer tag/version plus invalid nested bytes in both
+journals, requires `UnsupportedFormat`, and proves the durable records remain
+byte-identical after rejection. No metadata reader may create a V1 decoding
+bypass by embedding a descriptor inside another record.
+
+V1's content-defined profile is permanent format data:
+
+```text
+leaf minimum / target / maximum = 16,384 / 65,536 / 262,144 bytes
+leaf short / long masks         = 0x0001ffff / 0x00007fff
+branch minimum / target / max   = 4 / 16 / 64 children
+branch short / long masks       = 0x0000001f / 0x00000007
+gear(byte) = SplitMix64(byte + 0x9e3779b97f4a7c15), with multipliers
+             0xbf58476d1ce4e5b9 and 0x94d049bb133111eb
+```
+
+The leaf and branch rolling accumulators shift left by one and add that gear
+value per input byte or recovered grouping-hash byte. Before target they cut
+on the short mask; at/after target they cut on the long mask; the stated hard
+maximum always cuts. These values include the gear construction, not merely
+the visible size constants. They cannot be tuned, seeded from a runtime RNG,
+or changed for one backend without a new immutable format version.
+`v1_content_defined_profile_manifest_is_permanent` freezes gear vectors,
+short- and long-mask leaf ranges over a deterministic multi-megabyte input,
+the no-match hard maximum, UTF-8 boundary repair, and every object/logical hash
+of a multi-branch grouping manifest. This is a planted sensitivity receipt:
+changing either mask or any gear parameter changes at least one frozen range
+or branch object/logical hash.
+
+V1 JSON is literal validated UTF-8 source, never a normalized serialization.
+Its canonical receipt uses the exact source
+`{"literal":"\\uD83D\\uDE42","dup":1,"dup":2,"n":-0,"scientific":1e+00,"text":"\\u00e9"}`;
+the leaf bytes, object hash, and logical hash are respectively
+`0002027b226c69746572616c223a225c75443833445c7544453432222c22647570223a312c22647570223a322c226e223a2d302c22736369656e7469666963223a31652b30302c2274657874223a225c7530306539227d`,
+`c41c347e4880ecb7545a859a9fee9e011551ac5795ced9b5c7b58c77bf69f8b0`, and
+`b538953f883dc4ca231dc62746a6b3e8413b772e2baf267f16be791bd58fcb3f`.
+The source preserves duplicate spelling and number spelling physically; a
+parsed object read has ordinary last-duplicate-key behavior, retains negative
+zero, and decodes the Unicode escapes. The exact descriptor and scalar
+fixtures for a whole-document replacement containing literal `🙂` and `é` are
+authoritatively exercised by
+`v1_json_literal_duplicate_numeric_unicode_and_tail_fixtures_are_canonical`.
+They prove exact re-encoding, trailing-byte rejection, malformed UTF-8/JSON
+rejection, whole-value-only JSON edits, UTF-8-to-UTF-16 metric agreement, and
+tail consolidation back to an empty-tail immutable root.
 
 Nodes use Groove's ordinary canonical enum/record codec rather than a private
 serialization envelope. A leaf is `{ format, kind, bytes }`; a branch is
@@ -522,6 +664,31 @@ while consuming the claim removes staging ownership. Root zero-crossings update
 recursive node counts and append exact `(locator, hash)` work to a persisted
 reclamation queue. The reclaimer removes metadata only after hash-guarded byte
 deletion succeeds, so crashes retry without walking row history.
+
+The metadata key namespace is also the record discriminant. `root/<NodeRef>`
+contains the canonical Groove record `{ 1: durable:u64, 2: staged:u64,
+3: node_active:bool }`; `node/<NodeRef>` contains `{ 1: references:u64,
+2: upload_references:u64, 3: children:[NodeRef] }`; `staged/<StagingId>`
+contains `{ 1: id:bytes16, 2: value_ref:LargeValueRef,
+3: encoded_bytes:u64, 4: node_count:u64, 5: created_at_ms:u64 }`; and
+`upload/<StagingId>` contains `{ 1: id:bytes16, 2: descriptor:LargeValueRef?,
+3: receipt_id:bytes16?, 4: encoded_bytes:u64, 5: node_count:u64,
+6: created_at_ms:u64, 7: chunks:[NodeRef] }`. Numeric field IDs are permanent,
+one-based physical record slots and source declaration order is not semantic.
+If a future layout retires or skips an ID, it MUST retain every gap as a
+reserved `Nullable<bytes>` record slot encoded exactly as `null`; readers MUST
+reject a nonempty reserved slot and writers MUST NOT compact it away. Thus
+renumbering a field (for example `children:3` to `children:4`) changes the
+record layout and cannot be silently normalized by declaration-name sorting.
+Each value is exactly its normal
+Groove record encoding: there is no metadata magic prefix, private type tag,
+or serde/postcard envelope. Key prefixes are fixed engine-owned namespaces and
+must select their sole expected record shape; malformed, truncated, trailing,
+non-canonical, or mismatched records fail before any lifecycle/GC mutation.
+`reclaim/<NodeRef>` repeats that exact canonical `NodeRef` record as its value
+so reclamation MUST compare key and value before any lifecycle/GC mutation and
+cannot retarget a queue entry; `install/<NodeRef>` is an empty presence marker
+whose key alone carries the identity.
 
 `INV-LARGE-9`: physical-record mutation and descriptor-reference deltas MUST be
 crash-consistent and idempotent. A node/blob MUST NOT be reclaimed while its

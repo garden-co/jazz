@@ -348,6 +348,104 @@ fn duplicate_structured_query_authorization_mismatch_forces_reset() {
     );
 }
 
+#[test]
+fn maintained_subscription_fast_cursor_skips_covered_members_and_sends_only_newer_members() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x93));
+    let first_row = row(0x50);
+    let first_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", first_row, 1_000).cells(title_cells("first")),
+        )
+        .unwrap();
+    accept_global(&mut core, first_tx, 1);
+    let second_row = row(0x51);
+    let second_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", second_row, 1_001).cells(title_cells("second")),
+        )
+        .unwrap();
+    accept_global(&mut core, second_tx, 2);
+
+    let shape = Query::from("todos").validate(&schema()).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let canonical = subscription_key(&shape, &binding);
+    let fully_covered = SubscriptionKey {
+        binding_id: crate::query::BindingId(uuid::Uuid::from_u128(0x50)),
+        ..canonical
+    };
+    let partially_covered = SubscriptionKey {
+        binding_id: crate::query::BindingId(uuid::Uuid::from_u128(0x51)),
+        ..canonical
+    };
+    let mut peer = PeerState::relay();
+    peer.rehydrate_query_for_subscription_with_opts(
+        &mut core,
+        canonical,
+        &shape,
+        &binding,
+        RegisterShapeOptions::default(),
+    )
+    .unwrap();
+
+    peer.declare_known_state(
+        fully_covered,
+        Some(KnownStateDeclaration::Fast {
+            completeness: KnownStateCompleteness::FastCurrentMembership,
+            position: GlobalTime(2),
+        }),
+    );
+    let covered = peer
+        .rehydrate_query_for_subscription_from_maintained_subscription(
+            &mut core,
+            canonical,
+            fully_covered,
+            &shape,
+        )
+        .unwrap()
+        .expect("fully covered cursor still publishes its usage-site update");
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        reset_result_set,
+        result_member_adds,
+        result_member_removes,
+        ..
+    }) = covered
+    else {
+        panic!("expected fully covered view update");
+    };
+    assert!(!reset_result_set);
+    assert!(result_member_adds.is_empty());
+    assert!(result_member_removes.is_empty());
+
+    peer.declare_known_state(
+        partially_covered,
+        Some(KnownStateDeclaration::Fast {
+            completeness: KnownStateCompleteness::FastCurrentMembership,
+            position: GlobalTime(1),
+        }),
+    );
+    let partial = peer
+        .rehydrate_query_for_subscription_from_maintained_subscription(
+            &mut core,
+            canonical,
+            partially_covered,
+            &shape,
+        )
+        .unwrap()
+        .expect("partially covered cursor publishes newer members");
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        reset_result_set,
+        result_member_adds,
+        result_member_removes,
+        ..
+    }) = partial
+    else {
+        panic!("expected partial view update");
+    };
+    assert!(!reset_result_set);
+    assert_eq!(result_member_adds, vec![("todos".to_owned().into(), second_row, second_tx)]);
+    assert!(result_member_removes.is_empty());
+}
+
 fn output_member(root: RowUuid, joined: RowUuid, time: u64) -> ResultMemberEntry {
     RealRowMemberEntry::current_content((
         "todos".to_owned().into(),
@@ -1744,7 +1842,6 @@ fn maintained_subscription_view_cold_rehydrate_after_restore_ships_restored_cont
     let delete_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_001)
-                .parents(vec![original_tx])
                 .deletion(DeletionEvent::Deleted),
         )
         .unwrap();
@@ -1752,7 +1849,7 @@ fn maintained_subscription_view_cold_rehydrate_after_restore_ships_restored_cont
     let restored_content_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_002)
-                .parents(vec![delete_tx])
+                .parents(vec![original_tx])
                 .cells(title_cells("restored")),
         )
         .unwrap();
@@ -1760,7 +1857,7 @@ fn maintained_subscription_view_cold_rehydrate_after_restore_ships_restored_cont
     let restore_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_003)
-                .parents(vec![restored_content_tx])
+                .parents(vec![delete_tx])
                 .deletion(DeletionEvent::Restored),
         )
         .unwrap();
@@ -1828,7 +1925,6 @@ fn local_rehydrate_after_edge_restore_ships_restored_row() {
     let delete_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_001)
-                .parents(vec![original_tx])
                 .deletion(DeletionEvent::Deleted),
         )
         .unwrap();
@@ -1836,7 +1932,7 @@ fn local_rehydrate_after_edge_restore_ships_restored_row() {
     let restored_content_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_002)
-                .parents(vec![delete_tx])
+                .parents(vec![original_tx])
                 .cells(title_cells("restored")),
         )
         .unwrap();
@@ -1844,7 +1940,7 @@ fn local_rehydrate_after_edge_restore_ships_restored_row() {
     let restore_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_003)
-                .parents(vec![restored_content_tx])
+                .parents(vec![delete_tx])
                 .deletion(DeletionEvent::Restored),
         )
         .unwrap();
@@ -1912,15 +2008,18 @@ fn local_rehydrate_after_edge_restore_transaction_ships_restored_row() {
     let delete_tx = core
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 1_001)
-                .parents(vec![original_tx])
                 .deletion(DeletionEvent::Deleted),
         )
         .unwrap();
     accept_edge(&mut core, delete_tx);
     let restore_tx = core
         .commit_mergeable_many_settled(vec![
-            MergeableCommit::new("todos", row_uuid, 1_002).cells(title_cells("restored")),
-            MergeableCommit::new("todos", row_uuid, 1_003).deletion(DeletionEvent::Restored),
+            MergeableCommit::new("todos", row_uuid, 1_002)
+                .parents(vec![original_tx])
+                .cells(title_cells("restored")),
+            MergeableCommit::new("todos", row_uuid, 1_003)
+                .parents(vec![delete_tx])
+                .deletion(DeletionEvent::Restored),
         ])
         .unwrap();
     accept_edge(&mut core, restore_tx);

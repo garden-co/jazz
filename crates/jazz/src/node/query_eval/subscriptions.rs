@@ -251,7 +251,7 @@ where
             .sum()
     }
 
-    #[cfg(feature = "testing")]
+    #[cfg(any(test, feature = "testing"))]
     /// Internal receipt-lifetime coverage needs to observe canonical caches:
     /// public reads intentionally treat a Local overlay as best-effort.
     pub fn settled_authoritative_receipt_counts_for_test(&self) -> (usize, usize) {

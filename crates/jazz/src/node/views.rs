@@ -1058,6 +1058,8 @@ where
             for global_time in receiver_batch_global_times {
                 self.record_applied_global_time(global_time);
             }
+            self.settle_completed_parent_batch(&receiver_batch_tx_ids)
+                .await?;
             if let Some(tx_time) = receiver_batch_tx_ids.iter().map(|tx_id| tx_id.time).max() {
                 self.persist_storage_consistency_marker_through(tx_time)
                     .await?;
@@ -1086,6 +1088,11 @@ where
             for bundle in
                 version_bundle_refs_for_carriers(&update.version_bundles, &update.version_carriers)?
             {
+                // This preflight runs before bulk-reset selection, alias
+                // allocation, clock advancement, or receiver staging. The
+                // shared transaction boundary keeps view payloads from being
+                // a durable-ingress bypass for operation provenance.
+                self.admit_contribution_merge_for_storage(bundle.tx)?;
                 self.validate_view_payload_versions(bundle.versions)?;
             }
         }
@@ -1933,7 +1940,7 @@ where
         // authored cells were replaced by typed nulls.
         let has_complete_authored_payload = has_authored_layout
             && (version.layer() == VersionLayer::Deletion
-                || match version.authored_columns(&authored_table)? {
+                || match self.authored_columns_for_version(version)? {
                     Some(authored) => authored.iter().all(|column| {
                         version
                             .cell(&authored_table, column)

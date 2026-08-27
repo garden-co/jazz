@@ -7,9 +7,9 @@ where
         batch.update(
             "jazz_catalogue",
             vec![
-                Value::Bytes(b"schema".to_vec()),
+                Value::U64(codec::CatalogueRecordKind::Schema.key()),
                 Value::Uuid(schema.id.0),
-                Value::Bytes(serde_json::to_vec(schema)?),
+                Value::Bytes(codec::encode_catalogue_schema(schema)?),
             ],
         );
         let applied = self.database.apply_batch(batch).await?;
@@ -652,7 +652,7 @@ self.database.finish_persistence(persisted)?;
         batch.update(
             "jazz_catalogue",
             vec![
-                Value::Bytes(b"schema_lineage_staged".to_vec()),
+                Value::U64(codec::CatalogueRecordKind::SchemaLineageStaged.key()),
                 Value::Uuid(staged.publication.id.0),
                 Value::Bytes(serde_json::to_vec(staged)?),
             ],
@@ -671,7 +671,7 @@ self.database.finish_persistence(persisted)?;
         batch.update(
             "jazz_catalogue",
             vec![
-                Value::Bytes(b"schema_lineage_pending".to_vec()),
+                Value::U64(codec::CatalogueRecordKind::SchemaLineagePending.key()),
                 Value::Uuid(pending.publication.id.0),
                 Value::Bytes(serde_json::to_vec(pending)?),
             ],
@@ -691,7 +691,7 @@ self.database.finish_persistence(persisted)?;
         batch.delete(
             "jazz_catalogue",
             PrimaryKeyValue::Composite(vec![
-                PrimaryKeyValue::Bytes(b"schema_lineage_pending".to_vec()),
+                PrimaryKeyValue::U64(codec::CatalogueRecordKind::SchemaLineagePending.key()),
                 PrimaryKeyValue::Uuid(publication_id.0),
             ]),
         );
@@ -714,7 +714,7 @@ self.database.finish_persistence(persisted)?;
         batch.update(
             "jazz_catalogue",
             vec![
-                Value::Bytes(b"schema_lineage_staged".to_vec()),
+                Value::U64(codec::CatalogueRecordKind::SchemaLineageStaged.key()),
                 Value::Uuid(staged.publication.id.0),
                 Value::Bytes(serde_json::to_vec(staged)?),
             ],
@@ -722,15 +722,15 @@ self.database.finish_persistence(persisted)?;
         batch.update(
             "jazz_catalogue",
             vec![
-                Value::Bytes(b"schema".to_vec()),
+                Value::U64(codec::CatalogueRecordKind::Schema.key()),
                 Value::Uuid(schema.id.0),
-                Value::Bytes(serde_json::to_vec(schema)?),
+                Value::Bytes(codec::encode_catalogue_schema(schema)?),
             ],
         );
         batch.update(
             "jazz_catalogue",
             vec![
-                Value::Bytes(b"lens".to_vec()),
+                Value::U64(codec::CatalogueRecordKind::Lens.key()),
                 Value::Uuid(lens.id.0),
                 Value::Bytes(serde_json::to_vec(lens)?),
             ],
@@ -748,9 +748,9 @@ self.database.finish_persistence(persisted)?;
         batch.update(
             "jazz_catalogue",
             vec![
-                Value::Bytes(b"schema_lineage_active".to_vec()),
+                Value::U64(codec::CatalogueRecordKind::SchemaLineageActive.key()),
                 Value::Uuid(active.id.0),
-                Value::Bytes(serde_json::to_vec(&active)?),
+                Value::Bytes(codec::encode_catalogue_lineage_activation(active)),
             ],
         );
         Ok(())
@@ -765,7 +765,7 @@ self.database.finish_persistence(persisted)?;
         batch.update(
             "jazz_catalogue",
             vec![
-                Value::Bytes(b"lens".to_vec()),
+                Value::U64(codec::CatalogueRecordKind::Lens.key()),
                 Value::Uuid(lens.id.0),
                 Value::Bytes(serde_json::to_vec(lens)?),
             ],
@@ -822,14 +822,14 @@ self.database.finish_persistence(persisted)?;
         &mut self,
         pointer: CurrentWriteSchema,
     ) -> Result<(), Error> {
-        let id = uuid::Uuid::new_v5(&pointer.schema.0, &pointer.revision.to_le_bytes());
+        let id = codec::catalogue_write_pointer_id(pointer);
         let mut batch = self.database.open_batch();
         batch.update(
             "jazz_catalogue",
             vec![
-                Value::Bytes(b"write_pointer_pending".to_vec()),
+                Value::U64(codec::CatalogueRecordKind::WritePointerPending.key()),
                 Value::Uuid(id),
-                Value::Bytes(serde_json::to_vec(&pointer)?),
+                Value::Bytes(codec::encode_catalogue_write_pointer(pointer)),
             ],
         );
         let applied = self.database.apply_batch(batch).await?;
@@ -872,11 +872,11 @@ self.database.finish_persistence(persisted)?;
                 return Ok(alias);
             }
         }
-        let alias = NodeAlias(max_alias + 1);
-        self.node_aliases.insert(node_uuid, alias);
-        if node_uuid == self.node_uuid {
-            self.self_node_alias = Some(alias);
-        }
+        let alias = NodeAlias(
+            max_alias
+                .checked_add(1)
+                .ok_or(Error::InvalidStoredValue("node alias exhausted"))?,
+        );
         let mut batch = self.database.open_batch();
         batch.insert(
             "jazz_nodes",
@@ -885,6 +885,14 @@ self.database.finish_persistence(persisted)?;
         let applied = self.database.apply_batch(batch).await?;
 let persisted = applied.persist().await;
 self.database.finish_persistence(persisted)?;
+        // This mapping is a durable prerequisite for every later row that
+        // contains the compact alias.  Do not leave an in-memory alias behind
+        // if resident application or ordered persistence fails: the caller may
+        // only observe it after its catalogue row is durable.
+        self.node_aliases.insert(node_uuid, alias);
+        if node_uuid == self.node_uuid {
+            self.self_node_alias = Some(alias);
+        }
         Ok(alias)
     }
 

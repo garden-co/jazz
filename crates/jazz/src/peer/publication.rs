@@ -1492,7 +1492,7 @@ impl PeerState {
             .ok_or(Error::InvalidStoredValue(
                 "coverage group subscription is missing peer state",
             ))?;
-        let current_result_member_set = canonical_state.member_result_set();
+        let current_result_member_set = &canonical_state.result_member_set;
         let can_forward_flat_removals = client_link
             && ordinary_flat_row_duplicate_view(
                 shape,
@@ -1510,7 +1510,6 @@ impl PeerState {
         } else {
             Vec::new()
         };
-        let mut result_member_adds = current_result_member_set.into_iter().collect::<Vec<_>>();
         let tier = self
             .publication_states
             .get(&maintained_subscription)
@@ -1521,24 +1520,30 @@ impl PeerState {
             ))?;
         let peer_complete_tx_payloads = self.acknowledged_complete_tx_payloads();
         let mut reset_result_set = true;
-        if !authorization_mismatch
+        let result_member_adds = if !authorization_mismatch
             && let Some(position) = known_membership_position
             && canonical_subscription_settlement_time(node, maintained_subscription).0 > 0
             && position >= canonical_subscription_settlement_time(node, maintained_subscription)
         {
-            result_member_adds.clear();
             reset_result_set = false;
+            Vec::new()
         } else if !authorization_mismatch
             && let Some(position) = known_membership_position
-            && result_member_adds
+            && current_result_member_set
                 .iter()
                 .any(|member| member_settle_position(member).is_some())
         {
-            result_member_adds.retain(|member| {
-                member_settle_position(member).is_none_or(|settled| settled > position)
-            });
             reset_result_set = false;
-        }
+            current_result_member_set
+                .iter()
+                .filter(|member| {
+                    member_settle_position(member).is_none_or(|settled| settled > position)
+                })
+                .cloned()
+                .collect()
+        } else {
+            current_result_member_set.iter().cloned().collect()
+        };
         let update = {
             let maintained = &self
                 .publication_states

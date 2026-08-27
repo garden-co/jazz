@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { renderHook, act, waitFor } from "@testing-library/react";
 import { createUseLocalFirstAuth } from "./use-local-first-auth.js";
 import type { AuthSecretStore } from "../runtime/auth-secret-store.js";
+import { AuthSecretFormatError } from "../runtime/auth-secret-store.js";
 
 function makeInMemoryStore(): AuthSecretStore {
   let value: string | null = null;
@@ -91,5 +92,23 @@ describe("createUseLocalFirstAuth", () => {
 
     await waitFor(() => expect(a.current.secret).toBe("secret-A"));
     expect(b.current.secret).not.toBe("secret-A");
+  });
+
+  it("surfaces a malformed stored-root error instead of silently appearing anonymous", async () => {
+    const corruptStore: AuthSecretStore = {
+      loadSecret: async () => null,
+      saveSecret: async () => {},
+      clearSecret: async () => {},
+      getOrCreateSecret: () =>
+        Promise.reject(
+          new AuthSecretFormatError("A Jazz auth secret must start with jazz-auth-v1:"),
+        ),
+    };
+    const useCorruptAuth = createUseLocalFirstAuth(corruptStore);
+    const { result } = renderHook(() => useCorruptAuth());
+
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.secret).toBeNull();
+    expect(result.current.error).toBeInstanceOf(AuthSecretFormatError);
   });
 });

@@ -7,7 +7,17 @@
 
 use super::query_engine::{left_field, user_column_field};
 use super::*;
-use crate::schema::ColumnSchema;
+use crate::protocol::{
+    CompleteTxPayloadCoverageEntry, ContributingMembersEntry, PathCorrelationCoverageEntry,
+    PathHoleState, PointReadEntry, PolicyDecisionEntry, PolicyDecisionOutcomeEntry,
+    PolicyWitnessEntry, PredicateOutputSetEntry, PredicateOutputSetRoleEntry, PredicateReadEntry,
+    ReadFrontierSettledEntry, RelationEdgeEntry, RelationEdgeKind, RelationEdgeRole,
+    ResultMemberPayloadEntry, ResultRowLayer, ResultRowSource, RowVersionRefEntry, SnapshotRef,
+    SourceCoverageEntry, SyntheticReplacementToken, VersionWitnessEntry,
+    ViewCompleteExclusiveCoverageEntry,
+};
+use crate::schema::{ColumnSchema, contribution_merge_storage_type};
+use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey};
 
 use groove::schema::TableSchema as GrooveTableSchema;
 
@@ -132,6 +142,15 @@ groove::impl_record_field_enum!(DeletionEvent {
     DeletionEvent::Deleted = 0,
     DeletionEvent::Restored = 1,
 });
+groove::impl_record_field_enum!(MergeAspect {
+    MergeAspect::Content = 0,
+    MergeAspect::Deletion = 1,
+});
+groove::impl_record_field_enum!(ResultRowLayer {
+    ResultRowLayer::Content = 0,
+    ResultRowLayer::Deletion = 1,
+    ResultRowLayer::ContentOrDeletion = 2,
+});
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FateTag {
@@ -232,7 +251,7 @@ groove::define_record! {
         7 => absent_read_set: Option<Value>,
         8 => predicate_read_set: Option<Value>,
         9 => user_metadata: Option<String>,
-        10 => contribution_merge: Option<Vec<u8>>,
+        10 => contribution_merge: Option<OwnedRecord>,
         11 => permission_subject: Option<AuthorSubject>,
         // Retained physical slot, now used internally to mark redacted
         // view-scoped transaction cardinality without changing row alignment.
@@ -243,6 +262,147 @@ groove::define_record! {
         16 => cascade_root: Option<Value>,
         17 => reason_detail: Option<String>,
         18 => durability: DurabilityTier,
+    }
+}
+
+groove::define_record! {
+    pub(super) struct ContributionMergeStorageRecord {
+        0 => source: Vec<u8>,
+        1 => target: Vec<u8>,
+        2 => substitutions: Vec<Value>,
+    }
+}
+
+groove::define_record! {
+    pub(super) struct ContributionSubstitutionStorageRecord {
+        0 => target: OwnedRecord,
+        1 => sources: Vec<Value>,
+    }
+}
+
+groove::define_record! {
+    pub(super) struct ContributionDotStorageRecord {
+        0 => tx_time: u64,
+        1 => tx_node: uuid::Uuid,
+        2 => coordinate: OwnedRecord,
+    }
+}
+
+groove::define_record! {
+    pub(super) struct ContributionCoordinateStorageRecord {
+        0 => branch_key: Vec<u8>,
+        1 => physical_table_id: u64,
+        2 => row_uuid: uuid::Uuid,
+        3 => layer: MergeAspect,
+        4 => component: records::EnumValue,
+    }
+}
+
+groove::define_record! {
+    pub(super) struct ContributionColumnStorageRecord {
+        0 => physical_column_id: u64,
+    }
+}
+
+groove::define_record! {
+    pub(super) struct ContributionOperationStorageRecord {
+        0 => physical_column_id: u64,
+        1 => identity: Vec<u8>,
+    }
+}
+
+groove::define_record! {
+    struct ResultMemberUnionArmStorageRecord {
+        0 => position: u32,
+        1 => label: String,
+    }
+}
+
+groove::define_record! {
+    struct ResultMemberOccurrenceStorageRecord {
+        0 => root: uuid::Uuid,
+        1 => joined: Vec<Value>,
+        2 => union_arms: Vec<Value>,
+    }
+}
+
+groove::define_record! {
+    struct ResultMemberSnapshotSourceStorageRecord {
+        0 => owner: uuid::Uuid,
+        1 => global_base: u64,
+        2 => local_base: u64,
+        3 => dots: Vec<Value>,
+    }
+}
+
+groove::define_record! {
+    struct ResultMemberHistoryCutSourceStorageRecord {
+        0 => global_time: u64,
+    }
+}
+
+groove::define_record! {
+    struct ResultMemberMergeSourceStorageRecord {
+        0 => inputs: Vec<Value>,
+    }
+}
+
+groove::define_record! {
+    struct ResultMemberLensSourceStorageRecord {
+        0 => schema_version: uuid::Uuid,
+        1 => base: Vec<u8>,
+    }
+}
+
+groove::define_record! {
+    struct ResultMemberOverlaySourceStorageRecord {
+        0 => tx: Value,
+        1 => base: Vec<u8>,
+    }
+}
+
+groove::define_record! {
+    struct ResultMemberRealRowStorageRecord {
+        0 => table: String,
+        1 => row_uuid: uuid::Uuid,
+        2 => occurrence_id: Option<OwnedRecord>,
+        3 => content_tx: Option<Value>,
+        4 => layer: ResultRowLayer,
+        5 => deletion_tx: Option<Value>,
+        6 => source: records::EnumValue,
+        7 => read_view: uuid::Uuid,
+        8 => schema_version: Option<uuid::Uuid>,
+        9 => branch_or_prefix: Option<Vec<u8>>,
+        10 => row_digest: Option<Vec<u8>>,
+        11 => batch: Option<Value>,
+        12 => settle_position: Option<u64>,
+    }
+}
+
+groove::define_record! {
+    struct ResultMemberSyntheticStorageRecord {
+        0 => table: String,
+        1 => row: Vec<u8>,
+        2 => replacement: Vec<u8>,
+    }
+}
+
+groove::define_record! {
+    struct ResultMemberPathTupleStorageRecord {
+        0 => path: String,
+        1 => source_table: String,
+        2 => source_row: uuid::Uuid,
+        3 => target_table: String,
+        4 => target_row: uuid::Uuid,
+        5 => edge_id: Option<Vec<u8>>,
+        6 => revision: Vec<u8>,
+    }
+}
+
+groove::define_record! {
+    struct ResultMemberTypedRowStorageRecord {
+        0 => row: OwnedRecord,
+        1 => occurrence_key: OwnedRecord,
     }
 }
 
@@ -263,9 +423,250 @@ groove::define_record! {
 
 groove::define_record! {
     pub(super) struct CatalogueRowRecord {
-        0 => kind: Vec<u8>,
+        // This is the epoch-pinned catalogue kernel.  Its numeric cases are
+        // permanent: higher-level Jazz records are described by catalogue
+        // entries rather than by adding more hard-coded storage layouts.
+        0 => kind: CatalogueRecordKind,
         1 => id: uuid::Uuid,
         2 => payload: Vec<u8>,
+    }
+}
+
+/// Permanent discriminators for the tiny hard-coded catalogue kernel.
+///
+/// These values identify only the bootstrap records required to discover and
+/// activate immutable descriptors.  Application and ordinary Jazz system
+/// tables must remain catalogue-described rather than extending this enum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CatalogueRecordKind {
+    Genesis,
+    Schema,
+    Lens,
+    SchemaLineageStaged,
+    SchemaLineagePending,
+    SchemaLineageActive,
+    WritePointerPending,
+    BootstrapReady,
+}
+
+impl CatalogueRecordKind {
+    pub(super) const fn key(self) -> u64 {
+        match self {
+            Self::Genesis => 0,
+            Self::Schema => 1,
+            Self::Lens => 2,
+            Self::SchemaLineageStaged => 3,
+            Self::SchemaLineagePending => 4,
+            Self::SchemaLineageActive => 5,
+            Self::WritePointerPending => 6,
+            Self::BootstrapReady => 7,
+        }
+    }
+
+    pub(super) fn from_key(key: u64) -> Result<Self, records::Error> {
+        match key {
+            0 => Ok(Self::Genesis),
+            1 => Ok(Self::Schema),
+            2 => Ok(Self::Lens),
+            3 => Ok(Self::SchemaLineageStaged),
+            4 => Ok(Self::SchemaLineagePending),
+            5 => Ok(Self::SchemaLineageActive),
+            6 => Ok(Self::WritePointerPending),
+            7 => Ok(Self::BootstrapReady),
+            _ => Err(records::Error::NonCanonicalRecord),
+        }
+    }
+}
+
+impl records::RecordField for CatalogueRecordKind {
+    fn read(record: &records::BorrowedRecord<'_>, idx: usize) -> Result<Self, records::Error> {
+        Self::from_key(record.get_u64(idx)?)
+    }
+
+    fn to_value(&self) -> Value {
+        Value::U64(self.key())
+    }
+
+    const COLUMN_KIND: records::FieldKind = records::FieldKind::U64;
+}
+
+// The catalogue table is the fixed, bootstrap-only Groove kernel.  Its
+// payloads deliberately do not use serde/postcard: those formats make the
+// durable bytes depend on Rust field layout and accept trailing data in some
+// configurations.  Every payload below starts with its own permanent format
+// version and consumes exactly its input.
+const CATALOGUE_SCHEMA_VERSION: u8 = 1;
+const CATALOGUE_BOOTSTRAP_READY_VERSION: u8 = 1;
+const CATALOGUE_WRITE_POINTER_VERSION: u8 = 1;
+const CATALOGUE_LINEAGE_ACTIVATION_VERSION: u8 = 1;
+
+pub(super) fn encode_catalogue_schema(schema: &SchemaVersion) -> Result<Vec<u8>, Error> {
+    let public_schema = serde_json::to_vec(schema.schema.public_schema())
+        .map_err(|_| Error::InvalidStoredValue("encode catalogue public schema"))?;
+    let length = u32::try_from(public_schema.len())
+        .map_err(|_| Error::InvalidStoredValue("catalogue public schema payload too large"))?;
+    let mut payload = Vec::with_capacity(1 + 16 + 4 + public_schema.len());
+    payload.push(CATALOGUE_SCHEMA_VERSION);
+    payload.extend_from_slice(schema.id.0.as_bytes());
+    payload.extend_from_slice(&length.to_le_bytes());
+    payload.extend_from_slice(&public_schema);
+    Ok(payload)
+}
+
+pub(super) fn decode_catalogue_schema(payload: &[u8]) -> Result<SchemaVersion, Error> {
+    let mut cursor = CataloguePayloadCursor::new(
+        payload,
+        CATALOGUE_SCHEMA_VERSION,
+        "invalid catalogue schema payload",
+    )?;
+    let id = SchemaVersionId(cursor.uuid()?);
+    let public_schema = cursor.sized_bytes()?;
+    cursor.finish()?;
+    let schema = crate::tools::public_schema_convert::decode_public_schema_json(public_schema)
+        .map_err(|_| Error::InvalidStoredValue("invalid catalogue schema public schema"))?;
+    let canonical_public_schema = serde_json::to_vec(schema.public_schema())
+        .map_err(|_| Error::InvalidStoredValue("encode catalogue public schema"))?;
+    if canonical_public_schema != public_schema {
+        return Err(Error::InvalidStoredValue(
+            "non-canonical catalogue schema public schema",
+        ));
+    }
+    if schema.version_id() != id {
+        return Err(Error::InvalidStoredValue(
+            "catalogue schema content id mismatch",
+        ));
+    }
+    Ok(SchemaVersion { id, schema })
+}
+
+pub(super) fn encode_catalogue_bootstrap_ready(ready: &CatalogueBootstrapReady) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(1 + 16 + 8 + 16 + 8);
+    payload.push(CATALOGUE_BOOTSTRAP_READY_VERSION);
+    payload.extend_from_slice(ready.genesis.0.as_bytes());
+    payload.extend_from_slice(&ready.current_write_schema.revision.to_le_bytes());
+    payload.extend_from_slice(ready.current_write_schema.schema.0.as_bytes());
+    payload.extend_from_slice(&ready.active_catalogue_seq.to_le_bytes());
+    payload
+}
+
+pub(super) fn decode_catalogue_bootstrap_ready(
+    payload: &[u8],
+) -> Result<CatalogueBootstrapReady, Error> {
+    let mut cursor = CataloguePayloadCursor::new(
+        payload,
+        CATALOGUE_BOOTSTRAP_READY_VERSION,
+        "invalid catalogue bootstrap receipt payload",
+    )?;
+    let genesis = SchemaVersionId(cursor.uuid()?);
+    let revision = cursor.u64()?;
+    let schema = SchemaVersionId(cursor.uuid()?);
+    let active_catalogue_seq = cursor.u64()?;
+    cursor.finish()?;
+    Ok(CatalogueBootstrapReady {
+        genesis,
+        current_write_schema: CurrentWriteSchema { revision, schema },
+        active_catalogue_seq,
+    })
+}
+
+pub(super) fn encode_catalogue_write_pointer(pointer: CurrentWriteSchema) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(1 + 8 + 16);
+    payload.push(CATALOGUE_WRITE_POINTER_VERSION);
+    payload.extend_from_slice(&pointer.revision.to_le_bytes());
+    payload.extend_from_slice(pointer.schema.0.as_bytes());
+    payload
+}
+
+pub(super) fn catalogue_write_pointer_id(pointer: CurrentWriteSchema) -> uuid::Uuid {
+    uuid::Uuid::new_v5(&pointer.schema.0, &pointer.revision.to_le_bytes())
+}
+
+pub(super) fn decode_catalogue_write_pointer(payload: &[u8]) -> Result<CurrentWriteSchema, Error> {
+    let mut cursor = CataloguePayloadCursor::new(
+        payload,
+        CATALOGUE_WRITE_POINTER_VERSION,
+        "invalid catalogue write-pointer payload",
+    )?;
+    let revision = cursor.u64()?;
+    let schema = SchemaVersionId(cursor.uuid()?);
+    cursor.finish()?;
+    Ok(CurrentWriteSchema { revision, schema })
+}
+
+pub(super) fn encode_catalogue_lineage_activation(activation: SchemaLineageActivation) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(1 + 16 + 8);
+    payload.push(CATALOGUE_LINEAGE_ACTIVATION_VERSION);
+    payload.extend_from_slice(activation.id.0.as_bytes());
+    payload.extend_from_slice(&activation.catalogue_seq.to_le_bytes());
+    payload
+}
+
+pub(super) fn decode_catalogue_lineage_activation(
+    payload: &[u8],
+) -> Result<SchemaLineageActivation, Error> {
+    let mut cursor = CataloguePayloadCursor::new(
+        payload,
+        CATALOGUE_LINEAGE_ACTIVATION_VERSION,
+        "invalid catalogue lineage activation payload",
+    )?;
+    let id = SchemaLineagePublicationId(cursor.uuid()?);
+    let catalogue_seq = cursor.u64()?;
+    cursor.finish()?;
+    Ok(SchemaLineageActivation { id, catalogue_seq })
+}
+
+struct CataloguePayloadCursor<'a> {
+    payload: &'a [u8],
+    offset: usize,
+    context: &'static str,
+}
+
+impl<'a> CataloguePayloadCursor<'a> {
+    fn new(payload: &'a [u8], version: u8, context: &'static str) -> Result<Self, Error> {
+        if payload.first().copied() != Some(version) {
+            return Err(Error::InvalidStoredValue(context));
+        }
+        Ok(Self {
+            payload,
+            offset: 1,
+            context,
+        })
+    }
+
+    fn bytes(&mut self, length: usize) -> Result<&'a [u8], Error> {
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or(Error::InvalidStoredValue(self.context))?;
+        let bytes = self
+            .payload
+            .get(self.offset..end)
+            .ok_or(Error::InvalidStoredValue(self.context))?;
+        self.offset = end;
+        Ok(bytes)
+    }
+
+    fn uuid(&mut self) -> Result<uuid::Uuid, Error> {
+        let bytes: [u8; 16] = self.bytes(16)?.try_into().expect("exact UUID width");
+        Ok(uuid::Uuid::from_bytes(bytes))
+    }
+
+    fn u64(&mut self) -> Result<u64, Error> {
+        let bytes: [u8; 8] = self.bytes(8)?.try_into().expect("exact u64 width");
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    fn sized_bytes(&mut self) -> Result<&'a [u8], Error> {
+        let bytes: [u8; 4] = self.bytes(4)?.try_into().expect("exact u32 width");
+        self.bytes(u32::from_le_bytes(bytes) as usize)
+    }
+
+    fn finish(self) -> Result<(), Error> {
+        if self.offset == self.payload.len() {
+            Ok(())
+        } else {
+            Err(Error::InvalidStoredValue(self.context))
+        }
     }
 }
 
@@ -273,6 +674,131 @@ groove::define_record! {
     pub(super) struct CataloguePointerRowRecord {
         0 => revision: u64,
         1 => schema: SchemaVersionId,
+    }
+}
+
+#[cfg(test)]
+mod catalogue_payload_tests {
+    use super::*;
+
+    fn schema_id(value: u128) -> SchemaVersionId {
+        SchemaVersionId(uuid::Uuid::from_u128(value))
+    }
+
+    #[test]
+    fn catalogue_bootstrap_and_receipt_payloads_have_exact_v1_golden_bytes() {
+        let genesis = schema_id(0x00112233445566778899aabbccddeeff);
+        let current = schema_id(0xffeeddccbbaa99887766554433221100);
+        let ready = CatalogueBootstrapReady {
+            genesis,
+            current_write_schema: CurrentWriteSchema {
+                revision: 0x0102_0304_0506_0708,
+                schema: current,
+            },
+            active_catalogue_seq: 0x1112_1314_1516_1718,
+        };
+        assert_eq!(
+            encode_catalogue_bootstrap_ready(&ready),
+            vec![
+                1, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc,
+                0xdd, 0xee, 0xff, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0xff, 0xee, 0xdd,
+                0xcc, 0xbb, 0xaa, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00, 0x18,
+                0x17, 0x16, 0x15, 0x14, 0x13, 0x12, 0x11,
+            ]
+        );
+        assert_eq!(
+            decode_catalogue_bootstrap_ready(&encode_catalogue_bootstrap_ready(&ready)).unwrap(),
+            ready
+        );
+
+        let pointer = ready.current_write_schema;
+        assert_eq!(
+            encode_catalogue_write_pointer(pointer),
+            vec![
+                1, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0xff, 0xee, 0xdd, 0xcc, 0xbb,
+                0xaa, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00,
+            ]
+        );
+        assert_eq!(
+            decode_catalogue_write_pointer(&encode_catalogue_write_pointer(pointer)).unwrap(),
+            pointer
+        );
+
+        let activation = SchemaLineageActivation {
+            id: SchemaLineagePublicationId(uuid::Uuid::from_u128(
+                0x102030405060708090a0b0c0d0e0f000,
+            )),
+            catalogue_seq: 9,
+        };
+        assert_eq!(
+            encode_catalogue_lineage_activation(activation),
+            vec![
+                1, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xa0, 0xb0, 0xc0, 0xd0,
+                0xe0, 0xf0, 0x00, 9, 0, 0, 0, 0, 0, 0, 0,
+            ]
+        );
+        assert_eq!(
+            decode_catalogue_lineage_activation(&encode_catalogue_lineage_activation(activation))
+                .unwrap(),
+            activation
+        );
+    }
+
+    #[test]
+    fn catalogue_schema_payload_is_versioned_and_round_trips_public_schema() {
+        let schema = SchemaVersion::new(JazzSchema::empty());
+        let encoded = encode_catalogue_schema(&schema).unwrap();
+        assert_eq!(encoded[0], CATALOGUE_SCHEMA_VERSION);
+        assert_eq!(&encoded[1..17], schema.id.0.as_bytes());
+        assert_eq!(decode_catalogue_schema(&encoded).unwrap(), schema);
+    }
+
+    #[test]
+    fn catalogue_schema_payload_rejects_noncanonical_public_schema_json() {
+        let schema = SchemaVersion::new(JazzSchema::empty());
+        let mut encoded = encode_catalogue_schema(&schema).unwrap();
+        let length = u32::from_le_bytes(encoded[17..21].try_into().unwrap());
+        encoded[17..21].copy_from_slice(&(length + 1).to_le_bytes());
+        encoded.insert(21, b' ');
+        assert!(matches!(
+            decode_catalogue_schema(&encoded),
+            Err(Error::InvalidStoredValue(
+                "non-canonical catalogue schema public schema"
+            ))
+        ));
+    }
+
+    #[test]
+    fn catalogue_kernel_payloads_reject_unknown_truncated_and_trailing_bytes() {
+        let pointer = CurrentWriteSchema {
+            revision: 7,
+            schema: schema_id(8),
+        };
+        let valid = encode_catalogue_write_pointer(pointer);
+        for malformed in [
+            vec![],
+            vec![2],
+            valid[..valid.len() - 1].to_vec(),
+            [valid.clone(), vec![0]].concat(),
+        ] {
+            assert!(
+                decode_catalogue_write_pointer(&malformed).is_err(),
+                "{malformed:?}"
+            );
+        }
+
+        let schema = SchemaVersion::new(JazzSchema::empty());
+        let valid = encode_catalogue_schema(&schema).unwrap();
+        for malformed in [
+            vec![2],
+            valid[..valid.len() - 1].to_vec(),
+            [valid.clone(), vec![0]].concat(),
+        ] {
+            assert!(
+                decode_catalogue_schema(&malformed).is_err(),
+                "{malformed:?}"
+            );
+        }
     }
 }
 
@@ -295,6 +821,10 @@ groove::define_record! {
         1 => child_node_id: NodeAlias,
         2 => parent_time: TxTime,
         3 => parent_node_id: NodeAlias,
+        4 => physical_table_id: u64,
+        5 => branch_key: Vec<u8>,
+        6 => row_uuid: RowUuid,
+        7 => layer: Vec<u8>,
     }
 }
 
@@ -342,6 +872,7 @@ impl VersionRecord {
         stored: &VersionRow,
         table: &TableSchema,
         schema_version: SchemaVersionId,
+        authored_columns: Option<BTreeSet<String>>,
     ) -> Result<Self, Error> {
         // Wire records remain the replicated immutable projection. Content and
         // register rows now live in different storage tables, so projection at
@@ -351,7 +882,6 @@ impl VersionRecord {
             .iter()
             .map(|column| stored.cell(table, &column.name))
             .collect::<Result<Vec<_>, _>>()?;
-        let authored_columns = stored.authored_columns(table)?;
         VersionRecord::encode(
             table,
             schema_version,
@@ -520,7 +1050,7 @@ pub(super) struct VersionRowParts {
     pub(super) updated_by: AuthorSubject,
     pub(super) updated_at: TxTime,
     pub(super) cells: BTreeMap<String, Value>,
-    pub(super) authored_columns: Option<BTreeSet<String>>,
+    pub(super) authored_columns: Option<BTreeSet<PhysicalColumnId>>,
     pub(super) deletion: Option<DeletionEvent>,
 }
 
@@ -560,11 +1090,22 @@ impl VersionRow {
     pub(super) fn from_wire_with_schema_version(
         table: &TableSchema,
         version: &VersionRecord,
+        authored_columns: Option<BTreeSet<PhysicalColumnId>>,
         tx_node_alias: NodeAlias,
         schema_version_alias: SchemaVersionAlias,
         tx_time: TxTime,
         _storage_schema_version: Option<SchemaVersionId>,
     ) -> Result<Self, Error> {
+        if !version.branch_key().is_canonical() {
+            return Err(Error::InvalidMergeableCommit(
+                "row version branch key is not canonical",
+            ));
+        }
+        if version.parents().windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(Error::InvalidMergeableCommit(
+                "row version parents must be sorted and unique",
+            ));
+        }
         let (storage_table, values) = if let Some(deletion) = version.deletion() {
             (
                 table.register_storage_table(),
@@ -582,6 +1123,7 @@ impl VersionRow {
                 history_values_from_wire(
                     table,
                     version,
+                    authored_columns,
                     tx_node_alias,
                     schema_version_alias,
                     tx_time,
@@ -641,13 +1183,21 @@ impl VersionRow {
     }
 
     pub(super) fn parents(&self) -> Vec<TxId> {
+        self.checked_parents()
+            .expect("valid canonical parent tx ids")
+    }
+
+    pub(super) fn validate_canonical(&self) -> Result<(), Error> {
+        validate_canonical_version_parts(&self.branch_key, &self.checked_parents()?)
+    }
+
+    fn checked_parents(&self) -> Result<Vec<TxId>, Error> {
         let idx = if self.is_register_record() {
             RegisterRowRecord::FIELD_PARENTS_IDX
         } else {
             HistoryRowRecord::FIELD_PARENTS_IDX
         };
-        tx_ids_from_value(self.record.borrowed().get_idx(idx).expect("valid parents"))
-            .expect("valid parent tx ids")
+        tx_ids_from_value(self.record.borrowed().get_idx(idx)?)
     }
 
     pub(super) fn created_by(&self) -> AuthorSubject {
@@ -779,26 +1329,17 @@ impl VersionRow {
     }
 
     /// `None` is the deliberate legacy/lens fallback: every present cell is
-    /// treated as authored by merge code.
-    pub(super) fn authored_columns(
-        &self,
-        table: &TableSchema,
-    ) -> Result<Option<BTreeSet<String>>, Error> {
+    /// treated as authored by merge code. Exact sets use strictly increasing
+    /// node-local physical column ids; alternate set spellings are invalid.
+    pub(super) fn authored_column_ids(&self) -> Result<Option<BTreeSet<PhysicalColumnId>>, Error> {
         if self.is_register_record() {
             return Ok(None);
         }
-        let field = HistoryRowRecord::USER_CELLS + table.columns.len();
-        if field >= self.record.descriptor().fields().len() {
+        let Some(field) = self.record.descriptor().field_index("authored_columns") else {
             return Ok(None);
-        }
+        };
         let value = nullable_value(self.record.borrowed().get_idx(field)?)?;
-        value
-            .map(|value| match value {
-                Value::Bytes(bytes) => serde_json::from_slice(&bytes)
-                    .map_err(|_| Error::InvalidStoredValue("invalid authored columns")),
-                _ => Err(Error::InvalidStoredValue("authored columns must be bytes")),
-            })
-            .transpose()
+        value.map(authored_column_ids_from_value).transpose()
     }
 
     pub(super) fn is_register_record(&self) -> bool {
@@ -981,6 +1522,14 @@ pub(super) enum VersionLayer {
     Deletion,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct ParentCoordinate {
+    pub(super) physical_table_id: PhysicalTableId,
+    pub(super) branch_key: BranchKey,
+    pub(super) row_uuid: RowUuid,
+    pub(super) layer: VersionLayer,
+}
+
 impl VersionLayer {
     pub(super) fn for_commit(commit: &MergeableCommit) -> Self {
         if commit.deletion.is_some() {
@@ -1007,14 +1556,1832 @@ pub(super) fn version_layer_from_deletion(deletion: Option<DeletionEvent>) -> Ve
     }
 }
 
+fn contribution_merge_descriptor() -> &'static records::RecordDescriptor {
+    static DESCRIPTOR: std::sync::LazyLock<records::RecordDescriptor> =
+        std::sync::LazyLock::new(|| {
+            let records::ValueType::Nullable(inner) = contribution_merge_storage_type() else {
+                unreachable!("contribution merge storage column is nullable")
+            };
+            let records::ValueType::Record(descriptor) = *inner else {
+                unreachable!("contribution merge storage column contains a record")
+            };
+            *descriptor
+        });
+    &DESCRIPTOR
+}
+
+pub(super) fn record_field_type(
+    descriptor: &records::RecordDescriptor,
+    index: usize,
+) -> &records::ValueType {
+    &descriptor
+        .fields()
+        .get(index)
+        .expect("contribution storage descriptor field")
+        .value_type
+}
+
+fn nested_record_descriptor(value_type: &records::ValueType) -> &records::RecordDescriptor {
+    let records::ValueType::Record(descriptor) = value_type else {
+        unreachable!("contribution storage field is a record")
+    };
+    descriptor
+}
+
+fn array_element_type(value_type: &records::ValueType) -> &records::ValueType {
+    let records::ValueType::Array(element) = value_type else {
+        unreachable!("contribution storage field is an array")
+    };
+    element
+}
+
+fn contribution_component_storage_value(
+    coordinate: &ContributionCoordinate,
+    component: &ContributionComponent,
+    value_type: &records::ValueType,
+    resolve_column_id: &mut impl FnMut(&str, &str) -> Result<PhysicalColumnId, Error>,
+) -> Result<records::EnumValue, Error> {
+    let records::ValueType::Enum(schema) = value_type else {
+        unreachable!("contribution component uses a Groove payload enum")
+    };
+    let case_name = match component {
+        ContributionComponent::Column(_) => "column",
+        ContributionComponent::Operation { .. } => "operation",
+        ContributionComponent::Register => "register",
+    };
+    let tag = schema
+        .tag(case_name)
+        .expect("declared contribution component case");
+    let payload = &schema
+        .case(tag)
+        .expect("declared contribution component case")
+        .payload;
+    let record = match component {
+        ContributionComponent::Column(name) => {
+            let id = resolve_column_id(&coordinate.table, name)?;
+            if id.0 == 0 {
+                return Err(Error::InvalidStoredValue(
+                    "contribution physical column id must be nonzero",
+                ));
+            }
+            ContributionColumnStorageRecord::encode(payload, id.0)?
+                .record()
+                .clone()
+        }
+        ContributionComponent::Operation { column, identity } => {
+            let id = resolve_column_id(&coordinate.table, column)?;
+            if id.0 == 0 {
+                return Err(Error::InvalidStoredValue(
+                    "contribution physical column id must be nonzero",
+                ));
+            }
+            ContributionOperationStorageRecord::encode(payload, id.0, identity.clone())?
+                .record()
+                .clone()
+        }
+        ContributionComponent::Register => OwnedRecord::new(payload.create(&[])?, *payload),
+    };
+    Ok(records::EnumValue::new(tag, record))
+}
+
+fn contribution_coordinate_storage_record(
+    coordinate: &ContributionCoordinate,
+    descriptor: &records::RecordDescriptor,
+    resolve_table_id: &mut impl FnMut(&str) -> Result<PhysicalTableId, Error>,
+    resolve_column_id: &mut impl FnMut(&str, &str) -> Result<PhysicalColumnId, Error>,
+) -> Result<OwnedRecord, Error> {
+    let table_id = resolve_table_id(&coordinate.table)?;
+    if table_id.0 == 0 {
+        return Err(Error::InvalidStoredValue(
+            "contribution physical table id must be nonzero",
+        ));
+    }
+    let record = ContributionCoordinateStorageRecord::encode(
+        descriptor,
+        coordinate.branch_key.canonical_bytes(),
+        table_id.0,
+        coordinate.row_uuid.0,
+        coordinate.layer,
+        contribution_component_storage_value(
+            coordinate,
+            &coordinate.component,
+            record_field_type(descriptor, 4),
+            resolve_column_id,
+        )?,
+    )?
+    .record()
+    .clone();
+    Ok(record)
+}
+
+fn contribution_dot_storage_record(
+    dot: &ContributionDot,
+    descriptor: &records::RecordDescriptor,
+    resolve_table_id: &mut impl FnMut(&str) -> Result<PhysicalTableId, Error>,
+    resolve_column_id: &mut impl FnMut(&str, &str) -> Result<PhysicalColumnId, Error>,
+) -> Result<OwnedRecord, Error> {
+    let coordinate = nested_record_descriptor(record_field_type(descriptor, 2));
+    let record = ContributionDotStorageRecord::encode(
+        descriptor,
+        dot.tx_id.time.0,
+        dot.tx_id.node.0,
+        contribution_coordinate_storage_record(
+            &dot.coordinate,
+            coordinate,
+            resolve_table_id,
+            resolve_column_id,
+        )?,
+    )?
+    .record()
+    .clone();
+    Ok(record)
+}
+
+fn contribution_substitution_storage_record(
+    substitution: &ContributionSubstitution,
+    descriptor: &records::RecordDescriptor,
+    resolve_table_id: &mut impl FnMut(&str) -> Result<PhysicalTableId, Error>,
+    resolve_column_id: &mut impl FnMut(&str, &str) -> Result<PhysicalColumnId, Error>,
+) -> Result<OwnedRecord, Error> {
+    let target = nested_record_descriptor(record_field_type(descriptor, 0));
+    let source = nested_record_descriptor(array_element_type(record_field_type(descriptor, 1)));
+    let record = ContributionSubstitutionStorageRecord::encode(
+        descriptor,
+        contribution_coordinate_storage_record(
+            &substitution.target,
+            target,
+            resolve_table_id,
+            resolve_column_id,
+        )?,
+        substitution
+            .sources
+            .iter()
+            .map(|dot| {
+                contribution_dot_storage_record(dot, source, resolve_table_id, resolve_column_id)
+                    .map(Value::Record)
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    )?
+    .record()
+    .clone();
+    Ok(record)
+}
+
+pub(super) fn contribution_merge_storage_value(
+    provenance: Option<&ContributionMergeProvenance>,
+    mut resolve_table_id: impl FnMut(&str) -> Result<PhysicalTableId, Error>,
+    mut resolve_column_id: impl FnMut(&str, &str) -> Result<PhysicalColumnId, Error>,
+) -> Result<Value, Error> {
+    let descriptor = contribution_merge_descriptor();
+    let record = provenance
+        .map(|provenance| -> Result<OwnedRecord, Error> {
+            let substitution =
+                nested_record_descriptor(array_element_type(record_field_type(descriptor, 2)));
+            Ok(ContributionMergeStorageRecord::encode(
+                descriptor,
+                provenance.source.canonical_bytes(),
+                provenance.target.canonical_bytes(),
+                provenance
+                    .substitutions
+                    .iter()
+                    .map(|item| {
+                        contribution_substitution_storage_record(
+                            item,
+                            substitution,
+                            &mut resolve_table_id,
+                            &mut resolve_column_id,
+                        )
+                        .map(Value::Record)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )?
+            .record()
+            .clone())
+        })
+        .transpose()?;
+    Ok(records::RecordField::to_value(&record))
+}
+
+pub(super) fn contribution_component_from_storage(
+    value: records::EnumValue,
+    schema: &records::EnumSchema,
+    table: &str,
+    resolve_column_name: &mut impl FnMut(&str, PhysicalColumnId) -> Result<String, Error>,
+) -> Result<ContributionComponent, Error> {
+    let case = schema.case(value.tag()).map_err(|_| {
+        Error::InvalidStoredValue("transaction contribution component tag is invalid")
+    })?;
+    let payload = value.into_record();
+    match case.name.as_str() {
+        "column" => {
+            let id = PhysicalColumnId(
+                ContributionColumnStorageRecord::new(payload).physical_column_id()?,
+            );
+            if id.0 == 0 {
+                return Err(Error::InvalidStoredValue(
+                    "stored contribution physical column id must be nonzero",
+                ));
+            }
+            Ok(ContributionComponent::Column(resolve_column_name(
+                table, id,
+            )?))
+        }
+        "operation" => {
+            let payload = ContributionOperationStorageRecord::new(payload);
+            let id = PhysicalColumnId(payload.physical_column_id()?);
+            if id.0 == 0 {
+                return Err(Error::InvalidStoredValue(
+                    "stored contribution physical column id must be nonzero",
+                ));
+            }
+            Ok(ContributionComponent::Operation {
+                column: resolve_column_name(table, id)?,
+                identity: payload.identity()?,
+            })
+        }
+        "register" if payload.descriptor().fields().is_empty() => {
+            payload.to_values()?;
+            Ok(ContributionComponent::Register)
+        }
+        _ => Err(Error::InvalidStoredValue(
+            "transaction contribution component payload is invalid",
+        )),
+    }
+}
+
+fn contribution_coordinate_from_storage(
+    record: OwnedRecord,
+    resolve_table_name: &mut impl FnMut(PhysicalTableId) -> Result<String, Error>,
+    resolve_column_name: &mut impl FnMut(&str, PhysicalColumnId) -> Result<String, Error>,
+) -> Result<ContributionCoordinate, Error> {
+    let records::ValueType::Enum(component_schema) = record_field_type(record.descriptor(), 4)
+    else {
+        return Err(Error::InvalidStoredValue(
+            "transaction contribution component descriptor is invalid",
+        ));
+    };
+    let component_schema = component_schema.clone();
+    let record = ContributionCoordinateStorageRecord::new(record);
+    let table_id = PhysicalTableId(record.physical_table_id()?);
+    if table_id.0 == 0 {
+        return Err(Error::InvalidStoredValue(
+            "stored contribution physical table id must be nonzero",
+        ));
+    }
+    let table = resolve_table_name(table_id)?;
+    let branch_key = BranchKey::from_canonical_bytes(&record.branch_key()?)
+        .map_err(|_| Error::InvalidStoredValue("transaction contribution branch key is invalid"))?;
+    Ok(ContributionCoordinate {
+        branch_key,
+        table: table.clone(),
+        row_uuid: RowUuid(record.row_uuid()?),
+        layer: record.layer()?,
+        component: contribution_component_from_storage(
+            record.component()?,
+            &component_schema,
+            &table,
+            resolve_column_name,
+        )?,
+    })
+}
+
+fn contribution_dot_from_storage(
+    record: OwnedRecord,
+    resolve_table_name: &mut impl FnMut(PhysicalTableId) -> Result<String, Error>,
+    resolve_column_name: &mut impl FnMut(&str, PhysicalColumnId) -> Result<String, Error>,
+) -> Result<ContributionDot, Error> {
+    let record = ContributionDotStorageRecord::new(record);
+    Ok(ContributionDot {
+        tx_id: TxId::new(TxTime(record.tx_time()?), NodeUuid(record.tx_node()?)),
+        coordinate: contribution_coordinate_from_storage(
+            record.coordinate()?,
+            resolve_table_name,
+            resolve_column_name,
+        )?,
+    })
+}
+
+fn contribution_substitution_from_storage(
+    record: OwnedRecord,
+    resolve_table_name: &mut impl FnMut(PhysicalTableId) -> Result<String, Error>,
+    resolve_column_name: &mut impl FnMut(&str, PhysicalColumnId) -> Result<String, Error>,
+) -> Result<ContributionSubstitution, Error> {
+    let record = ContributionSubstitutionStorageRecord::new(record);
+    Ok(ContributionSubstitution {
+        target: contribution_coordinate_from_storage(
+            record.target()?,
+            resolve_table_name,
+            resolve_column_name,
+        )?,
+        sources: record
+            .sources()?
+            .into_iter()
+            .map(|source| match source {
+                Value::Record(record) => {
+                    contribution_dot_from_storage(record, resolve_table_name, resolve_column_name)
+                }
+                _ => Err(Error::InvalidStoredValue(
+                    "transaction contribution dot must be a record",
+                )),
+            })
+            .collect::<Result<_, _>>()?,
+    })
+}
+
+pub(super) fn contribution_merge_from_storage_record(
+    record: OwnedRecord,
+    mut resolve_table_name: impl FnMut(PhysicalTableId) -> Result<String, Error>,
+    mut resolve_column_name: impl FnMut(&str, PhysicalColumnId) -> Result<String, Error>,
+) -> Result<ContributionMergeProvenance, Error> {
+    let descriptor = contribution_merge_descriptor();
+    if record.descriptor() != descriptor {
+        return Err(Error::InvalidStoredValue(
+            "transaction contribution provenance must be a record",
+        ));
+    }
+    let record = ContributionMergeStorageRecord::new(record);
+    let provenance = ContributionMergeProvenance {
+        source: BranchKey::from_canonical_bytes(&record.source()?).map_err(|_| {
+            Error::InvalidStoredValue("transaction contribution source branch key is invalid")
+        })?,
+        target: BranchKey::from_canonical_bytes(&record.target()?).map_err(|_| {
+            Error::InvalidStoredValue("transaction contribution target branch key is invalid")
+        })?,
+        substitutions: record
+            .substitutions()?
+            .into_iter()
+            .map(|substitution| match substitution {
+                Value::Record(record) => contribution_substitution_from_storage(
+                    record,
+                    &mut resolve_table_name,
+                    &mut resolve_column_name,
+                ),
+                _ => Err(Error::InvalidStoredValue(
+                    "transaction contribution substitution must be a record",
+                )),
+            })
+            .collect::<Result<_, _>>()?,
+    };
+    provenance.validate().map_err(|_| {
+        Error::InvalidStoredValue("transaction contribution provenance must be canonical")
+    })?;
+    Ok(provenance)
+}
+
+const RESULT_MEMBER_STORAGE_MAGIC: &[u8; 4] = b"JRME";
+const RESULT_MEMBER_STORAGE_VERSION: u8 = 1;
+// This is a durable key codec, not a wire codec.  Tags below are permanent:
+// never renumber or reuse them; introduce a new storage version instead.
+const PROGRAM_FACT_STORAGE_MAGIC: &[u8; 4] = b"JPFK";
+const PROGRAM_FACT_STORAGE_VERSION: u8 = 1;
+const MAX_PROGRAM_FACT_STORAGE_BYTES: usize = 1024 * 1024;
+const MAX_PROGRAM_FACT_NESTING: usize = 32;
+const RESULT_ROW_SOURCE_STORAGE_MAGIC: &[u8; 4] = b"JRSE";
+const RESULT_ROW_SOURCE_STORAGE_VERSION: u8 = 1;
+const RESULT_MEMBER_STORAGE_ENVELOPE_HEADER_LEN: usize = 4 + 1 + 4;
+const RESULT_MEMBER_ROW_TAG: u32 = 0;
+const RESULT_MEMBER_SYNTHETIC_TAG: u32 = 1;
+const RESULT_MEMBER_PATH_TUPLE_TAG: u32 = 2;
+const RESULT_MEMBER_TYPED_ROW_TAG: u32 = 3;
+const RESULT_ROW_SOURCE_CURRENT_TAG: u32 = 0;
+const RESULT_ROW_SOURCE_SNAPSHOT_TAG: u32 = 1;
+const RESULT_ROW_SOURCE_HISTORY_CUT_TAG: u32 = 2;
+const RESULT_ROW_SOURCE_MERGE_TAG: u32 = 3;
+const RESULT_ROW_SOURCE_LENS_PROJECTION_TAG: u32 = 4;
+const RESULT_ROW_SOURCE_OVERLAY_TAG: u32 = 5;
+const MAX_RESULT_MEMBER_STORAGE_BYTES: usize = 1024 * 1024;
+const MAX_RESULT_ROW_SOURCE_DEPTH: usize = 32;
+const MAX_RESULT_MEMBER_JOINED_SOURCES: usize = 256;
+const MAX_RESULT_MEMBER_UNION_ARM_LABEL_BYTES: usize = 4 * 1024;
+
+struct ResultMemberStorageLayout {
+    member_envelope: records::RecordDescriptor,
+    member_schema: records::EnumSchema,
+    source_envelope: records::RecordDescriptor,
+    source_schema: records::EnumSchema,
+    occurrence: records::RecordDescriptor,
+    union_arm: records::RecordDescriptor,
+    real_row: records::RecordDescriptor,
+}
+
+fn result_member_storage_layout() -> &'static ResultMemberStorageLayout {
+    static LAYOUT: std::sync::LazyLock<ResultMemberStorageLayout> =
+        std::sync::LazyLock::new(|| {
+            let tx_id =
+                records::ValueType::Tuple(vec![records::ValueType::U64, records::ValueType::Uuid]);
+            let union_arm = records::RecordDescriptor::new([
+                ("position", records::ValueType::U32),
+                ("label", records::ValueType::String),
+            ]);
+            let occurrence = records::RecordDescriptor::new([
+                ("root", records::ValueType::Uuid),
+                (
+                    "joined",
+                    records::ValueType::Array(Box::new(records::ValueType::Uuid)),
+                ),
+                (
+                    "union_arms",
+                    records::ValueType::Array(Box::new(records::ValueType::Record(Box::new(
+                        union_arm,
+                    )))),
+                ),
+            ]);
+            let snapshot_source = records::RecordDescriptor::new([
+                ("owner", records::ValueType::Uuid),
+                ("global_base", records::ValueType::U64),
+                ("local_base", records::ValueType::U64),
+                ("dots", records::ValueType::Array(Box::new(tx_id.clone()))),
+            ]);
+            let history_cut_source =
+                records::RecordDescriptor::new([("global_time", records::ValueType::U64)]);
+            let merge_source = records::RecordDescriptor::new([(
+                "inputs",
+                records::ValueType::Array(Box::new(records::ValueType::Bytes)),
+            )]);
+            let lens_source = records::RecordDescriptor::new([
+                ("schema_version", records::ValueType::Uuid),
+                ("base", records::ValueType::Bytes),
+            ]);
+            let overlay_source = records::RecordDescriptor::new([
+                ("tx", tx_id.clone()),
+                ("base", records::ValueType::Bytes),
+            ]);
+            let source_cases = [
+                (
+                    RESULT_ROW_SOURCE_CURRENT_TAG,
+                    records::EnumCase::new(
+                        "Current",
+                        records::RecordDescriptor::new(std::iter::empty::<(
+                            &'static str,
+                            records::ValueType,
+                        )>()),
+                    ),
+                ),
+                (
+                    RESULT_ROW_SOURCE_SNAPSHOT_TAG,
+                    records::EnumCase::new("Snapshot", snapshot_source),
+                ),
+                (
+                    RESULT_ROW_SOURCE_HISTORY_CUT_TAG,
+                    records::EnumCase::new("HistoryCut", history_cut_source),
+                ),
+                (
+                    RESULT_ROW_SOURCE_MERGE_TAG,
+                    records::EnumCase::new("Merge", merge_source),
+                ),
+                (
+                    RESULT_ROW_SOURCE_LENS_PROJECTION_TAG,
+                    records::EnumCase::new("LensProjection", lens_source),
+                ),
+                (
+                    RESULT_ROW_SOURCE_OVERLAY_TAG,
+                    records::EnumCase::new("Overlay", overlay_source),
+                ),
+            ];
+            debug_assert!(
+                source_cases
+                    .iter()
+                    .enumerate()
+                    .all(|(index, (tag, _))| usize::try_from(*tag) == Ok(index))
+            );
+            let source_schema = records::EnumSchema::new(
+                "jazz.internal.result_row_source.v1",
+                source_cases.map(|(_, case)| case),
+            )
+            .expect("fixed result-row-source storage schema is valid");
+            let source_envelope = records::RecordDescriptor::new([(
+                "source",
+                records::ValueType::Enum(Box::new(source_schema.clone())),
+            )]);
+
+            let layer = records::ScalarEnumSchema::new(
+                "jazz.internal.result_row_layer.v1",
+                ["Content", "Deletion", "ContentOrDeletion"],
+            )
+            .expect("fixed result-row-layer storage schema is valid");
+            debug_assert_eq!(
+                [
+                    ResultRowLayer::Content.discriminant(),
+                    ResultRowLayer::Deletion.discriminant(),
+                    ResultRowLayer::ContentOrDeletion.discriminant(),
+                ],
+                [0, 1, 2]
+            );
+            let real_row = records::RecordDescriptor::new([
+                ("table", records::ValueType::String),
+                ("row_uuid", records::ValueType::Uuid),
+                (
+                    "occurrence_id",
+                    records::ValueType::Nullable(Box::new(records::ValueType::Record(Box::new(
+                        occurrence,
+                    )))),
+                ),
+                (
+                    "content_tx",
+                    records::ValueType::Nullable(Box::new(tx_id.clone())),
+                ),
+                ("layer", records::ValueType::EnumTag(layer)),
+                (
+                    "deletion_tx",
+                    records::ValueType::Nullable(Box::new(tx_id.clone())),
+                ),
+                (
+                    "source",
+                    records::ValueType::Enum(Box::new(source_schema.clone())),
+                ),
+                ("read_view", records::ValueType::Uuid),
+                (
+                    "schema_version",
+                    records::ValueType::Nullable(Box::new(records::ValueType::Uuid)),
+                ),
+                (
+                    "branch_or_prefix",
+                    records::ValueType::Nullable(Box::new(records::ValueType::Bytes)),
+                ),
+                (
+                    "row_digest",
+                    records::ValueType::Nullable(Box::new(records::ValueType::Bytes)),
+                ),
+                ("batch", records::ValueType::Nullable(Box::new(tx_id))),
+                (
+                    "settle_position",
+                    records::ValueType::Nullable(Box::new(records::ValueType::U64)),
+                ),
+            ]);
+            let synthetic = records::RecordDescriptor::new([
+                ("table", records::ValueType::String),
+                ("row", records::ValueType::Bytes),
+                ("replacement", records::ValueType::Bytes),
+            ]);
+            let path_tuple = records::RecordDescriptor::new([
+                ("path", records::ValueType::String),
+                ("source_table", records::ValueType::String),
+                ("source_row", records::ValueType::Uuid),
+                ("target_table", records::ValueType::String),
+                ("target_row", records::ValueType::Uuid),
+                (
+                    "edge_id",
+                    records::ValueType::Nullable(Box::new(records::ValueType::Bytes)),
+                ),
+                ("revision", records::ValueType::Bytes),
+            ]);
+            let typed_row = records::RecordDescriptor::new([
+                ("row", records::ValueType::Record(Box::new(real_row))),
+                (
+                    "occurrence_key",
+                    records::ValueType::Record(Box::new(occurrence)),
+                ),
+            ]);
+            let member_cases = [
+                (
+                    RESULT_MEMBER_ROW_TAG,
+                    records::EnumCase::new("Row", real_row),
+                ),
+                (
+                    RESULT_MEMBER_SYNTHETIC_TAG,
+                    records::EnumCase::new("Synthetic", synthetic),
+                ),
+                (
+                    RESULT_MEMBER_PATH_TUPLE_TAG,
+                    records::EnumCase::new("PathTuple", path_tuple),
+                ),
+                (
+                    RESULT_MEMBER_TYPED_ROW_TAG,
+                    records::EnumCase::new("TypedRow", typed_row),
+                ),
+            ];
+            debug_assert!(
+                member_cases
+                    .iter()
+                    .enumerate()
+                    .all(|(index, (tag, _))| usize::try_from(*tag) == Ok(index))
+            );
+            let member_schema = records::EnumSchema::new(
+                "jazz.internal.result_member.v1",
+                member_cases.map(|(_, case)| case),
+            )
+            .expect("fixed result-member storage schema is valid");
+            let member_envelope = records::RecordDescriptor::new([(
+                "member",
+                records::ValueType::Enum(Box::new(member_schema.clone())),
+            )]);
+            ResultMemberStorageLayout {
+                member_envelope,
+                member_schema,
+                source_envelope,
+                source_schema,
+                occurrence,
+                union_arm,
+                real_row,
+            }
+        });
+    &LAYOUT
+}
+
+fn encode_result_member_envelope(
+    magic: &[u8; 4],
+    version: u8,
+    descriptor: records::RecordDescriptor,
+    value: records::EnumValue,
+) -> Result<Vec<u8>, Error> {
+    let payload = descriptor.create(&[Value::Enum(value)])?;
+    let total_len = magic
+        .len()
+        .checked_add(1)
+        .and_then(|len| len.checked_add(4))
+        .and_then(|len| len.checked_add(payload.len()))
+        .ok_or(Error::InvalidStoredValue(
+            "settled result member encoding is too large",
+        ))?;
+    if total_len > MAX_RESULT_MEMBER_STORAGE_BYTES {
+        return Err(Error::InvalidStoredValue(
+            "settled result member encoding is too large",
+        ));
+    }
+    let mut encoded = Vec::with_capacity(total_len);
+    encoded.extend_from_slice(magic);
+    encoded.push(version);
+    encoded.extend_from_slice(
+        &u32::try_from(payload.len())
+            .map_err(|_| Error::InvalidStoredValue("settled result member encoding is too large"))?
+            .to_le_bytes(),
+    );
+    encoded.extend_from_slice(&payload);
+    Ok(encoded)
+}
+
+fn decode_result_member_envelope(
+    encoded: &[u8],
+    magic: &[u8; 4],
+    version: u8,
+    descriptor: records::RecordDescriptor,
+    context: &'static str,
+) -> Result<records::EnumValue, Error> {
+    if encoded.len() > MAX_RESULT_MEMBER_STORAGE_BYTES {
+        return Err(Error::InvalidStoredValue(context));
+    }
+    let Some((header, payload)) =
+        encoded.split_at_checked(RESULT_MEMBER_STORAGE_ENVELOPE_HEADER_LEN)
+    else {
+        return Err(Error::InvalidStoredValue(context));
+    };
+    if &header[..magic.len()] != magic || header[magic.len()] != version {
+        return Err(Error::InvalidStoredValue(context));
+    }
+    let payload_len = u32::from_le_bytes(
+        header[magic.len() + 1..RESULT_MEMBER_STORAGE_ENVELOPE_HEADER_LEN]
+            .try_into()
+            .expect("result-member payload length has fixed width"),
+    );
+    if usize::try_from(payload_len) != Ok(payload.len()) {
+        return Err(Error::InvalidStoredValue(context));
+    }
+    let values = descriptor.bind(payload).to_values()?;
+    let [Value::Enum(value)] = values.as_slice() else {
+        return Err(Error::InvalidStoredValue(context));
+    };
+    if descriptor.create(&values)? != payload {
+        return Err(Error::InvalidStoredValue(context));
+    }
+    Ok(value.clone())
+}
+
+fn result_member_case_descriptor(
+    schema: &records::EnumSchema,
+    tag: u32,
+) -> Result<records::RecordDescriptor, Error> {
+    schema
+        .case(tag)
+        .map(|case| case.payload)
+        .map_err(|_| Error::InvalidStoredValue("settled result member tag is invalid"))
+}
+
+fn result_member_occurrence_storage_record(
+    occurrence: &OutputOccurrenceId,
+) -> Result<OwnedRecord, Error> {
+    let layout = result_member_storage_layout();
+    if occurrence.joined_sources().len() > MAX_RESULT_MEMBER_JOINED_SOURCES {
+        return Err(Error::InvalidStoredValue(
+            "settled result member has too many joined sources",
+        ));
+    }
+    let mut previous_position = None;
+    let mut union_arms = Vec::with_capacity(occurrence.union_arms().len());
+    for (position, label) in occurrence.union_arms() {
+        if *position >= occurrence.joined_sources().len()
+            || label.is_empty()
+            || label.len() > MAX_RESULT_MEMBER_UNION_ARM_LABEL_BYTES
+            || previous_position.is_some_and(|previous| previous >= *position)
+        {
+            return Err(Error::InvalidStoredValue(
+                "settled result member occurrence is not canonical",
+            ));
+        }
+        previous_position = Some(*position);
+        let position = u32::try_from(*position).map_err(|_| {
+            Error::InvalidStoredValue("settled result member occurrence position is too large")
+        })?;
+        union_arms.push(Value::Record(
+            ResultMemberUnionArmStorageRecord::encode(&layout.union_arm, position, label.clone())?
+                .record()
+                .clone(),
+        ));
+    }
+    Ok(ResultMemberOccurrenceStorageRecord::encode(
+        &layout.occurrence,
+        *occurrence.root_source().uuid(),
+        occurrence
+            .joined_sources()
+            .iter()
+            .map(|source| Value::Uuid(*source.uuid()))
+            .collect(),
+        union_arms,
+    )?
+    .record()
+    .clone())
+}
+
+fn result_member_occurrence_from_storage_record(
+    record: OwnedRecord,
+) -> Result<OutputOccurrenceId, Error> {
+    let layout = result_member_storage_layout();
+    if record.descriptor() != &layout.occurrence {
+        return Err(Error::InvalidStoredValue(
+            "settled result member occurrence descriptor is invalid",
+        ));
+    }
+    let record = ResultMemberOccurrenceStorageRecord::new(record);
+    let joined = record.joined()?;
+    if joined.len() > MAX_RESULT_MEMBER_JOINED_SOURCES {
+        return Err(Error::InvalidStoredValue(
+            "settled result member has too many joined sources",
+        ));
+    }
+    let joined = joined
+        .into_iter()
+        .map(|value| match value {
+            Value::Uuid(value) => Ok(ObjectId::from_uuid(value)),
+            _ => Err(Error::InvalidStoredValue(
+                "settled result member joined source must be a UUID",
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut previous_position = None;
+    let mut union_arms = Vec::new();
+    for value in record.union_arms()? {
+        let Value::Record(arm) = value else {
+            return Err(Error::InvalidStoredValue(
+                "settled result member union arm must be a record",
+            ));
+        };
+        if arm.descriptor() != &layout.union_arm {
+            return Err(Error::InvalidStoredValue(
+                "settled result member union arm descriptor is invalid",
+            ));
+        }
+        let arm = ResultMemberUnionArmStorageRecord::new(arm);
+        let position = usize::try_from(arm.position()?).map_err(|_| {
+            Error::InvalidStoredValue("settled result member occurrence position is too large")
+        })?;
+        let label = arm.label()?;
+        if position >= joined.len()
+            || label.is_empty()
+            || label.len() > MAX_RESULT_MEMBER_UNION_ARM_LABEL_BYTES
+            || previous_position.is_some_and(|previous| previous >= position)
+        {
+            return Err(Error::InvalidStoredValue(
+                "settled result member occurrence is not canonical",
+            ));
+        }
+        previous_position = Some(position);
+        union_arms.push((position, label));
+    }
+    let root = ObjectId::from_uuid(record.root()?);
+    if union_arms.is_empty() {
+        Ok(OutputOccurrenceId::new(root, joined))
+    } else {
+        OutputOccurrenceId::with_union_arms(root, joined, union_arms).ok_or(
+            Error::InvalidStoredValue("settled result member occurrence is invalid"),
+        )
+    }
+}
+
+fn result_row_source_storage_value(
+    source: &ResultRowSource,
+    depth: usize,
+) -> Result<records::EnumValue, Error> {
+    if depth > MAX_RESULT_ROW_SOURCE_DEPTH {
+        return Err(Error::InvalidStoredValue(
+            "settled result member source is too deeply nested",
+        ));
+    }
+    let layout = result_member_storage_layout();
+    let (tag, record) = match source {
+        ResultRowSource::Current => {
+            let payload = result_member_case_descriptor(
+                &layout.source_schema,
+                RESULT_ROW_SOURCE_CURRENT_TAG,
+            )?;
+            (
+                RESULT_ROW_SOURCE_CURRENT_TAG,
+                OwnedRecord::new(payload.create(&[])?, payload),
+            )
+        }
+        ResultRowSource::Snapshot { snapshot } => {
+            let tag = RESULT_ROW_SOURCE_SNAPSHOT_TAG;
+            let payload = result_member_case_descriptor(&layout.source_schema, tag)?;
+            let record = ResultMemberSnapshotSourceStorageRecord::encode(
+                &payload,
+                snapshot.owner.0,
+                snapshot.global_base.0,
+                snapshot.local_base.0,
+                snapshot.dots.iter().copied().map(tx_id_value).collect(),
+            )?
+            .record()
+            .clone();
+            (tag, record)
+        }
+        ResultRowSource::HistoryCut { global_time } => {
+            let tag = RESULT_ROW_SOURCE_HISTORY_CUT_TAG;
+            let payload = result_member_case_descriptor(&layout.source_schema, tag)?;
+            let record =
+                ResultMemberHistoryCutSourceStorageRecord::encode(&payload, global_time.0)?
+                    .record()
+                    .clone();
+            (tag, record)
+        }
+        ResultRowSource::Merge { inputs } => {
+            let tag = RESULT_ROW_SOURCE_MERGE_TAG;
+            let payload = result_member_case_descriptor(&layout.source_schema, tag)?;
+            let inputs = inputs
+                .iter()
+                .map(|input| result_row_source_storage_bytes(input, depth + 1).map(Value::Bytes))
+                .collect::<Result<Vec<_>, _>>()?;
+            let record = ResultMemberMergeSourceStorageRecord::encode(&payload, inputs)?
+                .record()
+                .clone();
+            (tag, record)
+        }
+        ResultRowSource::LensProjection {
+            schema_version,
+            base,
+        } => {
+            let tag = RESULT_ROW_SOURCE_LENS_PROJECTION_TAG;
+            let payload = result_member_case_descriptor(&layout.source_schema, tag)?;
+            let record = ResultMemberLensSourceStorageRecord::encode(
+                &payload,
+                schema_version.0,
+                result_row_source_storage_bytes(base, depth + 1)?,
+            )?
+            .record()
+            .clone();
+            (tag, record)
+        }
+        ResultRowSource::Overlay { tx, base } => {
+            let tag = RESULT_ROW_SOURCE_OVERLAY_TAG;
+            let payload = result_member_case_descriptor(&layout.source_schema, tag)?;
+            let record = ResultMemberOverlaySourceStorageRecord::encode(
+                &payload,
+                tx_id_value(*tx),
+                result_row_source_storage_bytes(base, depth + 1)?,
+            )?
+            .record()
+            .clone();
+            (tag, record)
+        }
+    };
+    Ok(records::EnumValue::new(tag, record))
+}
+
+fn result_row_source_storage_bytes(
+    source: &ResultRowSource,
+    depth: usize,
+) -> Result<Vec<u8>, Error> {
+    let layout = result_member_storage_layout();
+    encode_result_member_envelope(
+        RESULT_ROW_SOURCE_STORAGE_MAGIC,
+        RESULT_ROW_SOURCE_STORAGE_VERSION,
+        layout.source_envelope,
+        result_row_source_storage_value(source, depth)?,
+    )
+}
+
+fn result_row_source_from_storage_value(
+    value: records::EnumValue,
+    depth: usize,
+) -> Result<ResultRowSource, Error> {
+    if depth > MAX_RESULT_ROW_SOURCE_DEPTH {
+        return Err(Error::InvalidStoredValue(
+            "settled result member source is too deeply nested",
+        ));
+    }
+    let tag = value.tag();
+    let record = value.into_record();
+    match tag {
+        RESULT_ROW_SOURCE_CURRENT_TAG => {
+            record.to_values()?;
+            if !record.descriptor().fields().is_empty() {
+                return Err(Error::InvalidStoredValue(
+                    "settled result member current source is invalid",
+                ));
+            }
+            Ok(ResultRowSource::Current)
+        }
+        RESULT_ROW_SOURCE_SNAPSHOT_TAG => {
+            let record = ResultMemberSnapshotSourceStorageRecord::new(record);
+            let dots = record.dots()?;
+            Ok(ResultRowSource::Snapshot {
+                snapshot: SnapshotRef {
+                    owner: NodeUuid(record.owner()?),
+                    global_base: GlobalTime(record.global_base()?),
+                    local_base: TxTime(record.local_base()?),
+                    dots: dots
+                        .into_iter()
+                        .map(tx_id_from_value)
+                        .collect::<Result<Vec<_>, _>>()?,
+                },
+            })
+        }
+        RESULT_ROW_SOURCE_HISTORY_CUT_TAG => {
+            let record = ResultMemberHistoryCutSourceStorageRecord::new(record);
+            Ok(ResultRowSource::HistoryCut {
+                global_time: GlobalTime(record.global_time()?),
+            })
+        }
+        RESULT_ROW_SOURCE_MERGE_TAG => {
+            let record = ResultMemberMergeSourceStorageRecord::new(record);
+            let inputs = record.inputs()?;
+            Ok(ResultRowSource::Merge {
+                inputs: inputs
+                    .into_iter()
+                    .map(|input| match input {
+                        Value::Bytes(bytes) => {
+                            result_row_source_from_storage_bytes(&bytes, depth + 1)
+                        }
+                        _ => Err(Error::InvalidStoredValue(
+                            "settled result member merge input must be bytes",
+                        )),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            })
+        }
+        RESULT_ROW_SOURCE_LENS_PROJECTION_TAG => {
+            let record = ResultMemberLensSourceStorageRecord::new(record);
+            Ok(ResultRowSource::LensProjection {
+                schema_version: SchemaVersionId(record.schema_version()?),
+                base: Box::new(result_row_source_from_storage_bytes(
+                    &record.base()?,
+                    depth + 1,
+                )?),
+            })
+        }
+        RESULT_ROW_SOURCE_OVERLAY_TAG => {
+            let record = ResultMemberOverlaySourceStorageRecord::new(record);
+            Ok(ResultRowSource::Overlay {
+                tx: tx_id_from_value(record.tx()?)?,
+                base: Box::new(result_row_source_from_storage_bytes(
+                    &record.base()?,
+                    depth + 1,
+                )?),
+            })
+        }
+        _ => Err(Error::InvalidStoredValue(
+            "settled result member source tag is invalid",
+        )),
+    }
+}
+
+fn result_row_source_from_storage_bytes(
+    encoded: &[u8],
+    depth: usize,
+) -> Result<ResultRowSource, Error> {
+    let layout = result_member_storage_layout();
+    let value = decode_result_member_envelope(
+        encoded,
+        RESULT_ROW_SOURCE_STORAGE_MAGIC,
+        RESULT_ROW_SOURCE_STORAGE_VERSION,
+        layout.source_envelope,
+        "settled result member source encoding is invalid",
+    )?;
+    let source = result_row_source_from_storage_value(value, depth)?;
+    if result_row_source_storage_bytes(&source, depth)? != encoded {
+        return Err(Error::InvalidStoredValue(
+            "settled result member source encoding is not canonical",
+        ));
+    }
+    Ok(source)
+}
+
+fn result_member_real_row_storage_record(row: &RealRowMemberEntry) -> Result<OwnedRecord, Error> {
+    let layout = result_member_storage_layout();
+    Ok(ResultMemberRealRowStorageRecord::encode(
+        &layout.real_row,
+        row.table.as_str().to_owned(),
+        row.row_uuid.0,
+        row.occurrence_id
+            .as_ref()
+            .map(result_member_occurrence_storage_record)
+            .transpose()?,
+        row.content_tx.map(tx_id_value),
+        row.layer,
+        row.deletion_tx.map(tx_id_value),
+        result_row_source_storage_value(&row.source, 0)?,
+        row.read_view.id,
+        row.schema_version.map(|value| value.0),
+        row.branch_or_prefix.clone(),
+        row.row_digest.clone(),
+        row.batch.map(tx_id_value),
+        row.settle_position.map(|value| value.0),
+    )?
+    .record()
+    .clone())
+}
+
+fn result_member_real_row_from_storage_record(
+    record: OwnedRecord,
+) -> Result<RealRowMemberEntry, Error> {
+    let layout = result_member_storage_layout();
+    if record.descriptor() != &layout.real_row {
+        return Err(Error::InvalidStoredValue(
+            "settled real-row member descriptor is invalid",
+        ));
+    }
+    let record = ResultMemberRealRowStorageRecord::new(record);
+    Ok(RealRowMemberEntry {
+        table: record.table()?.into(),
+        row_uuid: RowUuid(record.row_uuid()?),
+        occurrence_id: record
+            .occurrence_id()?
+            .map(result_member_occurrence_from_storage_record)
+            .transpose()?,
+        content_tx: record.content_tx()?.map(tx_id_from_value).transpose()?,
+        layer: record.layer()?,
+        deletion_tx: record.deletion_tx()?.map(tx_id_from_value).transpose()?,
+        source: result_row_source_from_storage_value(record.source()?, 0)?,
+        read_view: ReadViewKey {
+            id: record.read_view()?,
+        },
+        schema_version: record.schema_version()?.map(SchemaVersionId),
+        branch_or_prefix: record.branch_or_prefix()?,
+        row_digest: record.row_digest()?,
+        batch: record.batch()?.map(tx_id_from_value).transpose()?,
+        settle_position: record.settle_position()?.map(GlobalTime),
+    })
+}
+
+fn result_member_storage_value(member: &ResultMemberEntry) -> Result<records::EnumValue, Error> {
+    let layout = result_member_storage_layout();
+    let (tag, record) = match member {
+        ResultMemberEntry::Row(row) => (
+            RESULT_MEMBER_ROW_TAG,
+            result_member_real_row_storage_record(row)?,
+        ),
+        ResultMemberEntry::Synthetic {
+            table,
+            row,
+            replacement,
+        } => {
+            let tag = RESULT_MEMBER_SYNTHETIC_TAG;
+            let payload = result_member_case_descriptor(&layout.member_schema, tag)?;
+            let record = ResultMemberSyntheticStorageRecord::encode(
+                &payload,
+                table.clone(),
+                row.clone(),
+                replacement.encoded_record().to_vec(),
+            )?
+            .record()
+            .clone();
+            (tag, record)
+        }
+        ResultMemberEntry::PathTuple {
+            path,
+            source_table,
+            source_row,
+            target_table,
+            target_row,
+            edge_id,
+            revision,
+        } => {
+            let tag = RESULT_MEMBER_PATH_TUPLE_TAG;
+            let payload = result_member_case_descriptor(&layout.member_schema, tag)?;
+            let record = ResultMemberPathTupleStorageRecord::encode(
+                &payload,
+                path.clone(),
+                source_table.as_str().to_owned(),
+                source_row.0,
+                target_table.as_str().to_owned(),
+                target_row.0,
+                edge_id.clone(),
+                revision.clone(),
+            )?
+            .record()
+            .clone();
+            (tag, record)
+        }
+        ResultMemberEntry::TypedRow {
+            row,
+            occurrence_key,
+        } => {
+            let tag = RESULT_MEMBER_TYPED_ROW_TAG;
+            let payload = result_member_case_descriptor(&layout.member_schema, tag)?;
+            let record = ResultMemberTypedRowStorageRecord::encode(
+                &payload,
+                result_member_real_row_storage_record(row)?,
+                result_member_occurrence_storage_record(occurrence_key.as_occurrence())?,
+            )?
+            .record()
+            .clone();
+            (tag, record)
+        }
+    };
+    Ok(records::EnumValue::new(tag, record))
+}
+
+pub(super) fn result_member_storage_bytes(member: &ResultMemberEntry) -> Result<Vec<u8>, Error> {
+    let layout = result_member_storage_layout();
+    encode_result_member_envelope(
+        RESULT_MEMBER_STORAGE_MAGIC,
+        RESULT_MEMBER_STORAGE_VERSION,
+        layout.member_envelope,
+        result_member_storage_value(member)?,
+    )
+}
+
+pub(super) fn result_member_from_storage_bytes(encoded: &[u8]) -> Result<ResultMemberEntry, Error> {
+    let layout = result_member_storage_layout();
+    let value = decode_result_member_envelope(
+        encoded,
+        RESULT_MEMBER_STORAGE_MAGIC,
+        RESULT_MEMBER_STORAGE_VERSION,
+        layout.member_envelope,
+        "settled result member encoding is invalid",
+    )?;
+    let tag = value.tag();
+    let record = value.into_record();
+    let member = match tag {
+        RESULT_MEMBER_ROW_TAG => {
+            ResultMemberEntry::Row(result_member_real_row_from_storage_record(record)?)
+        }
+        RESULT_MEMBER_SYNTHETIC_TAG => {
+            let record = ResultMemberSyntheticStorageRecord::new(record);
+            ResultMemberEntry::Synthetic {
+                table: record.table()?,
+                row: record.row()?,
+                replacement: SyntheticReplacementToken::from_encoded_record(record.replacement()?),
+            }
+        }
+        RESULT_MEMBER_PATH_TUPLE_TAG => {
+            let record = ResultMemberPathTupleStorageRecord::new(record);
+            ResultMemberEntry::PathTuple {
+                path: record.path()?,
+                source_table: record.source_table()?.into(),
+                source_row: RowUuid(record.source_row()?),
+                target_table: record.target_table()?.into(),
+                target_row: RowUuid(record.target_row()?),
+                edge_id: record.edge_id()?,
+                revision: record.revision()?,
+            }
+        }
+        RESULT_MEMBER_TYPED_ROW_TAG => {
+            let record = ResultMemberTypedRowStorageRecord::new(record);
+            ResultMemberEntry::TypedRow {
+                row: result_member_real_row_from_storage_record(record.row()?)?,
+                occurrence_key: ResultKey::from_occurrence(
+                    result_member_occurrence_from_storage_record(record.occurrence_key()?)?,
+                ),
+            }
+        }
+        _ => {
+            return Err(Error::InvalidStoredValue(
+                "settled result member tag is invalid",
+            ));
+        }
+    };
+    if result_member_storage_bytes(&member)? != encoded {
+        return Err(Error::InvalidStoredValue(
+            "settled result member encoding is not canonical",
+        ));
+    }
+    Ok(member)
+}
+
+struct ProgramFactStorageReader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> ProgramFactStorageReader<'a> {
+    fn take(&mut self, len: usize) -> Result<&'a [u8], Error> {
+        let end = self
+            .offset
+            .checked_add(len)
+            .filter(|end| *end <= self.bytes.len())
+            .ok_or(Error::InvalidStoredValue(
+                "settled program fact encoding is truncated",
+            ))?;
+        let value = &self.bytes[self.offset..end];
+        self.offset = end;
+        Ok(value)
+    }
+    fn u8(&mut self) -> Result<u8, Error> {
+        Ok(self.take(1)?[0])
+    }
+    fn u32(&mut self) -> Result<u32, Error> {
+        Ok(u32::from_le_bytes(
+            self.take(4)?.try_into().expect("length checked"),
+        ))
+    }
+    fn u64(&mut self) -> Result<u64, Error> {
+        Ok(u64::from_le_bytes(
+            self.take(8)?.try_into().expect("length checked"),
+        ))
+    }
+    fn bytes(&mut self) -> Result<Vec<u8>, Error> {
+        let len = usize::try_from(self.u32()?)
+            .map_err(|_| Error::InvalidStoredValue("settled program fact length is too large"))?;
+        if len > MAX_PROGRAM_FACT_STORAGE_BYTES {
+            return Err(Error::InvalidStoredValue(
+                "settled program fact field is too large",
+            ));
+        }
+        Ok(self.take(len)?.to_vec())
+    }
+    fn string(&mut self) -> Result<String, Error> {
+        String::from_utf8(self.bytes()?)
+            .map_err(|_| Error::InvalidStoredValue("settled program fact string is invalid UTF-8"))
+    }
+    fn uuid(&mut self) -> Result<uuid::Uuid, Error> {
+        Ok(uuid::Uuid::from_bytes(
+            self.take(16)?.try_into().expect("length checked"),
+        ))
+    }
+    fn finish(&self) -> Result<(), Error> {
+        if self.offset == self.bytes.len() {
+            Ok(())
+        } else {
+            Err(Error::InvalidStoredValue(
+                "settled program fact encoding has trailing bytes",
+            ))
+        }
+    }
+}
+
+fn program_fact_put_u32(bytes: &mut Vec<u8>, value: usize) -> Result<(), Error> {
+    bytes.extend_from_slice(
+        &u32::try_from(value)
+            .map_err(|_| Error::InvalidStoredValue("settled program fact length is too large"))?
+            .to_le_bytes(),
+    );
+    Ok(())
+}
+fn program_fact_put_bytes(bytes: &mut Vec<u8>, value: &[u8]) -> Result<(), Error> {
+    if value.len() > MAX_PROGRAM_FACT_STORAGE_BYTES {
+        return Err(Error::InvalidStoredValue(
+            "settled program fact field is too large",
+        ));
+    }
+    program_fact_put_u32(bytes, value.len())?;
+    bytes.extend_from_slice(value);
+    Ok(())
+}
+fn program_fact_put_string(bytes: &mut Vec<u8>, value: &str) -> Result<(), Error> {
+    program_fact_put_bytes(bytes, value.as_bytes())
+}
+fn program_fact_put_uuid(bytes: &mut Vec<u8>, value: uuid::Uuid) {
+    bytes.extend_from_slice(value.as_bytes());
+}
+fn program_fact_put_tx(bytes: &mut Vec<u8>, value: TxId) {
+    bytes.extend_from_slice(&value.time.0.to_le_bytes());
+    program_fact_put_uuid(bytes, value.node.0);
+}
+fn program_fact_tx(reader: &mut ProgramFactStorageReader<'_>) -> Result<TxId, Error> {
+    Ok(TxId::new(TxTime(reader.u64()?), NodeUuid(reader.uuid()?)))
+}
+fn program_fact_put_option<T>(
+    bytes: &mut Vec<u8>,
+    value: &Option<T>,
+    put: impl FnOnce(&mut Vec<u8>, &T) -> Result<(), Error>,
+) -> Result<(), Error> {
+    match value {
+        None => bytes.push(0),
+        Some(value) => {
+            bytes.push(1);
+            put(bytes, value)?;
+        }
+    };
+    Ok(())
+}
+fn program_fact_option<T>(
+    reader: &mut ProgramFactStorageReader<'_>,
+    get: impl FnOnce(&mut ProgramFactStorageReader<'_>) -> Result<T, Error>,
+) -> Result<Option<T>, Error> {
+    match reader.u8()? {
+        0 => Ok(None),
+        1 => get(reader).map(Some),
+        _ => Err(Error::InvalidStoredValue(
+            "settled program fact option tag is invalid",
+        )),
+    }
+}
+
+fn program_fact_put_member(
+    bytes: &mut Vec<u8>,
+    member: &ResultMemberEntry,
+    depth: usize,
+) -> Result<(), Error> {
+    if depth > MAX_PROGRAM_FACT_NESTING {
+        return Err(Error::InvalidStoredValue(
+            "settled program fact is too deeply nested",
+        ));
+    }
+    program_fact_put_bytes(bytes, &result_member_storage_bytes(member)?)
+}
+fn program_fact_member(
+    reader: &mut ProgramFactStorageReader<'_>,
+    depth: usize,
+) -> Result<ResultMemberEntry, Error> {
+    if depth > MAX_PROGRAM_FACT_NESTING {
+        return Err(Error::InvalidStoredValue(
+            "settled program fact is too deeply nested",
+        ));
+    }
+    result_member_from_storage_bytes(&reader.bytes()?)
+}
+fn program_fact_put_version(bytes: &mut Vec<u8>, value: &RowVersionRefEntry) -> Result<(), Error> {
+    program_fact_put_tx(bytes, value.tx);
+    program_fact_put_option(bytes, &value.schema_version, |b, v| {
+        program_fact_put_uuid(b, v.0);
+        Ok(())
+    })?;
+    bytes.push(match value.layer {
+        ResultRowLayer::Content => 0,
+        ResultRowLayer::Deletion => 1,
+        ResultRowLayer::ContentOrDeletion => 2,
+    });
+    program_fact_put_option(bytes, &value.batch, |b, v| {
+        program_fact_put_tx(b, *v);
+        Ok(())
+    })?;
+    program_fact_put_option(bytes, &value.branch_or_prefix, |b, v: &Vec<u8>| {
+        program_fact_put_bytes(b, v)
+    })?;
+    program_fact_put_option(bytes, &value.row_digest, |b, v: &Vec<u8>| {
+        program_fact_put_bytes(b, v)
+    })
+}
+fn program_fact_version(
+    reader: &mut ProgramFactStorageReader<'_>,
+) -> Result<RowVersionRefEntry, Error> {
+    let tx = program_fact_tx(reader)?;
+    let schema_version = program_fact_option(reader, |r| Ok(SchemaVersionId(r.uuid()?)))?;
+    let layer = match reader.u8()? {
+        0 => ResultRowLayer::Content,
+        1 => ResultRowLayer::Deletion,
+        2 => ResultRowLayer::ContentOrDeletion,
+        _ => {
+            return Err(Error::InvalidStoredValue(
+                "settled program fact row layer tag is invalid",
+            ));
+        }
+    };
+    let batch = program_fact_option(reader, program_fact_tx)?;
+    let branch_or_prefix = program_fact_option(reader, |r| r.bytes())?;
+    let row_digest = program_fact_option(reader, |r| r.bytes())?;
+    Ok(RowVersionRefEntry {
+        tx,
+        schema_version,
+        layer,
+        batch,
+        branch_or_prefix,
+        row_digest,
+    })
+}
+fn program_fact_tier(reader: &mut ProgramFactStorageReader<'_>) -> Result<DurabilityTier, Error> {
+    match reader.u8()? {
+        0 => Ok(DurabilityTier::None),
+        1 => Ok(DurabilityTier::Local),
+        2 => Ok(DurabilityTier::Edge),
+        3 => Ok(DurabilityTier::Global),
+        _ => Err(Error::InvalidStoredValue(
+            "settled program fact durability tag is invalid",
+        )),
+    }
+}
+fn program_fact_put_tier(bytes: &mut Vec<u8>, value: DurabilityTier) {
+    bytes.push(match value {
+        DurabilityTier::None => 0,
+        DurabilityTier::Local => 1,
+        DurabilityTier::Edge => 2,
+        DurabilityTier::Global => 3,
+    });
+}
+
+/// Explicit versioned canonical codec for settled-program-fact durable keys.
+/// Nested result-member values use their own Groove-record codec; no serde
+/// representation of `ProgramFactEntry` is durable.
+pub(super) fn program_fact_storage_bytes(fact: &ProgramFactEntry) -> Result<Vec<u8>, Error> {
+    let mut bytes = Vec::with_capacity(128);
+    bytes.extend_from_slice(PROGRAM_FACT_STORAGE_MAGIC);
+    bytes.push(PROGRAM_FACT_STORAGE_VERSION);
+    match fact {
+        ProgramFactEntry::ResultPayload(v) => {
+            bytes.push(0);
+            program_fact_put_member(&mut bytes, &v.member, 1)?;
+            program_fact_put_bytes(&mut bytes, &v.descriptor)?;
+            program_fact_put_bytes(&mut bytes, &v.record)?;
+        }
+        ProgramFactEntry::RelationEdge(v) => {
+            bytes.push(1);
+            program_fact_put_string(&mut bytes, &v.path)?;
+            program_fact_put_string(&mut bytes, v.source_table.as_str())?;
+            program_fact_put_uuid(&mut bytes, v.source_row.0);
+            program_fact_put_string(&mut bytes, v.target_table.as_str())?;
+            program_fact_put_uuid(&mut bytes, v.target_row.0);
+            program_fact_put_option(&mut bytes, &v.kind, |b, v| {
+                b.push(match v {
+                    RelationEdgeKind::Include => 0,
+                    RelationEdgeKind::Join => 1,
+                    RelationEdgeKind::Relation => 2,
+                    RelationEdgeKind::Recursive => 3,
+                    RelationEdgeKind::Policy => 4,
+                });
+                Ok(())
+            })?;
+            program_fact_put_option(&mut bytes, &v.source_version, program_fact_put_version)?;
+            program_fact_put_option(&mut bytes, &v.target_version, program_fact_put_version)?;
+            program_fact_put_option(&mut bytes, &v.depth, |b, v| {
+                b.extend_from_slice(&v.to_le_bytes());
+                Ok(())
+            })?;
+            program_fact_put_option(&mut bytes, &v.edge_id, |b, v| program_fact_put_bytes(b, v))?;
+            program_fact_put_option(&mut bytes, &v.branch, |b, v| program_fact_put_bytes(b, v))?;
+            program_fact_put_option(&mut bytes, &v.role, |b, v| {
+                b.push(match v {
+                    RelationEdgeRole::Intermediate => 0,
+                    RelationEdgeRole::Frontier => 1,
+                    RelationEdgeRole::Terminal => 2,
+                });
+                Ok(())
+            })?;
+            program_fact_put_option(&mut bytes, &v.order, |b, v| program_fact_put_bytes(b, v))?;
+            program_fact_put_option(&mut bytes, &v.hole_state, |b, v| {
+                b.push(match v {
+                    PathHoleState::Matched => 0,
+                    PathHoleState::Hole => 1,
+                });
+                Ok(())
+            })?;
+        }
+        ProgramFactEntry::PathCorrelationCoverage(v) => {
+            bytes.push(2);
+            program_fact_put_string(&mut bytes, &v.path)?;
+            program_fact_put_string(&mut bytes, v.source_table.as_str())?;
+            program_fact_put_uuid(&mut bytes, v.source_row.0);
+            program_fact_put_bytes(&mut bytes, &v.correlation_key)?;
+            bytes.push(u8::from(v.complete));
+        }
+        ProgramFactEntry::SourceCoverage(v) => {
+            bytes.push(3);
+            program_fact_put_string(&mut bytes, &v.source)?;
+            program_fact_put_string(&mut bytes, v.table.as_str())?;
+            program_fact_put_option(&mut bytes, &v.row, |b, v| {
+                program_fact_put_uuid(b, v.0);
+                Ok(())
+            })?;
+            program_fact_put_bytes(&mut bytes, &v.coverage)?;
+        }
+        ProgramFactEntry::ReadFrontierSettled(v) => {
+            bytes.push(4);
+            program_fact_put_string(&mut bytes, &v.scope)?;
+            program_fact_put_tier(&mut bytes, v.tier);
+            program_fact_put_option(&mut bytes, &v.stream, |b, v| program_fact_put_string(b, v))?;
+            program_fact_put_bytes(&mut bytes, &v.frontier)?;
+        }
+        ProgramFactEntry::CompleteTxPayloadCoverage(v) => {
+            bytes.push(5);
+            program_fact_put_tx(&mut bytes, v.tx);
+            program_fact_put_tier(&mut bytes, v.tier);
+            program_fact_put_bytes(&mut bytes, &v.payload_digest)?;
+        }
+        ProgramFactEntry::ViewCompleteExclusiveCoverage(v) => {
+            bytes.push(6);
+            program_fact_put_tx(&mut bytes, v.tx);
+            program_fact_put_string(&mut bytes, &v.scope)?;
+            program_fact_put_option(&mut bytes, &v.result, |b, v| {
+                program_fact_put_member(b, v, 1)
+            })?;
+            program_fact_put_tier(&mut bytes, v.tier);
+            program_fact_put_bytes(&mut bytes, &v.covered_members_digest)?;
+        }
+        ProgramFactEntry::PolicyDecision(v) => {
+            bytes.push(7);
+            program_fact_put_bytes(&mut bytes, &v.decision)?;
+            match &v.outcome {
+                PolicyDecisionOutcomeEntry::Allowed => bytes.push(0),
+                PolicyDecisionOutcomeEntry::Denied => bytes.push(1),
+                PolicyDecisionOutcomeEntry::IndeterminateRequiresInput { input } => {
+                    bytes.push(2);
+                    program_fact_put_string(&mut bytes, input)?
+                }
+                PolicyDecisionOutcomeEntry::RequiresCoverage { scope, frontier } => {
+                    bytes.push(3);
+                    program_fact_put_string(&mut bytes, scope)?;
+                    program_fact_put_bytes(&mut bytes, frontier)?
+                }
+            };
+            program_fact_put_option(&mut bytes, &v.reason, |b, v| program_fact_put_string(b, v))?;
+        }
+        ProgramFactEntry::VersionWitness(v) => {
+            bytes.push(8);
+            program_fact_put_string(&mut bytes, &v.role)?;
+            program_fact_put_version(&mut bytes, &v.version)?;
+            program_fact_put_option(&mut bytes, &v.member, |b, v| {
+                program_fact_put_member(b, v, 1)
+            })?;
+        }
+        ProgramFactEntry::PolicyWitness(v) => {
+            bytes.push(9);
+            program_fact_put_member(&mut bytes, &v.protected, 1)?;
+            program_fact_put_string(&mut bytes, &v.policy_path)?;
+            program_fact_put_version(&mut bytes, &v.witness)?;
+            program_fact_put_option(&mut bytes, &v.edge_kind, |b, v| {
+                b.push(match v {
+                    RelationEdgeKind::Include => 0,
+                    RelationEdgeKind::Join => 1,
+                    RelationEdgeKind::Relation => 2,
+                    RelationEdgeKind::Recursive => 3,
+                    RelationEdgeKind::Policy => 4,
+                });
+                Ok(())
+            })?;
+        }
+        ProgramFactEntry::ContributingMembers(v) => {
+            bytes.push(10);
+            program_fact_put_member(&mut bytes, &v.result, 1)?;
+            program_fact_put_member(&mut bytes, &v.contributor, 1)?;
+            program_fact_put_option(&mut bytes, &v.batch, |b, v| {
+                program_fact_put_tx(b, *v);
+                Ok(())
+            })?;
+            program_fact_put_option(&mut bytes, &v.role, |b, v| program_fact_put_string(b, v))?;
+        }
+        ProgramFactEntry::PredicateRead(v) => {
+            bytes.push(11);
+            bytes.push(match v.role {
+                PredicateOutputSetRoleEntry::Base => 0,
+                PredicateOutputSetRoleEntry::Now => 1,
+            });
+            program_fact_put_uuid(&mut bytes, v.shape_id.0);
+            program_fact_put_uuid(&mut bytes, v.binding_id.0);
+            program_fact_put_bytes(&mut bytes, &v.predicate)?;
+            program_fact_put_bytes(&mut bytes, &v.frontier)?;
+        }
+        ProgramFactEntry::PredicateOutputSet(v) => {
+            bytes.push(12);
+            bytes.push(match v.role {
+                PredicateOutputSetRoleEntry::Base => 0,
+                PredicateOutputSetRoleEntry::Now => 1,
+            });
+            program_fact_put_string(&mut bytes, v.table.as_str())?;
+            program_fact_put_uuid(&mut bytes, v.row.0);
+            program_fact_put_version(&mut bytes, &v.version)?;
+            program_fact_put_uuid(&mut bytes, v.shape_id.0);
+            program_fact_put_uuid(&mut bytes, v.binding_id.0);
+        }
+        ProgramFactEntry::PointRead(v) => {
+            bytes.push(13);
+            bytes.push(u8::from(v.present));
+            program_fact_put_string(&mut bytes, v.table.as_str())?;
+            program_fact_put_uuid(&mut bytes, v.row.0);
+            program_fact_put_option(&mut bytes, &v.version, program_fact_put_version)?;
+            program_fact_put_uuid(&mut bytes, v.shape_id.0);
+            program_fact_put_uuid(&mut bytes, v.binding_id.0);
+        }
+    }
+    if bytes.len() > MAX_PROGRAM_FACT_STORAGE_BYTES {
+        return Err(Error::InvalidStoredValue(
+            "settled program fact is too large",
+        ));
+    }
+    Ok(bytes)
+}
+
+pub(super) fn program_fact_from_storage_bytes(encoded: &[u8]) -> Result<ProgramFactEntry, Error> {
+    if encoded.len() > MAX_PROGRAM_FACT_STORAGE_BYTES
+        || encoded.len() < 6
+        || &encoded[..4] != PROGRAM_FACT_STORAGE_MAGIC
+        || encoded[4] != PROGRAM_FACT_STORAGE_VERSION
+    {
+        return Err(Error::InvalidStoredValue(
+            "settled program fact encoding is invalid or unsupported",
+        ));
+    }
+    let mut r = ProgramFactStorageReader {
+        bytes: encoded,
+        offset: 5,
+    };
+    let tag = r.u8()?;
+    let role =
+        |r: &mut ProgramFactStorageReader<'_>| -> Result<PredicateOutputSetRoleEntry, Error> {
+            match r.u8()? {
+                0 => Ok(PredicateOutputSetRoleEntry::Base),
+                1 => Ok(PredicateOutputSetRoleEntry::Now),
+                _ => Err(Error::InvalidStoredValue(
+                    "settled program fact role tag is invalid",
+                )),
+            }
+        };
+    let kind = |r: &mut ProgramFactStorageReader<'_>| -> Result<RelationEdgeKind, Error> {
+        match r.u8()? {
+            0 => Ok(RelationEdgeKind::Include),
+            1 => Ok(RelationEdgeKind::Join),
+            2 => Ok(RelationEdgeKind::Relation),
+            3 => Ok(RelationEdgeKind::Recursive),
+            4 => Ok(RelationEdgeKind::Policy),
+            _ => Err(Error::InvalidStoredValue(
+                "settled program fact edge kind tag is invalid",
+            )),
+        }
+    };
+    let edge_role = |r: &mut ProgramFactStorageReader<'_>| -> Result<RelationEdgeRole, Error> {
+        match r.u8()? {
+            0 => Ok(RelationEdgeRole::Intermediate),
+            1 => Ok(RelationEdgeRole::Frontier),
+            2 => Ok(RelationEdgeRole::Terminal),
+            _ => Err(Error::InvalidStoredValue(
+                "settled program fact edge role tag is invalid",
+            )),
+        }
+    };
+    let fact = match tag {
+        0 => ProgramFactEntry::ResultPayload(ResultMemberPayloadEntry {
+            member: program_fact_member(&mut r, 1)?,
+            descriptor: r.bytes()?,
+            record: r.bytes()?,
+        }),
+        1 => ProgramFactEntry::RelationEdge(RelationEdgeEntry {
+            path: r.string()?,
+            source_table: r.string()?.into(),
+            source_row: RowUuid(r.uuid()?),
+            target_table: r.string()?.into(),
+            target_row: RowUuid(r.uuid()?),
+            kind: program_fact_option(&mut r, kind)?,
+            source_version: program_fact_option(&mut r, program_fact_version)?,
+            target_version: program_fact_option(&mut r, program_fact_version)?,
+            depth: program_fact_option(&mut r, |r| r.u32())?,
+            edge_id: program_fact_option(&mut r, |r| r.bytes())?,
+            branch: program_fact_option(&mut r, |r| r.bytes())?,
+            role: program_fact_option(&mut r, edge_role)?,
+            order: program_fact_option(&mut r, |r| r.bytes())?,
+            hole_state: program_fact_option(&mut r, |r| match r.u8()? {
+                0 => Ok(PathHoleState::Matched),
+                1 => Ok(PathHoleState::Hole),
+                _ => Err(Error::InvalidStoredValue(
+                    "settled program fact hole tag is invalid",
+                )),
+            })?,
+        }),
+        2 => ProgramFactEntry::PathCorrelationCoverage(PathCorrelationCoverageEntry {
+            path: r.string()?,
+            source_table: r.string()?.into(),
+            source_row: RowUuid(r.uuid()?),
+            correlation_key: r.bytes()?,
+            complete: match r.u8()? {
+                0 => false,
+                1 => true,
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "settled program fact boolean is invalid",
+                    ));
+                }
+            },
+        }),
+        3 => ProgramFactEntry::SourceCoverage(SourceCoverageEntry {
+            source: r.string()?,
+            table: r.string()?.into(),
+            row: program_fact_option(&mut r, |r| Ok(RowUuid(r.uuid()?)))?,
+            coverage: r.bytes()?,
+        }),
+        4 => ProgramFactEntry::ReadFrontierSettled(ReadFrontierSettledEntry {
+            scope: r.string()?,
+            tier: program_fact_tier(&mut r)?,
+            stream: program_fact_option(&mut r, |r| r.string())?,
+            frontier: r.bytes()?,
+        }),
+        5 => ProgramFactEntry::CompleteTxPayloadCoverage(CompleteTxPayloadCoverageEntry {
+            tx: program_fact_tx(&mut r)?,
+            tier: program_fact_tier(&mut r)?,
+            payload_digest: r.bytes()?,
+        }),
+        6 => ProgramFactEntry::ViewCompleteExclusiveCoverage(ViewCompleteExclusiveCoverageEntry {
+            tx: program_fact_tx(&mut r)?,
+            scope: r.string()?,
+            result: program_fact_option(&mut r, |r| program_fact_member(r, 1))?,
+            tier: program_fact_tier(&mut r)?,
+            covered_members_digest: r.bytes()?,
+        }),
+        7 => {
+            let decision = r.bytes()?;
+            let outcome = match r.u8()? {
+                0 => PolicyDecisionOutcomeEntry::Allowed,
+                1 => PolicyDecisionOutcomeEntry::Denied,
+                2 => PolicyDecisionOutcomeEntry::IndeterminateRequiresInput { input: r.string()? },
+                3 => PolicyDecisionOutcomeEntry::RequiresCoverage {
+                    scope: r.string()?,
+                    frontier: r.bytes()?,
+                },
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "settled program fact policy outcome tag is invalid",
+                    ));
+                }
+            };
+            ProgramFactEntry::PolicyDecision(PolicyDecisionEntry {
+                decision,
+                outcome,
+                reason: program_fact_option(&mut r, |r| r.string())?,
+            })
+        }
+        8 => ProgramFactEntry::VersionWitness(VersionWitnessEntry {
+            role: r.string()?,
+            version: program_fact_version(&mut r)?,
+            member: program_fact_option(&mut r, |r| program_fact_member(r, 1))?,
+        }),
+        9 => ProgramFactEntry::PolicyWitness(PolicyWitnessEntry {
+            protected: program_fact_member(&mut r, 1)?,
+            policy_path: r.string()?,
+            witness: program_fact_version(&mut r)?,
+            edge_kind: program_fact_option(&mut r, kind)?,
+        }),
+        10 => ProgramFactEntry::ContributingMembers(ContributingMembersEntry {
+            result: program_fact_member(&mut r, 1)?,
+            contributor: program_fact_member(&mut r, 1)?,
+            batch: program_fact_option(&mut r, program_fact_tx)?,
+            role: program_fact_option(&mut r, |r| r.string())?,
+        }),
+        11 => ProgramFactEntry::PredicateRead(PredicateReadEntry {
+            role: role(&mut r)?,
+            shape_id: ShapeId(r.uuid()?),
+            binding_id: BindingId(r.uuid()?),
+            predicate: r.bytes()?,
+            frontier: r.bytes()?,
+        }),
+        12 => ProgramFactEntry::PredicateOutputSet(PredicateOutputSetEntry {
+            role: role(&mut r)?,
+            table: r.string()?.into(),
+            row: RowUuid(r.uuid()?),
+            version: program_fact_version(&mut r)?,
+            shape_id: ShapeId(r.uuid()?),
+            binding_id: BindingId(r.uuid()?),
+        }),
+        13 => ProgramFactEntry::PointRead(PointReadEntry {
+            present: match r.u8()? {
+                0 => false,
+                1 => true,
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "settled program fact boolean is invalid",
+                    ));
+                }
+            },
+            table: r.string()?.into(),
+            row: RowUuid(r.uuid()?),
+            version: program_fact_option(&mut r, program_fact_version)?,
+            shape_id: ShapeId(r.uuid()?),
+            binding_id: BindingId(r.uuid()?),
+        }),
+        _ => {
+            return Err(Error::InvalidStoredValue(
+                "settled program fact tag is invalid",
+            ));
+        }
+    };
+    r.finish()?;
+    if program_fact_storage_bytes(&fact)? != encoded {
+        return Err(Error::InvalidStoredValue(
+            "settled program fact encoding is not canonical",
+        ));
+    }
+    Ok(fact)
+}
+
 pub(super) fn transaction_values(
     node_alias: NodeAlias,
     tx: &Transaction,
     fate: Fate,
     global_time: Option<GlobalTime>,
     durability: DurabilityTier,
+    contribution_merge: Value,
 ) -> Vec<Value> {
-    transaction_values_with_cardinality_scope(node_alias, tx, fate, global_time, durability, false)
+    transaction_values_with_cardinality_scope(
+        node_alias,
+        tx,
+        fate,
+        global_time,
+        durability,
+        false,
+        contribution_merge,
+    )
 }
 
 pub(super) fn transaction_values_with_cardinality_scope(
@@ -1024,6 +3391,7 @@ pub(super) fn transaction_values_with_cardinality_scope(
     global_time: Option<GlobalTime>,
     durability: DurabilityTier,
     view_scoped_cardinality: bool,
+    contribution_merge: Value,
 ) -> Vec<Value> {
     vec![
         Value::U64(tx.tx_id.time.0),
@@ -1043,11 +3411,7 @@ pub(super) fn transaction_values_with_cardinality_scope(
                 .clone()
                 .map(|value| Box::new(Value::String(value))),
         ),
-        Value::Nullable(tx.contribution_merge.as_ref().map(|provenance| {
-            Box::new(Value::Bytes(
-                postcard::to_allocvec(provenance).expect("contribution provenance is serializable"),
-            ))
-        })),
+        contribution_merge,
         Value::Nullable(
             tx.permission_subject
                 .map(|id| Box::new(Value::String(id.canonical().to_owned()))),
@@ -1104,13 +3468,20 @@ pub(super) fn pending_edge_values(
     child: TxId,
     parent_alias: NodeAlias,
     parent: TxId,
-) -> Vec<Value> {
-    vec![
+    coordinate: &ParentCoordinate,
+) -> Result<Vec<Value>, Error> {
+    Ok(vec![
         Value::U64(child.time.0),
         Value::U64(child_alias.0),
         Value::U64(parent.time.0),
         Value::U64(parent_alias.0),
-    ]
+        Value::U64(coordinate.physical_table_id.0),
+        Value::Bytes(coordinate.branch_key.try_canonical_bytes().map_err(|_| {
+            Error::InvalidMergeableCommit("pending parent coordinate branch key is not canonical")
+        })?),
+        Value::Uuid(coordinate.row_uuid.0),
+        Value::Bytes(version_layer_string(coordinate.layer).into_bytes()),
+    ])
 }
 
 pub(super) fn pending_edge_primary_key(
@@ -1118,13 +3489,47 @@ pub(super) fn pending_edge_primary_key(
     child: TxId,
     parent_alias: NodeAlias,
     parent: TxId,
-) -> PrimaryKeyValue {
-    PrimaryKeyValue::Composite(vec![
+    coordinate: &ParentCoordinate,
+) -> Result<PrimaryKeyValue, Error> {
+    Ok(PrimaryKeyValue::Composite(vec![
         PrimaryKeyValue::U64(child.time.0),
         PrimaryKeyValue::U64(child_alias.0),
         PrimaryKeyValue::U64(parent.time.0),
         PrimaryKeyValue::U64(parent_alias.0),
-    ])
+        PrimaryKeyValue::U64(coordinate.physical_table_id.0),
+        PrimaryKeyValue::Bytes(coordinate.branch_key.try_canonical_bytes().map_err(|_| {
+            Error::InvalidStoredValue("pending parent coordinate branch key is invalid")
+        })?),
+        PrimaryKeyValue::Uuid(coordinate.row_uuid.0),
+        PrimaryKeyValue::Bytes(version_layer_string(coordinate.layer).into_bytes()),
+    ]))
+}
+
+pub(super) fn pending_edge_coordinate_from_record(
+    record: BorrowedRecord<'_>,
+) -> Result<ParentCoordinate, Error> {
+    let layer = match record.get_bytes(PendingEdgeRowRecord::FIELD_LAYER_IDX)? {
+        b"content" => VersionLayer::Content,
+        b"deletion" => VersionLayer::Deletion,
+        _ => {
+            return Err(Error::InvalidStoredValue(
+                "pending parent coordinate layer is invalid",
+            ));
+        }
+    };
+    Ok(ParentCoordinate {
+        physical_table_id: PhysicalTableId(
+            record.get_u64(PendingEdgeRowRecord::FIELD_PHYSICAL_TABLE_ID_IDX)?,
+        ),
+        branch_key: BranchKey::from_canonical_bytes(
+            record.get_bytes(PendingEdgeRowRecord::FIELD_BRANCH_KEY_IDX)?,
+        )
+        .map_err(|_| {
+            Error::InvalidStoredValue("pending parent coordinate branch key is invalid")
+        })?,
+        row_uuid: RowUuid(record.get_uuid(PendingEdgeRowRecord::FIELD_ROW_UUID_IDX)?),
+        layer,
+    })
 }
 
 pub(super) fn rejected_version_values(
@@ -1281,6 +3686,49 @@ pub(super) fn canonical_versions(mut versions: Vec<VersionRecord>) -> Vec<Versio
     versions
 }
 
+pub(super) fn authored_column_ids_from_value(
+    value: Value,
+) -> Result<BTreeSet<PhysicalColumnId>, Error> {
+    // This is an intentional pre-v1 storage cut. Do not accept the former
+    // JSON-in-Bytes representation: durable rows have one schema-declared,
+    // canonical native representation.
+    let Value::Array(values) = value else {
+        return Err(Error::InvalidStoredValue(
+            "authored columns must be an array of physical column ids",
+        ));
+    };
+    let mut ids = BTreeSet::new();
+    let mut previous = None;
+    for value in values {
+        let Value::U64(id) = value else {
+            return Err(Error::InvalidStoredValue(
+                "authored columns must contain physical column ids",
+            ));
+        };
+        if id == 0 {
+            return Err(Error::InvalidStoredValue(
+                "authored physical column ids must be nonzero",
+            ));
+        }
+        if previous.is_some_and(|previous| previous >= id) {
+            return Err(Error::InvalidStoredValue(
+                "authored physical column ids must be strictly increasing",
+            ));
+        }
+        previous = Some(id);
+        ids.insert(PhysicalColumnId(id));
+    }
+    Ok(ids)
+}
+
+fn authored_column_ids_value(columns: Option<&BTreeSet<PhysicalColumnId>>) -> Value {
+    Value::Nullable(columns.map(|columns| {
+        Box::new(Value::Array(
+            columns.iter().map(|column| Value::U64(column.0)).collect(),
+        ))
+    }))
+}
+
 pub(super) fn history_values_from_parts(
     table: &TableSchema,
     version: &VersionRowParts,
@@ -1308,23 +3756,14 @@ pub(super) fn history_values_from_parts(
             version.cells.get(&column.name).cloned().map(Box::new),
         ));
     }
-    values.push(Value::Nullable(
-        version
-            .authored_columns
-            .as_ref()
-            .map(|columns| {
-                serde_json::to_vec(columns)
-                    .expect("serializing an ordered set of strings cannot fail")
-            })
-            .map(Box::new)
-            .map(|bytes| Box::new(Value::Bytes(*bytes))),
-    ));
+    values.push(authored_column_ids_value(version.authored_columns.as_ref()));
     Ok(values)
 }
 
 fn history_values_from_wire(
     table: &TableSchema,
     version: &VersionRecord,
+    authored_columns: Option<BTreeSet<PhysicalColumnId>>,
     tx_node_alias: NodeAlias,
     schema_version_alias: SchemaVersionAlias,
     tx_time: TxTime,
@@ -1363,12 +3802,7 @@ fn history_values_from_wire(
         }
         values.push(Value::Nullable(value.map(Box::new)));
     }
-    values.push(Value::Nullable(
-        version
-            .authored_columns()
-            .map(|columns| serde_json::to_vec(columns).expect("serializing authored columns"))
-            .map(|bytes| Box::new(Value::Bytes(bytes))),
-    ));
+    values.push(authored_column_ids_value(authored_columns.as_ref()));
     Ok(values)
 }
 
@@ -1505,11 +3939,8 @@ pub(super) fn global_current_values(
             nullable_value(version.record.borrowed().get_idx(field)?)?.map(Box::new),
         ));
     }
-    values.push(Value::Nullable(
-        version
-            .authored_columns(table)?
-            .map(|columns| serde_json::to_vec(&columns).expect("serializing authored columns"))
-            .map(|bytes| Box::new(Value::Bytes(bytes))),
+    values.push(authored_column_ids_value(
+        version.authored_column_ids()?.as_ref(),
     ));
     Ok(values)
 }
@@ -2085,9 +4516,63 @@ pub(super) fn expect_uuid(value: Value, field: &'static str) -> Result<uuid::Uui
 
 pub(super) fn tx_ids_from_value(value: Value) -> Result<Vec<TxId>, Error> {
     match value {
-        Value::Array(values) => values.into_iter().map(tx_id_from_value).collect(),
+        Value::Array(values) => {
+            let parents = values
+                .into_iter()
+                .map(tx_id_from_value)
+                .collect::<Result<Vec<_>, _>>()?;
+            validate_parent_tx_ids(&parents)?;
+            Ok(parents)
+        }
         _ => Err(Error::InvalidStoredValue("parents must be array")),
     }
+}
+
+pub(super) fn validate_parent_tx_ids(parents: &[TxId]) -> Result<(), Error> {
+    if parents.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(Error::InvalidMergeableCommit(
+            "row version parents must be sorted and unique",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_canonical_version_parts(
+    branch_key: &BranchKey,
+    parents: &[TxId],
+) -> Result<(), Error> {
+    branch_key
+        .try_canonical_bytes()
+        .map_err(|_| Error::InvalidMergeableCommit("row version branch key is not canonical"))?;
+    validate_parent_tx_ids(parents)
+}
+
+pub(super) fn merge_heads_value(heads: &BTreeSet<TxId>) -> Value {
+    Value::Array(heads.iter().copied().map(tx_id_value).collect())
+}
+
+pub(super) fn merge_heads_from_value(value: Value) -> Result<BTreeSet<TxId>, Error> {
+    // This is an intentional pre-v1 storage cut. Do not accept the former
+    // postcard-in-Bytes representation: this derived table has one
+    // schema-declared representation and can be rebuilt from history.
+    let Value::Array(values) = value else {
+        return Err(Error::InvalidStoredValue(
+            "merge heads must be an array of transaction ids",
+        ));
+    };
+    let mut heads = BTreeSet::new();
+    let mut previous = None;
+    for value in values {
+        let head = tx_id_from_value(value)?;
+        if previous.is_some_and(|previous| previous >= head) {
+            return Err(Error::InvalidStoredValue(
+                "merge heads must be strictly increasing",
+            ));
+        }
+        previous = Some(head);
+        heads.insert(head);
+    }
+    Ok(heads)
 }
 
 pub(super) fn tx_id_from_value(value: Value) -> Result<TxId, Error> {
@@ -2204,5 +4689,427 @@ pub(super) fn version_layer_string(layer: VersionLayer) -> String {
     match layer {
         VersionLayer::Content => "content".to_owned(),
         VersionLayer::Deletion => "deletion".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod result_member_storage_codec_tests {
+    use super::*;
+
+    fn tx(time: u64, node: u8) -> TxId {
+        TxId::new(TxTime(time), NodeUuid::from_bytes([node; 16]))
+    }
+
+    fn ordinary_row() -> RealRowMemberEntry {
+        let mut row = RealRowMemberEntry::current_content((
+            "todos".to_owned().into(),
+            RowUuid::from_bytes([0x11; 16]),
+            tx(7, 0x22),
+        ))
+        .with_settle_position(Some(GlobalTime(9)));
+        row.read_view = ReadViewKey {
+            id: uuid::Uuid::from_bytes([0x19; 16]),
+        };
+        row
+    }
+
+    fn fixture_member() -> ResultMemberEntry {
+        ResultMemberEntry::Synthetic {
+            table: "facts".to_owned(),
+            row: vec![0x11],
+            replacement: SyntheticReplacementToken::from_encoded_record(vec![0x12]),
+        }
+    }
+
+    fn fixture_version() -> RowVersionRefEntry {
+        RowVersionRefEntry {
+            tx: tx(31, 0x33),
+            schema_version: Some(SchemaVersionId::from_bytes([0x34; 16])),
+            layer: ResultRowLayer::ContentOrDeletion,
+            batch: Some(tx(32, 0x35)),
+            branch_or_prefix: Some(vec![0x36]),
+            row_digest: Some(vec![0x37]),
+        }
+    }
+
+    // This is necessarily an internal test: raw durable keys are an engine
+    // boundary.  It locks every permanent fact/source/value tag to a fixture;
+    // restart behavior exercises those keys through the public node lifecycle.
+    #[test]
+    fn program_fact_storage_codec_has_permanent_tags_and_exact_fixtures() {
+        let member = fixture_member();
+        let version = fixture_version();
+        let facts = vec![
+            ProgramFactEntry::ResultPayload(ResultMemberPayloadEntry {
+                member: member.clone(),
+                descriptor: vec![1],
+                record: vec![2],
+            }),
+            ProgramFactEntry::RelationEdge(RelationEdgeEntry {
+                path: "p".into(),
+                source_table: "a".to_owned().into(),
+                source_row: RowUuid::from_bytes([3; 16]),
+                target_table: "b".to_owned().into(),
+                target_row: RowUuid::from_bytes([4; 16]),
+                kind: Some(RelationEdgeKind::Policy),
+                source_version: Some(version.clone()),
+                target_version: Some(version.clone()),
+                depth: Some(5),
+                edge_id: Some(vec![6]),
+                branch: Some(vec![7]),
+                role: Some(RelationEdgeRole::Terminal),
+                order: Some(vec![8]),
+                hole_state: Some(PathHoleState::Hole),
+            }),
+            ProgramFactEntry::PathCorrelationCoverage(PathCorrelationCoverageEntry {
+                path: "p".into(),
+                source_table: "a".to_owned().into(),
+                source_row: RowUuid::from_bytes([9; 16]),
+                correlation_key: vec![10],
+                complete: true,
+            }),
+            ProgramFactEntry::SourceCoverage(SourceCoverageEntry {
+                source: "s".into(),
+                table: "a".to_owned().into(),
+                row: Some(RowUuid::from_bytes([11; 16])),
+                coverage: vec![12],
+            }),
+            ProgramFactEntry::ReadFrontierSettled(ReadFrontierSettledEntry {
+                scope: "s".into(),
+                tier: DurabilityTier::Global,
+                stream: Some("t".into()),
+                frontier: vec![13],
+            }),
+            ProgramFactEntry::CompleteTxPayloadCoverage(CompleteTxPayloadCoverageEntry {
+                tx: tx(33, 14),
+                tier: DurabilityTier::Edge,
+                payload_digest: vec![15],
+            }),
+            ProgramFactEntry::ViewCompleteExclusiveCoverage(ViewCompleteExclusiveCoverageEntry {
+                tx: tx(34, 16),
+                scope: "s".into(),
+                result: Some(member.clone()),
+                tier: DurabilityTier::Local,
+                covered_members_digest: vec![17],
+            }),
+            ProgramFactEntry::PolicyDecision(PolicyDecisionEntry {
+                decision: vec![18],
+                outcome: PolicyDecisionOutcomeEntry::RequiresCoverage {
+                    scope: "s".into(),
+                    frontier: vec![19],
+                },
+                reason: Some("r".into()),
+            }),
+            ProgramFactEntry::VersionWitness(VersionWitnessEntry {
+                role: "r".into(),
+                version: version.clone(),
+                member: Some(member.clone()),
+            }),
+            ProgramFactEntry::PolicyWitness(PolicyWitnessEntry {
+                protected: member.clone(),
+                policy_path: "p".into(),
+                witness: version.clone(),
+                edge_kind: Some(RelationEdgeKind::Recursive),
+            }),
+            ProgramFactEntry::ContributingMembers(ContributingMembersEntry {
+                result: member.clone(),
+                contributor: member.clone(),
+                batch: Some(tx(35, 20)),
+                role: Some("r".into()),
+            }),
+            ProgramFactEntry::PredicateRead(PredicateReadEntry {
+                role: PredicateOutputSetRoleEntry::Now,
+                shape_id: ShapeId(uuid::Uuid::from_bytes([21; 16])),
+                binding_id: BindingId(uuid::Uuid::from_bytes([22; 16])),
+                predicate: vec![23],
+                frontier: vec![24],
+            }),
+            ProgramFactEntry::PredicateOutputSet(PredicateOutputSetEntry {
+                role: PredicateOutputSetRoleEntry::Base,
+                table: "a".to_owned().into(),
+                row: RowUuid::from_bytes([25; 16]),
+                version: version.clone(),
+                shape_id: ShapeId(uuid::Uuid::from_bytes([26; 16])),
+                binding_id: BindingId(uuid::Uuid::from_bytes([27; 16])),
+            }),
+            ProgramFactEntry::PointRead(PointReadEntry {
+                present: true,
+                table: "a".to_owned().into(),
+                row: RowUuid::from_bytes([28; 16]),
+                version: Some(version),
+                shape_id: ShapeId(uuid::Uuid::from_bytes([29; 16])),
+                binding_id: BindingId(uuid::Uuid::from_bytes([30; 16])),
+            }),
+        ];
+        let encoded = facts
+            .iter()
+            .map(|fact| program_fact_storage_bytes(fact).unwrap())
+            .collect::<Vec<_>>();
+        for (tag, (fact, bytes)) in facts.iter().zip(&encoded).enumerate() {
+            assert_eq!(&bytes[..4], PROGRAM_FACT_STORAGE_MAGIC);
+            assert_eq!(bytes[4], PROGRAM_FACT_STORAGE_VERSION);
+            assert_eq!(usize::from(bytes[5]), tag);
+            assert_eq!(program_fact_from_storage_bytes(bytes).unwrap(), *fact);
+        }
+        assert_eq!(
+            encoded
+                .iter()
+                .map(|bytes| blake3::hash(bytes).to_hex().to_string())
+                .collect::<Vec<_>>(),
+            [
+                "eaabad908cc2f66ff0a302dccfd8aacbf619a6b78098a4e22037c4c4befa90e2",
+                "fd88aa550022a04bc6775b5e997d15b8f4e75f9cb26f62b7cb6d9d9aac6c4212",
+                "cc05966da0ecfb3ddbbeb437c3f0466c9757211b4718e005ed98109d0d9e24b0",
+                "090b02e75b1028e4b732d2a1eb56da8d22cac67015ca4b223c3914b62338c753",
+                "85f2bab0a0f503066f669f9482b887b177e3a68cc1e6f7af69343d31795135c2",
+                "cbdf98c6f111efb8b9ffaae39160150cddd7f4ca4b10d7e211e8d23d59104584",
+                "2713fd886f4afc0760389640c4328ef461da65b9371335a71132b7f27dcd01c1",
+                "2d1ae58110da67261105647b85d16b2cd0eed8e0ad602a2393a49dcd20e1e307",
+                "83a2dca82e25b669343ca731c45e9c7872681bd83b7c81180a5feceeb0e69b9e",
+                "eb80886502cf23a0fb3d8bf41679188e5a5f763214c444fa1c44eddc703dd48a",
+                "1a49359e08e4eb9956a55ba4523f511ba0a2b4d3e4edeec6c6399f42a369ba45",
+                "cd7baa59c57b431ceb32580a74541393890e69af5c6587d4a16dfacf4ff10482",
+                "ceca71b78f841cf8ca9387c9cc0c616fd043a5ce5698fb7098c9c5d6a148ad8e",
+                "73b584cebffb48801a204b0c1e5d57e7b1dddc1c40180ffa5497d8981ad5d1b1",
+            ]
+        );
+    }
+
+    #[test]
+    fn program_fact_storage_codec_rejects_legacy_unknown_trailing_and_noncanonical_bytes() {
+        let encoded =
+            program_fact_storage_bytes(&ProgramFactEntry::PolicyDecision(PolicyDecisionEntry {
+                decision: vec![],
+                outcome: PolicyDecisionOutcomeEntry::Allowed,
+                reason: None,
+            }))
+            .unwrap();
+        assert!(
+            program_fact_from_storage_bytes(
+                &postcard::to_allocvec(&ProgramFactEntry::PolicyDecision(PolicyDecisionEntry {
+                    decision: vec![],
+                    outcome: PolicyDecisionOutcomeEntry::Allowed,
+                    reason: None
+                }))
+                .unwrap()
+            )
+            .is_err()
+        );
+        let mut wrong_version = encoded.clone();
+        wrong_version[4] += 1;
+        assert!(program_fact_from_storage_bytes(&wrong_version).is_err());
+        let mut unknown = encoded.clone();
+        unknown[5] = 255;
+        assert!(program_fact_from_storage_bytes(&unknown).is_err());
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        assert!(program_fact_from_storage_bytes(&trailing).is_err());
+        let mut noncanonical =
+            program_fact_storage_bytes(&ProgramFactEntry::PointRead(PointReadEntry {
+                present: true,
+                table: "facts".to_owned().into(),
+                row: RowUuid::from_bytes([0; 16]),
+                version: None,
+                shape_id: ShapeId(uuid::Uuid::nil()),
+                binding_id: BindingId(uuid::Uuid::nil()),
+            }))
+            .unwrap();
+        noncanonical[6] = 2;
+        assert!(program_fact_from_storage_bytes(&noncanonical).is_err());
+    }
+
+    // These stay internal because exact physical key bytes and malformed
+    // engine-owned payloads cannot be observed through Jazz's public API.
+    // The ordinary persisted/reopen behavior is covered by the known-state
+    // restart tests.
+    #[test]
+    fn result_member_storage_codec_has_permanent_tags_and_golden_bytes() {
+        let root = ObjectId::from_uuid(uuid::Uuid::from_bytes([0x31; 16]));
+        let joined = ObjectId::from_uuid(uuid::Uuid::from_bytes([0x32; 16]));
+        let typed_key =
+            ResultKey::from_union_occurrence(root, [joined], [(0, "direct".to_owned())]).unwrap();
+        let members = [
+            ResultMemberEntry::Row(ordinary_row()),
+            ResultMemberEntry::Synthetic {
+                table: "totals".to_owned(),
+                row: vec![1, 2],
+                replacement: SyntheticReplacementToken::from_encoded_record(vec![3, 4]),
+            },
+            ResultMemberEntry::PathTuple {
+                path: "owner".to_owned(),
+                source_table: "todos".to_owned().into(),
+                source_row: RowUuid::from_bytes([0x41; 16]),
+                target_table: "users".to_owned().into(),
+                target_row: RowUuid::from_bytes([0x42; 16]),
+                edge_id: Some(vec![5, 6]),
+                revision: vec![7, 8],
+            },
+            ResultMemberEntry::TypedRow {
+                row: ordinary_row(),
+                occurrence_key: typed_key,
+            },
+        ];
+        let encoded = members
+            .iter()
+            .map(|member| result_member_storage_bytes(member).unwrap())
+            .collect::<Vec<_>>();
+        for (expected_tag, (member, encoded)) in members.iter().zip(&encoded).enumerate() {
+            assert_eq!(&encoded[..4], RESULT_MEMBER_STORAGE_MAGIC);
+            assert_eq!(encoded[4], RESULT_MEMBER_STORAGE_VERSION);
+            assert_eq!(
+                decode_result_member_envelope(
+                    encoded,
+                    RESULT_MEMBER_STORAGE_MAGIC,
+                    RESULT_MEMBER_STORAGE_VERSION,
+                    result_member_storage_layout().member_envelope,
+                    "test member",
+                )
+                .unwrap()
+                .tag(),
+                u32::try_from(expected_tag).unwrap()
+            );
+            assert_eq!(result_member_from_storage_bytes(encoded).unwrap(), *member);
+        }
+        assert_eq!(
+            encoded
+                .iter()
+                .map(|bytes| blake3::hash(bytes).to_hex().to_string())
+                .collect::<Vec<_>>(),
+            [
+                "0e1d541c58211d93e04f7f53eff924c639ce7640989384430236be315222072b",
+                "ea51cdbe5077c2236ddb62f192dc50a5e9b9e5306d4d1ec8a5935b73cc016de6",
+                "67b1049e3ab2654cac0076a2894e16f97667cee5bd9defa51f86dd4dd890fb49",
+                "64d9489980bb8678717621a02b7518748e019a2a55104cbb9a0614498d7ed01f",
+            ]
+        );
+    }
+
+    #[test]
+    fn result_member_storage_codec_round_trips_all_source_variants_and_rejects_v0() {
+        let source = ResultRowSource::Merge {
+            inputs: vec![
+                ResultRowSource::Current,
+                ResultRowSource::Snapshot {
+                    snapshot: SnapshotRef {
+                        owner: NodeUuid::from_bytes([0x51; 16]),
+                        global_base: GlobalTime(11),
+                        local_base: TxTime(12),
+                        dots: vec![tx(13, 0x52), tx(14, 0x53)],
+                    },
+                },
+                ResultRowSource::HistoryCut {
+                    global_time: GlobalTime(15),
+                },
+                ResultRowSource::LensProjection {
+                    schema_version: SchemaVersionId::from_bytes([0x54; 16]),
+                    base: Box::new(ResultRowSource::Current),
+                },
+                ResultRowSource::Overlay {
+                    tx: tx(16, 0x55),
+                    base: Box::new(ResultRowSource::Current),
+                },
+            ],
+        };
+        let mut row = ordinary_row();
+        row.source = source;
+        row.layer = ResultRowLayer::ContentOrDeletion;
+        row.deletion_tx = Some(tx(17, 0x56));
+        row.schema_version = Some(SchemaVersionId::from_bytes([0x57; 16]));
+        row.branch_or_prefix = Some(vec![1, 2, 3]);
+        row.row_digest = Some(vec![4, 5, 6]);
+        row.batch = Some(tx(18, 0x58));
+        let member = ResultMemberEntry::Row(row);
+        let encoded = result_member_storage_bytes(&member).unwrap();
+        assert_eq!(result_member_from_storage_bytes(&encoded).unwrap(), member);
+
+        let mut wrong_version = encoded.clone();
+        wrong_version[4] = RESULT_MEMBER_STORAGE_VERSION + 1;
+        assert!(result_member_from_storage_bytes(&wrong_version).is_err());
+        assert!(result_member_from_storage_bytes(&[0, 1, 2, 3]).is_err());
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert!(result_member_from_storage_bytes(&trailing).is_err());
+    }
+
+    #[test]
+    fn result_row_source_storage_codec_has_permanent_tags_and_golden_bytes() {
+        let sources = [
+            (0_u32, ResultRowSource::Current),
+            (
+                1_u32,
+                ResultRowSource::Snapshot {
+                    snapshot: SnapshotRef {
+                        owner: NodeUuid::from_bytes([0x61; 16]),
+                        global_base: GlobalTime(21),
+                        local_base: TxTime(22),
+                        dots: vec![tx(23, 0x62)],
+                    },
+                },
+            ),
+            (
+                2_u32,
+                ResultRowSource::HistoryCut {
+                    global_time: GlobalTime(24),
+                },
+            ),
+            (
+                3_u32,
+                ResultRowSource::Merge {
+                    inputs: vec![ResultRowSource::Current],
+                },
+            ),
+            (
+                4_u32,
+                ResultRowSource::LensProjection {
+                    schema_version: SchemaVersionId::from_bytes([0x63; 16]),
+                    base: Box::new(ResultRowSource::Current),
+                },
+            ),
+            (
+                5_u32,
+                ResultRowSource::Overlay {
+                    tx: tx(25, 0x64),
+                    base: Box::new(ResultRowSource::Current),
+                },
+            ),
+        ];
+        let encoded = sources
+            .iter()
+            .map(|(_, source)| result_row_source_storage_bytes(source, 0).unwrap())
+            .collect::<Vec<_>>();
+        for ((expected_tag, source), encoded) in sources.iter().zip(&encoded) {
+            assert_eq!(&encoded[..4], RESULT_ROW_SOURCE_STORAGE_MAGIC);
+            assert_eq!(encoded[4], RESULT_ROW_SOURCE_STORAGE_VERSION);
+            assert_eq!(
+                decode_result_member_envelope(
+                    encoded,
+                    RESULT_ROW_SOURCE_STORAGE_MAGIC,
+                    RESULT_ROW_SOURCE_STORAGE_VERSION,
+                    result_member_storage_layout().source_envelope,
+                    "test source",
+                )
+                .unwrap()
+                .tag(),
+                *expected_tag
+            );
+            assert_eq!(
+                result_row_source_from_storage_bytes(encoded, 0).unwrap(),
+                *source
+            );
+        }
+        assert_eq!(
+            encoded
+                .iter()
+                .map(|bytes| blake3::hash(bytes).to_hex().to_string())
+                .collect::<Vec<_>>(),
+            [
+                "c3615f39f699ab18ffe7c4290ae9b4f8e030c68c51b79745fa3b53960d4f74d7",
+                "b2cd10a88cae72fb030756f53633cd03ecd1a5d624275d4c4aeb5dc6dcc5c425",
+                "7d10fac91f6c2a8a9a340ed5e79cec1fc09552790ab7d60dad91a5e01dc369c7",
+                "26c05aa7fabf7867acfbdfc37e3c27dc9c4fc64b2757a11b42800fe32fe1e54f",
+                "fa9739e0513bdf9accde5901ddcf1a9a7beabd2f61a491cc2c627dfd30ad739d",
+                "d07b06377c81e1dadee1cc2a148bf988f2fbdbcab79931016683e91a60eb252d",
+            ],
+        );
     }
 }

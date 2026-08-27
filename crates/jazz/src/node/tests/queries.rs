@@ -106,6 +106,32 @@ fn query_rows_by_uuid_for_identity(
     (rows, node.query_engine_read_metrics().clone())
 }
 
+#[test]
+fn history_complete_query_ignores_stale_settled_result_membership() {
+    let schema = access_path_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
+    let (_core_dir, mut core) = open_history_complete_node_with_schema(node(9), schema);
+    let (first, second, _owner) = seed_access_path_docs(&mut writer, &mut core);
+    let query = Query::from("docs");
+    let shape = query.validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let binding_view = crate::protocol::BindingViewKey::new(
+        shape.shape_id(),
+        binding.binding_id(),
+        crate::protocol::ReadViewKey::default(),
+    );
+    core.query
+        .settled_result_sets
+        .insert(binding_view, BTreeSet::new());
+
+    assert!(core.is_history_complete());
+    assert_eq!(
+        query_rows_by_uuid(&mut core, query, DurabilityTier::Global).0,
+        vec![first, second],
+        "a history-complete authority must read canonical physical state rather than its downstream settled-result cache"
+    );
+}
+
 /// This is intentionally an internal receipt for the physical access-path
 /// counter. Row visibility itself is asserted through the normal query API;
 /// no public surface exposes whether the source was an index or full scan.
@@ -1095,7 +1121,7 @@ fn groove_current_rows_match_oracle_for_seeded_m1_commits() {
 fn local_current_from_ahead_index_matches_history_argmax_for_seeded_commits() {
     for seed in 0..16_u64 {
         let (_temp_dir, mut node) = open_node();
-        let mut parents = BTreeMap::<RowUuid, TxId>::new();
+        let mut parents = BTreeMap::<RowUuid, (Option<TxId>, Option<TxId>)>::new();
         let mut pending = Vec::<(RowUuid, TxId)>::new();
         let mut rng = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15);
 
@@ -1103,8 +1129,14 @@ fn local_current_from_ahead_index_matches_history_argmax_for_seeded_commits() {
             rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
             let row_uuid = row(((rng >> 56) as u8 % 6) + 1);
             let action = (rng >> 48) % 9;
+            let deletion = matches!(action, 0..=3);
             let mut commit = MergeableCommit::new("todos", row_uuid, 1_000 + step);
-            if let Some(parent) = parents.get(&row_uuid).copied() {
+            if let Some(parent) = parents
+                .get(&row_uuid)
+                .and_then(|(content, deletion_parent)| {
+                    if deletion { *deletion_parent } else { *content }
+                })
+            {
                 commit = commit.parents(vec![parent]);
             }
             commit = match action {
@@ -1114,7 +1146,12 @@ fn local_current_from_ahead_index_matches_history_argmax_for_seeded_commits() {
             };
 
             let tx_id = node.commit_mergeable_settled(commit).unwrap();
-            parents.insert(row_uuid, tx_id);
+            let entry = parents.entry(row_uuid).or_default();
+            if deletion {
+                entry.1 = Some(tx_id);
+            } else {
+                entry.0 = Some(tx_id);
+            }
             match action {
                 0 | 4 | 5 => {
                     let global_time = node.allocate_global_time_for_test();

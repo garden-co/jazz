@@ -1,7 +1,120 @@
+fn contribution_gset_element_descriptor(
+    column_type: &records::ValueType,
+) -> Result<records::RecordDescriptor, Error> {
+    let records::ValueType::Array(element_type) = column_type else {
+        return Err(Error::InvalidMergeableCommit(
+            "g-set contribution column must be an array",
+        ));
+    };
+    Ok(records::RecordDescriptor::new([(
+        "element",
+        element_type.as_ref().clone(),
+    )]))
+}
+
+fn encode_contribution_gset_identity(
+    column_type: &records::ValueType,
+    element: &Value,
+) -> Result<Vec<u8>, Error> {
+    Ok(contribution_gset_element_descriptor(column_type)?
+        .create(std::slice::from_ref(element))?)
+}
+
+fn decode_contribution_gset_identity(
+    column_type: &records::ValueType,
+    identity: &[u8],
+) -> Result<Value, Error> {
+    let descriptor = contribution_gset_element_descriptor(column_type)?;
+    let malformed = || {
+        Error::InvalidStoredValue("g-set contribution operation identity must be canonical")
+    };
+    let element = records::BorrowedRecord::new(identity, &descriptor)
+        .get_idx(0)
+        .map_err(|_| malformed())?;
+    if descriptor
+        .create(std::slice::from_ref(&element))
+        .map_err(|_| malformed())?
+        != identity
+    {
+        return Err(malformed());
+    }
+    Ok(element)
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// The one durable admission boundary for contribution provenance. Every
+    /// path that can persist a transaction must pass through this before it
+    /// can allocate aliases, stage large values, or mutate a batch.
+    pub(super) fn admit_contribution_merge_for_storage(
+        &self,
+        tx: &Transaction,
+    ) -> Result<Value, Error> {
+        self.validate_contribution_merge_operation_identities(tx)?;
+        self.contribution_merge_storage_value(tx.contribution_merge.as_ref())
+    }
+
+    /// Validate strategy-defined operation coordinates before a transaction can
+    /// become durable.  Operation identity is not opaque provenance: its
+    /// canonical spelling is part of merge deduplication, so a received or
+    /// recovered record must be checked against the admitted schema rather
+    /// than deferred until a later contribution calculation happens to read
+    /// it.
+    pub(super) fn validate_contribution_merge_operation_identities(
+        &self,
+        tx: &Transaction,
+    ) -> Result<(), Error> {
+        let Some(provenance) = &tx.contribution_merge else {
+            return Ok(());
+        };
+        provenance.validate().map_err(|_| {
+            Error::InvalidStoredValue("transaction contribution provenance must be canonical")
+        })?;
+        let schema_version = self.catalogue.current_write_schema.schema;
+        let coordinates = provenance.substitutions.iter().flat_map(|substitution| {
+            std::iter::once(&substitution.target)
+                .chain(substitution.sources.iter().map(|source| &source.coordinate))
+        });
+        for coordinate in coordinates {
+            let ContributionComponent::Operation { column, identity } = &coordinate.component
+            else {
+                continue;
+            };
+            if coordinate.layer != MergeAspect::Content {
+                return Err(Error::InvalidStoredValue(
+                    "contribution operation must belong to the content layer",
+                ));
+            }
+            let table = self.table_in_schema(&coordinate.table, schema_version)?;
+            let column_schema = table
+                .columns
+                .iter()
+                .find(|candidate| candidate.name == *column)
+                .ok_or(Error::InvalidStoredValue(
+                    "contribution operation column is absent from its table",
+                ))?;
+            match table.merge_strategy(column) {
+                MergeStrategy::Counter if identity.is_empty() => {}
+                MergeStrategy::Counter => {
+                    return Err(Error::InvalidStoredValue(
+                        "counter contribution operation identity must be empty",
+                    ));
+                }
+                MergeStrategy::GSet => {
+                    decode_contribution_gset_identity(&column_schema.column_type, identity)?;
+                }
+                MergeStrategy::Lww => {
+                    return Err(Error::InvalidStoredValue(
+                        "lww contribution column must not use an operation identity",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Calculate novel scalar, counter, grow-only-set, and deletion-register
     /// contributions between explicit branch views and commit the result as
     /// one ordinary atomic transaction. Unsupported or incomplete calculation
@@ -28,13 +141,48 @@ where
             .schema
             .clone();
         let full_key = |selector: &BranchSelector| -> Result<BranchKey, Error> {
-            let branch_columns = schema.tables.iter().flat_map(|table| table.branch_by.iter().cloned()).collect::<BTreeSet<_>>();
-            if selector.values.keys().cloned().collect::<BTreeSet<_>>() != branch_columns {
+            let branch_columns = schema
+                .tables
+                .iter()
+                .flat_map(|table| {
+                    table.branch_by.iter().map(|name| {
+                        let column = table
+                            .columns
+                            .iter()
+                            .find(|column| column.name == *name)
+                            .expect("validated branch column");
+                        (name.clone(), column.column_type.clone())
+                    })
+                })
+                .collect::<BTreeMap<_, _>>();
+            if selector.values.keys().collect::<BTreeSet<_>>()
+                != branch_columns.keys().collect::<BTreeSet<_>>()
+            {
                 return Err(Error::InvalidBranchKey(
                     "contribution selector must bind every schema branch column".to_owned(),
                 ));
             }
-            let values = selector.values.iter().map(|(name, value)| (name.clone(), value.clone())).collect();
+            let values = selector
+                .values
+                .iter()
+                .map(|(name, encoded)| {
+                    let value = encoded.decode().map_err(|_| {
+                        Error::InvalidBranchKey(format!(
+                            "invalid contribution branch column {name} encoding"
+                        ))
+                    })?;
+                    let encoded = crate::protocol::BranchColumnValue::encode_typed(
+                        &value,
+                        &branch_columns[name],
+                    )
+                    .map_err(|_| {
+                        Error::InvalidBranchKey(format!(
+                            "invalid contribution branch column {name} value"
+                        ))
+                    })?;
+                    Ok((name.clone(), encoded))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
             Ok(BranchKey { values })
         };
         let source_full = full_key(&request.source)?;
@@ -164,12 +312,10 @@ where
                 for version in versions.iter().filter(|version| version.layer() == layer) {
                     if let Some(column) = match &component {
                         ContributionComponent::Column(column) => Some(column.as_str()),
-                        ContributionComponent::Operation(operation) => {
-                            std::str::from_utf8(operation).ok()
-                        }
+                        ContributionComponent::Operation { column, .. } => Some(column.as_str()),
                         ContributionComponent::Register => None,
                     } {
-                        let authored = version.authored_columns(&table)?;
+                        let authored = node.authored_columns_for_version(version)?;
                         if !authored.as_ref().is_none_or(|columns| columns.contains(column))
                             || version.cell(&table, column)?.is_none()
                         {
@@ -217,10 +363,12 @@ where
                 let strategy = table.merge_strategy(&column.name);
                 let component = match strategy {
                     MergeStrategy::Lww => ContributionComponent::Column(column.name.clone()),
-                    MergeStrategy::Counter => {
-                        ContributionComponent::Operation(column.name.as_bytes().to_vec())
+                    MergeStrategy::Counter | MergeStrategy::GSet => {
+                        ContributionComponent::Operation {
+                            column: column.name.clone(),
+                            identity: Vec::new(),
+                        }
                     }
-                    MergeStrategy::GSet => ContributionComponent::Operation(Vec::new()),
                 };
                 let novel = match strategy {
                     MergeStrategy::Lww => {
@@ -249,7 +397,7 @@ where
                                 .iter()
                                 .filter(|version| version.layer() == VersionLayer::Content)
                             {
-                                let authored = version.authored_columns(&table)?;
+                                let authored = self.authored_columns_for_version(version)?;
                                 if !authored
                                     .as_ref()
                                     .is_none_or(|columns| columns.contains(&column.name))
@@ -285,21 +433,12 @@ where
                                         .map(|tx_id| (tx_id, version.clone()))
                                 })
                                 .collect::<Result<BTreeMap<_, _>, Error>>()?;
-                            let element_type = match &column.column_type {
-                                records::ValueType::Array(element) => element.as_ref().clone(),
-                                _ => {
-                                    return Err(Error::InvalidMergeableCommit(
-                                        "g-set contribution column must be an array",
-                                    ));
-                                }
-                            };
-                            let descriptor = records::RecordDescriptor::new([("element", element_type)]);
                             let mut dots = Vec::new();
                             for version in versions
                                 .iter()
                                 .filter(|version| version.layer() == VersionLayer::Content)
                             {
-                                let authored = version.authored_columns(&table)?;
+                                let authored = self.authored_columns_for_version(version)?;
                                 if !authored
                                     .as_ref()
                                     .is_none_or(|columns| columns.contains(&column.name))
@@ -319,7 +458,12 @@ where
                                 };
                                 let parent = parent
                                     .iter()
-                                    .map(|element| descriptor.create(std::slice::from_ref(element)))
+                                    .map(|element| {
+                                        encode_contribution_gset_identity(
+                                            &column.column_type,
+                                            element,
+                                        )
+                                    })
                                     .collect::<Result<BTreeSet<_>, _>>()?;
                                 let Some(Value::Array(elements)) =
                                     version.cell(&table, &column.name)?
@@ -327,7 +471,11 @@ where
                                     continue;
                                 };
                                 for element in elements {
-                                    if parent.contains(&descriptor.create(std::slice::from_ref(&element))?) {
+                                    let identity = encode_contribution_gset_identity(
+                                        &column.column_type,
+                                        &element,
+                                    )?;
+                                    if parent.contains(&identity) {
                                         continue;
                                     }
                                     dots.push(ContributionDot {
@@ -339,12 +487,10 @@ where
                                             table: selected.table.clone(),
                                             row_uuid: selected.row_uuid,
                                             layer: MergeAspect::Content,
-                                            component: ContributionComponent::Operation(
-                                                postcard::to_allocvec(&(column.name.as_str(), &element))
-                                                    .map_err(|_| Error::InvalidMergeableCommit(
-                                                        "g-set contribution operation must encode",
-                                                    ))?,
-                                            ),
+                                            component: ContributionComponent::Operation {
+                                                column: column.name.clone(),
+                                                identity,
+                                            },
                                         },
                                     });
                                 }
@@ -437,11 +583,6 @@ where
                         )?
                     }
                     MergeStrategy::GSet => {
-                        let element_type = match &column.column_type {
-                            records::ValueType::Array(element) => element.as_ref().clone(),
-                            _ => unreachable!("validated g-set schema"),
-                        };
-                        let descriptor = records::RecordDescriptor::new([("element", element_type)]);
                         let mut elements = BTreeMap::<Vec<u8>, Value>::new();
                         if let Some(Value::Array(current)) = self
                             .query_current_layer_winner_in_branch(
@@ -458,32 +599,34 @@ where
                         {
                             for element in current {
                                 elements.insert(
-                                    descriptor.create(std::slice::from_ref(&element))?,
+                                    encode_contribution_gset_identity(
+                                        &column.column_type,
+                                        &element,
+                                    )?,
                                     element,
                                 );
                             }
                         }
                         for root in &novel {
-                            let ContributionComponent::Operation(operation) = &root.coordinate.component else {
+                            let ContributionComponent::Operation {
+                                column: operation_column,
+                                identity,
+                            } = &root.coordinate.component
+                            else {
                                 return Err(Error::InvalidStoredValue(
                                     "g-set contribution operation missing",
                                 ));
                             };
-                            let (operation_column, element): (String, Value) =
-                                postcard::from_bytes(operation).map_err(|_| {
-                                    Error::InvalidStoredValue(
-                                        "g-set contribution operation must decode",
-                                    )
-                                })?;
-                            if operation_column != column.name {
+                            if operation_column != &column.name {
                                 return Err(Error::InvalidStoredValue(
                                     "g-set contribution operation column mismatch",
                                 ));
                             }
-                            elements.insert(
-                                descriptor.create(std::slice::from_ref(&element))?,
-                                element,
-                            );
+                            let element = decode_contribution_gset_identity(
+                                &column.column_type,
+                                identity,
+                            )?;
+                            elements.insert(identity.clone(), element);
                         }
                         Value::Array(elements.into_values().collect())
                     }
@@ -493,23 +636,33 @@ where
                 if strategy == MergeStrategy::GSet {
                     let mut by_operation = BTreeMap::<Vec<u8>, Vec<ContributionDot>>::new();
                     for root in novel {
-                        let ContributionComponent::Operation(operation) =
-                            &root.coordinate.component
+                        let ContributionComponent::Operation {
+                            column: operation_column,
+                            identity,
+                        } = &root.coordinate.component
                         else {
                             return Err(Error::InvalidStoredValue(
                                 "g-set contribution operation missing",
                             ));
                         };
-                        by_operation.entry(operation.clone()).or_default().push(root);
+                        if operation_column != &column.name {
+                            return Err(Error::InvalidStoredValue(
+                                "g-set contribution operation column mismatch",
+                            ));
+                        }
+                        by_operation.entry(identity.clone()).or_default().push(root);
                     }
                     substitutions.extend(by_operation.into_iter().map(
-                        |(operation, sources)| ContributionSubstitution {
+                        |(identity, sources)| ContributionSubstitution {
                             target: ContributionCoordinate {
                                 branch_key: target_key.clone(),
                                 table: selected.table.clone(),
                                 row_uuid: selected.row_uuid,
                                 layer: MergeAspect::Content,
-                                component: ContributionComponent::Operation(operation),
+                                component: ContributionComponent::Operation {
+                                    column: column.name.clone(),
+                                    identity,
+                                },
                             },
                             sources,
                         },

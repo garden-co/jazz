@@ -153,7 +153,7 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
     );
 
     let duplicate_grant = row(0xfe);
-    let duplicate_grant_tx = accept_global(
+    let _duplicate_grant_tx = accept_global(
         &mut core,
         MergeableCommit::new("documentAccess", duplicate_grant, 302).cells(BTreeMap::from([
             ("document".to_owned(), Value::Uuid(row(99).0)),
@@ -170,7 +170,6 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
     accept_global(
         &mut core,
         MergeableCommit::new("documentAccess", row(199), 303)
-            .parents(vec![grant_txs[99]])
             .deletion(DeletionEvent::Deleted),
     );
     let partial_revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
@@ -183,7 +182,6 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
     accept_global(
         &mut core,
         MergeableCommit::new("documentAccess", duplicate_grant, 304)
-            .parents(vec![duplicate_grant_tx])
             .deletion(DeletionEvent::Deleted),
     );
     let overlapping_branch = peer.query_update(&mut core, &shape, &binding).unwrap();

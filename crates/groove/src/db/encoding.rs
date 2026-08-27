@@ -579,11 +579,18 @@ pub(super) fn decode_primary_key_part(
             let value = take_key_bytes(bytes, 1)?[0];
             Ok(Value::EnumTag(value))
         }
+        records::ValueType::Tuple(members) => {
+            expect_key_tag(bytes, 11)?;
+            let mut values = Vec::with_capacity(members.len());
+            for member in members {
+                values.push(decode_primary_key_part(bytes, member)?);
+            }
+            Ok(Value::Tuple(values))
+        }
         records::ValueType::F64
         | records::ValueType::Internal(_)
         | records::ValueType::Array(_)
         | records::ValueType::Nullable(_)
-        | records::ValueType::Tuple(_)
         | records::ValueType::Record(_)
         | records::ValueType::Enum(_) => Err(Error::InvalidDirectRecordStoreKey(
             "unsupported direct record store key type".to_owned(),
@@ -659,7 +666,11 @@ pub(super) fn decode_index_key_part(
             } else {
                 !ordered
             };
-            Ok(Value::F64(f64::from_bits(bits)))
+            let value = f64::from_bits(bits);
+            if value.is_nan() {
+                return Err(Error::InvalidPersistedIndex(index_name.to_owned()));
+            }
+            Ok(Value::F64(value))
         }
         ColumnType::Bool => {
             expect_persisted_index_key_tag(bytes, index_name, 5)?;

@@ -621,6 +621,169 @@ fn exclusive_row_read_conflict_rejects_and_client_restores_old_value() {
         BTreeMap::from([(row, title_cells("base"))])
     );
 }
+
+/// A row read records visible content. A later deletion changes that visible
+/// state even though the content register retains the version the reader saw,
+/// so the exclusive write must conflict rather than be admitted by content CAS.
+#[test]
+fn exclusive_row_read_conflicts_when_a_later_delete_hides_the_content() {
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let (_other_dir, mut other) = open_node_with_uuid(node(2));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let row = row(0x6e);
+    commit_mergeable_global(
+        &mut client,
+        &mut core,
+        MergeableCommit::new("todos", row, 10).cells(title_cells("base")),
+    );
+    let open = OpenTransactionId::new();
+    client.open_exclusive(open).unwrap();
+    assert_eq!(client.tx_read(open, "todos", row).unwrap(), Some(title_cells("base")));
+
+    // Planted sensitivity: content remains current after this delete, so a
+    // content-register-only row-read check would incorrectly accept below.
+    commit_mergeable_global(
+        &mut other,
+        &mut core,
+        MergeableCommit::new("todos", row, 12).deletion(DeletionEvent::Deleted),
+    );
+    client
+        .tx_write(open, "todos", row, title_cells("loser"), None)
+        .unwrap();
+    let (_tx_id, unit) = client
+        .commit_exclusive_settled(open, AuthorSubject::SYSTEM, 13)
+        .unwrap();
+    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+    assert!(matches!(
+        fate,
+        SyncMessage::FateUpdate {
+            fate: Fate::Rejected(RejectionReason::ExclusiveConflict),
+            ..
+        }
+    ));
+}
+
+/// A delete starts the independent deletion-register history. Its first
+/// deletion-layer write therefore has no version parent even though content is
+/// globally current; authority first-committer-wins must compare that same
+/// deletion register rather than treating content as a general dependency.
+#[test]
+fn exclusive_delete_compares_the_deletion_register_not_content() {
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let row = row(0x6d);
+    commit_mergeable_global(
+        &mut client,
+        &mut core,
+        MergeableCommit::new("todos", row, 10).cells(title_cells("base")),
+    );
+
+    let open = OpenTransactionId::new();
+    client.open_exclusive(open).unwrap();
+    assert_eq!(client.tx_read(open, "todos", row).unwrap(), Some(title_cells("base")));
+    client
+        .tx_write(
+            open,
+            "todos",
+            row,
+            BTreeMap::<String, Value>::new(),
+            Some(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    let (_tx_id, unit) = client
+        .commit_exclusive_settled(open, AuthorSubject::SYSTEM, 11)
+        .unwrap();
+    let SyncMessage::CommitUnit { versions, .. } = &unit else {
+        panic!("expected exclusive commit unit");
+    };
+    assert_eq!(versions.len(), 1);
+    assert!(versions[0].parents().is_empty());
+
+    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+    assert!(matches!(
+        fate,
+        SyncMessage::FateUpdate {
+            fate: Fate::Accepted,
+            ..
+        }
+    ));
+}
+
+/// Deletion visibility does not erase content ancestry. Replacing a deleted
+/// row and restoring it atomically must advance both independent registers from
+/// the winners captured by the exclusive snapshot.
+#[test]
+fn exclusive_replacement_and_restore_parent_their_own_registers() {
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let row = row(0x6f);
+    let content_parent = commit_mergeable_global(
+        &mut client,
+        &mut core,
+        MergeableCommit::new("todos", row, 10).cells(title_cells("base")),
+    );
+    let deletion_parent = commit_mergeable_global(
+        &mut client,
+        &mut core,
+        MergeableCommit::new("todos", row, 11).deletion(DeletionEvent::Deleted),
+    );
+
+    let open = OpenTransactionId::new();
+    client.open_exclusive(open).unwrap();
+    assert_eq!(client.tx_read(open, "todos", row).unwrap(), None);
+    client
+        .tx_write(open, "todos", row, title_cells("replacement"), None)
+        .unwrap();
+    client
+        .tx_write(
+            open,
+            "todos",
+            row,
+            BTreeMap::<String, Value>::new(),
+            Some(DeletionEvent::Restored),
+        )
+        .unwrap();
+    let (_tx_id, unit) = client
+        .commit_exclusive_settled(open, AuthorSubject::SYSTEM, 12)
+        .unwrap();
+    let SyncMessage::CommitUnit { versions, .. } = &unit else {
+        panic!("expected exclusive commit unit");
+    };
+    assert_eq!(versions.len(), 2);
+    let content = versions
+        .iter()
+        .find(|version| version.deletion().is_none())
+        .unwrap();
+    let restore = versions
+        .iter()
+        .find(|version| version.deletion() == Some(DeletionEvent::Restored))
+        .unwrap();
+    // Planted sensitivity: dropping content ancestry because the row was
+    // hidden makes authority CAS compare Some(C) with None and reject.
+    assert_eq!(content.parents(), vec![content_parent]);
+    assert_eq!(restore.parents(), vec![deletion_parent]);
+
+    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+    assert!(
+        matches!(
+            fate,
+            SyncMessage::FateUpdate {
+                fate: Fate::Accepted,
+                ..
+            }
+        ),
+        "unexpected fate: {fate:?}"
+    );
+    assert_eq!(
+        core.current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row, title_cells("replacement"))])
+    );
+}
+
 #[test]
 fn exclusive_predicate_phantom_conflict_rejects() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));

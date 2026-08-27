@@ -105,25 +105,33 @@ where
                     .clone()
                     .unwrap_or_else(|| commit.cells.keys().cloned().collect());
                 for column in authored {
+                    let column_type = table
+                        .columns
+                        .iter()
+                        .find(|candidate| candidate.name == column)
+                        .expect("authored column exists")
+                        .column_type
+                        .clone();
                     let components = match table.merge_strategy(&column) {
                         MergeStrategy::Lww => vec![ContributionComponent::Column(column)],
-                        MergeStrategy::Counter => {
-                            vec![ContributionComponent::Operation(column.into_bytes())]
-                        }
+                        MergeStrategy::Counter => vec![ContributionComponent::Operation {
+                            column,
+                            identity: Vec::new(),
+                        }],
                         MergeStrategy::GSet => match commit.cells.get(&column) {
                             Some(Value::Array(elements)) => elements
                                 .iter()
                                 .map(|element| {
-                                    postcard::to_allocvec(&(column.as_str(), element)).map(
-                                        ContributionComponent::Operation,
+                                    encode_contribution_gset_identity(
+                                        &column_type,
+                                        element,
                                     )
+                                    .map(|identity| ContributionComponent::Operation {
+                                        column: column.clone(),
+                                        identity,
+                                    })
                                 })
-                                .collect::<Result<Vec<_>, _>>()
-                                .map_err(|_| {
-                                    Error::InvalidMergeableCommit(
-                                        "g-set contribution operation must encode",
-                                    )
-                                })?,
+                                .collect::<Result<Vec<_>, _>>()?,
                             _ => {
                                 return Err(Error::InvalidMergeableCommit(
                                     "g-set calculated merge value must be an array",
@@ -261,16 +269,9 @@ where
         for (_, commit) in &commits {
             commit.validate()?;
         }
-        self.prepare_and_stage_large_commit_values(&mut commits).await?;
-        let staged_ids = commits
-            .iter()
-            .flat_map(|(_, commit)| commit.staged_large_values.iter().copied())
-            .collect::<BTreeSet<_>>();
-        self.ensure_large_value_stages_current(&staged_ids).await?;
         let tx_id = TxId::new(made_at, self.node_uuid);
         let made_by = commits[0].1.made_by;
         let permission_subject = commits[0].1.effective_permission_subject();
-        let user_metadata_json = commits[0].1.user_metadata_json.clone();
         let tx = Transaction {
             tx_id,
             kind: TxKind::Mergeable,
@@ -283,10 +284,27 @@ where
             row_read_set: None,
             absent_read_set: None,
             predicate_read_set: None,
-            user_metadata_json,
+            user_metadata_json: commits[0].1.user_metadata_json.clone(),
             contribution_merge,
         };
+        let contribution_merge = self.admit_contribution_merge_for_storage(&tx)?;
+        self.prepare_and_stage_large_commit_values(&mut commits).await?;
+        let staged_ids = commits
+            .iter()
+            .flat_map(|(_, commit)| commit.staged_large_values.iter().copied())
+            .collect::<BTreeSet<_>>();
+        self.ensure_large_value_stages_current(&staged_ids).await?;
         let tx_node_alias = self.ensure_node_alias(tx_id.node).await?;
+        // Parent TxIds are durable canonical references. Establish every
+        // local alias before the history batch so an unknown parent retains a
+        // durable coordinate constraint instead of being silently skipped.
+        let parent_nodes = commits
+            .iter()
+            .flat_map(|(_, commit)| commit.parents.iter().map(|parent| parent.node))
+            .collect::<BTreeSet<_>>();
+        for parent_node in parent_nodes {
+            self.ensure_node_alias(parent_node).await?;
+        }
         let mut batch = self.database.open_batch();
         for (_, commit) in &commits {
             for staged_id in &commit.staged_large_values {
@@ -301,11 +319,12 @@ where
                 Fate::Pending,
                 None,
                 self.authored_commit_durability,
+                contribution_merge,
             ),
         );
         let mut stored_versions = Vec::new();
-        let mut pending_parents = BTreeSet::new();
         let mut authored_content_rows = BTreeSet::new();
+        let mut pending_parent_constraints = Vec::new();
         for (write_schema_version, commit) in commits {
             let provenance_at = TxTime::from_physical_ms(commit.now_ms).map_err(|_| {
                 Error::InvalidMergeableCommit(
@@ -329,21 +348,17 @@ where
                 write_schema_version,
                 &table_schema.name,
             )?;
-            for parent in &commit.parents {
-                let parent_versions = self.query_versions_for_tx(*parent).await?;
-                let same_row = parent_versions.iter().filter(|version| {
-                    version.row_uuid() == commit.row_uuid
-                        && self.physical_table_id_for_version(version).ok() == Some(table_id)
-                });
-                if same_row.clone().next().is_some()
-                    && !same_row.into_iter().any(|version| version.branch_key() == &branch_key)
-                {
-                    return Err(Error::InvalidMergeableCommit(
-                        "version parent belongs to a different branch-local row",
-                    ));
-                }
-            }
             let layer = VersionLayer::for_commit(&commit);
+            let parent_coordinate = ParentCoordinate {
+                physical_table_id: table_id,
+                branch_key: branch_key.clone(),
+                row_uuid: commit.row_uuid,
+                layer,
+            };
+            for parent in &commit.parents {
+                self.validate_known_parent_coordinate(*parent, &parent_coordinate)
+                    .await?;
+            }
             let first_content_occurrence_in_batch = layer != VersionLayer::Content
                 || authored_content_rows.insert((
                     table_id,
@@ -428,6 +443,11 @@ where
                     .clone()
                     .unwrap_or_else(|| cells.keys().cloned().collect()),
             );
+            let authored_column_ids = self.authored_column_ids_for_names(
+                write_schema_version,
+                &table_schema.name,
+                authored_columns.as_ref(),
+            )?;
             let history_descriptor = if commit.deletion.is_none() {
                 Some(
                     self.prepared_physical_write_plan(
@@ -455,7 +475,7 @@ where
                     updated_by: commit.made_by,
                     updated_at: provenance_at,
                     cells,
-                    authored_columns,
+                    authored_columns: authored_column_ids,
                     deletion: commit.deletion,
                 },
                 (write_schema_version != self.catalogue.current_schema_version_id)
@@ -487,16 +507,26 @@ where
             )
             .await?;
             self.write_ahead_current_insert(&mut batch, &stored)?;
-            pending_parents.extend(stored.parents());
+            pending_parent_constraints.extend(
+                stored
+                    .parents()
+                    .into_iter()
+                    .map(|parent| (parent, parent_coordinate.clone())),
+            );
             stored_versions.push(stored);
         }
-        for parent in pending_parents {
-            if let Some(parent_alias) = self.node_aliases.get(&parent.node).copied() {
-                batch.insert(
-                    "jazz_pending_edges",
-                    pending_edge_values(tx_node_alias, tx_id, parent_alias, parent),
-                );
-            }
+        for (parent, coordinate) in pending_parent_constraints {
+            let parent_alias = self
+                .node_aliases
+                .get(&parent.node)
+                .copied()
+                .ok_or(Error::InvalidStoredValue(
+                    "pending edge parent alias must exist after allocation",
+                ))?;
+            batch.insert(
+                "jazz_pending_edges",
+                pending_edge_values(tx_node_alias, tx_id, parent_alias, parent, &coordinate)?,
+            );
         }
         let pending_child_edges = {
             let mut edges = Vec::new();
@@ -1085,7 +1115,10 @@ where
     }
 
     pub(super) fn cached_tx_versions(&self, tx_id: TxId) -> Option<Vec<VersionRow>> {
-        self.query.tx_versions_cache.get(&tx_id).cloned()
+        self.query
+            .tx_versions_cache
+            .get(&tx_id)
+            .map(|cached| cached.versions.clone())
     }
 
     pub(super) fn cache_tx_version_tables(&mut self, tx_id: TxId, tables: BTreeSet<String>) {
@@ -1096,7 +1129,9 @@ where
 
     pub(super) fn cache_tx_versions(&mut self, tx_id: TxId, versions: Vec<VersionRow>) {
         self.touch_tx_version_cache_entry(tx_id);
-        self.query.tx_versions_cache.insert(tx_id, versions);
+        self.query
+            .tx_versions_cache
+            .insert(tx_id, CachedTransactionVersions::new(versions));
         self.bound_tx_version_cache();
     }
 

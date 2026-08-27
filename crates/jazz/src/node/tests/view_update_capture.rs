@@ -199,7 +199,7 @@ fn install_test_provider_claims(core: &mut NodeState<RocksDbStorage>, identity: 
 
 fn accept_owner_capture_row(
     core: &mut NodeState<RocksDbStorage>,
-    parents: &mut BTreeMap<RowUuid, TxId>,
+    parents: &mut BTreeMap<RowUuid, (Option<TxId>, Option<TxId>)>,
     row_uuid: RowUuid,
     owner: AuthorSubject,
     title: impl Into<String>,
@@ -207,28 +207,27 @@ fn accept_owner_capture_row(
 ) -> TxId {
     let mut commit =
         MergeableCommit::new("todos", row_uuid, made_at).cells(owner_cells(owner, title));
-    if let Some(parent) = parents.get(&row_uuid).copied() {
+    if let Some(parent) = parents.get(&row_uuid).and_then(|(content, _)| *content) {
         commit = commit.parents(vec![parent]);
     }
     let tx_id = accept_global(core, commit);
-    parents.insert(row_uuid, tx_id);
+    parents.entry(row_uuid).or_default().0 = Some(tx_id);
     tx_id
 }
 
 fn accept_capture_delete(
     core: &mut NodeState<RocksDbStorage>,
-    parents: &mut BTreeMap<RowUuid, TxId>,
+    parents: &mut BTreeMap<RowUuid, (Option<TxId>, Option<TxId>)>,
     row_uuid: RowUuid,
     made_at: u64,
 ) {
-    let parent = parents[&row_uuid];
-    let tx_id = accept_global(
-        core,
-        MergeableCommit::new("todos", row_uuid, made_at)
-            .parents(vec![parent])
-            .deletion(DeletionEvent::Deleted),
-    );
-    parents.insert(row_uuid, tx_id);
+    let mut commit = MergeableCommit::new("todos", row_uuid, made_at)
+        .deletion(DeletionEvent::Deleted);
+    if let Some(parent) = parents.get(&row_uuid).and_then(|(_, deletion)| *deletion) {
+        commit = commit.parents(vec![parent]);
+    }
+    let tx_id = accept_global(core, commit);
+    parents.entry(row_uuid).or_default().1 = Some(tx_id);
 }
 
 fn apply_capture_result_delta(
@@ -585,7 +584,7 @@ fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity:
     let multi_match_a = row(base.wrapping_add(11));
     let multi_match_b = row(base.wrapping_add(12));
     let rls_revoked = row(base.wrapping_add(13));
-    let mut parents = BTreeMap::<RowUuid, TxId>::new();
+    let mut parents = BTreeMap::<RowUuid, (Option<TxId>, Option<TxId>)>::new();
     let mut txs = BTreeMap::<RowUuid, TxId>::new();
 
     for (row_uuid, owner, title, made_at) in [
@@ -937,38 +936,45 @@ fn team_cells(id: RowUuid, name: &str) -> BTreeMap<String, Value> {
     ])
 }
 
+type CaptureLayerParents = BTreeMap<(&'static str, RowUuid), (Option<TxId>, Option<TxId>)>;
+
 fn accept_recursive_row(
     core: &mut NodeState<RocksDbStorage>,
-    parents: &mut BTreeMap<(&'static str, RowUuid), TxId>,
+    parents: &mut CaptureLayerParents,
     table: &'static str,
     row_uuid: RowUuid,
     cells: BTreeMap<String, Value>,
     made_at: u64,
 ) -> TxId {
     let mut commit = MergeableCommit::new(table, row_uuid, made_at).cells(cells);
-    if let Some(parent) = parents.get(&(table, row_uuid)).copied() {
+    if let Some(parent) = parents
+        .get(&(table, row_uuid))
+        .and_then(|(content, _)| *content)
+    {
         commit = commit.parents(vec![parent]);
     }
     let tx_id = accept_global(core, commit);
-    parents.insert((table, row_uuid), tx_id);
+    parents.entry((table, row_uuid)).or_default().0 = Some(tx_id);
     tx_id
 }
 
 fn delete_recursive_row(
     core: &mut NodeState<RocksDbStorage>,
-    parents: &mut BTreeMap<(&'static str, RowUuid), TxId>,
+    parents: &mut CaptureLayerParents,
     table: &'static str,
     row_uuid: RowUuid,
     made_at: u64,
 ) -> TxId {
-    let parent = parents[&(table, row_uuid)];
-    let tx_id = accept_global(
-        core,
-        MergeableCommit::new(table, row_uuid, made_at)
-            .parents(vec![parent])
-            .deletion(DeletionEvent::Deleted),
-    );
-    parents.insert((table, row_uuid), tx_id);
+    let mut commit = MergeableCommit::new(table, row_uuid, made_at)
+        .deletion(DeletionEvent::Deleted);
+    if let Some(parent) = parents
+        .get(&(table, row_uuid))
+        .and_then(|(_, deletion)| *deletion)
+    {
+        commit = commit.parents(vec![parent]);
+    }
+    let tx_id = accept_global(core, commit);
+    parents.entry((table, row_uuid)).or_default().1 = Some(tx_id);
     tx_id
 }
 
@@ -989,7 +995,7 @@ fn seeded_maintained_subscription_view_recursive_rls_capture(seed: u64, identity
     let hidden_access = row(base.wrapping_add(7));
     let added_access = row(base.wrapping_add(8));
     let edge = row(base.wrapping_add(9));
-    let mut parents = BTreeMap::<(&'static str, RowUuid), TxId>::new();
+    let mut parents = CaptureLayerParents::new();
 
     accept_recursive_row(
         &mut core,
@@ -1220,22 +1226,25 @@ fn seeded_maintained_subscription_view_multitable_capture(
     let root_deleted = row(base.wrapping_add(7));
     let member_visible = row(base.wrapping_add(8));
     let member_added = row(base.wrapping_add(9));
-    let mut parents = BTreeMap::<(&'static str, RowUuid), TxId>::new();
+    let mut parents = CaptureLayerParents::new();
     let mut txs = BTreeMap::<(&'static str, RowUuid), TxId>::new();
 
     let accept = |core: &mut NodeState<RocksDbStorage>,
-                  parents: &mut BTreeMap<(&'static str, RowUuid), TxId>,
+                  parents: &mut CaptureLayerParents,
                   txs: &mut BTreeMap<(&'static str, RowUuid), TxId>,
                   table: &'static str,
                   row_uuid: RowUuid,
                   made_at: u64,
                   cells: BTreeMap<String, Value>| {
         let mut commit = MergeableCommit::new(table, row_uuid, made_at).cells(cells);
-        if let Some(parent) = parents.get(&(table, row_uuid)).copied() {
+        if let Some(parent) = parents
+            .get(&(table, row_uuid))
+            .and_then(|(content, _)| *content)
+        {
             commit = commit.parents(vec![parent]);
         }
         let tx_id = accept_global(core, commit);
-        parents.insert((table, row_uuid), tx_id);
+        parents.entry((table, row_uuid)).or_default().0 = Some(tx_id);
         txs.insert((table, row_uuid), tx_id);
         tx_id
     };
@@ -1471,14 +1480,12 @@ fn seeded_maintained_subscription_view_multitable_capture(
     );
 
     let root_deleted_initial_tx = txs[&("roots", root_deleted)];
-    let delete_parent = parents[&("roots", root_deleted)];
     let delete_tx = accept_global(
         &mut core,
         MergeableCommit::new("roots", root_deleted, 5_000)
-            .parents(vec![delete_parent])
             .deletion(DeletionEvent::Deleted),
     );
-    parents.insert(("roots", root_deleted), delete_tx);
+    parents.entry(("roots", root_deleted)).or_default().1 = Some(delete_tx);
     txs.insert(("roots", root_deleted), delete_tx);
     let update = maintained.update(
         &mut core,
@@ -1520,7 +1527,7 @@ fn seeded_real_peer_maintained_subscription_view_capture(seed: u64, identity: Au
     let multi_match_a = row(base.wrapping_add(11));
     let multi_match_b = row(base.wrapping_add(12));
     let rls_revoked = row(base.wrapping_add(13));
-    let mut parents = BTreeMap::<RowUuid, TxId>::new();
+    let mut parents = BTreeMap::<RowUuid, (Option<TxId>, Option<TxId>)>::new();
     let mut txs = BTreeMap::<RowUuid, TxId>::new();
 
     for (row_uuid, owner, title, made_at) in [
@@ -1729,7 +1736,7 @@ fn maintained_subscription_view_incremental_tick_avoids_per_reader_rematerializa
     let alice = user(0xa1);
     install_test_provider_claims(&mut core, alice);
     let bob = user(0xb2);
-    let mut parents = BTreeMap::<RowUuid, TxId>::new();
+    let mut parents = BTreeMap::<RowUuid, (Option<TxId>, Option<TxId>)>::new();
 
     let initial_alice_tx =
         accept_owner_capture_row(&mut core, &mut parents, row(0x11), alice, "match", 1_000);

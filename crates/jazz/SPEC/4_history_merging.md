@@ -26,7 +26,9 @@ Invariant digest:
 - `INV-HIST-15`: Merge strategy behavior MUST be deterministic and grouping-insensitive over the parent/head set; write-time canonicalization remains validation and rejects loudly.
 - `INV-HIST-16`: A merge value MUST be the deterministic fold over the de-duplicated raw head set, never a fold of already-merged values. Combining divergent merge versions MUST fold the union of their raw parent-closures de-duplicated by version identity (LWW argmax; `Counter` sums per-`TxId` deltas so shared ancestors count once), so divergent merges converge to the single-merger-over-the-union result.
 - `INV-HIST-17`: Content and deletion history MUST remain independently immutable and independently selected; a combined current row is a derived cache over their winners and MUST be reproducible from retained histories after restart or rebuild.
-- `INV-TX-6`: A commit unit MUST be rejected with RejectionReason::CausalityViolation if its txid.time is less than or equal to any parent transaction's txid.time, and its versions...
+- `INV-HIST-18`: A version parent MUST identify an exact prior version of the same physical table, branch key, row, and content/deletion layer; it MUST NOT encode a cross-row transaction dependency or a dependency between the content and deletion layers.
+- `INV-HIST-19`: A node-local content-frontier helper, if retained, MUST be keyed by the complete physical content-row coordinate and encode a strictly increasing, duplicate-free canonical `TxId` array using Groove values rather than an opaque collection payload.
+- `INV-TX-6`: A commit unit MUST be rejected with RejectionReason::CausalityViolation if its txid.time is less than or equal to any same-row/layer history parent's txid.time, and its versions...
 
 ## Details
 
@@ -34,7 +36,17 @@ Invariant digest:
 
 A row's history is modeled as a directed acyclic graph of **row versions**. Each
 version is identified by the `TxId` that wrote it and names zero or more direct
-`parents` (ch. 2). Ordering is based on `TxId.time`, the HLC input, with the full
+`parents` (ch. 2). Every parent resolves to the same physical table, exact branch
+key, `RowUuid`, and content/deletion layer as its child (`INV-HIST-18`). Thus
+`parents` are history edges only: mergeable transactions have no general
+dependency graph, and content does not parent deletion or vice versa. The same
+separation governs exclusive first-committer-wins: a content write is compared
+with the content winner, and a deletion/restore write with the deletion winner;
+row/predicate read checks validate the visible state they observed instead. Thus
+content `C` followed by first delete `D` gives `D` no history parent, and a
+later restore parents `D` rather than `C` (covered by
+`exclusive_delete_compares_the_deletion_register_not_content` and
+`known_parent_must_match_exact_row_coordinate_and_layer`). Ordering is based on `TxId.time`, the HLC input, with the full
 sort key `(time, node)` used for deterministic tie-breaking.
 
 Causality is enforced at acceptance time. A causal child has a strictly greater
@@ -121,6 +133,30 @@ Merges over divergent frontiers converge to exactly what a single merger over
 the union would have produced (`INV-HIST-16`). Reconciliation re-folds the
 underlying versions, deltas, and ops, which are replicated history and so always
 on hand.
+
+#### Durable content-frontier helper
+
+An implementation may retain a node-local derived content-frontier helper to
+avoid rewalking history while accepting a new content version or preparing a
+merge. The helper belongs to the **content** layer only: deletion is an
+independent register (§4.4) and has no merge-head row. Its complete physical
+key is `(PhysicalTableId, canonical BranchKey, RowUuid)`; omitting a branch or
+using a logical table name would alias independent histories.
+
+The helper's `heads` field is one normal Groove `Array<Tuple<U64, Uuid>>`: one
+canonical `(TxTime, NodeUuid)` tuple per `TxId`, in strictly increasing
+canonical `TxId` order with no duplicate. It is neither a `Bytes` wrapper nor
+a serde/postcard collection. For example, concurrent `A=(10, node-a)` and
+`B=(10, node-b)` with `node-a < node-b` are stored as `[A, B]`; replaying `A`
+does not append a second `A`. A malformed, out-of-order, duplicate, or
+wrongly typed value fails closed before it affects a merge.
+
+This helper is derived local state, never a wire identity or source of history
+truth. Immutable content history remains authoritative and can rebuild the
+helper. The helper is nevertheless durable whenever retained, so an existing
+storage root must first pass the top-level epoch-manifest admission gate before
+any row is decoded: an unsupported former-alpha opaque payload must not be
+guessed as the new untagged array (`INV-HIST-19`; Groove storage §2).
 
 ### 4.4 Deletion as a separate layer
 

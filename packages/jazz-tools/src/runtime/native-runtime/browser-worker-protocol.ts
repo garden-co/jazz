@@ -105,6 +105,12 @@ export type BrowserFollowerPortEvent =
   | { type: "auth-failure"; reason: string }
   | { type: "auth-restored" }
   | { type: "mutation-error"; event: MutationErrorEvent }
+  /**
+   * A terminal failure of the worker-owned upstream server transport. This is
+   * deliberately not a mutation rejection: the follower records it only to
+   * reject its active remote waits and subscriptions.
+   */
+  | { type: "transport-error"; message: string }
   | { type: "storage-reset"; resetId: number }
   | { type: "storage-invalidated" }
   | { type: "relay-trace"; entries: BrowserRelayTrace[] }

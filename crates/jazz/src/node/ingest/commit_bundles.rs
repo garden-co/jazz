@@ -960,6 +960,14 @@ where
                 .ingest_known_transaction(tx, versions, fate, global_time, durability)
                 .await;
         }
+        if let Some(complete_parent_versions) = self.complete_parent_versions(&tx, &versions).await?
+        {
+            self.preflight_complete_parent_batch(
+                batch,
+                &[(tx.tx_id, complete_parent_versions)],
+            )
+            .await?;
+        }
         let staged_versions = self.stage_transaction_and_versions_with_current_indexes(
             batch,
             tx.clone(),
@@ -989,6 +997,9 @@ where
     ) -> Result<BTreeSet<TxId>, Error> {
         let mut bundles_by_tx = BTreeMap::<TxId, Vec<VersionBundleRef<'_>>>::new();
         for bundle in bundles {
+            // This helper is also called directly by reset fast paths; do not
+            // rely on their outer ViewUpdate preflight for durable admission.
+            self.admit_contribution_merge_for_storage(bundle.tx)?;
             validate_received_view_bundle_global_time_durability(
                 bundle.global_time,
                 bundle.durability,
@@ -1098,10 +1109,27 @@ where
             .cloned()
             .collect::<Vec<_>>();
         self.prepare_authored_schema_variants_for_commit(&eligible_versions).await?;
-        self.sync_metrics.receiver_bulk_ingest_commits += 1;
-        self.sync_metrics.receiver_bulk_bundle_ingests += eligible.len() as u64;
+
+        let mut complete_parents = Vec::new();
+        for (tx_bundles, tx, _) in &eligible {
+            let versions = tx_bundles
+                .iter()
+                .flat_map(|bundle| bundle.versions.iter().cloned())
+                .collect::<Vec<_>>();
+            if let Some(versions) = self.complete_parent_versions(tx, &versions).await? {
+                complete_parents.push((tx.tx_id, versions));
+            }
+        }
+        let complete_parent_tx_ids = complete_parents
+            .iter()
+            .map(|(tx_id, _)| *tx_id)
+            .collect::<BTreeSet<_>>();
 
         let mut batch = self.database.open_batch();
+        self.preflight_complete_parent_batch(&mut batch, &complete_parents)
+            .await?;
+        self.sync_metrics.receiver_bulk_ingest_commits += 1;
+        self.sync_metrics.receiver_bulk_bundle_ingests += eligible.len() as u64;
         let version_count = eligible
             .iter()
             .flat_map(|(tx_bundles, _, _)| tx_bundles)
@@ -1123,6 +1151,9 @@ where
             let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
             let global_time = first.global_time.expect("checked above");
             applied_global_times.push(global_time);
+            let contribution_merge = self.contribution_merge_storage_value(
+                tx.contribution_merge.as_ref(),
+            )?;
             batch.insert(
                 "jazz_transactions",
                 // A reset may bulk-load only the view-authorized rows of an
@@ -1136,6 +1167,7 @@ where
                     first.global_time,
                     first.durability,
                     view_scoped,
+                    contribution_merge,
                 ),
             );
 
@@ -1162,9 +1194,15 @@ where
                 let author_schema = version.schema_version();
                 let source_table_schema = self.table_in_schema(version.table(), author_schema)?;
                 let schema_version_alias = self.ensure_schema_version_alias(author_schema).await?;
+                let authored_column_ids = self.authored_column_ids_for_names(
+                    author_schema,
+                    version.table(),
+                    version.authored_columns(),
+                )?;
                 let stored = VersionRow::from_wire_with_schema_version(
                     &source_table_schema,
                     version,
+                    authored_column_ids,
                     tx_node_alias,
                     schema_version_alias,
                     tx.tx_id.time,
@@ -1249,6 +1287,8 @@ where
         for global_time in applied_global_times {
             self.record_applied_global_time(global_time);
         }
+        self.settle_completed_parent_batch(&complete_parent_tx_ids)
+            .await?;
         Ok(loaded_tx_ids)
     }
 }

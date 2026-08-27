@@ -295,6 +295,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         block_on(forbidden.write_state())?,
         WriteState {
             fate: Fate::Pending,
+            global_time: None,
             durability: DurabilityTier::Local,
         }
     );
@@ -304,6 +305,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         block_on(forbidden.write_state())?,
         WriteState {
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            global_time: None,
             durability: DurabilityTier::Local,
         }
     );

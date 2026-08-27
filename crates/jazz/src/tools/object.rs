@@ -92,6 +92,14 @@ impl OutputOccurrenceId {
         !self.union_arms.is_empty()
     }
 
+    pub(crate) fn root_source(&self) -> ObjectId {
+        self.root
+    }
+
+    pub(crate) fn union_arms(&self) -> &[(usize, String)] {
+        &self.union_arms
+    }
+
     /// Construct an occurrence from its root and joined source rows.
     ///
     /// `joined` must be in declared join order. The ordinary one- and two-hop

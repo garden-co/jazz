@@ -138,6 +138,43 @@ branch-specific declaration or binding abstraction.
 The empty branch key denotes shared data. It is not a privileged root branch key and
 has no lifecycle semantics (`INV-BVIEW-7`).
 
+#### Canonical branch-coordinate codec
+
+Branch coordinates use an engine-owned binary codec, not the serde layout of
+`groove::Value`, `BranchColumnValue`, or `BranchKey`. A branch-column envelope is:
+
+```text
+codec_version:u8 = 1
+scalar_tag:u8
+groove_value_bytes:remaining bytes
+```
+
+The scalar tags are permanently assigned as `0=U8`, `1=U16`, `2=U32`,
+`3=U64`, `4=I32`, `5=I64`, `6=String`, `7=Uuid`, and `8=EnumTag`.
+The payload is Groove's canonical single-field encoding under the schema-declared
+column type. Selector construction may infer a scalar type before table projection;
+projection MUST decode that value and re-encode it under the selected table's
+declared type. In particular, a string selector for a stable enum becomes the
+declared enum discriminant rather than retaining a Rust value-enum tag.
+
+An exact branch key is:
+
+```text
+codec_version:u8 = 1
+entry_count:u32 little-endian
+repeated entry_count times:
+  name_byte_length:u32 little-endian
+  name_utf8:name_byte_length bytes
+  value_byte_length:u32 little-endian
+  branch_column_envelope:value_byte_length bytes
+```
+
+Entries MUST be strictly ordered by column name, with no duplicates or trailing
+bytes. Decoders reject unknown versions, scalar tags, non-canonical Groove
+payloads, invalid UTF-8 names, invalid lengths, and non-increasing names. A new
+codec version is a storage-format migration boundary; legacy serde/postcard bytes
+are not guessed from shape.
+
 #### Branch-local row identity
 
 `RowUuid` remains the stable application object identity. The same `RowUuid` may
@@ -155,9 +192,16 @@ requires a read view or an exact branch key.
 Branch columns are ordinary values for query projection, reference traversal,
 and policy, but key-like coordinates for mutation. Every version must carry the
 complete canonical branch key. A patch cannot omit, inherit ambiguously, or change
-that coordinate, and a version parent must belong to the same branch key
-(`INV-BVIEW-3`, `INV-BVIEW-4`). An application move is an explicit atomic write to
+that coordinate, and a version parent must belong to the same branch key,
+physical table, row, and layer (`INV-BVIEW-3`, `INV-BVIEW-4`, `INV-HIST-18`). An application move is an explicit atomic write to
 the source and destination branch-local rows, not a cross-branch-key parent edge.
+
+Validation addresses an explicit version parent by its `(PhysicalTableId,
+RowUuid, TxId)` across both content and deletion history before comparing its
+`BranchKey`. Schema aliases resolve to the same physical table identity, and a
+missing parent remains a pending history prerequisite. A cached parent lookup must
+be row-addressable: unrelated rows from the same transaction, including
+same-table siblings, must not be materialized merely to validate a parent.
 
 #### Storage and indices
 

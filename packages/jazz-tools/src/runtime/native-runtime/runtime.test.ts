@@ -2827,21 +2827,33 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
-  it("reuses worker-confirmed query coverage without requiring an impossible second response", async () => {
+  it("requires fresh worker coverage when a full one-shot query is reattached", async () => {
     vi.useFakeTimers();
     try {
+      let rows = encodeRows([]);
+      let publishCommittedRow = false;
+      let attachmentCount = 0;
       const runtime = new NativeRuntimeAdapter(
         {
           openMemory: () =>
             fakeDb({
-              all: () => new Uint8Array([0]),
+              all: () => rows,
               connectUpstream: () => new FakeTransport([]),
               prepareQuery: () => ({}),
-              attachQuery: () => ({}),
+              attachQuery: () => ({ generation: ++attachmentCount }),
               queryAttachmentIsCovered: () => true,
               detachQuery: () => undefined,
               setNonDurableClient: () => undefined,
-              tick: () => undefined,
+              tick: () => {
+                if (!publishCommittedRow) return;
+                rows = encodeRows([
+                  {
+                    table: "todos",
+                    rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+                    title: "committed while detached",
+                  },
+                ]);
+              },
             }),
           openBrowser: async () => {
             throw new Error("not used");
@@ -2855,31 +2867,54 @@ describe("NativeRuntimeAdapter server transport", () => {
       );
       runtime.setNonDurableClient();
       runtime.connectUpstreamPeer();
+      const queryJson = JSON.stringify({ table: "todos" });
+      const fullPropagation = JSON.stringify({ propagation: "full" });
 
-      let firstSettled = false;
-      const first = runtime
-        .query(JSON.stringify({ table: "todos" }), null, "edge")
-        .then(() => (firstSettled = true));
+      const first = runtime.query(queryJson, null, "global", fullPropagation);
       await vi.advanceTimersByTimeAsync(10);
-      expect(firstSettled).toBe(false);
-
       runtime.notifyPeerTransportActivity();
+      await runtime.progressPeerTransport();
       await vi.advanceTimersByTimeAsync(10);
-      await first;
+      await expect(first).resolves.toEqual([]);
+      expect(attachmentCount).toBe(1);
 
       let secondSettled = false;
-      const second = runtime
-        .query(JSON.stringify({ table: "todos" }), null, "edge")
-        .then(() => (secondSettled = true));
+      const second = runtime.query(queryJson, null, "global", fullPropagation).then((result) => {
+        secondSettled = true;
+        return result;
+      });
       await vi.advanceTimersByTimeAsync(1);
-      expect(secondSettled).toBe(true);
-      await second;
+      expect(secondSettled).toBe(false);
+
+      publishCommittedRow = true;
+      runtime.notifyPeerTransportActivity();
+      // Receiving a frame cannot make the stale covered bit authoritative
+      // before the worker has processed and materialized that generation.
+      await vi.advanceTimersByTimeAsync(10);
+      expect(secondSettled).toBe(false);
+      await runtime.progressPeerTransport();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(secondSettled).toBe(false);
+
+      // The populated global read performs one row-scoped edge refresh before
+      // publishing, which likewise requires coverage for its new attachment.
+      runtime.notifyPeerTransportActivity();
+      await runtime.progressPeerTransport();
+      await vi.advanceTimersByTimeAsync(10);
+      await expect(second).resolves.toEqual([
+        {
+          table: "todos",
+          id: "00000000-0000-0000-0000-000000000001",
+          values: [{ type: "Text", value: "committed while detached" }],
+        },
+      ]);
+      expect(attachmentCount).toBe(3);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("consumes newer worker activity before reusing confirmed query coverage", async () => {
+  it("requires post-attachment activity for a repeated full query", async () => {
     vi.useFakeTimers();
     try {
       const runtime = new NativeRuntimeAdapter(
@@ -2915,11 +2950,11 @@ describe("NativeRuntimeAdapter server transport", () => {
       await vi.advanceTimersByTimeAsync(10);
       expect(firstSettled).toBe(false);
       runtime.notifyPeerTransportActivity();
+      await runtime.progressPeerTransport();
       await vi.advanceTimersByTimeAsync(10);
       await first;
 
-      // The cached confirmation is still valid, but it must not bypass a
-      // worker frame that arrived since that confirmation.
+      // A pending frame received before the new attachment cannot confirm it.
       runtime.notifyPeerTransportActivity();
       let secondSettled = false;
       const second = runtime
@@ -2930,6 +2965,10 @@ describe("NativeRuntimeAdapter server transport", () => {
 
       await runtime.progressPeerTransport();
       await vi.advanceTimersByTimeAsync(10);
+      expect(secondSettled).toBe(false);
+      runtime.notifyPeerTransportActivity();
+      await runtime.progressPeerTransport();
+      await vi.advanceTimersByTimeAsync(10);
       await second;
       expect(secondSettled).toBe(true);
     } finally {
@@ -2937,7 +2976,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
-  it("accepts newer worker activity that was processed before reattachment", async () => {
+  it("does not treat processed activity as coverage for a new full attachment", async () => {
     vi.useFakeTimers();
     try {
       const runtime = new NativeRuntimeAdapter(
@@ -2969,12 +3008,12 @@ describe("NativeRuntimeAdapter server transport", () => {
       const first = runtime.query(JSON.stringify({ table: "todos" }), null, "edge");
       await vi.advanceTimersByTimeAsync(10);
       runtime.notifyPeerTransportActivity();
+      await runtime.progressPeerTransport();
       await vi.advanceTimersByTimeAsync(10);
       await first;
 
-      // A policy-changing worker frame can be fully applied before React (or
-      // another caller) reattaches its query. The new attachment already
-      // reports covered state, so requiring a second frame would deadlock.
+      // Activity processed before this attachment cannot confirm the new
+      // upstream subscription, even when its local native state is covered.
       runtime.notifyPeerTransportActivity();
       await runtime.progressPeerTransport();
 
@@ -2983,8 +3022,12 @@ describe("NativeRuntimeAdapter server transport", () => {
         .query(JSON.stringify({ table: "todos" }), null, "edge")
         .then(() => (settled = true));
       await vi.advanceTimersByTimeAsync(1);
-      expect(settled).toBe(true);
+      expect(settled).toBe(false);
+      runtime.notifyPeerTransportActivity();
+      await runtime.progressPeerTransport();
+      await vi.advanceTimersByTimeAsync(10);
       await second;
+      expect(settled).toBe(true);
     } finally {
       vi.useRealTimers();
     }
@@ -3042,6 +3085,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       await vi.advanceTimersByTimeAsync(10);
       expect(aliceSettled).toBe(false);
       runtime.notifyPeerTransportActivity();
+      await runtime.progressPeerTransport();
       await vi.advanceTimersByTimeAsync(10);
       await firstAlice;
 
@@ -3052,6 +3096,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       await vi.advanceTimersByTimeAsync(10);
       expect(bobSettled).toBe(false);
       runtime.notifyPeerTransportActivity();
+      await runtime.progressPeerTransport();
       await vi.advanceTimersByTimeAsync(10);
       await firstBob;
 
@@ -3060,8 +3105,12 @@ describe("NativeRuntimeAdapter server transport", () => {
         .query(JSON.stringify({ table: "todos" }), bob, "edge")
         .then(() => (secondBobSettled = true));
       await vi.advanceTimersByTimeAsync(1);
-      expect(secondBobSettled).toBe(true);
+      expect(secondBobSettled).toBe(false);
+      runtime.notifyPeerTransportActivity();
+      await runtime.progressPeerTransport();
+      await vi.advanceTimersByTimeAsync(10);
       await secondBob;
+      expect(secondBobSettled).toBe(true);
     } finally {
       vi.useRealTimers();
     }
@@ -3115,6 +3164,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       const firstAlice = runtime.query(JSON.stringify({ table: "todos" }), alice, "edge");
       await vi.advanceTimersByTimeAsync(10);
       runtime.notifyPeerTransportActivity();
+      await runtime.progressPeerTransport();
       await vi.advanceTimersByTimeAsync(10);
       await firstAlice;
 
@@ -3130,6 +3180,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       expect(bobSettled).toBe(false);
 
       runtime.notifyPeerTransportActivity();
+      await runtime.progressPeerTransport();
       await vi.advanceTimersByTimeAsync(10);
       await firstBob;
       expect(bobSettled).toBe(true);
@@ -3191,6 +3242,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       await vi.advanceTimersByTimeAsync(10);
       expect(readerSettled).toBe(false);
       runtime.notifyPeerTransportActivity();
+      await runtime.progressPeerTransport();
       await vi.advanceTimersByTimeAsync(10);
       await firstReader;
 
@@ -3201,6 +3253,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       await vi.advanceTimersByTimeAsync(10);
       expect(revokedSettled).toBe(false);
       runtime.notifyPeerTransportActivity();
+      await runtime.progressPeerTransport();
       await vi.advanceTimersByTimeAsync(10);
       await firstRevoked;
 
@@ -3209,8 +3262,12 @@ describe("NativeRuntimeAdapter server transport", () => {
         .query(JSON.stringify({ table: "todos" }), revoked, "edge")
         .then(() => (secondRevokedSettled = true));
       await vi.advanceTimersByTimeAsync(1);
-      expect(secondRevokedSettled).toBe(true);
+      expect(secondRevokedSettled).toBe(false);
+      runtime.notifyPeerTransportActivity();
+      await runtime.progressPeerTransport();
+      await vi.advanceTimersByTimeAsync(10);
       await secondRevoked;
+      expect(secondRevokedSettled).toBe(true);
     } finally {
       vi.useRealTimers();
     }

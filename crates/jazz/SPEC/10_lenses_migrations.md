@@ -31,6 +31,12 @@ Invariant digest:
 - `INV-LENS-19`: Policy evaluation under lenses MUST translate data into the pinned permission evaluation schema and MUST NOT translate policy bundles.
 - `INV-LENS-20`: Published physical lineages and authored schema variants MUST NOT be automatically garbage-collected.
 - `INV-LENS-21`: A compatible table rename MUST retain its `PhysicalTableId`; deletion history and combined-current state therefore continue under that id without copying, rewriting, or rescanning unrelated lineages.
+- `INV-LENS-23`: The `jazz_catalogue` bootstrap kernel uses only the fixed
+  numeric record kinds `0..=7` described in §10.2. Unknown kinds fail closed
+  during discovery and reopen. This freezes the kernel discriminator only; it
+  does not yet freeze descriptor identity or the remaining catalogue payload
+  encodings.
+- `INV-LENS-22`: A content version's explicit authored-column presence MUST be stored only as a nullable, strictly increasing array of nonzero local `PhysicalColumnId`s; the exact authored schema/table mapping converts it to or from logical wire names, and malformed or unmapped ids MUST fail before any derived current row is persisted.
 
 ## Details
 
@@ -60,6 +66,48 @@ ordered lens ops, and recursively tagged default values. The embedded
 rejects a mismatched id (`INV-LENS-1`, `INV-LENS-2`).
 
 ### 10.2 The catalogue
+
+#### Epoch-pinned catalogue kernel
+
+`jazz_catalogue.kind` is stored as a `U64` and forms the composite primary key
+`(kind, id)` with the record UUID. The current storage epoch permanently maps
+`genesis = 0`, `schema = 1`, `lens = 2`, `schema_lineage_staged = 3`,
+`schema_lineage_pending = 4`, `schema_lineage_active = 5`,
+`write_pointer_pending = 6`, and `bootstrap_ready = 7`. Discovery and reopen
+reject every other numeric kind rather than guessing how to decode it.
+
+The kernel payloads that establish recovery state have their own explicit,
+versioned binary layouts; they are not authoritative JSON. In this epoch,
+`schema` is `[v1, schema_uuid, public_schema_json_len:u32-le,
+public_schema_json]`, `bootstrap_ready` is `[v1, genesis_uuid,
+pointer_revision:u64-le, pointer_schema_uuid, active_catalogue_seq:u64-le]`,
+and the pending write-pointer and active-lineage receipts are likewise fixed
+`v1` UUID/integer tuples. A decoder accepts exactly one known version and
+must consume the entire payload before it returns a value to catalogue
+recovery; it does not fall back to the former JSON bytes. The public-schema
+body is decoded and re-encoded with the canonical public-schema serializer,
+and those bytes must match exactly, so insignificant whitespace, field
+reordering, or alternate JSON spellings are corruption rather than aliases.
+Each pending write-pointer row id is UUIDv5 under its schema UUID over the
+little-endian revision bytes; recovery verifies that join and rejects two rows
+claiming the same revision before building resident pointer state.
+
+For example, a bootstrap receipt whose genesis UUID begins `00112233…`, whose
+pointer revision is `0x0102030405060708`, and whose active sequence is
+`0x1112131415161718` begins with `01 00 11 22 33 … 08 07 06 05 04 03 02 01`.
+Appending even one byte, adding whitespace to the embedded public-schema JSON,
+using an arbitrary pending-pointer row id, duplicating a pending revision,
+truncating a payload, or changing `01` to an unknown version rejects reopen
+before resident catalogue state is replaced.
+
+This freezes the numeric discriminator and primary-key layout plus only the
+schema envelope, bootstrap receipt, pending write-pointer, and active-lineage
+receipt representations described above. It does not freeze the remaining
+catalogue payload codecs, schema-descriptor identity model, physical identity
+allocation, or complete catalogue lifecycle guarantees. Those remain part of
+the catalogue storage settlement tracked by
+[#2037](https://github.com/garden-co/jazz/issues/2037) and
+[#1779](https://github.com/garden-co/jazz/issues/1779).
 
 Schema evolution is coordinated through the catalogue, which serializes
 publication and write-pointer changes under administrative authority. Catalogue
@@ -150,6 +198,47 @@ descriptor registry are durable local storage state and are recovered before
 any payload is decoded. They never appear in a public value or on the wire.
 An alias or mapping remains retained while any retained history, current row,
 branch-local row, snapshot, or rejected payload can name it.
+
+Every content-history row also has nullable `authored_columns` metadata. When
+present, its sole durable spelling is a Groove `Array<U64>` containing strictly
+increasing, nonzero local `PhysicalColumnId`s. It is not JSON-in-bytes, a
+logical-name payload, or an alternate serialized collection. The same typed
+field is copied into derived ahead/global content-current carriers only after
+resolving every id through the row's exact authored schema and logical table;
+zero, noncanonical order, type mismatch, or an absent mapping fails closed
+before the derived write. `None` is the deliberately conservative
+legacy/lens-payload fallback: every present cell is treated as authored.
+
+`VersionRecord` remains portable and carries logical authored column names.
+Local authoring and incoming wire ingest map those names to the receiving
+node's physical ids; exporting a stored row maps the ids back through its
+stored schema/table mapping. A compatible `RenameColumn` therefore retains one
+physical id while `v1.title` and `v2.name` remain their respective authored
+wire names. This epoch intentionally does not accept the former JSON-in-bytes
+storage spelling.
+
+Contribution-merge provenance is likewise logical on the transaction/wire
+surface, but its durable `jazz_transactions` coordinate is a standard Groove
+record with nonzero `physical_table_id: U64` and a permanent component enum:
+`column` has tag 0 and the one-field record `{ physical_column_id: U64 }`,
+`operation` has tag 1 and `{ physical_column_id: U64, identity: Bytes }`, and
+`register` has tag 2 and an empty record. The field order and enum tags are
+durable. The storage boundary resolves a logical `(table, column)` to those
+local ids when writing and resolves the ids back to the active logical
+spellings when reading. Compatible table and column lens renames retain the
+same ids; recovery consults retained mappings when the active spelling has
+changed.
+
+An operation identity is strategy-owned rather than opaque provenance:
+`Counter` uses exactly an empty `identity`, while `GSet` uses exactly the
+canonical one-field Groove record `{ element: <the declared array element
+type> }`. The receiving node validates the table/column ownership, content
+layer, merge strategy, enum tag, payload shape, and canonical identity bytes
+at remote admission and again while reopening durable state, before any
+derived mutation or resident state. Zero, unknown, ambiguous, malformed,
+trailing, or noncanonical contribution payloads fail closed. This is local
+storage identity only: API and wire records never expose physical ids or a
+private postcard contribution encoding.
 
 Jazz registers a schema variant and every projection needed for its logical
 views before activating a catalogue bundle or accepting a row under that

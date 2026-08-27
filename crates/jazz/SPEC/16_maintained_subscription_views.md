@@ -17,6 +17,7 @@ Invariant digest:
 - `groove/SPEC/INVARIANTS.md::INV-INC-1`: Incremental delivery invariant (mechanism law). For any maintained view, the work performed to ingest, apply, and publish a change — including snapshot assembly, diffi...
 - `groove/SPEC/INVARIANTS.md::INV-MV-1`: No state that feeds a maintained view may change without that maintained view observing the change, either as ordinary deltas through the runtime or as an explicit reb...
 - `INV-SYNC-23`: A serving peer MUST reject a capability-gapped live subscription with SyncMessage::SubscribeRejected addressed to the requested SubscriptionKey; the rejected subscript...
+- `INV-SYNC-30`: A fresh `Edge`/`Global` settled one-shot read MUST obtain settled authority coverage for its exact current usage-site subscription; an update for a detached predecessor MUST NOT satisfy it even when shape, binding, and options are equal. This freshness rule MUST NOT change local-read semantics or prevent reuse of still-live maintained subscription coverage.
 
 ## Details
 
@@ -57,6 +58,18 @@ and subscriber delivery are bounded by the size of the change and affected keys,
 not by accumulated view state. `groove/SPEC/INVARIANTS.md::INV-MV-1` and the maintained-vs-one-shot
 differential oracle prove observable equivalence; they do not justify a
 full-state rebuild or full-state diff on the maintained path.
+
+#### Durable settled-program-fact keys
+
+`INV-QUERY-36` — Every settled program fact durable key is exactly one
+versioned, canonical `JPFK` codec value. Its version and variant tags are
+permanent; nested result-member values use the corresponding canonical Groove
+record codec. Recovery MUST reject before mutating resident query state any
+legacy postcard payload, malformed or truncated value, unknown version/tag,
+trailing bytes, non-canonical representation, oversized field, or value beyond
+the codec nesting bound. There is no compatibility decode or on-open rewrite
+for the pre-freeze raw `ViewFactEntry` postcard keys. Add, remove, rewrite, and
+reopen all derive the same exact key bytes. Storage-freeze issue #2249.
 
 The high-level `Db` facade follows the same boundary for every live
 subscription tier. Local subscriptions are desired and first-class: they are the
@@ -114,6 +127,23 @@ because of that boundary movement, the stream emits the corresponding remove
 and add/update changes even when the entering row's stored cells did not change.
 Per-event work is expected to be O(changed rows), not O(result set); this is the
 application-surface form of `groove/SPEC/INVARIANTS.md::INV-INC-1`.
+
+### 16.1.2 Fresh one-shot coverage
+
+A new remote settled one-shot is a new usage site, not a request to inspect
+whatever equal-shape state happens to be materialized locally. Each fresh
+`Edge`/`Global` one-shot registers a current `SubscriptionKey` and completes
+only after an authority-backed settled update covers that exact key. Binding-view
+generation advancement alone is insufficient: a late update addressed to an
+already detached equal-shape predecessor must not acknowledge its replacement
+(`INV-SYNC-30`).
+
+This usage-site freshness boundary does not create a second query algebra or
+require a maintained terminal stream for the one-shot. It may still materialize
+and post-process the shared lowered shape. It also leaves synchronous/local
+one-shots unchanged and permits still-live maintained subscriptions to reuse
+their maintained coverage groups; only a new remote settled one-shot must prove
+coverage for its own current wire subscription.
 
 ### 16.2 Policy composition
 

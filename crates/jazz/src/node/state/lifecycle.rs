@@ -84,8 +84,10 @@ where
         {
             has_catalogue_residue = true;
             let record = raw.record();
-            match record.get_bytes(CatalogueRowRecord::FIELD_KIND_IDX)? {
-                b"genesis" => {
+            match codec::CatalogueRecordKind::from_key(
+                record.get_u64(CatalogueRowRecord::FIELD_KIND_IDX)?,
+            )? {
+                codec::CatalogueRecordKind::Genesis => {
                     let schema =
                         SchemaVersionId(record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?);
                     if genesis.replace(schema).is_some() {
@@ -94,8 +96,8 @@ where
                         ));
                     }
                 }
-                b"schema" => {
-                    let schema: SchemaVersion = serde_json::from_slice(
+                codec::CatalogueRecordKind::Schema => {
+                    let schema = codec::decode_catalogue_schema(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
                     if schema.id
@@ -105,8 +107,8 @@ where
                         return Err(Error::InvalidStoredValue("catalogue schema id mismatch"));
                     }
                 }
-                b"schema_lineage_active" => {
-                    let active: SchemaLineageActivation = serde_json::from_slice(
+                codec::CatalogueRecordKind::SchemaLineageActive => {
+                    let active = codec::decode_catalogue_lineage_activation(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
                     if active.id.0 != record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?
@@ -120,7 +122,7 @@ where
                         ));
                     }
                 }
-                b"schema_lineage_staged" => {
+                codec::CatalogueRecordKind::SchemaLineageStaged => {
                     let staged: StagedSchemaLineage = serde_json::from_slice(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
@@ -136,8 +138,8 @@ where
                         ));
                     }
                 }
-                b"bootstrap_ready" => {
-                    let ready: CatalogueBootstrapReady = serde_json::from_slice(
+                codec::CatalogueRecordKind::BootstrapReady => {
+                    let ready = codec::decode_catalogue_bootstrap_ready(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
                     if ready.genesis.0 != record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?
@@ -473,9 +475,9 @@ where
                 batch.update(
                     "jazz_catalogue",
                     vec![
-                        Value::Bytes(b"bootstrap_ready".to_vec()),
+                        Value::U64(codec::CatalogueRecordKind::BootstrapReady.key()),
                         Value::Uuid(ready.genesis.0),
-                        Value::Bytes(serde_json::to_vec(&ready)?),
+                        Value::Bytes(codec::encode_catalogue_bootstrap_ready(&ready)),
                     ],
                 );
             }
@@ -1540,30 +1542,38 @@ where
             .await?
         {
             let record = raw.record();
-            match record.get_bytes(CatalogueRowRecord::FIELD_KIND_IDX)? {
-                b"schema" => {
-                    let schema_version: SchemaVersion = serde_json::from_slice(
+            match codec::CatalogueRecordKind::from_key(
+                record.get_u64(CatalogueRowRecord::FIELD_KIND_IDX)?,
+            )? {
+                codec::CatalogueRecordKind::Schema => {
+                    let schema_version = codec::decode_catalogue_schema(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
                     if schema_version.id
                         != SchemaVersionId(record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?)
+                        || schema_version.id != schema_version.schema.version_id()
                     {
-                        return Err(Error::InvalidStoredValue("catalogue schema id mismatch"));
+                        return Err(Error::InvalidStoredValue(
+                            "catalogue schema id does not match schema payload",
+                        ));
                     }
                     catalogue_schemas.insert(schema_version.id, schema_version);
                 }
-                b"lens" => {
+                codec::CatalogueRecordKind::Lens => {
                     let lens: MigrationLens = serde_json::from_slice(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
                     if lens.id
                         != MigrationLensId(record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?)
+                        || lens.id != lens.content_id()
                     {
-                        return Err(Error::InvalidStoredValue("catalogue lens id mismatch"));
+                        return Err(Error::InvalidStoredValue(
+                            "catalogue lens id does not match lens payload",
+                        ));
                     }
                     catalogue_lenses.insert(lens.id, lens);
                 }
-                b"schema_lineage_staged" => {
+                codec::CatalogueRecordKind::SchemaLineageStaged => {
                     let staged: StagedSchemaLineage = serde_json::from_slice(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
@@ -1577,7 +1587,7 @@ where
                     }
                     staged_lineages_by_id.insert(staged.publication.id, staged);
                 }
-                b"schema_lineage_pending" => {
+                codec::CatalogueRecordKind::SchemaLineagePending => {
                     let pending: PendingSchemaLineage = serde_json::from_slice(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
@@ -1593,8 +1603,8 @@ where
                         ));
                     }
                 }
-                b"schema_lineage_active" => {
-                    let active: SchemaLineageActivation = serde_json::from_slice(
+                codec::CatalogueRecordKind::SchemaLineageActive => {
+                    let active = codec::decode_catalogue_lineage_activation(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
                     if active.id.0 != record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?
@@ -1606,13 +1616,27 @@ where
                         ));
                     }
                 }
-                b"write_pointer_pending" => {
-                    let pointer: CurrentWriteSchema = serde_json::from_slice(
+                codec::CatalogueRecordKind::WritePointerPending => {
+                    let pointer = codec::decode_catalogue_write_pointer(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
-                    pending_write_pointers.insert(pointer.revision, pointer);
+                    if record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?
+                        != codec::catalogue_write_pointer_id(pointer)
+                    {
+                        return Err(Error::InvalidStoredValue(
+                            "pending catalogue write-pointer id mismatch",
+                        ));
+                    }
+                    if pending_write_pointers
+                        .insert(pointer.revision, pointer)
+                        .is_some()
+                    {
+                        return Err(Error::InvalidStoredValue(
+                            "duplicate pending catalogue write-pointer revision",
+                        ));
+                    }
                 }
-                b"genesis" => {
+                codec::CatalogueRecordKind::Genesis => {
                     let schema =
                         SchemaVersionId(record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?);
                     if genesis_schema.replace(schema).is_some() {
@@ -1621,8 +1645,8 @@ where
                         ));
                     }
                 }
-                b"bootstrap_ready" => {
-                    let ready: CatalogueBootstrapReady = serde_json::from_slice(
+                codec::CatalogueRecordKind::BootstrapReady => {
+                    let ready = codec::decode_catalogue_bootstrap_ready(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
                     if ready.genesis.0 != record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?
@@ -1633,8 +1657,22 @@ where
                         ));
                     }
                 }
-                _ => return Err(Error::InvalidStoredValue("unknown catalogue kind")),
             }
+        }
+        // A standalone `PublishLens` survives independently of a lineage
+        // receipt.  Decode alone is insufficient on reopen: validate it against
+        // the exact durable endpoints before it becomes resident catalogue
+        // state.
+        for lens in catalogue_lenses.values() {
+            let source = catalogue_schemas.get(&lens.source).ok_or(
+                Error::InvalidStoredValue("catalogue lens source schema is missing"),
+            )?;
+            let target = catalogue_schemas.get(&lens.target).ok_or(
+                Error::InvalidStoredValue("catalogue lens target schema is missing"),
+            )?;
+            Self::validate_migration_lens_between(lens, source, target).map_err(|_| {
+                Error::InvalidStoredValue("catalogue lens violates trusted semantic invariants")
+            })?;
         }
         let mut staged_lineages = BTreeMap::new();
         let mut active_lineages_by_target = BTreeMap::new();
@@ -1700,6 +1738,7 @@ where
             .copied()
             .unwrap_or(0);
         let mut schema_version_aliases = BTreeMap::new();
+        let mut schema_version_for_alias = BTreeMap::new();
         let mut physical_mappings = BTreeMap::new();
         for raw in meta_database
             .primary_key_scan_raw("jazz_schema_versions", &[])
@@ -1713,7 +1752,26 @@ where
                 SchemaVersionId(record.get_uuid(SchemaVersionAliasRowRecord::FIELD_UUID_IDX)?);
             let alias =
                 SchemaVersionAlias(record.get_u64(SchemaVersionAliasRowRecord::FIELD_ID_IDX)?);
+            // Schema aliases become Groove variant tags in physical storage.
+            // Check the narrowing boundary on recovery even if this particular
+            // mapping happens to carry a previously materialized variant case.
+            groove_variant_tag(alias)?;
+            if let Some(existing) = schema_version_aliases.get(&schema_version) {
+                if *existing != alias {
+                    return Err(Error::InvalidStoredValue(
+                        "schema version has conflicting durable aliases",
+                    ));
+                }
+            }
+            if let Some(existing) = schema_version_for_alias.get(&alias) {
+                if *existing != schema_version {
+                    return Err(Error::InvalidStoredValue(
+                        "schema alias maps to multiple durable schema versions",
+                    ));
+                }
+            }
             schema_version_aliases.insert(schema_version, alias);
+            schema_version_for_alias.insert(alias, schema_version);
             physical_mappings.insert(schema_version, mapping);
         }
         validate_physical_variant_cases(&physical_mappings, &schema_version_aliases)?;
@@ -1820,7 +1878,7 @@ where
                     batch.update(
                         "jazz_catalogue",
                         vec![
-                            Value::Bytes(b"genesis".to_vec()),
+                            Value::U64(codec::CatalogueRecordKind::Genesis.key()),
                             Value::Uuid(current_schema_version_id.0),
                             Value::Bytes(Vec::new()),
                         ],
@@ -1830,9 +1888,9 @@ where
                     batch.update(
                         "jazz_catalogue",
                         vec![
-                            Value::Bytes(b"schema".to_vec()),
+                            Value::U64(codec::CatalogueRecordKind::Schema.key()),
                             Value::Uuid(current_schema_version_id.0),
-                            Value::Bytes(serde_json::to_vec(&SchemaVersion::new(schema.clone()))?),
+                            Value::Bytes(codec::encode_catalogue_schema(&SchemaVersion::new(schema.clone()))?),
                         ],
                     );
                 }

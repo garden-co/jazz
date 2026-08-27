@@ -452,6 +452,7 @@ fn next_groove_runtime_token() -> u64 {
 #[cfg(test)]
 std::thread_local! {
     static QUERY_VERSIONS_FOR_TX_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PARENT_VERSION_LOOKUP_MATERIALIZED_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SUBSCRIPTION_SNAPSHOT_FOR_LINK_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -466,8 +467,23 @@ pub(super) fn query_versions_for_tx_call_count() -> usize {
 }
 
 #[cfg(test)]
+pub(super) fn reset_parent_version_lookup_materialized_row_count() {
+    PARENT_VERSION_LOOKUP_MATERIALIZED_ROWS.with(|rows| rows.set(0));
+}
+
+#[cfg(test)]
+pub(super) fn parent_version_lookup_materialized_row_count() -> usize {
+    PARENT_VERSION_LOOKUP_MATERIALIZED_ROWS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
 fn record_query_versions_for_tx_call() {
     QUERY_VERSIONS_FOR_TX_CALLS.with(|calls| calls.set(calls.get() + 1));
+}
+
+#[cfg(test)]
+fn record_parent_version_lookup_materialized_rows(rows: usize) {
+    PARENT_VERSION_LOOKUP_MATERIALIZED_ROWS.with(|count| count.set(count.get() + rows));
 }
 
 #[cfg(test)]
@@ -767,6 +783,56 @@ struct Parking {
     parked_catalogue_commit_units: BTreeSet<TxId>,
 }
 
+/// Recently stored transaction versions with a row-addressable cache view.
+///
+/// The complete vector remains available to callers that need the whole
+/// transaction. Parent validation, however, is constrained by the physical
+/// `(table, row)` coordinate, so its cache hit must not revisit unrelated
+/// siblings from a wide transaction.
+#[derive(Clone, Debug, Default)]
+struct CachedTransactionVersions {
+    versions: Vec<VersionRow>,
+    by_schema_table_row: BTreeMap<(SchemaVersionAlias, String, RowUuid), Vec<usize>>,
+}
+
+impl CachedTransactionVersions {
+    fn new(versions: Vec<VersionRow>) -> Self {
+        let mut by_schema_table_row = BTreeMap::new();
+        for (index, version) in versions.iter().enumerate() {
+            by_schema_table_row
+                .entry((
+                    version.schema_version_alias(),
+                    version.table().to_owned(),
+                    version.row_uuid(),
+                ))
+                .or_insert_with(Vec::new)
+                .push(index);
+        }
+        Self {
+            versions,
+            by_schema_table_row,
+        }
+    }
+
+    fn versions_for_schema_table_row(
+        &self,
+        schema_alias: SchemaVersionAlias,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Vec<VersionRow> {
+        let key = (schema_alias, table.to_owned(), row_uuid);
+        let Some(indexes) = self.by_schema_table_row.get(&key) else {
+            return Vec::new();
+        };
+        #[cfg(test)]
+        record_parent_version_lookup_materialized_rows(indexes.len());
+        indexes
+            .iter()
+            .map(|index| self.versions[*index].clone())
+            .collect()
+    }
+}
+
 /// Query registration, cache, current-row graph, and settled-result state.
 #[derive(Clone, Debug, Default)]
 struct QueryServing {
@@ -784,8 +850,10 @@ struct QueryServing {
     policy_proof_stack: Vec<String>,
     /// Logical tables that have history rows for a stored transaction.
     tx_version_tables_cache: BTreeMap<TxId, BTreeSet<String>>,
-    /// Recently staged history rows for a stored transaction.
-    tx_versions_cache: BTreeMap<TxId, Vec<VersionRow>>,
+    /// Recently staged history rows for a stored transaction, indexed by
+    /// authored schema/table/row so parent validation does not rescan wide
+    /// transactions on a cache hit.
+    tx_versions_cache: BTreeMap<TxId, CachedTransactionVersions>,
     /// Approximate insertion order for bounding `tx_version_tables_cache`.
     tx_version_tables_cache_order: VecDeque<TxId>,
     /// Live membership for `tx_version_tables_cache_order`.
@@ -1615,7 +1683,13 @@ pub struct MergeableCommit {
     pub authored_columns: Option<BTreeSet<String>>,
     /// Deletion-register event, if any.
     pub deletion: Option<DeletionEvent>,
-    /// Parent content versions.
+    /// Exact prior versions of this same physical row and layer.
+    ///
+    /// Version parents describe only row-history ancestry: they are neither a
+    /// general transaction-dependency graph nor a way to express an observed
+    /// state precondition. In particular, content and deletion registers have
+    /// independent parent chains. A read/CAS precondition belongs to an
+    /// exclusive transaction's read set instead.
     pub parents: Vec<TxId>,
     /// Optional application metadata.
     pub user_metadata_json: Option<String>,
@@ -1729,7 +1803,7 @@ impl MergeableCommit {
         self
     }
 
-    /// Set parent content versions.
+    /// Set exact same-row/layer history parents.
     pub fn parents(mut self, parents: Vec<TxId>) -> Self {
         self.parents = parents;
         self
@@ -1748,6 +1822,7 @@ impl MergeableCommit {
             )
         })?;
         validate_mergeable_write_shape(self.cells.is_empty(), self.deletion.is_some())?;
+        codec::validate_parent_tx_ids(&self.parents)?;
         if self.cells.iter().any(|(column, value)| {
             value_contains_indirect_descriptor(value)
                 && !self.prepared_large_columns.contains(column)
@@ -1967,7 +2042,7 @@ struct PendingSchemaLineage {
     publication: SchemaLineagePublication,
 }
 
-#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 struct SchemaLineageActivation {
     id: SchemaLineagePublicationId,
     catalogue_seq: u64,
@@ -2053,9 +2128,7 @@ fn settled_result_member_key(
     member: &ResultMemberEntry,
 ) -> Result<Vec<Value>, Error> {
     let mut key = binding_view_store_prefix(binding_view_key);
-    key.push(Value::Bytes(postcard::to_allocvec(member).map_err(
-        |_| Error::InvalidStoredValue("settled result member must encode"),
-    )?));
+    key.push(Value::Bytes(codec::result_member_storage_bytes(member)?));
     Ok(key)
 }
 
@@ -2064,9 +2137,7 @@ fn settled_program_fact_key(
     fact: &ViewFactEntry,
 ) -> Result<Vec<Value>, Error> {
     let mut key = binding_view_store_prefix(binding_view_key);
-    key.push(Value::Bytes(postcard::to_allocvec(fact).map_err(|_| {
-        Error::InvalidStoredValue("settled program fact must encode")
-    })?));
+    key.push(Value::Bytes(codec::program_fact_storage_bytes(fact)?));
     Ok(key)
 }
 

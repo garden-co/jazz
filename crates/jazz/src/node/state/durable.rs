@@ -655,6 +655,11 @@ where
         self.query.local_materialized_window_binding_views.clear();
         self.query.settled_result_row_index.clear();
         self.query.settled_program_facts.clear();
+        // Validate the complete durable closure off to the side.  Open/recovery
+        // must not leave even a prefix of the recovered state resident when a
+        // later store entry is malformed.
+        let mut settled_through_by_binding_view = BTreeMap::new();
+        let mut authorization_progress_by_binding_view = BTreeMap::new();
         let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
         for entry in store.prefix_entries(&[]).await? {
             if entry.key.len() != 3 {
@@ -695,14 +700,10 @@ where
                 }
             };
             let binding_view_key = BindingViewKey::new(shape_id, binding_id, read_view);
-            self.query
-                .settled_through_by_binding_view
-                .insert(binding_view_key, settled_through);
+            settled_through_by_binding_view.insert(binding_view_key, settled_through);
             match entry.value.get_idx(1)? {
                 Value::U64(progress) if progress != u64::MAX => {
-                    self.query
-                        .authorization_progress_by_binding_view
-                        .insert(binding_view_key, progress);
+                    authorization_progress_by_binding_view.insert(binding_view_key, progress);
                 }
                 Value::U64(_) => {}
                 _ => {
@@ -734,19 +735,30 @@ where
                     ));
                 }
             };
-            let member = postcard::from_bytes::<ResultMemberEntry>(member_bytes).map_err(|_| {
-                Error::InvalidStoredValue("settled result member payload must decode")
-            })?;
+            let member = result_member_from_storage_bytes(member_bytes)?;
             recovered_members.push((binding_view_key, member));
         }
-        drop(store);
+        let mut settled_result_sets =
+            BTreeMap::<BindingViewKey, BTreeSet<ResultMemberEntry>>::new();
+        let mut settled_result_row_index =
+            BTreeMap::<BindingViewKey, BTreeMap<ResultRowMembershipKey, ResultMemberEntry>>::new();
         for (binding_view_key, member) in recovered_members {
-            self.insert_settled_result_member_indexed(binding_view_key, member);
+            if let Some(row_key) = Self::result_member_row_key(&member) {
+                settled_result_row_index
+                    .entry(binding_view_key)
+                    .or_default()
+                    .insert(row_key, member.clone());
+            }
+            settled_result_sets
+                .entry(binding_view_key)
+                .or_default()
+                .insert(member);
         }
 
         let store = self
             .database
             .direct_record_store(SETTLED_PROGRAM_FACTS_STORE)?;
+        let mut settled_program_facts = BTreeMap::<BindingViewKey, BTreeSet<ViewFactEntry>>::new();
         for entry in store.prefix_entries(&[]).await? {
             if entry.key.len() != 4 {
                 return Err(Error::InvalidStoredValue(
@@ -765,15 +777,17 @@ where
                     ));
                 }
             };
-            let fact = postcard::from_bytes::<ViewFactEntry>(fact_bytes).map_err(|_| {
-                Error::InvalidStoredValue("settled program fact payload must decode")
-            })?;
-            self.query
-                .settled_program_facts
+            let fact = codec::program_fact_from_storage_bytes(fact_bytes)?;
+            settled_program_facts
                 .entry(binding_view_key)
                 .or_default()
                 .insert(fact);
         }
+        self.query.settled_through_by_binding_view = settled_through_by_binding_view;
+        self.query.authorization_progress_by_binding_view = authorization_progress_by_binding_view;
+        self.query.settled_result_sets = settled_result_sets;
+        self.query.settled_result_row_index = settled_result_row_index;
+        self.query.settled_program_facts = settled_program_facts;
         Ok(())
     }
 
