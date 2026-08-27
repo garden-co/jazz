@@ -895,22 +895,37 @@ where
         self.tick().await?;
         let ConnectionLink::Subscriber(SubscriberConnectionState {
             peer,
+            served,
             served_current_rows,
             ..
         }) = &mut self.link
         else {
             return Ok(());
         };
+        let subscription = self.node.borrow().whole_table_subscription_key(table)?;
+        if let Some(existing_table) = served_current_rows.get(&subscription) {
+            if existing_table == table {
+                return Ok(());
+            }
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "whole-table subscription key is already owned by another current-row view",
+            ));
+        }
+        if served.contains_key(&subscription) {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "whole-table subscription key is already owned by an ordinary subscription",
+            ));
+        }
         let update = {
             let mut node = self.node.lock().await;
             peer.current_rows_update(&mut node, table).await?
         };
         self.last_resume_bytes = Some(serialized_sync_message_len(&update));
-        let subscription = view_update_subscription(&update);
+        debug_assert_eq!(view_update_subscription(&update), Some(subscription));
         send_sync_message_chunked(self.transport.as_mut(), update)?;
-        if let Some(subscription) = subscription {
-            served_current_rows.insert(subscription, table.to_owned());
-        }
+        served_current_rows.insert(subscription, table.to_owned());
         if let ConnectionLink::Subscriber(SubscriberConnectionState { serve_dirty, .. }) =
             &mut self.link
         {
@@ -2841,6 +2856,10 @@ where
                             }
                             let shape_id = subscribe.shape_id;
                             let subscription = subscribe.subscription;
+                            if shape_id != subscription.shape_id {
+                                drop_peer_request(&self.node);
+                                return Ok::<bool, Error>(true);
+                            }
                             let values = subscribe.values.clone();
                             let known_state = subscribe.known_state.clone();
                             let registration_key = (shape_id, subscription.read_view);
@@ -2895,11 +2914,9 @@ where
                                 }
                                 return Ok::<bool, Error>(true);
                             };
-                            if pending_catalogue_admission {
-                                shape_registrations.insert(
-                                    registration_key,
-                                    SubscriberShapeRegistration::Registered(opts.clone()),
-                                );
+                            if values.len() != shape.params().len() {
+                                drop_peer_request(&self.node);
+                                return Ok::<bool, Error>(true);
                             }
                             let value_map = shape
                                 .params()
@@ -2923,6 +2940,23 @@ where
                             {
                                 drop_peer_request(&self.node);
                                 return Ok::<bool, Error>(true);
+                            }
+                            let coverage = coverage_key(&shape, &binding, opts.clone());
+                            if served_current_rows.contains_key(&subscription) {
+                                drop_peer_request(&self.node);
+                                return Ok::<bool, Error>(true);
+                            }
+                            if let Some(existing_coverage) = served.get(&subscription)
+                                && existing_coverage != &coverage
+                            {
+                                drop_peer_request(&self.node);
+                                return Ok::<bool, Error>(true);
+                            }
+                            if pending_catalogue_admission {
+                                shape_registrations.insert(
+                                    registration_key,
+                                    SubscriberShapeRegistration::Registered(opts.clone()),
+                                );
                             }
                             let scope_purpose = if let Some(purpose) = scope_purpose {
                                 let expected_result =
@@ -3008,7 +3042,6 @@ where
                                 flush_subscriber_controls_or_stop!(self, peer);
                                 return Ok(true);
                             }
-                            let coverage = coverage_key(&shape, &binding, opts.clone());
                             let group_subscription = SubscriptionKey {
                                 shape_id: coverage.shape_id,
                                 binding_id: coverage.binding_id,
