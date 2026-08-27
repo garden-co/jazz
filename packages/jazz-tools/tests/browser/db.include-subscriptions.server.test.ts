@@ -21,10 +21,12 @@ const app = schema.defineApp({
     org_id: schema.ref("orgs"),
   }),
   user_checks: schema.table({
+    org_id: schema.ref("orgs"),
     todo_id: schema.ref("todos"),
   }),
   check_notes: schema.table({
     body: schema.string(),
+    org_id: schema.ref("orgs"),
     user_check_id: schema.ref("user_checks"),
   }),
 });
@@ -66,6 +68,76 @@ afterEach(async () => {
 });
 
 describe("websocket include subscriptions", () => {
+  /**
+   * A client may attach several independently bound strict-edge reads after an
+   * authority has accepted an exclusive transaction. Each attachment
+   * needs its own current authority receipt; one must not strand the others.
+   *
+   * owner ──exclusive todo──► server
+   * observer ──three Edge attachments──► server ──current receipts──► observer
+   */
+  it("covers concurrent edge queries attached after an exclusive commit", async () => {
+    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
+      uniqueDbName("exclusive-then-edge-coverage"),
+    );
+    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
+
+    const sharedSecret = generateAuthSecret();
+    const owner = await openDb(
+      appId,
+      serverUrl,
+      adminSecret,
+      "exclusive-then-edge-owner",
+      sharedSecret,
+    );
+    const observer = await openDb(
+      appId,
+      serverUrl,
+      adminSecret,
+      "exclusive-then-edge-observer",
+      sharedSecret,
+    );
+    await ensureNativeRuntimeAdapterReady(owner);
+    await ensureNativeRuntimeAdapterReady(observer);
+
+    const org = await owner.insert(app.orgs, { name: "North" }).wait({ tier: "edge" });
+    expect(await observer.all(app.orgs.where({ id: org.id }), { tier: "edge" })).toMatchObject([
+      { id: org.id },
+    ]);
+    const write = await owner.exclusiveTransaction((transaction) => {
+      const todo = transaction.insert(app.todos, { title: "Ship", org_id: org.id });
+      const check = transaction.insert(app.user_checks, { org_id: org.id, todo_id: todo.id });
+      const note = transaction.insert(app.check_notes, {
+        body: "ready",
+        org_id: org.id,
+        user_check_id: check.id,
+      });
+      return { todo, check, note };
+    });
+    const { todo, check, note } = await withTimeout(
+      write.wait(),
+      15_000,
+      "exclusive transaction did not reach the authority",
+    );
+
+    const [todos, checks, notes] = await withTimeout(
+      Promise.all([
+        observer.all(app.todos.where({ org_id: org.id }), { tier: "edge" }),
+        observer.all(app.user_checks.where({ todo_id: todo.id }), { tier: "edge" }),
+        observer.all(app.check_notes.where({ user_check_id: check.id }), { tier: "edge" }),
+      ]),
+      20_000,
+      "concurrent strict-edge query coverage did not settle",
+    );
+    expect(todos.map((row) => row.id)).toEqual([todo.id]);
+    expect(checks.map((row) => ({ id: row.id, todoId: row.todo_id }))).toEqual([
+      { id: check.id, todoId: todo.id },
+    ]);
+    expect(notes.map((row) => ({ id: row.id, checkId: row.user_check_id }))).toEqual([
+      { id: note.id, checkId: check.id },
+    ]);
+  }, 45_000);
+
   it("delivers depth-3 reverse include material from client A to client B subscribe", async () => {
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
       uniqueDbName("include-subscriptions"),
@@ -124,7 +196,7 @@ describe("websocket include subscriptions", () => {
       "client A todo insert did not reach the server",
     );
     const userCheck = await withTimeout(
-      dbA.insert(app.user_checks, { todo_id: todo.id }).wait({ tier: "global" }),
+      dbA.insert(app.user_checks, { org_id: org.id, todo_id: todo.id }).wait({ tier: "global" }),
       10_000,
       "client A user_check insert did not reach the server",
     );
@@ -133,6 +205,7 @@ describe("websocket include subscriptions", () => {
       dbA
         .insert(app.check_notes, {
           body: "looks good",
+          org_id: org.id,
           user_check_id: userCheck.id,
         })
         .wait({ tier: "global" }),

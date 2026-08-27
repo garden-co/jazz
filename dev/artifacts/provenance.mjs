@@ -80,6 +80,7 @@ const isNapiGeneratedOutput = (repoPath) =>
   repoPath === "crates/jazz-napi/index.js" ||
   repoPath === "crates/jazz-napi/index.d.ts" ||
   repoPath === "crates/jazz-napi/native-binding.pointer.cjs" ||
+  repoPath === "crates/jazz-napi/correctness-native-binding.pointer.cjs" ||
   repoPath === "crates/jazz-napi/native-binding.d.ts" ||
   repoPath === "crates/jazz-napi/native-loader.cjs" ||
   repoPath === "crates/jazz-napi/native-artifact-fingerprint.cjs" ||
@@ -103,6 +104,7 @@ function files(root, paths) {
       if (
         repoPath.endsWith(".node") ||
         repoPath.endsWith(".jazz-artifact-manifest.json") ||
+        repoPath === "crates/jazz-wasm/.jazz-correctness-test-artifacts.json" ||
         // These tracked files are generated from packageInputs below. Including
         // them would make the artifact fingerprint self-referential.
         isNapiGeneratedOutput(repoPath) ||
@@ -286,7 +288,7 @@ export function expectedManifest(root, kind, profile, targetOverride, options = 
       dirtyDiff: injectedGit
         ? process.env.JAZZ_ARTIFACT_GIT_DIRTY_DIFF
         : sha256(
-            `${run(root, "git", ["diff", "--binary", "HEAD", "--", ".", ":(exclude)crates/jazz-wasm/pkg/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-wasm/.pkg-stage-*", ":(exclude)crates/jazz-wasm/.pkg-backup-*", ":(exclude)crates/jazz-wasm/.pkg-transaction.json*", ":(exclude)crates/jazz-napi/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-napi/native-binding.pointer.cjs", ":(exclude)crates/jazz-napi/native-binding.d.ts", ":(exclude)crates/jazz-napi/native-artifact-fingerprint.cjs", ":(exclude)crates/jazz-napi/native-loader.cjs", ":(exclude)crates/jazz-napi/.native-artifacts/**", ":(exclude)packages/jazz-tools/src/runtime/native-artifact-fingerprint-napi.ts", ":(exclude)packages/jazz-tools/src/runtime/native-artifact-fingerprint-wasm.ts"])}\n${run(root, "git", ["status", "--porcelain=v1", "--untracked-files=all", "--", ".", ":(exclude)crates/jazz-wasm/pkg/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-wasm/.pkg-stage-*", ":(exclude)crates/jazz-wasm/.pkg-backup-*", ":(exclude)crates/jazz-wasm/.pkg-transaction.json*", ":(exclude)crates/jazz-napi/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-napi/native-binding.pointer.cjs", ":(exclude)crates/jazz-napi/native-binding.d.ts", ":(exclude)crates/jazz-napi/native-artifact-fingerprint.cjs", ":(exclude)crates/jazz-napi/native-loader.cjs", ":(exclude)crates/jazz-napi/.native-artifacts/**", ":(exclude)packages/jazz-tools/src/runtime/native-artifact-fingerprint-napi.ts", ":(exclude)packages/jazz-tools/src/runtime/native-artifact-fingerprint-wasm.ts"])}`,
+            `${run(root, "git", ["diff", "--binary", "HEAD", "--", ".", ":(exclude)crates/jazz-wasm/pkg/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-wasm/.pkg-stage-*", ":(exclude)crates/jazz-wasm/.pkg-backup-*", ":(exclude)crates/jazz-wasm/.pkg-transaction.json*", ":(exclude)crates/jazz-wasm/.jazz-correctness-test-artifacts.json", ":(exclude)crates/jazz-napi/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-napi/native-binding.pointer.cjs", ":(exclude)crates/jazz-napi/correctness-native-binding.pointer.cjs", ":(exclude)crates/jazz-napi/native-binding.d.ts", ":(exclude)crates/jazz-napi/native-artifact-fingerprint.cjs", ":(exclude)crates/jazz-napi/native-loader.cjs", ":(exclude)crates/jazz-napi/.native-artifacts/**", ":(exclude)packages/jazz-tools/src/runtime/native-artifact-fingerprint-napi.ts", ":(exclude)packages/jazz-tools/src/runtime/native-artifact-fingerprint-wasm.ts"])}\n${run(root, "git", ["status", "--porcelain=v1", "--untracked-files=all", "--", ".", ":(exclude)crates/jazz-wasm/pkg/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-wasm/.pkg-stage-*", ":(exclude)crates/jazz-wasm/.pkg-backup-*", ":(exclude)crates/jazz-wasm/.pkg-transaction.json*", ":(exclude)crates/jazz-wasm/.jazz-correctness-test-artifacts.json", ":(exclude)crates/jazz-napi/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-napi/native-binding.pointer.cjs", ":(exclude)crates/jazz-napi/correctness-native-binding.pointer.cjs", ":(exclude)crates/jazz-napi/native-binding.d.ts", ":(exclude)crates/jazz-napi/native-artifact-fingerprint.cjs", ":(exclude)crates/jazz-napi/native-loader.cjs", ":(exclude)crates/jazz-napi/.native-artifacts/**", ":(exclude)packages/jazz-tools/src/runtime/native-artifact-fingerprint-napi.ts", ":(exclude)packages/jazz-tools/src/runtime/native-artifact-fingerprint-wasm.ts"])}`,
           ),
     },
     cargoLock: existsSync(cargoLock) ? sha256(readFileSync(cargoLock)) : "missing",

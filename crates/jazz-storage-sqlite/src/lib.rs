@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 use groove::storage::{
     Error, KeyValue, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, ScanBounds,
     ScanDirection, ScanRequest, StorageCursor, StorageFactory, StorageFuture, StorageScan, Value,
-    apply_storage_delta,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -46,8 +45,9 @@ impl Durability {
 /// One thread-affine SQLite ordered-KV store.
 ///
 /// The storage is executor-local like the rest of the async Groove seam. A
-/// relay owns exactly one instance per persistence scope; callers must not
-/// treat clones or separate processes as a multi-writer API.
+/// relay normally owns one instance per persistence scope. Independent handles
+/// are supported specifically for the atomic conditional primitives; this does
+/// not promote the rest of the interface to a general multi-writer API.
 pub struct SqliteStorage {
     path: PathBuf,
     durability: Durability,
@@ -423,6 +423,65 @@ impl OrderedKvStorage for SqliteStorage {
         })
     }
 
+    fn put_if_absent(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+        Box::pin(async move {
+            let cf = self.cf_id(&cf)?;
+            self.with_connection_mut(|connection| {
+                let transaction = connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(backend)?;
+                let existing = transaction
+                    .query_row(
+                        "SELECT v FROM kv WHERE cf = ?1 AND k = ?2",
+                        params![cf, &key],
+                        |row| row.get::<_, Vec<u8>>(0),
+                    )
+                    .optional()
+                    .map_err(backend)?;
+                if existing.is_none() {
+                    transaction
+                        .execute(
+                            "INSERT INTO kv (cf, k, v) VALUES (?1, ?2, ?3)",
+                            params![cf, key, value],
+                        )
+                        .map_err(backend)?;
+                }
+                transaction.commit().map_err(backend)?;
+                Ok(existing)
+            })
+        })
+    }
+
+    fn compare_and_delete(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<bool, Error>> {
+        Box::pin(async move {
+            let cf = self.cf_id(&cf)?;
+            self.with_connection_mut(|connection| {
+                let transaction = connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(backend)?;
+                let removed = transaction
+                    .execute(
+                        "DELETE FROM kv WHERE cf = ?1 AND k = ?2 AND v = ?3",
+                        params![cf, key, expected],
+                    )
+                    .map_err(backend)?
+                    != 0;
+                transaction.commit().map_err(backend)?;
+                Ok(removed)
+            })
+        })
+    }
+
     fn set(
         &self,
         cf: String,
@@ -592,8 +651,7 @@ impl OrderedKvStorage for SqliteStorage {
                 .map(|operation| {
                     let name = match &operation {
                         OwnedWriteOperation::Set { cf, .. }
-                        | OwnedWriteOperation::Delete { cf, .. }
-                        | OwnedWriteOperation::Delta { cf, .. } => cf,
+                        | OwnedWriteOperation::Delete { cf, .. } => cf,
                     };
                     Ok((self.cf_id(name)?, operation))
                 })
@@ -619,34 +677,6 @@ impl OrderedKvStorage for SqliteStorage {
                                     params![cf, key],
                                 )
                                 .map_err(backend)?;
-                        }
-                        OwnedWriteOperation::Delta { key, delta, .. } => {
-                            let existing = transaction
-                                .query_row(
-                                    "SELECT v FROM kv WHERE cf = ?1 AND k = ?2",
-                                    params![cf, &key],
-                                    |row| row.get::<_, Vec<u8>>(0),
-                                )
-                                .optional()
-                                .map_err(backend)?;
-                            match apply_storage_delta(existing.as_deref(), &delta.encode()?)? {
-                                Some(merged) => {
-                                    transaction
-                                        .execute(
-                                            "INSERT OR REPLACE INTO kv (cf, k, v) VALUES (?1, ?2, ?3)",
-                                            params![cf, key, merged],
-                                        )
-                                        .map_err(backend)?;
-                                }
-                                None => {
-                                    transaction
-                                        .execute(
-                                            "DELETE FROM kv WHERE cf = ?1 AND k = ?2",
-                                            params![cf, key],
-                                        )
-                                        .map_err(backend)?;
-                                }
-                            }
                         }
                     }
                 }
@@ -705,57 +735,25 @@ fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use groove::storage::{StorageDelta, collect_scan};
+    use futures::executor::block_on;
+    use std::sync::{Arc, Barrier};
 
     #[test]
-    fn former_rocksdb_tombstone_bytes_remain_an_ordinary_value() {
-        futures::executor::block_on(async {
-            let directory = tempfile::tempdir().unwrap();
-            let storage =
-                SqliteStorage::open(directory.path().join("storage.sqlite"), &["records"]).unwrap();
-            let key = b"former-tombstone".to_vec();
-            let value = b"\0groove-storage-delta-tombstone-v1".to_vec();
-
-            storage
-                .set("records".to_owned(), key.clone(), value.clone())
-                .await
-                .unwrap();
-            storage
-                .write_many(vec![OwnedWriteOperation::Delta {
-                    cf: "records".to_owned(),
-                    key: key.clone(),
-                    delta: StorageDelta::set_if_absent(b"replacement".to_vec()),
-                }])
-                .await
-                .unwrap();
-            assert_eq!(
-                storage
-                    .get("records".to_owned(), key.clone())
-                    .await
-                    .unwrap(),
-                Some(value.clone())
-            );
-            assert_eq!(
-                collect_scan(
-                    storage
-                        .scan(ScanRequest::prefix("records".to_owned(), Vec::new()))
-                        .await
-                        .unwrap(),
-                )
-                .await
-                .unwrap(),
-                vec![(key.clone(), value.clone())]
-            );
-
-            storage
-                .write_many(vec![OwnedWriteOperation::Delta {
-                    cf: "records".to_owned(),
-                    key: key.clone(),
-                    delta: StorageDelta::delete_if_value_matches(value),
-                }])
-                .await
-                .unwrap();
-            assert_eq!(storage.get("records".to_owned(), key).await.unwrap(), None);
+    fn independent_handles_racing_put_if_absent_choose_one_winner() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("race.sqlite");
+        drop(SqliteStorage::open(&path, &["records"]).unwrap());
+        let barrier = Arc::new(Barrier::new(2));
+        let handles = [b"first".to_vec(), b"second".to_vec()].map(|value| {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let storage = SqliteStorage::open(path, &["records"]).unwrap();
+                barrier.wait();
+                block_on(storage.put_if_absent("records".into(), b"key".to_vec(), value)).unwrap()
+            })
         });
+        let outcomes = handles.map(|handle| handle.join().unwrap());
+        assert_ne!(outcomes[0].is_none(), outcomes[1].is_none());
     }
 }
