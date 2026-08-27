@@ -2776,7 +2776,11 @@ where
                                             detail,
                                         ),
                                     );
-                                    continue;
+                                    // This subscribe has been handled. The outer receive loop
+                                    // owns iteration; returning its continue signal preserves
+                                    // the deferred-rejection ordering without trying to jump out
+                                    // of this heap-pinned async admission block.
+                                    return Ok::<bool, Error>(true);
                                 }
                                 SubscriberShapeRegistration::Registered(opts)
                                 | SubscriberShapeRegistration::PendingCatalogueAdmission(opts) => {
