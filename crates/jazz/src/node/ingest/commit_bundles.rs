@@ -960,6 +960,15 @@ where
                 .ingest_known_transaction(tx, versions, fate, global_time, durability)
                 .await;
         }
+        if let Some(complete_parent_versions) = self.complete_parent_versions(&tx, &versions).await?
+        {
+            self.preflight_complete_parent_constraints(
+                batch,
+                tx.tx_id,
+                &complete_parent_versions,
+            )
+            .await?;
+        }
         let staged_versions = self.stage_transaction_and_versions_with_current_indexes(
             batch,
             tx.clone(),

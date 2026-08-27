@@ -213,8 +213,15 @@ child's full expected coordinate alongside that `TxId`; arrival of a
 multi-version parent satisfies it only by an exact coordinate match. A
 different row, branch, table, or layer rejects the pending child rather than
 leaving an unconstrained causal edge behind. A deliberately partial
-view-scoped transaction receipt is not proof of mismatch; it retains the
-constraint until that coordinate or a complete authority receipt arrives.
+view-scoped transaction receipt is not proof of mismatch. This includes an
+already-accepted partial child: its durable constraint survives reopen and
+remains while parent fragments are incomplete. A complete parent receipt is
+preflighted against the assembled existing and incoming versions before any of
+that completion is persisted. An exact match clears the constraint for an
+already-accepted child; a mismatch is a typed connection/repair error and does
+not rewrite that child's immutable accepted fate. Pending children retain the
+edge so the ordinary rejection-cascade machinery settles them after the parent
+becomes complete.
 
 `BranchKey` bytes use the frozen engine-owned codec in SPEC 11: a versioned,
 length-delimited, strictly increasing `(column name, canonical typed value

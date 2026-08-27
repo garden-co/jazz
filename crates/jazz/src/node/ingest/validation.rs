@@ -1,3 +1,9 @@
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ParentCoordinateValidation {
+    Exact,
+    Inconclusive,
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -10,21 +16,17 @@ where
         &mut self,
         parent: TxId,
         coordinate: &ParentCoordinate,
-    ) -> Result<(), Error> {
+    ) -> Result<ParentCoordinateValidation, Error> {
         let Some(parent_tx) = self.query_transaction(parent).await? else {
-            return Ok(());
+            return Ok(ParentCoordinateValidation::Inconclusive);
         };
         let parent_versions = self.query_versions_for_tx(parent).await?;
         if parent_versions.is_empty() {
-            return Ok(());
+            return Ok(ParentCoordinateValidation::Inconclusive);
         }
         for candidate in &parent_versions {
-            if candidate.row_uuid() == coordinate.row_uuid
-                && candidate.branch_key() == &coordinate.branch_key
-                && candidate.layer() == coordinate.layer
-                && self.physical_table_id_for_version(candidate)? == coordinate.physical_table_id
-            {
-                return Ok(());
+            if self.version_row_matches_parent_coordinate(candidate, coordinate)? {
+                return Ok(ParentCoordinateValidation::Exact);
             }
         }
         let parent_is_complete = !parent_tx.view_scoped_cardinality
@@ -34,11 +36,142 @@ where
             // A view-scoped transaction may contain only another row so far.
             // Retain the durable constraint until the requested parent
             // coordinate arrives or an authority sees the complete unit.
-            return Ok(());
+            return Ok(ParentCoordinateValidation::Inconclusive);
         }
         Err(Error::InvalidMergeableCommit(
             "version parent does not resolve to the same physical row, branch, and layer",
         ))
+    }
+
+    fn version_row_matches_parent_coordinate(
+        &self,
+        version: &VersionRow,
+        coordinate: &ParentCoordinate,
+    ) -> Result<bool, Error> {
+        Ok(version.row_uuid() == coordinate.row_uuid
+            && version.branch_key() == &coordinate.branch_key
+            && version.layer() == coordinate.layer
+            && self.physical_table_id_for_version(version)? == coordinate.physical_table_id)
+    }
+
+    fn version_record_matches_parent_coordinate(
+        &self,
+        version: &VersionRecord,
+        coordinate: &ParentCoordinate,
+    ) -> Result<bool, Error> {
+        Ok(version.row_uuid() == coordinate.row_uuid
+            && version.branch_key() == &coordinate.branch_key
+            && VersionLayer::for_record(version) == coordinate.layer
+            && self.physical_table_id_for_schema(version.schema_version(), version.table())?
+                == coordinate.physical_table_id)
+    }
+
+    async fn complete_parent_versions(
+        &mut self,
+        tx: &Transaction,
+        incoming: &[VersionRecord],
+    ) -> Result<Option<Vec<VersionRecord>>, Error> {
+        let mut assembled = BTreeMap::new();
+        if self.query_transaction(tx.tx_id).await?.is_some() {
+            for stored in self.query_versions_for_tx(tx.tx_id).await? {
+                let version = self.version_record_from_row(&stored)?;
+                assembled.insert(view_version_key_for_ingest(&version), version);
+            }
+        }
+        for version in incoming {
+            match assembled.get(&view_version_key_for_ingest(version)) {
+                Some(existing) if existing != version => {
+                    return Err(Error::ConflictingCommitUnit(tx.tx_id));
+                }
+                Some(_) => {}
+                None => {
+                    assembled.insert(view_version_key_for_ingest(version), version.clone());
+                }
+            }
+        }
+        if usize::try_from(tx.n_total_writes).ok() != Some(assembled.len()) {
+            return Ok(None);
+        }
+        Ok(Some(assembled.into_values().collect()))
+    }
+
+    /// Validate durable constraints owned by already-accepted partial children
+    /// before a complete parent can become durable. Pending children retain
+    /// their edge so ordinary post-ingest fate propagation can accept or
+    /// reject them; an accepted child is immutable, so a contradictory parent
+    /// is a typed protocol conflict rather than a retroactive fate rewrite.
+    async fn preflight_complete_parent_constraints(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        parent: TxId,
+        complete_versions: &[VersionRecord],
+    ) -> Result<(), Error> {
+        let raw_constraints = self
+            .database
+            .primary_key_scan_raw_in_batch(batch, "jazz_pending_edges", &[])
+            .await?;
+        let mut constraints = Vec::with_capacity(raw_constraints.len());
+        for raw in raw_constraints {
+            let record = raw.record();
+            let parent_alias = NodeAlias(
+                record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX)?,
+            );
+            let stored_parent = TxId::new(
+                TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_TIME_IDX)?),
+                self.node_for_alias(parent_alias).ok_or(Error::InvalidStoredValue(
+                    "pending edge parent alias must exist",
+                ))?,
+            );
+            if stored_parent != parent {
+                continue;
+            }
+            let child_alias = NodeAlias(
+                record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_NODE_ID_IDX)?,
+            );
+            let child = TxId::new(
+                TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_TIME_IDX)?),
+                self.node_for_alias(child_alias).ok_or(Error::InvalidStoredValue(
+                    "pending edge child alias must exist",
+                ))?,
+            );
+            constraints.push((
+                child_alias,
+                child,
+                parent_alias,
+                pending_edge_coordinate_from_record(record)?,
+            ));
+        }
+        for (child_alias, child, parent_alias, coordinate) in constraints {
+            let Some(child_tx) = self.query_transaction(child).await? else {
+                return Err(Error::InvalidStoredValue(
+                    "pending parent constraint child transaction is missing",
+                ));
+            };
+            if !matches!(child_tx.fate, Fate::Accepted) {
+                continue;
+            }
+            let mut exact = false;
+            for version in complete_versions {
+                if self.version_record_matches_parent_coordinate(version, &coordinate)? {
+                    exact = true;
+                    break;
+                }
+            }
+            if !exact {
+                return Err(Error::ConflictingCommitUnit(parent));
+            }
+            batch.delete(
+                "jazz_pending_edges",
+                pending_edge_primary_key(
+                    child_alias,
+                    child,
+                    parent_alias,
+                    parent,
+                    &coordinate,
+                )?,
+            );
+        }
+        Ok(())
     }
 
     /// Resolve durable constraints left by children that referenced a parent
@@ -81,12 +214,7 @@ where
             let coordinate = pending_edge_coordinate_from_record(record)?;
             let mut exact = false;
             for candidate in &parent_versions {
-                if candidate.row_uuid() == coordinate.row_uuid
-                    && candidate.branch_key() == &coordinate.branch_key
-                    && candidate.layer() == coordinate.layer
-                    && self.physical_table_id_for_version(candidate)?
-                        == coordinate.physical_table_id
-                {
+                if self.version_row_matches_parent_coordinate(candidate, &coordinate)? {
                     exact = true;
                     break;
                 }
@@ -239,7 +367,20 @@ where
         view_scoped_cardinality: bool,
     ) -> Result<(), Error> {
         let tx_id = tx.tx_id;
+        let complete_parent_versions = if view_scoped_cardinality {
+            None
+        } else {
+            self.complete_parent_versions(&tx, &versions).await?
+        };
         let mut batch = self.database.open_batch();
+        if let Some(complete_parent_versions) = complete_parent_versions.as_deref() {
+            self.preflight_complete_parent_constraints(
+                &mut batch,
+                tx_id,
+                complete_parent_versions,
+            )
+            .await?;
+        }
         let staged_versions = self.stage_transaction_and_versions_with_current_indexes(
             &mut batch,
             tx,
@@ -265,7 +406,11 @@ where
         let applied = self.database.apply_batch(batch).await?;
         let persisted = applied.persist().await;
         self.database.finish_persistence(persisted)?;
-        self.invalidate_tx_version_table_names_cache(tx_id);
+        // A later complete payload may have appended to a transaction first
+        // seen through a view-scoped fragment. The staging cache contains only
+        // this call's new versions, so discard it before any constraint or
+        // caller re-query observes the assembled transaction.
+        self.invalidate_tx_version_tables_cache(tx_id);
         self.reject_mismatched_pending_children_for_parent(tx_id)
             .await?;
         Ok(())
@@ -363,10 +508,15 @@ where
                 layer,
             };
             for parent in stored.parents() {
-                self.validate_known_parent_coordinate(parent, &parent_coordinate)
+                let parent_validation = self
+                    .validate_known_parent_coordinate(parent, &parent_coordinate)
                     .await?;
                 parent_edges.insert(parent);
-                if matches!(fate, Fate::Pending) {
+                if matches!(fate, Fate::Pending)
+                    || matches!(fate, Fate::Accepted)
+                        && view_scoped_cardinality
+                        && parent_validation == ParentCoordinateValidation::Inconclusive
+                {
                     pending_parent_constraints.push((parent, parent_coordinate.clone()));
                 }
             }

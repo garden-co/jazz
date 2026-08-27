@@ -1961,4 +1961,253 @@ fn unknown_parent_constraint_survives_matching_parent_arrival() {
     .unwrap();
 
     assert_eq!(core.transaction_record(child).unwrap().fate, Fate::Pending);
+    assert_eq!(
+        core.database
+            .primary_key_scan_raw("jazz_pending_edges", &[])
+            .unwrap()
+            .len(),
+        1,
+        "a matching parent does not erase a pending child's rejection-cascade edge"
+    );
+}
+
+#[test]
+fn accepted_view_scoped_child_constraint_survives_partial_parent_and_rejects_wrong_completion() {
+    let schema = schema();
+    let dir = tempfile::tempdir().unwrap();
+    let mut reader = open_node_at(&dir, schema.clone());
+    let parent = TxId::new(TxTime::from(70), node(0x82));
+    let child = TxId::new(TxTime::from(80), node(0x83));
+    let child_row = row(0x84);
+    reader
+        .ingest_view_scoped_transaction_with_current_indexes(
+            Transaction {
+                tx_id: child,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorSubject::SYSTEM,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![version_record(
+                child_row,
+                vec![parent],
+                title_cells("accepted partial child"),
+                None,
+            )],
+            Fate::Accepted,
+            None,
+            DurabilityTier::Edge,
+        )
+        .unwrap();
+    assert_eq!(
+        reader
+            .database
+            .primary_key_scan_raw("jazz_pending_edges", &[])
+            .unwrap()
+            .len(),
+        1
+    );
+
+    reader.database.close().unwrap();
+    drop(reader);
+    let mut reader = reopen_node_at(&dir, node(1), schema);
+    assert_eq!(
+        reader
+            .database
+            .primary_key_scan_raw("jazz_pending_edges", &[])
+            .unwrap()
+            .len(),
+        1,
+        "accepted-child coordinate constraint must survive reopen"
+    );
+
+    let wrong_partial = version_record(
+        row(0x85),
+        Vec::new(),
+        title_cells("partial wrong parent row"),
+        None,
+    );
+    reader
+        .ingest_view_scoped_transaction_with_current_indexes(
+            Transaction {
+                tx_id: parent,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorSubject::SYSTEM,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![wrong_partial.clone()],
+            Fate::Accepted,
+            None,
+            DurabilityTier::Edge,
+        )
+        .unwrap();
+    assert_eq!(
+        reader
+            .database
+            .primary_key_scan_raw("jazz_pending_edges", &[])
+            .unwrap()
+            .len(),
+        1,
+        "a wrong partial parent fragment is inconclusive"
+    );
+
+    let wrong_completion = version_record(
+        row(0x86),
+        Vec::new(),
+        title_cells("second wrong parent row"),
+        None,
+    );
+    let error = reader
+        .ingest_known_transaction(
+            Transaction {
+                tx_id: parent,
+                kind: TxKind::Mergeable,
+                n_total_writes: 2,
+                made_by: AuthorSubject::SYSTEM,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![wrong_partial, wrong_completion],
+            Fate::Accepted,
+            None,
+            DurabilityTier::Edge,
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::ConflictingCommitUnit(tx) if tx == parent));
+    assert!(reader
+        .query_transaction(parent)
+        .unwrap()
+        .unwrap()
+        .view_scoped_cardinality);
+    assert_eq!(reader.query_versions_for_tx(parent).unwrap().len(), 1);
+    assert_eq!(
+        reader.transaction_record(child).unwrap().fate,
+        Fate::Accepted,
+        "an already-accepted partial child is immutable"
+    );
+    assert_eq!(
+        reader
+            .database
+            .primary_key_scan_raw("jazz_pending_edges", &[])
+            .unwrap()
+            .len(),
+        1,
+        "failed completion must not erase the durable constraint"
+    );
+}
+
+#[test]
+fn accepted_view_scoped_child_constraint_clears_on_matching_complete_parent() {
+    let (_dir, mut reader) = open_node_with_uuid(node(0x87));
+    let parent = TxId::new(TxTime::from(70), node(0x88));
+    let child = TxId::new(TxTime::from(80), node(0x89));
+    let child_row = row(0x8a);
+    reader
+        .ingest_view_scoped_transaction_with_current_indexes(
+            Transaction {
+                tx_id: child,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorSubject::SYSTEM,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![version_record(
+                child_row,
+                vec![parent],
+                title_cells("accepted partial child"),
+                None,
+            )],
+            Fate::Accepted,
+            None,
+            DurabilityTier::Edge,
+        )
+        .unwrap();
+    let wrong_partial = version_record(
+        row(0x8b),
+        Vec::new(),
+        title_cells("partial sibling"),
+        None,
+    );
+    reader
+        .ingest_view_scoped_transaction_with_current_indexes(
+            Transaction {
+                tx_id: parent,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorSubject::SYSTEM,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![wrong_partial.clone()],
+            Fate::Accepted,
+            None,
+            DurabilityTier::Edge,
+        )
+        .unwrap();
+    let matching = version_record(
+        child_row,
+        Vec::new(),
+        title_cells("matching parent coordinate"),
+        None,
+    );
+    reader
+        .ingest_known_transaction(
+            Transaction {
+                tx_id: parent,
+                kind: TxKind::Mergeable,
+                n_total_writes: 2,
+                made_by: AuthorSubject::SYSTEM,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            vec![wrong_partial, matching],
+            Fate::Accepted,
+            None,
+            DurabilityTier::Edge,
+        )
+        .unwrap();
+
+    let stored_parent = reader.query_transaction(parent).unwrap().unwrap();
+    assert!(!stored_parent.view_scoped_cardinality);
+    assert_eq!(reader.query_versions_for_tx(parent).unwrap().len(), 2);
+    assert!(reader
+        .database
+        .primary_key_scan_raw("jazz_pending_edges", &[])
+        .unwrap()
+        .is_empty());
+    assert_eq!(reader.transaction_record(child).unwrap().fate, Fate::Accepted);
 }
