@@ -42,7 +42,7 @@ fn reachability_graph() -> GraphBuilder {
 
 #[futures_test::test]
 async fn second_subscriber_to_prepared_recursive_graph_gets_full_initial_message() {
-    let storage = MemoryStorage::new(&["edges"]);
+    let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
     let mut db = Database::new(edges_schema(), storage).await.unwrap();
 
     let mut batch = db.open_batch();
@@ -75,7 +75,7 @@ async fn second_subscriber_to_prepared_recursive_graph_gets_full_initial_message
 #[futures_test::test]
 async fn hydrating_a_new_subscriber_must_not_steal_tick_deltas_from_existing_recursive_subscribers()
 {
-    let storage = MemoryStorage::new(&["edges"]);
+    let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
     let mut db = Database::new(edges_schema(), storage).await.unwrap();
 
     // Subscriber A: prepared by its first two commits.
@@ -126,7 +126,7 @@ async fn hydrating_a_new_subscriber_must_not_steal_tick_deltas_from_existing_rec
 async fn one_shot_queries_do_not_perturb_subscription_streams() {
     use groove::queries::{Query, Select, SelectItem, TableRef};
 
-    let storage = MemoryStorage::new(&["edges"]);
+    let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
     let mut db = Database::new(edges_schema(), storage).await.unwrap();
 
     let mut batch = db.open_batch();
@@ -149,7 +149,7 @@ async fn one_shot_queries_do_not_perturb_subscription_streams() {
 
 #[futures_test::test]
 async fn new_subscriber_uses_current_state_not_stale_hydrated_accumulated() {
-    let storage = MemoryStorage::new(&["edges"]);
+    let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
     let mut db = Database::new(edges_schema(), storage).await.unwrap();
 
     // S1 hydrates and prepares the shared recursive state.

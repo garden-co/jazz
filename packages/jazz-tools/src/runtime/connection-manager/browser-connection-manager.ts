@@ -1,6 +1,7 @@
 import type { DurabilityTier } from "../client.js";
-import { resolveClientSessionSync } from "../client-session.js";
+import { resolveClientInternalSessionSync } from "../client-session.js";
 import type { Session } from "../context.js";
+import { getTrustedReservedSession, setTrustedReservedSession } from "../db-internal-session.js";
 import type { BrowserWorkerConnection } from "../runtime-source.js";
 import { reloadAfterStorageInvalidation } from "../browser-storage-invalidation.js";
 import { runCleanupSteps } from "../run-cleanup-steps.js";
@@ -19,6 +20,7 @@ import { registerBrowserInspectorControl } from "../../dev/inspector-overlay/bro
 export class BrowserConnectionManager extends ConnectionManager {
   private connection: BrowserWorkerConnection | null = null;
   private connectionReady: Promise<void> | null = null;
+  private initialExplicitOfflineStateKnown = false;
   private connectionError: Error | null = null;
   private disconnected = false;
   private readonly reconnectWaiters = new Set<() => void>();
@@ -33,12 +35,15 @@ export class BrowserConnectionManager extends ConnectionManager {
   async start(): Promise<void> {}
 
   protected override onClientCreated({ schema, client }: ConnectionManagerClientInput): void {
+    const workerConfig = { ...this.host.config };
+    setTrustedReservedSession(workerConfig, getTrustedReservedSession(this.host.config));
     const connection = this.host.runtimeSource.createBrowserWorkerConnection({
-      config: { ...this.host.config },
+      config: workerConfig,
       schema,
       client,
       onAuthFailure: (reason) => this.host.markUnauthenticated(reason),
       onAuthRestored: () => this.host.clearAuthError(),
+      onExplicitOfflineChange: (offline) => this.setExplicitOffline(connection, offline),
       onFailure: (error) => {
         if (this.connection !== connection) return;
         this.connectionError = asError(error);
@@ -51,10 +56,19 @@ export class BrowserConnectionManager extends ConnectionManager {
     this.unregisterInspectorControl = registerBrowserInspectorControl(() =>
       connection.openInspectorControlPort(),
     );
-    this.connectionReady = connection.ready().catch((error: unknown) => {
-      this.connectionError = asError(error);
-      throw error;
-    });
+    this.initialExplicitOfflineStateKnown = false;
+    this.connectionReady = connection.ready().then(
+      () => {
+        // The worker sends an initial transport-state event before resolving
+        // follower init. Once this resolves, this manager has an authoritative
+        // namespace-wide explicit-offline snapshot.
+        this.initialExplicitOfflineStateKnown = true;
+      },
+      (error: unknown) => {
+        this.connectionError = asError(error);
+        throw error;
+      },
+    );
     void this.connectionReady.catch(() => undefined);
     if (this.disconnected) {
       const ready = this.connectionReady;
@@ -92,6 +106,9 @@ export class BrowserConnectionManager extends ConnectionManager {
   }
   isExplicitlyOffline(): boolean {
     return this.disconnected;
+  }
+  override initialExplicitOfflineState(): Promise<void> | null {
+    return this.initialExplicitOfflineStateKnown ? null : this.connectionReady;
   }
   async waitForReconnect(signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) return;
@@ -166,6 +183,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (this.connection !== connection || this.storageReset) return;
     this.connection = null;
     this.connectionReady = null;
+    this.initialExplicitOfflineStateKnown = false;
     const client = this.detachClient();
     client?.discard();
     this.storageReset = connection
@@ -187,6 +205,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     const connection = this.connection;
     this.connection = null;
     this.connectionReady = null;
+    this.initialExplicitOfflineStateKnown = false;
     this.resolveReconnectWaiters();
     const unregisterInspectorControl = this.unregisterInspectorControl;
     this.unregisterInspectorControl = null;
@@ -212,6 +231,17 @@ export class BrowserConnectionManager extends ConnectionManager {
     for (const resolve of waiters) resolve();
   }
 
+  /**
+   * A persistent browser namespace has one worker-owned upstream connection.
+   * The initiating tab receives the RPC result too, but every attached tab
+   * must make the same explicit-offline choice for RemoteIfPossible reads.
+   */
+  private setExplicitOffline(connection: BrowserWorkerConnection, offline: boolean): void {
+    if (this.connection !== connection) return;
+    this.disconnected = offline;
+    if (!offline) this.resolveReconnectWaiters();
+  }
+
   private enqueueTransportTransition(run: () => void | Promise<void>): Promise<void> {
     const transition = this.transportTransition.then(run, run);
     this.transportTransition = transition.catch(() => undefined);
@@ -229,7 +259,12 @@ function runtimeAuth(config: DbForConnection["config"]): Record<string, unknown>
 }
 
 function runtimeSessionClaims(config: DbForConnection["config"]): Record<string, unknown> {
-  return resolveClientSessionSync(config)?.claims ?? {};
+  return (
+    resolveClientInternalSessionSync({
+      ...config,
+      trustedReservedSession: getTrustedReservedSession(config),
+    })?.claims ?? {}
+  );
 }
 
 function asError(error: unknown): Error {

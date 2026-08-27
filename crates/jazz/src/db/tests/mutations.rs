@@ -2,6 +2,27 @@
 
 use super::*;
 
+/// JSON pointer writes use the RFC 6901 array-index grammar, so a caller
+/// cannot mutate `alice`'s first array member through a leading-zero path that
+/// an equivalent read treats as absent.
+#[test]
+fn json_set_rejects_noncanonical_array_indices() {
+    let mut value = serde_json::json!({ "items": ["first", "second"] });
+    let error = super::super::mutations::apply_json_set(
+        &mut value,
+        "/items/01",
+        serde_json::json!("replaced"),
+    )
+    .expect_err("leading-zero JSON array pointer must be rejected");
+    assert_eq!(error.code, ErrorCode::Query);
+    assert_eq!(error.message, "JSON array pointer token is not an index");
+    assert_eq!(value, serde_json::json!({ "items": ["first", "second"] }));
+
+    super::super::mutations::apply_json_set(&mut value, "/items/1", serde_json::json!("ok"))
+        .expect("canonical JSON array index succeeds");
+    assert_eq!(value, serde_json::json!({ "items": ["first", "ok"] }));
+}
+
 #[derive(Clone)]
 struct RetryableChunkResolver {
     retry_after_ms: u32,
@@ -25,7 +46,7 @@ fn branch_column_reference_policy_schema() -> JazzSchema {
         table: "branches".to_owned(),
         condition: Box::new(PublicPolicyExpr::And(vec![
             public_outer_eq("branch_key", "branch_id"),
-            public_session_eq("owner", &["user_id"]),
+            public_session_eq("owner", &["claims", "sub"]),
         ])),
     };
     build_public_db_test_schema(
@@ -60,7 +81,7 @@ fn branch_column_reference_policy_schema() -> JazzSchema {
 }
 
 fn branch_update_read_policy_schema() -> JazzSchema {
-    let owner_write = public_session_eq("owner", &["user_id"]);
+    let owner_write = public_session_eq("owner", &["claims", "sub"]);
     build_public_db_test_schema(
         PublicSchemaBuilder::new().table(
             PublicTableSchemaBuilder::new("todos")
@@ -161,7 +182,7 @@ fn session_branch_updates_require_read_visibility_before_staging() {
         id_source: Some(Box::new(SeededRowIdSource::new(0x7a))),
     }))
     .expect("open history-complete authority");
-    db.set_identity_claims(writer, test_provider_claims(writer));
+    db.set_test_provider_claims(writer, test_provider_claims(writer));
 
     let seed = block_on(db.insert(
         "todos",
@@ -363,7 +384,7 @@ fn point_update_preimage_fast_path_preserves_target_and_policy_dispatch() {
                 .column("body", PublicColumnType::Text)
                 .policies(
                     PublicTablePolicies::new()
-                        .with_select(public_session_eq("owner", &["user_id"]))
+                        .with_select(public_session_eq("owner", &["claims", "sub"]))
                         .with_insert(PublicPolicyExpr::True)
                         .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True),
                 ),
@@ -1043,6 +1064,82 @@ fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
     assert_eq!(
         block_on(db.read_json_pointer("todos", json_row, "title", "/selected/answer")).unwrap(),
         Some(serde_json::json!(42))
+    );
+}
+
+#[test]
+fn partial_value_update_publishes_text_splice_and_ordinary_patch_atomically() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let mut title = "a".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 32);
+    title.push_str("tail");
+    let write = db
+        .insert(
+            "todos",
+            doctest_support::todo_cells(&title, false),
+            Default::default(),
+        )
+        .unwrap();
+    let row = write.row_uuid();
+    block_on(write.wait(DurabilityTier::Local)).unwrap();
+
+    let start = title.len() as u64 - 4;
+    let write = block_on(db.update_with_large_value_mutations(
+        "todos",
+        row,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        vec![LargeValueUpdate::Splice {
+            column: "title".to_owned(),
+            within: LargeValueUpdatePage::TextUtf8 {
+                from: start,
+                to: start + 4,
+            },
+            splices: vec![LargeValueUpdateSplice {
+                at: 0,
+                delete: 4,
+                insert: b"done".to_vec(),
+            }],
+        }],
+    ))
+    .unwrap();
+    block_on(write.wait(DurabilityTier::Local)).unwrap();
+
+    title.replace_range(title.len() - 4.., "done");
+    let rows = prepared_read(&db, &db.table("todos"));
+    let table = &doctest_support::schema().tables[0];
+    assert_eq!(
+        rows[0].cell(table, "title"),
+        Some(Value::String(title.clone()))
+    );
+    assert_eq!(rows[0].cell(table, "done"), Some(Value::Bool(true)));
+
+    let error = match block_on(db.update_with_large_value_mutations(
+        "todos",
+        row,
+        BTreeMap::from([("done".to_owned(), Value::Bool(false))]),
+        vec![LargeValueUpdate::JsonSet {
+            column: "title".to_owned(),
+            edits: vec![JsonSetEdit {
+                at: "/not-a-text-edit".to_owned(),
+                value: serde_json::json!("malformed raw descriptor"),
+            }],
+        }],
+    )) {
+        Ok(_) => panic!("a JSON descriptor for a text column must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, ErrorCode::Schema);
+    assert_eq!(error.message, "JSON set requires a JSON column");
+
+    let rows = prepared_read(&db, &db.table("todos"));
+    assert_eq!(
+        rows[0].cell(table, "title"),
+        Some(Value::String(title)),
+        "a schema-rejected raw descriptor must not publish a partial row version"
+    );
+    assert_eq!(
+        rows[0].cell(table, "done"),
+        Some(Value::Bool(true)),
+        "ordinary cells staged with a rejected descriptor must roll back too"
     );
 }
 
@@ -1801,15 +1898,15 @@ fn admitted_server_prepared_write_policy_binds_text_user_id_claim() {
     let alice_client = open_db(0xa1, alice, &schema);
     let bob_client = open_db(0xb2, bob, &schema);
     let alice_claims = BTreeMap::from([(
-        "user_id".to_owned(),
+        crate::query::provider_claim_key("sub"),
         Value::String("alice-subject".to_owned()),
     )]);
-    alice_client.set_identity_claims(alice, alice_claims.clone());
+    alice_client.set_test_provider_claims(alice, alice_claims.clone());
     let bob_claims = BTreeMap::from([(
-        "user_id".to_owned(),
+        crate::query::provider_claim_key("sub"),
         Value::String("bob-subject".to_owned()),
     )]);
-    bob_client.set_identity_claims(bob, bob_claims.clone());
+    bob_client.set_test_provider_claims(bob, bob_claims.clone());
 
     let (alice_transport, alice_server_transport) = duplex();
     let _alice_upstream = crate::db::block_on(alice_client.connect_upstream(alice_transport));
@@ -1842,7 +1939,7 @@ fn admitted_server_prepared_write_policy_binds_text_user_id_claim() {
     assert_eq!(
         block_on(accepted.wait(DurabilityTier::Global)).unwrap(),
         accepted.mergeable_tx_id(),
-        "the admitted server must bind public session.user_id as Text in its prepared write-policy plan"
+        "the admitted server must bind public session.user as Text in its prepared write-policy plan"
     );
 
     let denied = bob_client
@@ -1880,15 +1977,15 @@ fn admitted_server_prepared_write_policy_coerces_string_user_id_to_uuid_column()
     let alice_client = open_db(0xa3, alice, &schema);
     let bob_client = open_db(0xb3, bob, &schema);
     let alice_claims = BTreeMap::from([(
-        "user_id".to_owned(),
+        crate::query::provider_claim_key("sub"),
         Value::String(alice.test_uuid().to_string()),
     )]);
     let bob_claims = BTreeMap::from([(
-        "user_id".to_owned(),
+        crate::query::provider_claim_key("sub"),
         Value::String(bob.test_uuid().to_string()),
     )]);
-    alice_client.set_identity_claims(alice, alice_claims.clone());
-    bob_client.set_identity_claims(bob, bob_claims.clone());
+    alice_client.set_test_provider_claims(alice, alice_claims.clone());
+    bob_client.set_test_provider_claims(bob, bob_claims.clone());
 
     let (alice_transport, alice_server_transport) = duplex();
     let _alice_upstream = crate::db::block_on(alice_client.connect_upstream(alice_transport));
@@ -1950,8 +2047,8 @@ fn admitted_server_prepared_write_policy_fails_closed_for_wrong_user_id_type() {
     let author = AuthorSubject::for_test_bytes([0xa4; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xa4, author, &schema);
-    let claims = BTreeMap::from([("user_id".to_owned(), Value::Bool(true))]);
-    client.set_identity_claims(author, claims.clone());
+    let claims = BTreeMap::from([(crate::query::provider_claim_key("sub"), Value::Bool(true))]);
+    client.set_test_provider_claims(author, claims.clone());
 
     let (client_transport, server_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
@@ -1973,7 +2070,7 @@ fn admitted_server_prepared_write_policy_fails_closed_for_wrong_user_id_type() {
     client.tick().unwrap();
     let error = server.tick().unwrap_err();
     assert!(
-        error.to_string().contains("user_id has wrong type"),
+        error.to_string().contains("claims3:sub has wrong type"),
         "a non-coercible claim must fail before authorization support can admit the write: {error}"
     );
     assert!(
@@ -2117,7 +2214,7 @@ fn trusted_backend_upload_applies_session_claim_assertions_for_write_policy() {
         CommitUnitTrust::TrustedBackend,
     );
 
-    backend.set_identity_claims(
+    backend.set_test_provider_claims(
         editor_author,
         BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
     );
@@ -2157,7 +2254,7 @@ fn session_claim_assertions_require_trusted_backend_upload() {
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, session_author);
 
-    client.set_identity_claims(
+    client.set_test_provider_claims(
         session_author,
         BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
     );
@@ -2199,7 +2296,7 @@ fn trusted_backend_delete_uses_permission_subject_parent_for_write_policy() {
     );
     // The trusted backend may attribute a mutation to this admitted provider
     // session, but its UUID owner policy still reads the raw provider claim.
-    backend.set_identity_claims(attributed_user, test_provider_claims(attributed_user));
+    backend.set_test_provider_claims(attributed_user, test_provider_claims(attributed_user));
     backend.tick().unwrap();
     server.tick().unwrap();
 
@@ -2247,8 +2344,8 @@ fn client_insert_advice_is_unknown_without_writing() {
     let other = AuthorSubject::for_test_bytes([0xb2; 16]);
     let owner_db = open_db(0xa1, owner, &schema);
     let other_db = open_db(0xb2, other, &schema);
-    owner_db.set_identity_claims(owner, test_provider_claims(owner));
-    other_db.set_identity_claims(other, test_provider_claims(other));
+    owner_db.set_test_provider_claims(owner, test_provider_claims(owner));
+    other_db.set_test_provider_claims(other, test_provider_claims(other));
 
     assert_eq!(
         owner_db
@@ -2285,8 +2382,8 @@ fn client_delete_advice_is_unknown_without_mutating() {
     let other = AuthorSubject::for_test_bytes([0xb2; 16]);
     let owner_db = open_db(0xa1, owner, &schema);
     let other_db = open_db(0xb2, other, &schema);
-    owner_db.set_identity_claims(owner, test_provider_claims(owner));
-    other_db.set_identity_claims(other, test_provider_claims(other));
+    owner_db.set_test_provider_claims(owner, test_provider_claims(owner));
+    other_db.set_test_provider_claims(other, test_provider_claims(other));
     let row = row(1);
     let write = owner_db
         .insert(
@@ -2725,14 +2822,14 @@ fn attributed_streaming_uses_system_admission_without_losing_provenance() {
     let schema = editor_claim_write_schema();
     let alice = AuthorSubject::for_test_bytes([0xab; 16]);
     let server = open_core(0xac, AuthorSubject::SYSTEM, &schema);
-    server.node().borrow_mut().set_session_claims(
+    server.node().borrow_mut().set_test_provider_claims(
         AuthorSubject::SYSTEM,
         BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
     );
     server
         .node()
         .borrow_mut()
-        .set_session_claims(alice, BTreeMap::new());
+        .set_test_provider_claims(alice, BTreeMap::new());
     let backend = block_on(unsafe {
         // SAFETY: this is the explicit trusted-backend constructor exercised by
         // the native binding, with SYSTEM as its admission identity.

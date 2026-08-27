@@ -865,12 +865,15 @@ fn relation_value_to_operand(value: &RelationValueRef) -> Result<Operand, QueryE
         }
         RelationValueRef::Param(name) => Ok(Operand::Param(name.clone())),
         RelationValueRef::SessionRef(path) => {
-            if path.len() != 1 {
-                return Err(relation_unification_error(
-                    "nested session refs are not unified yet",
-                ));
+            match path.as_slice() {
+                [name] => Ok(Operand::Claim(name.clone())),
+                [claims, name] if claims == "claims" => {
+                    Ok(Operand::Claim(provider_claim_operand_key(name)))
+                }
+                _ => Err(relation_unification_error(
+                    "session refs support session.user and session.claims[\"name\"]",
+                )),
             }
-            Ok(Operand::Claim(path[0].clone()))
         }
         RelationValueRef::OuterColumn(_)
         | RelationValueRef::FrontierColumn(_)

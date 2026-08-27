@@ -89,10 +89,7 @@ impl SyncBench {
         dirs.push(dir);
         let ui_author = AuthorSubject::for_test_bytes([7; 16]);
         for node in [&mut ui, &mut worker, &mut edge, &mut core] {
-            node.admit_test_session_claims(
-                ui_author,
-                BTreeMap::from([("user_id".to_owned(), Value::Uuid(ui_author.test_uuid()))]),
-            );
+            node.admit_test_session_claims(ui_author, BTreeMap::new());
         }
         Self {
             config,
@@ -320,11 +317,9 @@ impl SyncBench {
             .expect("ui subscription");
         let schema = schema();
         let table = &schema.tables[0];
-        assert!(
-            ui_rows
-                .iter()
-                .all(|row| row.cell(table, "owner") == Some(Value::Uuid(self.ui_owner.test_uuid())))
-        );
+        assert!(ui_rows.iter().all(|row| {
+            row.cell(table, "owner") == Some(Value::String(self.ui_owner.canonical().to_owned()))
+        }));
         assert!(!ui_expected_rows.contains_key(&row(250)));
         assert_eq!(
             self.worker.sync_metrics().parked_orphans,
@@ -501,7 +496,9 @@ fn rows_owned_by(
     owner: AuthorSubject,
 ) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     rows.iter()
-        .filter(|(_row_uuid, cells)| cells.get("owner") == Some(&Value::Uuid(owner.test_uuid())))
+        .filter(|(_row_uuid, cells)| {
+            cells.get("owner") == Some(&Value::String(owner.canonical().to_owned()))
+        })
         .map(|(row_uuid, cells)| (*row_uuid, cells.clone()))
         .collect()
 }
@@ -521,7 +518,7 @@ fn schema() -> JazzSchema {
         SchemaBuilder::new().table(
             TableSchemaBuilder::new(TABLE)
                 .column("title", ColumnType::Text)
-                .column("owner", ColumnType::Uuid)
+                .column("owner", ColumnType::Text)
                 .policies(policies),
         ),
     )
@@ -544,7 +541,10 @@ fn open_node(
 fn cells(title: impl Into<String>, owner: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.into())),
-        ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
+        (
+            "owner".to_owned(),
+            Value::String(owner.canonical().to_owned()),
+        ),
     ])
 }
 

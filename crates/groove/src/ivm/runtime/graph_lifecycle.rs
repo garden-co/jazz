@@ -85,6 +85,17 @@ impl IvmRuntime {
         stats
     }
 
+    #[cfg(test)]
+    pub(crate) fn top_by_retained_group_count(&self) -> usize {
+        self.operator_states
+            .values()
+            .filter_map(|state| match state {
+                OperatorState::TopBy(state) => Some(state.value().group_count()),
+                _ => None,
+            })
+            .sum()
+    }
+
     pub(super) fn cheap_stats(&self) -> RuntimeStats {
         RuntimeStats {
             graph_nodes: self.graph.nodes().len(),

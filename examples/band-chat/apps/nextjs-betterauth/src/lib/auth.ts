@@ -30,7 +30,7 @@ export const auth = betterAuth({
         issuer: appOrigin,
         expirationTime: "1h",
         // Better Auth's stable internal user id remains the raw session user
-        // id. Jazz independently records issuer-scoped session.author.
+        // id. Jazz independently records issuer-scoped session.user.
         getSubject: ({ user }: { user: { id: string } }) => user.id,
       },
     }),

@@ -161,7 +161,7 @@ fn recursive_permissions_schema() -> JazzSchema {
         "team_edges",
         "member",
         "parent",
-        RelValueRef::SessionRef(vec!["user_id".to_owned()]),
+        RelValueRef::SessionRef(vec!["user".to_owned()]),
     );
 
     schema_fixture::compile(
@@ -223,7 +223,7 @@ fn open_db_with_schema(
         author,
         history_complete,
         schema,
-        MemoryStorage::new,
+        |refs| MemoryStorage::new(refs).expect("valid memory storage families"),
         "open core realistic benchmark db",
     )
 }

@@ -14,6 +14,7 @@ Invariant digest:
 - `INV-STORAGE-1`: `OrderedKvStorage::scan(ScanRequest)` MUST return range results in the requested lexicographic direction and include keys `>= start` while excluding keys `>= end`.
 - `INV-STORAGE-2`: A prefix `ScanRequest` MUST return exactly keys beginning with the supplied byte prefix in the requested lexicographic direction, including prefixes whose finite upper bound cannot be computed.
 - `INV-STORAGE-29`: An explicit ordered scan request's finite item bound MUST cap the complete cursor result in the requested direction; adapters MUST stop reading beyond that bound rather than treating it as a caller-side collection hint.
+- `INV-STORAGE-30`: Application table and direct-record-store names MUST have one case-sensitive, collision-free namespace that excludes Groove's engine-owned names; every physical column-family ingress MUST reject embedded NUL and names beyond the portable UTF-8 byte bound before durable mutation.
 - `INV-STORAGE-4`: `write_many` MUST apply all `Set`/`Delete` operations atomically at the storage-operation level, and a missing column family in the operation list MUST leave earlier valid operations unapplied.
 - `INV-STORAGE-5`: `ReopenableStorage::reopen` MUST preserve existing data while adding newly requested column families.
 - `INV-STORAGE-6`: Table records MUST be stored as values in the table column family named by `TableSchema::name`, keyed by the encoded primary key derived from the row record.
@@ -131,6 +132,30 @@ bound. `INV-STORAGE-29` — an explicit scan limit applies across all cursor
 batches and stops physical traversal rather than merely truncating a materialized
 result. `INV-STORAGE-5` (prov) — `ReopenableStorage::reopen` preserves existing
 data while adding newly requested families.
+
+### Column-family namespace admission
+
+Application table names and directly exposed record-store names share one
+case-sensitive namespace (`INV-STORAGE-30`). Each application-selected name
+therefore has exactly one owner; a duplicate table name, duplicate direct-store
+name, or table/direct-store collision is rejected before Groove initializes a
+runtime or writes a layout marker. Application names cannot use the
+engine-owned `__groove_*` namespace, the durable-index family `indices`, or
+RocksDB's `default` family. These reservations are global: they do not depend
+on the selected storage layout or on whether an index happens to be declared.
+That keeps an otherwise-valid application schema from becoming unopenable when
+it later adds an index or changes a layout.
+
+This does not make all physical families application names. Groove itself may
+open its reserved metadata families, and a backend may add its own internal
+family. Every physical family name that crosses a backend's open, reopen, or
+persisted-catalogue boundary MUST nevertheless be valid before that backend
+mutates durable state: it contains no embedded NUL and is at most `u16::MAX`
+UTF-8 bytes. The common bound follows the IndexedDB name framing and makes a
+valid logical schema portable across the supported backends. It also protects
+the RocksDB C-string boundary. Backend discovery and import paths validate the
+same physical contract before admitting requested families or replacing live
+in-memory state.
 
 An ordered cursor is **not** a snapshot-isolation primitive. A backend may
 observe committed changes between batches; in particular, `MemoryStorage`

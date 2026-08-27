@@ -370,24 +370,31 @@ pub fn admit_local_first_jwt(
 }
 
 /// Inject the trusted session vocabulary once after provider claims are
-/// admitted. Provider `sub` maps to the documented raw `user_id`; `author` is
+/// admitted. Provider `sub` maps to the documented raw `user_id`; `user` is
 /// the distinct reserved canonical `[iss,sub]` logical identity.
 pub fn admitted_session_claims(
     issuer: &str,
     subject: &str,
     author: AuthorSubject,
-    mut claims: BTreeMap<String, Value>,
+    claims: BTreeMap<String, Value>,
 ) -> BTreeMap<String, Value> {
-    claims.insert("iss".to_owned(), Value::String(issuer.to_owned()));
-    claims.insert("issuer".to_owned(), Value::String(issuer.to_owned()));
-    claims.insert("subject".to_owned(), Value::String(subject.to_owned()));
-    claims.insert("sub".to_owned(), Value::String(subject.to_owned()));
-    claims.insert("user_id".to_owned(), Value::String(subject.to_owned()));
-    claims.insert(
-        "author".to_owned(),
+    let mut admitted = claims
+        .into_iter()
+        .map(|(name, value)| (crate::query::provider_claim_key(&name), value))
+        .collect::<BTreeMap<_, _>>();
+    admitted.insert(
+        crate::query::provider_claim_key("iss"),
+        Value::String(issuer.to_owned()),
+    );
+    admitted.insert(
+        crate::query::provider_claim_key("sub"),
+        Value::String(subject.to_owned()),
+    );
+    admitted.insert(
+        "user".to_owned(),
         Value::String(author.canonical().to_owned()),
     );
-    claims
+    admitted
 }
 
 fn jwt_decoding_key(verifier: &JwtVerifierConfig) -> Result<DecodingKey, AuthAdmissionError> {
@@ -428,7 +435,9 @@ fn jwt_error(error: jsonwebtoken::errors::Error) -> AuthAdmissionError {
     AuthAdmissionError::InvalidJwt(error.to_string())
 }
 
-fn jwt_json_claims_to_policy_claims(
+/// Convert verified JWT JSON claims into scalar policy values. Registered
+/// identity fields are excluded because admission supplies verified values.
+pub fn jwt_json_claims_to_policy_claims(
     extra: BTreeMap<String, serde_json::Value>,
 ) -> Result<BTreeMap<String, Value>, AuthAdmissionError> {
     let mut claims = BTreeMap::new();
@@ -594,7 +603,9 @@ mod tests {
             r#"[" https://issuer.example "," user "]"#
         );
         assert_eq!(
-            admitted.claims.get("iss"),
+            admitted
+                .claims
+                .get(&crate::query::provider_claim_key("iss")),
             Some(&Value::String(" https://issuer.example ".to_owned()))
         );
     }

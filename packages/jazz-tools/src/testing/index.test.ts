@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { anyOf, definePermissions } from "../permissions/index.js";
+import { canonicalAuthorSubject } from "../runtime/author-id.js";
 import { schema as s } from "../index.js";
 import {
   createPolicyTestApp,
@@ -25,10 +26,8 @@ const testSchema = {
 type TestSchema = s.Schema<typeof testSchema>;
 const testApp: s.App<TestSchema> = s.defineApp(testSchema);
 const testPermissions = definePermissions(testApp, ({ policy, session }) => {
-  policy.todos.allowRead.where(
-    anyOf([{ ownerId: session.user_id }, { ownerId: { isNull: true } }]),
-  );
-  policy.todos.allowInsert.where({ ownerId: session.user_id });
+  policy.todos.allowRead.where(anyOf([{ ownerId: session.user }, { ownerId: { isNull: true } }]));
+  policy.todos.allowInsert.where({ ownerId: session.user });
 });
 
 afterEach(async () => {
@@ -351,7 +350,7 @@ describe("createPolicyTestApp", () => {
         return db.insert(testApp.todos, {
           title: "Ship the direct app API",
           done: false,
-          ownerId: "alice",
+          ownerId: canonicalAuthorSubject("https://policy-test.example", "alice"),
         });
       });
 
@@ -426,7 +425,7 @@ describe("createPolicyTestApp", () => {
         db.insert(testApp.todos, {
           title: "Alice can insert her own todo",
           done: false,
-          ownerId: "alice",
+          ownerId: canonicalAuthorSubject("https://policy-test.example", "alice"),
         });
       });
 
@@ -434,7 +433,7 @@ describe("createPolicyTestApp", () => {
         return db.insert(testApp.todos, {
           title: "Bob cannot insert Alice's todo",
           done: false,
-          ownerId: "alice",
+          ownerId: canonicalAuthorSubject("https://policy-test.example", "alice"),
         });
       });
 

@@ -81,14 +81,14 @@ fn make_folders_schema(table_name: &str, policies: TablePolicies) -> TableSchema
 fn shared_document_select_policy() -> PolicyExpr {
     pe::exists(pe::table("document_shares").where_(pe::rel::all_of([
         pe::rel::eq_outer("document_id", "id"),
-        pe::rel::eq_session("user_id", "user_id"),
+        pe::rel::eq_session("user_id", vec!["claims", "sub"]),
     ])))
 }
 
 fn editor_document_update_policy() -> PolicyExpr {
     pe::exists(pe::table("document_editors").where_(pe::rel::all_of([
         pe::rel::eq_outer("document_id", "id"),
-        pe::rel::eq_session("user_id", "user_id"),
+        pe::rel::eq_session("user_id", vec!["claims", "sub"]),
     ])))
 }
 
@@ -134,7 +134,7 @@ fn join_membership_select_policy() -> PolicyExpr {
                 PredicateExpr::Cmp {
                     left: scoped_column("group_memberships", "user_id"),
                     op: PredicateCmpOp::Eq,
-                    right: ValueRef::SessionRef(vec!["user_id".into()]),
+                    right: ValueRef::SessionRef(vec!["user".to_owned()]),
                 },
             ]),
         },
@@ -154,7 +154,7 @@ fn hop_membership_select_policy() -> PolicyExpr {
                         predicate: PredicateExpr::Cmp {
                             left: scoped_column("group_memberships", "user_id"),
                             op: PredicateCmpOp::Eq,
-                            right: ValueRef::SessionRef(vec!["user_id".into()]),
+                            right: ValueRef::SessionRef(vec!["user".to_owned()]),
                         },
                     }),
                     right: Box::new(RelExpr::TableScan {
@@ -255,7 +255,7 @@ fn joined_table_select_policy_schema() -> Schema {
                 .policies(permissions(|p| {
                     p.allow_insert().always();
                     p.allow_read()
-                        .where_(pe::eq("owner_name", pe::session("user_id")));
+                        .where_(pe::eq("owner_name", pe::session(vec!["claims", "sub"])));
                 })),
         )
         .build()
@@ -290,7 +290,7 @@ fn mixed_complex_policy_schema() -> Schema {
             permissions(|p| {
                 p.allow_insert().always();
                 p.allow_read()
-                    .where_(pe::eq("owner_id", pe::session("user_id")));
+                    .where_(pe::eq("owner_id", pe::session(vec!["claims", "sub"])));
             }),
         ))
         .table(make_complex_documents_schema(

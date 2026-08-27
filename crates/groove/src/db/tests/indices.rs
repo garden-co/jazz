@@ -4,7 +4,8 @@ use super::*;
 
 #[futures_test::test]
 async fn database_creation_dedups_schema_indices_as_durable_nodes() {
-    let storage = MemoryStorage::new(&["albums", "indices"]);
+    let storage =
+        MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
     let database = Database::new(indexed_albums_schema(), storage)
         .await
         .unwrap();
@@ -27,7 +28,8 @@ async fn database_creation_dedups_schema_indices_as_durable_nodes() {
 
 #[futures_test::test]
 async fn persist_maintains_schema_index_entries() {
-    let storage = MemoryStorage::new(&["albums", "indices"]);
+    let storage =
+        MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(indexed_albums_schema(), storage)
         .await
         .unwrap();
@@ -85,7 +87,8 @@ async fn persist_maintains_schema_index_entries() {
 
 #[futures_test::test]
 async fn persist_consolidates_same_tick_deltas_and_rejects_unique_conflicts() {
-    let storage = MemoryStorage::new(&["albums", "indices"]);
+    let storage =
+        MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(unique_indexed_albums_schema(), storage)
         .await
         .unwrap();
@@ -140,7 +143,8 @@ async fn public_database_facade_reads_secondary_indexes_with_memory_storage() {
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    let storage = MemoryStorage::new(&["albums", "indices"]);
+    let storage =
+        MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(schema, storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -216,7 +220,8 @@ async fn public_database_facade_reads_secondary_indexes_with_memory_storage() {
 
 #[futures_test::test]
 async fn index_reads_track_insert_update_delete_and_prefixes() {
-    let storage = MemoryStorage::new(&["tracks", "indices"]);
+    let storage =
+        MemoryStorage::new(&["tracks", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(indexed_tracks_schema(), storage)
         .await
         .unwrap();
@@ -305,7 +310,8 @@ async fn index_reads_track_insert_update_delete_and_prefixes() {
 
 #[futures_test::test]
 async fn persisted_index_update_retracts_old_key_when_indexed_value_changes_to_finite() {
-    let storage = MemoryStorage::new(&["history", "indices"]);
+    let storage =
+        MemoryStorage::new(&["history", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(interval_history_schema(), storage)
         .await
         .unwrap();
@@ -371,7 +377,8 @@ async fn persisted_index_update_retracts_old_key_when_indexed_value_changes_to_f
 
 #[futures_test::test]
 async fn persisted_index_update_preserves_entry_when_index_key_is_unchanged() {
-    let storage = MemoryStorage::new(&["history", "indices"]);
+    let storage =
+        MemoryStorage::new(&["history", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(interval_history_schema(), storage)
         .await
         .unwrap();
@@ -422,7 +429,7 @@ async fn persisted_index_update_preserves_entry_when_index_key_is_unchanged() {
 
 #[futures_test::test]
 async fn uuid_primary_keys_nullable_index_keys_and_ordering_work() {
-    let storage = MemoryStorage::new(&["docs", "indices"]);
+    let storage = MemoryStorage::new(&["docs", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(uuid_docs_schema(), storage).await.unwrap();
     let low = uuid::Uuid::from_bytes([1; 16]);
     let mid = uuid::Uuid::from_bytes([2; 16]);
@@ -516,7 +523,8 @@ async fn uuid_primary_keys_nullable_index_keys_and_ordering_work() {
 
 #[futures_test::test]
 async fn index_get_on_unique_index_returns_zero_or_one_record() {
-    let storage = MemoryStorage::new(&["tracks", "indices"]);
+    let storage =
+        MemoryStorage::new(&["tracks", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(indexed_tracks_schema(), storage)
         .await
         .unwrap();
@@ -560,7 +568,7 @@ async fn index_get_on_unique_index_returns_zero_or_one_record() {
 
 #[futures_test::test]
 async fn tuple_columns_work_in_index_keys_and_nullable_columns() {
-    let storage = MemoryStorage::new(&["edges", "indices"]);
+    let storage = MemoryStorage::new(&["edges", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(tuple_edges_schema(), storage).await.unwrap();
     let node_a = uuid::Uuid::from_bytes([0x0a; 16]);
     let node_b = uuid::Uuid::from_bytes([0x0b; 16]);
@@ -619,7 +627,8 @@ async fn tuple_columns_work_in_index_keys_and_nullable_columns() {
 
 #[futures_test::test]
 async fn raw_reads_return_encoded_base_records() {
-    let storage = MemoryStorage::new(&["tracks", "indices"]);
+    let storage =
+        MemoryStorage::new(&["tracks", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(indexed_tracks_schema(), storage)
         .await
         .unwrap();
@@ -677,7 +686,8 @@ async fn raw_reads_return_encoded_base_records() {
 
 #[futures_test::test]
 async fn persisted_index_scan_treats_missing_primary_key_record_as_invalid() {
-    let storage = MemoryStorage::new(&["albums", "indices"]);
+    let storage =
+        MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(indexed_albums_schema(), storage)
         .await
         .unwrap();
@@ -704,7 +714,8 @@ async fn persisted_index_scan_treats_missing_primary_key_record_as_invalid() {
 
 #[futures_test::test]
 async fn primary_key_last_before_or_at_raw_returns_bounded_prefix_winner() {
-    let storage = MemoryStorage::new(&["history", "indices"]);
+    let storage =
+        MemoryStorage::new(&["history", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -759,7 +770,8 @@ async fn primary_key_last_before_or_at_raw_returns_bounded_prefix_winner() {
 
 #[futures_test::test]
 async fn randomized_index_reads_match_full_scan_oracle() {
-    let storage = MemoryStorage::new(&["tracks", "indices"]);
+    let storage =
+        MemoryStorage::new(&["tracks", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(indexed_tracks_schema(), storage)
         .await
         .unwrap();
@@ -804,7 +816,8 @@ async fn randomized_index_reads_match_full_scan_oracle() {
 
 #[futures_test::test]
 async fn persisted_index_keys_sort_by_index_value_then_primary_key() {
-    let storage = MemoryStorage::new(&["albums", "indices"]);
+    let storage =
+        MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(indexed_albums_schema(), storage)
         .await
         .unwrap();
@@ -840,7 +853,8 @@ async fn persisted_index_keys_sort_by_index_value_then_primary_key() {
 
 #[futures_test::test]
 async fn durable_non_unique_index_keys_append_separator_and_primary_key_suffix() {
-    let storage = MemoryStorage::new(&["albums", "indices"]);
+    let storage =
+        MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(indexed_albums_schema(), storage)
         .await
         .unwrap();
@@ -871,7 +885,8 @@ async fn durable_non_unique_index_keys_append_separator_and_primary_key_suffix()
 
 #[futures_test::test]
 async fn unique_indices_use_only_index_columns_as_storage_keys() {
-    let storage = MemoryStorage::new(&["albums", "indices"]);
+    let storage =
+        MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(unique_indexed_albums_schema(), storage)
         .await
         .unwrap();
@@ -904,7 +919,8 @@ async fn unique_indices_use_only_index_columns_as_storage_keys() {
 
 #[futures_test::test]
 async fn durable_unique_index_keys_omit_primary_key_suffix() {
-    let storage = MemoryStorage::new(&["albums", "indices"]);
+    let storage =
+        MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(unique_indexed_albums_schema(), storage)
         .await
         .unwrap();
@@ -952,7 +968,8 @@ async fn primary_key_covering_indices_omit_redundant_suffix_and_recover_pk_from_
         PrimaryKeyColumn::integer("node", IntegerKeyType::U64),
     ]))
     .with_index(IndexSchema::new("by_tx", ["stamp", "node", "row"]))]);
-    let storage = MemoryStorage::new(&["history", "indices"]);
+    let storage =
+        MemoryStorage::new(&["history", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(schema, storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -1012,7 +1029,8 @@ async fn primary_key_covering_indices_omit_redundant_suffix_and_recover_pk_from_
 
 #[futures_test::test]
 async fn unique_indices_reject_existing_conflicting_values() {
-    let storage = MemoryStorage::new(&["albums", "indices"]);
+    let storage =
+        MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(unique_indexed_albums_schema(), storage)
         .await
         .unwrap();
@@ -1049,7 +1067,8 @@ async fn unique_indices_reject_existing_conflicting_values() {
 
 #[futures_test::test]
 async fn durable_unique_indices_reject_positive_delta_for_existing_different_record() {
-    let storage = MemoryStorage::new(&["albums", "indices"]);
+    let storage =
+        MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(unique_indexed_albums_schema(), storage)
         .await
         .unwrap();
@@ -1075,7 +1094,8 @@ async fn durable_unique_indices_reject_positive_delta_for_existing_different_rec
 
 #[futures_test::test]
 async fn unique_indices_reject_conflicts_within_one_batch() {
-    let storage = MemoryStorage::new(&["albums", "indices"]);
+    let storage =
+        MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(unique_indexed_albums_schema(), storage)
         .await
         .unwrap();
@@ -1113,7 +1133,8 @@ async fn table_and_index_state_survive_restart_for_resubscribed_graphs() {
     let index_graph = GraphBuilder::index("albums", "albums_by_title");
 
     let storage = {
-        let storage = MemoryStorage::new(&["albums", "indices"]);
+        let storage =
+            MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
         let mut database = Database::new(indexed_albums_schema(), storage)
             .await
             .unwrap();
@@ -1201,7 +1222,8 @@ async fn persisted_indices_can_be_deleted_after_restart() {
     let index_graph = GraphBuilder::index("albums", "albums_by_title");
 
     let storage = {
-        let storage = MemoryStorage::new(&["albums", "indices"]);
+        let storage =
+            MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
         let mut database = Database::new(indexed_albums_schema(), storage)
             .await
             .unwrap();
@@ -1269,7 +1291,8 @@ async fn persisted_indices_can_be_deleted_after_restart() {
 
 #[futures_test::test]
 async fn live_index_registration_rejects_while_a_publication_is_resident() {
-    let storage = MemoryStorage::new(&["albums", "indices"]);
+    let storage =
+        MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let mut batch = database.open_batch();
     batch.insert(

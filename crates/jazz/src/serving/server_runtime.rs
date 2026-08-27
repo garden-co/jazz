@@ -27,6 +27,7 @@ use futures::StreamExt;
 use futures::channel::mpsc;
 use futures::future::LocalBoxFuture;
 use futures::task::LocalSpawnExt;
+use futures::task::{ArcWake, waker};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot, watch};
 
 /// Sendable handle for the thread that owns the in-memory server shell.
@@ -135,6 +136,19 @@ struct ServerShellTickState {
     delayed: AtomicBool,
 }
 
+/// A storage-future wake is translated back into one serialized shell turn.
+/// The callback contains no database state, so it remains safe for a backend
+/// to invoke through a normal cross-thread `Waker`.
+struct ServerShellQueryRuntimeWake {
+    scheduler: ServerShellTickScheduler,
+}
+
+impl ArcWake for ServerShellQueryRuntimeWake {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        arc_self.scheduler.schedule_tick(TickUrgency::Immediate);
+    }
+}
+
 impl ServerShellTickScheduler {
     fn enqueue_tick(
         jobs: &mpsc::UnboundedSender<ServerShellCommand>,
@@ -193,6 +207,12 @@ impl TickScheduler for ServerShellTickScheduler {
             state.delayed.store(false, Ordering::Release);
             Self::enqueue_tick(&jobs, &activity_tx, &io_wakers, &state);
         });
+    }
+
+    fn query_runtime_waker(&self) -> Option<std::task::Waker> {
+        Some(waker(Arc::new(ServerShellQueryRuntimeWake {
+            scheduler: self.clone(),
+        })))
     }
 }
 

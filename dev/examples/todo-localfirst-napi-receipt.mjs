@@ -31,11 +31,11 @@ const app = s.defineApp({
 
 const permissions = s.definePermissions(app, ({ policy, session }) => {
   policy.todos.allowRead.where({});
-  policy.todos.allowInsert.where({ owner_id: session.user_id });
+  policy.todos.allowInsert.where({ owner_id: session.user });
   policy.todos.allowUpdate
-    .whereOld({ owner_id: session.user_id })
-    .whereNew({ owner_id: session.user_id });
-  policy.todos.allowDelete.where({ owner_id: session.user_id });
+    .whereOld({ owner_id: session.user })
+    .whereNew({ owner_id: session.user });
+  policy.todos.allowDelete.where({ owner_id: session.user });
 });
 
 function createLocalFirstIdentity(actorName) {

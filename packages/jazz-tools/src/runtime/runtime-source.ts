@@ -49,6 +49,8 @@ export interface BrowserWorkerConnectionContext<RuntimeConfig extends DbConfig =
   client: JazzClient;
   onAuthFailure: (reason: AuthFailureReason) => void;
   onAuthRestored: () => void;
+  /** The worker namespace's explicit offline state changed. */
+  onExplicitOfflineChange?: (offline: boolean) => void;
   onFailure: (error: unknown) => void;
   onStorageReset?: () => void;
   onStorageInvalidated?: () => void;
@@ -60,6 +62,8 @@ export interface BrowserFollowerConnectionContext<RuntimeConfig extends DbConfig
   port: MessagePort;
   onAuthFailure: (reason: AuthFailureReason) => void;
   onAuthRestored: () => void;
+  /** The worker namespace's explicit offline state changed. */
+  onExplicitOfflineChange?: (offline: boolean) => void;
   onFailure: (error: unknown) => void;
   onStorageReset?: () => void;
   onStorageInvalidated?: () => void;

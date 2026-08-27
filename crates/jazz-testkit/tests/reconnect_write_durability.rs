@@ -149,7 +149,7 @@ fn detaching_the_upstream_resolves_pending_global_wait() {
         .collect::<Vec<_>>();
     let node = block_on(Db::open(DbConfig::new(
         schema,
-        MemoryStorage::new(&refs),
+        MemoryStorage::new(&refs).expect("valid memory storage families"),
         DbIdentity {
             node: NodeUuid::from_bytes([0x51; 16]),
             author: AuthorSubject::for_test_bytes([0xa9; 16]),

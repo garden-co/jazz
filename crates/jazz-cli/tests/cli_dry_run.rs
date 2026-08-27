@@ -271,8 +271,12 @@ fn open_connected_client(
     let refs = schema.column_families();
     let cf_refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
     let db = block_on(Db::open(
-        DbConfig::new(schema, MemoryStorage::new(&cf_refs), client)
-            .with_id_source(SeededRowIdSource::new(0xc1)),
+        DbConfig::new(
+            schema,
+            MemoryStorage::new(&cf_refs).expect("valid memory storage families"),
+            client,
+        )
+        .with_id_source(SeededRowIdSource::new(0xc1)),
     ))
     .expect("open client db");
     let wire = QueuedWireTransport::default();

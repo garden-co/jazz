@@ -609,3 +609,29 @@ pub enum Operand {
     /// Typed literal value.
     Literal(Value),
 }
+
+/// Collision-proof internal namespace for raw identity-provider claims.
+/// Public policy paths remain `session.claims[<name>]`.
+pub(crate) const PROVIDER_CLAIM_PREFIX: &str = "\0claims:";
+
+/// Collision-proof storage key for a raw provider claim exposed as
+/// `session.claims[name]` in public policies.
+pub fn provider_claim_key(name: &str) -> String {
+    provider_claim_operand_key(name)
+}
+
+pub(crate) fn provider_claim_operand_key(name: &str) -> String {
+    format!("{PROVIDER_CLAIM_PREFIX}{name}")
+}
+
+pub(crate) fn operand_claim_path(name: &str) -> Vec<String> {
+    name.strip_prefix(PROVIDER_CLAIM_PREFIX)
+        .map(|name| vec!["claims".to_owned(), name.to_owned()])
+        .unwrap_or_else(|| vec![name.to_owned()])
+}
+
+pub(crate) fn operand_claim_storage_key(name: &str) -> String {
+    name.strip_prefix(PROVIDER_CLAIM_PREFIX)
+        .map(provider_claim_key)
+        .unwrap_or_else(|| name.to_owned())
+}

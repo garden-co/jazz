@@ -33,7 +33,6 @@ import {
 } from "../client-session.js";
 import {
   authorBytesForSession,
-  canonicalAuthorSubject,
   decodeCanonicalAuthorSubjectBytes,
   isUsableSubject,
   parseCanonicalAuthorSubject,
@@ -334,6 +333,13 @@ type NativeDb = {
     deleteLength: number,
     insert: Uint8Array,
   ): Write | PendingNativeWrite | Promise<Write | PendingNativeWrite>;
+  updateLargeValuesEncoded?(
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    descriptors: unknown,
+    updatedAtMs?: number | null,
+  ): Write;
   connectUpstream(): Transport;
   connectUpstreamWithSession?(
     protocolVersion: number,
@@ -344,6 +350,12 @@ type NativeDb = {
     localEpoch: bigint,
   ): Transport | Promise<Transport>;
   acceptSubscriber?(author: Uint8Array, claims: Record<string, unknown>): Transport;
+  acceptSubscriberWithSelfSignedProof?(
+    claims: Record<string, unknown>,
+    token: string,
+    appId: string,
+    claimedAuthor: string,
+  ): Transport;
   tick(): void | Promise<void>;
   close?(): void;
   free?(): void;
@@ -624,6 +636,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly schemaBytes: Uint8Array;
   private readonly configBytes: Uint8Array;
   private readonly peerIdentity: Uint8Array;
+  private readonly selfSignedClientProof: NativeSelfSignedClientProof | undefined;
   private readonly schemaHash: string;
   private readonly trustedBackend: boolean;
   private readonly preparedQueries = new Map<string, PreparedQuery>();
@@ -693,8 +706,15 @@ export class NativeRuntimeAdapter implements Runtime {
     author: Uint8Array,
     sourceId: number,
     historyComplete: boolean,
+    opts?: Pick<
+      NonNullable<ConstructorParameters<typeof NativeRuntimeAdapter>[6]>,
+      "selfSignedClientProof"
+    >,
   ): NativeRuntimeAdapter {
-    return new NativeRuntimeAdapter(null, schema, node, author, sourceId, historyComplete, { db });
+    return new NativeRuntimeAdapter(null, schema, node, author, sourceId, historyComplete, {
+      db,
+      selfSignedClientProof: opts?.selfSignedClientProof,
+    });
   }
 
   registerSchemaView(schema: WasmSchema): NativeRuntimeAdapter {
@@ -735,12 +755,14 @@ export class NativeRuntimeAdapter implements Runtime {
     this.writes = this.transactionOwner.writes;
     this.schemaBytes = encodeSchema(schema);
     this.trustedBackend = opts?.backendMode === true;
+    this.selfSignedClientProof = opts?.selfSignedClientProof;
     this.configBytes = openConfig(
       node,
       author,
       undefined,
       historyComplete,
       opts?.initialSyncFlushEvery,
+      opts?.selfSignedClientProof,
     );
     this.peerIdentity = author;
     this.schemaHash = serializeRuntimeSchema(schema);
@@ -982,6 +1004,20 @@ export class NativeRuntimeAdapter implements Runtime {
 
   acceptPeer(claims: Record<string, unknown> = {}): Transport {
     if (this !== this.ownerRuntime) return this.ownerRuntime.acceptPeer(claims);
+    const proof = this.selfSignedClientProof;
+    if (proof) {
+      if (!this.db.acceptSubscriberWithSelfSignedProof) {
+        throw new Error(
+          "Native runtime does not support self-signed subscriber admission; rebuild the matching Jazz WASM artifact",
+        );
+      }
+      return this.db.acceptSubscriberWithSelfSignedProof(
+        claims,
+        proof.token,
+        proof.appId,
+        proof.claimedAuthor,
+      );
+    }
     if (!this.db.acceptSubscriber) {
       throw new Error("Native runtime does not expose subscriber links");
     }
@@ -1368,6 +1404,41 @@ export class NativeRuntimeAdapter implements Runtime {
         updatedAtMs: updatedAtMs ?? undefined,
       });
     });
+    return this.finishMutation(write);
+  }
+
+  updateLargeValues(
+    table: string,
+    objectId: string,
+    values: Record<string, Value>,
+    descriptors: readonly unknown[],
+    writeContext?: string | null,
+  ): MutationResult {
+    const rowId = parseUuid(objectId);
+    const updatedAtMs = effectiveUpdatedAtMs(writeContext);
+    const branchView = branchViewFromWriteContext(writeContext);
+    const tx = this.currentTx(writeContext, "Update");
+
+    // The first partial-value API is intentionally root-context only (#2087).
+    // Do not silently substitute the adapter's root author for a session or
+    // attributed write, nor read/stage through a transaction or branch view.
+    if (branchView) {
+      throw new Error("Typed large-value updates are not supported in branch views.");
+    }
+    if (tx) {
+      throw writeError("Update", "typed partial-value updates are not supported in transactions");
+    }
+    if (largeValueWriteHasIncompatibleIdentity(writeContext, this.peerIdentity)) {
+      throw new Error("Typed large-value updates do not yet support an attributed identity.");
+    }
+    const updateLargeValues = this.db.updateLargeValuesEncoded;
+    if (!updateLargeValues) {
+      throw new Error("Native runtime does not support typed partial-value updates.");
+    }
+    const patch = encodeCellsForPatch(this.table(table), values);
+    const write = writeOrNormalizeRejection("Update", () =>
+      updateLargeValues.call(this.db, table, rowId, patch, descriptors, updatedAtMs ?? undefined),
+    );
     return this.finishMutation(write);
   }
 
@@ -3392,6 +3463,39 @@ function branchViewFromWriteContext(writeContext?: string | null): EncodedBranch
   }
 }
 
+function largeValueWriteHasIncompatibleIdentity(
+  writeContext: string | null | undefined,
+  runtimeAuthor: Uint8Array,
+): boolean {
+  if (!writeContext) return false;
+  let parsed: {
+    issuer?: unknown;
+    user_id?: unknown;
+    session?: unknown;
+    attribution?: unknown;
+  };
+  try {
+    parsed = JSON.parse(writeContext) as {
+      issuer?: unknown;
+      user_id?: unknown;
+      session?: unknown;
+      attribution?: unknown;
+    };
+    if (parsed.attribution !== undefined) return true;
+    const hasSessionIdentity =
+      parsed.issuer !== undefined || parsed.user_id !== undefined || parsed.session !== undefined;
+    if (!hasSessionIdentity) return false;
+  } catch {
+    return false;
+  }
+  try {
+    const session = sessionFromWriteContext(writeContext);
+    return session === null || !sameBytes(session.identity, runtimeAuthor);
+  } catch {
+    return true;
+  }
+}
+
 function rejectAttributedBranchWrite(
   attribution: Uint8Array | undefined,
   branchView: EncodedBranchView | undefined,
@@ -3653,16 +3757,11 @@ function sessionClaims(
   rawClaims: unknown,
   session: { issuer: string; user_id: string; authMode?: string },
 ): Record<string, unknown> {
-  const canonical = canonicalAuthorSubject(session.issuer, session.user_id);
   return {
     ...(isRecord(rawClaims) ? rawClaims : {}),
     iss: session.issuer,
-    issuer: session.issuer,
     sub: session.user_id,
-    user_id: session.user_id,
-    userId: session.user_id,
-    author: canonical,
-    ...(session.authMode ? { authMode: session.authMode, auth_mode: session.authMode } : {}),
+    authMode: session.authMode ?? "external",
   };
 }
 
@@ -4038,7 +4137,7 @@ function addNestedOuterColumnsToSubqueries(subqueries: unknown): void {
         const outerColumn = (nested as { outer_column?: unknown }).outer_column;
         if (typeof outerColumn !== "string") continue;
         const column = outerColumn.split(".").at(-1) ?? outerColumn;
-        if (!record.select_columns.includes(column)) {
+        if (!(readSelectColumns(record.select_columns) ?? []).includes(column)) {
           record.select_columns.push(column);
         }
       }
@@ -4482,10 +4581,32 @@ function isQueryPredicateCmp(
 function readSelectColumns(value: unknown): string[] | undefined {
   if (value == null) return undefined;
   if (!Array.isArray(value)) throw unsupportedQueryEncodingError();
-  if (!value.every((column): column is string => typeof column === "string")) {
-    throw unsupportedQueryEncodingError();
+  const columns: string[] = [];
+  for (const entry of value) {
+    if (typeof entry === "string") {
+      columns.push(entry);
+      continue;
+    }
+    if (
+      !entry ||
+      typeof entry !== "object" ||
+      typeof (entry as { column?: unknown }).column !== "string"
+    ) {
+      throw unsupportedQueryEncodingError();
+    }
+    const projection = entry as { kind?: unknown; column: string };
+    if (
+      projection.kind !== "full" &&
+      projection.kind !== "bytes" &&
+      projection.kind !== "text_utf16" &&
+      projection.kind !== "text_utf8" &&
+      projection.kind !== "json_pointer"
+    ) {
+      throw unsupportedQueryEncodingError();
+    }
+    columns.push(projection.column);
   }
-  return value;
+  return columns;
 }
 
 function readRootOrderBy(value: unknown): QueryOrder[] {

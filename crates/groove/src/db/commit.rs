@@ -17,7 +17,7 @@ impl Database {
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families")).await?;
     /// let subscription = database.subscribe_one_sink(GraphBuilder::table("albums")).await?;
     /// assert!(subscription.recv()?.is_empty());
     ///
@@ -82,7 +82,7 @@ impl Database {
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families")).await?;
     /// let mut batch = database.open_batch();
     /// batch.insert(
     ///     "albums",

@@ -366,8 +366,14 @@ describe("backend/create-jazz-context", () => {
     ]) {
       expect(scopedDb).toHaveProperty("getAuthState");
     }
-    expect(requestDb.getAuthState()).toMatchObject({ authMode: "external", session });
-    expect(sessionDb.getAuthState()).toMatchObject({ authMode: "external", session });
+    expect(requestDb.getAuthState()).toMatchObject({
+      authMode: "external",
+      session: { user: JSON.stringify([session.issuer, session.user_id]) },
+    });
+    expect(sessionDb.getAuthState()).toMatchObject({
+      authMode: "external",
+      session: { user: JSON.stringify([session.issuer, session.user_id]) },
+    });
     expect(mocks.resolveRequestSession).toHaveBeenCalledTimes(2);
     expect(mocks.resolveRequestSession).toHaveBeenNthCalledWith(1, req, {
       appId: "server-app",
