@@ -2111,6 +2111,11 @@ fn browser_relay_releases_each_detached_bounded_one_shot_receipt() {
             (0, 0),
             "offset {offset} leaves no retained authority membership"
         );
+        assert_eq!(
+            worker.settled_authoritative_receipt_counts_for_test(),
+            (0, 0),
+            "offset {offset} must also release the worker's paired Global receipt",
+        );
     }
 }
 

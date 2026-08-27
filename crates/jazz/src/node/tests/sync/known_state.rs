@@ -1135,7 +1135,14 @@ fn known_state_declaration_never_skips_unfated_edge_members() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_edge_dir, mut edge) = open_node_with_uuid(node(7));
     let row_uuid = row(18);
-    let (shape, binding) = edge.whole_table_shape_binding("todos").unwrap();
+    // A zero-offset exact-id Edge read without a policy remains a genuinely
+    // local relay evaluation: an unfated Edge member must be visible even
+    // though no Global receipt exists to source it.
+    let shape = Query::from("todos")
+        .filter(eq(col("id"), lit(Value::Uuid(row_uuid.0))))
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
     let opts = RegisterShapeOptions {
         tier: DurabilityTier::Edge,
         ..RegisterShapeOptions::default()

@@ -1475,6 +1475,37 @@ where
             .map(|view| view.key)
     }
 
+    fn is_policy_scoped_exact_id_query(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+    ) -> Result<bool, Error> {
+        let table = self.table_in_schema(&shape.query().table, shape.schema_version())?;
+        Ok(table.has_any_policy()
+            && root_literal_equalities(shape.query(), binding)?.contains_key("id"))
+    }
+
+    /// Decide whether a relay's Edge child must be evaluated from its Global
+    /// membership receipt rather than from the relay's raw local rows.
+    ///
+    /// Nonzero windows need this because their absolute offset is otherwise
+    /// applied twice. A policy-scoped exact-id read needs it for the inverse
+    /// reason: its local row body can outlive the Global authorization receipt
+    /// that made the row visible. Without a matching receipt, re-evaluating
+    /// that cached row as the relay's trusted identity would resurrect access
+    /// after revocation. Ordinary zero-offset Edge reads remain local so an
+    /// unfated Edge member is still publishable before upstream settlement.
+    pub(crate) fn relay_edge_query_requires_authority_source(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+    ) -> Result<bool, Error> {
+        if shape.query().offset != 0 {
+            return Ok(true);
+        }
+        self.is_policy_scoped_exact_id_query(shape, binding)
+    }
+
     fn client_settled_binding_view_for_query(
         &self,
         shape: &ValidatedQuery,

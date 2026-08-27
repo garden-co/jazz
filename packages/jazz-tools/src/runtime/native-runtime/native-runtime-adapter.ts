@@ -1757,11 +1757,12 @@ export class NativeRuntimeAdapter implements Runtime {
     this.applySessionClaims(session);
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const coreQueryJson = addNestedOuterColumns(queryJson);
-    // In browser mode the requested tier gates hydration through the worker,
-    // while the main-thread Db remains an in-memory materialized cache. Once
-    // coverage is confirmed, evaluate that cache at its Local tier.
-    const materializedTier = this.nonDurableClient ? "local" : tier;
-    const opts = readOptions(materializedTier, queryIncludesDeleted(coreQueryJson), optionsJson);
+    // Browser runtimes still materialize row bodies from their in-memory
+    // cache, but an Edge/Global read must keep its requested tier while doing
+    // so. The settled membership from the worker is the authorization
+    // boundary; lowering it to Local here would re-scan cached rows that a
+    // fresh remote receipt had just removed.
+    const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
     if (queryUsesNativeRelationApi(coreQueryJson)) {
       if (this.readAuthorizationHost === "trusted-serving") {
         if (!this.db.allRelationQueryForIdentity) {

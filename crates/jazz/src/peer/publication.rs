@@ -892,21 +892,17 @@ impl PeerState {
         if trace_rehydrate {
             node.reset_storage_read_metrics();
         }
+        let relay_edge_requires_authority_source = purpose == RehydratePurpose::Query
+            && self.role == PeerRole::Relay
+            && tier == DurabilityTier::Edge
+            && node.relay_edge_query_requires_authority_source(shape, binding)?;
         let opened = match purpose {
             // A local relay's Edge child is the browser half of a durable
-            // worker receipt. Reuse the worker's authority-selected Global
-            // membership as the source, so the child does not reapply a
-            // root offset/limit over an already-windowed result.
-            RehydratePurpose::Query
-                if self.role == PeerRole::Relay
-                    && tier == DurabilityTier::Edge
-                    // Reusing a settled source is necessary only when an
-                    // absolute offset would otherwise be applied again by
-                    // the downstream relay. A zero-offset LIMIT is already
-                    // idempotent, while generic relay links must continue to
-                    // evaluate their ordinary Edge view from local state.
-                    && shape.query().offset != 0 =>
-            {
+            // worker receipt. Selected queries must reuse the worker's
+            // authority-selected Global membership: a window would otherwise
+            // apply its offset twice, and a policy-scoped exact-id read could
+            // otherwise re-authorize a revoked cached row as SYSTEM.
+            RehydratePurpose::Query if relay_edge_requires_authority_source => {
                 node.open_seeded_relay_edge_subscription_view(shape, binding, self.identity(), read_view)
                     .await
             }
@@ -930,10 +926,7 @@ impl PeerState {
                 )
                 .await,
         };
-        let source_binding_view = (self.role == PeerRole::Relay
-            && tier == DurabilityTier::Edge
-            && shape.query().offset != 0)
-            .then(|| {
+        let source_binding_view = relay_edge_requires_authority_source.then(|| {
                 crate::protocol::BindingViewKey::new(
                     shape.shape_id(),
                     binding.binding_id(),

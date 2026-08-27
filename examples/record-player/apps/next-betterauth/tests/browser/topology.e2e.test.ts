@@ -1205,6 +1205,23 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   "edge",
                 ),
               ]);
+
+              // This is deliberately a policy-scoped exact-id Edge read.
+              // The browser worker must source it from the editor's Global
+              // authorization receipt, not re-evaluate its cached row as a
+              // trusted relay. The revocation check below proves that the
+              // same receipt is not retained after its supporting invitation
+              // is deleted.
+              const authorizedExactChild = await waitForQuery(
+                editor,
+                app.playlist_entries.where({ id: belowWindowEntryId }),
+                (rows) => rows[0]?.id === belowWindowEntryId,
+                "authorized editor reads exact child through edge coverage",
+                15_000,
+                "edge",
+              );
+              expect(authorizedExactChild.map((row) => row.id)).toEqual([belowWindowEntryId]);
+
               await owner.delete(app.invitations, editorInvite.id).wait({ tier: "edge" });
               await Promise.all([
                 waitForQuery(
@@ -1244,6 +1261,14 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   "edge",
                 ),
               ]);
+              // Local-first deliberately continues to expose the row body
+              // already materialized in this browser.  Only the requested
+              // Edge read above is constrained by the empty remote
+              // authorization membership after revocation.
+              const locallyCachedInvitation = await editor.all(
+                app.invitations.where({ id: editorInvite.id }),
+              );
+              expect(locallyCachedInvitation.map((row) => row.id)).toEqual([editorInvite.id]);
               await expect(
                 editor
                   .insert(app.playlist_entries, {
