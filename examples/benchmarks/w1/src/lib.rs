@@ -4,20 +4,29 @@ use std::collections::BTreeMap;
 
 use jazz::db::{
     Db, DbConfig, DbIdentity, InsertOptions, LocalUpdates, MergeableTxOps, PreparedQuery,
-    Propagation, ReadOpts, SubscriptionEvent, SubscriptionStream, block_on,
+    Propagation, ReadOpts, SubscriptionEvent, SubscriptionStream, UpdateOptions, WriteIdentity,
+    block_on,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
-use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tools::{
+    CmpOp, ColumnType, PolicyExpr, PolicyValue, SchemaBuilder, TablePolicies, TableSchemaBuilder,
+    Value as PublicValue,
+};
 use jazz::tx::DurabilityTier;
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use tempfile::TempDir;
 
 const USERS: usize = 10;
 const PROJECTS: usize = 30;
+
+fn policy_bench_identity() -> AuthorSubject {
+    AuthorSubject::authenticated("https://benchmark.invalid", "policy-writer")
+        .expect("static W1 benchmark identity is valid")
+}
 
 /// Seeded W1 read fixture. Setup is deliberately outside measured closures.
 pub struct Fixture<S: OrderedKvStorage> {
@@ -29,6 +38,7 @@ pub struct Fixture<S: OrderedKvStorage> {
     maintained_activity: PreparedQuery,
     activity_transition_row: RowUuid,
     activity_transition_matching: bool,
+    activity_update_identity: WriteIdentity,
 }
 
 pub struct MaintainedActivityFixture<S: OrderedKvStorage> {
@@ -38,7 +48,7 @@ pub struct MaintainedActivityFixture<S: OrderedKvStorage> {
 
 impl Fixture<MemoryStorage> {
     pub fn memory(tasks: usize, comments: usize, activity_events: usize) -> Self {
-        let schema = schema();
+        let schema = schema(false);
         let families = schema.column_families();
         let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         Self::new(
@@ -47,17 +57,36 @@ impl Fixture<MemoryStorage> {
             activity_events,
             schema,
             MemoryStorage::new(&family_refs),
+            WriteIdentity::Database,
         )
     }
 
     pub fn memory_profile_s() -> Self {
         Self::memory(3_000, 12_000, 9_000)
     }
+
+    pub fn memory_profile_s_policy_update() -> Self {
+        Self::memory_policy_update(3_000, 12_000, 9_000)
+    }
+
+    pub fn memory_policy_update(tasks: usize, comments: usize, activity_events: usize) -> Self {
+        let schema = schema(true);
+        let families = schema.column_families();
+        let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        Self::new(
+            tasks,
+            comments,
+            activity_events,
+            schema,
+            MemoryStorage::new(&family_refs),
+            WriteIdentity::Session(policy_bench_identity()),
+        )
+    }
 }
 
 impl Fixture<RocksDbStorage> {
     pub fn rocksdb(tasks: usize, comments: usize, activity_events: usize) -> (TempDir, Self) {
-        let schema = schema();
+        let schema = schema(false);
         let families = schema.column_families();
         let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         let dir = tempfile::tempdir().expect("create W1 RocksDB benchmark directory");
@@ -66,7 +95,14 @@ impl Fixture<RocksDbStorage> {
                 .expect("open W1 RocksDB benchmark storage");
         (
             dir,
-            Self::new(tasks, comments, activity_events, schema, storage),
+            Self::new(
+                tasks,
+                comments,
+                activity_events,
+                schema,
+                storage,
+                WriteIdentity::Database,
+            ),
         )
     }
 
@@ -82,6 +118,7 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
         activity_events: usize,
         schema: JazzSchema,
         storage: S,
+        activity_update_identity: WriteIdentity,
     ) -> Self {
         assert!(tasks > 0 && comments > 0 && activity_events > 0);
         let db = open_db(schema, storage);
@@ -221,6 +258,7 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
             maintained_activity,
             activity_transition_row: row_id(4, PROJECTS),
             activity_transition_matching: false,
+            activity_update_identity,
         };
         assert_eq!(fixture.board_count(), tasks.div_ceil(PROJECTS).min(200));
         assert_eq!(fixture.comments_count(), comments.div_ceil(tasks).min(200));
@@ -291,7 +329,10 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
             "activity",
             self.activity_transition_row,
             BTreeMap::from([("kind".to_owned(), Value::String(next_kind.to_owned()))]),
-            Default::default(),
+            UpdateOptions {
+                identity: self.activity_update_identity,
+                ..Default::default()
+            },
         ))
         .expect("toggle W1 indexed predicate");
         block_on(write.wait(DurabilityTier::Local)).expect("settle W1 indexed predicate toggle");
@@ -323,7 +364,32 @@ fn event_row_count(event: SubscriptionEvent) -> usize {
     }
 }
 
-fn schema() -> JazzSchema {
+fn schema(policy_activity_updates: bool) -> JazzSchema {
+    let activity_policy = PolicyExpr::Or(
+        ["updated", "commented"]
+            .into_iter()
+            .map(|kind| PolicyExpr::Cmp {
+                column: "kind".to_owned(),
+                op: CmpOp::Eq,
+                value: PolicyValue::Literal(PublicValue::Text(kind.to_owned())),
+            })
+            .collect(),
+    );
+    let activity = TableSchemaBuilder::new("activity")
+        .fk_column("project", "projects")
+        .fk_column("task", "tasks")
+        .fk_column("actor", "users")
+        .column("kind", ColumnType::Text)
+        .column("created_at", ColumnType::Timestamp);
+    let activity = if policy_activity_updates {
+        activity.policies(
+            TablePolicies::new()
+                .with_select(activity_policy.clone())
+                .with_update(Some(activity_policy.clone()), activity_policy),
+        )
+    } else {
+        activity
+    };
     let public = SchemaBuilder::new()
         .table(TableSchemaBuilder::new("users").column("name", ColumnType::Text))
         .table(TableSchemaBuilder::new("projects").column("name", ColumnType::Text))
@@ -342,14 +408,7 @@ fn schema() -> JazzSchema {
                 .column("body", ColumnType::Text)
                 .column("created_at", ColumnType::Timestamp),
         )
-        .table(
-            TableSchemaBuilder::new("activity")
-                .fk_column("project", "projects")
-                .fk_column("task", "tasks")
-                .fk_column("actor", "users")
-                .column("kind", ColumnType::Text)
-                .column("created_at", ColumnType::Timestamp),
-        )
+        .table(activity)
         .build();
     JazzSchema::new(&public).expect("W1 public schema compiles")
 }
