@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::db::peer_connection::{
-    dispatch_admitted_subscriber_message, ConnectionLink, PendingSubscriberControlResponse,
+    ConnectionLink, PendingSubscriberControlResponse, dispatch_admitted_subscriber_message,
 };
 use crate::node::SKEW_TOLERANCE_MS;
 
