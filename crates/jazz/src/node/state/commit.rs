@@ -790,6 +790,24 @@ where
         branch: &BranchSelector,
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeMap<String, Value>>, Error> {
+        Ok(self
+            .visible_current_physical_cells_and_winner_in_branch_schema(
+                schema_version,
+                table,
+                branch,
+                row_uuid,
+            )
+            .await?
+            .map(|(cells, _)| cells))
+    }
+
+    pub(crate) async fn visible_current_physical_cells_and_winner_in_branch_schema(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        branch: &BranchSelector,
+        row_uuid: RowUuid,
+    ) -> Result<Option<(BTreeMap<String, Value>, TxId)>, Error> {
         let table_schema = self.table_in_schema(table, schema_version)?;
         let schema = &self
             .catalogue
@@ -841,6 +859,7 @@ where
         else {
             return Ok(None);
         };
+        let content_tx = self.version_tx_id(&content)?;
         let authored_schema = self
             .schema_version_for_alias(content.schema_version_alias())
             .ok_or(Error::InvalidStoredValue(
@@ -858,7 +877,7 @@ where
                 "current version projects to an unexpected table",
             ));
         }
-        Ok(Some(cells))
+        Ok(Some((cells, content_tx)))
     }
 
     /// Return the exact local content parent for a branch-local row.
@@ -1172,6 +1191,21 @@ where
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeMap<String, Value>>, Error> {
         self.current_physical_cells_in_branch_schema(
+            schema_version,
+            table,
+            &BranchSelector::default(),
+            row_uuid,
+        )
+        .await
+    }
+
+    pub(crate) async fn current_physical_cells_and_winner_in_schema(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Option<(BTreeMap<String, Value>, TxId)>, Error> {
+        self.visible_current_physical_cells_and_winner_in_branch_schema(
             schema_version,
             table,
             &BranchSelector::default(),

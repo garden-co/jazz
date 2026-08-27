@@ -148,6 +148,12 @@ fn insert_storage_read_metrics(
     insert_read_bucket(
         fields,
         prefix,
+        "ahead_current_rows",
+        metrics.ahead_current_rows,
+    );
+    insert_read_bucket(
+        fields,
+        prefix,
         "global_current_rows",
         metrics.global_current_rows,
     );

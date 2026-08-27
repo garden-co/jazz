@@ -436,7 +436,39 @@ where
         inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
     ) -> Result<QueryProgram, Error> {
-        Box::pin(self.prepare_query_program_policy_dependencies(&request)).await?;
+        self.compile_query_program_request_with_inline_sources_and_access_paths_inner(
+            request,
+            inline_sources,
+            access_paths,
+            true,
+        )
+        .await
+    }
+
+    pub(super) async fn compile_query_program_request_with_shared_access_paths(
+        &mut self,
+        request: QueryProgramRequest,
+        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+    ) -> Result<QueryProgram, Error> {
+        self.compile_query_program_request_with_inline_sources_and_access_paths_inner(
+            request,
+            BTreeMap::new(),
+            access_paths,
+            false,
+        )
+        .await
+    }
+
+    async fn compile_query_program_request_with_inline_sources_and_access_paths_inner(
+        &mut self,
+        request: QueryProgramRequest,
+        inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
+        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        count_access_path_metrics: bool,
+    ) -> Result<QueryProgram, Error> {
+        let replaced_policy_graphs =
+            Box::pin(self.prepare_query_program_policy_dependencies(&request, &access_paths))
+                .await?;
         let trace_request = capability_trace_enabled().then(|| request.clone());
         let read_view = request.reads.primary.clone();
         let mut resolver = JazzSourceGraphPreparer {
@@ -444,11 +476,15 @@ where
             read_view: &read_view,
             inline_sources,
             access_paths,
+            count_access_path_metrics,
             current_projection_targets: BTreeMap::new(),
         };
         let node_uuid = resolver.node.node_uuid;
         let node_alias = resolver.node.self_node_alias;
         let result = Box::pin(prepare_and_lower_query_program(request, &mut resolver)).await;
+        resolver
+            .node
+            .restore_policy_authorization_graphs(replaced_policy_graphs);
         if let Some(request) = trace_request {
             trace_capability_compile(
                 node_uuid,
@@ -463,7 +499,8 @@ where
     async fn prepare_query_program_policy_dependencies(
         &mut self,
         request: &QueryProgramRequest,
-    ) -> Result<(), Error> {
+        outer_access_paths: &BTreeMap<SourceId, CurrentAccessPath>,
+    ) -> Result<BTreeMap<String, Option<PolicyAuthorizationGraph>>, Error> {
         let source_requests = query_program_source_requests(request)
             .map_err(|report| Error::QueryCapability(format!("{report:?}")))?;
         let read_view = request.reads.primary.clone();
@@ -473,6 +510,7 @@ where
                 read_view: &read_view,
                 inline_sources: BTreeMap::new(),
                 access_paths: BTreeMap::new(),
+                count_access_path_metrics: true,
                 current_projection_targets: BTreeMap::new(),
             };
             source_requests
@@ -492,26 +530,108 @@ where
                 )
             })
             .collect::<BTreeMap<_, _>>();
+        let mut replaced = BTreeMap::new();
         for (cache_key, dependency) in dependencies {
-            match Box::pin(self.policy_authorization_row_id_graph(dependency)).await {
-                Ok(_) => {}
-                Err(Error::QueryCapability(error)) if error.contains("PolicyProofCycle") => {
-                    return Err(Error::QueryCapability(error));
+            let point_path = match &dependency.policy {
+                PolicyContext::AuthorizationSubplan {
+                    protected_source, ..
+                } => outer_access_paths
+                    .get(protected_source)
+                    .cloned()
+                    .map(|path| BTreeMap::from([(protected_source.clone(), path)])),
+                _ => None,
+            };
+            if let Some(access_paths) = point_path {
+                let previous = self
+                    .query
+                    .policy_authorization_graph_cache
+                    .remove(&cache_key);
+                match Box::pin(
+                    self.point_policy_authorization_row_id_graph(dependency, access_paths),
+                )
+                .await
+                {
+                    Ok(graph) => {
+                        self.query
+                            .policy_authorization_graph_cache
+                            .insert(cache_key.clone(), graph);
+                        replaced.insert(cache_key, previous);
+                    }
+                    Err(Error::QueryCapability(error)) if error.contains("PolicyProofCycle") => {
+                        self.restore_policy_authorization_graphs(replaced);
+                        if let Some(previous) = previous {
+                            self.query
+                                .policy_authorization_graph_cache
+                                .insert(cache_key, previous);
+                        }
+                        return Err(Error::QueryCapability(error));
+                    }
+                    Err(Error::QueryCapability(_)) => {
+                        self.query.policy_authorization_graph_cache.insert(
+                            cache_key.clone(),
+                            PolicyAuthorizationGraph {
+                                graph: empty_authorized_row_id_graph(),
+                                route_fields: BTreeSet::new(),
+                                access_paths: BTreeMap::new(),
+                            },
+                        );
+                        replaced.insert(cache_key, previous);
+                    }
+                    Err(error) => {
+                        self.restore_policy_authorization_graphs(replaced);
+                        if let Some(previous) = previous {
+                            self.query
+                                .policy_authorization_graph_cache
+                                .insert(cache_key, previous);
+                        }
+                        return Err(error);
+                    }
                 }
-                Err(Error::QueryCapability(_)) => {
-                    self.query.policy_authorization_graph_cache.insert(
-                        cache_key,
-                        PolicyAuthorizationGraph {
-                            graph: empty_authorized_row_id_graph(),
-                            route_fields: BTreeSet::new(),
-                            access_paths: BTreeMap::new(),
-                        },
-                    );
+            } else {
+                match Box::pin(self.policy_authorization_row_id_graph(dependency)).await {
+                    Ok(_) => {}
+                    Err(Error::QueryCapability(error)) if error.contains("PolicyProofCycle") => {
+                        self.restore_policy_authorization_graphs(replaced);
+                        return Err(Error::QueryCapability(error));
+                    }
+                    Err(Error::QueryCapability(_)) => {
+                        self.query.policy_authorization_graph_cache.insert(
+                            cache_key,
+                            PolicyAuthorizationGraph {
+                                graph: empty_authorized_row_id_graph(),
+                                route_fields: BTreeSet::new(),
+                                access_paths: BTreeMap::new(),
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        self.restore_policy_authorization_graphs(replaced);
+                        return Err(error);
+                    }
                 }
-                Err(error) => return Err(error),
             }
         }
-        Ok(())
+        Ok(replaced)
+    }
+
+    fn restore_policy_authorization_graphs(
+        &mut self,
+        replaced: BTreeMap<String, Option<PolicyAuthorizationGraph>>,
+    ) {
+        for (cache_key, previous) in replaced {
+            match previous {
+                Some(graph) => {
+                    self.query
+                        .policy_authorization_graph_cache
+                        .insert(cache_key, graph);
+                }
+                None => {
+                    self.query
+                        .policy_authorization_graph_cache
+                        .remove(&cache_key);
+                }
+            }
+        }
     }
 
     pub(super) async fn prepared_query_plan_from_program(

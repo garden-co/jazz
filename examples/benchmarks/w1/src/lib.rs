@@ -4,20 +4,29 @@ use std::collections::BTreeMap;
 
 use jazz::db::{
     Db, DbConfig, DbIdentity, InsertOptions, LocalUpdates, MergeableTxOps, PreparedQuery,
-    Propagation, ReadOpts, SubscriptionEvent, SubscriptionStream, block_on,
+    Propagation, ReadOpts, SubscriptionEvent, SubscriptionStream, UpdateOptions, WriteIdentity,
+    block_on,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
-use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tools::{
+    CmpOp, ColumnType, PolicyExpr, PolicyValue, SchemaBuilder, TablePolicies, TableSchemaBuilder,
+    Value as PublicValue,
+};
 use jazz::tx::DurabilityTier;
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use tempfile::TempDir;
 
 const USERS: usize = 10;
 const PROJECTS: usize = 30;
+
+fn policy_bench_identity() -> AuthorSubject {
+    AuthorSubject::authenticated("https://benchmark.invalid", "policy-writer")
+        .expect("static W1 benchmark identity is valid")
+}
 
 /// Seeded W1 read fixture. Setup is deliberately outside measured closures.
 pub struct Fixture<S: OrderedKvStorage> {
@@ -27,8 +36,10 @@ pub struct Fixture<S: OrderedKvStorage> {
     activity: PreparedQuery,
     bounded_activity_page: PreparedQuery,
     maintained_activity: PreparedQuery,
+    point_activity: PreparedQuery,
     activity_transition_row: RowUuid,
     activity_transition_matching: bool,
+    activity_update_identity: WriteIdentity,
 }
 
 pub struct MaintainedActivityFixture<S: OrderedKvStorage> {
@@ -38,7 +49,7 @@ pub struct MaintainedActivityFixture<S: OrderedKvStorage> {
 
 impl Fixture<MemoryStorage> {
     pub fn memory(tasks: usize, comments: usize, activity_events: usize) -> Self {
-        let schema = schema();
+        let schema = schema(false);
         let families = schema.column_families();
         let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         Self::new(
@@ -47,17 +58,36 @@ impl Fixture<MemoryStorage> {
             activity_events,
             schema,
             MemoryStorage::new(&family_refs),
+            WriteIdentity::Database,
         )
     }
 
     pub fn memory_profile_s() -> Self {
         Self::memory(3_000, 12_000, 9_000)
     }
+
+    pub fn memory_profile_s_policy_update() -> Self {
+        Self::memory_policy_update(3_000, 12_000, 9_000)
+    }
+
+    pub fn memory_policy_update(tasks: usize, comments: usize, activity_events: usize) -> Self {
+        let schema = schema(true);
+        let families = schema.column_families();
+        let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        Self::new(
+            tasks,
+            comments,
+            activity_events,
+            schema,
+            MemoryStorage::new(&family_refs),
+            WriteIdentity::Session(policy_bench_identity()),
+        )
+    }
 }
 
 impl Fixture<RocksDbStorage> {
     pub fn rocksdb(tasks: usize, comments: usize, activity_events: usize) -> (TempDir, Self) {
-        let schema = schema();
+        let schema = schema(false);
         let families = schema.column_families();
         let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         let dir = tempfile::tempdir().expect("create W1 RocksDB benchmark directory");
@@ -66,7 +96,14 @@ impl Fixture<RocksDbStorage> {
                 .expect("open W1 RocksDB benchmark storage");
         (
             dir,
-            Self::new(tasks, comments, activity_events, schema, storage),
+            Self::new(
+                tasks,
+                comments,
+                activity_events,
+                schema,
+                storage,
+                WriteIdentity::Database,
+            ),
         )
     }
 
@@ -82,6 +119,7 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
         activity_events: usize,
         schema: JazzSchema,
         storage: S,
+        activity_update_identity: WriteIdentity,
     ) -> Self {
         assert!(tasks > 0 && comments > 0 && activity_events > 0);
         let db = open_db(schema, storage);
@@ -212,6 +250,13 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
                     .filter(eq(col("kind"), lit("updated"))),
             )
             .expect("prepare W1 maintained two-equality activity query");
+        let point_activity = db
+            .prepare_query(
+                &Query::from("activity")
+                    .filter(eq(col("id"), lit(row_id(4, 0).0)))
+                    .limit(1),
+            )
+            .expect("prepare W1 point activity query");
         let fixture = Self {
             db,
             board,
@@ -219,8 +264,10 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
             activity: activity_query,
             bounded_activity_page,
             maintained_activity,
+            point_activity,
             activity_transition_row: row_id(4, PROJECTS),
             activity_transition_matching: false,
+            activity_update_identity,
         };
         assert_eq!(fixture.board_count(), tasks.div_ceil(PROJECTS).min(200));
         assert_eq!(fixture.comments_count(), comments.div_ceil(tasks).min(200));
@@ -274,6 +321,24 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
         fixture
     }
 
+    pub fn subscribe_point_activity_once(&self) -> usize {
+        let mut subscription = block_on(self.db.subscribe(
+            &self.point_activity,
+            ReadOpts {
+                tier: DurabilityTier::Local,
+                local_updates: LocalUpdates::Deferred,
+                propagation: Propagation::LocalOnly,
+                ..ReadOpts::default()
+            },
+        ))
+        .expect("install W1 maintained point subscription");
+        let mut rows = 0;
+        while let Some(event) = subscription.try_next_event() {
+            rows += event_row_count(event);
+        }
+        rows
+    }
+
     fn read_count(&self, query: &PreparedQuery) -> usize {
         self.db
             .read(query)
@@ -291,7 +356,10 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
             "activity",
             self.activity_transition_row,
             BTreeMap::from([("kind".to_owned(), Value::String(next_kind.to_owned()))]),
-            Default::default(),
+            UpdateOptions {
+                identity: self.activity_update_identity,
+                ..Default::default()
+            },
         ))
         .expect("toggle W1 indexed predicate");
         block_on(write.wait(DurabilityTier::Local)).expect("settle W1 indexed predicate toggle");
@@ -323,7 +391,32 @@ fn event_row_count(event: SubscriptionEvent) -> usize {
     }
 }
 
-fn schema() -> JazzSchema {
+fn schema(policy_activity_updates: bool) -> JazzSchema {
+    let activity_policy = PolicyExpr::Or(
+        ["updated", "commented"]
+            .into_iter()
+            .map(|kind| PolicyExpr::Cmp {
+                column: "kind".to_owned(),
+                op: CmpOp::Eq,
+                value: PolicyValue::Literal(PublicValue::Text(kind.to_owned())),
+            })
+            .collect(),
+    );
+    let activity = TableSchemaBuilder::new("activity")
+        .fk_column("project", "projects")
+        .fk_column("task", "tasks")
+        .fk_column("actor", "users")
+        .column("kind", ColumnType::Text)
+        .column("created_at", ColumnType::Timestamp);
+    let activity = if policy_activity_updates {
+        activity.policies(
+            TablePolicies::new()
+                .with_select(activity_policy.clone())
+                .with_update(Some(activity_policy.clone()), activity_policy),
+        )
+    } else {
+        activity
+    };
     let public = SchemaBuilder::new()
         .table(TableSchemaBuilder::new("users").column("name", ColumnType::Text))
         .table(TableSchemaBuilder::new("projects").column("name", ColumnType::Text))
@@ -342,14 +435,7 @@ fn schema() -> JazzSchema {
                 .column("body", ColumnType::Text)
                 .column("created_at", ColumnType::Timestamp),
         )
-        .table(
-            TableSchemaBuilder::new("activity")
-                .fk_column("project", "projects")
-                .fk_column("task", "tasks")
-                .fk_column("actor", "users")
-                .column("kind", ColumnType::Text)
-                .column("created_at", ColumnType::Timestamp),
-        )
+        .table(activity)
         .build();
     JazzSchema::new(&public).expect("W1 public schema compiles")
 }
@@ -400,4 +486,154 @@ fn expected_maintained_activity_count(activity_events: usize) -> usize {
     (0..activity_events)
         .filter(|index| index % PROJECTS == 0 && (index / PROJECTS).is_multiple_of(2))
         .count()
+}
+
+/// Hot current reads over a retained chain of ahead-current candidates.
+pub mod ahead_current {
+    use std::collections::BTreeMap;
+
+    use jazz::block_on;
+    use jazz::groove::records::Value;
+    use jazz::ids::{NodeUuid, RowUuid};
+    use jazz::node::{MergeableCommit, NodeState};
+    use jazz::schema::JazzSchema;
+    use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+    use jazz::tx::{DurabilityTier, Fate, TxId};
+    use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+
+    const TABLE: &str = "status";
+
+    /// Pre-seeded candidate history for a single logical current row.
+    pub struct AheadCurrentFixture {
+        core: NodeState<RocksDbStorage>,
+        _directory: tempfile::TempDir,
+        depth: usize,
+        tier: DurabilityTier,
+        newest_tx: TxId,
+    }
+
+    impl AheadCurrentFixture {
+        pub fn new(depth: usize, tier: DurabilityTier) -> Self {
+            assert!(depth > 0, "W1 requires at least one retained candidate");
+            assert!(
+                matches!(tier, DurabilityTier::Local | DurabilityTier::Edge),
+                "W1 only measures Local and Edge candidate visibility"
+            );
+
+            let schema = schema();
+            let directory = tempfile::tempdir().expect("create W1 fixture directory");
+            let families = schema.column_families();
+            let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+            let storage = RocksDbStorage::open_with_durability(
+                directory.path(),
+                &family_refs,
+                Durability::WalNoSync,
+            )
+            .expect("open W1 RocksDB");
+            let mut core = block_on(NodeState::new(node(), schema, storage)).expect("open W1 node");
+
+            let mut parent = None;
+            let mut newest_tx = None;
+            for index in 0..depth {
+                let mut commit = MergeableCommit::new(TABLE, row(), 20_000_000 + index as u64)
+                    .cells(cells(index));
+                if let Some(parent_tx) = parent {
+                    commit = commit.parents(vec![parent_tx]);
+                }
+                let publication =
+                    block_on(core.commit_mergeable(commit)).expect("commit W1 candidate");
+                let tx_id = publication.tx_id();
+                block_on(core.persist_and_settle_transaction(publication))
+                    .expect("persist W1 candidate");
+                if tier == DurabilityTier::Edge {
+                    block_on(core.apply_fate_update(
+                        tx_id,
+                        Fate::Accepted,
+                        None,
+                        Some(DurabilityTier::Edge),
+                    ))
+                    .expect("edge-accept W1 candidate");
+                }
+                parent = Some(tx_id);
+                newest_tx = Some(tx_id);
+            }
+
+            Self {
+                core,
+                _directory: directory,
+                depth,
+                tier,
+                newest_tx: newest_tx.expect("non-empty W1 candidate history"),
+            }
+        }
+
+        /// Untimed correctness receipt for depth, attribution, and winner identity.
+        pub fn assert_receipt(&mut self) {
+            self.core.reset_storage_read_metrics();
+            let rows = self.current_rows();
+            let metrics = self.core.storage_read_metrics();
+
+            assert_eq!(rows.len(), 1, "{:?} W1 winner count", self.tier);
+            assert_eq!(rows[0].row_uuid(), row(), "{:?} W1 winner row", self.tier);
+            assert_eq!(
+                rows[0].cell_at(0),
+                Some(Value::String(title(self.depth - 1))),
+                "{:?} W1 must expose the newest candidate ({:?})",
+                self.tier,
+                self.newest_tx,
+            );
+            assert_eq!(
+                metrics.ahead_current_rows.reads, self.depth,
+                "{:?} W1 must read exactly its retained candidate depth: {metrics:?}",
+                self.tier,
+            );
+            assert_eq!(
+                metrics.ahead_current_rows.ranges, 2,
+                "{:?} W1 must scan content and deletion ahead-current ranges: {metrics:?}",
+                self.tier,
+            );
+        }
+
+        /// The timed operation: one current-row read over the prepared fixture.
+        pub fn current_rows(&mut self) -> Vec<jazz::node::CurrentRow> {
+            block_on(self.core.current_rows(TABLE, self.tier)).expect("read W1 current rows")
+        }
+    }
+
+    fn schema() -> JazzSchema {
+        let source = SchemaBuilder::new()
+            .table(TableSchemaBuilder::new(TABLE).column("title", ColumnType::Text))
+            .build();
+        JazzSchema::new(&source).expect("compile W1 schema")
+    }
+
+    fn cells(index: usize) -> BTreeMap<String, Value> {
+        BTreeMap::from([("title".to_owned(), Value::String(title(index)))])
+    }
+
+    fn title(index: usize) -> String {
+        format!("status-{index:08}")
+    }
+
+    fn node() -> NodeUuid {
+        NodeUuid::from_bytes([0x71; 16])
+    }
+
+    fn row() -> RowUuid {
+        RowUuid::from_bytes([0x17; 16])
+    }
+}
+
+pub use ahead_current::AheadCurrentFixture;
+
+#[cfg(test)]
+mod ahead_current_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_receipt_reads_exact_local_and_edge_candidate_depth() {
+        for tier in [DurabilityTier::Local, DurabilityTier::Edge] {
+            AheadCurrentFixture::new(3, tier).assert_receipt();
+        }
+    }
 }
