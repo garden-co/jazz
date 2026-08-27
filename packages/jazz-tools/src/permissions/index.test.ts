@@ -456,6 +456,21 @@ describe("permissions DSL", () => {
     });
   });
 
+  it("rejects multiple asymmetric update rules before they form an old/new cross product", () => {
+    expect(() =>
+      definePermissions(app, ({ policy }) => [
+        policy.todos.allowUpdate
+          .whereOld({ archived: false })
+          .whereNew({ done: true }),
+        policy.todos.allowUpdate
+          .whereOld({ archived: true })
+          .whereNew({ done: false }),
+      ]),
+    ).toThrow(
+      /multiple asymmetric update rules.*todos.*USING and WITH CHECK.*ORed independently/i,
+    );
+  });
+
   it("compiles provenance magic column policies", () => {
     const compiled = definePermissions(app, ({ policy, session }) => [
       policy.todos.allowRead.where({ $createdBy: session.user }),
