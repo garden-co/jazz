@@ -331,17 +331,17 @@ where
             )?;
             for parent in &commit.parents {
                 let parent_versions = self
-                    .query_versions_for_tx_table(
+                    .query_versions_for_tx_physical_row(
                         *parent,
                         write_schema_version,
                         &table_schema.name,
+                        commit.row_uuid,
                     )
                     .await?;
                 let same_row = parent_versions
                     .iter()
                     .filter(|version| {
-                        version.row_uuid() == commit.row_uuid
-                            && self.physical_table_id_for_version(version).ok() == Some(table_id)
+                        self.physical_table_id_for_version(version).ok() == Some(table_id)
                     });
                 if same_row.clone().next().is_some()
                     && !same_row.into_iter().any(|version| version.branch_key() == &branch_key)
@@ -1093,7 +1093,10 @@ where
     }
 
     pub(super) fn cached_tx_versions(&self, tx_id: TxId) -> Option<Vec<VersionRow>> {
-        self.query.tx_versions_cache.get(&tx_id).cloned()
+        self.query
+            .tx_versions_cache
+            .get(&tx_id)
+            .map(|cached| cached.versions.clone())
     }
 
     pub(super) fn cache_tx_version_tables(&mut self, tx_id: TxId, tables: BTreeSet<String>) {
@@ -1104,7 +1107,9 @@ where
 
     pub(super) fn cache_tx_versions(&mut self, tx_id: TxId, versions: Vec<VersionRow>) {
         self.touch_tx_version_cache_entry(tx_id);
-        self.query.tx_versions_cache.insert(tx_id, versions);
+        self.query
+            .tx_versions_cache
+            .insert(tx_id, CachedTransactionVersions::new(versions));
         self.bound_tx_version_cache();
     }
 

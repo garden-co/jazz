@@ -513,20 +513,29 @@ fn parent_validation_scopes_same_table_transactions_to_the_physical_row() {
     // This transaction contains the target only under branch B, plus a
     // sibling deletion under branch A. A table-only lookup would see branch A
     // and wrongly bless the foreign target parent.
+    let mut foreign_parent_commits = vec![
+        MergeableCommit::new("todos", target, 50)
+            .branch(branch_b)
+            .cells(cells("foreign target parent")),
+        MergeableCommit::new("todos", sibling, 51)
+            .branch(branch_a.clone())
+            .deletion(DeletionEvent::Deleted),
+    ];
+    // The wide same-table batch is the cache-hit and storage-fallback
+    // boundary: neither path may materialize these unrelated physical rows.
+    foreign_parent_commits.extend((0..128).map(|index| {
+        MergeableCommit::new("todos", row(0x80 + index), 52 + u64::from(index))
+            .branch(branch_a.clone())
+            .cells(cells("unrelated same-table sibling"))
+    }));
     let foreign_parent = node
-        .commit_mergeable_many_settled(vec![
-            MergeableCommit::new("todos", target, 50)
-                .branch(branch_b)
-                .cells(cells("foreign target parent")),
-            MergeableCommit::new("todos", sibling, 51)
-                .branch(branch_a.clone())
-                .deletion(DeletionEvent::Deleted),
-        ])
+        .commit_mergeable_many_settled(foreign_parent_commits)
         .unwrap();
+    reset_parent_version_lookup_materialized_row_count();
     let error = node
         .commit_mergeable(
             MergeableCommit::new("todos", target, 60)
-                .branch(branch_a)
+                .branch(branch_a.clone())
                 .parents(vec![foreign_parent])
                 .cells(cells("must reject foreign target parent")),
         )
@@ -534,6 +543,33 @@ fn parent_validation_scopes_same_table_transactions_to_the_physical_row() {
         .err()
         .expect("a sibling under the requested branch cannot validate a foreign target parent");
     assert!(matches!(error, Error::InvalidMergeableCommit(_)));
+    assert_eq!(
+        parent_version_lookup_materialized_row_count(),
+        1,
+        "a cache hit must materialize only the foreign target row, not same-table siblings"
+    );
+
+    // Force the storage scan path after the same wide transaction. Content
+    // history and shared deletion history must discard sibling rows before
+    // decoding/materializing them, while still rejecting the foreign target.
+    node.invalidate_tx_version_tables_cache(foreign_parent);
+    reset_parent_version_lookup_materialized_row_count();
+    let error = node
+        .commit_mergeable(
+            MergeableCommit::new("todos", target, 61)
+                .branch(branch_a)
+                .parents(vec![foreign_parent])
+                .cells(cells("must reject foreign target parent after cache eviction")),
+        )
+        .resolve()
+        .err()
+        .expect("a storage scan must reject the foreign target parent");
+    assert!(matches!(error, Error::InvalidMergeableCommit(_)));
+    assert_eq!(
+        parent_version_lookup_materialized_row_count(),
+        1,
+        "a storage fallback must materialize only the foreign target row"
+    );
 }
 
 #[test]
