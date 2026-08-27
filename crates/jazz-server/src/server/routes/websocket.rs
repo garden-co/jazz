@@ -1220,6 +1220,60 @@ mod tests {
         assert!(validate_ws_cookie_origin(&headers, false).is_err());
     }
 
+    #[tokio::test]
+    async fn bug_302_orphan_backend_session_cannot_bypass_cookie_origin_check() {
+        let app_id = AppId::random();
+        let state = ServerBuilder::new(app_id)
+            .with_auth_config(AuthConfig {
+                auth_cookie_name: Some("jazz-auth".to_owned()),
+                allow_local_first_auth: true,
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .with_schema(Schema::new())
+            .build()
+            .await
+            .expect("build cookie auth websocket state")
+            .state;
+        let seed = [0x42; 32];
+        let token = jazz::tools::identity::mint_jazz_self_signed_token(
+            &seed,
+            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            &app_id.to_string(),
+            3_600,
+        )
+        .expect("mint local-first cookie token");
+        let user_id = jazz::tools::identity::derive_user_id(&seed).to_string();
+        let peer_identity = AuthorSubject::from_canonical(
+            &serde_json::to_string(&(jazz::tools::identity::LOCAL_FIRST_ISSUER, user_id))
+                .expect("encode local-first author"),
+        )
+        .expect("local-first peer identity");
+        let prelude = WebSocketPrelude {
+            peer_identity: peer_identity.canonical().to_owned(),
+            bootstrap_catalogue: false,
+            auth: jazz::tools::websocket_prelude_auth::AuthConfig {
+                backend_session: Some(serde_json::json!({ "attacker": true })),
+                ..Default::default()
+            },
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            format!("jazz-auth={token}").parse().unwrap(),
+        );
+        headers.insert(
+            axum::http::header::ORIGIN,
+            "https://evil.example".parse().unwrap(),
+        );
+        headers.insert(axum::http::header::HOST, "app.example".parse().unwrap());
+
+        let error = ws_admission(prelude, &headers, &state)
+            .await
+            .expect_err("orphan backend session must not suppress cookie origin enforcement");
+        assert!(error.contains("Origin does not match Host"), "{error}");
+    }
+
     #[test]
     fn websocket_limits_match_the_wire_protocol_limit() {
         assert_eq!(WS_MAX_FRAME_BYTES, MAX_WIRE_FRAME_BYTES);
