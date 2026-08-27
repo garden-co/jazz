@@ -4,7 +4,7 @@ use super::*;
 use crate::node::query_eval::authorization::permission_scope_claim_values;
 
 #[test]
-fn permission_advice_scope_preserves_provider_sub_and_injects_canonical_author() {
+fn permission_advice_scope_preserves_provider_sub_and_injects_canonical_user() {
     let author = AuthorSubject::authenticated("https://issuer.example", "opaque-subject").unwrap();
     let claims = BTreeMap::from([("sub".to_owned(), Value::String("spoofed".to_owned()))]);
 
@@ -15,7 +15,7 @@ fn permission_advice_scope_preserves_provider_sub_and_injects_canonical_author()
         Some(&Value::String("spoofed".to_owned()))
     );
     assert_eq!(
-        values.get("author"),
+        values.get("user"),
         Some(&Value::String(author.canonical().to_owned()))
     );
 }
@@ -81,19 +81,22 @@ fn nested_read_policy_claim_slots_do_not_cross_validated_types() {
             [ColumnSchema::new("owner", ColumnType::String.nullable())],
         ),
     ]);
-    let plain_name = claim_param_field(&ClaimPath(vec!["user_id".to_owned()]));
+    let provider_sub = crate::query::provider_claim_key("sub");
+    let provider_path = ClaimPath(vec!["claims".to_owned(), "sub".to_owned()]);
+    let plain_name = claim_param_field(&provider_path);
     let outer_slots = BTreeMap::from([(
         plain_name.clone(),
         ProgramClaimParam {
-            path: ClaimPath(vec!["user_id".to_owned()]),
+            path: provider_path,
             ty: ColumnType::String,
         },
     )]);
-    let mut query = Query::from("uuid_owners").filter(eq(col("owner"), claim("user_id")));
+    let mut query =
+        Query::from("uuid_owners").filter(eq(col("owner"), claim(provider_sub.clone())));
     let mut binding_values = BTreeMap::new();
     bind_scope_claim_operands(
         &mut query,
-        &BTreeMap::from([("user_id".to_owned(), Value::String("not-a-uuid".to_owned()))]),
+        &BTreeMap::from([(provider_sub, Value::String("not-a-uuid".to_owned()))]),
         &mut binding_values,
     );
     let slots = disambiguate_policy_claim_params_with_outer_slots(
@@ -146,13 +149,15 @@ fn nested_read_policy_claim_slots_do_not_cross_validated_types() {
         "an outer user_id slot must not be reused by account_id merely because both are String"
     );
 
-    let mut nullable_query =
-        Query::from("nullable_string_owners").filter(eq(col("owner"), claim("user_id")));
+    let mut nullable_query = Query::from("nullable_string_owners").filter(eq(
+        col("owner"),
+        claim(crate::query::provider_claim_key("sub")),
+    ));
     let mut nullable_values = BTreeMap::new();
     bind_scope_claim_operands(
         &mut nullable_query,
         &BTreeMap::from([(
-            "user_id".to_owned(),
+            crate::query::provider_claim_key("sub"),
             Value::String("nullable-boundary".to_owned()),
         )]),
         &mut nullable_values,
@@ -235,10 +240,10 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     let identity = author(0xa9);
     let (_client_dir, mut client) =
         open_node_with_uuid(NodeUuid::from_bytes([0xa7; 16]), schema.clone());
-    client.set_session_claims(
+    client.set_test_provider_claims(
         identity,
         BTreeMap::from([(
-            "join_code".to_owned(),
+            crate::query::provider_claim_key("join_code"),
             Value::String("invite-123".to_owned()),
         )]),
     );
@@ -272,10 +277,10 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
 
     let (_server_dir, mut node) =
         open_node_with_uuid(NodeUuid::from_bytes([0xa8; 16]), schema.clone());
-    node.set_session_claims(
+    node.set_test_provider_claims(
         identity,
         BTreeMap::from([(
-            "join_code".to_owned(),
+            crate::query::provider_claim_key("join_code"),
             Value::String("invite-123".to_owned()),
         )]),
     );
@@ -389,7 +394,10 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         )
         .expect("compile invite policy topology");
     let typed_join_code = typed_claim_param_alias(
-        &claim_param_field(&ClaimPath(vec!["join_code".to_owned()])),
+        &claim_param_field(&ClaimPath(vec![
+            "claims".to_owned(),
+            "join_code".to_owned(),
+        ])),
         &ColumnType::String.nullable(),
     );
     assert!(
@@ -643,10 +651,10 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     // session must materialize an already-existing private message through
     // its sender include and timestamp order, not merely discover chat
     // membership itself.
-    node.set_session_claims(
+    node.set_test_provider_claims(
         identity,
         BTreeMap::from([(
-            "user_id".to_owned(),
+            crate::query::provider_claim_key("user_id"),
             Value::String(identity.test_uuid().to_string()),
         )]),
     );
@@ -689,10 +697,10 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     .expect("prepare and hydrate normal-member message include/order subscription");
     let (_normal_client_dir, mut normal_client) =
         open_node_with_uuid(NodeUuid::from_bytes([0xae; 16]), schema.clone());
-    normal_client.set_session_claims(
+    normal_client.set_test_provider_claims(
         identity,
         BTreeMap::from([(
-            "user_id".to_owned(),
+            crate::query::provider_claim_key("user_id"),
             Value::String(identity.test_uuid().to_string()),
         )]),
     );
@@ -1010,9 +1018,12 @@ fn missing_policy_relation_seed_claim_fails_closed_without_breaking_prepared_bin
         .expect_err("ordinary prepared bindings must still reject missing claims");
     assert!(matches!(ordinary_error, Error::InvalidStoredValue(_)));
 
-    node.set_session_claims(
+    node.set_test_provider_claims(
         reader,
-        BTreeMap::from([("session_id".to_owned(), Value::Uuid(reader.test_uuid()))]),
+        BTreeMap::from([(
+            crate::query::provider_claim_key("session_id"),
+            Value::Uuid(reader.test_uuid()),
+        )]),
     );
     let allowed_rows = node
         .query_rows_for_link(&shape, &binding, DurabilityTier::Global, reader)
@@ -1048,13 +1059,19 @@ fn declared_id_point_read_prepares_claim_policy_bindings() {
     let bob = author(0xd3);
     let document = row(0xd4);
 
-    node.set_session_claims(
+    node.set_test_provider_claims(
         alice,
-        BTreeMap::from([("user_id".to_owned(), Value::Uuid(alice.test_uuid()))]),
+        BTreeMap::from([(
+            crate::query::provider_claim_key("user_id"),
+            Value::Uuid(alice.test_uuid()),
+        )]),
     );
-    node.set_session_claims(
+    node.set_test_provider_claims(
         bob,
-        BTreeMap::from([("user_id".to_owned(), Value::Uuid(bob.test_uuid()))]),
+        BTreeMap::from([(
+            crate::query::provider_claim_key("user_id"),
+            Value::Uuid(bob.test_uuid()),
+        )]),
     );
     commit_global_cells(
         &mut node,
@@ -1235,10 +1252,10 @@ fn policy_claim_array_string_ids_bind_as_uuid_array() {
     commit_issue(&mut node, 2, "open", bob);
 
     let reader = author(9);
-    node.set_session_claims(
+    node.set_test_provider_claims(
         reader,
         BTreeMap::from([(
-            "team_ids".to_owned(),
+            crate::query::provider_claim_key("team_ids"),
             Value::Array(vec![Value::String(alice.test_uuid().to_string())]),
         )]),
     );
@@ -1286,18 +1303,21 @@ fn prepared_policy_plan_is_recompiled_after_same_identity_claim_revision_changes
             .collect::<BTreeSet<_>>()
     };
 
-    node.set_session_claims(
+    node.set_test_provider_claims(
         identity,
         BTreeMap::from([(
-            "selected_assignee".to_owned(),
+            crate::query::provider_claim_key("selected_assignee"),
             Value::Uuid(alice.test_uuid()),
         )]),
     );
     assert_eq!(visible_for(&mut node), BTreeSet::from([row(1)]));
 
-    node.set_session_claims(
+    node.set_test_provider_claims(
         identity,
-        BTreeMap::from([("selected_assignee".to_owned(), Value::Uuid(bob.test_uuid()))]),
+        BTreeMap::from([(
+            crate::query::provider_claim_key("selected_assignee"),
+            Value::Uuid(bob.test_uuid()),
+        )]),
     );
     assert_eq!(
         visible_for(&mut node),

@@ -1,6 +1,7 @@
 import type { RuntimeSourcesConfig } from "./context.js";
 import type { DbConfig } from "./db.js";
-import { resolveClientSessionSync } from "./client-session.js";
+import { resolveClientInternalSessionSync } from "./client-session.js";
+import { getTrustedReservedSession } from "./db-internal-session.js";
 import {
   resolveConfiguredUrl,
   resolveRuntimeConfigBrokerWorkerUrl,
@@ -148,11 +149,11 @@ export function createBrowserAuthSessionKey(config: DbConfig): string {
 
 function resolveAuthClass(config: DbConfig): string {
   if (config.adminSecret) return "admin";
-  const session = resolveClientSessionSync({
+  const session = resolveClientInternalSessionSync({
     appId: config.appId,
     jwtToken: config.jwtToken,
     cookieSession: config.cookieSession,
-    trustedReservedSession: config.trustedReservedSession,
+    trustedReservedSession: getTrustedReservedSession(config),
   });
   if (!session?.user_id || session.authMode === "anonymous") return "anonymous";
   return `${session.authMode}:${JSON.stringify([session.issuer, session.user_id])}`;

@@ -1,10 +1,10 @@
 impl PeerState {
     /// Ingest a client mergeable commit unit at an edge boundary.
     ///
-    /// The edge first stores the unit as pending relay history, then gates fate
-    /// assignment on the first settled permission-scope subscription for the
-    /// affected tables and writer. If a scope was not settled before this call,
-    /// the unit remains pending and can be completed by
+    /// The edge gates admission on the first settled permission-scope
+    /// subscription for the affected tables and writer. If a scope was not
+    /// settled before this call, the unit remains outside edge history and can
+    /// be admitted exactly once by
     /// [`Self::drain_deferred_edge_fates`] after the registered scope settles.
     pub async fn ingest_edge_mergeable_commit_unit<S>(
         &mut self,
@@ -32,8 +32,21 @@ impl PeerState {
         )
         .await?
         {
-            node.ingest_relay_commit_unit(tx.clone(), versions.clone()).await?;
-            if !self.deferred_edge_fates.contains_key(&tx.tx_id) {
+            if let Some(existing) = self.deferred_edge_fates.get(&tx.tx_id) {
+                // The durable ingest path rejects two different commit units
+                // for one transaction id.  Deferred admission sits before that
+                // path, so retain the same conflict boundary here rather than
+                // silently treating a conflicting upload as a retransmit.
+                // Version order is transport-insignificant and is normalized
+                // by NodeState on eventual admission.
+                let mut existing_versions = existing.versions.clone();
+                existing_versions.sort();
+                let mut incoming_versions = versions;
+                incoming_versions.sort();
+                if existing.tx != tx || existing_versions != incoming_versions {
+                    return Err(Error::ConflictingCommitUnit(tx.tx_id));
+                }
+            } else {
                 for subscription in &scope_subscriptions {
                     self.retain_edge_scope_subscription(*subscription);
                 }

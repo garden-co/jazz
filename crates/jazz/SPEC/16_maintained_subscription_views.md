@@ -113,7 +113,7 @@ For non-system peers, the maintained graph begins from the shared
 policy-composed lowered-query core from ch. 14: the user query intersected with
 the table read policy under the authenticated peer identity, lowered over the
 subscription's visible-current base source. Claim operands are rewritten to
-server-derived parameters before lowering. `claim("author")` is the stable subject
+server-derived parameters before lowering. `claim("user")` is the stable subject
 identity. Recognized claims that do not yet have a runtime value fail closed.
 
 Policy composition is not merely an output filter. Policy dependency tables are

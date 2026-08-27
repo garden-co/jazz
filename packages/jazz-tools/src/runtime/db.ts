@@ -47,11 +47,16 @@ import { SubscriptionManager, type SubscriptionDelta } from "./subscription-mana
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
 import {
   parseJwtPayload,
-  resolveClientSessionSync,
-  sessionFromVerifiedReservedJwtPayload,
-  type ClientSessionInput,
+  internalSessionFromVerifiedReservedJwtPayload,
+  resolveClientInternalSessionSync,
 } from "./client-session.js";
 import { canonicalAuthorSubject } from "./author-id.js";
+import {
+  getDbInternalSession,
+  getTrustedReservedSession,
+  setDbInternalSession,
+  setTrustedReservedSession,
+} from "./db-internal-session.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import {
   normalizeBuiltQuery,
@@ -101,8 +106,6 @@ export type DbConfig = {
   telemetryCollectorUrl?: string;
   /** Enable runtime tracing for DevTools-only diagnostics. */
   devMode?: boolean;
-  /** @internal Session produced by a first-party reserved-issuer auth flow. */
-  trustedReservedSession?: ClientSessionInput["trustedReservedSession"];
 } & (
   | {
       /** Local-first auth via a local seed. */
@@ -147,11 +150,11 @@ export function resolveDefaultPersistentDbName(config: DbConfig): string {
     return explicitDbName;
   }
 
-  const session = resolveClientSessionSync({
+  const session = resolveClientInternalSessionSync({
     appId: config.appId,
     jwtToken: config.jwtToken,
     cookieSession: config.cookieSession,
-    trustedReservedSession: config.trustedReservedSession,
+    trustedReservedSession: getTrustedReservedSession(config),
   });
 
   if (!session?.user_id || session.authMode === "anonymous") {
@@ -1421,7 +1424,12 @@ export class Db {
   ) {
     this.config = config;
     this.runtimeSource = runtimeSource;
-    this.authStateStore = createAuthStateStore(config, authStateOptions);
+    const sessionInput = {
+      ...config,
+      trustedReservedSession: getTrustedReservedSession(config),
+    };
+    setDbInternalSession(this, resolveClientInternalSessionSync(sessionInput));
+    this.authStateStore = createAuthStateStore(sessionInput, authStateOptions);
     this.connection = new DirectConnectionManager(this.dbForConnection());
     dbSubscriptionSources.set(this, {
       all: (query, options) => this.all(query, options),
@@ -1478,7 +1486,7 @@ export class Db {
         this.config.appId,
         ttlSeconds,
       );
-      const trustedReservedSession = sessionFromVerifiedReservedJwtPayload(
+      const trustedReservedSession = internalSessionFromVerifiedReservedJwtPayload(
         parseJwtPayload(newToken) ?? {},
         "local-first",
       );
@@ -1505,19 +1513,42 @@ export class Db {
     this.authStateStore.markUnauthenticated(reason);
   }
 
+  private publishAuthStateWithInternalSession<T>(
+    nextSession: Session | null,
+    publish: () => T,
+  ): { value: T; rollback: () => void } {
+    const previousSession = getDbInternalSession(this);
+    setDbInternalSession(this, nextSession);
+    const rollback = () => setDbInternalSession(this, previousSession);
+    try {
+      return { value: publish(), rollback };
+    } catch (error) {
+      rollback();
+      throw error;
+    }
+  }
+
   protected applyAuthUpdate(token: string | null, trustedReservedSession?: Session): boolean {
     const jwtToken = token ?? undefined;
     const previousToken = this.config.jwtToken;
     const previousState = this.authStateStore.getState();
-    const nextState = this.authStateStore.applyJwtToken(jwtToken, trustedReservedSession);
+    const nextInternalSession = resolveClientInternalSessionSync({
+      ...this.config,
+      jwtToken,
+      trustedReservedSession,
+    });
+    const published = this.publishAuthStateWithInternalSession(nextInternalSession, () =>
+      this.authStateStore.applyJwtToken(jwtToken, trustedReservedSession),
+    );
     const tokenChanged = previousToken !== jwtToken;
 
-    if (!tokenChanged && nextState === previousState) {
+    if (!tokenChanged && published.value === previousState) {
+      published.rollback();
       return false;
     }
 
     this.config.jwtToken = jwtToken;
-    this.config.trustedReservedSession = trustedReservedSession;
+    setTrustedReservedSession(this.config, trustedReservedSession);
 
     this.connection.updateAuth({ jwtToken, trustedReservedSession });
 
@@ -1528,10 +1559,17 @@ export class Db {
     const cookieSession = session ?? undefined;
     const previousSession = this.config.cookieSession;
     const previousState = this.authStateStore.getState();
-    const nextState = this.authStateStore.applyCookieSession(cookieSession);
+    const nextInternalSession = resolveClientInternalSessionSync({
+      ...this.config,
+      cookieSession,
+    });
+    const published = this.publishAuthStateWithInternalSession(nextInternalSession, () =>
+      this.authStateStore.applyCookieSession(cookieSession),
+    );
     const sessionChanged = JSON.stringify(previousSession) !== JSON.stringify(cookieSession);
 
-    if (!sessionChanged && nextState === previousState) {
+    if (!sessionChanged && published.value === previousState) {
+      published.rollback();
       return false;
     }
 
@@ -2220,10 +2258,7 @@ export class Db {
     return results[0] ?? null;
   }
 
-  /**
-   * Subscribe to a query and receive its complete current result whenever it changes.
-   * Each callback receives a fresh result array.
-   */
+  /** Subscribe to a query and receive its complete current result whenever it changes. */
   subscribe<T extends { id: string }>(
     query: QueryBuilder<T>,
     callback: (rows: T[]) => void,
@@ -2651,15 +2686,12 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
       const jwtToken = runtimeSource.mintLocalFirstToken(
         createRuntimeTokenOptions(secret, config.appId, 3600),
       );
-      const trustedReservedSession = sessionFromVerifiedReservedJwtPayload(
+      const trustedReservedSession = internalSessionFromVerifiedReservedJwtPayload(
         parseJwtPayload(jwtToken) ?? {},
         "local-first",
       );
-      resolvedConfig = {
-        ...configWithoutAuth,
-        jwtToken,
-        trustedReservedSession,
-      };
+      resolvedConfig = { ...configWithoutAuth, jwtToken };
+      setTrustedReservedSession(resolvedConfig, trustedReservedSession);
     }
   } else if (!config.jwtToken && !config.cookieSession && !config.adminSecret) {
     // Anonymous: mint an ephemeral keypair + anonymous JWT.
@@ -2669,11 +2701,12 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
     const jwtToken = runtimeSource.mintAnonymousToken(
       createRuntimeTokenOptions(ephemeralSeed, config.appId, 3600),
     );
-    const trustedReservedSession = sessionFromVerifiedReservedJwtPayload(
+    const trustedReservedSession = internalSessionFromVerifiedReservedJwtPayload(
       parseJwtPayload(jwtToken) ?? {},
       "anonymous",
     );
-    resolvedConfig = { ...configWithoutAuth, jwtToken, trustedReservedSession };
+    resolvedConfig = { ...configWithoutAuth, jwtToken };
+    setTrustedReservedSession(resolvedConfig, trustedReservedSession);
   }
 
   const driver = resolveStorageDriver(resolvedConfig.driver);

@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { userIdentity } from "jazz-tools";
 import { startTestJwtIssuer, type TestJwtIssuerHandle } from "jazz-tools/testing";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
@@ -24,13 +25,14 @@ const EXTERNAL_ISSUER = "https://todo-server.example.test";
 type Identity = {
   token: string;
   userId: string;
+  user: string;
 };
 
 function createIdentity(jwtIssuer: TestJwtIssuerHandle, userId: string): Identity {
   const token = jwtIssuer.jwtForUser(userId, {}, { issuer: EXTERNAL_ISSUER });
   const payload = JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString("utf8"));
   expect(payload).toMatchObject({ iss: EXTERNAL_ISSUER, sub: userId });
-  return { token, userId };
+  return { token, userId, user: userIdentity(EXTERNAL_ISSUER, userId) };
 }
 let primaryIdentity: Identity;
 let jwtIssuer: TestJwtIssuerHandle;
@@ -181,7 +183,7 @@ describe("Todo Server Integration", () => {
       );
       expect(createAlice.status).toBe(201);
       const aliceTodo: Todo = await createAlice.json();
-      expect(aliceTodo.owner_id).toBe(alice.userId);
+      expect(aliceTodo.owner_id).toBe(alice.user);
 
       const createBob = await authenticatedFetch(
         `${baseUrl}/todos`,
@@ -194,7 +196,7 @@ describe("Todo Server Integration", () => {
       );
       expect(createBob.status).toBe(201);
       const bobTodo: Todo = await createBob.json();
-      expect(bobTodo.owner_id).toBe(bob.userId);
+      expect(bobTodo.owner_id).toBe(bob.user);
 
       const aliceViewRes = await authenticatedFetch(`${baseUrl}/todos`, {}, alice);
       expect(aliceViewRes.status).toBe(200);

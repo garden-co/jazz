@@ -14,7 +14,7 @@ import {
   type PropType,
   type ShallowRef,
 } from "vue";
-import type { Session } from "../runtime/context.js";
+import type { PublicSession } from "../runtime/context.js";
 import type { Db, DbConfig } from "../runtime/db.js";
 import { createJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 import { startInspectorOnce } from "../dev-tools/auto-attach.js";
@@ -237,11 +237,11 @@ export function useDb(): Db {
 }
 
 /**
- * Subscribe to the current Jazz {@link Session}.
+ * Subscribe to the current Jazz {@link PublicSession}.
  * Returns a {@link ComputedRef} whose `.value` updates automatically as the user
  * logs in or out — use it in templates or computed properties.
  */
-export function useSession(): ComputedRef<Session | null> {
+export function useSession(): ComputedRef<PublicSession | null> {
   const ctx = inject(JazzContextKey, null);
   if (!ctx) {
     throw new Error(

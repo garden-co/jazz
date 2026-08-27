@@ -19,10 +19,10 @@ async fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exi
     let projects_policies = permissions(|p| {
         p.allow_insert()
             .where_(pe::exists(pe::table("admins").where_(pe::all_of([
-                pe::eq("user_id", pe::session("user_id")),
+                pe::eq("user_id", pe::session(vec!["claims", "sub"])),
                 pe::exists(pe::table("team_memberships").where_(pe::rel::all_of([
                     pe::rel::eq_outer("team_id", "team_id"),
-                    pe::rel::eq_session("user_id", "user_id"),
+                    pe::rel::eq_session("user_id", vec!["claims", "sub"]),
                 ]))),
             ]))));
     });
@@ -91,7 +91,7 @@ async fn local_insert_with_exists_rel_policy_denies_non_admin() {
 async fn local_insert_with_exists_rel_policy_denies_non_admin_inner() {
     let projects_policies = permissions(|p| {
         p.allow_insert().where_(pe::exists(
-            pe::table("admins").where_(pe::rel::eq_session("user_id", "user_id")),
+            pe::table("admins").where_(pe::rel::eq_session("user_id", vec!["claims", "sub"])),
         ));
     });
     let schema = SchemaBuilder::new()
@@ -150,7 +150,7 @@ async fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned
 async fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned_table_inner() {
     let projects_policies = permissions(|p| {
         p.allow_insert().where_(pe::exists(
-            pe::table("admins").where_(pe::rel::eq_session("user_id", "user_id")),
+            pe::table("admins").where_(pe::rel::eq_session("user_id", vec!["claims", "sub"])),
         ));
     });
     let schema = SchemaBuilder::new()
@@ -201,7 +201,7 @@ async fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows_i
     let projects_policies = permissions(|p| {
         p.allow_insert()
             .where_(pe::exists(pe::table("admins").where_(pe::rel::all_of([
-                pe::rel::eq_session("user_id", "user_id"),
+                pe::rel::eq_session("user_id", vec!["claims", "sub"]),
                 pe::rel::eq_literal("revoked_at", Value::Null),
             ]))));
     });
@@ -269,7 +269,7 @@ async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin()
 async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin_inner() {
     let protected_policies = permissions(|p| {
         p.allow_delete().where_(pe::exists(
-            pe::table("admins").where_(pe::rel::eq_session("user_id", "user_id")),
+            pe::table("admins").where_(pe::rel::eq_session("user_id", vec!["claims", "sub"])),
         ));
     });
     let schema = SchemaBuilder::new()

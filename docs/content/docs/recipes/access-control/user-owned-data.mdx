@@ -20,7 +20,7 @@ See [Defining tables](/docs/schemas/defining-tables) for the full schema DSL.
 
 ## Permissions
 
-Match `$createdBy` to `session.author` to validate whether the current user is the one who created the data. Because `$createdBy` is set automatically, we can declare insert explicitly with `.always()`.
+Match `$createdBy` to `session.user` to validate whether the current user is the one who created the data. Because `$createdBy` is set automatically, we can declare insert explicitly with `.always()`.
 
 <include cwd lang="ts" meta='title="permissions.ts"'>
   ../examples/docs/todo-client-localfirst-react/src/user-owned-snippets.tsx#owned-permissions
@@ -66,7 +66,7 @@ If ownership can be transferred after creation, use an explicit `owner_id` colum
 
 `allowUpdate.whereOld(...)` checks the row before the update, so the current owner can rewrite `owner_id` to transfer the row. Using `.where(...)` instead would also enforce the condition on the post-update row and block transfers. See [Permissions](/docs/auth/permissions) for `whereOld`/`whereNew` semantics.
 
-`allowInsert.always()` lets any user insert a row with any `owner_id`, including someone else's. That's the right default if you want users to be able to assign rows to others on creation; otherwise, narrow it to `.where({ owner_id: session.user_id })` so clients can only create rows they own.
+`allowInsert.always()` lets any user insert a row with any `owner_id`, including someone else's. That's the right default if you want users to be able to assign rows to others on creation; otherwise, narrow it to `.where({ owner_id: session.user })` so clients can only create rows they own.
 
 </Accordion>
 </Accordions>

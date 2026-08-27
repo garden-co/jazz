@@ -2384,6 +2384,23 @@ where
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_test_provider_claims(
+        &self,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) {
+        let changed = {
+            let mut node = self.node.node.borrow_mut();
+            let previous_revision = node.session_claim_revision(identity);
+            node.set_test_provider_claims(identity, claims);
+            node.session_claim_revision(identity) != previous_revision
+        };
+        if changed {
+            self.node.schedule_tick(TickUrgency::Deferred);
+        }
+    }
+
     /// Advise whether a delete may be allowed. Client-local replicas return
     /// `Unknown` rather than using locally available rows as policy evidence.
     pub fn can_delete(&self, _table: &str, _row: RowUuid) -> Result<PermissionAdvice, Error> {

@@ -42,7 +42,7 @@ fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
     let base = branch_selector(0x45);
     let head = branch_selector(0x46);
     let owner = AuthorSubject::for_test_bytes([0x48; 16]);
-    node.set_session_claims(
+    node.set_test_provider_claims(
         owner,
         BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.test_uuid()))]),
     );

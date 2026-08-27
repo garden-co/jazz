@@ -2834,6 +2834,13 @@ pub(crate) fn decode_node_untyped_authenticated(
     expected_hash: ContentHash,
     encoded: &[u8],
 ) -> Result<ChunkNode, Error> {
+    // This path is also used while installing durable metadata, before a row
+    // descriptor supplies the schema-derived kind. Keep the resource ceiling
+    // ahead of authentication so an oversized stored object cannot make us
+    // hash it merely because it has no descriptor yet.
+    if encoded.len() > MAX_ENCODED_NODE_BYTES {
+        return Err(Error::MalformedNode);
+    }
     if object_hash(encoded) != expected_hash {
         return Err(Error::ObjectHashMismatch);
     }
@@ -5615,6 +5622,20 @@ mod tests {
         assert_eq!(
             decode_authenticated_node(object_hash(&encoded), &encoded),
             Err(Error::MalformedNode)
+        );
+    }
+
+    #[test]
+    fn untyped_authenticated_decode_rejects_oversized_bytes_before_hashing() {
+        // This is intentionally an internal receipt: durable chunk-install
+        // metadata authenticates nodes before any descriptor exists, so the
+        // public row API cannot exercise this resource boundary directly.
+        let encoded = vec![0; MAX_ENCODED_NODE_BYTES + 1];
+        let matching_hash = object_hash(&encoded);
+        assert_eq!(
+            decode_node_untyped_authenticated(matching_hash, &encoded),
+            Err(Error::MalformedNode),
+            "the size ceiling must win even when the oversized payload's hash matches"
         );
     }
 

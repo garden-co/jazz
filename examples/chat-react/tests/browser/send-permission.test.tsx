@@ -4,7 +4,7 @@
  * Both hypotheses concern the messages INSERT policy:
  *   WITH CHECK (EXISTS (SELECT FROM chatMembers
  *                       WHERE (chat = @session.__jazz_outer_row.chat)
- *                         AND (userId = @session.user_id)))
+ *                         AND (userId = @session.user)))
  *
  * Hypothesis A — the chat creator (who has a chatMember row from chat
  *   creation) cannot send a message because the EXISTS check in WITH CHECK

@@ -75,13 +75,16 @@ impl Database {
             Rc::new(crate::chunks::UnavailableChunkResolver);
         let large_value_lifecycle = std::sync::Arc::new(futures::lock::Mutex::new(()));
         ivm_runtime.set_chunk_provider(Rc::new(
-            crate::chunks::StorageChunkProvider::with_resolver_and_observer(
+            crate::chunks::StorageChunkProvider::with_resolver_observer_and_journal(
                 chunk_storage.clone(),
                 chunk_resolver.clone(),
                 Rc::new(MetadataChunkInstallObserver {
                     storage: Rc::downgrade(&storage),
                     lifecycle: std::sync::Arc::downgrade(&large_value_lifecycle),
                     resident_install: None,
+                }),
+                Rc::new(MetadataChunkInstallJournal {
+                    storage: Rc::downgrade(&storage),
                 }),
             ),
         ));
@@ -189,13 +192,16 @@ impl Database {
     /// evaluation reads directly through it.
     pub fn set_chunk_storage(&mut self, storage: Rc<dyn crate::chunks::ChunkStorage>) {
         self.ivm_runtime.set_chunk_provider(Rc::new(
-            crate::chunks::StorageChunkProvider::with_resolver_and_observer(
+            crate::chunks::StorageChunkProvider::with_resolver_observer_and_journal(
                 storage.clone(),
                 self.chunk_resolver.clone(),
                 Rc::new(MetadataChunkInstallObserver {
                     storage: Rc::downgrade(&self.storage),
                     lifecycle: std::sync::Arc::downgrade(&self.large_value_lifecycle),
                     resident_install: None,
+                }),
+                Rc::new(MetadataChunkInstallJournal {
+                    storage: Rc::downgrade(&self.storage),
                 }),
             ),
         ));
@@ -207,13 +213,16 @@ impl Database {
         resolver: Rc<dyn crate::chunks::MissingChunkResolver>,
     ) {
         self.ivm_runtime.set_chunk_provider(Rc::new(
-            crate::chunks::StorageChunkProvider::with_resolver_and_observer(
+            crate::chunks::StorageChunkProvider::with_resolver_observer_and_journal(
                 self.chunk_storage.clone(),
                 resolver.clone(),
                 Rc::new(MetadataChunkInstallObserver {
                     storage: Rc::downgrade(&self.storage),
                     lifecycle: std::sync::Arc::downgrade(&self.large_value_lifecycle),
                     resident_install: None,
+                }),
+                Rc::new(MetadataChunkInstallJournal {
+                    storage: Rc::downgrade(&self.storage),
                 }),
             ),
         ));

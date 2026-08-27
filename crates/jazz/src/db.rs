@@ -54,7 +54,7 @@ use crate::protocol::{
     CurrentWriteSchema, LensOp, MigrationLens, PermissionAdviceAction, PermissionAdviceRequestId,
     ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, SchemaLineagePublication,
     SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode,
-    SubscriptionKey, SyncMessage, TableLens,
+    SubscriptionKey, SyncMessage, TableLens, VersionRecord,
 };
 use crate::protocol_limits::{
     validate_fetch_row_versions, validate_known_state_declaration, validate_shape_registration_size,
@@ -73,7 +73,7 @@ use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalTime;
 use crate::tools::OpenTransactionId;
 use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey, TransactionId};
-use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKind};
+use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, Transaction, TxId, TxKind};
 use crate::wire::{TransportError, WireAuthorityEndpoint, WireFeatures, encode_sync_message};
 
 mod wire_transport;
@@ -1498,8 +1498,45 @@ struct PendingAuthorityViewUpdate {
 struct EdgeFateRoute {
     authority: Option<AuthorityContext>,
     queue: Weak<RefCell<Vec<SyncMessage>>>,
+    /// The edge-local acceptance has already been emitted to this exact
+    /// downstream session.  The later Core terminal fate remains separately
+    /// routable through the same retained obligation.
+    edge_acknowledged: bool,
 }
-type EdgeFateRoutes = Rc<RefCell<BTreeMap<TxId, Vec<EdgeFateRoute>>>>;
+
+/// The immutable identity of a client commit while its edge fate obligation is
+/// live.  An edge intentionally keeps a pre-proof upload out of durable
+/// transaction history, but it must still enforce history's one-payload-per-id
+/// rule across all client connections.  Normalize version order here because
+/// transport ordering is not semantically meaningful.
+#[derive(Clone, Debug)]
+struct EdgeFateCommitIdentity {
+    tx: Transaction,
+    versions: Vec<VersionRecord>,
+}
+
+impl EdgeFateCommitIdentity {
+    fn new(tx: &Transaction, versions: &[VersionRecord]) -> Self {
+        let mut versions = versions.to_vec();
+        versions.sort();
+        Self {
+            tx: tx.clone(),
+            versions,
+        }
+    }
+
+    fn matches(&self, other: &Self) -> bool {
+        self.tx == other.tx && self.versions == other.versions
+    }
+}
+
+/// The shared edge obligation for one transaction.
+struct EdgeFateObligation {
+    identity: EdgeFateCommitIdentity,
+    routes: Vec<EdgeFateRoute>,
+}
+
+type EdgeFateRoutes = Rc<RefCell<BTreeMap<TxId, EdgeFateObligation>>>;
 
 struct LocalFateRoute {
     queue: Weak<RefCell<Vec<SyncMessage>>>,
@@ -1599,6 +1636,38 @@ fn route_local_fate(routes: &LocalFateRoutes, tx_id: TxId, fate: &SyncMessage) {
     }
 }
 
+/// Deliver the edge's own admission fate through the same route registry that
+/// later carries the selected Core fate.  This avoids a direct-response path
+/// that would acknowledge only the tick currently handling the upload (and
+/// would duplicate a retransmitted upload), while a rejection retires the
+/// obligation because there is no admitted unit for Core to settle.
+fn route_edge_admission_fate(routes: &EdgeFateRoutes, tx_id: TxId, fate: &SyncMessage) {
+    let terminal = matches!(
+        fate,
+        SyncMessage::FateUpdate {
+            fate: Fate::Rejected(_),
+            ..
+        }
+    );
+    let mut routes = routes.borrow_mut();
+    let Some(obligation) = routes.get_mut(&tx_id) else {
+        return;
+    };
+    obligation.routes.retain_mut(|route| {
+        let Some(queue) = route.queue.upgrade() else {
+            return false;
+        };
+        if terminal || !route.edge_acknowledged {
+            queue.borrow_mut().push(fate.clone());
+            route.edge_acknowledged = true;
+        }
+        !terminal
+    });
+    if obligation.routes.is_empty() {
+        routes.remove(&tx_id);
+    }
+}
+
 async fn collect_local_replay_commit_units<S>(
     node: &mut NodeState<S>,
     tx_id: TxId,
@@ -1634,11 +1703,11 @@ where
 /// dead subscriber queues) eagerly: retaining a weak queue alone would let
 /// arbitrary uploads grow this registry forever.
 fn prune_edge_fate_routes(
-    routes: &mut BTreeMap<TxId, Vec<EdgeFateRoute>>,
+    routes: &mut BTreeMap<TxId, EdgeFateObligation>,
     admitted: Option<AuthorityContext>,
 ) {
-    routes.retain(|_, pending| {
-        pending.retain(|route| {
+    routes.retain(|_, obligation| {
+        obligation.routes.retain(|route| {
             route.queue.upgrade().is_some()
                 && match (route.authority, admitted) {
                     (None, _) => true,
@@ -1646,7 +1715,7 @@ fn prune_edge_fate_routes(
                     (Some(_), None) => false,
                 }
         });
-        !pending.is_empty()
+        !obligation.routes.is_empty()
     });
 }
 type SharedMutationErrors = Rc<RefCell<MutationErrorState>>;
@@ -2489,23 +2558,20 @@ where
     node.validate_shape_ast_for_registration(shape_id, ast)
 }
 
-fn send_unsupported_shape_capability_rejection(
-    transport: &mut dyn Transport,
+fn unsupported_shape_capability_rejection_message(
     subscription: SubscriptionKey,
     detail: String,
-) -> Result<(), TransportError> {
-    send_subscription_rejection(
-        transport,
+) -> SyncMessage {
+    subscription_rejection_message(
         subscription,
         SubscribeRejectReason::UnsupportedShapeCapability { detail },
     )
 }
 
-fn reject_server_subscription_failure(
-    transport: &mut dyn Transport,
+fn server_subscription_failure_rejection_message(
     subscription: SubscriptionKey,
     error: &crate::node::Error,
-) -> Result<(), TransportError> {
+) -> SyncMessage {
     // Keep the complete error on the serving process only. Subscription keys
     // provide a correlation handle without disclosing schema, policy, or
     // storage details to the peer.
@@ -2513,8 +2579,7 @@ fn reject_server_subscription_failure(
         "jazz subscription rejected: shape={} binding={} read_view={} server_error={error}",
         subscription.shape_id.0, subscription.binding_id.0, subscription.read_view.id,
     );
-    send_subscription_rejection(
-        transport,
+    subscription_rejection_message(
         subscription,
         SubscribeRejectReason::ServerFailure {
             code: server_failure_code(error),
@@ -2522,15 +2587,14 @@ fn reject_server_subscription_failure(
     )
 }
 
-fn send_subscription_rejection(
-    transport: &mut dyn Transport,
+fn subscription_rejection_message(
     subscription: SubscriptionKey,
     reason: SubscribeRejectReason,
-) -> Result<(), TransportError> {
-    transport.send(SyncMessage::SubscribeRejected {
+) -> SyncMessage {
+    SyncMessage::SubscribeRejected {
         subscription,
         reason,
-    })
+    }
 }
 
 fn server_failure_code(error: &crate::node::Error) -> SubscribeServerFailureCode {
@@ -4464,37 +4528,65 @@ fn apply_maintained_membership_update_to_snapshot(
         }
     }
 
-    let mut index = 0;
-    while index < snapshot.root_count {
-        let occurrence_id = snapshot_index
-            .roots
+    if !update_removed.is_empty() {
+        let replaced = update_added
             .iter()
-            .find_map(|(occurrence, position)| (*position == index).then(|| occurrence.clone()))
-            .expect("every maintained root row has an occurrence index");
-        if update_removed.contains(&occurrence_id)
-            && !update_added
+            .map(|(occurrence, _)| occurrence)
+            .collect::<BTreeSet<_>>();
+        let requested_removals = update_removed.iter().collect::<BTreeSet<_>>();
+        let mut removals = requested_removals
+            .iter()
+            .filter(|occurrence| !replaced.contains(*occurrence))
+            .filter_map(|occurrence| {
+                snapshot_index
+                    .roots
+                    .get(*occurrence)
+                    .copied()
+                    .map(|position| ((*occurrence).clone(), position))
+            })
+            .collect::<Vec<_>>();
+        removals.sort_by_key(|(_, position)| *position);
+        if !removals.is_empty() {
+            // A removed index is part of the public delta contract: it is the
+            // position in the complete pre-frame result, not the position after
+            // a preceding removal has already shifted the snapshot.  Remove the
+            // whole batch together so both that contract and the index repair are
+            // linear in the result size rather than quadratic in removed roots.
+            let removed_positions = removals
                 .iter()
-                .any(|(added, _)| *added == occurrence_id)
-        {
-            let row = snapshot.rows.remove(index);
-            snapshot.root_count -= 1;
-            snapshot_index.roots.remove(&occurrence_id);
-            for position in snapshot_index.roots.values_mut() {
-                if *position > index {
-                    *position -= 1;
+                .map(|(_, position)| *position)
+                .collect::<Vec<_>>();
+            let removal_ids = removals
+                .iter()
+                .map(|(occurrence, _)| occurrence)
+                .collect::<BTreeSet<_>>();
+            removed.extend(removals.iter().map(|(occurrence_id, index)| {
+                let row = &snapshot.rows[*index];
+                RemovedRow {
+                    table: row.table().to_owned(),
+                    row_uuid: row.row_uuid(),
+                    occurrence_id: occurrence_id.clone(),
+                    index: *index,
                 }
+            }));
+            let root_count_before_removals = snapshot.root_count;
+            let mut position = 0;
+            snapshot.rows.retain(|_| {
+                let keep = position >= root_count_before_removals
+                    || removed_positions.binary_search(&position).is_err();
+                position += 1;
+                keep
+            });
+            snapshot.root_count -= removed_positions.len();
+            snapshot_index
+                .roots
+                .retain(|occurrence, _| !removal_ids.contains(occurrence));
+            for position in snapshot_index.roots.values_mut() {
+                *position -= removed_positions.partition_point(|removed| removed < position);
             }
             for position in snapshot_index.related.values_mut() {
-                *position -= 1;
+                *position -= removed_positions.len();
             }
-            removed.push(RemovedRow {
-                table: row.table().to_owned(),
-                row_uuid: row.row_uuid(),
-                occurrence_id,
-                index,
-            });
-        } else {
-            index += 1;
         }
     }
 

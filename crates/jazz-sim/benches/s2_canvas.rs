@@ -1860,7 +1860,7 @@ fn run_db_surface(config: &Config, coalesced: bool) -> DbSurfaceSummary {
                 ("canvas".to_owned(), Value::Uuid(canvas.0)),
                 (
                     "userID".to_owned(),
-                    Value::String(participant_author(idx).test_uuid().to_string()),
+                    Value::String(participant_author(idx).canonical().to_owned()),
                 ),
             ]),
             jazz::db::InsertOptions {
@@ -2065,7 +2065,7 @@ fn schema() -> JazzSchema {
     let invite_policy = public_policy_expr::exists(public_policy_expr::table(INVITES).where_(
         public_policy_expr::rel::all_of([
             public_policy_expr::rel::eq_outer("canvas", "canvas"),
-            public_policy_expr::rel::eq_session("userID", "user_id"),
+            public_policy_expr::rel::eq_session("userID", vec!["user"]),
         ]),
     ));
     compile_public_schema(
@@ -2118,7 +2118,7 @@ fn seed_fixture(
                 ("canvas".to_owned(), Value::Uuid(canvas.0)),
                 (
                     "userID".to_owned(),
-                    Value::String(participant_author(idx).test_uuid().to_string()),
+                    Value::String(participant_author(idx).canonical().to_owned()),
                 ),
             ]),
             100 + idx as u64,
@@ -2167,7 +2167,7 @@ fn seed_concurrent_fixture(
                 ("canvas".to_owned(), Value::Uuid(canvas.0)),
                 (
                     "userID".to_owned(),
-                    Value::String(participant_author(idx).test_uuid().to_string()),
+                    Value::String(participant_author(idx).canonical().to_owned()),
                 ),
             ]),
             0,

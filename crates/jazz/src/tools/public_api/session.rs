@@ -60,10 +60,6 @@ impl Session {
         }
     }
 
-    fn is_user_id_path(path: &[String]) -> bool {
-        matches!(path, [segment] if segment == "user_id" || segment == "userId")
-    }
-
     fn is_auth_mode_path(path: &[String]) -> bool {
         matches!(path, [segment] if segment == "auth_mode" || segment == "authMode")
     }
@@ -93,17 +89,10 @@ impl Session {
     /// Get a value at the given path.
     ///
     /// Path segments:
-    /// - `["user_id"]` -> returns the user_id as a string
     /// - `["claims", "key"]` -> returns claims.key
     /// - `["claims", "nested", "key"]` -> returns claims.nested.key
     pub fn get_path(&self, path: &[String]) -> Option<&JsonValue> {
         if path.is_empty() {
-            return None;
-        }
-
-        if Self::is_user_id_path(path) {
-            // Special case: user_id is stored as a String, not JsonValue
-            // Return None here; use get_user_id() instead
             return None;
         }
 
@@ -145,9 +134,6 @@ impl Session {
         if path.is_empty() {
             return false;
         }
-        if Self::is_user_id_path(path) {
-            return true;
-        }
         if Self::is_auth_mode_path(path) {
             return true;
         }
@@ -156,14 +142,10 @@ impl Session {
 
     /// Get a string value at the given path.
     ///
-    /// For `["user_id"]`, returns the user_id.
-    /// For other paths, returns the JSON string if present.
+    /// Returns the JSON string if present.
     pub fn get_string(&self, path: &[String]) -> Option<&str> {
         if path.is_empty() {
             return None;
-        }
-        if Self::is_user_id_path(path) {
-            return Some(&self.user_id);
         }
         if Self::is_auth_mode_path(path) {
             return Some(match self.auth_mode {
@@ -275,10 +257,10 @@ mod tests {
     fn test_session_user_id() {
         let session = Session::new("urn:jazz:test", "user123");
         assert_eq!(session.get_user_id(), "user123");
-        assert_eq!(session.get_string(&["user_id".into()]), Some("user123"));
-        assert_eq!(session.get_string(&["userId".into()]), Some("user123"));
-        assert!(session.has_path(&["user_id".into()]));
-        assert!(session.has_path(&["userId".into()]));
+        assert_eq!(session.get_string(&["user_id".into()]), None);
+        assert_eq!(session.get_string(&["userId".into()]), None);
+        assert!(!session.has_path(&["user_id".into()]));
+        assert!(!session.has_path(&["userId".into()]));
     }
 
     #[test]

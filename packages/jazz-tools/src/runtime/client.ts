@@ -19,6 +19,7 @@ import {
   resolveClientSessionStateSync,
   trustedReservedSessionToken,
 } from "./client-session.js";
+import { getTrustedReservedSession, setTrustedReservedSession } from "./db-internal-session.js";
 import { mapAuthReason } from "./auth-state.js";
 import {
   resolveRuntimeConfigSyncInitInput,
@@ -28,13 +29,19 @@ import { httpUrlToWs } from "./url.js";
 import { PostcardWriter } from "./native-runtime/native-codec.js";
 import { assertNativeArtifactCompatibility } from "./native-artifact-compatibility.js";
 
-type RuntimeSerializedSession = Session & {
+type RuntimeSerializedSession = Pick<Session, "issuer" | "user_id" | "claims" | "authMode"> & {
   [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]?: string;
 };
 
 function serializeRuntimeSession(session: Session): RuntimeSerializedSession {
   const token = trustedReservedSessionToken(session);
-  return token ? { ...session, [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: token } : session;
+  return {
+    issuer: session.issuer,
+    user_id: session.user_id,
+    claims: session.claims,
+    authMode: session.authMode,
+    ...(token ? { [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: token } : {}),
+  };
 }
 
 function encodeBranchColumnValue(value: Value): Uint8Array {
@@ -809,8 +816,8 @@ export class JazzClient {
       appId: this.context.appId,
       jwtToken: this.context.jwtToken,
       cookieSession: this.context.cookieSession,
-      trustedReservedSession: this.context.trustedReservedSession,
-    }).session;
+      trustedReservedSession: getTrustedReservedSession(this.context),
+    }).internalSession;
   }
 
   private buildTransportAuthPayload(): {
@@ -919,7 +926,7 @@ export class JazzClient {
 
   updateAuthToken(jwtToken?: string): void {
     this.context.jwtToken = jwtToken;
-    this.context.trustedReservedSession = undefined;
+    setTrustedReservedSession(this.context, undefined);
     this.resolvedSession = this.resolveSessionFromContext();
     // Push the refreshed credentials into the Rust transport.
     // Carry forward admin/backend secrets from context — omitting them here
@@ -931,7 +938,7 @@ export class JazzClient {
   /** @internal Update a token minted by a dedicated first-party reserved auth flow. */
   updateTrustedAuthToken(jwtToken: string, session: Session): void {
     this.context.jwtToken = jwtToken;
-    this.context.trustedReservedSession = session;
+    setTrustedReservedSession(this.context, session);
     this.resolvedSession = this.resolveSessionFromContext();
     this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
   }
