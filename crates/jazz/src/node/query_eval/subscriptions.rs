@@ -155,6 +155,16 @@ where
             binding_id: binding.binding_id(),
             read_view: subscribe.subscription.read_view,
         };
+        // A new wire subscription needs an authority receipt. Discard a
+        // browser-only materialized-window interpretation before any opening
+        // reset can otherwise preserve its old member set.
+        if self
+            .query
+            .local_materialized_window_binding_views
+            .remove(&binding_view_key)
+        {
+            self.clear_settled_result_view(binding_view_key);
+        }
         if subscribe.known_state.is_some() {
             self.query
                 .known_state_declared_binding_views
@@ -184,6 +194,18 @@ where
 
     pub(crate) fn apply_unsubscribe(&mut self, subscription: SubscriptionKey) {
         let binding_view_key = self.binding_view_key_for_subscription(subscription).ok();
+        let retain_local_materialized_window = binding_view_key.is_some_and(|binding_view_key| {
+            self.authored_commit_durability == DurabilityTier::None
+                && self
+                    .query
+                    .registered_shapes
+                    .get(&subscription.shape_id)
+                    .is_some_and(|shape| shape.query().offset != 0)
+                && self
+                    .query
+                    .settled_result_sets
+                    .contains_key(&binding_view_key)
+        });
         if let Some(bindings) = self
             .query
             .registered_bindings
@@ -198,7 +220,13 @@ where
             // last downstream usage site releases this exact binding view,
             // revoke its authority-selected membership rather than retaining
             // a browser cache after scope teardown.
-            self.clear_settled_result_view(binding_view_key);
+            if retain_local_materialized_window {
+                self.query
+                    .local_materialized_window_binding_views
+                    .insert(binding_view_key);
+            } else {
+                self.clear_settled_result_view(binding_view_key);
+            }
             self.query.settled_program_facts.remove(&binding_view_key);
             self.query
                 .known_state_declared_binding_views
@@ -228,7 +256,16 @@ where
     /// public reads intentionally treat a Local overlay as best-effort.
     pub fn settled_authoritative_receipt_counts_for_test(&self) -> (usize, usize) {
         (
-            self.query.settled_result_sets.len(),
+            self.query
+                .settled_result_sets
+                .keys()
+                .filter(|key| {
+                    !self
+                        .query
+                        .local_materialized_window_binding_views
+                        .contains(key)
+                })
+                .count(),
             self.query.settled_program_facts.len(),
         )
     }
@@ -256,6 +293,10 @@ where
         self.query
             .settled_result_sets
             .contains_key(&binding_view_key)
+            && !self
+                .query
+                .local_materialized_window_binding_views
+                .contains(&binding_view_key)
     }
 
     pub(crate) fn applied_view_update_generation(&self, binding_view_key: BindingViewKey) -> u64 {

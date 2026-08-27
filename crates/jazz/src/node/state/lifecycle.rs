@@ -559,6 +559,7 @@ where
                 registered_bindings: BTreeMap::new(),
                 applied_view_update_generations: BTreeMap::new(),
                 settled_result_sets: BTreeMap::new(),
+                local_materialized_window_binding_views: BTreeSet::new(),
                 settled_result_row_index: BTreeMap::new(),
                 settled_program_facts: BTreeMap::new(),
                 settled_through_by_binding_view: BTreeMap::new(),
@@ -1424,6 +1425,7 @@ where
         self.query.tx_version_tables_cache_order_set.clear();
         self.query.version_storage_sources_cache.clear();
         self.query.settled_result_sets.clear();
+        self.query.local_materialized_window_binding_views.clear();
         self.query.settled_result_row_index.clear();
         self.query.settled_program_facts.clear();
         self.query.settled_through_by_binding_view.clear();
@@ -1504,6 +1506,9 @@ where
 
     fn clear_settled_result_view(&mut self, binding_view_key: BindingViewKey) {
         self.query.settled_result_sets.remove(&binding_view_key);
+        self.query
+            .local_materialized_window_binding_views
+            .remove(&binding_view_key);
         self.query
             .settled_result_row_index
             .remove(&binding_view_key);

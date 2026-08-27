@@ -635,6 +635,7 @@ where
             }
         }
         self.query.settled_result_sets.clear();
+        self.query.local_materialized_window_binding_views.clear();
         self.query.settled_result_row_index.clear();
         self.query.settled_program_facts.clear();
         Ok(())
@@ -651,6 +652,7 @@ where
         self.query.settled_through_by_binding_view.clear();
         self.query.authorization_progress_by_binding_view.clear();
         self.query.settled_result_sets.clear();
+        self.query.local_materialized_window_binding_views.clear();
         self.query.settled_result_row_index.clear();
         self.query.settled_program_facts.clear();
         let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;

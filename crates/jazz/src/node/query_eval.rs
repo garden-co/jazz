@@ -1514,6 +1514,17 @@ where
             }
             .read_view_key(),
         );
+        if tier >= DurabilityTier::Edge
+            && self
+                .query
+                .local_materialized_window_binding_views
+                .contains(&binding_view)
+        {
+            // A detached browser window is only enough to rebase a Local
+            // read over the materialized overlay. It must never stand in for
+            // a fresh Edge/Global authorization receipt.
+            return None;
+        }
         if tier == DurabilityTier::Local
             && !self.query.settled_result_sets.contains_key(&binding_view)
         {

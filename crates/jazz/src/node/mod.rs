@@ -806,6 +806,11 @@ struct QueryServing {
     applied_view_update_generations: BTreeMap<BindingViewKey, u64>,
     /// Subscriber-side settled result-member/completeness state by canonical query binding/view.
     settled_result_sets: BTreeMap<BindingViewKey, BTreeSet<ResultMemberEntry>>,
+    /// Non-durable-client window memberships retained only to interpret its
+    /// materialized row overlay after the matching Edge usage site detached.
+    /// They are deliberately not authority receipts: Edge/Global reads must
+    /// open fresh coverage before they may consume a binding view again.
+    local_materialized_window_binding_views: BTreeSet<BindingViewKey>,
     /// Point index for settled real-row output occurrences.
     ///
     /// This mirrors the row-shaped subset of `settled_result_sets` so applying a

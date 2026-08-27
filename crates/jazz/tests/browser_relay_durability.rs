@@ -1684,6 +1684,15 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
     );
 }
 
+/// A browser worker must rebase a narrower one-shot page against a received
+/// authority window instead of applying that page's absolute offset twice.
+/// Alice first subscribes to positions 8..24, then asks for positions 8..10;
+/// the latter must remain the first two members of the received window.
+///
+/// ```text
+/// core Global page 8..24 ──► worker ──► main Edge page 8..24
+/// main later Local page 8..10 ──► materialized page 8..24
+/// ```
 #[test]
 fn browser_relay_keeps_offset_window_membership_when_materializing_locally() {
     let schema = schema();
@@ -1893,6 +1902,95 @@ fn browser_relay_keeps_offset_window_membership_when_materializing_locally() {
         todo_ids[7..9].to_vec(),
         "a local subwindow is invalidated with the authority window it derives from",
     );
+
+    // Mirror a browser `db.all({ tier: "edge" })`: it releases the broad
+    // coverage after its result is materialized, but its rows remain in the
+    // main-thread overlay for later Local reads.
+    drop(subscription);
+    for _ in 0..12 {
+        main_thread.tick().expect("release broad browser window");
+        worker.tick().expect("forward broad window release");
+        core.tick().expect("accept broad window release");
+        worker.tick().expect("apply broad window release");
+        main_thread.tick().expect("apply broad window cleanup");
+    }
+
+    // A later Local one-shot must recognize that the overlay is only the
+    // materialized 8..24 page. It starts at the same absolute offset, so it
+    // must slice relative to that page instead of returning positions 16/17.
+    let same_offset_one_shot = main_thread
+        .prepare_query(
+            &Query::from("todos")
+                .order_by("title", OrderDirection::Asc)
+                .offset(8)
+                .limit(2),
+        )
+        .expect("prepare same-offset one-shot subwindow");
+    assert_eq!(
+        row_ids(
+            &block_on(main_thread.all(
+                &same_offset_one_shot,
+                ReadOpts {
+                    tier: DurabilityTier::Local,
+                    ..ReadOpts::default()
+                },
+            ))
+            .expect("read same-offset local one-shot after broad coverage release"),
+        ),
+        todo_ids[7..9].to_vec(),
+        "same-offset Local page is relative to the materialized authority page",
+    );
+
+    // The retained page is deliberately not an Edge receipt. A fresh Edge
+    // usage site must clear the local-only interpretation and wait for a new
+    // authority response instead of treating detached membership as current
+    // authorization coverage.
+    let fresh_edge_read = main_thread
+        .attach_query_with_opts(
+            &same_offset_one_shot,
+            ReadOpts {
+                tier: DurabilityTier::Edge,
+                ..ReadOpts::default()
+            },
+        )
+        .expect("attach fresh same-offset Edge read");
+    assert!(
+        !main_thread.query_attachment_is_covered(&fresh_edge_read),
+        "a detached materialized page must not satisfy a fresh Edge read",
+    );
+    for _ in 0..12 {
+        main_thread
+            .tick()
+            .expect("send fresh same-offset Edge read");
+        worker.tick().expect("forward fresh same-offset Edge read");
+        core.tick().expect("serve fresh same-offset Edge read");
+        worker.tick().expect("relay fresh same-offset Edge read");
+        main_thread
+            .tick()
+            .expect("apply fresh same-offset Edge receipt");
+        if main_thread.query_attachment_is_covered(&fresh_edge_read) {
+            break;
+        }
+    }
+    assert!(
+        main_thread.query_attachment_is_covered(&fresh_edge_read),
+        "the fresh Edge page must receive a new authority receipt",
+    );
+    assert_eq!(
+        row_ids(
+            &block_on(main_thread.all(
+                &same_offset_one_shot,
+                ReadOpts {
+                    tier: DurabilityTier::Edge,
+                    ..ReadOpts::default()
+                },
+            ))
+            .expect("read fresh same-offset Edge page"),
+        ),
+        todo_ids[7..9].to_vec(),
+        "fresh Edge coverage replaces the detached local materialization",
+    );
+    main_thread.detach_query(fresh_edge_read);
 }
 
 /// A detached bounded Edge read releases its exact authoritative receipt.
