@@ -138,6 +138,43 @@ branch-specific declaration or binding abstraction.
 The empty branch key denotes shared data. It is not a privileged root branch key and
 has no lifecycle semantics (`INV-BVIEW-7`).
 
+#### Canonical branch-coordinate codec
+
+Branch coordinates use an engine-owned binary codec, not the serde layout of
+`groove::Value`, `BranchColumnValue`, or `BranchKey`. A branch-column envelope is:
+
+```text
+codec_version:u8 = 1
+scalar_tag:u8
+groove_value_bytes:remaining bytes
+```
+
+The scalar tags are permanently assigned as `0=U8`, `1=U16`, `2=U32`,
+`3=U64`, `4=I32`, `5=I64`, `6=String`, `7=Uuid`, and `8=EnumTag`.
+The payload is Groove's canonical single-field encoding under the schema-declared
+column type. Selector construction may infer a scalar type before table projection;
+projection MUST decode that value and re-encode it under the selected table's
+declared type. In particular, a string selector for a stable enum becomes the
+declared enum discriminant rather than retaining a Rust value-enum tag.
+
+An exact branch key is:
+
+```text
+codec_version:u8 = 1
+entry_count:u32 little-endian
+repeated entry_count times:
+  name_byte_length:u32 little-endian
+  name_utf8:name_byte_length bytes
+  value_byte_length:u32 little-endian
+  branch_column_envelope:value_byte_length bytes
+```
+
+Entries MUST be strictly ordered by column name, with no duplicates or trailing
+bytes. Decoders reject unknown versions, scalar tags, non-canonical Groove
+payloads, invalid UTF-8 names, invalid lengths, and non-increasing names. A new
+codec version is a storage-format migration boundary; legacy serde/postcard bytes
+are not guessed from shape.
+
 #### Branch-local row identity
 
 `RowUuid` remains the stable application object identity. The same `RowUuid` may

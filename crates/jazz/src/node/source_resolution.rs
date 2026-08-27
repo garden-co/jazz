@@ -98,8 +98,15 @@ where
                         .columns
                         .iter()
                         .find(|column| column.name == *column_name)
-                        .and_then(|column| column.default.clone())
-                        .map(crate::protocol::BranchColumnValue::from);
+                        .and_then(|column| {
+                            column.default.as_ref().map(|value| {
+                                crate::protocol::BranchColumnValue::encode_typed(
+                                    value,
+                                    &column.column_type,
+                                )
+                                .expect("validated branch default")
+                            })
+                        });
                     selected_by_physical.get(physical) != default.as_ref()
                 });
             if missing_branch_value_is_non_default {

@@ -28,13 +28,48 @@ where
             .schema
             .clone();
         let full_key = |selector: &BranchSelector| -> Result<BranchKey, Error> {
-            let branch_columns = schema.tables.iter().flat_map(|table| table.branch_by.iter().cloned()).collect::<BTreeSet<_>>();
-            if selector.values.keys().cloned().collect::<BTreeSet<_>>() != branch_columns {
+            let branch_columns = schema
+                .tables
+                .iter()
+                .flat_map(|table| {
+                    table.branch_by.iter().map(|name| {
+                        let column = table
+                            .columns
+                            .iter()
+                            .find(|column| column.name == *name)
+                            .expect("validated branch column");
+                        (name.clone(), column.column_type.clone())
+                    })
+                })
+                .collect::<BTreeMap<_, _>>();
+            if selector.values.keys().collect::<BTreeSet<_>>()
+                != branch_columns.keys().collect::<BTreeSet<_>>()
+            {
                 return Err(Error::InvalidBranchKey(
                     "contribution selector must bind every schema branch column".to_owned(),
                 ));
             }
-            let values = selector.values.iter().map(|(name, value)| (name.clone(), value.clone())).collect();
+            let values = selector
+                .values
+                .iter()
+                .map(|(name, encoded)| {
+                    let value = encoded.decode().map_err(|_| {
+                        Error::InvalidBranchKey(format!(
+                            "invalid contribution branch column {name} encoding"
+                        ))
+                    })?;
+                    let encoded = crate::protocol::BranchColumnValue::encode_typed(
+                        &value,
+                        &branch_columns[name],
+                    )
+                    .map_err(|_| {
+                        Error::InvalidBranchKey(format!(
+                            "invalid contribution branch column {name} value"
+                        ))
+                    })?;
+                    Ok((name.clone(), encoded))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
             Ok(BranchKey { values })
         };
         let source_full = full_key(&request.source)?;
