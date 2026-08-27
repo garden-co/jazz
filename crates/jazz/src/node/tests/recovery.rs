@@ -978,6 +978,92 @@ fn reopen_replay_lookup_keeps_local_pending_write() {
 }
 
 #[test]
+fn reopen_replay_deduplicates_pending_ahead_current_keys_per_table_and_layer() {
+    let schema = todos_notes_schema();
+    let shared_row = row(0x4d);
+    let (node_dir, mut writer) = open_node_with_schema(node(0x41), schema.clone());
+
+    // One wire commit deliberately carries content and deletion records with
+    // the same row identity and transaction identity. The raw keys therefore
+    // coincide within a layer; only the physical table and layer distinguish
+    // all four pending projections.
+    let replay_tx = writer
+        .commit_mergeable_many_settled(vec![
+            MergeableCommit::new("todos", shared_row, 10).cells(title_cells("todo")),
+            MergeableCommit::new("notes", shared_row, 10).cells(BTreeMap::from([(
+                "body".to_owned(),
+                v("note"),
+            )])),
+            MergeableCommit::new("todos", shared_row, 10).deletion(DeletionEvent::Deleted),
+            MergeableCommit::new("notes", shared_row, 10).deletion(DeletionEvent::Deleted),
+        ])
+        .unwrap();
+    let replay_unit = writer.commit_unit_for(replay_tx).unwrap();
+
+    let mappings = &writer.catalogue.physical_mappings[&schema.version_id()].tables;
+    let todos_id = mappings["todos"].table_id;
+    let notes_id = mappings["notes"].table_id;
+    assert_ne!(todos_id, notes_id);
+    // This receipt intentionally inspects the private physical projection:
+    // public rows cannot reveal whether exact pending replay duplicated it.
+    for table_id in [todos_id, notes_id] {
+        assert_eq!(
+            writer
+                .database
+                .primary_key_scan_raw(&physical_ahead_current_table_name(table_id), &[])
+                .unwrap()
+                .len(),
+            1,
+        );
+        assert_eq!(
+            writer
+                .database
+                .primary_key_scan_raw(
+                    &physical_register_ahead_current_table_name(table_id),
+                    &[],
+                )
+                .unwrap()
+                .len(),
+            1,
+        );
+    }
+
+    drop(writer);
+    let mut reader = reopen_node_at(&node_dir, node(0x41), schema);
+    let SyncMessage::CommitUnit { tx, versions } = replay_unit else {
+        panic!("pending commit must have a wire unit");
+    };
+    // View/peer replay is not a fate authority: it re-ingests the exact wire
+    // payload as pending and must leave the reconstructed projections intact.
+    reader
+        .ingest_known_transaction(tx, versions, Fate::Pending, None, DurabilityTier::Local)
+        .resolve()
+        .unwrap();
+    for table_id in [todos_id, notes_id] {
+        assert_eq!(ahead_current_row_count(&mut reader, if table_id == todos_id { "todos" } else { "notes" }), 2);
+    }
+
+    let distinct_tx = reader
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", shared_row, 20).cells(title_cells("distinct key")),
+        )
+        .unwrap();
+    assert_eq!(ahead_current_row_count(&mut reader, "todos"), 3);
+    assert_eq!(ahead_current_row_count(&mut reader, "notes"), 2);
+
+    reader
+        .apply_sync_message_settled(SyncMessage::FateUpdate {
+            tx_id: distinct_tx,
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            global_time: None,
+            durability: None,
+        })
+        .unwrap();
+    assert_eq!(ahead_current_row_count(&mut reader, "todos"), 2);
+    assert_eq!(ahead_current_row_count(&mut reader, "notes"), 2);
+}
+
+#[test]
 fn reopen_in_place_recovers_history_watermarks_pending_edges_and_rehydrates_peer() {
     let (_dir, mut core) = open_node_with_uuid(node(0x3a));
     let mut peer = PeerState::new();
