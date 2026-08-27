@@ -50,6 +50,169 @@ fn opening_existing_storage_recovers_mirrors_and_high_water_marks() {
 }
 
 #[test]
+fn reopening_rejects_a_colliding_durable_node_alias_before_decoding_history() {
+    // This must plant impossible persisted metadata directly: public APIs never
+    // create duplicate aliases, while recovery is the fail-closed boundary.
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    {
+        let mut reopened_node = open_node_at(&temp_dir, schema.clone());
+        let mut batch = reopened_node.database.open_batch();
+        batch.insert(
+            "jazz_nodes",
+            vec![Value::U64(999), Value::Uuid(node(1).0)],
+        );
+        let applied = crate::db::block_on(reopened_node.database.apply_batch(batch)).unwrap();
+        let persisted = crate::db::block_on(applied.persist());
+        reopened_node.database.finish_persistence(persisted).unwrap();
+        crate::db::block_on(reopened_node.database.close()).unwrap();
+    }
+
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    assert!(matches!(
+        crate::db::block_on(NodeState::new(node(1), schema, storage)),
+        Err(Error::InvalidStoredValue("node UUID has conflicting durable aliases"))
+    ));
+}
+
+#[test]
+fn failed_node_alias_persistence_leaves_no_resident_alias_or_dependent_history_for_reopen() {
+    // This is intentionally an internal storage-boundary receipt. A public
+    // write can only report the failed commit; inspecting the reopened node is
+    // the only way to prove that its compact alias was not left as an
+    // in-memory-only prerequisite for later physical history rows.
+    let (mut writer, _) = fail_write_many_node();
+    let (foreign_tx, unit) = writer
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(9), 10).cells(title_cells("must not become durable")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("local write must produce a commit unit");
+    };
+
+    let node_schema = schema();
+    let column_families = node_schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let storage = FailWriteManyMemoryStorage::new(&refs);
+    let mut failed_node = NodeState::new(node(0xd2), node_schema.clone(), storage.clone()).unwrap();
+    storage.fail_nth_following_write_many(1);
+
+    assert!(failed_node
+        .ingest_commit_unit_settled(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
+        .is_err());
+    assert!(
+        !failed_node.node_aliases.contains_key(&foreign_tx.node),
+        "a failed alias prerequisite must not become a resident alias"
+    );
+
+    let mut reopened = crate::db::block_on(NodeState::new(node(0xd2), node_schema, storage)).unwrap();
+    let aliases = crate::db::block_on(reopened.database.primary_key_scan_raw("jazz_nodes", &[]))
+        .unwrap();
+    assert_eq!(aliases.len(), 1, "only the core's own durable alias may remain");
+    assert_eq!(
+        aliases[0]
+            .record()
+            .get_uuid(NodeAliasRowRecord::FIELD_UUID_IDX)
+            .unwrap(),
+        node(0xd2).0
+    );
+    assert!(reopened.query_table_versions("todos").unwrap().is_empty());
+
+    reopened
+        .ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap();
+    assert_eq!(
+        reopened
+            .current_rows("todos", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(row(9), title_cells("must not become durable"))])
+    );
+}
+
+#[test]
+fn reopening_rejects_a_schema_version_with_two_durable_aliases() {
+    // This plants impossible metadata directly because the normal catalogue
+    // writer has one primary record per alias. Recovery is nevertheless the
+    // fail-closed boundary for corrupt durable stores.
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    {
+        let mut opened = open_node_at(&temp_dir, schema.clone());
+        let schema_version = opened.catalogue.current_schema_version_id;
+        let mapping = opened.catalogue.physical_mappings[&schema_version].clone();
+        let mut batch = opened.database.open_batch();
+        batch.insert(
+            "jazz_schema_versions",
+            vec![
+                Value::U64(999),
+                Value::Uuid(schema_version.0),
+                Value::Bytes(serde_json::to_vec(&mapping).unwrap()),
+            ],
+        );
+        let applied = crate::db::block_on(opened.database.apply_batch(batch)).unwrap();
+        let persisted = crate::db::block_on(applied.persist());
+        opened.database.finish_persistence(persisted).unwrap();
+        crate::db::block_on(opened.database.close()).unwrap();
+    }
+
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    assert!(matches!(
+        crate::db::block_on(NodeState::new(node(1), schema, storage)),
+        Err(Error::InvalidStoredValue(
+            "schema version has conflicting durable aliases"
+        ))
+    ));
+}
+
+#[test]
+fn reopening_rejects_schema_alias_that_cannot_lower_to_a_groove_variant_tag() {
+    // This is likewise a direct corrupt-store fixture: a physical alias is a
+    // u64 catalogue field but must remain representable by Groove's u32 case
+    // tag before any catalogue payload is trusted.
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    {
+        let mut opened = open_node_at(&temp_dir, schema.clone());
+        let schema_version = SchemaVersionId::from_bytes([0x9d; 16]);
+        let mapping = opened.catalogue.physical_mappings
+            [&opened.catalogue.current_schema_version_id]
+            .clone();
+        let mut batch = opened.database.open_batch();
+        batch.insert(
+            "jazz_schema_versions",
+            vec![
+                Value::U64(u64::from(u32::MAX) + 1),
+                Value::Uuid(schema_version.0),
+                Value::Bytes(serde_json::to_vec(&mapping).unwrap()),
+            ],
+        );
+        let applied = crate::db::block_on(opened.database.apply_batch(batch)).unwrap();
+        let persisted = crate::db::block_on(applied.persist());
+        opened.database.finish_persistence(persisted).unwrap();
+        crate::db::block_on(opened.database.close()).unwrap();
+    }
+
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    assert!(matches!(
+        crate::db::block_on(NodeState::new(node(1), schema, storage)),
+        Err(Error::InvalidStoredValue("physical table variant tag exhausted"))
+    ));
+}
+
+#[test]
 fn contribution_merge_provenance_survives_reopen() {
     let schema = schema();
     let temp_dir = tempfile::tempdir().unwrap();

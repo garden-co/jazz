@@ -27,6 +27,11 @@ fn wire_commit_units_preserve_node_and_schema_uuids_not_local_aliases() {
     assert_eq!(versions[0].parents()[0].node, node(0x4a));
 
     core.apply_sync_message_settled(unit).unwrap();
+    assert_ne!(
+        writer.node_aliases[&node(0x4a)],
+        core.node_aliases[&node(0x4a)],
+        "replicas deliberately compress the same wire node UUID with independent local aliases"
+    );
     let stored = core.query_table_versions("todos").unwrap();
     let child_row = stored
         .iter()
