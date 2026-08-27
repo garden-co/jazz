@@ -21,6 +21,8 @@ import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
 
 const PAGE_SIZE = 12;
+const TEST_ISSUER = "urn:jazz:test";
+const user = (subject: string) => JSON.stringify([TEST_ISSUER, subject]);
 
 const cleanup = new TestCleanup();
 
@@ -169,28 +171,31 @@ describe("BandBinder cross-topology recovery", () => {
               const workspace = await owner
                 .insert(app.workspaces, {
                   name: "World tour",
-                  ownerSubject: "band-binder-owner",
+                  ownerSubject: user("band-binder-owner"),
                 })
                 .wait({ tier: "edge" });
               workspaceId = workspace.id;
               await owner
                 .insert(app.members, {
                   workspaceId,
-                  subject: "band-binder-owner",
+                  subject: user("band-binder-owner"),
                   role: "owner",
                 })
                 .wait({ tier: "edge" });
               const membership = await owner
                 .insert(app.members, {
                   workspaceId,
-                  subject: "band-binder-manager",
+                  subject: user("band-binder-manager"),
                   role: "stage_manager",
                 })
                 .wait({ tier: "edge" });
               managerMembershipId = membership.id;
               await waitForQuery(
                 manager,
-                app.members.where({ id: managerMembershipId, subject: "band-binder-manager" }),
+                app.members.where({
+                  id: managerMembershipId,
+                  subject: user("band-binder-manager"),
+                }),
                 (rows) => rows.length === 1,
                 "manager receives own membership grant",
                 15_000,
@@ -216,7 +221,7 @@ describe("BandBinder cross-topology recovery", () => {
                   (rows) =>
                     rows.length === 2 &&
                     rows.map((row) => row.subject).join(",") ===
-                      "band-binder-manager,band-binder-owner",
+                      `${user("band-binder-manager")},${user("band-binder-owner")}`,
                   "manager reads the workspace roster through its grant",
                   15_000,
                   "edge",

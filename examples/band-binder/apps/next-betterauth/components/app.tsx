@@ -34,10 +34,10 @@ function WorkspaceShell() {
       <p className="eyebrow">Jazz example · local-first Next.js variant</p>
       <h1>BandBinder</h1>
       <p>A shared band workspace for nested pages, tasks, calendars, songs, and attachments.</p>
-      {!session?.user_id ? (
+      {!session?.user ? (
         <p>Waiting for an identity…</p>
       ) : !selected ? (
-        <BootstrapWorkspace subject={session.user_id} />
+        <BootstrapWorkspace subject={session.user} />
       ) : (
         <Workspace workspaceId={selected.id} />
       )}

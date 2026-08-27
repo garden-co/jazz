@@ -4,11 +4,11 @@ import { app } from "./schema.js";
 export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedTo }) => {
   type WorkspaceScoped = { workspaceId: string };
   const membership = (row: RowContext<WorkspaceScoped>) =>
-    policy.members.exists.where({ workspaceId: row.workspaceId, subject: session.user_id });
+    policy.members.exists.where({ workspaceId: row.workspaceId, subject: session.user });
   const management = (row: RowContext<WorkspaceScoped>) =>
     policy.members.exists.where({
       workspaceId: row.workspaceId,
-      subject: session.user_id,
+      subject: session.user,
       role: { in: ["owner", "stage_manager"] },
     });
   type PageScoped = WorkspaceScoped & { parentPageId: string | null };
@@ -53,20 +53,18 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
 
   policy.workspaces.allowRead.where((workspace) =>
     anyOf([
-      { ownerSubject: session.user_id },
-      policy.members.exists.where({ workspaceId: workspace.id, subject: session.user_id }),
+      { ownerSubject: session.user },
+      policy.members.exists.where({ workspaceId: workspace.id, subject: session.user }),
     ]),
   );
-  policy.workspaces.allowInsert.where({ ownerSubject: session.user_id });
-  policy.workspaces.allowUpdate.where({ ownerSubject: session.user_id });
-  policy.workspaces.allowDelete.where({ ownerSubject: session.user_id });
+  policy.workspaces.allowInsert.where({ ownerSubject: session.user });
+  policy.workspaces.allowUpdate.where({ ownerSubject: session.user });
+  policy.workspaces.allowDelete.where({ ownerSubject: session.user });
 
   // A member must be able to discover their own grant without first reading
   // the workspace that the grant unlocks. Managers can still inspect the
   // complete roster through the workspace policy.
-  policy.members.allowRead.where(
-    anyOf([{ subject: session.user_id }, allowedTo.read("workspaceId")]),
-  );
+  policy.members.allowRead.where(anyOf([{ subject: session.user }, allowedTo.read("workspaceId")]));
   policy.members.allowInsert.where(allowedTo.update("workspaceId"));
   policy.members.allowUpdate.where(allowedTo.update("workspaceId"));
   policy.members.allowDelete.where(allowedTo.update("workspaceId"));
