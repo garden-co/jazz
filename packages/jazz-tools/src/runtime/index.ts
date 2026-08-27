@@ -67,5 +67,13 @@ export {
   type IntrospectionSubscriptionGroup,
   type IntrospectionSubscriptionResponse,
 } from "./introspection-fetch.js";
-export { generateAuthSecret, BrowserAuthSecretStore } from "./auth-secret-store.js";
+export {
+  generateAuthSecret,
+  BrowserAuthSecretStore,
+  authSecretStorageKey,
+  formatAuthSecret,
+  localFirstSeed,
+  parseAuthSecret,
+  AuthSecretFormatError,
+} from "./auth-secret-store.js";
 export type { AuthSecretStore, BrowserAuthSecretStoreOptions } from "./auth-secret-store.js";

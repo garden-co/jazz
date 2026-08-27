@@ -51,6 +51,7 @@ import {
   resolveClientInternalSessionSync,
 } from "./client-session.js";
 import { canonicalAuthorSubject } from "./author-id.js";
+import { localFirstSeed } from "./auth-secret-codec.js";
 import {
   getDbInternalSession,
   getTrustedReservedSession,
@@ -2752,7 +2753,7 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
   // Local-first auth: resolve seed and mint a JWT
   let localFirstSecret: string | null = null;
   if (config.secret) {
-    const secret = config.secret;
+    const secret = localFirstSeed(config.secret);
     localFirstSecret = secret;
 
     if (!config.jwtToken) {

@@ -7,6 +7,7 @@ vi.mock("expo-secure-store", () => ({
   setItemAsync: vi.fn(),
 }));
 import { ExpoAuthSecretStore, type ExpoSecureStoreLike } from "./auth-secret-store.js";
+import { authSecretStorageKey, generateAuthSecret } from "../runtime/auth-secret-store.js";
 
 function recordingStore() {
   const getItemAsync = vi.fn<ExpoSecureStoreLike["getItemAsync"]>(async () => null);
@@ -17,39 +18,39 @@ function recordingStore() {
 }
 
 describe("ExpoAuthSecretStore scoped keys", () => {
-  it("uses only Expo SecureStore-compatible characters for scoped defaults", async () => {
+  it("uses the same hashed, SecureStore-compatible key as browser storage", async () => {
     const { secureStore, setItemAsync } = recordingStore();
     const store = new ExpoAuthSecretStore({
       secureStore,
       appId: "app:one/%",
-      userId: "user@example.com",
-      sessionId: "session/東京",
+      profile: "user@example.com",
     });
 
-    await store.saveSecret("secret");
+    await store.saveSecret(generateAuthSecret());
 
     const key = setItemAsync.mock.calls[0]?.[0];
     expect(key).toMatch(/^[A-Za-z0-9._-]+$/);
     expect(key).not.toContain(":");
     expect(key).not.toContain("%");
+    expect(key).toBe(authSecretStorageKey({ appId: "app:one/%", profile: "user@example.com" }));
   });
 
-  it("keeps app, user, and session scopes distinct", async () => {
+  it("keeps app/profile scopes distinct", async () => {
     const { secureStore, getItemAsync } = recordingStore();
 
     await new ExpoAuthSecretStore({ secureStore, appId: "same" }).loadSecret();
-    await new ExpoAuthSecretStore({ secureStore, userId: "same" }).loadSecret();
-    await new ExpoAuthSecretStore({ secureStore, sessionId: "same" }).loadSecret();
+    await new ExpoAuthSecretStore({ secureStore, profile: "same" }).loadSecret();
+    await new ExpoAuthSecretStore({ secureStore, appId: "same", profile: "same" }).loadSecret();
 
     const keys = getItemAsync.mock.calls.map(([key]) => key);
     expect(new Set(keys)).toHaveProperty("size", 3);
   });
 
-  it("preserves the unscoped default key", async () => {
+  it("uses the common hashed default key", async () => {
     const { secureStore, getItemAsync } = recordingStore();
 
     await new ExpoAuthSecretStore({ secureStore }).loadSecret();
 
-    expect(getItemAsync).toHaveBeenCalledWith("jazz-auth-secret");
+    expect(getItemAsync).toHaveBeenCalledWith(authSecretStorageKey());
   });
 });

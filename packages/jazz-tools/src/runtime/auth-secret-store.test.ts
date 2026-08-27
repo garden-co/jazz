@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { BrowserAuthSecretStore, generateAuthSecret } from "./auth-secret-store.js";
+import {
+  authSecretStorageKey,
+  BrowserAuthSecretStore,
+  generateAuthSecret,
+  localFirstSeed,
+  parseAuthSecret,
+} from "./auth-secret-store.js";
 
 function createMockStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> {
   const store = new Map<string, string>();
@@ -15,16 +21,21 @@ function createMockStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"
 }
 
 describe("generateAuthSecret", () => {
-  it("produces a base64url string", () => {
+  it("produces the versioned canonical 256-bit representation", () => {
     const secret = generateAuthSecret();
-    // 32 bytes → 43 base64url chars (no padding)
-    expect(secret).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(secret).toMatch(/^jazz-auth-v1:[A-Za-z0-9_-]{43}$/);
+    expect(parseAuthSecret(secret)).toHaveLength(32);
   });
 
   it("produces different secrets each call", () => {
     const a = generateAuthSecret();
     const b = generateAuthSecret();
     expect(a).not.toBe(b);
+  });
+
+  it("keeps token derivation rooted in the encoded 32 bytes, not its format prefix", () => {
+    const secret = "jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    expect(localFirstSeed(secret)).toBe("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
   });
 });
 
@@ -55,7 +66,7 @@ describe("BrowserAuthSecretStore", () => {
 
   it("getOrCreateSecret generates on first call", async () => {
     const secret = await store.getOrCreateSecret();
-    expect(secret).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(secret).toMatch(/^jazz-auth-v1:[A-Za-z0-9_-]{43}$/);
   });
 
   it("getOrCreateSecret returns same secret on second call", async () => {
@@ -77,15 +88,17 @@ describe("BrowserAuthSecretStore", () => {
     expect(second).not.toBe(first);
   });
 
-  it("uses custom key name", async () => {
+  it("uses a custom physical key name", async () => {
     const customStore = new BrowserAuthSecretStore({ storage, key: "my-custom-key" });
-    await customStore.saveSecret("test-secret");
-    expect(storage.getItem("my-custom-key")).toBe("test-secret");
+    const secret = generateAuthSecret();
+    await customStore.saveSecret(secret);
+    expect(storage.getItem("my-custom-key")).toBe(secret);
   });
 
-  it("default key is jazz-auth-secret", async () => {
-    await store.saveSecret("test-secret");
-    expect(storage.getItem("jazz-auth-secret")).toBe("test-secret");
+  it("uses a versioned hashed default key", async () => {
+    const secret = generateAuthSecret();
+    await store.saveSecret(secret);
+    expect(storage.getItem(authSecretStorageKey())).toBe(secret);
   });
 
   it("saveSecret updates getOrCreateSecret's cache", async () => {
@@ -103,21 +116,21 @@ describe("BrowserAuthSecretStore", () => {
     expect(await store.loadSecret()).toBe(replacement);
   });
 
-  it("isolates secrets by appId/userId when namespace hints are provided", async () => {
+  it("isolates secrets by appId/profile without putting raw scope values in keys", async () => {
     const aliceStore = new BrowserAuthSecretStore({
       storage,
       appId: "chat-app",
-      userId: "alice",
+      profile: "alice@example.com",
     });
     const bobStore = new BrowserAuthSecretStore({
       storage,
       appId: "chat-app",
-      userId: "bob",
+      profile: "bob@example.com",
     });
     const aliceAgainStore = new BrowserAuthSecretStore({
       storage,
       appId: "chat-app",
-      userId: "alice",
+      profile: "alice@example.com",
     });
 
     const aliceSecret = await aliceStore.getOrCreateSecret();
@@ -126,6 +139,14 @@ describe("BrowserAuthSecretStore", () => {
 
     expect(aliceSecret).not.toBe(bobSecret);
     expect(aliceAgainSecret).toBe(aliceSecret);
+  });
+
+  it("rejects malformed persisted and restored values before they reach auth", async () => {
+    storage.setItem(authSecretStorageKey(), "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+    await expect(store.loadSecret()).rejects.toThrow(/jazz-auth-v1/);
+    await expect(
+      store.saveSecret("jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
+    ).rejects.toThrow(/43 unpadded/);
   });
 
   it("throws a clear error if used in a non-browser env (no localStorage)", async () => {
@@ -146,20 +167,26 @@ describe("BrowserAuthSecretStore", () => {
     const aliceSecret = await BrowserAuthSecretStore.getOrCreateSecret({
       storage,
       appId: "docs-chat",
-      userId: "alice",
+      profile: "alice",
     });
     const bobSecret = await BrowserAuthSecretStore.getOrCreateSecret({
       storage,
       appId: "docs-chat",
-      userId: "bob",
+      profile: "bob",
     });
     const aliceAgainSecret = await BrowserAuthSecretStore.getOrCreateSecret({
       storage,
       appId: "docs-chat",
-      userId: "alice",
+      profile: "alice",
     });
 
     expect(aliceSecret).not.toBe(bobSecret);
     expect(aliceAgainSecret).toBe(aliceSecret);
+  });
+
+  it("has a stable cross-platform scope-key fixture", () => {
+    expect(authSecretStorageKey({ appId: "band-chat", profile: "default" })).toBe(
+      "jazz-auth-store-v1-xtjm7t8x0cqlJ-wMiSiH7DwnziSS30JOh-Op-rlyVWE",
+    );
   });
 });

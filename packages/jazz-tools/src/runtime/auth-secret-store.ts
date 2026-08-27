@@ -8,50 +8,37 @@ export interface AuthSecretStore {
   getOrCreateSecret(): Promise<string>;
 }
 
-const DEFAULT_KEY = "jazz-auth-secret";
+import {
+  authSecretStorageKey,
+  formatAuthSecret,
+  localFirstSeed,
+  parseAuthSecret,
+  type AuthSecretScope,
+} from "./auth-secret-codec.js";
+
+export {
+  authSecretStorageKey,
+  AuthSecretFormatError,
+  formatAuthSecret,
+  localFirstSeed,
+  parseAuthSecret,
+} from "./auth-secret-codec.js";
 
 /**
- * Generate a new 32-byte auth secret as a base64url string.
+ * Generate a new 32-byte auth secret in canonical versioned form.
  * Uses the platform's native CSPRNG.
  */
 export function generateAuthSecret(): string {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
-  return uint8ArrayToBase64url(bytes);
+  return formatAuthSecret(bytes);
 }
 
-function uint8ArrayToBase64url(bytes: Uint8Array): string {
-  let binary = "";
-  for (const b of bytes) {
-    binary += String.fromCharCode(b);
-  }
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-export interface BrowserAuthSecretStoreOptions {
-  /** localStorage key name (default: "jazz-auth-secret") */
+export interface BrowserAuthSecretStoreOptions extends AuthSecretScope {
+  /** Explicit physical storage key. Prefer appId/profile for portable scoping. */
   key?: string;
-  /** Optional app identifier to namespace the default key. */
-  appId?: string;
-  /** Optional principal identifier to isolate secrets per user. */
-  userId?: string | null;
-  /** Optional session identifier for per-session isolation. */
-  sessionId?: string | null;
   /** Override storage backend (for testing) */
   storage?: Pick<Storage, "getItem" | "setItem" | "removeItem">;
-}
-
-function normalizeScopeSegment(value?: string | null): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-
-  const trimmed = value.trim();
-  if (trimmed.length === 0) {
-    return null;
-  }
-
-  return encodeURIComponent(trimmed);
 }
 
 function resolveBrowserAuthSecretKey(options: BrowserAuthSecretStoreOptions = {}): string {
@@ -59,17 +46,7 @@ function resolveBrowserAuthSecretKey(options: BrowserAuthSecretStoreOptions = {}
     return options.key;
   }
 
-  const scopeSegments = [
-    normalizeScopeSegment(options.appId),
-    normalizeScopeSegment(options.userId),
-    normalizeScopeSegment(options.sessionId),
-  ].filter((segment): segment is string => segment !== null);
-
-  if (scopeSegments.length === 0) {
-    return DEFAULT_KEY;
-  }
-
-  return `${DEFAULT_KEY}:${scopeSegments.join(":")}`;
+  return authSecretStorageKey(options);
 }
 
 /**
@@ -135,10 +112,14 @@ export class BrowserAuthSecretStore implements AuthSecretStore {
   }
 
   async loadSecret(): Promise<string | null> {
-    return this.requireStorage().getItem(this.key);
+    const secret = this.requireStorage().getItem(this.key);
+    if (secret === null) return null;
+    parseAuthSecret(secret);
+    return secret;
   }
 
   async saveSecret(secret: string): Promise<void> {
+    parseAuthSecret(secret);
     this.requireStorage().setItem(this.key, secret);
     this.cachedPromise = Promise.resolve(secret);
   }
@@ -153,6 +134,7 @@ export class BrowserAuthSecretStore implements AuthSecretStore {
       const storage = this.requireStorage();
       const existing = storage.getItem(this.key);
       if (existing) {
+        parseAuthSecret(existing);
         this.cachedPromise = Promise.resolve(existing);
       } else {
         const secret = generateAuthSecret();

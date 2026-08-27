@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { BrowserAuthSecretStore } from "./auth-secret-store.js";
+import { formatAuthSecret } from "./auth-secret-codec.js";
 import { RecoveryPhrase } from "./recovery-phrase.js";
 import { createDb } from "./db.js";
 
@@ -36,7 +37,7 @@ describe("RecoveryPhrase integration — BrowserAuthSecretStore", () => {
     const originStorage = createMockStorage();
     const origin = new BrowserAuthSecretStore({
       appId: "recovery-app",
-      userId: "origin-user",
+      profile: "origin-user",
       storage: originStorage,
     });
     const original = await origin.getOrCreateSecret();
@@ -48,7 +49,7 @@ describe("RecoveryPhrase integration — BrowserAuthSecretStore", () => {
     const targetStorage = createMockStorage();
     const target = new BrowserAuthSecretStore({
       appId: "recovery-app",
-      userId: "target-user",
+      profile: "target-user",
       storage: targetStorage,
     });
     await target.saveSecret(restored);
@@ -64,9 +65,7 @@ describe("RecoveryPhrase integration — restore over an existing session", () =
 
     const phrase = RecoveryPhrase.fromSecret(original);
     const replacementBytes = new Uint8Array(32).fill(7);
-    let binary = "";
-    for (const b of replacementBytes) binary += String.fromCharCode(b);
-    const replacement = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    const replacement = formatAuthSecret(replacementBytes);
     expect(replacement).not.toBe(original);
     expect(RecoveryPhrase.fromSecret(replacement)).not.toBe(phrase);
 

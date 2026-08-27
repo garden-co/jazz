@@ -113,6 +113,25 @@ modes. The distinguished system subject bypasses policy for
 internal authority work; it is not a JWT identity and cannot be forged by
 supplying claims (`INV-RLS-23`).
 
+### Local-first identity root format
+
+The local-first identity root is outside Groove, row history, sync, and
+`AuthorSubject`. It is exactly 32 CSPRNG bytes. Its only portable storage or
+export representation is `jazz-auth-v1:` followed by the canonical unpadded
+43-character base64url encoding of those bytes. Decoders reject every other
+prefix, alphabet, length, padding, and noncanonical form before the value can
+reach token minting. English BIP-39 recovery is a direct 24-word/checksum
+encoding of the 256 entropy bits (with NFKD/whitespace-normalized input), not
+a PBKDF or passphrase-derived seed.
+
+Platform adapters differ only in their secure store. Their logical key is a
+versioned hash of canonical JSON `{appId, profile}` and never embeds a raw
+external subject, PII, or connection/session identifier. `backendSecret` is a
+separate deployment admission credential: it is never persisted by Jazz or
+Groove, never client-side, and cannot alter authorship or storage identity.
+Changing the root creates a new local-first author. Future root formats use a
+new prefix and a verified atomic key-store migration.
+
 Policy evaluation is **fail-closed**: it denies whenever it cannot determine that
 a policy predicate is satisfied (`INV-RLS-14`). With the interpreter removed,
 this is enforced during policy compilation and claim binding: unsupported

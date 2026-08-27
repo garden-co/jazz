@@ -1,8 +1,12 @@
 import { getRandomBytes } from "expo-crypto";
 import { deleteItemAsync, getItemAsync, setItemAsync } from "expo-secure-store";
 import type { AuthSecretStore } from "../runtime/auth-secret-store.js";
-
-const DEFAULT_KEY = "jazz-auth-secret";
+import {
+  authSecretStorageKey,
+  formatAuthSecret,
+  parseAuthSecret,
+  type AuthSecretScope,
+} from "../runtime/auth-secret-codec.js";
 
 export interface ExpoSecureStoreLike {
   getItemAsync(key: string): Promise<string | null>;
@@ -10,36 +14,11 @@ export interface ExpoSecureStoreLike {
   deleteItemAsync(key: string): Promise<void>;
 }
 
-export interface ExpoAuthSecretStoreOptions {
-  /** SecureStore key name (default: "jazz-auth-secret"). */
+export interface ExpoAuthSecretStoreOptions extends AuthSecretScope {
+  /** Explicit physical SecureStore key. Prefer appId/profile for portable scoping. */
   key?: string;
-  /** Optional app identifier to namespace the default key. */
-  appId?: string;
-  /** Optional principal identifier to isolate secrets per user. */
-  userId?: string | null;
-  /** Optional session identifier for per-session isolation. */
-  sessionId?: string | null;
   /** Override SecureStore backend for tests and host adapters. */
   secureStore?: ExpoSecureStoreLike;
-}
-
-function encodeScopeSegment(label: string, value?: string | null): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-
-  const trimmed = value.trim();
-  if (trimmed.length === 0) {
-    return null;
-  }
-
-  const bytes = new TextEncoder().encode(trimmed);
-  let binary = "";
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-  const encoded = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  return `${label}-${encoded}`;
 }
 
 function resolveExpoAuthSecretKey(options: ExpoAuthSecretStoreOptions = {}): string {
@@ -47,13 +26,7 @@ function resolveExpoAuthSecretKey(options: ExpoAuthSecretStoreOptions = {}): str
     return options.key;
   }
 
-  const scopeSegments = [
-    encodeScopeSegment("app", options.appId),
-    encodeScopeSegment("user", options.userId),
-    encodeScopeSegment("session", options.sessionId),
-  ].filter((segment): segment is string => segment !== null);
-
-  return scopeSegments.length === 0 ? DEFAULT_KEY : `${DEFAULT_KEY}.${scopeSegments.join(".")}`;
+  return authSecretStorageKey(options);
 }
 
 export class ExpoAuthSecretStore implements AuthSecretStore {
@@ -98,10 +71,14 @@ export class ExpoAuthSecretStore implements AuthSecretStore {
   }
 
   async loadSecret(): Promise<string | null> {
-    return this.store.getItemAsync(this.key);
+    const secret = await this.store.getItemAsync(this.key);
+    if (secret === null) return null;
+    parseAuthSecret(secret);
+    return secret;
   }
 
   async saveSecret(secret: string): Promise<void> {
+    parseAuthSecret(secret);
     await this.store.setItemAsync(this.key, secret);
     this.cachedPromise = Promise.resolve(secret);
   }
@@ -121,6 +98,7 @@ export class ExpoAuthSecretStore implements AuthSecretStore {
   private async getOrCreateSecretInternal(): Promise<string> {
     const existing = await this.store.getItemAsync(this.key);
     if (existing) {
+      parseAuthSecret(existing);
       return existing;
     }
     const secret = generateExpoAuthSecret();
@@ -149,9 +127,5 @@ export const expoAuthSecretStore: AuthSecretStore = ExpoAuthSecretStore.getDefau
 
 function generateExpoAuthSecret(): string {
   const bytes = getRandomBytes(32);
-  let binary = "";
-  for (const b of bytes) {
-    binary += String.fromCharCode(b);
-  }
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return formatAuthSecret(bytes);
 }

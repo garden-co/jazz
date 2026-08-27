@@ -10,11 +10,7 @@ import {
   type CreateJazzClient,
 } from "../react-core/provider.js";
 import { useLocalFirstAuthWithStore } from "../react-core/use-local-first-auth.js";
-import {
-  BrowserAuthSecretStore,
-  browserAuthSecretStore,
-  type AuthSecretStore,
-} from "../runtime/auth-secret-store.js";
+import { BrowserAuthSecretStore, type AuthSecretStore } from "../runtime/auth-secret-store.js";
 import { createJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 import { LocalFirstAuthStoreProvider } from "./use-local-first-auth.js";
 
@@ -37,125 +33,8 @@ interface JazzClientContextValue {
 const createClient: CreateJazzClient = (config) =>
   createJazzClient(config) as Promise<CreatedJazzClient>;
 
-function withLegacyMigrationLock<T>(
-  migration: () => Promise<T>,
-  indexedDbFallback: () => Promise<T>,
-): Promise<T> {
-  // The owner marker is not a compare-and-swap primitive. Only migrate while
-  // Web Locks provides origin-wide exclusion; without it, creating a scoped
-  // secret is safer than copying an identity into two app namespaces.
-  const locks = typeof navigator === "undefined" ? undefined : navigator.locks;
-  if (!locks || typeof locks.request !== "function") return indexedDbFallback();
-
-  try {
-    return Promise.resolve(
-      locks.request("jazz-auth-secret-legacy-migration", { mode: "exclusive" }, migration),
-    ).catch(indexedDbFallback);
-  } catch {
-    return indexedDbFallback();
-  }
-}
-
-const LEGACY_MIGRATION_DB = "jazz-auth-secret-migration";
-const LEGACY_MIGRATION_STORE = "owners";
-const LEGACY_MIGRATION_RECORD = "legacy-auth-secret";
-
-async function claimLegacyMigrationInIndexedDb(appId: string): Promise<string> {
-  if (typeof indexedDB === "undefined") {
-    throw new Error(
-      "Jazz cannot safely migrate the legacy local-first secret: Web Locks and IndexedDB are unavailable.",
-    );
-  }
-
-  const db = await new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open(LEGACY_MIGRATION_DB, 1);
-    request.onupgradeneeded = () => request.result.createObjectStore(LEGACY_MIGRATION_STORE);
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-
-  try {
-    return await new Promise<string>((resolve, reject) => {
-      const transaction = db.transaction(LEGACY_MIGRATION_STORE, "readwrite");
-      const store = transaction.objectStore(LEGACY_MIGRATION_STORE);
-      let owner = appId;
-      const read = store.get(LEGACY_MIGRATION_RECORD);
-      read.onsuccess = () => {
-        if (typeof read.result === "string") {
-          owner = read.result;
-        } else {
-          store.put(appId, LEGACY_MIGRATION_RECORD);
-        }
-      };
-      read.onerror = () => reject(read.error);
-      transaction.oncomplete = () => resolve(owner);
-      transaction.onerror = () => reject(transaction.error);
-      transaction.onabort = () => reject(transaction.error);
-    });
-  } finally {
-    db.close();
-  }
-}
-
-class ProviderAuthSecretStore implements AuthSecretStore {
-  constructor(
-    private readonly appId: string,
-    private readonly scopedStore: BrowserAuthSecretStore,
-  ) {}
-
-  loadSecret(): Promise<string | null> {
-    return this.scopedStore.loadSecret();
-  }
-
-  saveSecret(secret: string): Promise<void> {
-    return this.scopedStore.saveSecret(secret);
-  }
-
-  clearSecret(): Promise<void> {
-    return this.scopedStore.clearSecret();
-  }
-
-  getOrCreateSecret(): Promise<string> {
-    return withLegacyMigrationLock(
-      () => this.migrateLegacySecret(() => claimLegacyMigrationInIndexedDb(this.appId)),
-      () => this.migrateLegacySecret(() => claimLegacyMigrationInIndexedDb(this.appId)),
-    );
-  }
-
-  private async migrateLegacySecret(claimOwner: () => Promise<string>): Promise<string> {
-    const scopedSecret = await this.scopedStore.loadSecret();
-    if (scopedSecret) return scopedSecret;
-
-    const legacySecret = await browserAuthSecretStore.loadSecret();
-    if (legacySecret) {
-      const migrationOwner = await claimOwner();
-      if (migrationOwner !== this.appId) {
-        return this.scopedStore.getOrCreateSecret();
-      }
-
-      await this.scopedStore.saveSecret(legacySecret);
-      try {
-        await browserAuthSecretStore.clearSecret();
-      } catch (error) {
-        console.warn("Jazz could not remove the legacy local-first secret", error);
-      }
-      return legacySecret;
-    }
-
-    return this.scopedStore.getOrCreateSecret();
-  }
-}
-
-const providerAuthSecretStores = new WeakMap<BrowserAuthSecretStore, ProviderAuthSecretStore>();
-
-function getProviderAuthSecretStore(appId: string): ProviderAuthSecretStore {
-  const scopedStore = BrowserAuthSecretStore.getDefault({ appId });
-  let store = providerAuthSecretStores.get(scopedStore);
-  if (!store) {
-    store = new ProviderAuthSecretStore(appId, scopedStore);
-    providerAuthSecretStores.set(scopedStore, store);
-  }
-  return store;
+function getProviderAuthSecretStore(appId: string): AuthSecretStore {
+  return BrowserAuthSecretStore.getDefault({ appId });
 }
 
 // Dev-only: mount the inspector overlay + publish the host handle for this db.
