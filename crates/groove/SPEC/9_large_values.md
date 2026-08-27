@@ -71,7 +71,12 @@ identity independent of source declaration order: `NodeRef = { 1: object_hash, 2
 5: delete_utf16_length, 6: insert_utf16_length }`, and `LargeValueRef` is
 `{ 1: format_version, 2: logical_hash, 3: root, 4: byte_length,
 5: utf16_length, 6: edit_tail }`. Changing an ID is a format change, not a
-refactor; implementations sort descriptors by these IDs before encoding.
+refactor. Implementations normalize source declarations by ID, then materialize
+each ID as its actual record ordinal. A skipped or retired ID remains a
+reserved `Nullable<bytes>` slot encoded exactly as `null`; readers reject a
+nonempty reserved slot and writers never compact it away. Thus source reorder
+is harmless, while renumbering `locator:2` to `locator:3`, an edit field, or a
+reference field changes canonical physical bytes and rejects the old layout.
 `bytes` uses the bytes primitive and `string` uses the string primitive. JSON
 retains Groove's existing canonical JSON-as-string logical representation, so
 its primitive backing is string as well. The ordinary enum schema is
