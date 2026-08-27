@@ -226,13 +226,15 @@ enum ShutdownState {
 /// reconnect against a partially closed core.
 struct ShutdownCompletion {
     inner: Rc<RefCell<ClientDbInner>>,
+    backend: Backend,
     finished: bool,
 }
 
 impl ShutdownCompletion {
-    fn new(inner: Rc<RefCell<ClientDbInner>>) -> Self {
+    fn new(inner: Rc<RefCell<ClientDbInner>>, backend: Backend) -> Self {
         Self {
             inner,
+            backend,
             finished: false,
         }
     }
@@ -265,8 +267,7 @@ impl Drop for ShutdownCompletion {
             "shutdown was cancelled before the storage close completed".to_string(),
         );
         inner.shutdown_notify.notify_waiters();
-        // `Backend` is owned by the cancelled shutdown future and drops
-        // immediately afterwards, releasing storage resources without
+        // `backend` drops with this guard, releasing storage resources without
         // advertising an unfinished context as usable.
     }
 }
@@ -829,6 +830,10 @@ impl ClientDb {
                 }
             }
         };
+        // Install the cancellation guard before the first await: forwarder
+        // draining is part of shutdown, and cancellation there must still
+        // leave every retained facade terminal and wake concurrent shutdowns.
+        let mut completion = ShutdownCompletion::new(Rc::clone(&self.inner), backend);
         let mut completions = Vec::with_capacity(forwarders.len());
         for SubscriptionForwarder {
             cancellation,
@@ -841,8 +846,11 @@ impl ClientDb {
         for completion in completions {
             let _ = completion.await;
         }
-        let mut completion = ShutdownCompletion::new(Rc::clone(&self.inner));
-        let result = backend.close().await.map_err(|error| error.to_string());
+        let result = completion
+            .backend
+            .close()
+            .await
+            .map_err(|error| error.to_string());
         completion.finish(result)
     }
 
@@ -4297,6 +4305,81 @@ mod tests {
                 let restarted = JazzClient::connect(context)
                     .await
                     .expect("reopen persistent directory after in-flight admission");
+                restarted
+                    .shutdown()
+                    .await
+                    .expect("close reopened persistent client");
+            })
+            .await;
+    }
+
+    /// Cancelling shutdown while it drains alice's in-flight admission must
+    /// leave retained facades terminal rather than stranded in `Closing`.
+    ///
+    /// This is a narrow internal receipt for task cancellation during the
+    /// drain await; public adapters cannot deterministically suspend that
+    /// interval without mocking transport or storage.
+    ///
+    /// ```text
+    /// alice ──admit subscription──► shutdown waits for admission exit
+    /// alice ──abort shutdown──────► retained clone observes terminal failure
+    /// alice ──reopen─────────────► same directory
+    /// ```
+    #[tokio::test(flavor = "current_thread")]
+    async fn aborting_shutdown_during_subscription_drain_notifies_retained_clone() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let data_dir = TempDir::new().expect("temp client dir");
+                let app_id = AppId::from_name("abort-subscription-drain-shutdown");
+                let context = make_offline_context_with_storage(
+                    app_id,
+                    data_dir.path().to_path_buf(),
+                    declared_todo_schema(),
+                    ClientStorage::Persistent,
+                );
+                let client = JazzClient::connect(context.clone())
+                    .await
+                    .expect("connect offline client");
+                let retained_clone = client.clone();
+                let (mut cancellation, admission_completion) = client
+                    .db
+                    .inner
+                    .borrow_mut()
+                    .admit_subscription()
+                    .expect("admit in-flight subscription");
+
+                let shutdown = tokio::task::spawn_local(client.shutdown());
+                tokio::time::timeout(Duration::from_secs(1), &mut cancellation)
+                    .await
+                    .expect("shutdown must cancel in-flight admission")
+                    .expect("shutdown cancellation sender must stay alive");
+                assert!(
+                    !shutdown.is_finished(),
+                    "shutdown must still be draining the in-flight admission"
+                );
+
+                shutdown.abort();
+                let cancellation = shutdown
+                    .await
+                    .expect_err("aborted shutdown task must not complete normally");
+                assert!(
+                    cancellation.is_cancelled(),
+                    "shutdown task must report task cancellation: {cancellation}"
+                );
+                drop(admission_completion);
+
+                let error = tokio::time::timeout(Duration::from_secs(1), retained_clone.shutdown())
+                    .await
+                    .expect("retained clone shutdown must not hang after cancellation")
+                    .expect_err("retained clone must observe terminal shutdown failure");
+                assert!(
+                    matches!(error, JazzError::Connection(ref message) if message.contains("shutdown previously failed")),
+                    "unexpected retained-clone shutdown error: {error}"
+                );
+
+                let restarted = JazzClient::connect(context)
+                    .await
+                    .expect("reopen persistent directory after cancelled shutdown");
                 restarted
                     .shutdown()
                     .await
