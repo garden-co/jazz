@@ -655,6 +655,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly subscriptions = new Map<number, SubscriptionState>();
   private authFailureCallback: ((reason: string) => void) | null = null;
   private mutationErrorCallback: ((event: MutationErrorEvent) => void) | null = null;
+  private serverTransportErrorCallback: ((error: Error) => void) | null = null;
   private readonly deliveredMutationErrors = new Set<string>();
   private serverTransport: Transport | null = null;
   private peerUpstreamAttached = false;
@@ -2129,6 +2130,23 @@ export class NativeRuntimeAdapter implements Runtime {
     this.db.onMutationError((event) => this.deliverMutationError(event));
   }
 
+  /**
+   * Observe a terminal upstream transport/protocol failure. This has no fate
+   * semantics: it only wakes remote waits and subscriptions that are active
+   * in this runtime.
+   */
+  onServerTransportError(callback: (error: Error) => void): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.onServerTransportError(callback);
+    this.serverTransportErrorCallback = callback;
+  }
+
+  /** Record a terminal error relayed from a durable browser-worker upstream. */
+  reportRemoteServerTransportError(error: Error): void {
+    if (this !== this.ownerRuntime)
+      return this.ownerRuntime.reportRemoteServerTransportError(error);
+    this.handleServerTransportError(error);
+  }
+
   reportRemoteMutationError(event: MutationErrorEvent): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.reportRemoteMutationError(event);
     this.deliverMutationError(event);
@@ -3259,9 +3277,11 @@ export class NativeRuntimeAdapter implements Runtime {
     if (generation !== this.serverConnectionGeneration) return;
     const message = errorMessage(error);
     if (this.serverTransportError && message === "websocket closed") return;
+    const isFirstTerminalError = this.serverTransportError === null;
     this.serverTransportError = error instanceof Error ? error : new Error(message);
     this.failActiveSubscriptions(this.serverTransportError);
     this.resolveServerTransportErrorWaiters(this.serverTransportError);
+    if (isFirstTerminalError) this.serverTransportErrorCallback?.(this.serverTransportError);
   }
 
   private finishServerConnectionAttempt(attempt: ServerConnectionAttempt, error: Error): void {

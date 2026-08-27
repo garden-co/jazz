@@ -266,6 +266,96 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(transportTicks).toBeGreaterThanOrEqual(2);
   });
 
+  it("rejects active remote waits and subscriptions for a relayed terminal error without inventing a rejection", async () => {
+    const remoteSettlement = new Promise<void>(() => {});
+    const subscription = {
+      closed: false,
+      readAll: () => [],
+      close() {
+        this.closed = true;
+        return true;
+      },
+    };
+    let nativeMutationError: ((event: unknown) => void) | undefined;
+    const write = {
+      batchId: "00000000000070008000000000000008",
+      payload: new Uint8Array(),
+      rowId: new Uint8Array(16),
+      wait: (tier: string) => (tier === "local" ? Promise.resolve() : remoteSettlement),
+      writeState: () => ({}),
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            insertEncoded: () => write,
+            prepareQuery: () => ({}),
+            subscribe: () => subscription,
+            onMutationError: (callback: (event: unknown) => void) => {
+              nativeMutationError = callback;
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const mutationErrors = vi.fn();
+    runtime.onMutationError(mutationErrors);
+    expect(nativeMutationError).toBeTypeOf("function");
+    const authoritativeRejection = {
+      code: "permission_denied",
+      reason: "authority rejected the mutation",
+      transaction: {
+        transactionId: "00000000000070008000000000000008",
+        kind: "mergeable",
+        sealed: true,
+        latestSettlement: {
+          kind: "rejected",
+          transactionId: "00000000000070008000000000000008",
+          code: "permission_denied",
+          reason: "authority rejected the mutation",
+        },
+      },
+    };
+    nativeMutationError?.(authoritativeRejection);
+    expect(mutationErrors).toHaveBeenCalledWith(authoritativeRejection);
+    mutationErrors.mockClear();
+
+    const inserted = runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "still locally durable" } },
+      null,
+      "00000000-0000-0000-0000-000000000008",
+    );
+    const batchId = await committedBatchId(inserted);
+    await expect(runtime.waitForTransaction(batchId, "local")).resolves.toBeUndefined();
+
+    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "edge");
+    const updates = vi.fn();
+    runtime.executeSubscription(handle, updates);
+    const remoteWait = runtime.waitForTransaction(batchId, "edge");
+    await Promise.resolve();
+
+    runtime.reportRemoteServerTransportError(new Error("Protocol: terminal upstream failure"));
+
+    await expect(remoteWait).rejects.toThrow("Protocol: terminal upstream failure");
+    expect(subscription.closed).toBe(true);
+    expect(updates).toHaveBeenCalledWith(expect.any(Error));
+    const firstUpdate = updates.mock.calls[0];
+    if (!firstUpdate) throw new Error("terminal transport error did not wake subscription");
+    expect((firstUpdate[0] as Error).message).toBe("Protocol: terminal upstream failure");
+    // Unlike the authoritative rejection above, a transport failure has no
+    // fate and must not use the mutation-rejection callback path.
+    expect(mutationErrors).not.toHaveBeenCalled();
+  });
+
   it("retries a pending edge wait when a websocket frame arrives without a native callback", async () => {
     let settled = false;
     let transportTicks = 0;
