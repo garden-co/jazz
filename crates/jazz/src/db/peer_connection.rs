@@ -2221,8 +2221,14 @@ where
                         }
                     }
                 }
-                for fate in std::mem::take(&mut *self.downstream_fates.borrow_mut()) {
-                    send_with_sync_context(&self.node, peer, self.transport.as_mut(), fate)?;
+                if !flush_downstream_fates(
+                    &self.node,
+                    peer,
+                    self.transport.as_mut(),
+                    &self.downstream_fates,
+                    &self.scheduler,
+                )? {
+                    return Ok(true);
                 }
                 if let Some(message) = self.auxiliary_pump.take_outbound(64) {
                     if let Err(error) = self.transport.send(message.clone()) {
@@ -3010,12 +3016,7 @@ where
                                     global_time: None,
                                     durability: None,
                                 };
-                                send_with_sync_context(
-                                    &self.node,
-                                    peer,
-                                    self.transport.as_mut(),
-                                    response,
-                                )?;
+                                self.downstream_fates.borrow_mut().push(response);
                                 continue;
                             }
                             let write_state_tx_id = write_state_update_tx_id(&other);
@@ -3056,12 +3057,16 @@ where
                                 );
                             }
                             for response in responses {
-                                send_with_sync_context(
-                                    &self.node,
-                                    peer,
-                                    self.transport.as_mut(),
-                                    response,
-                                )?;
+                                if matches!(response, SyncMessage::FateUpdate { .. }) {
+                                    self.downstream_fates.borrow_mut().push(response);
+                                } else {
+                                    send_with_sync_context(
+                                        &self.node,
+                                        peer,
+                                        self.transport.as_mut(),
+                                        response,
+                                    )?;
+                                }
                             }
                             if let Some((tx_id, unit)) = local_upload {
                                 let mut outbox = outbox.borrow_mut();
@@ -3076,8 +3081,14 @@ where
                     }
                 }
                 queue_local_acknowledgements(&self.local_fate_routes, &self.node).await;
-                for fate in std::mem::take(&mut *self.downstream_fates.borrow_mut()) {
-                    send_with_sync_context(&self.node, peer, self.transport.as_mut(), fate)?;
+                if !flush_downstream_fates(
+                    &self.node,
+                    peer,
+                    self.transport.as_mut(),
+                    &self.downstream_fates,
+                    &self.scheduler,
+                )? {
+                    return Ok(true);
                 }
                 if needs_subscription_refresh {
                     stats.subscription_events += refresh_subscriptions_in(
@@ -4315,6 +4326,42 @@ where
         summarize_sync_message(&message)
     ));
     send_sync_message_chunked(transport, message)
+}
+
+/// Deliver terminal/local fate updates in FIFO order without letting a bounded
+/// byte transport turn an already-produced settlement into a dropped message.
+///
+/// The wire adapter retains at most the one logical message it has already
+/// accepted. If that backlog is full, this queue keeps the *unaccepted* fate
+/// at its semantic producer boundary and the scheduler retries after the
+/// binding wakes for transport capacity. We remove only after `send` accepts
+/// the logical message, so a retry neither duplicates a sent fate nor loses a
+/// later fate behind it.
+fn flush_downstream_fates<S>(
+    node: &SharedNodeState<S>,
+    peer: &mut PeerState,
+    transport: &mut dyn Transport,
+    fates: &PendingDownstreamFates,
+    scheduler: &SharedTickScheduler,
+) -> Result<bool, Error>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    loop {
+        let Some(fate) = fates.borrow().first().cloned() else {
+            return Ok(true);
+        };
+        match send_with_sync_context(node, peer, transport, fate) {
+            Ok(()) => {
+                fates.borrow_mut().remove(0);
+            }
+            Err(error) if error.code == ErrorCode::Backpressure => {
+                schedule_tick_in(scheduler, TickUrgency::Deferred);
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Send an authority catalogue snapshot exactly once per peer fingerprint.

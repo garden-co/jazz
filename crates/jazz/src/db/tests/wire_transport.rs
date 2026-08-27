@@ -272,7 +272,7 @@ impl WireTransport for ScriptedSendTransport {
 }
 
 #[test]
-fn send_expires_stale_reassembly_before_pending_outbound_flush() {
+fn pending_outbound_backpressure_rejects_later_logical_message_without_encoding_it() {
     let message = SyncMessage::SessionClaims {
         identity: AuthorSubject::for_test_bytes([0x76; 16]),
         claims: BTreeMap::new(),
@@ -298,16 +298,7 @@ fn send_expires_stale_reassembly_before_pending_outbound_flush() {
         assert_eq!(adapter.reassembler.push(fragment.clone(), 0).unwrap(), None);
         adapter.set_reassembly_elapsed_for_test(MAX_FRAGMENT_REASSEMBLY_IDLE_MS);
 
-        let result = adapter.send(message.clone());
-        if matches!(flush_error, TransportError::Backpressure) {
-            assert_eq!(
-                result,
-                Ok(()),
-                "later logical messages queue behind a temporarily full transport"
-            );
-        } else {
-            assert_eq!(result, Err(flush_error));
-        }
+        assert_eq!(adapter.send(message.clone()), Err(flush_error));
         assert_eq!(
             (
                 adapter.reassembler.incomplete.len(),
@@ -725,7 +716,7 @@ fn first_frame_backpressure_queues_compressed_logical_message_without_retry() {
 }
 
 #[test]
-fn pending_backpressure_queues_later_receipt_without_semantic_retry() {
+fn pending_backpressure_rejects_later_receipt_for_semantic_retry() {
     #[derive(Clone)]
     struct BlockedWireTransport {
         outbound: Rc<RefCell<std::collections::VecDeque<Vec<u8>>>>,
@@ -773,16 +764,17 @@ fn pending_backpressure_queues_later_receipt_without_semantic_retry() {
     assert_eq!(sender.send(view.clone()), Ok(()));
     assert_eq!(
         sender.send(receipt.clone()),
-        Ok(()),
-        "a receipt behind a pending bounded-view frame is accepted exactly once"
+        Err(TransportError::Backpressure),
+        "the adapter retains only the already-accepted view; its producer must retain the fate"
     );
     assert!(staged.borrow().is_empty());
 
     blocked.set(false);
     assert!(
         sender.try_recv().is_none(),
-        "poll flushes both queued messages"
+        "poll flushes the one already-accepted message"
     );
+    assert_eq!(sender.send(receipt.clone()), Ok(()));
     assert_eq!(receiver.try_recv(), Some(view));
     assert_eq!(receiver.try_recv(), Some(receipt));
     assert!(receiver.try_recv().is_none());
