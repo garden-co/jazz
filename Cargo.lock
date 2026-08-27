@@ -2155,16 +2155,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "jazz-example-w1-benchmark"
-version = "0.1.0"
-dependencies = [
- "codspeed-divan-compat",
- "jazz",
- "jazz-storage-rocksdb",
- "tempfile",
-]
-
-[[package]]
 name = "jazz-napi"
 version = "0.1.0"
 dependencies = [
