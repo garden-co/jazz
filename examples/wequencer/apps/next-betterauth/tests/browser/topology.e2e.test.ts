@@ -433,6 +433,14 @@ describe("Wequencer cross-topology recovery", () => {
               expect(
                 await editor.all(sessionQueries(session.id).presence, { tier: "edge" }),
               ).toHaveLength(2);
+              await waitForQuery(
+                owner,
+                sessionQueries(session.id).presence,
+                (rows) => rows.some((row) => row.id === ownerPresence.id),
+                "persistent owner reopens presence",
+                20_000,
+                "edge",
+              );
               // This directly exercises the durable row/sync contract used by
               // the app heartbeat. Its cadence and timer cleanup have a
               // separate deterministic unit receipt; this proves that a
