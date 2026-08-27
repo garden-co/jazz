@@ -1801,11 +1801,14 @@ fn upload_is_not_marked_sent_after_one_shot_backpressure_and_retries() {
                 .cells(cells("retry", false, client_author)),
         )
         .unwrap();
-    client
-        .node
-        .outbox
-        .borrow_mut()
-        .push(PendingUpload { tx_id, unit: None });
+    assert!(
+        client
+            .node
+            .outbox
+            .borrow_mut()
+            .push(PendingUpload { tx_id, unit: None }),
+        "test setup queues the retry upload once"
+    );
 
     client.tick().unwrap();
     assert!(outbound.borrow().is_empty());
@@ -1828,6 +1831,63 @@ fn upload_is_not_marked_sent_after_one_shot_backpressure_and_retries() {
     assert!(outbound.borrow_mut().pop_front().is_none());
 }
 
+/// A terminal authority rejection releases its upload from the shared outbox,
+/// so reconnecting the client cannot replay a transaction whose user-visible
+/// outcome is already final.
+///
+/// writer ──CommitUnit──► authority
+/// writer ◄─rejected fate── authority
+/// writer ──reconnect──► replacement authority (no replay)
+#[test]
+fn rejected_upload_is_not_replayed_after_reconnect() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xe1; 16]);
+    let client = open_db(0xe1, author, &schema);
+    let (client_transport, mut authority_transport) = duplex();
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+
+    let write = client
+        .insert(
+            "todos",
+            cells("rejected", false, author),
+            Default::default(),
+        )
+        .expect("stage local upload");
+    client.tick().expect("send initial upload");
+    let uploaded = std::iter::from_fn(|| authority_transport.try_recv()).find_map(|message| {
+        matches!(message, SyncMessage::CommitUnit { ref tx, .. } if tx.tx_id == write.mergeable_tx_id())
+            .then_some(message)
+    });
+    assert!(
+        uploaded.is_some(),
+        "authority receives the staged upload once"
+    );
+
+    authority_transport
+        .send(SyncMessage::FateUpdate {
+            tx_id: write.mergeable_tx_id(),
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            global_time: None,
+            durability: None,
+        })
+        .expect("return terminal rejection");
+    client.tick().expect("apply terminal rejection");
+    let rejected = crate::db::block_on(write.wait(DurabilityTier::Global))
+        .expect_err("rejected upload stays terminal");
+    assert_eq!(rejected.code, ErrorCode::WriteRejected);
+
+    assert!(client.detach_connection(&upstream));
+    let (reconnected_transport, mut replacement_authority) = duplex();
+    let _reconnected = crate::db::block_on(client.connect_upstream(reconnected_transport));
+    client.tick().expect("tick replacement connection");
+    assert!(
+        std::iter::from_fn(|| replacement_authority.try_recv()).all(
+            |message| !matches!(message, SyncMessage::CommitUnit { tx, .. } if tx.tx_id == write.mergeable_tx_id())
+        ),
+        "replacement authority must not replay a terminally rejected upload"
+    );
+}
+
 #[test]
 fn local_missing_upload_body_still_kills_sync_driver() {
     let schema = schema();
@@ -1839,10 +1899,13 @@ fn local_missing_upload_body_still_kills_sync_driver() {
         crate::time::TxTime::from(client.next_now_ms()),
         NodeUuid::from_bytes([0xee; 16]),
     );
-    client.node.outbox.borrow_mut().push(PendingUpload {
-        tx_id: missing_tx,
-        unit: None,
-    });
+    assert!(
+        client.node.outbox.borrow_mut().push(PendingUpload {
+            tx_id: missing_tx,
+            unit: None,
+        }),
+        "test setup queues the missing upload once"
+    );
 
     let error = client.tick().unwrap_err();
     assert_eq!(error.code, ErrorCode::Protocol);
