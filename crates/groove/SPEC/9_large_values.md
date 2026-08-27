@@ -523,6 +523,21 @@ recursive node counts and append exact `(locator, hash)` work to a persisted
 reclamation queue. The reclaimer removes metadata only after hash-guarded byte
 deletion succeeds, so crashes retry without walking row history.
 
+The metadata key namespace is also the record discriminant. `root/<NodeRef>`
+contains the canonical Groove record `{ 1: durable:u64, 2: staged:u64,
+3: node_active:bool }`; `node/<NodeRef>` contains `{ 1: references:u64,
+2: upload_references:u64, 3: children:[NodeRef] }`; `staged/<StagingId>`
+contains `{ 1: id:bytes16, 2: value_ref:LargeValueRef,
+3: encoded_bytes:u64, 4: node_count:u64, 5: created_at_ms:u64 }`; and
+`upload/<StagingId>` contains `{ 1: id:bytes16, 2: descriptor:LargeValueRef?,
+3: receipt_id:bytes16?, 4: encoded_bytes:u64, 5: node_count:u64,
+6: created_at_ms:u64, 7: chunks:[NodeRef] }`. Numeric field IDs are permanent
+and source declaration order is not semantic. Each value is exactly its normal
+Groove record encoding: there is no metadata magic prefix, private type tag,
+or serde/postcard envelope. Key prefixes are fixed engine-owned namespaces and
+must select their sole expected record shape; malformed, truncated, trailing,
+non-canonical, or mismatched records fail before any lifecycle/GC mutation.
+
 `INV-LARGE-9`: physical-record mutation and descriptor-reference deltas MUST be
 crash-consistent and idempotent. A node/blob MUST NOT be reclaimed while its
 durable inbound count, staging protection, or active lease is nonzero.

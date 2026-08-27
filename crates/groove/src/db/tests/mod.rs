@@ -73,9 +73,11 @@ fn large_value_metadata_keys_use_the_canonical_node_ref_record() {
 
 // These are intentionally internal codec assertions: the metadata column
 // family is an engine-owned crash journal/reference ledger and cannot be
-// observed or malformed through Groove's public row API.
+// observed or malformed through Groove's public row API. The public
+// `stage_large_value_chunk_batch` / reopen / reclaim receipts below exercise
+// the same records through the user-visible lifecycle.
 #[test]
-fn large_value_metadata_records_are_versioned_canonical_groove_values() {
+fn large_value_metadata_records_are_canonical_groove_records() {
     fn to_hex(bytes: impl AsRef<[u8]>) -> String {
         bytes
             .as_ref()
@@ -170,16 +172,35 @@ fn large_value_metadata_records_are_versioned_canonical_groove_values() {
     let encoded_node = encode_large_value_node_references(&node).unwrap();
     let encoded_staged = encode_staged_large_value(&staged).unwrap();
     let encoded_pending = encode_pending_large_value_upload(&pending).unwrap();
-    for (tag, encoded) in [
-        (LARGE_VALUE_ROOT_REFERENCES_TAG, &encoded_root),
-        (LARGE_VALUE_NODE_REFERENCES_TAG, &encoded_node),
-        (STAGED_LARGE_VALUE_TAG, &encoded_staged),
-        (PENDING_LARGE_VALUE_UPLOAD_TAG, &encoded_pending),
+    for (schema, encoded) in [
+        (large_value_root_references_schema(), &encoded_root),
+        (large_value_node_references_schema(), &encoded_node),
+        (staged_large_value_schema(), &encoded_staged),
+        (pending_large_value_upload_schema(), &encoded_pending),
     ] {
-        assert_eq!(&encoded[..4], LARGE_VALUE_METADATA_MAGIC);
-        assert_eq!(encoded[4], LARGE_VALUE_METADATA_VERSION);
-        assert_eq!(encoded[5], tag);
+        assert!(
+            !encoded.starts_with(b"GLVM"),
+            "metadata is a standard Groove record, not a private envelope"
+        );
+        let values = schema.descriptor.bind(encoded).to_values().unwrap();
+        assert_eq!(schema.descriptor.create(&values).unwrap(), *encoded);
     }
+    assert_eq!(
+        large_value_root_references_schema().field_ids,
+        [
+            ROOT_REF_DURABLE_FIELD,
+            ROOT_REF_STAGED_FIELD,
+            ROOT_REF_NODE_ACTIVE_FIELD,
+        ]
+    );
+    assert_eq!(
+        large_value_node_references_schema().field_ids,
+        [
+            NODE_REF_REFERENCES_FIELD,
+            NODE_REF_UPLOAD_REFERENCES_FIELD,
+            NODE_REF_CHILDREN_FIELD,
+        ]
+    );
     assert_eq!(
         decode_large_value_root_references(&encoded_root).unwrap(),
         root
@@ -201,24 +222,62 @@ fn large_value_metadata_records_are_versioned_canonical_groove_values() {
     );
 
     let duplicate_children = encode_large_value_metadata_record(
-        LARGE_VALUE_NODE_REFERENCES_TAG,
-        large_value_node_references_descriptor(),
-        &[
-            records::Value::U64(1),
-            records::Value::U64(0),
-            records::Value::Array(vec![
-                crate::large_values::node_ref_value(&first),
-                crate::large_values::node_ref_value(&first),
-            ]),
+        large_value_node_references_schema(),
+        [
+            (NODE_REF_REFERENCES_FIELD, records::Value::U64(1)),
+            (NODE_REF_UPLOAD_REFERENCES_FIELD, records::Value::U64(0)),
+            (
+                NODE_REF_CHILDREN_FIELD,
+                records::Value::Array(vec![
+                    crate::large_values::node_ref_value(&first),
+                    crate::large_values::node_ref_value(&first),
+                ]),
+            ),
         ],
         "large-value node references",
     )
     .unwrap();
     assert!(decode_large_value_node_references(&duplicate_children).is_err());
 
-    let mut wrong_version = encoded_root.clone();
-    wrong_version[4] = LARGE_VALUE_METADATA_VERSION + 1;
-    assert!(decode_large_value_root_references(&wrong_version).is_err());
+    let reversed_children = encode_large_value_metadata_record(
+        large_value_node_references_schema(),
+        [
+            (NODE_REF_REFERENCES_FIELD, records::Value::U64(1)),
+            (NODE_REF_UPLOAD_REFERENCES_FIELD, records::Value::U64(0)),
+            (
+                NODE_REF_CHILDREN_FIELD,
+                records::Value::Array(vec![
+                    crate::large_values::node_ref_value(&second),
+                    crate::large_values::node_ref_value(&first),
+                ]),
+            ),
+        ],
+        "large-value node references",
+    )
+    .unwrap();
+    assert!(decode_large_value_node_references(&reversed_children).is_err());
+
+    assert!(decode_large_value_root_references(&encoded_root[..encoded_root.len() - 1]).is_err());
+    assert!(decode_large_value_node_references(&encoded_node[..encoded_node.len() - 1]).is_err());
+    assert!(decode_staged_large_value(&encoded_staged[..encoded_staged.len() - 1]).is_err());
+    assert!(
+        decode_pending_large_value_upload(&encoded_pending[..encoded_pending.len() - 1]).is_err()
+    );
+    let mut trailing_root = encoded_root.clone();
+    trailing_root.push(0);
+    assert!(decode_large_value_root_references(&trailing_root).is_err());
+    let mut trailing_node = encoded_node.clone();
+    trailing_node.push(0);
+    assert!(decode_large_value_node_references(&trailing_node).is_err());
+    let mut trailing_staged = encoded_staged.clone();
+    trailing_staged.push(0);
+    assert!(decode_staged_large_value(&trailing_staged).is_err());
+    let mut trailing_pending = encoded_pending.clone();
+    trailing_pending.push(0);
+    assert!(decode_pending_large_value_upload(&trailing_pending).is_err());
+    let mut unknown_value_ref_tag = encoded_value_ref.clone();
+    unknown_value_ref_tag[0] = 3;
+    assert!(crate::large_values::decode_large_value_ref(&unknown_value_ref_tag).is_err());
     assert!(decode_large_value_root_references(&[0; 16]).is_err());
 
     assert_eq!(
@@ -229,13 +288,13 @@ fn large_value_metadata_records_are_versioned_canonical_groove_values() {
             &encoded_staged,
             &encoded_pending,
         ]
-        .map(|encoded| blake3::hash(encoded).to_hex().to_string()),
+        .map(to_hex),
         [
-            "7b4260ad792ca009bc0545aa9ad410b6a17e0a272039f92c368c274dd62d8092",
-            "7f2ef6c6815aa9cfdaf2fddd64c1d02cef060f13874d62d287ce08df59f8acaf",
-            "45b4d2d881f84ef9402b14c9bf1a2c0965cdedf0f99712f5b90a91015119b003",
-            "530554ffae216bacd195d0575c9d5b0c3c12ad05cee3f38dd7fac80c8e7057bb",
-            "282844f56e020418663781963d4ecf6d47b99ebe489c1749a8ce7b945bf27aaa",
+            "000207000000000000000000000000000000003a0000007e0000003333333333333333333333333333333333333333333333333333333333333333240000001111111111111111111111111111111111111111111111111111111111111111ee96d2a87be5c1dd447125981a7bf47f0d48d127b8b8fbea50b16a8ecf6fdfff00000000",
+            "0300000000000000050000000000000001",
+            "07000000000000000b00000000000000020000004c000000240000001111111111111111111111111111111111111111111111111111111111111111ee96d2a87be5c1dd447125981a7bf47f0d48d127b8b8fbea50b16a8ecf6fdfff2400000022222222222222222222222222222222222222222222222222222222222222226c51cfbc9a018998ba52dec05284df710cb836a95d75d802ac9471e096c59292",
+            "0d00000000000000020000000000000011000000000000002c00000044444444444444444444444444444444000207000000000000000000000000000000003a0000007e0000003333333333333333333333333333333333333333333333333333333333333333240000001111111111111111111111111111111111111111111111111111111111111111ee96d2a87be5c1dd447125981a7bf47f0d48d127b8b8fbea50b16a8ecf6fdfff00000000",
+            "13000000000000000200000000000000170000000000000034000000b8000000c90000005555555555555555555555555555555501000207000000000000000000000000000000003a0000007e0000003333333333333333333333333333333333333333333333333333333333333333240000001111111111111111111111111111111111111111111111111111111111111111ee96d2a87be5c1dd447125981a7bf47f0d48d127b8b8fbea50b16a8ecf6fdfff000000000166666666666666666666666666666666020000004c000000240000001111111111111111111111111111111111111111111111111111111111111111ee96d2a87be5c1dd447125981a7bf47f0d48d127b8b8fbea50b16a8ecf6fdfff2400000022222222222222222222222222222222222222222222222222222222222222226c51cfbc9a018998ba52dec05284df710cb836a95d75d802ac9471e096c59292",
         ]
         .map(str::to_owned)
     );
