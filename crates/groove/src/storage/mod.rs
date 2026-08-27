@@ -26,7 +26,6 @@ use std::pin::Pin;
 use std::rc::Rc;
 
 use crate::records::{Record, RecordDescriptor};
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use idb::IdbStorage;
@@ -192,140 +191,6 @@ const STAGED_OPS_BEFORE_POINT_INDEX: usize = 64;
 pub type ScanVisitor<'visitor> =
     dyn for<'a, 'b> FnMut(&'a [u8], &'b [u8]) -> Result<(), Error> + 'visitor;
 
-/// Typed storage delta appended through backends that can durably merge without
-/// first reading the existing value.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StorageDelta {
-    pub kind: StorageDeltaKind,
-    pub payload: Vec<u8>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum StorageDeltaKind {
-    CurrentWinnerV1,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CurrentWinnerDelta {
-    pub tx_time: u64,
-    pub tx_node_uuid: [u8; 16],
-    pub parents: Vec<(u64, [u8; 16])>,
-    pub tx_time_offset: u32,
-    pub tx_node_uuid_offset: u32,
-    pub record: Vec<u8>,
-}
-
-impl StorageDelta {
-    pub fn current_winner(delta: CurrentWinnerDelta) -> Result<Self, Error> {
-        Ok(Self {
-            kind: StorageDeltaKind::CurrentWinnerV1,
-            payload: postcard::to_allocvec(&delta)
-                .map_err(|error| Error::InvalidStorageDelta(error.to_string()))?,
-        })
-    }
-
-    pub fn encode(&self) -> Result<Vec<u8>, Error> {
-        postcard::to_allocvec(&(self.kind, &self.payload))
-            .map_err(|error| Error::InvalidStorageDelta(error.to_string()))
-    }
-
-    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        let (kind, payload): (StorageDeltaKind, Vec<u8>) = postcard::from_bytes(bytes)
-            .map_err(|error| Error::InvalidStorageDelta(error.to_string()))?;
-        Ok(Self { kind, payload })
-    }
-}
-
-/// Compact one encoded delta operand using the storage-level delta contract.
-///
-/// Ordered-KV adapters with native merge operators use this to implement the
-/// same delta semantics as the default read/modify/write path.
-pub fn compact_storage_delta_operand(
-    template_operand: &[u8],
-    merged_record: Vec<u8>,
-) -> Result<Vec<u8>, Error> {
-    let template = StorageDelta::decode(template_operand)?;
-    match template.kind {
-        StorageDeltaKind::CurrentWinnerV1 => {
-            let template: CurrentWinnerDelta = postcard::from_bytes(&template.payload)
-                .map_err(|error| Error::InvalidStorageDelta(error.to_string()))?;
-            let (tx_time, tx_node_uuid) = current_winner_key(
-                &merged_record,
-                template.tx_time_offset as usize,
-                template.tx_node_uuid_offset as usize,
-            )?;
-            StorageDelta::current_winner(CurrentWinnerDelta {
-                tx_time,
-                tx_node_uuid,
-                parents: Vec::new(),
-                tx_time_offset: template.tx_time_offset,
-                tx_node_uuid_offset: template.tx_node_uuid_offset,
-                record: merged_record,
-            })?
-            .encode()
-        }
-    }
-}
-
-pub fn apply_storage_delta(
-    existing: Option<&[u8]>,
-    encoded_delta: &[u8],
-) -> Result<Vec<u8>, Error> {
-    let delta = StorageDelta::decode(encoded_delta)?;
-    match delta.kind {
-        StorageDeltaKind::CurrentWinnerV1 => {
-            let candidate: CurrentWinnerDelta = postcard::from_bytes(&delta.payload)
-                .map_err(|error| Error::InvalidStorageDelta(error.to_string()))?;
-            apply_current_winner_delta(existing, &candidate)
-        }
-    }
-}
-
-fn apply_current_winner_delta(
-    existing: Option<&[u8]>,
-    candidate: &CurrentWinnerDelta,
-) -> Result<Vec<u8>, Error> {
-    let Some(existing) = existing else {
-        return Ok(candidate.record.clone());
-    };
-    let existing_key = current_winner_key(
-        existing,
-        candidate.tx_time_offset as usize,
-        candidate.tx_node_uuid_offset as usize,
-    )?;
-    let candidate_key = (candidate.tx_time, candidate.tx_node_uuid);
-    if candidate.parents.contains(&existing_key) || candidate_key > existing_key {
-        Ok(candidate.record.clone())
-    } else {
-        Ok(existing.to_vec())
-    }
-}
-
-fn current_winner_key(
-    record: &[u8],
-    tx_time_offset: usize,
-    tx_node_uuid_offset: usize,
-) -> Result<(u64, [u8; 16]), Error> {
-    let time_bytes = record
-        .get(tx_time_offset..tx_time_offset + 8)
-        .ok_or_else(|| {
-            Error::InvalidStorageDelta("current-winner tx_time offset out of bounds".to_owned())
-        })?;
-    let uuid_bytes = record
-        .get(tx_node_uuid_offset..tx_node_uuid_offset + 16)
-        .ok_or_else(|| {
-            Error::InvalidStorageDelta(
-                "current-winner tx_node_uuid offset out of bounds".to_owned(),
-            )
-        })?;
-    let mut uuid = [0; 16];
-    uuid.copy_from_slice(uuid_bytes);
-    Ok((
-        u64::from_le_bytes(time_bytes.try_into().expect("slice length checked")),
-        uuid,
-    ))
-}
-
 /// Backing-implementation interface for ordered key/value storage.
 ///
 /// This is the only trait a storage backend must implement. Its column-family
@@ -356,6 +221,22 @@ pub trait OrderedKvStorage {
     }
 
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>>;
+    /// Atomically install `value` only when `key` is absent. Returns the
+    /// pre-existing value when another writer already installed one.
+    fn put_if_absent(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<Value>, Error>>;
+    /// Atomically delete `key` only when its bytes still equal `expected`.
+    /// Returns whether this call removed the value.
+    fn compare_and_delete(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<bool, Error>>;
     fn set(&self, cf: String, key: Vec<u8>, value: Vec<u8>)
     -> StorageFuture<'_, Result<(), Error>>;
     fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>>;
@@ -479,6 +360,24 @@ where
         self.as_ref().get(cf, key)
     }
 
+    fn put_if_absent(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+        self.as_ref().put_if_absent(cf, key, value)
+    }
+
+    fn compare_and_delete(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<bool, Error>> {
+        self.as_ref().compare_and_delete(cf, key, expected)
+    }
+
     fn set(
         &self,
         cf: String,
@@ -542,6 +441,24 @@ where
 
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         S::get(*self, cf, key)
+    }
+
+    fn put_if_absent(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+        S::put_if_absent(*self, cf, key, value)
+    }
+
+    fn compare_and_delete(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<bool, Error>> {
+        S::compare_and_delete(*self, cf, key, expected)
     }
 
     fn set(
@@ -853,6 +770,27 @@ impl OrderedKvStorage for LayoutStorage {
         self.inner.get(physical_cf, physical_key)
     }
 
+    fn put_if_absent(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+        let (physical_cf, physical_key) = self.physical_key(&cf, &key);
+        self.inner.put_if_absent(physical_cf, physical_key, value)
+    }
+
+    fn compare_and_delete(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<bool, Error>> {
+        let (physical_cf, physical_key) = self.physical_key(&cf, &key);
+        self.inner
+            .compare_and_delete(physical_cf, physical_key, expected)
+    }
+
     fn set(
         &self,
         cf: String,
@@ -981,14 +919,6 @@ impl OrderedKvStorage for LayoutStorage {
                         key: physical_key,
                     }
                 }
-                OwnedWriteOperation::Delta { cf, key, delta } => {
-                    let (physical_cf, physical_key) = self.physical_key(&cf, &key);
-                    OwnedWriteOperation::Delta {
-                        cf: physical_cf,
-                        key: physical_key,
-                        delta,
-                    }
-                }
             })
             .collect::<Vec<_>>();
         self.inner.write_many(translated)
@@ -1058,6 +988,24 @@ impl OrderedKvStorage for BoxedStorage {
 
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         self.inner.get(cf, key)
+    }
+
+    fn put_if_absent(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+        self.inner.put_if_absent(cf, key, value)
+    }
+
+    fn compare_and_delete(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<bool, Error>> {
+        self.inner.compare_and_delete(cf, key, expected)
     }
 
     fn set(
@@ -1240,14 +1188,6 @@ where
         }
     }
 
-    pub fn delta(&self, key: &Key, delta: &StorageDelta) -> OwnedWriteOperation {
-        OwnedWriteOperation::Delta {
-            cf: self.column_family.to_owned(),
-            key: key.to_vec(),
-            delta: delta.clone(),
-        }
-    }
-
     pub fn write_many(
         &self,
         operations: Vec<OwnedWriteOperation>,
@@ -1269,11 +1209,6 @@ pub enum WriteOperation<'a> {
         cf: &'a str,
         key: &'a Key,
     },
-    Delta {
-        cf: &'a str,
-        key: &'a Key,
-        delta: &'a StorageDelta,
-    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1286,11 +1221,6 @@ pub enum OwnedWriteOperation {
     Delete {
         cf: String,
         key: Vec<u8>,
-    },
-    Delta {
-        cf: String,
-        key: Vec<u8>,
-        delta: StorageDelta,
     },
 }
 
@@ -1316,36 +1246,22 @@ impl OwnedWriteOperation {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn delta(
-        cf: impl Into<String>,
-        key: impl Into<Vec<u8>>,
-        delta: StorageDelta,
-    ) -> Self {
-        Self::Delta {
-            cf: cf.into(),
-            key: key.into(),
-            delta,
-        }
-    }
-
     pub fn as_write_operation(&self) -> WriteOperation<'_> {
         match self {
             Self::Set { cf, key, value } => WriteOperation::set(cf, key, value),
             Self::Delete { cf, key } => WriteOperation::delete(cf, key),
-            Self::Delta { cf, key, delta } => WriteOperation::delta(cf, key, delta),
         }
     }
 
     fn cf(&self) -> &str {
         match self {
-            Self::Set { cf, .. } | Self::Delete { cf, .. } | Self::Delta { cf, .. } => cf,
+            Self::Set { cf, .. } | Self::Delete { cf, .. } => cf,
         }
     }
 
     fn key(&self) -> &[u8] {
         match self {
-            Self::Set { key, .. } | Self::Delete { key, .. } | Self::Delta { key, .. } => key,
+            Self::Set { key, .. } | Self::Delete { key, .. } => key,
         }
     }
 }
@@ -1545,9 +1461,6 @@ fn overlay_point_value(
         match operation {
             OwnedWriteOperation::Set { value: set, .. } => value = Some(set.clone()),
             OwnedWriteOperation::Delete { .. } => value = None,
-            OwnedWriteOperation::Delta { delta, .. } => {
-                value = Some(apply_storage_delta(value.as_deref(), &delta.encode()?)?);
-            }
         }
     }
     Ok(value)
@@ -1682,21 +1595,18 @@ where
         }
 
         // A base limit of only the logical result size is unsound: every
-        // staged key whose final operation is a Delete may consume one of
-        // those physical entries without producing a logical result.  The
-        // final operation is sufficient here: Set and Delta always retain a
-        // key (or surface their own error only if traversal reaches it), while
-        // Delete removes it regardless of its base value.  Thus `limit +
-        // deletes` is both a hard physical ceiling and enough base entries to
-        // fill the requested logical result when they exist.
+        // staged key whose final operation can remove it may consume one of
+        // those physical entries without producing a logical result. A
+        // Thus `limit + removals` is both a hard physical ceiling and enough base entries to fill the
+        // requested logical result when they exist.
         let physical_max_items = request.max_items.map(|limit| {
-            let final_deletes = staged
+            let final_removals = staged
                 .values()
                 .filter(|operations| {
                     matches!(operations.last(), Some(OwnedWriteOperation::Delete { .. }))
                 })
                 .count();
-            limit.saturating_add(final_deletes)
+            limit.saturating_add(final_removals)
         });
         let base = base
             .scan(ScanRequest {
@@ -1724,6 +1634,23 @@ impl<S> OrderedKvStorage for StagedWriteOverlay<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn put_if_absent(
+        &self,
+        _cf: String,
+        _key: Vec<u8>,
+        _value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+        Box::pin(async { Err(Error::ConditionalMutationInTransaction) })
+    }
+
+    fn compare_and_delete(
+        &self,
+        _cf: String,
+        _key: Vec<u8>,
+        _expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<bool, Error>> {
+        Box::pin(async { Err(Error::ConditionalMutationInTransaction) })
+    }
     fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         overlay_scan(&*self.base, &self.staged_writes, request)
     }
@@ -1742,26 +1669,10 @@ where
         match &staged_writes.operations[index] {
             OwnedWriteOperation::Set { value, .. } => {
                 let value = value.clone();
-                return Box::pin(async move { Ok(Some(value)) });
+                Box::pin(async move { Ok(Some(value)) })
             }
-            OwnedWriteOperation::Delete { .. } => {
-                return Box::pin(async { Ok(None) });
-            }
-            OwnedWriteOperation::Delta { .. } => {}
+            OwnedWriteOperation::Delete { .. } => Box::pin(async { Ok(None) }),
         }
-
-        let operations = staged_writes
-            .operations
-            .iter()
-            .filter(|operation| operation.cf() == cf && operation.key() == key)
-            .cloned()
-            .collect::<Vec<_>>();
-        drop(staged_writes);
-
-        Box::pin(async move {
-            let base = self.base.get(cf.clone(), key.clone()).await?;
-            overlay_point_value(base, &operations, &cf, &key)
-        })
     }
 
     fn set(
@@ -1800,6 +1711,23 @@ impl<S> OrderedKvStorage for StorageTransaction<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn put_if_absent(
+        &self,
+        _cf: String,
+        _key: Vec<u8>,
+        _value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+        Box::pin(async { Err(Error::ConditionalMutationInTransaction) })
+    }
+
+    fn compare_and_delete(
+        &self,
+        _cf: String,
+        _key: Vec<u8>,
+        _expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<bool, Error>> {
+        Box::pin(async { Err(Error::ConditionalMutationInTransaction) })
+    }
     fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         overlay_scan(self.base, &self.staged_writes, request)
     }
@@ -1856,10 +1784,6 @@ impl<'a> WriteOperation<'a> {
     pub fn delete(cf: &'a str, key: &'a Key) -> Self {
         Self::Delete { cf, key }
     }
-
-    pub fn delta(cf: &'a str, key: &'a Key, delta: &'a StorageDelta) -> Self {
-        Self::Delta { cf, key, delta }
-    }
 }
 
 #[derive(Debug, Error)]
@@ -1870,8 +1794,10 @@ pub enum Error {
     InvalidStorageLayout(String),
     #[error("invalid storage key: {0}")]
     InvalidStorageKey(String),
-    #[error("invalid storage delta: {0}")]
-    InvalidStorageDelta(String),
+    #[error("conditional mutations require a direct storage boundary")]
+    ConditionalMutationInTransaction,
+    #[error("IndexedDB storage remained contended after {retries} generation-conflict retries")]
+    IdbGenerationContention { retries: usize },
     #[error("record error: {0}")]
     Record(#[source] Box<crate::records::Error>),
     #[error("{backend} storage error: {message}")]
@@ -2004,100 +1930,55 @@ pub(crate) mod conformance {
         );
     }
 
-    pub(crate) async fn delta_append_current_winner_observes_merged_state<S>(storage: S)
+    pub(crate) async fn atomic_conditionals_preserve_winners_and_reject_stale_deletes<S>(storage: S)
     where
         S: OrderedKvStorage,
     {
-        fn record(time: u64, node: u8, payload: &[u8]) -> Vec<u8> {
-            let mut bytes = Vec::new();
-            bytes.extend(time.to_le_bytes());
-            bytes.extend([node; 16]);
-            bytes.extend(payload);
-            bytes
-        }
-
-        fn delta(time: u64, node: u8, parents: Vec<(u64, u8)>, record: Vec<u8>) -> StorageDelta {
-            StorageDelta::current_winner(CurrentWinnerDelta {
-                tx_time: time,
-                tx_node_uuid: [node; 16],
-                parents: parents
-                    .into_iter()
-                    .map(|(time, node)| (time, [node; 16]))
-                    .collect(),
-                tx_time_offset: 0,
-                tx_node_uuid_offset: 8,
-                record,
-            })
-            .unwrap()
-        }
-
-        let older = record(10, 1, b"older");
-        let newer = record(20, 1, b"newer");
-        let child = record(11, 2, b"child");
-        let loser = record(9, 9, b"loser");
-
-        storage
-            .write_many(vec![OwnedWriteOperation::delta(
-                "records",
-                b"row",
-                delta(10, 1, Vec::new(), older.clone()),
-            )])
-            .await
-            .unwrap();
+        let key = b"conditional".to_vec();
+        let first = b"first-install-receipt".to_vec();
+        let second = b"second-install-receipt".to_vec();
         assert_eq!(
             storage
-                .get("records".into(), b"row".to_vec())
+                .put_if_absent("records".into(), key.clone(), first.clone())
                 .await
                 .unwrap(),
-            Some(older.clone())
+            None
         );
-
-        storage
-            .write_many(vec![OwnedWriteOperation::delta(
-                "records",
-                b"row",
-                delta(20, 1, Vec::new(), newer.clone()),
-            )])
-            .await
-            .unwrap();
         assert_eq!(
             storage
-                .get("records".into(), b"row".to_vec())
+                .put_if_absent("records".into(), key.clone(), second.clone())
                 .await
                 .unwrap(),
-            Some(newer.clone())
+            Some(first.clone())
         );
-
-        storage
-            .write_many(vec![OwnedWriteOperation::delta(
-                "records",
-                b"row",
-                delta(11, 2, vec![(20, 1)], child.clone()),
-            )])
-            .await
-            .unwrap();
-        assert_eq!(
-            storage
-                .get("records".into(), b"row".to_vec())
+        assert!(
+            !storage
+                .compare_and_delete("records".into(), key.clone(), second)
                 .await
-                .unwrap(),
-            Some(child.clone())
+                .unwrap()
         );
-
-        storage
-            .write_many(vec![OwnedWriteOperation::delta(
-                "records",
-                b"row",
-                delta(9, 9, Vec::new(), loser),
-            )])
-            .await
-            .unwrap();
+        assert!(
+            storage
+                .compare_and_delete("records".into(), key.clone(), first.clone())
+                .await
+                .unwrap()
+        );
         assert_eq!(
             storage
-                .get("records".into(), b"row".to_vec())
+                .put_if_absent("records".into(), key.clone(), b"reinstalled".to_vec())
                 .await
                 .unwrap(),
-            Some(child)
+            None
+        );
+        assert!(
+            !storage
+                .compare_and_delete("records".into(), key.clone(), first)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            storage.get("records".into(), key).await.unwrap(),
+            Some(b"reinstalled".to_vec())
         );
     }
 }
@@ -2812,76 +2693,6 @@ mod tests {
     }
 
     #[futures_test::test]
-    async fn bounded_transaction_scan_applies_staged_deltas_without_underfilling() {
-        let storage = MemoryStorage::new(&["records"]);
-        let old = current_winner_test_record(10, 1, b"old");
-        let amended = current_winner_test_record(20, 2, b"amended");
-        let later = current_winner_test_record(15, 3, b"later");
-        storage
-            .set("records".into(), b"a".to_vec(), old)
-            .await
-            .unwrap();
-        storage
-            .set("records".into(), b"b".to_vec(), later.clone())
-            .await
-            .unwrap();
-
-        let transaction = storage.begin_txn();
-        transaction
-            .write_many(vec![
-                OwnedWriteOperation::Delta {
-                    cf: "records".to_owned(),
-                    key: b"a".to_vec(),
-                    delta: current_winner_test_delta(20, 2, amended.clone()),
-                },
-                OwnedWriteOperation::Delete {
-                    cf: "records".to_owned(),
-                    key: b"b".to_vec(),
-                },
-                OwnedWriteOperation::Set {
-                    cf: "records".to_owned(),
-                    key: b"c".to_vec(),
-                    value: later.clone(),
-                },
-            ])
-            .await
-            .unwrap();
-
-        let forward = collect_scan(
-            transaction
-                .scan(ScanRequest::prefix("records".into(), Vec::new()).with_max_items(2))
-                .await
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            forward,
-            vec![(b"a".to_vec(), amended), (b"c".to_vec(), later.clone())]
-        );
-
-        let reverse = collect_scan(
-            transaction
-                .scan(
-                    ScanRequest::prefix("records".into(), Vec::new())
-                        .reversed()
-                        .with_max_items(2),
-                )
-                .await
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            reverse,
-            vec![
-                (b"c".to_vec(), later),
-                (b"a".to_vec(), forward[0].1.clone())
-            ]
-        );
-    }
-
-    #[futures_test::test]
     async fn bounded_transaction_scan_stops_base_cursor_after_logical_output_is_full() {
         let (storage, control) = TestStorage::controlled(&["records"]);
         for key in [b"a".as_slice(), b"b".as_slice(), b"c".as_slice()] {
@@ -3171,223 +2982,6 @@ mod tests {
     }
 
     #[futures_test::test]
-    async fn memory_write_many_keeps_earlier_sets_private_when_a_later_delta_is_malformed() {
-        let storage = MemoryStorage::new(&["records"]);
-        let malformed_delta = StorageDelta {
-            kind: StorageDeltaKind::CurrentWinnerV1,
-            payload: vec![0xff],
-        };
-
-        let error = storage
-            .write_many(vec![
-                OwnedWriteOperation::set("records", b"first", b"must not leak"),
-                OwnedWriteOperation::delta("records", b"later", malformed_delta),
-            ])
-            .await
-            .expect_err("the malformed later delta must reject the whole batch");
-
-        assert!(matches!(error, Error::InvalidStorageDelta(_)));
-        assert_eq!(
-            storage
-                .get("records".into(), b"first".to_vec())
-                .await
-                .unwrap(),
-            None
-        );
-        assert_eq!(
-            storage
-                .get("records".into(), b"later".to_vec())
-                .await
-                .unwrap(),
-            None
-        );
-    }
-
-    fn current_winner_test_record(time: u64, node: u8, payload: &[u8]) -> Vec<u8> {
-        let mut record = Vec::new();
-        record.extend(time.to_le_bytes());
-        record.extend([node; 16]);
-        record.extend(payload);
-        record
-    }
-
-    fn current_winner_test_delta(time: u64, node: u8, record: Vec<u8>) -> StorageDelta {
-        StorageDelta::current_winner(CurrentWinnerDelta {
-            tx_time: time,
-            tx_node_uuid: [node; 16],
-            parents: Vec::new(),
-            tx_time_offset: 0,
-            tx_node_uuid_offset: 8,
-            record,
-        })
-        .unwrap()
-    }
-
-    /// An explicit delete in a batch is a prospective absence. A following
-    /// delta must use that absence rather than falling through to the durable
-    /// predecessor, otherwise delete→delta resurrects the old winner.
-    #[futures_test::test]
-    async fn memory_write_many_delete_then_delta_uses_post_delete_absence() {
-        let storage = MemoryStorage::new(&["records"]);
-        let old = current_winner_test_record(30, 1, b"old");
-        let candidate = current_winner_test_record(20, 2, b"candidate");
-        let delta = current_winner_test_delta(20, 2, candidate.clone());
-        storage
-            .set("records".into(), b"row".to_vec(), old)
-            .await
-            .unwrap();
-
-        storage
-            .write_many(vec![
-                OwnedWriteOperation::delete("records", b"row"),
-                OwnedWriteOperation::delta("records", b"row", delta),
-            ])
-            .await
-            .unwrap();
-
-        assert_eq!(
-            storage
-                .get("records".into(), b"row".to_vec())
-                .await
-                .unwrap(),
-            Some(candidate)
-        );
-    }
-
-    #[futures_test::test]
-    async fn memory_write_many_same_key_operation_sequences_use_the_prospective_value() {
-        let old = current_winner_test_record(10, 1, b"old");
-        let set = current_winner_test_record(15, 1, b"set");
-        let later_set = current_winner_test_record(25, 1, b"later set");
-        let first_delta_record = current_winner_test_record(20, 2, b"first delta");
-        let second_delta_record = current_winner_test_record(30, 3, b"second delta");
-        let first_delta = current_winner_test_delta(20, 2, first_delta_record.clone());
-        let second_delta = current_winner_test_delta(30, 3, second_delta_record.clone());
-
-        let cases = vec![
-            (
-                vec![
-                    OwnedWriteOperation::set("records", b"row", set.clone()),
-                    OwnedWriteOperation::set("records", b"row", later_set.clone()),
-                ],
-                Some(later_set.clone()),
-            ),
-            (
-                vec![
-                    OwnedWriteOperation::set("records", b"row", set.clone()),
-                    OwnedWriteOperation::delete("records", b"row"),
-                ],
-                None,
-            ),
-            (
-                vec![
-                    OwnedWriteOperation::delete("records", b"row"),
-                    OwnedWriteOperation::set("records", b"row", set.clone()),
-                ],
-                Some(set.clone()),
-            ),
-            (
-                vec![
-                    OwnedWriteOperation::delete("records", b"row"),
-                    OwnedWriteOperation::delete("records", b"row"),
-                ],
-                None,
-            ),
-            (
-                vec![
-                    OwnedWriteOperation::set("records", b"row", set.clone()),
-                    OwnedWriteOperation::delta("records", b"row", first_delta.clone()),
-                ],
-                Some(first_delta_record.clone()),
-            ),
-            (
-                vec![
-                    OwnedWriteOperation::delta("records", b"row", first_delta.clone()),
-                    OwnedWriteOperation::set("records", b"row", later_set.clone()),
-                ],
-                Some(later_set.clone()),
-            ),
-            (
-                vec![
-                    OwnedWriteOperation::delete("records", b"row"),
-                    OwnedWriteOperation::delta("records", b"row", first_delta.clone()),
-                ],
-                Some(first_delta_record.clone()),
-            ),
-            (
-                vec![
-                    OwnedWriteOperation::delta("records", b"row", first_delta.clone()),
-                    OwnedWriteOperation::delete("records", b"row"),
-                ],
-                None,
-            ),
-            (
-                vec![
-                    OwnedWriteOperation::delta("records", b"row", first_delta),
-                    OwnedWriteOperation::delta("records", b"row", second_delta),
-                ],
-                Some(second_delta_record),
-            ),
-        ];
-
-        for (operations, expected) in cases {
-            let storage = MemoryStorage::new(&["records"]);
-            storage
-                .set("records".into(), b"row".to_vec(), old.clone())
-                .await
-                .unwrap();
-            storage.write_many(operations).await.unwrap();
-            assert_eq!(
-                storage
-                    .get("records".into(), b"row".to_vec())
-                    .await
-                    .unwrap(),
-                expected
-            );
-        }
-    }
-
-    #[futures_test::test]
-    async fn memory_write_many_prospective_overlay_is_isolated_per_key() {
-        let storage = MemoryStorage::new(&["records"]);
-        let old = current_winner_test_record(10, 1, b"old");
-        let candidate = current_winner_test_record(20, 2, b"candidate");
-        let delta = current_winner_test_delta(20, 2, candidate.clone());
-        storage
-            .set("records".into(), b"row-a".to_vec(), old)
-            .await
-            .unwrap();
-        storage
-            .set("records".into(), b"row-b".to_vec(), b"old-b".to_vec())
-            .await
-            .unwrap();
-
-        storage
-            .write_many(vec![
-                OwnedWriteOperation::delete("records", b"row-a"),
-                OwnedWriteOperation::set("records", b"row-b", b"new-b"),
-                OwnedWriteOperation::delta("records", b"row-a", delta),
-            ])
-            .await
-            .unwrap();
-
-        assert_eq!(
-            storage
-                .get("records".into(), b"row-a".to_vec())
-                .await
-                .unwrap(),
-            Some(candidate)
-        );
-        assert_eq!(
-            storage
-                .get("records".into(), b"row-b".to_vec())
-                .await
-                .unwrap(),
-            Some(b"new-b".to_vec())
-        );
-    }
-
-    #[futures_test::test]
     async fn write_many_can_mix_sets_and_deletes_atomically() {
         let storage = MemoryStorage::new(&["records"]);
 
@@ -3504,6 +3098,24 @@ mod tests {
                 key: Vec<u8>,
             ) -> StorageFuture<'_, Result<Option<Vec<u8>>, Error>> {
                 self.0.get(cf, key)
+            }
+
+            fn put_if_absent(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+                value: Vec<u8>,
+            ) -> StorageFuture<'_, Result<Option<Vec<u8>>, Error>> {
+                self.0.put_if_absent(cf, key, value)
+            }
+
+            fn compare_and_delete(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+                expected: Vec<u8>,
+            ) -> StorageFuture<'_, Result<bool, Error>> {
+                self.0.compare_and_delete(cf, key, expected)
             }
 
             fn set(
@@ -3715,6 +3327,24 @@ mod tests {
                 self.inner.get(cf, key)
             }
 
+            fn put_if_absent(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+                value: Vec<u8>,
+            ) -> StorageFuture<'_, Result<Option<Vec<u8>>, Error>> {
+                self.inner.put_if_absent(cf, key, value)
+            }
+
+            fn compare_and_delete(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+                expected: Vec<u8>,
+            ) -> StorageFuture<'_, Result<bool, Error>> {
+                self.inner.compare_and_delete(cf, key, expected)
+            }
+
             fn set(
                 &self,
                 cf: String,
@@ -3808,9 +3438,11 @@ mod tests {
     }
 
     #[futures_test::test]
-    async fn memory_storage_conforms_to_delta_append_contract() {
-        let storage = MemoryStorage::new(&["records"]);
-        conformance::delta_append_current_winner_observes_merged_state(storage).await;
+    async fn memory_storage_conditionals_are_atomic_and_aba_safe() {
+        conformance::atomic_conditionals_preserve_winners_and_reject_stale_deletes(
+            MemoryStorage::new(&["records"]),
+        )
+        .await;
     }
 
     #[futures_test::test]
@@ -3826,59 +3458,5 @@ mod tests {
 
         let stored = store.get(key).await.unwrap().unwrap();
         assert_eq!(stored.get_idx(0).unwrap(), Value::U64(42));
-    }
-
-    #[futures_test::test]
-    async fn memory_test_store_conforms_to_delta_append_contract() {
-        let storage = MemoryStorage::new(&["records"]);
-        conformance::delta_append_current_winner_observes_merged_state(storage).await;
-    }
-
-    #[futures_test::test]
-    async fn memory_storage_delta_append_survives_in_process_rehydration() {
-        fn record(time: u64, node: u8, payload: &[u8]) -> Vec<u8> {
-            let mut bytes = Vec::new();
-            bytes.extend(time.to_le_bytes());
-            bytes.extend([node; 16]);
-            bytes.extend(payload);
-            bytes
-        }
-        fn delta(time: u64, node: u8, record: Vec<u8>) -> StorageDelta {
-            StorageDelta::current_winner(CurrentWinnerDelta {
-                tx_time: time,
-                tx_node_uuid: [node; 16],
-                parents: Vec::new(),
-                tx_time_offset: 0,
-                tx_node_uuid_offset: 8,
-                record,
-            })
-            .unwrap()
-        }
-
-        let storage = MemoryStorage::new(&["records"]);
-        storage
-            .write_many(vec![OwnedWriteOperation::delta(
-                "records",
-                b"row",
-                delta(10, 1, record(10, 1, b"older")),
-            )])
-            .await
-            .unwrap();
-        storage
-            .write_many(vec![OwnedWriteOperation::delta(
-                "records",
-                b"row",
-                delta(20, 2, record(20, 2, b"newer")),
-            )])
-            .await
-            .unwrap();
-        let reopened = storage.reopen(Vec::new()).await.unwrap();
-        assert_eq!(
-            reopened
-                .get("records".into(), b"row".to_vec())
-                .await
-                .unwrap(),
-            Some(record(20, 2, b"newer"))
-        );
     }
 }

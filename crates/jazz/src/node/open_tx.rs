@@ -15,16 +15,28 @@ where
     pub async fn open_exclusive(&mut self, id: OpenTransactionId) -> Result<(), Error> {
         self.open_transaction(
             id,
-            OpenTransactionKind::Exclusive { bound_author: None },
-            AuthorId::SYSTEM,
+            OpenTransactionKind::Exclusive {
+                bound_author: Some(AuthorSubject::SYSTEM),
+            },
+            AuthorSubject::SYSTEM,
         )
         .await
+    }
+
+    #[cfg(feature = "testing")]
+    /// Open an exclusive transaction for a synthetic test identity.
+    pub async fn open_exclusive_for_test(
+        &mut self,
+        id: OpenTransactionId,
+        made_by: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.open_exclusive_for_identity(id, made_by).await
     }
 
     pub(crate) async fn open_exclusive_for_identity(
         &mut self,
         id: OpenTransactionId,
-        made_by: AuthorId,
+        made_by: AuthorSubject,
     ) -> Result<(), Error> {
         self.open_transaction(
             id,
@@ -40,8 +52,8 @@ where
     pub(crate) async fn open_mergeable(
         &mut self,
         id: OpenTransactionId,
-        made_by: AuthorId,
-        permission_subject: Option<AuthorId>,
+        made_by: AuthorSubject,
+        permission_subject: Option<AuthorSubject>,
     ) -> Result<(), Error> {
         self.open_transaction(
             id,
@@ -54,11 +66,62 @@ where
         .await
     }
 
+    /// Whether an open mergeable batch separates durable provenance from its
+    /// permission subject. Such batches are deliberately root-only until
+    /// branch attribution has a complete representation.
+    pub(crate) fn mergeable_transaction_is_attributed(
+        &self,
+        id: OpenTransactionId,
+    ) -> Result<bool, Error> {
+        match self.open_tx(id)?.kind {
+            OpenTransactionKind::Mergeable {
+                made_by,
+                permission_subject: Some(subject),
+            } => Ok(subject != made_by),
+            OpenTransactionKind::Mergeable { .. } | OpenTransactionKind::Exclusive { .. } => {
+                Ok(false)
+            }
+        }
+    }
+
+    /// Return the policy identity bound to an open mergeable transaction.
+    pub(crate) fn mergeable_transaction_permission_subject(
+        &self,
+        id: OpenTransactionId,
+    ) -> Result<Option<AuthorSubject>, Error> {
+        match self.open_tx(id)?.kind {
+            OpenTransactionKind::Mergeable {
+                permission_subject, ..
+            } => Ok(permission_subject),
+            OpenTransactionKind::Exclusive { .. } => Err(Error::InvalidMergeableCommit(
+                "open transaction is not mergeable",
+            )),
+        }
+    }
+
+    /// Return the identity capability bound to an open exclusive transaction.
+    pub(crate) fn exclusive_transaction_bound_author(
+        &self,
+        id: OpenTransactionId,
+    ) -> Result<AuthorSubject, Error> {
+        match self.open_tx(id)?.kind {
+            OpenTransactionKind::Exclusive {
+                bound_author: Some(author),
+            } => Ok(author),
+            OpenTransactionKind::Exclusive { bound_author: None } => {
+                Ok(self.open_tx(id)?.provisional_author)
+            }
+            OpenTransactionKind::Mergeable { .. } => Err(Error::InvalidMergeableCommit(
+                "open transaction is not exclusive",
+            )),
+        }
+    }
+
     async fn open_transaction(
         &mut self,
         id: OpenTransactionId,
         kind: OpenTransactionKind,
-        provisional_author: AuthorId,
+        provisional_author: AuthorSubject,
     ) -> Result<(), Error> {
         self.require_catalogue_ready()?;
         if self.open_tx.open_transactions.contains_key(&id)
@@ -263,9 +326,9 @@ where
                     (
                         RowProvenance {
                             created_by: created.created_by(),
-                            created_at: created.created_at(),
+                            created_at: created.created_at().physical_ms(),
                             updated_by: updated.updated_by(),
-                            updated_at: updated.updated_at(),
+                            updated_at: updated.updated_at().physical_ms(),
                         },
                         (updated.tx_time(), updated.tx_node_alias()),
                     )
@@ -275,7 +338,7 @@ where
                     let Some(now_ms) = write.now_ms else {
                         continue;
                     };
-                    let updated_at = TxTime(now_ms);
+                    let updated_at = now_ms;
                     provenance = Some(match provenance {
                         Some(existing) => RowProvenance {
                             updated_by: provisional_author,
@@ -420,6 +483,7 @@ where
             parents: parent.into_iter().collect(),
             now_ms,
             refresh_parents_at_commit: false,
+            known_fresh_row: false,
         };
         let open_tx = self.open_tx_mut(tx_id)?;
         open_tx
@@ -461,6 +525,7 @@ where
             parents,
             now_ms,
             refresh_parents_at_commit,
+            false,
         )
         .await
     }
@@ -476,6 +541,7 @@ where
         parents: Vec<TxId>,
         now_ms: Option<u64>,
         refresh_parents_at_commit: bool,
+        known_fresh_row: bool,
     ) -> Result<(), Error> {
         self.tx_write_mergeable_in_schema_and_branch(
             tx_id,
@@ -488,6 +554,7 @@ where
             now_ms,
             refresh_parents_at_commit,
             BranchSelector::default(),
+            known_fresh_row,
         )
     }
 
@@ -504,6 +571,7 @@ where
         now_ms: Option<u64>,
         refresh_parents_at_commit: bool,
         branch: BranchSelector,
+        known_fresh_row: bool,
     ) -> Result<(), Error> {
         if !matches!(
             self.open_tx(tx_id)?.kind,
@@ -528,6 +596,7 @@ where
                 parents,
                 now_ms,
                 refresh_parents_at_commit,
+                known_fresh_row,
             },
         )
     }
@@ -620,6 +689,7 @@ where
                 parents: Vec::new(),
                 now_ms,
                 refresh_parents_at_commit: false,
+                known_fresh_row: false,
             },
         )
     }
@@ -627,7 +697,7 @@ where
     fn stage_mergeable_write(
         &mut self,
         tx_id: OpenTransactionId,
-        pending: PendingWrite,
+        mut pending: PendingWrite,
     ) -> Result<(), Error> {
         let open_tx = self.open_tx_mut(tx_id)?;
         open_tx
@@ -640,6 +710,7 @@ where
                     && write.branch == pending.branch
                     && write.deletion.is_none()
             }) {
+                pending.known_fresh_row |= existing.known_fresh_row;
                 let cells = match (&existing.cells, &pending.cells) {
                     (PendingCells::Replace(existing), PendingCells::Patch(patch)) => {
                         let mut cells = existing.clone();
@@ -681,28 +752,41 @@ where
     }
 
     /// Commit an exclusive transaction and return its sync commit unit.
+    pub(crate) async fn commit_exclusive_bound(
+        &mut self,
+        open_batch_id: OpenTransactionId,
+        now_ms: u64,
+    ) -> Result<(PublishedTransaction, SyncMessage), Error> {
+        let OpenTransactionKind::Exclusive {
+            bound_author: Some(author),
+        } = self.open_tx(open_batch_id)?.kind
+        else {
+            return Err(Error::OpenTransactionIdentityMismatch);
+        };
+        self.commit_exclusive(open_batch_id, author, now_ms).await
+    }
+
+    /// Commit an exclusive transaction and return its sync commit unit.
     pub async fn commit_exclusive(
         &mut self,
         open_batch_id: OpenTransactionId,
-        made_by: AuthorId,
+        made_by: AuthorSubject,
         now_ms: u64,
     ) -> Result<(PublishedTransaction, SyncMessage), Error> {
-        if !matches!(
-            self.open_tx(open_batch_id)?.kind,
-            OpenTransactionKind::Exclusive { .. }
-        ) {
-            return Err(Error::InvalidMergeableCommit(
-                "open transaction is not exclusive",
-            ));
-        }
-        if matches!(
-            self.open_tx(open_batch_id)?.kind,
+        let made_by = match self.open_tx(open_batch_id)?.kind {
             OpenTransactionKind::Exclusive {
-                bound_author: Some(bound)
-            } if bound != made_by
-        ) {
-            return Err(Error::OpenTransactionIdentityMismatch);
-        }
+                bound_author: Some(bound_author),
+            } if bound_author != made_by => return Err(Error::OpenTransactionIdentityMismatch),
+            OpenTransactionKind::Exclusive {
+                bound_author: Some(bound_author),
+            } => bound_author,
+            OpenTransactionKind::Exclusive { bound_author: None } => made_by,
+            OpenTransactionKind::Mergeable { .. } => {
+                return Err(Error::InvalidMergeableCommit(
+                    "open transaction is not exclusive",
+                ));
+            }
+        };
         if !self
             .open_exclusive_is_locally_serializable(open_batch_id)
             .await?
@@ -715,10 +799,19 @@ where
             .get(&open_batch_id)
             .cloned()
             .ok_or(Error::MissingOpenBatch(open_batch_id))?;
+        for write in &open_tx.writes {
+            if let Some(provenance_ms) = write.now_ms {
+                TxTime::from_physical_ms(provenance_ms).map_err(|_| {
+                    Error::InvalidMergeableCommit(
+                        "exclusive write now_ms exceeds packed HLC physical-millisecond range",
+                    )
+                })?;
+            }
+        }
         for parent in open_tx.writes.iter().flat_map(|write| write.parents.iter()) {
             self.merge_tx_time(parent.time);
         }
-        let made_at = self.mint_tx_time(now_ms);
+        let made_at = self.mint_tx_time(now_ms)?;
         let tx_id = TxId::new(made_at, self.node_uuid);
         let provenance_snapshot = open_tx.base_snapshot.clone();
         let mut versions = Vec::with_capacity(open_tx.writes.len());
@@ -732,13 +825,50 @@ where
                 )
                 .await;
             let table_schema = self.table_in_schema(&write.table, write.schema_version)?;
-            let PendingCells::Replace(cells) = write.cells else {
+            let PendingCells::Replace(mut cells) = write.cells else {
                 return Err(Error::InvalidMergeableCommit(
                     "exclusive transaction cannot contain update patches",
                 ));
             };
+            let snapshot_row = self
+                .snapshot_row_in_schema(
+                    write.schema_version,
+                    &write.table,
+                    write.row_uuid,
+                    &provenance_snapshot,
+                )
+                .await?;
+            let inherited = table_schema
+                .columns
+                .iter()
+                .zip(snapshot_row.content_cells.unwrap_or_default())
+                .filter_map(|(column, value)| value.map(|value| (column.name.clone(), value)))
+                .collect::<BTreeMap<_, _>>();
+            for (column, value) in &cells {
+                if value_contains_indirect_descriptor(value) && inherited.get(column) != Some(value)
+                {
+                    return Err(Error::InvalidMergeableCommit(
+                        "exclusive transaction contains an unverified large-value descriptor",
+                    ));
+                }
+            }
+            for (column, value) in &mut cells {
+                let semantic_kind = table_schema
+                    .columns
+                    .iter()
+                    .find(|candidate| candidate.name == *column)
+                    .map(|column| column.large_value_kind)
+                    .unwrap_or(crate::schema::LargeValueSemanticKind::NotLarge);
+                self.prepare_and_stage_large_scalar(value, semantic_kind)
+                    .await?;
+            }
             let cells = positional_cells_from_map(&table_schema, &cells)?;
-            let provenance_at = TxTime(write.now_ms.unwrap_or(now_ms));
+            let provenance_at =
+                TxTime::from_physical_ms(write.now_ms.unwrap_or(now_ms)).map_err(|_| {
+                    Error::InvalidMergeableCommit(
+                        "exclusive write now_ms exceeds packed HLC physical-millisecond range",
+                    )
+                })?;
             let (created_by, created_at) = snapshot_content
                 .as_ref()
                 .map(|version| (version.created_by(), version.created_at()))
@@ -749,9 +879,9 @@ where
                 write.row_uuid,
                 write.parents,
                 created_by,
-                created_at,
+                created_at.physical_ms(),
                 made_by,
-                provenance_at,
+                provenance_at.physical_ms(),
                 &cells,
                 write.deletion,
             )?);
@@ -763,7 +893,11 @@ where
                 Error::InvalidMergeableCommit("transaction write count exceeds u32")
             })?,
             made_by,
-            permission_subject: None,
+            // Exclusive writes carry their trusted open-session identity
+            // explicitly, just like immediate mergeable session writes. This
+            // keeps authority policy evaluation independent from the transport
+            // link's SYSTEM credential.
+            permission_subject: Some(made_by),
             base_snapshot: Some(open_tx.base_snapshot),
             row_read_set: Some(open_tx.row_reads),
             absent_read_set: Some(open_tx.absent_reads),
@@ -781,16 +915,6 @@ where
         self.open_tx.open_transactions.remove(&open_batch_id);
         self.open_tx.closed_batches.insert(open_batch_id);
         Ok((publication, SyncMessage::CommitUnit { tx, versions }))
-    }
-
-    /// Commit an exclusive transaction using the identity bound when it opened.
-    pub async fn commit_exclusive_bound(
-        &mut self,
-        open_batch_id: OpenTransactionId,
-        now_ms: u64,
-    ) -> Result<(PublishedTransaction, SyncMessage), Error> {
-        let author = self.open_tx(open_batch_id)?.provisional_author;
-        self.commit_exclusive(open_batch_id, author, now_ms).await
     }
 
     async fn open_exclusive_is_locally_serializable(
@@ -886,9 +1010,6 @@ where
         };
         let mut commits = Vec::with_capacity(open_tx.writes.len());
         for (index, write) in open_tx.writes.into_iter().enumerate() {
-            for parent in &write.parents {
-                self.merge_tx_time(parent.time);
-            }
             let parents = if write.refresh_parents_at_commit {
                 if write.deletion.is_none() {
                     self.local_content_winner_tx_id_in_branch(
@@ -947,6 +1068,9 @@ where
             if let Some(deletion) = write.deletion {
                 commit = commit.deletion(deletion);
             }
+            if write.known_fresh_row {
+                commit = commit.known_fresh_row();
+            }
             if index == 0
                 && let Some(metadata) = open_tx.user_metadata_json.as_ref()
             {
@@ -954,10 +1078,22 @@ where
             }
             commits.push((write.schema_version, commit));
         }
+        // Constructing an open batch may require snapshot reads, but it must
+        // not advance HLC/parent state until *every* lowered write is valid.
+        // In particular, a later invalid public provenance value must not make
+        // an otherwise valid first write observably consume a clock position.
+        for (_, commit) in &commits {
+            commit.validate()?;
+        }
         let first = commits.first().ok_or(Error::InvalidMergeableCommit(
             "mergeable transaction requires at least one write",
         ))?;
-        let made_at = self.mint_tx_time(first.1.now_ms);
+        for (_, commit) in &commits {
+            for parent in &commit.parents {
+                self.merge_tx_time(parent.time);
+            }
+        }
+        let made_at = self.mint_tx_time(first.1.now_ms)?;
         let committed = self
             .commit_mergeable_many_at_with_schema_versions(commits, made_at)
             .await?;
@@ -1247,13 +1383,11 @@ where
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OpenTransactionKind {
     Exclusive {
-        /// Present only for identity-capability transactions opened by `Db`.
-        /// Low-level node transactions retain their historical commit-time author.
-        bound_author: Option<AuthorId>,
+        bound_author: Option<AuthorSubject>,
     },
     Mergeable {
-        made_by: AuthorId,
-        permission_subject: Option<AuthorId>,
+        made_by: AuthorSubject,
+        permission_subject: Option<AuthorSubject>,
     },
 }
 
@@ -1262,7 +1396,7 @@ pub(super) struct OpenTransaction {
     /// Commit semantics and attribution carried by this open transaction.
     pub(super) kind: OpenTransactionKind,
     /// Author reflected by transaction-local provenance before commit.
-    pub(super) provisional_author: AuthorId,
+    pub(super) provisional_author: AuthorSubject,
     /// Snapshot captured when the transaction opened.
     pub(super) base_snapshot: Snapshot,
     /// Base snapshot row derivations observed by point reads in this transaction.
@@ -1306,6 +1440,9 @@ pub(super) struct PendingWrite {
     pub(super) now_ms: Option<u64>,
     /// Whether restore parents must follow the current layer winner at commit time.
     pub(super) refresh_parents_at_commit: bool,
+    /// The production UUID source generated this staged insert's id, so it may
+    /// use the trusted fresh-coordinate fast path.
+    pub(super) known_fresh_row: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

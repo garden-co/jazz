@@ -262,6 +262,12 @@ impl Database {
                 });
             }
         }
+        if !self.resident_publications.is_empty() {
+            return Err(Error::TableIndexRegistrationWhilePublicationsResident {
+                table: table.to_owned(),
+                index: index.name,
+            });
+        }
         if let Err(error) = self
             .ivm_runtime
             .register_table_index(table, index, &self.storage)

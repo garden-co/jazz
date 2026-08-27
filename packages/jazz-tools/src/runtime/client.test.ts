@@ -2,7 +2,10 @@ import { describe, it, expect, vi } from "vitest";
 import {
   JazzClient,
   ExclusiveWriteHandle,
+  ReadTier,
   resolveDefaultDurabilityTier,
+  resolveEffectiveQueryExecutionOptions,
+  resolveReadTier,
   type Runtime,
   type TransactionalRuntime,
   type BatchId,
@@ -142,6 +145,51 @@ describe("JazzClient onAuthFailure wiring", () => {
   });
 });
 
+describe("JazzClient subscription ownership", () => {
+  it("releases a created handle when synchronous callback installation throws", () => {
+    const runtime = makeFakeRuntime();
+    const failure = new Error("executeSubscription failed after callback");
+    runtime.createSubscription.mockReturnValue(41);
+    runtime.executeSubscription.mockImplementation((_handle, onUpdate) => {
+      onUpdate({ added: [], updated: [], removed: [] });
+      throw failure;
+    });
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const callback = vi.fn();
+
+    expect(() => client.subscribe('{"table":"todos"}', callback)).toThrow(failure);
+
+    expect(callback).toHaveBeenCalledOnce();
+    expect(runtime.unsubscribe).toHaveBeenCalledOnce();
+    expect(runtime.unsubscribe).toHaveBeenCalledWith(41);
+  });
+});
+
+describe("JazzClient native session boundary", () => {
+  it("keeps public author out of serialized query sessions", async () => {
+    const runtime = makeFakeRuntime();
+    runtime.query.mockResolvedValue([]);
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const session = {
+      issuer: "https://issuer.example",
+      user_id: "alice",
+      claims: { role: "reader" },
+      authMode: "external",
+    } as const;
+
+    await client.query('{"table":"todos"}', undefined, session);
+
+    const serialized = JSON.parse(runtime.query.mock.calls[0][1] ?? "null");
+    expect(serialized).toEqual({
+      issuer: "https://issuer.example",
+      user_id: "alice",
+      claims: { role: "reader" },
+      authMode: "external",
+    });
+    expect(serialized).not.toHaveProperty("author");
+  });
+});
+
 describe("JazzClient.updateAuthToken", () => {
   it("forwards refreshed JWT to the Rust runtime via runtime.updateAuth", () => {
     const runtime = makeFakeRuntime();
@@ -213,6 +261,7 @@ describe("JazzClient.updateCookieSession", () => {
           subject: "alice-subject",
           issuer: "https://issuer.example",
         },
+        issuer: "https://issuer.example",
         authMode: "external",
       },
     });
@@ -225,6 +274,7 @@ describe("JazzClient.updateCookieSession", () => {
         subject: "alice-subject",
         issuer: "https://issuer.example",
       },
+      issuer: "https://issuer.example",
       authMode: "external",
     });
 
@@ -242,11 +292,13 @@ describe("JazzClient.updateCookieSession", () => {
       cookieSession: {
         user_id: "00000000-0000-0000-0000-000000000001",
         claims: { role: "reader" },
+        issuer: "https://issuer.example",
         authMode: "external",
       },
     });
 
     const refreshed = {
+      issuer: "https://issuer.example",
       user_id: "00000000-0000-0000-0000-000000000001",
       claims: { role: "writer" },
       authMode: "external" as const,
@@ -269,6 +321,29 @@ describe("resolveDefaultDurabilityTier", () => {
 
   it("still prefers edge when a server is configured outside the browser runtime", () => {
     expect(resolveDefaultDurabilityTier({ serverUrl: "https://example.test" })).toBe("edge");
+  });
+});
+
+describe("public read tiers", () => {
+  it("lowers each new public tier to the existing native durability contract", () => {
+    expect(resolveReadTier(ReadTier.LocalFirst)).toBe("local");
+    expect(resolveReadTier(ReadTier.Remote)).toBe("edge");
+    expect(resolveReadTier(ReadTier.RemoteIfPossible)).toBe("edge");
+  });
+
+  it("keeps legacy read durability controls byte-for-byte compatible", () => {
+    for (const tier of ["local", "edge", "global"] as const) {
+      expect(resolveReadTier(tier)).toBe(tier);
+      expect(resolveEffectiveQueryExecutionOptions({}, { tier })).toMatchObject({ tier });
+    }
+  });
+
+  it("does not reinterpret remote-if-possible as a third native tier", () => {
+    expect(
+      resolveEffectiveQueryExecutionOptions({}, { tier: ReadTier.RemoteIfPossible }),
+    ).toMatchObject({
+      tier: "edge",
+    });
   });
 });
 
@@ -308,12 +383,12 @@ describe("JazzClient transaction query plumbing", () => {
     );
 
     expect(JSON.parse(runtime.insert.mock.calls[0][2] as string)).toMatchObject({
-      branch_view: { head: { values: { workspace: [14, 14] } } },
+      branch_view: { head: { values: { workspace: [15, 14] } } },
     });
     expect(JSON.parse(runtime.update.mock.calls[0][3] as string)).toMatchObject({
       branch_view: {
-        head: { values: { workspace: [14, 14] } },
-        base: { Current: { values: { workspace: [14, 2] } } },
+        head: { values: { workspace: [15, 14] } },
+        base: { Current: { values: { workspace: [15, 2] } } },
       },
     });
   });
@@ -343,12 +418,12 @@ describe("JazzClient transaction query plumbing", () => {
       read_view: {
         source: {
           BranchView: {
-            head: { values: { workspace: [14, 14] } },
+            head: { values: { workspace: [15, 14] } },
             base: {
               Current: {
                 values: {
-                  workspace: [14, 2],
-                  tenant: [8, 16, ...Array(16).fill(0x42)],
+                  workspace: [15, 2],
+                  tenant: [9, 16, ...Array(16).fill(0x42)],
                 },
               },
             },

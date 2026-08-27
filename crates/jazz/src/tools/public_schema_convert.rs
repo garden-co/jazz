@@ -7,7 +7,7 @@ use crate::groove::records::{
 use crate::groove::schema::ColumnType as GrooveColumnType;
 use crate::query::{
     InheritsOperation, JoinCorrelation, JoinSourceLookup, JoinTarget, JoinVia, Operand,
-    PolicyBranch, Predicate, Query,
+    PolicyBranch, Predicate, Query, provider_claim_operand_key,
 };
 use crate::schema::{
     ColumnSchema as CoreColumnSchema, JazzSchema, MergeStrategy, RuntimeSchema,
@@ -25,8 +25,10 @@ use crate::tools::public_schema::{
     TableSchema, Value,
 };
 
-const DIRECT_USER_ID_CLAIM: &str = "user_id";
-const PUBLIC_USER_ID_SESSION_PATHS: &[&str] = &["user_id", "userId"];
+const DIRECT_USER_CLAIM: &str = "user";
+#[cfg(test)]
+const DIRECT_USER_ID_CLAIM: &str = "\0claims:sub";
+const PUBLIC_USER_SESSION_PATHS: &[&str] = &["user"];
 const DIRECT_AUTH_MODE_CLAIM: &str = "authMode";
 const PUBLIC_AUTH_MODE_SESSION_PATHS: &[&str] = &["authMode", "auth_mode"];
 const RESERVED_AGGREGATE_OUTPUT_PREFIX: &str = "__jazz_aggregate_";
@@ -352,9 +354,8 @@ fn column_type_for_operand(
     column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
 ) -> Option<TypedLiteralTarget> {
     match column {
-        "id" | "$createdBy" | "$updatedBy" => {
-            Some(TypedLiteralTarget::Core(GrooveColumnType::Uuid))
-        }
+        "id" => Some(TypedLiteralTarget::Core(GrooveColumnType::Uuid)),
+        "$createdBy" | "$updatedBy" => Some(TypedLiteralTarget::Core(GrooveColumnType::String)),
         "$createdAt" | "$updatedAt" => Some(TypedLiteralTarget::Core(GrooveColumnType::U64)),
         _ => column_types
             .get(table)
@@ -548,6 +549,24 @@ fn convert_table(
         "policies.select.using",
         table.policies.select.using.as_ref(),
     )?;
+    let update_using = convert_optional_policy(
+        schema,
+        table,
+        name,
+        "policies.update.using",
+        table.policies.update.using.as_ref(),
+    )?;
+    let delete_using = if table.policies.delete.using.is_some() {
+        convert_optional_policy(
+            schema,
+            table,
+            name,
+            "policies.delete.using",
+            table.policies.delete.using.as_ref(),
+        )?
+    } else {
+        update_using.clone()
+    };
     converted.write_policies = WritePolicies {
         insert_check: convert_optional_policy(
             schema,
@@ -556,13 +575,7 @@ fn convert_table(
             "policies.insert.with_check",
             table.policies.insert.with_check.as_ref(),
         )?,
-        update_using: convert_optional_policy(
-            schema,
-            table,
-            name,
-            "policies.update.using",
-            table.policies.update.using.as_ref(),
-        )?,
+        update_using,
         update_check: convert_optional_policy(
             schema,
             table,
@@ -570,13 +583,7 @@ fn convert_table(
             "policies.update.with_check",
             table.policies.update.with_check.as_ref(),
         )?,
-        delete_using: convert_optional_policy(
-            schema,
-            table,
-            name,
-            "policies.delete.using",
-            table.policies.delete.using.as_ref(),
-        )?,
+        delete_using,
     };
     Ok(converted)
 }
@@ -593,6 +600,12 @@ fn convert_column(
         column_type = column_type.nullable();
     }
     let mut converted = CoreColumnSchema::new(column.name.as_str(), column_type);
+    if matches!(column.column_type, ColumnType::Json { .. }) {
+        // JSON is logically represented as Groove's canonical string value,
+        // but its physical large-scalar interpretation is schema-derived and
+        // deliberately distinct from text.
+        converted.large_value_kind = crate::schema::LargeValueSemanticKind::Json;
+    }
     if let Some(default) = &column.default {
         converted.default = Some(convert_column_default(table, column, default)?);
     }
@@ -873,17 +886,16 @@ fn convert_merge_strategy(
     column: &ColumnDescriptor,
     strategy: ColumnMergeStrategy,
 ) -> Result<MergeStrategy, SchemaConversionError> {
+    column.validate_merge_strategy().map_err(|message| {
+        err(
+            format!("$.{}.{}", table.as_str(), column.name.as_str()),
+            message,
+        )
+    })?;
+
     match strategy {
         ColumnMergeStrategy::Counter => Ok(MergeStrategy::Counter),
-        ColumnMergeStrategy::GSet
-            if !column.nullable && matches!(column.column_type, ColumnType::Array { .. }) =>
-        {
-            Ok(MergeStrategy::GSet)
-        }
-        ColumnMergeStrategy::GSet => Err(err(
-            format!("$.{}.{}", table.as_str(), column.name.as_str()),
-            "GSet merge strategy requires a non-nullable ARRAY column",
-        )),
+        ColumnMergeStrategy::GSet => Ok(MergeStrategy::GSet),
     }
 }
 
@@ -1010,13 +1022,15 @@ fn convert_policy_with_native_select_inherits(
 }
 
 fn is_core_policy_clause(expr: &PolicyExpr) -> bool {
-    matches!(
-        expr,
+    match expr {
         PolicyExpr::Inherits { max_depth: _, .. }
-            | PolicyExpr::InheritsReferencing { .. }
-            | PolicyExpr::Exists { .. }
-            | PolicyExpr::ExistsRel { .. }
-    )
+        | PolicyExpr::InheritsReferencing { .. }
+        | PolicyExpr::Exists { .. }
+        | PolicyExpr::ExistsRel { .. } => true,
+        PolicyExpr::And(exprs) | PolicyExpr::Or(exprs) => exprs.iter().any(is_core_policy_clause),
+        PolicyExpr::Not(expr) => is_core_policy_clause(expr),
+        _ => false,
+    }
 }
 
 fn policy_requires_branch(expr: &PolicyExpr) -> bool {
@@ -1041,6 +1055,21 @@ fn append_policy_clause(
     native_select_inherits: bool,
 ) -> Result<Query, SchemaConversionError> {
     match expr {
+        PolicyExpr::And(exprs) => {
+            let mut query = query;
+            for (index, expr) in exprs.iter().enumerate() {
+                query = append_policy_clause(
+                    schema,
+                    table_schema,
+                    table,
+                    &format!("{path}.And[{index}]"),
+                    query,
+                    expr,
+                    native_select_inherits,
+                )?;
+            }
+            Ok(query)
+        }
         PolicyExpr::Inherits {
             operation,
             via_column,
@@ -1270,13 +1299,11 @@ fn append_exists_policy_clause(
 
     let mut outer_correlations = Vec::new();
     let mut filters = Vec::new();
+    let mut nested_exists = Vec::new();
+    let mut conditions = Vec::new();
+    collect_policy_conjuncts(condition, &mut conditions);
 
-    let conditions = match condition {
-        PolicyExpr::And(exprs) => exprs.as_slice(),
-        expr => std::slice::from_ref(expr),
-    };
-
-    for (index, expr) in conditions.iter().enumerate() {
+    for (index, expr) in conditions.into_iter().enumerate() {
         match expr {
             PolicyExpr::Cmp {
                 column,
@@ -1288,6 +1315,10 @@ fn append_exists_policy_clause(
                     source_column: path_segments[1].clone(),
                 });
             }
+            PolicyExpr::Exists {
+                table: nested_table,
+                condition: nested_condition,
+            } => nested_exists.push((index, nested_table.as_str(), nested_condition.as_ref())),
             other => filters.push(convert_policy_predicate(
                 &exists_table_name,
                 &format!("{path}.Exists[{index}]"),
@@ -1311,23 +1342,52 @@ fn append_exists_policy_clause(
     let source_column = primary.source_column;
     let correlated_filters = outer_correlations;
 
-    if join_column == "id" {
-        Ok(query.join_via_row_id_with_correlations(
+    let query = if join_column == "id" {
+        query.join_via_row_id_with_correlations(
             exists_table,
             source_column,
             correlated_filters,
             filters,
-        ))
+        )
     } else if correlated_filters.is_empty() {
-        Ok(query.join_via_column(exists_table, join_column, source_column, filters))
+        query.join_via_column(exists_table, join_column, source_column, filters)
     } else {
-        Ok(query.join_via_column_with_correlations(
+        query.join_via_column_with_correlations(
             exists_table,
             join_column,
             source_column,
             correlated_filters,
             filters,
-        ))
+        )
+    };
+
+    // Legacy `Exists` has one outer-row scope, even when an all-of nests
+    // another EXISTS. Each nested existential is therefore an additional
+    // proof about the protected row, not a join relative to the first proof
+    // row. Lower it through this same correlated-join path so every declared
+    // FK edge remains independently validated by the core query contract.
+    nested_exists
+        .into_iter()
+        .try_fold(query, |query, (index, nested_table, nested_condition)| {
+            append_exists_policy_clause(
+                schema,
+                table,
+                &format!("{path}.Exists[{index}]"),
+                query,
+                nested_table,
+                nested_condition,
+            )
+        })
+}
+
+fn collect_policy_conjuncts<'a>(expr: &'a PolicyExpr, output: &mut Vec<&'a PolicyExpr>) {
+    match expr {
+        PolicyExpr::And(children) => {
+            for child in children {
+                collect_policy_conjuncts(child, output);
+            }
+        }
+        other => output.push(other),
     }
 }
 
@@ -1374,7 +1434,16 @@ fn append_exists_rel_policy_clause(
     let correlation_index = lowered
         .filters
         .iter()
-        .position(|filter| matches!(filter.value, Some(LoweredRelValue::OuterRow(_))))
+        .position(|filter| {
+            matches!(filter.value, Some(LoweredRelValue::OuterRow(_)))
+                && filter.column.as_deref() == Some("id")
+        })
+        .or_else(|| {
+            lowered
+                .filters
+                .iter()
+                .position(|filter| matches!(filter.value, Some(LoweredRelValue::OuterRow(_))))
+        })
         .ok_or_else(|| {
             err(
                 format!("$.{}.{}", table.as_str(), path),
@@ -1395,11 +1464,23 @@ fn append_exists_rel_policy_clause(
         ));
     };
 
-    let remaining_filters = lowered
-        .filters
-        .iter()
-        .map(|filter| filter.predicate.clone())
-        .collect::<Vec<_>>();
+    // An ExistsRel can correlate more than one key from the protected row.
+    // Keep every extra outer-row equality as part of the join predicate;
+    // lowering it as the placeholder `Predicate::All([])` would otherwise
+    // prove the referenced row but not that it belongs to the same workspace.
+    let mut correlated_filters = Vec::new();
+    let mut remaining_filters = Vec::new();
+    for filter in &lowered.filters {
+        match (&filter.column, &filter.value) {
+            (Some(join_column), Some(LoweredRelValue::OuterRow(source_column))) => {
+                correlated_filters.push(JoinCorrelation {
+                    join_column: join_column.clone(),
+                    source_column: source_column.clone(),
+                });
+            }
+            _ => remaining_filters.push(filter.predicate.clone()),
+        }
+    }
 
     for reachable in &mut lowered.reachable {
         if reachable.access_row_column == "__pending_outer_row" {
@@ -1435,17 +1516,57 @@ fn append_exists_rel_policy_clause(
     }
 
     if !lowered.joins.is_empty() {
-        if lowered.joins.len() != 1 {
-            return Err(err(
-                format!("$.{}.{}", table.as_str(), path),
-                "core schema ExistsRel policies support one join chain at the server shell boundary",
-            ));
+        // The relation's left-most scan is the row correlated to the
+        // protected row. Its joins remain nested beneath that root; replacing
+        // it with the first nested join loses the FK relation and produces a
+        // `JoinNotRefCompatible` plan (for example task.block -> member.id).
+        // Lift outer correlations on a nested join through its equality edge,
+        // so `member.workspace = outer.workspace` constrains the root block's
+        // workspace without publishing any proof carrier.
+        for nested in &mut lowered.joins {
+            if nested
+                .nested_joins
+                .iter()
+                .any(|child| !child.correlated_filters.is_empty())
+            {
+                return Err(err(
+                    format!("$.{}.{}", table.as_str(), path),
+                    "core schema ExistsRel does not yet support outer correlations beyond one nested join",
+                ));
+            }
+            let source_column = nested.source_column.clone().ok_or_else(|| {
+                err(
+                    format!("$.{}.{}", table.as_str(), path),
+                    "core schema ExistsRel nested join is missing its source column",
+                )
+            })?;
+            for correlation in std::mem::take(&mut nested.correlated_filters) {
+                if correlation.join_column != nested.on_column {
+                    return Err(err(
+                        format!("$.{}.{}", table.as_str(), path),
+                        "core schema ExistsRel nested outer correlation must use its join key",
+                    ));
+                }
+                correlated_filters.push(JoinCorrelation {
+                    join_column: source_column.clone(),
+                    source_column: correlation.source_column,
+                });
+            }
         }
-        let mut join = lowered.joins.remove(0);
-        join.source_column = Some(source_column);
-        join.on_column = correlation_column;
-        join.filters.extend(remaining_filters);
-        query.joins.push(join);
+        query.joins.push(JoinVia {
+            table: lowered.table,
+            on_column: correlation_column.clone(),
+            target: if correlation_column == "id" {
+                JoinTarget::RowId
+            } else {
+                JoinTarget::Column
+            },
+            source_column: Some(source_column),
+            source_lookup: None,
+            correlated_filters,
+            filters: remaining_filters,
+            nested_joins: lowered.joins,
+        });
         return Ok(query);
     }
 
@@ -1455,9 +1576,20 @@ fn append_exists_rel_policy_clause(
         .map(|filter| filter.predicate)
         .collect::<Vec<_>>();
     if correlation_column == "id" {
-        Ok(query.join_via_row_id(lowered.table, source_column, filters))
+        Ok(query.join_via_row_id_with_correlations(
+            lowered.table,
+            source_column,
+            correlated_filters,
+            filters,
+        ))
     } else {
-        Ok(query.join_via_column(lowered.table, correlation_column, source_column, filters))
+        Ok(query.join_via_column_with_correlations(
+            lowered.table,
+            correlation_column,
+            source_column,
+            correlated_filters,
+            filters,
+        ))
     }
 }
 
@@ -1551,6 +1683,21 @@ fn lower_exists_rel(
                 });
             }
 
+            let mut correlated_filters = Vec::new();
+            let filters = right
+                .filters
+                .into_iter()
+                .filter_map(|filter| match (filter.column, filter.value) {
+                    (Some(join_column), Some(LoweredRelValue::OuterRow(source_column))) => {
+                        correlated_filters.push(JoinCorrelation {
+                            join_column,
+                            source_column,
+                        });
+                        None
+                    }
+                    _ => Some(filter.predicate),
+                })
+                .collect();
             let join = JoinVia {
                 table: right.table,
                 on_column: on.right.column.clone(),
@@ -1561,12 +1708,8 @@ fn lower_exists_rel(
                 },
                 source_column: Some(on.left.column.clone()),
                 source_lookup: None,
-                correlated_filters: Vec::new(),
-                filters: right
-                    .filters
-                    .into_iter()
-                    .map(|filter| filter.predicate)
-                    .collect(),
+                correlated_filters,
+                filters,
                 nested_joins: right.joins,
             };
             left.joins.push(join);
@@ -2417,9 +2560,8 @@ fn convert_session_path_operand(
     path: &str,
     path_segments: &[String],
 ) -> Result<Operand, SchemaConversionError> {
-    if path_segments.len() == 1 && PUBLIC_USER_ID_SESSION_PATHS.contains(&path_segments[0].as_str())
-    {
-        return Ok(Operand::Claim(DIRECT_USER_ID_CLAIM.to_owned()));
+    if path_segments.len() == 1 && PUBLIC_USER_SESSION_PATHS.contains(&path_segments[0].as_str()) {
+        return Ok(Operand::Claim(DIRECT_USER_CLAIM.to_owned()));
     }
     if path_segments.len() == 1
         && PUBLIC_AUTH_MODE_SESSION_PATHS.contains(&path_segments[0].as_str())
@@ -2427,12 +2569,14 @@ fn convert_session_path_operand(
         return Ok(Operand::Claim(DIRECT_AUTH_MODE_CLAIM.to_owned()));
     }
     if path_segments.len() == 2 && path_segments[0] == "claims" {
-        return Ok(Operand::Claim(path_segments[1].clone()));
+        return Ok(Operand::Claim(provider_claim_operand_key(
+            &path_segments[1],
+        )));
     }
     Err(err(
         format!("$.{}.{}", table.as_str(), path),
         format!(
-            "core schema policies only support session.user_id, session.authMode, and session.claims.* references, got session.{}",
+            "core schema policies only support session.user, session.authMode, and raw provider claims through session.claims[\"name\"]; got session.{}",
             path_segments.join(".")
         ),
     ))
@@ -2449,7 +2593,22 @@ fn convert_policy_literal(
         Value::Text(value) => Ok(GrooveValue::String(value.clone())),
         Value::Integer(value) => Ok(GrooveValue::I32(*value)),
         Value::BigInt(value) => Ok(GrooveValue::I64(*value)),
+        Value::Double(value) if value.is_finite() => Ok(GrooveValue::F64(*value)),
+        Value::Double(_) => Err(err(
+            format!("$.{}.{}", table.as_str(), path),
+            "core schema policy floating-point literals must be finite numbers",
+        )),
+        Value::Timestamp(value) => Ok(GrooveValue::U64(*value)),
         Value::Uuid(value) => Ok(GrooveValue::Uuid(*value.uuid())),
+        Value::Bytea(value) => Ok(GrooveValue::Bytes(value.clone())),
+        Value::Array(values) => values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                convert_policy_literal(table, &format!("{path}.Array[{index}]"), value)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(GrooveValue::Array),
         other => Err(err(
             format!("$.{}.{}", table.as_str(), path),
             format!("core schema policies do not support {other:?} literals yet"),
@@ -2498,6 +2657,99 @@ mod tests {
     };
     use std::path::PathBuf;
     use uuid::Uuid;
+
+    fn schema_with_counter_column(column: ColumnDescriptor) -> Schema {
+        Schema::from([(
+            TableName::new("counters"),
+            TableSchema::new(RowDescriptor::new(vec![
+                column.merge_strategy(ColumnMergeStrategy::Counter),
+            ])),
+        )])
+    }
+
+    #[test]
+    fn converts_counter_merge_strategy_on_integer_columns() {
+        let schema =
+            schema_with_counter_column(ColumnDescriptor::new("integer_value", ColumnType::Integer));
+
+        let converted =
+            convert_public_schema(&schema).expect("integer counter column must convert");
+
+        assert_eq!(
+            converted.tables[0].merge_strategy("integer_value"),
+            MergeStrategy::Counter
+        );
+    }
+
+    #[test]
+    fn converts_counter_merge_strategy_on_bigint_columns() {
+        let schema =
+            schema_with_counter_column(ColumnDescriptor::new("bigint_value", ColumnType::BigInt));
+
+        let converted = convert_public_schema(&schema).expect("bigint counter column must convert");
+
+        assert_eq!(
+            converted.tables[0].merge_strategy("bigint_value"),
+            MergeStrategy::Counter
+        );
+    }
+
+    #[test]
+    fn rejects_counter_merge_strategy_on_nullable_integer_columns_with_exact_path() {
+        let cases = [
+            (
+                ColumnDescriptor::new("nullable_integer", ColumnType::Integer).nullable(),
+                "$.counters.nullable_integer: Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns",
+            ),
+            (
+                ColumnDescriptor::new("nullable_bigint", ColumnType::BigInt).nullable(),
+                "$.counters.nullable_bigint: Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns",
+            ),
+        ];
+
+        for (column, expected_error) in cases {
+            let schema = schema_with_counter_column(column);
+            let error = convert_public_schema(&schema)
+                .expect_err("nullable counter column must fail conversion");
+
+            assert_eq!(error.to_string(), expected_error);
+        }
+    }
+
+    #[test]
+    fn rejects_counter_merge_strategy_on_non_integer_columns_with_exact_path() {
+        let cases = [
+            (
+                ColumnDescriptor::new("timestamp_value", ColumnType::Timestamp),
+                "$.counters.timestamp_value: Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns",
+            ),
+            (
+                ColumnDescriptor::new("text_value", ColumnType::Text),
+                "$.counters.text_value: Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns",
+            ),
+            (
+                ColumnDescriptor::new("double_value", ColumnType::Double),
+                "$.counters.double_value: Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns",
+            ),
+            (
+                ColumnDescriptor::new(
+                    "array_value",
+                    ColumnType::Array {
+                        element: Box::new(ColumnType::Text),
+                    },
+                ),
+                "$.counters.array_value: Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns",
+            ),
+        ];
+
+        for (column, expected_error) in cases {
+            let schema = schema_with_counter_column(column);
+            let error = convert_public_schema(&schema)
+                .expect_err("non-integer counter column must fail conversion");
+
+            assert_eq!(error.to_string(), expected_error);
+        }
+    }
 
     #[test]
     fn compiles_branch_columns_with_the_same_name_and_type_across_tables() {
@@ -2997,6 +3249,9 @@ mod tests {
             crate::groove::records::ValueType::Bool => GrooveValue::Bool(true),
             crate::groove::records::ValueType::String => GrooveValue::String("value".to_owned()),
             crate::groove::records::ValueType::Bytes => GrooveValue::Bytes(vec![8]),
+            crate::groove::records::ValueType::Internal(_) => {
+                panic!("public schemas must not contain Groove internal storage types")
+            }
             crate::groove::records::ValueType::Uuid => GrooveValue::Uuid(Uuid::from_bytes([9; 16])),
             crate::groove::records::ValueType::EnumTag(_) => GrooveValue::EnumTag(0),
             crate::groove::records::ValueType::Tuple(members) => {
@@ -3067,10 +3322,29 @@ mod tests {
             table
                 .columns
                 .iter()
+                .find(|column| column.name == "payload")
+                .unwrap()
+                .large_value_kind,
+            crate::schema::LargeValueSemanticKind::Json,
+            "JSON keeps its logical String type but freezes a distinct physical kind"
+        );
+        assert_eq!(
+            table
+                .columns
+                .iter()
                 .find(|column| column.name == "metadata")
                 .unwrap()
                 .column_type,
             GrooveColumnType::String.nullable()
+        );
+        assert_eq!(
+            table
+                .columns
+                .iter()
+                .find(|column| column.name == "metadata")
+                .unwrap()
+                .large_value_kind,
+            crate::schema::LargeValueSemanticKind::Json
         );
     }
 
@@ -3134,7 +3408,10 @@ mod tests {
                                 PolicyExpr::Cmp {
                                     column: "owner_id".to_owned(),
                                     op: CmpOp::Eq,
-                                    value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                                    value: PolicyValue::SessionRef(vec![
+                                        "claims".to_owned(),
+                                        "sub".to_owned(),
+                                    ]),
                                 },
                                 PolicyExpr::Not(Box::new(PolicyExpr::Cmp {
                                     column: "archived".to_owned(),
@@ -3193,7 +3470,7 @@ mod tests {
                     )))),
                     Predicate::Eq(
                         Operand::Column("owner_id".to_owned()),
-                        Operand::Claim("team_id".to_owned()),
+                        Operand::Claim(provider_claim_operand_key("team_id")),
                     ),
                 ]),
             ]
@@ -3209,6 +3486,102 @@ mod tests {
                 Operand::Literal(GrooveValue::Uuid(Uuid::nil())),
             )]
         );
+    }
+
+    #[test]
+    fn converts_runtime_comparable_policy_literal_categories() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("events")
+                    .column("occurred_at", ColumnType::Timestamp)
+                    .column("ratio", ColumnType::Double)
+                    .column("digest", ColumnType::Bytea)
+                    .column(
+                        "roles",
+                        ColumnType::Array {
+                            element: Box::new(ColumnType::Text),
+                        },
+                    )
+                    .policies(TablePolicies::new().with_select(PolicyExpr::And(vec![
+                        PolicyExpr::eq_literal("occurred_at", Value::Timestamp(1_767_323_045_000)),
+                        PolicyExpr::eq_literal("ratio", Value::Double(1.5)),
+                        PolicyExpr::eq_literal("digest", Value::Bytea(vec![1, 2, 3])),
+                        PolicyExpr::eq_literal(
+                            "roles",
+                            Value::Array(vec![
+                                Value::Text("owner".to_owned()),
+                                Value::Text("editor".to_owned()),
+                            ]),
+                        ),
+                    ]))),
+            )
+            .build();
+
+        let converted =
+            convert_public_schema(&schema).expect("runtime-comparable policy literals compile");
+        let events = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "events")
+            .unwrap();
+
+        assert_eq!(
+            events.read_policy.as_ref().unwrap().filters,
+            vec![
+                Predicate::Eq(
+                    Operand::Column("occurred_at".to_owned()),
+                    Operand::Literal(GrooveValue::U64(1_767_323_045_000)),
+                ),
+                Predicate::Eq(
+                    Operand::Column("ratio".to_owned()),
+                    Operand::Literal(GrooveValue::F64(1.5)),
+                ),
+                Predicate::Eq(
+                    Operand::Column("digest".to_owned()),
+                    Operand::Literal(GrooveValue::Bytes(vec![1, 2, 3])),
+                ),
+                Predicate::Eq(
+                    Operand::Column("roles".to_owned()),
+                    Operand::Literal(GrooveValue::Array(vec![
+                        GrooveValue::String("owner".to_owned()),
+                        GrooveValue::String("editor".to_owned()),
+                    ])),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_non_finite_policy_doubles_at_the_literal_path() {
+        for (literal, path_suffix) in [
+            (Value::Double(f64::NAN), ""),
+            (
+                Value::Array(vec![Value::Double(f64::INFINITY)]),
+                ".Array[0]",
+            ),
+        ] {
+            let schema = SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("events")
+                        .column("ratio", ColumnType::Double)
+                        .policies(
+                            TablePolicies::new()
+                                .with_select(PolicyExpr::eq_literal("ratio", literal)),
+                        ),
+                )
+                .build();
+
+            let error =
+                convert_public_schema(&schema).expect_err("non-finite double must not compile");
+            assert_eq!(
+                error.path,
+                format!("$.events.policies.select.using{path_suffix}")
+            );
+            assert_eq!(
+                error.message,
+                "core schema policy floating-point literals must be finite numbers"
+            );
+        }
     }
 
     #[test]
@@ -3238,6 +3611,57 @@ mod tests {
                 Operand::Claim("authMode".to_owned()),
                 Operand::Literal(GrooveValue::String("external".to_owned())),
             )]
+        );
+    }
+
+    #[test]
+    fn magic_author_literals_are_text_while_row_id_literals_remain_uuid() {
+        let column_types = BTreeMap::new();
+        let mut filters = vec![
+            Predicate::Eq(
+                Operand::Column("id".to_owned()),
+                Operand::Literal(GrooveValue::String(
+                    "00000000-0000-4000-8000-000000000001".to_owned(),
+                )),
+            ),
+            Predicate::Eq(
+                Operand::Column("$createdBy".to_owned()),
+                Operand::Literal(GrooveValue::String(
+                    r#"["https://issuer.example","alice"]"#.to_owned(),
+                )),
+            ),
+            Predicate::Eq(
+                Operand::Column("$updatedBy".to_owned()),
+                Operand::Literal(GrooveValue::String(
+                    r#"["https://issuer.example","alice"]"#.to_owned(),
+                )),
+            ),
+        ];
+
+        coerce_predicates_typed_literals("todos", &mut filters, &column_types);
+
+        assert_eq!(
+            filters,
+            vec![
+                Predicate::Eq(
+                    Operand::Column("id".to_owned()),
+                    Operand::Literal(GrooveValue::Uuid(
+                        Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap()
+                    )),
+                ),
+                Predicate::Eq(
+                    Operand::Column("$createdBy".to_owned()),
+                    Operand::Literal(GrooveValue::String(
+                        r#"["https://issuer.example","alice"]"#.to_owned(),
+                    )),
+                ),
+                Predicate::Eq(
+                    Operand::Column("$updatedBy".to_owned()),
+                    Operand::Literal(GrooveValue::String(
+                        r#"["https://issuer.example","alice"]"#.to_owned(),
+                    )),
+                ),
+            ]
         );
     }
 
@@ -3279,15 +3703,26 @@ mod tests {
         let user_id = rel_value_to_policy_operand(
             &table,
             path,
-            &RelValueRef::SessionRef(vec!["userId".to_owned()]),
+            &RelValueRef::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
         )
-        .expect("userId alias is supported");
+        .expect("raw provider sub is supported through session.claims");
         assert!(matches!(
             user_id,
             LoweredRelValue::Operand(Operand::Claim(claim)) if claim == DIRECT_USER_ID_CLAIM
         ));
 
-        for path_segments in [["user_id"], ["authMode"], ["auth_mode"]] {
+        let user = rel_value_to_policy_operand(
+            &table,
+            path,
+            &RelValueRef::SessionRef(vec!["user".to_owned()]),
+        )
+        .expect("user is a supported canonical provenance session field");
+        assert!(matches!(
+            user,
+            LoweredRelValue::Operand(Operand::Claim(claim)) if claim == DIRECT_USER_CLAIM
+        ));
+
+        for path_segments in [["user"], ["authMode"], ["auth_mode"]] {
             rel_value_to_policy_operand(
                 &table,
                 path,
@@ -3295,6 +3730,16 @@ mod tests {
             )
             .expect("documented public session aliases are supported");
         }
+
+        let nested_user = rel_value_to_policy_operand(
+            &table,
+            path,
+            &RelValueRef::SessionRef(vec!["claims".to_owned(), "user".to_owned()]),
+        )
+        .expect("provider claim `user` coexists under the claims namespace");
+        assert!(matches!(nested_user,
+            LoweredRelValue::Operand(Operand::Claim(claim)) if claim == provider_claim_operand_key("user")
+        ));
 
         let claim = rel_value_to_policy_operand(
             &table,
@@ -3304,7 +3749,7 @@ mod tests {
         .expect("one-level session claims are supported");
         assert!(matches!(
             claim,
-            LoweredRelValue::Operand(Operand::Claim(name)) if name == "role"
+            LoweredRelValue::Operand(Operand::Claim(name)) if name == provider_claim_operand_key("role")
         ));
     }
 
@@ -3335,7 +3780,10 @@ mod tests {
                             PolicyExpr::Cmp {
                                 column: "userId".to_owned(),
                                 op: CmpOp::Eq,
-                                value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                                value: PolicyValue::SessionRef(vec![
+                                    "claims".to_owned(),
+                                    "sub".to_owned(),
+                                ]),
                             },
                         ])),
                     })),
@@ -3363,6 +3811,97 @@ mod tests {
                 Operand::Claim(DIRECT_USER_ID_CLAIM.to_owned()),
             )]
         );
+    }
+
+    // This conversion-boundary test stays internal because its purpose is to
+    // prove that legacy public-policy syntax is normalized into the same core
+    // join representation as relation-backed policies before any runtime
+    // schema can be admitted.
+    #[test]
+    fn converts_nested_correlated_exists_conjunction_to_independent_joins() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("canvases"))
+            .table(TableSchemaBuilder::new("layers").fk_column("canvas_id", "canvases"))
+            .table(
+                TableSchemaBuilder::new("canvas_members")
+                    .fk_column("canvas_id", "canvases")
+                    .column("user_id", ColumnType::Text)
+                    .column("role", ColumnType::Text),
+            )
+            .table(
+                TableSchemaBuilder::new("shapes")
+                    .fk_column("layer_id", "layers")
+                    .fk_column("canvas_id", "canvases")
+                    .policies(TablePolicies::new().with_insert(PolicyExpr::Exists {
+                        table: "layers".to_owned(),
+                        condition: Box::new(PolicyExpr::And(vec![
+                            PolicyExpr::Cmp {
+                                column: "id".to_owned(),
+                                op: CmpOp::Eq,
+                                value: PolicyValue::SessionRef(vec![
+                                    "__jazz_outer_row".to_owned(),
+                                    "layer_id".to_owned(),
+                                ]),
+                            },
+                            PolicyExpr::Cmp {
+                                column: "canvas_id".to_owned(),
+                                op: CmpOp::Eq,
+                                value: PolicyValue::SessionRef(vec![
+                                    "__jazz_outer_row".to_owned(),
+                                    "canvas_id".to_owned(),
+                                ]),
+                            },
+                            PolicyExpr::Exists {
+                                table: "canvas_members".to_owned(),
+                                condition: Box::new(PolicyExpr::And(vec![
+                                    PolicyExpr::Cmp {
+                                        column: "canvas_id".to_owned(),
+                                        op: CmpOp::Eq,
+                                        value: PolicyValue::SessionRef(vec![
+                                            "__jazz_outer_row".to_owned(),
+                                            "canvas_id".to_owned(),
+                                        ]),
+                                    },
+                                    PolicyExpr::Cmp {
+                                        column: "user_id".to_owned(),
+                                        op: CmpOp::Eq,
+                                        value: PolicyValue::SessionRef(vec!["user".to_owned()]),
+                                    },
+                                    PolicyExpr::Cmp {
+                                        column: "role".to_owned(),
+                                        op: CmpOp::Eq,
+                                        value: PolicyValue::Literal(Value::Text(
+                                            "editor".to_owned(),
+                                        )),
+                                    },
+                                ])),
+                            },
+                        ])),
+                    })),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema)
+            .expect("nested correlated EXISTS conjunction must compile");
+        let shapes = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "shapes")
+            .unwrap();
+        let policy = shapes.write_policies.insert_check.as_ref().unwrap();
+        assert_eq!(policy.joins.len(), 2);
+        assert_eq!(policy.joins[0].table, "layers");
+        assert_eq!(policy.joins[0].source_column.as_deref(), Some("layer_id"));
+        assert_eq!(
+            policy.joins[0].correlated_filters,
+            vec![JoinCorrelation {
+                join_column: "canvas_id".to_owned(),
+                source_column: "canvas_id".to_owned(),
+            }]
+        );
+        assert_eq!(policy.joins[1].table, "canvas_members");
+        assert_eq!(policy.joins[1].on_column, "canvas_id");
+        assert_eq!(policy.joins[1].source_column.as_deref(), Some("canvas_id"));
     }
 
     #[test]
@@ -3471,7 +4010,10 @@ mod tests {
                                 PolicyExpr::Cmp {
                                     column: "userId".to_owned(),
                                     op: CmpOp::Eq,
-                                    value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                                    value: PolicyValue::SessionRef(vec![
+                                        "claims".to_owned(),
+                                        "sub".to_owned(),
+                                    ]),
                                 },
                             ])),
                         },
@@ -3524,7 +4066,10 @@ mod tests {
                                 PolicyExpr::Cmp {
                                     column: "user_id".to_owned(),
                                     op: CmpOp::Eq,
-                                    value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                                    value: PolicyValue::SessionRef(vec![
+                                        "claims".to_owned(),
+                                        "sub".to_owned(),
+                                    ]),
                                 },
                             ])),
                         },
@@ -3564,7 +4109,7 @@ mod tests {
             join.filters,
             vec![Predicate::Eq(
                 Operand::Column("user_id".to_owned()),
-                Operand::Claim("user_id".to_owned()),
+                Operand::Claim(provider_claim_operand_key("sub")),
             )]
         );
     }
@@ -3603,7 +4148,7 @@ mod tests {
                     )
                     .policies(TablePolicies::new().with_select(PolicyExpr::Contains {
                         column: "owners".to_owned(),
-                        value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                        value: PolicyValue::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
                     })),
             )
             .table(
@@ -3626,6 +4171,52 @@ mod tests {
         let policy = documents.read_policy.as_ref().unwrap();
         assert!(policy.filters.is_empty());
         assert!(policy.joins.is_empty());
+        assert_eq!(policy.inherits.len(), 1);
+        assert_eq!(policy.inherits[0].parent_column, "folder_id");
+        assert_eq!(policy.inherits[0].operation, InheritsOperation::Select);
+    }
+
+    #[test]
+    fn preserves_inherits_nested_under_a_conjunction() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("folders")
+                    .column("name", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+            )
+            .table(
+                TableSchemaBuilder::new("documents")
+                    .column("published", ColumnType::Boolean)
+                    .nullable_fk_column("folder_id", "folders")
+                    .policies(TablePolicies::new().with_select(PolicyExpr::And(vec![
+                        PolicyExpr::Cmp {
+                            column: "published".to_owned(),
+                            op: CmpOp::Eq,
+                            value: PolicyValue::Literal(Value::Boolean(true)),
+                        },
+                        PolicyExpr::And(vec![PolicyExpr::Inherits {
+                            operation: Operation::Select,
+                            via_column: "folder_id".to_owned(),
+                            max_depth: None,
+                        }]),
+                    ]))),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema).unwrap();
+        let documents = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "documents")
+            .unwrap();
+        let policy = documents.read_policy.as_ref().unwrap();
+        assert_eq!(
+            policy.filters,
+            vec![Predicate::Eq(
+                Operand::Column("published".to_owned()),
+                Operand::Literal(GrooveValue::Bool(true)),
+            )]
+        );
         assert_eq!(policy.inherits.len(), 1);
         assert_eq!(policy.inherits[0].parent_column, "folder_id");
         assert_eq!(policy.inherits[0].operation, InheritsOperation::Select);
@@ -3737,7 +4328,7 @@ mod tests {
         assert_eq!(
             policy.filters,
             vec![Predicate::In(
-                Operand::Claim("role".to_owned()),
+                Operand::Claim(provider_claim_operand_key("role")),
                 vec![
                     Operand::Literal(GrooveValue::String(legacy_role_id.uuid().to_string())),
                     Operand::Literal(GrooveValue::String("member".to_owned())),
@@ -3770,7 +4361,7 @@ mod tests {
         assert_eq!(
             policy.filters,
             vec![Predicate::Eq(
-                Operand::Claim("role".to_owned()),
+                Operand::Claim(provider_claim_operand_key("role")),
                 Operand::Literal(GrooveValue::String("admin".to_owned())),
             )]
         );
@@ -3838,7 +4429,7 @@ mod tests {
                             column: "team_id".to_owned(),
                         },
                         op: RelPredicateCmpOp::Eq,
-                        right: RelValueRef::SessionRef(vec!["user_id".to_owned()]),
+                        right: RelValueRef::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
                     },
                 }),
                 right: Box::new(PublicRelExpr::TableScan {
@@ -3875,6 +4466,59 @@ mod tests {
     }
 
     #[test]
+    fn compiles_update_using_as_the_default_delete_policy() {
+        let owner_policy = PolicyExpr::Cmp {
+            column: "owner_id".to_owned(),
+            op: CmpOp::Eq,
+            value: PolicyValue::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
+        };
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("documents")
+                    .column("owner_id", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new().with_update(Some(owner_policy), PolicyExpr::True),
+                    ),
+            )
+            .table(
+                TableSchemaBuilder::new("attachments")
+                    .fk_column("document_id", "documents")
+                    .policies(TablePolicies::new().with_insert(PolicyExpr::Inherits {
+                        operation: Operation::Delete,
+                        via_column: "document_id".to_owned(),
+                        max_depth: None,
+                    })),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema).unwrap();
+        let documents = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "documents")
+            .unwrap();
+        assert_eq!(
+            documents.write_policies.delete_using, documents.write_policies.update_using,
+            "DELETE must inherit UPDATE USING when no explicit DELETE USING is declared"
+        );
+        let attachments = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "attachments")
+            .unwrap();
+        assert_eq!(
+            attachments
+                .write_policies
+                .insert_check
+                .as_ref()
+                .unwrap()
+                .inherits[0]
+                .operation,
+            InheritsOperation::Delete
+        );
+    }
+
+    #[test]
     fn preserves_operation_specific_inherits_for_complex_child_write_policy() {
         let schema = SchemaBuilder::new()
             .table(
@@ -3885,7 +4529,10 @@ mod tests {
                             PolicyExpr::Cmp {
                                 column: "owner_id".to_owned(),
                                 op: CmpOp::Eq,
-                                value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                                value: PolicyValue::SessionRef(vec![
+                                    "claims".to_owned(),
+                                    "sub".to_owned(),
+                                ]),
                             },
                             PolicyExpr::Exists {
                                 table: "parent_admins".to_owned(),
@@ -3901,7 +4548,10 @@ mod tests {
                                     PolicyExpr::Cmp {
                                         column: "user_id".to_owned(),
                                         op: CmpOp::Eq,
-                                        value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                                        value: PolicyValue::SessionRef(vec![
+                                            "claims".to_owned(),
+                                            "sub".to_owned(),
+                                        ]),
                                     },
                                 ])),
                             },
@@ -3979,7 +4629,7 @@ mod tests {
                         column: "identity_key".to_owned(),
                     },
                     op: RelPredicateCmpOp::Eq,
-                    right: RelValueRef::SessionRef(vec!["user_id".to_owned()]),
+                    right: RelValueRef::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
                 },
             }),
             columns: vec![crate::tools::public_api::relation_ir::ProjectColumn {
@@ -4115,7 +4765,10 @@ mod tests {
                             PolicyExpr::Cmp {
                                 column: "userId".to_owned(),
                                 op: CmpOp::Eq,
-                                value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                                value: PolicyValue::SessionRef(vec![
+                                    "claims".to_owned(),
+                                    "sub".to_owned(),
+                                ]),
                             },
                         ])),
                     })),
@@ -4171,7 +4824,10 @@ mod tests {
                             PolicyExpr::Cmp {
                                 column: "userId".to_owned(),
                                 op: CmpOp::Eq,
-                                value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                                value: PolicyValue::SessionRef(vec![
+                                    "claims".to_owned(),
+                                    "sub".to_owned(),
+                                ]),
                             },
                         ])),
                     })),
@@ -4211,7 +4867,7 @@ mod tests {
                     .policies(TablePolicies::new().with_select(PolicyExpr::Cmp {
                         column: "ownerId".to_owned(),
                         op: CmpOp::Eq,
-                        value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                        value: PolicyValue::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
                     })),
             )
             .table(
@@ -4260,7 +4916,7 @@ mod tests {
                     .policies(TablePolicies::new().with_select(PolicyExpr::Cmp {
                         column: "ownerId".to_owned(),
                         op: CmpOp::Eq,
-                        value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                        value: PolicyValue::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
                     })),
             )
             .table(
@@ -4374,7 +5030,8 @@ mod tests {
                                             },
                                             op: RelPredicateCmpOp::Eq,
                                             right: RelValueRef::SessionRef(vec![
-                                                "user_id".to_owned(),
+                                                "claims".to_owned(),
+                                                "sub".to_owned(),
                                             ]),
                                         },
                                     }),

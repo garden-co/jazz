@@ -1488,9 +1488,11 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 name = "groove"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "bytes",
  "futures",
  "futures-test",
+ "getrandom 0.3.4",
  "hdrhistogram",
  "idb-tree",
  "internment",
@@ -2004,6 +2006,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "blake3",
+ "bytes",
  "criterion",
  "ed25519-dalek",
  "futures",
@@ -2026,6 +2029,7 @@ dependencies = [
  "rand 0.8.5",
  "rcgen",
  "reqwest",
+ "rustc-hash",
  "serde",
  "serde_bytes",
  "serde_json",
@@ -2099,7 +2103,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-example-benchmark-w1"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+ "jazz-storage-rocksdb",
+ "tempfile",
+]
+
+[[package]]
 name = "jazz-example-big-label-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+]
+
+[[package]]
+name = "jazz-example-epic-drop-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "groove",
+ "jazz",
+]
+
+[[package]]
+name = "jazz-example-jamazon-warehouse-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+]
+
+[[package]]
+name = "jazz-example-music-agent-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "groove",
+ "jazz",
+]
+
+[[package]]
+name = "jazz-example-poster-shop-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+]
+
+[[package]]
+name = "jazz-example-world-tour-benchmark"
 version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
@@ -2124,6 +2180,7 @@ dependencies = [
  "postcard",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "uuid",
@@ -2134,6 +2191,7 @@ name = "jazz-native-relay"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "getrandom 0.3.4",
  "jazz",
  "jazz-storage-sqlite",
  "postcard",
@@ -2161,6 +2219,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite",
+ "uuid",
 ]
 
 [[package]]

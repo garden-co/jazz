@@ -387,7 +387,7 @@ function buildInitScript(schemaTables) {
                 type: "Cmp",
                 column: "owner_id",
                 op: "Eq",
-                value: { type: "SessionRef", path: ["user_id"] },
+                value: { type: "SessionRef", path: ["claims", "sub"] },
               },
               {
                 type: "And",
@@ -412,7 +412,7 @@ function buildInitScript(schemaTables) {
                 type: "Cmp",
                 column: "owner_id",
                 op: "Eq",
-                value: { type: "SessionRef", path: ["user_id"] },
+                value: { type: "SessionRef", path: ["claims", "sub"] },
               },
               {
                 type: "And",
@@ -435,7 +435,7 @@ function buildInitScript(schemaTables) {
                 type: "Cmp",
                 column: "owner_id",
                 op: "Eq",
-                value: { type: "SessionRef", path: ["user_id"] },
+                value: { type: "SessionRef", path: ["claims", "sub"] },
               },
               {
                 type: "And",
@@ -468,7 +468,7 @@ function buildInitScript(schemaTables) {
                 type: "Cmp",
                 column: "editor_id",
                 op: "Eq",
-                value: { type: "SessionRef", path: ["user_id"] },
+                value: { type: "SessionRef", path: ["claims", "sub"] },
               },
               {
                 type: "Inherits",
@@ -485,7 +485,7 @@ function buildInitScript(schemaTables) {
                 type: "Cmp",
                 column: "editor_id",
                 op: "Eq",
-                value: { type: "SessionRef", path: ["user_id"] },
+                value: { type: "SessionRef", path: ["claims", "sub"] },
               },
               {
                 type: "Inherits",
@@ -861,10 +861,10 @@ function buildB5Setup(scenario, serverInfo, dbPrefix) {
         user_id: allowedPrincipalId,
         claims: { auth_mode: "local-first" },
       };
-      const unsubscribe = allowedDb.subscribeAll(
+      const unsubscribe = allowedDb.subscribe(
         visibleDocumentsQuery,
-        (delta) => {
-          warmAllowedVisible = delta.all.length;
+        (rows) => {
+          warmAllowedVisible = rows.length;
         },
         undefined,
         allowedSession,

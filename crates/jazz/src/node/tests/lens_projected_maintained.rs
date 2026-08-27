@@ -38,7 +38,7 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved_payload.id,
@@ -76,12 +76,12 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
     let mut peer = PeerState::new();
     let update = peer.current_rows_update(&mut core, "todos").unwrap();
     let bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         reset_result_set,
         ..
-    } = update
+    }) = update
     else {
         panic!("current-row subscription should produce a view update");
     };
@@ -153,7 +153,7 @@ fn maintained_renamed_table_witness_reloads_the_authored_history_row() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved_payload.id,
@@ -240,7 +240,7 @@ fn maintained_renamed_witness_rejects_reused_logical_table_collision() {
         None,
     )
     .unwrap();
-    let (collision_tx, _) = core.commit_exclusive_settled(open, AuthorId::SYSTEM, 10).unwrap();
+    let (collision_tx, _) = core.commit_exclusive_settled(open, AuthorSubject::SYSTEM, 10).unwrap();
     core.accept_global_for_test(collision_tx).unwrap();
 
     publish_schema_lineage(
@@ -263,7 +263,7 @@ fn maintained_renamed_witness_rejects_reused_logical_table_collision() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved_payload.id,

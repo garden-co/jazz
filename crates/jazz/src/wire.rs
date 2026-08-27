@@ -8,16 +8,19 @@
 
 use postcard::{from_bytes, to_allocvec};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 
-use crate::ids::{AuthorId, NodeUuid};
+use crate::ids::{AuthorSubject, NodeUuid};
 use crate::protocol::SyncMessage;
 use crate::protocol_limits::{validate_logical_message_len, validate_wire_frame_len};
 
 /// Current Jazz wire protocol version.
-/// Version 11 adds explicit complete-transaction versus view-scoped bundle
-/// semantics. This is an intentional breaking baseline: older peers cannot
-/// safely decode the extended bundle payload, so negotiation rejects them.
-pub const WIRE_PROTOCOL_VERSION: u16 = 11;
+/// Version 14 combines the v13 Groove canonical large-scalar descriptor and
+/// canonical `[iss,sub]` author encoding with Unix-millisecond public row
+/// provenance. The packed HLC remains internal ordering state and is never
+/// protocol data. This is an intentional breaking baseline: a v13 peer would
+/// interpret provenance payloads differently, so negotiation rejects it.
+pub const WIRE_PROTOCOL_VERSION: u16 = 14;
 
 /// No optional features.
 pub const FEATURE_NONE: WireFeatures = 0;
@@ -42,6 +45,8 @@ pub const FEATURE_AUTHORIZATION_SCOPE_RECEIPTS: WireFeatures = 1 << 6;
 /// Authority-owned authorization scope hydration.  Unlike the first receipt
 /// experiment this never accepts caller supplied support query identities.
 pub const FEATURE_AUTHORIZATION_SCOPE_VIEWS: WireFeatures = 1 << 7;
+/// Peers support Groove chunk misses on the independently driven auxiliary lane.
+pub const FEATURE_AUXILIARY_CHUNKS: WireFeatures = 1 << 8;
 
 const FEATURE_PAYLOAD_COMPRESSION_MASK: WireFeatures = FEATURE_PAYLOAD_LZ4 | FEATURE_PAYLOAD_ZSTD;
 
@@ -212,7 +217,7 @@ pub struct WireSession {
     /// Monotone session incarnation. Reconnects that abandon prior ordering use a new epoch.
     pub epoch: u64,
     /// Authenticated user identity for edge/client links, once admission succeeds.
-    pub identity: Option<AuthorId>,
+    pub identity: Option<AuthorSubject>,
 }
 
 impl std::fmt::Debug for WireSession {
@@ -463,6 +468,7 @@ pub fn current_wire_features() -> WireFeatures {
         | FEATURE_MESSAGE_FRAGMENTATION
         | FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
         | FEATURE_AUTHORIZATION_SCOPE_VIEWS
+        | FEATURE_AUXILIARY_CHUNKS
         | runtime_transport_compression_features()
 }
 
@@ -599,18 +605,27 @@ impl WireStreamDecoder {
         Ok(Self { codec })
     }
 
-    /// Decode one message's stream chunk into one semantic sync payload.
+    /// Decode one message's stream chunk into one owned semantic sync payload.
     pub fn decode_message(
         &mut self,
         payload: &[u8],
         envelope_features: WireFeatures,
     ) -> Result<Vec<u8>, String> {
+        self.decode_message_borrowed(payload, envelope_features)
+            .map(Cow::into_owned)
+    }
+
+    pub(crate) fn decode_message_borrowed<'a>(
+        &mut self,
+        payload: &'a [u8],
+        envelope_features: WireFeatures,
+    ) -> Result<Cow<'a, [u8]>, String> {
         let active = envelope_features & FEATURE_PAYLOAD_COMPRESSION_MASK;
         if active.count_ones() > 1 {
             return Err("wire frame declares more than one payload compression codec".to_owned());
         }
         if active == FEATURE_NONE {
-            return Ok(payload.to_vec());
+            return Ok(Cow::Borrowed(payload));
         }
         if WireCompression::from_features(active) != self.codec {
             return Err("wire frame compression codec changed within one connection".to_owned());
@@ -619,7 +634,7 @@ impl WireStreamDecoder {
         if decoded.len() > crate::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES {
             return Err("decompressed logical message exceeds receiver budget".to_owned());
         }
-        Ok(decoded)
+        Ok(Cow::Owned(decoded))
     }
 }
 
@@ -695,12 +710,13 @@ mod tests {
     use crate::ids::SchemaVersionId;
     use crate::ids::{NodeUuid, RowUuid};
     use crate::protocol::{
-        AuthorizationScopePurpose, PermissionAdviceAction, RegisterShapeOptions, ResultRowEntry,
-        ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, VersionBundle,
+        AuthorizationScopePurpose, AuthorizationSupportScopeKey, ChunkRequestBatch,
+        ChunkRequestEntry, PermissionAdviceAction, PermissionAdviceRequestId, RegisterShapeOptions,
+        ResultRowEntry, ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, VersionBundle,
         VersionBundleRun, VersionBundleRunError, VersionCarrier, VersionRecord,
         build_version_bundle_runs_from_singletons,
     };
-    use crate::protocol_limits::MAX_WIRE_FRAME_BYTES;
+    use crate::protocol_limits::{MAX_CHUNK_REQUEST_BATCH_ENTRIES, MAX_WIRE_FRAME_BYTES};
     use crate::query::{BindingId, Query, ShapeId};
     use crate::schema::{ColumnSchema, TableSchema};
     use crate::time::{GlobalTime, TxTime};
@@ -732,7 +748,7 @@ mod tests {
         let session = WireSession {
             session_id: "session-1".to_owned(),
             epoch: 3,
-            identity: Some(AuthorId::from_bytes([0x42; 16])),
+            identity: Some(AuthorSubject::for_test_bytes([0x42; 16])),
         };
         let frame = WireFrame::Message(
             WireEnvelope::new(1, FEATURE_SESSION_FRAME, vec![1, 2, 3, 4])
@@ -784,7 +800,7 @@ mod tests {
         let session = WireSession {
             session_id: "credential-bearing-session-id".repeat(10_000),
             epoch: 3,
-            identity: Some(AuthorId::from_bytes([0x42; 16])),
+            identity: Some(AuthorSubject::for_test_bytes([0x42; 16])),
         };
         let distinct_session = WireSession {
             session_id: "credential-bearing-session-ix".repeat(10_000),
@@ -854,6 +870,159 @@ mod tests {
     }
 
     #[test]
+    fn oversized_chunk_request_batches_are_rejected_during_decode() {
+        let request = |request_id| ChunkRequestEntry {
+            request_id,
+            locator: groove::large_values::Locator::random(),
+            expected_hash: [0x22; 32],
+            remaining_hops: 1,
+        };
+        let at_limit = SyncMessage::ChunkRequestBatch(ChunkRequestBatch {
+            requests: (0..MAX_CHUNK_REQUEST_BATCH_ENTRIES as u64)
+                .map(request)
+                .collect(),
+        });
+        let encoded = encode_sync_message(&at_limit).expect("encode limit request fixture");
+        assert_eq!(
+            decode_sync_message(&encoded).expect("limit request fixture remains valid"),
+            at_limit
+        );
+
+        let mut requests = (0..MAX_CHUNK_REQUEST_BATCH_ENTRIES as u64)
+            .map(request)
+            .collect::<Vec<_>>();
+        requests.push(request(MAX_CHUNK_REQUEST_BATCH_ENTRIES as u64));
+        let over_limit = SyncMessage::ChunkRequestBatch(ChunkRequestBatch { requests });
+        let encoded = encode_sync_message(&over_limit).expect("encode oversized request fixture");
+        assert!(
+            decode_sync_message(&encoded).is_err(),
+            "remote request cardinality must be bounded before storage work"
+        );
+    }
+
+    #[test]
+    fn authorization_scope_view_has_a_nonrecursive_view_update_payload() {
+        let view = crate::protocol::ViewUpdatePayload::from_view_update(view_update_with_carriers(
+            Vec::new(),
+        ))
+        .expect("fixture is a view update");
+        let message = SyncMessage::AuthorizationScopeView {
+            request_id: PermissionAdviceRequestId([0x11; 16]),
+            key: AuthorizationSupportScopeKey {
+                support_shape_digest: [0x22; 32],
+                subject: AuthorSubject::for_test_bytes([0x33; 16]),
+                claims_digest: [0x44; 32],
+                policy_digest: [0x55; 32],
+            },
+            clause_index: 0,
+            clause_count: 1,
+            view,
+        };
+        let encoded = encode_sync_message(&message).expect("encode scope view fixture");
+        assert_eq!(
+            decode_sync_message(&encoded).expect("decode scope view fixture"),
+            message,
+            "the scope wrapper admits only its dedicated, non-recursive payload"
+        );
+    }
+
+    #[test]
+    fn chunk_request_locator_decode_requires_exactly_256_bits() {
+        #[derive(serde::Serialize)]
+        struct RawChunkRequestBatch {
+            requests: Vec<RawChunkRequestEntry>,
+        }
+        #[derive(serde::Serialize)]
+        struct RawChunkRequestEntry {
+            request_id: u64,
+            locator: Vec<u8>,
+            expected_hash: [u8; 32],
+            remaining_hops: u8,
+        }
+
+        for length in [31, 32, 33] {
+            let encoded = postcard::to_allocvec(&RawChunkRequestBatch {
+                requests: vec![RawChunkRequestEntry {
+                    request_id: 1,
+                    locator: vec![0x11; length],
+                    expected_hash: [0x22; 32],
+                    remaining_hops: 1,
+                }],
+            })
+            .unwrap();
+            assert_eq!(
+                postcard::from_bytes::<ChunkRequestBatch>(&encoded).is_ok(),
+                length == groove::large_values::LOCATOR_BYTES,
+                "locator length {length} must {}decode",
+                if length == groove::large_values::LOCATOR_BYTES {
+                    ""
+                } else {
+                    "not "
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn shared_view_update_payload_preserves_postcard_shape() {
+        #[allow(dead_code)]
+        #[derive(serde::Serialize)]
+        enum LegacySyncMessage {
+            V0,
+            V1,
+            V2,
+            V3,
+            V4,
+            V5,
+            V6,
+            V7,
+            V8,
+            V9,
+            V10,
+            V11,
+            V12,
+            V13,
+            ViewUpdate {
+                subscription: SubscriptionKey,
+                settled_through: GlobalTime,
+                reset_result_set: bool,
+                version_carriers: Vec<VersionCarrier>,
+                version_bundles: Vec<VersionBundle>,
+                peer_payload_inventory: crate::protocol::PeerPayloadInventory,
+                result_member_adds: Vec<crate::protocol::ResultMemberEntry>,
+                result_member_removes: Vec<crate::protocol::ResultMemberEntry>,
+                terminal_operations: Vec<groove::ivm::TerminalOperation>,
+                program_fact_adds: Vec<crate::protocol::ProgramFactEntry>,
+                program_fact_removes: Vec<crate::protocol::ProgramFactEntry>,
+            },
+        }
+
+        let SyncMessage::ViewUpdate(payload) = view_update_with_carriers(Vec::new()) else {
+            unreachable!()
+        };
+        let legacy = LegacySyncMessage::ViewUpdate {
+            subscription: payload.subscription,
+            settled_through: payload.settled_through,
+            reset_result_set: payload.reset_result_set,
+            version_carriers: payload.version_carriers.clone(),
+            version_bundles: payload.version_bundles.clone(),
+            peer_payload_inventory: payload.peer_payload_inventory.clone(),
+            result_member_adds: payload.result_member_adds.clone(),
+            result_member_removes: payload.result_member_removes.clone(),
+            terminal_operations: payload.terminal_operations.clone(),
+            program_fact_adds: payload.program_fact_adds.clone(),
+            program_fact_removes: payload.program_fact_removes.clone(),
+        };
+        let current = SyncMessage::ViewUpdate(payload);
+
+        assert_eq!(
+            encode_sync_message(&current).unwrap(),
+            postcard::to_allocvec(&legacy).unwrap(),
+            "a newtype struct is postcard-transparent relative to the former struct variant"
+        );
+    }
+
+    #[test]
     fn view_update_mixed_version_carrier_runs_round_trip_and_survive_receive_decode() {
         let bundles = version_bundles(4);
         let singleton_run = VersionCarrier::Run(
@@ -873,11 +1042,11 @@ mod tests {
 
         assert_eq!(decode_sync_message_for_receive(&encoded).unwrap(), message);
         let expanded = message.expand_version_carriers_for_receive().unwrap();
-        let SyncMessage::ViewUpdate {
+        let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             version_carriers,
             version_bundles,
             ..
-        } = expanded
+        }) = expanded
         else {
             panic!("expected view update");
         };
@@ -896,9 +1065,9 @@ mod tests {
 
         assert_eq!(decode_sync_message_for_receive(&encoded).unwrap(), message);
         let expanded = message.expand_version_carriers_for_receive().unwrap();
-        let SyncMessage::ViewUpdate {
+        let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             version_bundles, ..
-        } = expanded
+        }) = expanded
         else {
             panic!("expected view update");
         };
@@ -920,6 +1089,39 @@ mod tests {
             })
         );
         assert!(encode_then_decode_run(run).is_err());
+    }
+
+    #[test]
+    fn malformed_version_carrier_run_is_rejected_in_ordinary_and_scope_views() {
+        let mut run = build_version_bundle_runs_from_singletons(&version_bundles(2))
+            .unwrap()
+            .remove(0);
+        run.header.body_count = 3;
+
+        let ordinary = view_update_with_carriers(vec![VersionCarrier::Run(run.clone())]);
+        let scope_view = SyncMessage::AuthorizationScopeView {
+            request_id: PermissionAdviceRequestId([0x11; 16]),
+            key: AuthorizationSupportScopeKey {
+                support_shape_digest: [0x22; 32],
+                subject: AuthorSubject::for_test_bytes([0x33; 16]),
+                claims_digest: [0x44; 32],
+                policy_digest: [0x55; 32],
+            },
+            clause_index: 0,
+            clause_count: 1,
+            view: crate::protocol::ViewUpdatePayload::from_view_update(view_update_with_carriers(
+                vec![VersionCarrier::Run(run)],
+            ))
+            .expect("fixture is a view update"),
+        };
+
+        for message in [ordinary, scope_view] {
+            let encoded = encode_sync_message(&message).expect("encode malformed fixture");
+            assert!(
+                decode_sync_message(&encoded).is_err(),
+                "malformed runs must be rejected at either view-update seam"
+            );
+        }
     }
 
     #[test]
@@ -968,7 +1170,7 @@ mod tests {
     }
 
     fn view_update_with_carriers(version_carriers: Vec<VersionCarrier>) -> SyncMessage {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription: SubscriptionKey {
                 shape_id: ShapeId(uuid::Uuid::from_bytes([0x22; 16])),
                 binding_id: BindingId(uuid::Uuid::from_bytes([0x33; 16])),
@@ -984,14 +1186,14 @@ mod tests {
             terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
-        }
+        })
     }
 
     fn version_bundles(count: usize) -> Vec<VersionBundle> {
         let table = TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]);
         let schema_version = SchemaVersionId::from_bytes([0x44; 16]);
         let node = NodeUuid::from_bytes([0x11; 16]);
-        let author = AuthorId::from_bytes([0x55; 16]);
+        let author = AuthorSubject::for_test_bytes([0x55; 16]);
         (0..count)
             .map(|index| {
                 let tx_id = TxId::new(TxTime(1_000 + index as u64), node);
@@ -1016,9 +1218,9 @@ mod tests {
                             RowUuid::from_bytes([index as u8; 16]),
                             Vec::new(),
                             author,
-                            TxTime(1_000 + index as u64),
+                            1_000 + index as u64,
                             author,
-                            TxTime(1_000 + index as u64),
+                            1_000 + index as u64,
                             &BTreeMap::from([("title".to_owned(), format!("todo-{index}"))]),
                             None,
                         )
@@ -1066,6 +1268,18 @@ mod tests {
                 .unwrap(),
             second
         );
+    }
+
+    #[test]
+    fn uncompressed_stream_decoder_borrows_payload() {
+        let mut decoder = WireStreamDecoder::new(FEATURE_NONE).unwrap();
+        let message = b"uncompressed logical message".to_vec();
+
+        let decoded = decoder
+            .decode_message_borrowed(&message, FEATURE_NONE)
+            .unwrap();
+
+        assert_eq!(decoded.as_ptr(), message.as_ptr());
     }
 
     #[cfg(feature = "transport-compression-zstd")]
@@ -1156,7 +1370,7 @@ mod tests {
                         batch: Some(tx),
                         settle_position: Some(GlobalTime(10_000 + i)),
                     });
-                SyncMessage::ViewUpdate {
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
                     settled_through: GlobalTime(10_000 + i),
                     reset_result_set: false,
@@ -1168,7 +1382,7 @@ mod tests {
                     program_fact_adds: Vec::new(),
                     program_fact_removes: Vec::new(),
                     terminal_operations: Vec::new(),
-                }
+                })
             })
             .collect::<Vec<_>>();
         let mut raw = 0_u64;
@@ -1244,7 +1458,7 @@ mod tests {
                     code: crate::protocol::SubscribeServerFailureCode::TableNotFound,
                 },
             },
-            SyncMessage::ViewUpdate {
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription,
                 settled_through: GlobalTime(7),
                 reset_result_set: true,
@@ -1260,13 +1474,13 @@ mod tests {
                 terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
-            },
+            }),
             SyncMessage::CommitUnit {
                 tx: Transaction {
                     tx_id,
                     kind: TxKind::Mergeable,
                     n_total_writes: 0,
-                    made_by: AuthorId::from_bytes([0x55; 16]),
+                    made_by: AuthorSubject::for_test_bytes([0x55; 16]),
                     permission_subject: None,
                     base_snapshot: None,
                     row_read_set: None,
@@ -1317,7 +1531,7 @@ mod tests {
         let row = RowUuid::from_bytes([0x22; 16]);
         let tx_id = TxId::new(TxTime(21), NodeUuid::from_bytes([0x33; 16]));
         let entry: ResultRowEntry = (Intern::new("todos".to_owned()), row, tx_id);
-        let message = SyncMessage::ViewUpdate {
+        let message = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription: SubscriptionKey {
                 shape_id: ShapeId(uuid::Uuid::from_bytes([0x44; 16])),
                 binding_id: BindingId(uuid::Uuid::from_bytes([0x55; 16])),
@@ -1337,7 +1551,7 @@ mod tests {
             terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
-        };
+        });
 
         let encoded = encode_sync_message(&message).unwrap();
         let decoded = decode_sync_message(&encoded).unwrap();
@@ -1389,10 +1603,11 @@ mod tests {
     }
 
     #[test]
-    fn current_wire_version_rejects_previous_release_peer() {
+    fn wire_v14_rejects_v13_without_compatibility_negotiation() {
+        assert_eq!(WIRE_PROTOCOL_VERSION, 14);
         let remote = WireHello {
-            min_protocol_version: WIRE_PROTOCOL_VERSION - 1,
-            max_protocol_version: WIRE_PROTOCOL_VERSION - 1,
+            min_protocol_version: 13,
+            max_protocol_version: 13,
             features: FEATURE_SYNC_MESSAGE_PAYLOAD,
             role: WirePeerRole::Core,
             authority: None,
@@ -1406,6 +1621,29 @@ mod tests {
         )
         .expect_err("current wire protocol must not negotiate with an old peer");
 
+        assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
+        assert_eq!(error.retry, WireRetry::Never);
+    }
+
+    #[test]
+    fn wire_v14_rejects_v12_peer_before_payload_decode() {
+        let v12_peer = WireHello {
+            min_protocol_version: 12,
+            max_protocol_version: 12,
+            features: current_wire_features(),
+            role: WirePeerRole::Core,
+            authority: None,
+        };
+
+        let error = negotiate_wire(
+            &v12_peer,
+            WIRE_PROTOCOL_VERSION,
+            WIRE_PROTOCOL_VERSION,
+            current_wire_features(),
+        )
+        .expect_err("v12 encoding must fail during the v14 handshake");
+
+        assert_eq!(WIRE_PROTOCOL_VERSION, 14);
         assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
         assert_eq!(error.retry, WireRetry::Never);
     }

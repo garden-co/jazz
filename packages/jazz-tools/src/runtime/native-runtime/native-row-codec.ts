@@ -5,13 +5,15 @@ import type {
   Value,
   WasmRow,
 } from "../../drivers/types.js";
-import { isProvenanceMagicColumn, isProvenanceMagicTimestampColumn } from "../../magic-columns.js";
+import { isProvenanceMagicColumn } from "../../magic-columns.js";
+import { decodeCanonicalAuthorSubjectBytes } from "../author-id.js";
 
 const textDecoder = new TextDecoder();
 const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
 export type ValueType = {
   tag: number;
+  internal?: { tag: number; kind?: number };
   inner?: ValueType;
   members?: ValueType[];
   record?: DescriptorField[];
@@ -34,6 +36,10 @@ export type NativeSubscriptionDelta = {
   addedOccurrenceKeys: Uint8Array[];
   updatedOccurrenceKeys: Uint8Array[];
   removedOccurrenceKeys: Uint8Array[];
+  addedIndices: number[];
+  updatedPreviousIndices: number[];
+  updatedIndices: number[];
+  removedIndices: number[];
 };
 export type NativeRelationSubscriptionSnapshot = {
   rootCount: number;
@@ -80,13 +86,21 @@ export function readNativeSubscriptionDelta(reader: PostcardReaderLike): NativeS
     addedOccurrenceKeys: reader.readVec((keyReader) => readResultKey(keyReader)),
     updatedOccurrenceKeys: reader.readVec((keyReader) => readResultKey(keyReader)),
     removedOccurrenceKeys: reader.readVec((keyReader) => readResultKey(keyReader)),
+    addedIndices: reader.readVec((indexReader) => indexReader.u64()),
+    updatedPreviousIndices: reader.readVec((indexReader) => indexReader.u64()),
+    updatedIndices: reader.readVec((indexReader) => indexReader.u64()),
+    removedIndices: reader.readVec((indexReader) => indexReader.u64()),
   };
   const rowCount = (batches: NativeRowBatch[]) =>
     batches.reduce((count, batch) => count + batch.rows.length, 0);
   if (
     delta.addedOccurrenceKeys.length !== rowCount(delta.added) ||
     delta.updatedOccurrenceKeys.length !== rowCount(delta.updated) ||
-    delta.removedOccurrenceKeys.length !== delta.removed.length
+    delta.removedOccurrenceKeys.length !== delta.removed.length ||
+    delta.addedIndices.length !== rowCount(delta.added) ||
+    delta.updatedPreviousIndices.length !== rowCount(delta.updated) ||
+    delta.updatedIndices.length !== rowCount(delta.updated) ||
+    delta.removedIndices.length !== delta.removed.length
   ) {
     throw new Error("subscription occurrence sidecar length mismatch");
   }
@@ -185,7 +199,16 @@ export function readDescriptor(reader: PostcardReaderLike): DescriptorField[] {
 
 export function writeValueType(writer: PostcardWriterLike, valueType: ValueType): void {
   writer.enumUnit(valueType.tag);
-  if (valueType.tag === 11) {
+  if (valueType.tag === 10) {
+    if (!valueType.internal) throw new Error("missing physical type for ValueType::Internal");
+    writer.enumUnit(valueType.internal.tag);
+    if (valueType.internal.tag === 2) {
+      if (valueType.internal.kind == null) throw new Error("missing stored-scalar kind");
+      writer.enumUnit(valueType.internal.kind);
+    }
+    return;
+  }
+  if (valueType.tag === 12) {
     const enumSchema = valueType.enumSchema;
     const variants = enumSchema?.variants;
     if (!enumSchema || !variants) throw new Error("missing enum schema for ValueType::Enum");
@@ -194,7 +217,7 @@ export function writeValueType(writer: PostcardWriterLike, valueType: ValueType)
     writer.vec((variantWriter, index) => variantWriter.string(variants[index]!), variants.length);
     return;
   }
-  if (valueType.tag === 12) {
+  if (valueType.tag === 13) {
     const members = valueType.members ?? (valueType.inner ? [valueType.inner] : []);
     writer.vec(
       (memberWriter, index) => writeValueType(memberWriter, members[index]!),
@@ -202,17 +225,17 @@ export function writeValueType(writer: PostcardWriterLike, valueType: ValueType)
     );
     return;
   }
-  if (valueType.tag === 13 || valueType.tag === 14) {
+  if (valueType.tag === 14 || valueType.tag === 15) {
     if (!valueType.inner) throw new Error(`missing inner value type for tag ${valueType.tag}`);
     writeValueType(writer, valueType.inner);
     return;
   }
-  if (valueType.tag === 15) {
-    if (!valueType.record) throw new Error("missing inline record descriptor for tag 15");
+  if (valueType.tag === 16) {
+    if (!valueType.record) throw new Error("missing inline record descriptor for tag 16");
     writeDescriptor(writer, valueType.record);
     return;
   }
-  if (valueType.tag === 16) {
+  if (valueType.tag === 17) {
     const enumSchema = valueType.enumSchema;
     const cases = enumSchema?.cases;
     if (!enumSchema || !cases) throw new Error("missing cases for ValueType::Enum");
@@ -228,7 +251,14 @@ export function writeValueType(writer: PostcardWriterLike, valueType: ValueType)
 
 export function readValueType(reader: PostcardReaderLike): ValueType {
   const tag = reader.u64();
-  if (tag === 11) {
+  if (tag === 10) {
+    const internalTag = reader.u64();
+    return {
+      tag,
+      internal: { tag: internalTag, kind: internalTag === 2 ? reader.u64() : undefined },
+    };
+  }
+  if (tag === 12) {
     return {
       tag,
       enumSchema: {
@@ -238,17 +268,17 @@ export function readValueType(reader: PostcardReaderLike): ValueType {
       },
     };
   }
-  if (tag === 13 || tag === 14) {
+  if (tag === 14 || tag === 15) {
     return { tag, inner: readValueType(reader) };
   }
-  if (tag === 12) {
+  if (tag === 13) {
     const members = reader.readVec(readValueType);
     return { tag, members, inner: members[0] };
   }
-  if (tag === 15) {
+  if (tag === 16) {
     return { tag, record: readDescriptor(reader) };
   }
-  if (tag === 16) {
+  if (tag === 17) {
     return {
       tag,
       enumSchema: {
@@ -493,7 +523,7 @@ function assertTerminalRootLayoutCompatible(
   if (
     !Number.isSafeInteger(layout.rootKeySlot) ||
     root?.name !== layout.rootKeyFieldName ||
-    root.valueType.tag !== 10 ||
+    root.valueType.tag !== 11 ||
     !isKnownValueType(root.valueType)
   ) {
     throw new Error("terminal root layout key slot does not match its descriptor");
@@ -541,20 +571,16 @@ function terminalLayoutValueTypeMatchesColumn(
   // public value. Rust collector descriptors have already removed it.
   const logicalColumn = logicalStorageColumns([column])[0]!;
   // Provenance lives in fixed CurrentRow system fields, not nullable user_
-  // carriers. Authors are UUIDs internally and public strings; timestamps
-  // retain their native scalar storage type.
+  // carriers. Author subjects are already canonical text at the native/public
+  // boundary; timestamps retain their native scalar storage type.
   if (isProvenanceMagicColumn(column.name)) {
-    const storageColumn =
-      column.name === "$createdBy" || column.name === "$updatedBy"
-        ? { ...logicalColumn, column_type: { type: "Uuid" as const } }
-        : logicalColumn;
-    return terminalValueTypeMatchesColumn(valueType, storageColumn, false);
+    return terminalValueTypeMatchesColumn(valueType, logicalColumn, false);
   }
   if (carrier === "Logical") {
     return terminalValueTypeMatchesColumn(valueType, logicalColumn, false);
   }
   return (
-    valueType?.tag === 14 &&
+    valueType?.tag === 15 &&
     valueType.inner !== undefined &&
     terminalValueTypeMatchesColumn(valueType.inner, logicalColumn, false)
   );
@@ -612,7 +638,7 @@ function matchesNamedTerminalLayout(
   return (
     descriptor.length >= columns.length + 1 &&
     descriptor[0]?.name === keyName &&
-    descriptor[0]?.valueType.tag === 10 &&
+    descriptor[0]?.valueType.tag === 11 &&
     isKnownValueType(descriptor[0].valueType) &&
     columns.every(
       (column, index) =>
@@ -630,7 +656,7 @@ function terminalValueTypeMatchesColumn(
   if (!valueType || !isKnownValueType(valueType)) return false;
   if (column.sparse) {
     return (
-      valueType.tag === 14 &&
+      valueType.tag === 15 &&
       valueType.inner !== undefined &&
       terminalValueTypeMatchesColumn(
         valueType.inner,
@@ -641,16 +667,10 @@ function terminalValueTypeMatchesColumn(
   }
   if (forceNullable || column.nullable) {
     return (
-      valueType.tag === 14 &&
+      valueType.tag === 15 &&
       valueType.inner !== undefined &&
       terminalValueTypeMatchesColumn(valueType.inner, { ...column, nullable: false }, false)
     );
-  }
-  if (
-    (column.name === "$createdBy" || column.name === "$updatedBy") &&
-    column.column_type.type === "Text"
-  ) {
-    return valueType.tag === 10;
   }
   switch (column.column_type.type) {
     case "Boolean":
@@ -672,7 +692,7 @@ function terminalValueTypeMatchesColumn(
       if (payloadColumn.type !== "EnumPayload") return false;
       const payloadCases = valueType.enumSchema?.cases;
       return (
-        valueType.tag === 16 &&
+        valueType.tag === 17 &&
         payloadCases !== undefined &&
         payloadCases.length === payloadColumn.cases.length &&
         payloadCases.every((payloadCase, caseIndex) => {
@@ -694,12 +714,12 @@ function terminalValueTypeMatchesColumn(
       );
     }
     case "Uuid":
-      return valueType.tag === 10;
+      return valueType.tag === 11;
     case "Bytea":
       return valueType.tag === 9;
     case "Array":
       return (
-        valueType.tag === 13 &&
+        valueType.tag === 14 &&
         valueType.inner !== undefined &&
         terminalValueTypeMatchesColumn(
           valueType.inner,
@@ -713,10 +733,10 @@ function terminalValueTypeMatchesColumn(
       // any other variable-width type is not.
       return (
         valueType.tag === 9 ||
-        (valueType.tag === 15 &&
+        (valueType.tag === 16 &&
           valueType.record !== undefined &&
           valueType.record.length === column.column_type.columns.length + 1 &&
-          valueType.record[0]?.valueType.tag === 10 &&
+          valueType.record[0]?.valueType.tag === 11 &&
           column.column_type.columns.every((nested, index) =>
             terminalValueTypeMatchesColumn(valueType.record?.[index + 1]?.valueType, nested, false),
           ))
@@ -729,16 +749,23 @@ function decodeTerminalColumnBytes(
   bytes: Uint8Array,
   valueType: ValueType | undefined,
 ): Value {
-  let storageType = valueType;
-  while (storageType?.tag === 14) storageType = storageType.inner;
   if (
-    (column.name === "$createdBy" || column.name === "$updatedBy") &&
+    isProvenanceMagicColumn(column.name) &&
     column.column_type.type === "Text" &&
-    storageType?.tag === 10
+    nonNullableValueType(valueType)?.tag === 8
   ) {
-    return { type: "Text", value: formatUuid(bytes) };
+    return { type: "Text", value: decodeProvenanceText(bytes) };
   }
-  return decodeTerminalBytes(column.column_type, bytes);
+  return decodeTerminalBytes(column.column_type, bytes, column.name);
+}
+
+function decodeProvenanceText(bytes: Uint8Array): string {
+  return decodeCanonicalAuthorSubjectBytes(bytes);
+}
+
+function nonNullableValueType(valueType: ValueType | undefined): ValueType | undefined {
+  while (valueType?.tag === 15) valueType = valueType.inner;
+  return valueType;
 }
 
 function isKnownValueType(valueType: ValueType): boolean {
@@ -753,21 +780,32 @@ function isKnownValueType(valueType: ValueType): boolean {
     case 7:
     case 8:
     case 9:
-    case 10:
       return true;
+    case 10:
+      return (
+        valueType.internal !== undefined &&
+        (valueType.internal.tag === 0 ||
+          valueType.internal.tag === 1 ||
+          (valueType.internal.tag === 2 &&
+            valueType.internal.kind !== undefined &&
+            valueType.internal.kind >= 0 &&
+            valueType.internal.kind <= 2))
+      );
     case 11:
-      return valueType.enumSchema?.variants !== undefined;
+      return true;
     case 12:
-      return valueType.members !== undefined && valueType.members.every(isKnownValueType);
+      return valueType.enumSchema?.variants !== undefined;
     case 13:
+      return valueType.members !== undefined && valueType.members.every(isKnownValueType);
     case 14:
-      return valueType.inner !== undefined && isKnownValueType(valueType.inner);
     case 15:
+      return valueType.inner !== undefined && isKnownValueType(valueType.inner);
+    case 16:
       return (
         valueType.record !== undefined &&
         valueType.record.every((field) => isKnownValueType(field.valueType))
       );
-    case 16:
+    case 17:
       return (
         valueType.enumSchema?.cases !== undefined &&
         valueType.enumSchema.cases.every((enumCase) =>
@@ -812,12 +850,14 @@ function decodeNativeTerminalRowValues(
   return columns.map((column, index) => {
     const bytes = decodeRecordValue(descriptor, raw, index);
     if (bytes == null) return { type: "Null" };
-    return decodeTerminalBytes(column.column_type, bytes);
+    return decodeTerminalColumnBytes(column, bytes, descriptor[index]?.valueType);
   });
 }
 
-function decodeTerminalBytes(type: ColumnType, bytes: Uint8Array): Value {
+function decodeTerminalBytes(type: ColumnType, bytes: Uint8Array, columnName?: string): Value {
   switch (type.type) {
+    case "Timestamp":
+      return { type: "Timestamp", value: decodeNativeTimestamp(bytes, columnName) };
     case "Array":
       return { type: "Array", value: decodeTerminalArray(type.element, bytes) };
     case "Row": {
@@ -939,15 +979,15 @@ function decodeRecordValueWithLayout(
 }
 
 function unwrapValue(value: Uint8Array, valueType: ValueType): Uint8Array | null {
-  if (valueType.tag !== 14) return value;
+  if (valueType.tag !== 15) return value;
   const unwrapped = unwrapNullable(value);
   if (unwrapped == null) return null;
   return valueType.inner ? unwrapValue(unwrapped, valueType.inner) : unwrapped;
 }
 
 function formatValueType(valueType: ValueType): string {
-  if (valueType.tag === 13 || valueType.tag === 14) {
-    return `${valueType.tag === 13 ? "Array" : "Nullable"}<${valueType.inner ? formatValueType(valueType.inner) : "?"}>`;
+  if (valueType.tag === 14 || valueType.tag === 15) {
+    return `${valueType.tag === 14 ? "Array" : "Nullable"}<${valueType.inner ? formatValueType(valueType.inner) : "?"}>`;
   }
   return valueTypeName(valueType.tag);
 }
@@ -975,17 +1015,21 @@ function valueTypeName(tag: number): string {
     case 9:
       return "Bytes";
     case 10:
-      return "Uuid";
+      return "Internal";
     case 11:
-      return "Enum";
+      return "Uuid";
     case 12:
-      return "Tuple";
+      return "EnumTag";
     case 13:
-      return "Array";
+      return "Tuple";
     case 14:
-      return "Nullable";
+      return "Array";
     case 15:
+      return "Nullable";
+    case 16:
       return "Record";
+    case 17:
+      return "Enum";
     default:
       return `unknown(${tag})`;
   }
@@ -1017,10 +1061,10 @@ export function encodeNativeColumnValue(
   value: Value | undefined,
 ): Uint8Array {
   const logicalType = storageColumnTypeToValueType(column.column_type);
-  const nullableType: ValueType = column.nullable ? { tag: 14, inner: logicalType } : logicalType;
+  const nullableType: ValueType = column.nullable ? { tag: 15, inner: logicalType } : logicalType;
 
   if (!value) {
-    if (column.sparse) return encodeNativeNullValue({ tag: 14, inner: nullableType });
+    if (column.sparse) return encodeNativeNullValue({ tag: 15, inner: nullableType });
     if (!column.nullable) {
       throw new Error(`missing non-nullable value for ${column.name}`);
     }
@@ -1088,7 +1132,7 @@ function encodeNativeNonNullValue(type: ColumnType, value: Value): Uint8Array {
     case "Json":
     case "Enum":
       if (value.type !== "Text") throw new Error(`expected ${type.type} value`);
-      return new TextEncoder().encode(value.value);
+      return concatBytes([Uint8Array.of(2), new TextEncoder().encode(value.value)]);
     case "EnumPayload": {
       if (value.type !== "Enum") throw new Error("expected Enum payload value");
       const entry = type.cases.find((candidate) => candidate.name === value.value.case);
@@ -1104,7 +1148,7 @@ function encodeNativeNonNullValue(type: ColumnType, value: Value): Uint8Array {
       return parseUuid(value.value);
     case "Bytea":
       if (value.type !== "Bytea") throw new Error("expected Bytea value");
-      return value.value;
+      return concatBytes([Uint8Array.of(2), value.value]);
     case "Array":
       if (value.type !== "Array") throw new Error("expected Array value");
       return encodeNativeArrayValue(type.element, value.value);
@@ -1168,8 +1212,8 @@ function parseUuid(value: string): Uint8Array {
 
 export function storageColumnValueType(column: ColumnDescriptor): ValueType {
   let valueType = storageColumnTypeToValueType(column.column_type, column.name);
-  if (column.nullable) valueType = { tag: 14, inner: valueType };
-  return column.sparse ? { tag: 14, inner: valueType } : valueType;
+  if (column.nullable) valueType = { tag: 15, inner: valueType };
+  return column.sparse ? { tag: 15, inner: valueType } : valueType;
 }
 
 /** Strip physical sparse-carrier metadata for public packed row transport. */
@@ -1215,7 +1259,7 @@ export function storageColumnTypeToValueType(type: ColumnType, enumName = "enum"
       return { tag: 8 };
     case "EnumPayload":
       return {
-        tag: 16,
+        tag: 17,
         enumSchema: {
           name: enumName,
           cases: type.cases.map((entry) => ({
@@ -1230,9 +1274,9 @@ export function storageColumnTypeToValueType(type: ColumnType, enumName = "enum"
     case "Bytea":
       return { tag: 9 };
     case "Uuid":
-      return { tag: 10 };
+      return { tag: 11 };
     case "Array":
-      return { tag: 13, inner: storageColumnTypeToValueType(type.element, enumName) };
+      return { tag: 14, inner: storageColumnTypeToValueType(type.element, enumName) };
     case "Row":
       return { tag: 9 };
   }
@@ -1254,7 +1298,7 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
     case "Text":
     case "Json":
     case "Enum":
-      return { type: "Text", value: textDecoder.decode(bytes) };
+      return { type: "Text", value: textDecoder.decode(decodeInlineScalar(bytes)) };
     case "EnumPayload": {
       if (bytes.length < 4) throw new Error("invalid Enum payload value");
       const nameLength = view.getUint32(0, true);
@@ -1273,12 +1317,19 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
     case "Uuid":
       return { type: "Uuid", value: formatUuid(bytes) };
     case "Bytea":
-      return { type: "Bytea", value: bytes.slice() };
+      return { type: "Bytea", value: decodeInlineScalar(bytes).slice() };
     case "Array":
       return { type: "Array", value: decodeArray(type.element, bytes) };
     case "Row":
       return { type: "Row", value: decodeRowValue(type.columns, bytes) };
   }
+}
+
+function decodeInlineScalar(bytes: Uint8Array): Uint8Array {
+  if (bytes[0] !== 2) {
+    throw new Error("indirect scalar crossed a logical binding boundary");
+  }
+  return bytes.subarray(1);
 }
 
 function decodeRowValue(
@@ -1314,7 +1365,7 @@ function decodePlainValue(type: ColumnType, bytes: Uint8Array, columnName?: stri
   const value = decodeBytes(type, bytes);
   switch (type.type) {
     case "Timestamp":
-      return value.type === "Timestamp" ? timestampToDate(value.value, columnName) : null;
+      return timestampToDate(decodeNativeTimestamp(bytes, columnName), columnName);
     case "Json":
       return value.type === "Text" ? JSON.parse(value.value) : null;
     case "Array":
@@ -1384,10 +1435,14 @@ function decodeArrayElements<T>(
   return values;
 }
 
-function timestampToDate(value: number, columnName?: string): Date {
-  if (columnName && isProvenanceMagicTimestampColumn(columnName)) {
-    return new Date(Math.trunc(value / 1_000));
-  }
+export function decodeNativeTimestamp(bytes: Uint8Array, _columnName?: string): number {
+  const raw = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getBigUint64(0, true);
+  // All public timestamps use Unix milliseconds. Packed HLCs stay in internal
+  // version and transaction-ordering state and never cross this boundary.
+  return Number(raw);
+}
+
+function timestampToDate(value: number, _columnName?: string): Date {
   return new Date(value);
 }
 
@@ -1405,7 +1460,7 @@ export function nativeFixedValueSize(valueType: ValueType): number | undefined {
   switch (valueType.tag) {
     case 0:
     case 7:
-    case 11:
+    case 12:
       return 1;
     case 1:
       return 2;
@@ -1416,9 +1471,9 @@ export function nativeFixedValueSize(valueType: ValueType): number | undefined {
     case 5:
     case 6:
       return 8;
-    case 10:
+    case 11:
       return 16;
-    case 12: {
+    case 13: {
       const members = valueType.members ?? (valueType.inner ? [valueType.inner] : []);
       return members.reduce<number | undefined>((total, member) => {
         if (total == null) return undefined;
@@ -1426,9 +1481,10 @@ export function nativeFixedValueSize(valueType: ValueType): number | undefined {
         return memberSize == null ? undefined : total + memberSize;
       }, 0);
     }
-    case 13:
+    case 10:
+    case 14:
       return undefined;
-    case 14: {
+    case 15: {
       const innerSize = valueType.inner ? nativeFixedValueSize(valueType.inner) : undefined;
       return innerSize == null ? undefined : innerSize + 1;
     }

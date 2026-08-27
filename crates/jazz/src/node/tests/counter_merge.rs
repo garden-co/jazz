@@ -28,11 +28,11 @@ fn core_creates_merge_versions_for_concurrent_heads() {
 
     let update = core.view_update_for_current_rows("todos").unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -399,7 +399,7 @@ fn ingest_direct_version(
             tx_id,
             kind: TxKind::Mergeable,
             n_total_writes: 1,
-            made_by: AuthorId::SYSTEM,
+            made_by: AuthorSubject::SYSTEM,
             permission_subject: None,
             base_snapshot: None,
             row_read_set: None,
@@ -413,10 +413,10 @@ fn ingest_direct_version(
             schema.version_id(),
             row_uuid,
             parents,
-            AuthorId::SYSTEM,
-            TxTime(10),
-            AuthorId::SYSTEM,
-            TxTime(10),
+            AuthorSubject::SYSTEM,
+            10,
+            AuthorSubject::SYSTEM,
+            10,
             &cells,
             None,
         )

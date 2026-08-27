@@ -74,17 +74,19 @@ const camelChatApp = schema.defineApp({
 });
 
 const permissions = schema.definePermissions(app, ({ policy, anyOf, session }) => [
-  policy.chats.allowRead.where(anyOf([{ visibility: "public" }, { owner_id: session.user_id }])),
+  policy.chats.allowRead.where(
+    anyOf([{ visibility: "public" }, { owner_id: session.claims["sub"] }]),
+  ),
   policy.chats.allowInsert.always(),
   policy.chats.allowUpdate.always(),
   policy.chats.allowDelete.always(),
 
-  policy.chat_members.allowRead.where({ user_id: session.user_id }),
+  policy.chat_members.allowRead.where({ user_id: session.claims["sub"] }),
   policy.chat_members.allowInsert.always(),
   policy.chat_members.allowUpdate.always(),
   policy.chat_members.allowDelete.always(),
 
-  policy.messages.allowRead.where({ owner_id: session.user_id }),
+  policy.messages.allowRead.where({ owner_id: session.claims["sub"] }),
   policy.messages.allowInsert.always(),
   policy.messages.allowUpdate.always(),
   policy.messages.allowDelete.always(),
@@ -101,7 +103,7 @@ const chatStyleMessagePermissions = schema.definePermissions(app, ({ policy, any
       { visibility: "public" },
       policy.chat_members.exists.where({
         chat_id: chat.id,
-        user_id: session.user_id,
+        user_id: session.claims["sub"],
       }),
     ]),
   ),
@@ -109,10 +111,10 @@ const chatStyleMessagePermissions = schema.definePermissions(app, ({ policy, any
   policy.chats.allowUpdate.always(),
   policy.chats.allowDelete.always(),
 
-  policy.chat_members.allowRead.where({ user_id: session.user_id }),
-  policy.chat_members.allowInsert.where({ user_id: session.user_id }),
+  policy.chat_members.allowRead.where({ user_id: session.claims["sub"] }),
+  policy.chat_members.allowInsert.where({ user_id: session.claims["sub"] }),
   policy.chat_members.allowUpdate.always(),
-  policy.chat_members.allowDelete.where({ user_id: session.user_id }),
+  policy.chat_members.allowDelete.where({ user_id: session.claims["sub"] }),
 
   policy.messages.allowRead.where((message) =>
     anyOf([
@@ -122,14 +124,14 @@ const chatStyleMessagePermissions = schema.definePermissions(app, ({ policy, any
       }),
       policy.chat_members.exists.where({
         chat_id: message.chat_id,
-        user_id: session.user_id,
+        user_id: session.claims["sub"],
       }),
     ]),
   ),
   policy.messages.allowInsert.where((message) =>
     policy.chat_members.exists.where({
       chat_id: message.chat_id,
-      user_id: session.user_id,
+      user_id: session.claims["sub"],
     }),
   ),
   policy.messages.allowUpdate.always(),
@@ -145,56 +147,56 @@ const camelChatStyleMessagePermissions = schema.definePermissions(
   camelChatApp,
   ({ policy, anyOf, allowedTo, session }) => [
     policy.profiles.allowRead.where({}),
-    policy.profiles.allowInsert.where({ userId: session.user_id }),
-    policy.profiles.allowUpdate.where({ userId: session.user_id }),
+    policy.profiles.allowInsert.where({ userId: session.claims["sub"] }),
+    policy.profiles.allowUpdate.where({ userId: session.claims["sub"] }),
 
     policy.chats.allowRead.where((chat) =>
       anyOf([
         { isPublic: true },
         policy.chatMembers.exists.where({
           chatId: chat.id,
-          userId: session.user_id,
+          userId: session.claims["sub"],
         }),
-        { joinCode: session["claims.join_code"] },
+        { joinCode: session.claims["join_code"] },
       ]),
     ),
-    policy.chats.allowInsert.where({ createdBy: session.user_id }),
-    policy.chats.allowUpdate.where({ createdBy: session.user_id }),
-    policy.chats.allowDelete.where({ createdBy: session.user_id }),
+    policy.chats.allowInsert.where({ createdBy: session.claims["sub"] }),
+    policy.chats.allowUpdate.where({ createdBy: session.claims["sub"] }),
+    policy.chats.allowDelete.where({ createdBy: session.claims["sub"] }),
 
     policy.chatMembers.allowRead.where((member) =>
       anyOf([
-        { userId: session.user_id },
+        { userId: session.claims["sub"] },
         policy.chatMembers.exists.where({
           chatId: member.chatId,
-          userId: session.user_id,
+          userId: session.claims["sub"],
         }),
       ]),
     ),
-    policy.chatMembers.allowInsert.where({ userId: session.user_id }),
+    policy.chatMembers.allowInsert.where({ userId: session.claims["sub"] }),
     policy.chatMembers.allowUpdate.always(),
-    policy.chatMembers.allowDelete.where({ userId: session.user_id }),
+    policy.chatMembers.allowDelete.where({ userId: session.claims["sub"] }),
 
     policy.messages.allowRead.where((message) =>
       anyOf([
         policy.chats.exists.where({ id: message.chatId, isPublic: true }),
         policy.chatMembers.exists.where({
           chatId: message.chatId,
-          userId: session.user_id,
+          userId: session.claims["sub"],
         }),
       ]),
     ),
     policy.messages.allowInsert.where((message) =>
       policy.chatMembers.exists.where({
         chatId: message.chatId,
-        userId: session.user_id,
+        userId: session.claims["sub"],
       }),
     ),
-    policy.messages.allowDelete.where({ senderId: session.user_id }),
+    policy.messages.allowDelete.where({ senderId: session.claims["sub"] }),
 
     policy.reactions.allowRead.where(allowedTo.read("messageId")),
-    policy.reactions.allowInsert.where({ userId: session.user_id }),
-    policy.reactions.allowDelete.where({ userId: session.user_id }),
+    policy.reactions.allowInsert.where({ userId: session.claims["sub"] }),
+    policy.reactions.allowDelete.where({ userId: session.claims["sub"] }),
   ],
 );
 
@@ -206,10 +208,10 @@ const createdByApp = schema.defineApp({
 });
 
 const createdByPermissions = schema.definePermissions(createdByApp, ({ policy, session }) => {
-  policy.todos.allowRead.where({ $createdBy: session.user_id });
+  policy.todos.allowRead.where({ $createdBy: session.user });
   policy.todos.allowInsert.always();
-  policy.todos.allowUpdate.where({ $createdBy: session.user_id });
-  policy.todos.allowDelete.where({ $createdBy: session.user_id });
+  policy.todos.allowUpdate.where({ $createdBy: session.user });
+  policy.todos.allowDelete.where({ $createdBy: session.user });
 });
 
 type Chat = RowOf<typeof app.chats>;
@@ -586,6 +588,7 @@ describe("raw websocket private read gate", () => {
     );
 
     const inviteSession = {
+      issuer: "https://issuer.jazz.test",
       user_id: bobUserId,
       claims: { join_code: joinCode },
       authMode: "external" as const,
@@ -947,19 +950,19 @@ describe("raw websocket private read gate", () => {
     const chatSnapshots: Chat[][] = [];
     const messageSnapshots: Message[][] = [];
     const unsubscribeChats = ctx.trackSubscription(
-      bob.subscribeAll(
+      bob.subscribe(
         app.chats,
-        (delta) => {
-          chatSnapshots.push([...delta.all]);
+        (rows) => {
+          chatSnapshots.push(rows);
         },
         { tier: "edge" },
       ),
     );
     const unsubscribeMessages = ctx.trackSubscription(
-      bob.subscribeAll(
+      bob.subscribe(
         app.messages,
-        (delta) => {
-          messageSnapshots.push([...delta.all]);
+        (rows) => {
+          messageSnapshots.push(rows);
         },
         { tier: "edge" },
       ),
@@ -1038,7 +1041,7 @@ async function publishSchemaAndPermissions(
 }
 
 function requireUserId(db: Db, label: string): string {
-  const userId = db.getAuthState().session?.user_id;
+  const userId = db.getAuthState().session?.claims.sub;
   if (!userId) {
     throw new Error(`${label} Db did not initialize a local-first session`);
   }
@@ -1052,7 +1055,12 @@ async function waitForSubscription<T extends { id: string }>(
   label: string,
   timeoutMs = 15_000,
   options?: { tier?: "local" | "edge" },
-  session?: { user_id: string; claims: Record<string, unknown>; authMode: "external" },
+  session?: {
+    issuer: string;
+    user_id: string;
+    claims: Record<string, unknown>;
+    authMode: "external";
+  },
 ): Promise<() => void> {
   return await new Promise<() => void>((resolve, reject) => {
     let settled = false;
@@ -1068,12 +1076,12 @@ async function waitForSubscription<T extends { id: string }>(
         ),
       );
     }, timeoutMs);
-    unsubscribe = db.subscribeAll(
+    unsubscribe = db.subscribe(
       query,
-      (delta) => {
+      (rows) => {
         if (settled) return;
-        lastRows = delta.all;
-        if (!predicate(delta.all)) return;
+        lastRows = rows;
+        if (!predicate(rows)) return;
         settled = true;
         clearTimeout(timeoutId);
         resolve(unsubscribe);

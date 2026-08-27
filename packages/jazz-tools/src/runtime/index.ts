@@ -8,17 +8,22 @@ export {
   PersistedWriteRejectedError,
   loadWasmModule,
   type DurabilityTier,
+  ReadTier,
   type QueryPropagation,
   type QueryVisibility,
   type Row,
   type SubscriptionCallback,
+  type StreamingValueChunk,
+  type StreamingValueSource,
   type WasmModule,
   WriteHandle,
   WriteResult,
   ExclusiveWriteHandle,
   ExclusiveWriteResult,
 } from "./client.js";
-export type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
+export type { AppContext, PublicSession, RuntimeSourcesConfig } from "./context.js";
+/** Encode the opaque logical identity exposed as `session.user` by bindings. */
+export { canonicalAuthorSubject as userIdentity } from "./author-id.js";
 export {
   createDb,
   Db,
@@ -36,6 +41,7 @@ export {
   type BranchValue,
   type QualifiedBranch,
   type InsertOptions,
+  type StreamingInsertOptions,
   type RestoreOptions,
   type UpdateOptions,
   type DeleteOptions,
@@ -61,11 +67,5 @@ export {
   type IntrospectionSubscriptionGroup,
   type IntrospectionSubscriptionResponse,
 } from "./introspection-fetch.js";
-export {
-  RowChangeKind,
-  applySubscriptionDelta,
-  type RowDelta,
-  type SubscriptionDelta,
-} from "./subscription-manager.js";
 export { generateAuthSecret, BrowserAuthSecretStore } from "./auth-secret-store.js";
 export type { AuthSecretStore, BrowserAuthSecretStoreOptions } from "./auth-secret-store.js";

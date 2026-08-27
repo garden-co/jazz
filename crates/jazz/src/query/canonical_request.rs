@@ -629,6 +629,11 @@ fn value_type(value: &Value) -> ColumnType {
         Value::Enum(_) => {
             panic!("union-valued query bindings are an internal Groove representation")
         }
+        Value::Large(value) => match value.kind {
+            groove::large_values::LargeValueKind::Bytes => ColumnType::Bytes,
+            groove::large_values::LargeValueKind::String
+            | groove::large_values::LargeValueKind::Json => ColumnType::String,
+        },
     }
 }
 
@@ -664,6 +669,9 @@ fn value_matches_type(value: &Value, column_type: &ColumnType) -> bool {
         // never accepted as query-bound values.
         (Value::Record(_), _) => false,
         (Value::Enum(_), _) => false,
+        // Indirect descriptors are engine-owned and cannot be supplied as a
+        // public query binding; callers bind the ordinary logical primitive.
+        (Value::Large(_), _) => false,
         _ => false,
     }
 }
@@ -747,6 +755,9 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
         Value::Enum(_) => {
             panic!("union-valued query bindings are an internal Groove representation")
         }
+        Value::Large(_) => {
+            panic!("indirect descriptors are not public query binding values")
+        }
     }
 }
 
@@ -804,6 +815,9 @@ fn put_column_type(bytes: &mut Vec<u8>, ty: &ColumnType) {
             panic!(
                 "union column types are internal to Groove and have no Jazz query binding encoding"
             )
+        }
+        _ => {
+            panic!("raw stored-scalar backing types are not Jazz query column types")
         }
     }
 }

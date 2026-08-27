@@ -9,6 +9,7 @@ export type WhereOperator =
   | "lte"
   | "contains"
   | "in"
+  | "notIn"
   | "isNull";
 
 export interface WhereOperatorColumn {
@@ -25,34 +26,34 @@ function operatorsForColumn(
   references?: string,
 ): WhereOperator[] {
   if (references) {
-    return nullable ? ["eq", "ne", "in", "isNull"] : ["eq", "ne", "in"];
+    return nullable ? ["eq", "ne", "in", "notIn", "isNull"] : ["eq", "ne", "in", "notIn"];
   }
 
   switch (columnType.type) {
     case "Text":
-      return ["eq", "ne", "contains", "in"];
+      return ["eq", "ne", "contains", "in", "notIn"];
     case "Boolean":
-      return ["eq", "ne", "in"];
+      return ["eq", "ne", "in", "notIn"];
     case "Integer":
     case "BigInt":
     case "Double":
-      return ["eq", "ne", "gt", "gte", "lt", "lte", "in"];
+      return ["eq", "ne", "gt", "gte", "lt", "lte", "in", "notIn"];
     case "Timestamp":
-      return ["eq", "ne", "gt", "gte", "lt", "lte", "in"];
+      return ["eq", "ne", "gt", "gte", "lt", "lte", "in", "notIn"];
     case "Uuid":
-      return ["eq", "ne", "in"];
+      return ["eq", "ne", "in", "notIn"];
     case "Bytea":
-      return ["eq", "ne", "in"];
+      return ["eq", "ne", "in", "notIn"];
     case "Json":
-      return ["eq", "ne", "in"];
+      return ["eq", "ne", "in", "notIn"];
     case "Enum":
-      return ["eq", "ne", "in"];
+      return ["eq", "ne", "in", "notIn"];
     case "EnumPayload":
       // Payload enums deliberately use their dedicated `match` operator rather
       // than pretending that a whole discriminated record is comparable.
       return [];
     case "Array":
-      return ["eq", "contains", "in"];
+      return ["eq", "contains", "in", "notIn"];
     case "Row":
       return [];
   }
@@ -60,7 +61,7 @@ function operatorsForColumn(
 
 export function getSupportedWhereOperatorsForColumn(column: WhereOperatorColumn): WhereOperator[] {
   if (column.implicitId || column.name === "id") {
-    return ["eq", "ne", "in"];
+    return ["eq", "ne", "in", "notIn"];
   }
 
   return operatorsForColumn(column.columnType, column.nullable, column.references);
@@ -71,7 +72,7 @@ export function getSupportedWhereOperatorsForSchemaColumn(
   column: ColumnDescriptor | undefined,
 ): WhereOperator[] | undefined {
   if (fieldName === "id") {
-    return ["eq", "ne", "in"];
+    return ["eq", "ne", "in", "notIn"];
   }
 
   if (!column) {

@@ -50,6 +50,7 @@ pub enum VariantProjectionTarget {
 pub struct IndexSourceOp {
     pub table: String,
     pub index: String,
+    pub intersections: Vec<(String, StaticScanSpec)>,
     /// Fixed descriptor consumed by `IndexBy` after optional variant
     /// projection. For homogeneous tables this is the ordinary table
     /// descriptor.
@@ -147,6 +148,16 @@ pub struct MapProjectOp {
     pub expressions: Vec<ProjectionExpr>,
     /// `(input_descriptor_idx, input_field_idx)` pairs for fast record copying.
     pub mapping: Vec<(usize, usize)>,
+}
+
+/// Replace one String/Bytes field with its logical BLAKE3 checksum.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct StreamingChecksumOp {
+    pub field: String,
+    pub field_idx: usize,
+    pub output_field: String,
+    pub window_bytes: usize,
+    pub max_bytes_per_turn: usize,
 }
 
 /// Per-occurrence enum tag translation at a descriptor boundary.
@@ -559,7 +570,7 @@ impl From<Value> for LiteralValue {
             Value::Array(values) => Self::Array(values.into_iter().map(Into::into).collect()),
             Value::Nullable(value) => Self::Nullable(value.map(|value| Box::new((*value).into()))),
             // Neither records nor tagged payload unions are supported predicate literals.
-            Value::Record(_) | Value::Enum(_) => Self::Record,
+            Value::Record(_) | Value::Enum(_) | Value::Large(_) => Self::Record,
         }
     }
 }

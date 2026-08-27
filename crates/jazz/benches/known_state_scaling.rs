@@ -66,7 +66,7 @@ fn main() {
             .len();
         let metrics = fixture.core.storage_read_metrics();
 
-        let SyncMessage::ViewUpdate {
+        let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             version_carriers,
             version_bundles,
             peer_payload_inventory,
@@ -75,7 +75,7 @@ fn main() {
             program_fact_adds,
             program_fact_removes,
             ..
-        } = &update
+        }) = &update
         else {
             panic!("expected one view update");
         };
@@ -188,7 +188,9 @@ impl Fixture {
             .current_rows_update(&mut self.core, TABLE)
             .expect("discover whole-table subscription key");
         match update {
-            SyncMessage::ViewUpdate { subscription, .. } => subscription,
+            SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload { subscription, .. }) => {
+                subscription
+            }
             _ => panic!("expected one view update"),
         }
     }

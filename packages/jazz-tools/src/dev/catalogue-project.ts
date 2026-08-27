@@ -7,8 +7,22 @@
  * Prefer using {@link catalogue.ts} utils whenever possible.
  */
 
-import { access, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import {
+  access,
+  link,
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { hostname } from "node:os";
+import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import type { WasmSchema } from "../drivers/types.js";
@@ -384,10 +398,6 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-function snapshotsDirForMigrations(migrationsDir: string): string {
-  return join(migrationsDir, "snapshots");
-}
-
 interface ResolvedSchemaInput {
   hash: string;
   schema: WasmSchema;
@@ -400,7 +410,63 @@ interface SnapshotEntry {
   schema: WasmSchema;
 }
 
-// Supports both millisecond and microsecond-precision timestamps.
+/**
+ * Portable storage boundary for schema snapshots and migration publications.
+ *
+ * The project directory is trusted against mutation by another process running
+ * as the same OS user: such a process can already rewrite project source and is
+ * not an authorization boundary. Within that boundary we validate symlinks
+ * before every operation, fail closed when one is observed, serialize Jazz
+ * writers, and use atomic no-replace publication so concurrent Jazz commands
+ * never clobber an existing file.
+ */
+class MigrationStorage {
+  readonly migrationsDir: string;
+
+  constructor(migrationsDir: string) {
+    this.migrationsDir = resolve(migrationsDir);
+  }
+
+  get snapshotsDir(): string {
+    return join(this.migrationsDir, "snapshots");
+  }
+
+  async initialize(): Promise<void> {
+    await assertNoSymlinkComponents(this.migrationsDir, true);
+    await mkdir(this.migrationsDir, { recursive: true });
+    await assertNoSymlinkComponents(this.migrationsDir);
+  }
+
+  async listSnapshots(): Promise<SnapshotEntry[]> {
+    return listSnapshotEntries(this.snapshotsDir);
+  }
+
+  async resolveSnapshot(hash: string, label: string): Promise<SnapshotEntry | null> {
+    return resolveSnapshotEntry(this.snapshotsDir, hash, label);
+  }
+
+  async writeSnapshot(fileName: string, schema: WasmSchema): Promise<string> {
+    if (basename(fileName) !== fileName || !looksLikeSnapshotFileName(fileName)) {
+      throw new Error(`Invalid snapshot filename: ${fileName}`);
+    }
+    await assertNoSymlinkComponents(this.snapshotsDir, true);
+    await mkdir(this.snapshotsDir, { recursive: true });
+    await assertNoSymlinkComponents(this.snapshotsDir);
+    const filePath = join(this.snapshotsDir, fileName);
+    await assertNoSymlinkComponents(filePath, true);
+    const contents = `${JSON.stringify(schema, null, 2)}\n`;
+    try {
+      await syncFile(filePath, contents);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const identity = contentIdentity(contents);
+      await verifiedContents(filePath, identity.size, identity.sha256);
+    }
+    return filePath;
+  }
+}
+
+// Schema snapshots are named from their Unix-millisecond publication time.
 function looksLikeSnapshotFileName(fileName: string): boolean {
   return /^(?:\d{8,17}T\d{6}-)?[0-9a-f]{12}\.json$/i.test(fileName);
 }
@@ -411,6 +477,7 @@ async function readSnapshotEntry(dir: string, fileName: string): Promise<Snapsho
   }
 
   const filePath = join(dir, fileName);
+  await assertNoSymlinkComponents(filePath);
   const schema = JSON.parse(await readFile(filePath, "utf8")) as WasmSchema;
   return {
     hash: await computeSchemaHash(schema),
@@ -425,14 +492,19 @@ async function listSnapshotEntries(dir: string): Promise<SnapshotEntry[]> {
     return [];
   }
 
+  // Snapshots determine both the logical timestamp and the implicit baseline.
+  // Do not let either decision follow a redirected committed snapshot path.
+  await assertNoSymlinkComponents(dir);
   const files = await readdir(dir);
   return (await Promise.all(files.map((fileName) => readSnapshotEntry(dir, fileName)))).filter(
     (entry): entry is SnapshotEntry => entry !== null,
   );
 }
 
-async function listSnapshotEntriesForMigrations(migrationsDir: string): Promise<SnapshotEntry[]> {
-  return listSnapshotEntries(snapshotsDirForMigrations(migrationsDir));
+async function listSnapshotEntriesForMigrations(
+  storage: MigrationStorage,
+): Promise<SnapshotEntry[]> {
+  return storage.listSnapshots();
 }
 
 function snapshotFilename(hash: string, timestamp: string = createTimestamp()): string {
@@ -449,6 +521,40 @@ function createTimestamp(now: Date = new Date()): string {
   return `${year}${month}${day}T${hours}${minutes}${seconds}`;
 }
 
+function timestampDate(timestamp: string): Date {
+  const match = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})$/.exec(timestamp);
+  if (!match) {
+    throw new Error(`Invalid migration timestamp: ${timestamp}`);
+  }
+  return new Date(
+    Date.UTC(
+      Number(match[1]),
+      Number(match[2]) - 1,
+      Number(match[3]),
+      Number(match[4]),
+      Number(match[5]),
+      Number(match[6]),
+    ),
+  );
+}
+
+async function nextCommittedSnapshotTimestamp(
+  storage: MigrationStorage,
+  now: Date = new Date(),
+): Promise<string> {
+  const current = createTimestamp(now);
+  const latest = (await listSnapshotEntriesForMigrations(storage))
+    .filter((entry) => isCommittedSnapshotFileName(entry.fileName))
+    .map((entry) => /^([0-9]{8}T[0-9]{6})-/.exec(entry.fileName)?.[1])
+    .filter((timestamp): timestamp is string => timestamp !== undefined)
+    .sort()
+    .at(-1);
+  if (!latest || current > latest) {
+    return current;
+  }
+  return createTimestamp(new Date(timestampDate(latest).getTime() + 1000));
+}
+
 function createSnapshotTimestampFromPublishedAt(
   publishedAt: number | null | undefined,
   fallbackNow: Date = new Date(),
@@ -461,15 +567,11 @@ function createSnapshotTimestampFromPublishedAt(
 }
 
 async function writeSnapshotSchemaForMigrations(
-  migrationsDir: string,
+  storage: MigrationStorage,
   fileName: string,
   schema: WasmSchema,
 ): Promise<string> {
-  const dir = snapshotsDirForMigrations(migrationsDir);
-  await mkdir(dir, { recursive: true });
-  const filePath = join(dir, fileName);
-  await writeFile(filePath, `${JSON.stringify(schema, null, 2)}\n`);
-  return filePath;
+  return storage.writeSnapshot(fileName, schema);
 }
 
 function defaultMigrationsDir(schemaDir: string): string {
@@ -480,15 +582,13 @@ function resolvedMigrationsDir(schemaDir: string, migrationsDir?: string): strin
   return migrationsDir ?? defaultMigrationsDir(schemaDir);
 }
 
-function snapshotsDir(schemaDir: string, migrationsDir?: string): string {
-  return snapshotsDirForMigrations(resolvedMigrationsDir(schemaDir, migrationsDir));
-}
-
 async function listLocalSnapshotEntries(
   schemaDir: string,
   migrationsDir?: string,
 ): Promise<SnapshotEntry[]> {
-  return listSnapshotEntries(snapshotsDir(schemaDir, migrationsDir));
+  const storage = new MigrationStorage(resolvedMigrationsDir(schemaDir, migrationsDir));
+  await storage.initialize();
+  return storage.listSnapshots();
 }
 
 async function resolveLocalSnapshotEntry(
@@ -497,7 +597,9 @@ async function resolveLocalSnapshotEntry(
   hash: string,
   label: string,
 ): Promise<SnapshotEntry | null> {
-  return resolveSnapshotEntry(snapshotsDir(schemaDir, migrationsDir), hash, label);
+  const storage = new MigrationStorage(resolvedMigrationsDir(schemaDir, migrationsDir));
+  await storage.initialize();
+  return storage.resolveSnapshot(hash, label);
 }
 
 async function loadLocalSnapshotSchema(
@@ -524,11 +626,9 @@ async function writeSnapshotSchema(
   schema: WasmSchema,
   timestamp: string = createTimestamp(),
 ): Promise<string> {
-  const dir = snapshotsDir(schemaDir, migrationsDir);
-  await mkdir(dir, { recursive: true });
-  const filePath = join(dir, snapshotFilename(hash, timestamp));
-  await writeFile(filePath, `${JSON.stringify(schema, null, 2)}\n`);
-  return filePath;
+  const storage = new MigrationStorage(resolvedMigrationsDir(schemaDir, migrationsDir));
+  await storage.initialize();
+  return storage.writeSnapshot(snapshotFilename(hash, timestamp), schema);
 }
 
 async function ensureLocalSnapshot(
@@ -650,9 +750,9 @@ function isCommittedSnapshotFileName(fileName: string): boolean {
 }
 
 async function loadLatestCommittedSnapshot(
-  migrationsDir: string,
+  storage: MigrationStorage,
 ): Promise<ResolvedSchemaInput | null> {
-  const entries = await listSnapshotEntriesForMigrations(migrationsDir);
+  const entries = await listSnapshotEntriesForMigrations(storage);
   const latest = entries
     .filter((entry) => isCommittedSnapshotFileName(entry.fileName))
     .sort((left, right) => left.fileName.localeCompare(right.fileName))
@@ -667,12 +767,285 @@ async function loadLatestCommittedSnapshot(
   };
 }
 
-async function ensureCommittedSnapshot(
-  migrationsDir: string,
+interface MigrationPublicationFile {
+  finalPath: string;
+  contents: string;
+}
+
+interface MigrationPublicationJournal {
+  version: 2;
+  files: Array<{
+    stagedName: string;
+    finalRelativePath: string;
+    size: number;
+    sha256: string;
+  }>;
+}
+
+const MIGRATION_STAGE_DIR = ".jazz-create-migration-stage";
+const MIGRATION_JOURNAL = ".jazz-create-migration.journal.json";
+
+interface MigrationLockOwner {
+  version: 1;
+  pid: number;
+  hostname: string;
+  token: string;
+}
+
+function parseMigrationLockOwner(text: string): MigrationLockOwner {
+  const value = JSON.parse(text) as unknown;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("owner is not an object");
+  }
+  const owner = value as Record<string, unknown>;
+  if (
+    Object.keys(owner).sort().join(",") !== "hostname,pid,token,version" ||
+    owner.version !== 1 ||
+    !Number.isSafeInteger(owner.pid) ||
+    (owner.pid as number) <= 0 ||
+    typeof owner.hostname !== "string" ||
+    owner.hostname.length === 0 ||
+    typeof owner.token !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(owner.token)
+  ) {
+    throw new Error("owner has an invalid shape");
+  }
+  return owner as unknown as MigrationLockOwner;
+}
+
+function contentIdentity(contents: string | Buffer): { size: number; sha256: string } {
+  const bytes = Buffer.isBuffer(contents) ? contents : Buffer.from(contents);
+  return { size: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex") };
+}
+
+async function assertNoSymlinkComponents(path: string, allowMissingTail = false): Promise<void> {
+  const absolute = resolve(path);
+  const parsedRoot = parse(absolute).root;
+  const components = absolute.slice(parsedRoot.length).split(sep).filter(Boolean);
+  let current = parsedRoot;
+  for (const component of components) {
+    current = join(current, component);
+    try {
+      const stat = await lstat(current);
+      if (stat.isSymbolicLink()) {
+        throw new Error(`Migration path must not contain a symlink or junction: ${current}`);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" && allowMissingTail) return;
+      throw error;
+    }
+  }
+}
+
+async function verifiedContents(path: string, expectedSize: number, expectedSha256: string) {
+  await assertNoSymlinkComponents(path);
+  const contents = await readFile(path);
+  const actual = contentIdentity(contents);
+  if (actual.size !== expectedSize || actual.sha256 !== expectedSha256) {
+    throw new Error(`Migration publication content does not match its journal: ${path}`);
+  }
+}
+
+async function publishStagedFileNoReplace(
+  stagedPath: string,
+  finalPath: string,
+  expectedSize: number,
+  expectedSha256: string,
+): Promise<void> {
+  try {
+    // Portable atomic no-replace publication: a concurrent Jazz writer can
+    // create the destination first, but this operation never overwrites it.
+    await link(stagedPath, finalPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    // Recovery may observe its own already-published output. Only adopt it
+    // when it matches the fsynced journal identity exactly.
+    await verifiedContents(finalPath, expectedSize, expectedSha256);
+  }
+  await unlink(stagedPath);
+}
+
+function relativePublicationPath(migrationsDir: string, finalPath: string): string {
+  const relativePath = relative(resolve(migrationsDir), resolve(finalPath));
+  if (
+    !relativePath ||
+    relativePath === ".." ||
+    relativePath.startsWith(`..${sep}`) ||
+    isAbsolute(relativePath)
+  ) {
+    throw new Error(`Migration publication escaped its directory: ${finalPath}`);
+  }
+  return relativePath;
+}
+
+async function syncFile(path: string, contents: string): Promise<void> {
+  const handle = await open(path, "wx");
+  try {
+    await handle.writeFile(contents);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function syncDirectory(path: string): Promise<void> {
+  if (process.platform === "win32") return;
+  const handle = await open(path, "r");
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function recoverMigrationPublication(storage: MigrationStorage): Promise<void> {
+  const migrationsDir = storage.migrationsDir;
+  await assertNoSymlinkComponents(migrationsDir);
+  const journalPath = join(migrationsDir, MIGRATION_JOURNAL);
+  if (!(await pathExists(journalPath))) {
+    const stageDir = join(migrationsDir, MIGRATION_STAGE_DIR);
+    await assertNoSymlinkComponents(stageDir, true);
+    await rm(stageDir, { recursive: true, force: true });
+    for (const entry of await readdir(migrationsDir)) {
+      if (entry.startsWith(`${MIGRATION_JOURNAL}.`) && entry.endsWith(".tmp")) {
+        await rm(join(migrationsDir, entry), { force: true });
+      }
+    }
+    return;
+  }
+  await assertNoSymlinkComponents(journalPath);
+  const journal = JSON.parse(await readFile(journalPath, "utf8")) as MigrationPublicationJournal;
+  if (journal.version !== 2 || !Array.isArray(journal.files) || journal.files.length === 0) {
+    throw new Error(`Invalid interrupted migration publication journal: ${journalPath}`);
+  }
+  for (const file of journal.files) {
+    if (basename(file.stagedName) !== file.stagedName) {
+      throw new Error(`Invalid staged migration filename in ${journalPath}`);
+    }
+    const stagedPath = join(migrationsDir, MIGRATION_STAGE_DIR, file.stagedName);
+    const finalPath = resolve(migrationsDir, file.finalRelativePath);
+    if (relativePublicationPath(migrationsDir, finalPath) !== file.finalRelativePath) {
+      throw new Error(`Invalid migration publication path in ${journalPath}`);
+    }
+    if (!Number.isSafeInteger(file.size) || file.size < 0 || !/^[0-9a-f]{64}$/.test(file.sha256)) {
+      throw new Error(`Invalid migration publication identity in ${journalPath}`);
+    }
+    await assertNoSymlinkComponents(dirname(finalPath), true);
+    await assertNoSymlinkComponents(finalPath, true);
+    await assertNoSymlinkComponents(stagedPath, true);
+    if (await pathExists(finalPath)) {
+      await verifiedContents(finalPath, file.size, file.sha256);
+      continue;
+    }
+    if (!(await pathExists(stagedPath))) {
+      throw new Error(
+        `Cannot recover interrupted migration publication: missing ${stagedPath} and ${finalPath}`,
+      );
+    }
+    await mkdir(dirname(finalPath), { recursive: true });
+    await assertNoSymlinkComponents(dirname(finalPath));
+    await verifiedContents(stagedPath, file.size, file.sha256);
+    await publishStagedFileNoReplace(stagedPath, finalPath, file.size, file.sha256);
+    await verifiedContents(finalPath, file.size, file.sha256);
+    await syncDirectory(dirname(finalPath));
+  }
+  await rm(journalPath, { force: true });
+  await syncDirectory(migrationsDir);
+  await rm(join(migrationsDir, MIGRATION_STAGE_DIR), { recursive: true, force: true });
+  await syncDirectory(migrationsDir);
+}
+
+async function pauseMigrationPublicationForTest(phase: string): Promise<void> {
+  if (process.env.NODE_ENV !== "test" || process.env.JAZZ_TEST_MIGRATION_PAUSE_AT !== phase) {
+    return;
+  }
+  const marker = process.env.JAZZ_TEST_MIGRATION_PAUSE_MARKER;
+  if (marker) await writeFile(marker, phase);
+  const releaseMarker = process.env.JAZZ_TEST_MIGRATION_PAUSE_RELEASE_MARKER;
+  if (releaseMarker) {
+    while (!(await pathExists(releaseMarker))) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    return;
+  }
+  await new Promise<never>(() => {
+    setInterval(() => undefined, 1_000);
+  });
+}
+
+async function signalMigrationLockContentionForTest(): Promise<void> {
+  if (process.env.NODE_ENV !== "test") return;
+  const marker = process.env.JAZZ_TEST_MIGRATION_LOCK_CONTENTION_MARKER;
+  if (marker) await writeFile(marker, "contended");
+}
+
+/**
+ * Publish one logical migration generation. Multiple renames cannot be atomic,
+ * so a crash may briefly expose a prefix of the files. The fsynced journal is
+ * written first; every later invocation recovers that exact generation under
+ * the directory lock before inspecting baselines or allocating a timestamp.
+ */
+async function publishMigrationFilesRecoverably(
+  storage: MigrationStorage,
+  files: MigrationPublicationFile[],
+): Promise<void> {
+  if (files.length === 0) return;
+  const migrationsDir = storage.migrationsDir;
+  await assertNoSymlinkComponents(migrationsDir);
+  const stageDir = join(migrationsDir, MIGRATION_STAGE_DIR);
+  const journalPath = join(migrationsDir, MIGRATION_JOURNAL);
+  await assertNoSymlinkComponents(journalPath, true);
+  await mkdir(stageDir, { recursive: true });
+  await assertNoSymlinkComponents(stageDir);
+  const journal: MigrationPublicationJournal = { version: 2, files: [] };
+  for (const [index, file] of files.entries()) {
+    await assertNoSymlinkComponents(dirname(file.finalPath), true);
+    await assertNoSymlinkComponents(file.finalPath, true);
+    if (await pathExists(file.finalPath)) {
+      throw new Error(`Migration output already exists: ${file.finalPath}`);
+    }
+    const stagedName = `${randomUUID()}-${index}`;
+    const stagedPath = join(stageDir, stagedName);
+    await syncFile(stagedPath, file.contents);
+    const identity = contentIdentity(file.contents);
+    await verifiedContents(stagedPath, identity.size, identity.sha256);
+    journal.files.push({
+      stagedName,
+      finalRelativePath: relativePublicationPath(migrationsDir, file.finalPath),
+      ...identity,
+    });
+  }
+  await syncDirectory(stageDir);
+  const journalTemp = `${journalPath}.${randomUUID()}.tmp`;
+  await syncFile(journalTemp, `${JSON.stringify(journal)}\n`);
+  await rename(journalTemp, journalPath);
+  await syncDirectory(migrationsDir);
+  await pauseMigrationPublicationForTest("journaled");
+  for (const [index, file] of journal.files.entries()) {
+    const finalPath = resolve(migrationsDir, file.finalRelativePath);
+    await assertNoSymlinkComponents(dirname(finalPath), true);
+    await mkdir(dirname(finalPath), { recursive: true });
+    await assertNoSymlinkComponents(dirname(finalPath));
+    const stagedPath = join(stageDir, file.stagedName);
+    await verifiedContents(stagedPath, file.size, file.sha256);
+    await publishStagedFileNoReplace(stagedPath, finalPath, file.size, file.sha256);
+    await verifiedContents(finalPath, file.size, file.sha256);
+    await syncDirectory(dirname(finalPath));
+    if (index === 0 && journal.files.length > 1) {
+      await pauseMigrationPublicationForTest("between-publications");
+    }
+  }
+  await rm(journalPath, { force: true });
+  await syncDirectory(migrationsDir);
+  await rm(stageDir, { recursive: true, force: true });
+}
+
+async function committedSnapshotPublication(
+  storage: MigrationStorage,
   schema: ResolvedSchemaInput,
   timestamp: string,
-): Promise<string | null> {
-  const entries = await listSnapshotEntriesForMigrations(migrationsDir);
+): Promise<MigrationPublicationFile | null> {
+  const entries = await listSnapshotEntriesForMigrations(storage);
   if (
     entries.some(
       (entry) => entry.hash === schema.hash && isCommittedSnapshotFileName(entry.fileName),
@@ -680,12 +1053,10 @@ async function ensureCommittedSnapshot(
   ) {
     return null;
   }
-
-  return writeSnapshotSchemaForMigrations(
-    migrationsDir,
-    snapshotFilename(schema.hash, timestamp),
-    schema.schema,
-  );
+  return {
+    finalPath: join(storage.snapshotsDir, snapshotFilename(schema.hash, timestamp)),
+    contents: `${JSON.stringify(schema.schema, null, 2)}\n`,
+  };
 }
 
 async function loadCurrentSchema(schemaDir: string): Promise<ResolvedSchemaInput> {
@@ -697,20 +1068,20 @@ async function loadCurrentSchema(schemaDir: string): Promise<ResolvedSchemaInput
 }
 
 async function resolveHistoricalSchemaForCreateMigration(
-  migrationsDir: string,
+  storage: MigrationStorage,
   hash: string,
   label: string,
   appId: string | undefined,
   serverUrl: string | undefined,
   adminSecret: string | undefined,
 ): Promise<ResolvedSchemaInput> {
-  const local = await resolveLocalHistoricalSchema(migrationsDir, hash, label);
+  const local = await resolveLocalHistoricalSchema(storage, hash, label);
   if (local) {
     return { hash: local.hash, schema: local.schema };
   }
 
   return resolveRemoteHistoricalSchema(
-    migrationsDir,
+    storage,
     hash,
     label,
     requireAppId(appId),
@@ -719,24 +1090,27 @@ async function resolveHistoricalSchemaForCreateMigration(
   );
 }
 
-export async function createMigration(
+async function createMigrationUnlocked(
   options: CreateMigrationOptions,
+  storage: MigrationStorage,
 ): Promise<CreateMigrationResult> {
   const explicitHashFlow = Boolean(options.fromHash || options.toHash);
 
-  await mkdir(options.migrationsDir, { recursive: true });
   const currentSchema =
     !explicitHashFlow || !options.toHash ? await loadCurrentSchema(options.schemaDir) : null;
 
   let fromSchema: ResolvedSchemaInput;
   let toSchema: ResolvedSchemaInput;
   let shouldWriteCommittedSnapshot = false;
-  const timestamp = createTimestamp();
+  // Snapshot filenames are the ordering source for the implicit migration
+  // baseline. Treat their second-resolution timestamp as a logical clock so
+  // rapid successive schema edits cannot let the hash suffix pick the winner.
+  const timestamp = await nextCommittedSnapshotTimestamp(storage);
 
   if (explicitHashFlow) {
     if (options.fromHash) {
       fromSchema = await resolveHistoricalSchemaForCreateMigration(
-        options.migrationsDir,
+        storage,
         options.fromHash,
         "fromHash",
         options.appId,
@@ -744,7 +1118,7 @@ export async function createMigration(
         options.adminSecret,
       );
     } else {
-      const latest = await loadLatestCommittedSnapshot(options.migrationsDir);
+      const latest = await loadLatestCommittedSnapshot(storage);
       if (!latest) {
         throw new Error(
           "No committed snapshot found. Provide --fromHash or run `jazz-tools migrations create` once to create an initial snapshot.",
@@ -755,7 +1129,7 @@ export async function createMigration(
 
     toSchema = options.toHash
       ? await resolveHistoricalSchemaForCreateMigration(
-          options.migrationsDir,
+          storage,
           options.toHash,
           "toHash",
           options.appId,
@@ -765,15 +1139,14 @@ export async function createMigration(
       : currentSchema!;
     shouldWriteCommittedSnapshot = !options.toHash;
   } else {
-    const latest = await loadLatestCommittedSnapshot(options.migrationsDir);
+    const latest = await loadLatestCommittedSnapshot(storage);
     if (!latest) {
+      const snapshot = await committedSnapshotPublication(storage, currentSchema!, timestamp);
+      if (!snapshot) throw new Error("Initial committed snapshot already exists");
+      await publishMigrationFilesRecoverably(storage, [snapshot]);
       return {
         status: "initial-snapshot",
-        snapshotPath: (await ensureCommittedSnapshot(
-          options.migrationsDir,
-          currentSchema!,
-          timestamp,
-        ))!,
+        snapshotPath: snapshot.finalPath,
       };
     }
 
@@ -791,13 +1164,15 @@ export async function createMigration(
   }
 
   if (!schemaTransitionRequiresRowTransform(fromSchema.schema, toSchema.schema)) {
+    const snapshot = shouldWriteCommittedSnapshot
+      ? await committedSnapshotPublication(storage, toSchema, timestamp)
+      : null;
+    if (snapshot) await publishMigrationFilesRecoverably(storage, [snapshot]);
     return {
       status: "migration-not-required",
       fromHash: fromSchema.hash,
       toHash: toSchema.hash,
-      snapshotPath: shouldWriteCommittedSnapshot
-        ? await ensureCommittedSnapshot(options.migrationsDir, toSchema, timestamp)
-        : null,
+      snapshotPath: snapshot?.finalPath ?? null,
     };
   }
 
@@ -808,17 +1183,19 @@ export async function createMigration(
     options.name ? normalizeMigrationName(options.name) : undefined,
     timestamp,
   );
-  if (await pathExists(filePath)) {
-    throw new Error(`Migration stub already exists: ${filePath}`);
-  }
-
   const stub = renderMigrationStub({
     fromHash: fromSchema.hash,
     toHash: toSchema.hash,
     fromSchema: fromSchema.schema,
     toSchema: toSchema.schema,
   });
-  await writeFile(filePath, stub);
+  const snapshot = shouldWriteCommittedSnapshot
+    ? await committedSnapshotPublication(storage, toSchema, timestamp)
+    : null;
+  await publishMigrationFilesRecoverably(storage, [
+    { finalPath: filePath, contents: stub },
+    ...(snapshot ? [snapshot] : []),
+  ]);
 
   return {
     status: "generated",
@@ -826,10 +1203,132 @@ export async function createMigration(
     fromHash: fromSchema.hash,
     toHash: toSchema.hash,
     needsRename: !options.name,
-    snapshotPath: shouldWriteCommittedSnapshot
-      ? await ensureCommittedSnapshot(options.migrationsDir, toSchema, timestamp)
-      : null,
+    snapshotPath: snapshot?.finalPath ?? null,
   };
+}
+
+async function withMigrationDirectoryLock<T>(
+  storage: MigrationStorage,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const migrationsDir = storage.migrationsDir;
+  await assertNoSymlinkComponents(migrationsDir);
+  const lockDir = join(migrationsDir, ".jazz-create-migration.lock");
+  const ownerPath = join(lockDir, "owner.json");
+  const owner: MigrationLockOwner = {
+    version: 1,
+    pid: process.pid,
+    hostname: hostname(),
+    token: randomUUID(),
+  };
+  const deadline = Date.now() + 10_000;
+  let unknownOwnerSince: number | null = null;
+  for (;;) {
+    try {
+      // mkdir is the no-replace cross-process compare-and-set. A process that
+      // observes the short owner-write window fails closed rather than ever
+      // treating an unknown lock as stale.
+      await mkdir(lockDir);
+      await syncFile(ownerPath, `${JSON.stringify(owner)}\n`);
+      await syncDirectory(lockDir);
+      await syncDirectory(migrationsDir);
+      await pauseMigrationPublicationForTest("lock-held");
+      break;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EEXIST") throw error;
+      try {
+        await assertNoSymlinkComponents(lockDir);
+      } catch (validationError) {
+        if ((validationError as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw validationError;
+      }
+      let existing: MigrationLockOwner | null = null;
+      let existingText = "";
+      try {
+        await assertNoSymlinkComponents(ownerPath);
+        existingText = await readFile(ownerPath, "utf8");
+        existing = parseMigrationLockOwner(existingText);
+      } catch {
+        if (!(await pathExists(lockDir))) continue;
+        unknownOwnerSince ??= Date.now();
+        // A freshly created lock has a necessarily brief mkdir→owner-write
+        // window. Wait for that owner, but never steal the lock if it remains
+        // unknown: fail closed with the directory intact.
+        if (Date.now() - unknownOwnerSince >= 500) {
+          throw new Error(
+            `Cannot safely acquire migration lock ${lockDir}; owner metadata is missing, invalid, or unsafe`,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        continue;
+      }
+      unknownOwnerSince = null;
+      await signalMigrationLockContentionForTest();
+      if (
+        existing?.version === 1 &&
+        existing.hostname === hostname() &&
+        Number.isSafeInteger(existing.pid) &&
+        existing.pid > 0 &&
+        !processIsAlive(existing.pid)
+      ) {
+        const quarantine = `${lockDir}.recovery-${owner.token}`;
+        try {
+          await rename(lockDir, quarantine);
+        } catch (quarantineError) {
+          if ((quarantineError as NodeJS.ErrnoException).code === "ENOENT") continue;
+          throw quarantineError;
+        }
+        await assertNoSymlinkComponents(quarantine);
+        await assertNoSymlinkComponents(join(quarantine, "owner.json"));
+        const quarantinedOwner = await readFile(join(quarantine, "owner.json"), "utf8");
+        if (quarantinedOwner !== existingText) {
+          throw new Error(`Quarantined migration lock owner did not match: ${quarantine}`);
+        }
+        await pauseMigrationPublicationForTest("lock-quarantined");
+        await rm(quarantine, { recursive: true });
+        await syncDirectory(migrationsDir);
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        const detail = existing
+          ? `owner pid=${existing.pid} host=${existing.hostname}`
+          : "owner metadata is missing or invalid";
+        throw new Error(
+          `Timed out waiting for another migration generator to release ${lockDir}; ${detail}`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  try {
+    await recoverMigrationPublication(storage);
+    return await operation();
+  } finally {
+    const current = await readFile(ownerPath, "utf8").catch(() => "");
+    if (current === `${JSON.stringify(owner)}\n`) {
+      await rm(lockDir, { recursive: true, force: true });
+      await syncDirectory(migrationsDir);
+    }
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+export async function createMigration(
+  options: CreateMigrationOptions,
+): Promise<CreateMigrationResult> {
+  const storage = new MigrationStorage(options.migrationsDir);
+  await storage.initialize();
+  return withMigrationDirectoryLock(storage, () => createMigrationUnlocked(options, storage));
 }
 
 function isDefinedMigration(value: unknown): value is DefinedMigration {
@@ -964,15 +1463,11 @@ async function resolveSnapshotEntry(
 }
 
 async function resolveLocalHistoricalSchema(
-  migrationsDir: string,
+  storage: MigrationStorage,
   hash: string,
   label: string,
 ): Promise<ResolvedSchemaInput | null> {
-  const localEntry = await resolveSnapshotEntry(
-    snapshotsDirForMigrations(migrationsDir),
-    hash,
-    label,
-  );
+  const localEntry = await storage.resolveSnapshot(hash, label);
   if (!localEntry) {
     return null;
   }
@@ -984,7 +1479,7 @@ async function resolveLocalHistoricalSchema(
 }
 
 async function resolveRemoteHistoricalSchema(
-  migrationsDir: string,
+  storage: MigrationStorage,
   hash: string,
   label: string,
   appId: string,
@@ -1008,7 +1503,7 @@ async function resolveRemoteHistoricalSchema(
       schemaHash: resolvedHash,
     });
     await writeSnapshotSchemaForMigrations(
-      migrationsDir,
+      storage,
       snapshotFilename(
         resolvedHash,
         createSnapshotTimestampFromPublishedAt(storedSchema.publishedAt),
@@ -1203,7 +1698,7 @@ async function resolveProjectDeployMigrationChain(
       appId: options.appId,
       adminSecret: options.adminSecret,
     }),
-    listSnapshotEntriesForMigrations(migrationsDir),
+    new MigrationStorage(migrationsDir).listSnapshots(),
   ]);
   const knownHashes = [
     ...new Set([...stored.hashes, ...snapshots.map(({ hash }) => hash), toHash]),
@@ -1286,7 +1781,7 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
       migration: Awaited<ReturnType<typeof pushCatalogueMigration>>;
       filePath: string;
     }> = [];
-    const snapshots = await listSnapshotEntriesForMigrations(migrationsDir);
+    const snapshots = await new MigrationStorage(migrationsDir).listSnapshots();
 
     for (const edge of resolvedChain.migrations) {
       const storedTarget = (

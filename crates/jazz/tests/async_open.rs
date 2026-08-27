@@ -8,7 +8,7 @@ use futures::task::noop_waker;
 use jazz::db::{Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts};
 use jazz::groove::records::Value;
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
-use jazz::ids::{AuthorId, NodeUuid};
+use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
@@ -26,7 +26,7 @@ fn config(storage: TestStorage) -> DbConfig<TestStorage> {
         storage,
         DbIdentity {
             node: NodeUuid::from_bytes([0x31; 16]),
-            author: AuthorId::from_bytes([0x41; 16]),
+            author: AuthorSubject::for_test_bytes([0x41; 16]),
         },
     )
 }
@@ -82,6 +82,7 @@ fn concurrent_cold_reads_and_subscription_wait_for_the_async_node_owner() {
     block_on(db.insert(
         "todos",
         [("title".to_owned(), Value::String("cold read".to_owned()))].into(),
+        Default::default(),
     ))
     .expect("seed todo");
     let prepared = db

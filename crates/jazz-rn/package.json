@@ -3,19 +3,21 @@
   "version": "2.0.0-alpha.53",
   "description": "React Native native-relay bridge for Jazz (development builds only)",
   "keywords": [
+    "JazzNativeRelay.xcframework",
     "android",
     "ios",
+    "native",
     "react-native"
   ],
-  "homepage": "https://github.com/antoniomuso/jazz-rn#readme",
+  "homepage": "https://github.com/garden-co/jazz/tree/main/crates/jazz-rn#readme",
   "bugs": {
-    "url": "https://github.com/antoniomuso/jazz-rn/issues"
+    "url": "https://github.com/garden-co/jazz/issues"
   },
   "license": "MIT",
   "author": "Antonio Musolino <antoniomusolino007@gmail.com> (https://github.com/antoniomuso)",
   "repository": {
     "type": "git",
-    "url": "git+https://https://github.com/garden-co/jazz.git"
+    "url": "git+https://github.com/garden-co/jazz.git"
   },
   "files": [
     "src",
@@ -23,6 +25,9 @@
     "lib",
     "android",
     "ios",
+    "native/**",
+    "android/src/main/jniLibs/**/*",
+    "JazzNativeRelay.xcframework/**",
     "app.plugin.js",
     "*.podspec",
     "react-native.config.js",
@@ -62,6 +67,8 @@
   "scripts": {
     "build": "bob build",
     "test:codegen": "bash scripts/test-codegen.sh",
+    "build:relay:android": "bash scripts/build-relay-artifacts.sh android",
+    "build:relay:ios": "bash scripts/build-relay-artifacts.sh ios",
     "test": "jest",
     "typecheck": "tsc",
     "lint": "eslint \"**/*.{js,ts,tsx}\"",

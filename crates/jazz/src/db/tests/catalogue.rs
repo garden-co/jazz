@@ -40,10 +40,14 @@ pub(super) fn assert_authority_rejects_staged_write(
 fn live_subscription_rebuilds_after_shared_current_descriptor_widens() {
     let base = owner_write_schema();
     let evolved = evolved_owner_write_schema();
-    let author = AuthorId::from_bytes([0xa1; 16]);
+    let author = AuthorSubject::for_test_bytes([0xa1; 16]);
     let db = open_db(0x5d, author, &base);
-    db.insert("todos", cells("before evolution", false, author))
-        .unwrap();
+    db.insert(
+        "todos",
+        cells("before evolution", false, author),
+        Default::default(),
+    )
+    .unwrap();
 
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(
@@ -80,7 +84,7 @@ fn live_subscription_rebuilds_after_shared_current_descriptor_widens() {
         .node
         .borrow_mut()
         .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(SchemaLineagePublication::new(
                 schema_version.clone(),
@@ -94,7 +98,7 @@ fn live_subscription_rebuilds_after_shared_current_descriptor_widens() {
         .node
         .borrow_mut()
         .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
                 schema: schema_version.id,
@@ -111,8 +115,12 @@ fn live_subscription_rebuilds_after_shared_current_descriptor_widens() {
         SubscriptionEvent::Delta { reset: true, .. }
     ));
 
-    db.insert("todos", cells("after evolution", true, author))
-        .unwrap();
+    db.insert(
+        "todos",
+        cells("after evolution", true, author),
+        Default::default(),
+    )
+    .unwrap();
     let (added, updated, removed) = delta_rows(
         subscription
             .try_next_event()
@@ -154,7 +162,7 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
     let base = schema(&["open"], false);
     let middle = SchemaVersion::new(schema(&["open", "archived"], false));
     let latest = SchemaVersion::new(schema(&["open", "archived"], true));
-    let author = AuthorId::from_bytes([0xa2; 16]);
+    let author = AuthorSubject::for_test_bytes([0xa2; 16]);
     let db = open_db(0x5c, author, &base);
     let _before = db
         .insert(
@@ -163,6 +171,7 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
                 ("title".to_owned(), Value::String("before".to_owned())),
                 ("status".to_owned(), empty_payload_case(0)),
             ]),
+            Default::default(),
         )
         .unwrap();
     let query = Query::from("items");
@@ -199,7 +208,7 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
         .node
         .borrow_mut()
         .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(SchemaLineagePublication::new(
                 middle.clone(),
@@ -213,7 +222,7 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
         .node
         .borrow_mut()
         .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
                 schema: middle.id,
@@ -242,7 +251,7 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
         .node
         .borrow_mut()
         .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             catalogue_seq: 2,
             publication: Box::new(SchemaLineagePublication::new(
                 latest.clone(),
@@ -256,7 +265,7 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
         .node
         .borrow_mut()
         .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 2,
                 schema: latest.id,
@@ -293,8 +302,8 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
 
 #[test]
 fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
-    let alice = AuthorId::from_bytes([0xa1; 16]);
-    let bob = AuthorId::from_bytes([0xb2; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
     let table = |with_body: bool, read_column: Option<&str>| {
         let table = PublicTableSchemaBuilder::new("todos")
             .column("title", PublicColumnType::Text)
@@ -321,7 +330,9 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
     let owner_payload = SchemaVersion::new(owner_head.clone());
     assert_eq!(owner_payload.id, editor_head.version_id());
 
-    let db = open_db(0xa0, AuthorId::SYSTEM, &structural);
+    let db = open_db(0xa0, AuthorSubject::SYSTEM, &structural);
+    db.set_test_provider_claims(alice, test_provider_claims(alice));
+    db.set_test_provider_claims(bob, test_provider_claims(bob));
     db.publish_schema_with_lens(
         1,
         SchemaLineagePublication::new(
@@ -352,11 +363,11 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
     db.seed_settled_mergeable_for_bootstrap(
         "todos",
         first,
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         BTreeMap::from([
             ("title".to_owned(), Value::String("first".to_owned())),
-            ("owner".to_owned(), Value::Uuid(alice.0)),
-            ("editor".to_owned(), Value::Uuid(bob.0)),
+            ("owner".to_owned(), Value::Uuid(alice.test_uuid())),
+            ("editor".to_owned(), Value::Uuid(bob.test_uuid())),
             ("body".to_owned(), Value::String(String::new())),
         ]),
     )
@@ -381,11 +392,11 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
     db.seed_settled_mergeable_for_bootstrap(
         "todos",
         row(0xb2),
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         BTreeMap::from([
             ("title".to_owned(), Value::String("second".to_owned())),
-            ("owner".to_owned(), Value::Uuid(bob.0)),
-            ("editor".to_owned(), Value::Uuid(bob.0)),
+            ("owner".to_owned(), Value::Uuid(bob.test_uuid())),
+            ("editor".to_owned(), Value::Uuid(bob.test_uuid())),
             ("body".to_owned(), Value::String(String::new())),
         ]),
     )
@@ -415,8 +426,8 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
 fn db_catalogue_facade_publishes_schema_lens_and_current_write_schema() {
     let base = owner_write_schema();
     let evolved = evolved_owner_write_schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let core = open_core(0x5e, AuthorId::SYSTEM, &base);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let core = open_core(0x5e, AuthorSubject::SYSTEM, &base);
     let client = open_db(0xc1, owner, &base);
     let schema_version = SchemaVersion::new(evolved.clone());
 

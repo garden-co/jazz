@@ -50,6 +50,7 @@ export async function listTodosWithInheritedPolicy(
 // #region backend-attribution-ts
 export async function createAttributedHandles(req: Request) {
   const syntheticSession = {
+    issuer: "urn:jazz:docs",
     user_id: "user_123",
     authMode: "external" as const,
     claims: {},
@@ -57,7 +58,7 @@ export async function createAttributedHandles(req: Request) {
 
   return {
     backendDb: context.asBackend(schemaApp),
-    attributedDb: context.withAttribution("user_123", schemaApp),
+    attributedDb: context.withAttribution("urn:jazz:docs", "user_123", schemaApp),
     attributedSessionDb: context.withAttributionForSession(syntheticSession, schemaApp),
     attributedRequestDb: await context.withAttributionForRequest(req, schemaApp),
   };

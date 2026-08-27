@@ -5,7 +5,7 @@ use jazz::block_on;
 use jazz::db::{Db, DbConfig, DbIdentity, MergeableTxOps, ReadOpts, SeededRowIdSource};
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::ContributionMergeRow;
 use jazz::protocol::{BranchSelector, BranchViewBase, SnapshotRef};
 use jazz::query::{Query, col, eq, lit};
@@ -34,7 +34,7 @@ pub(crate) fn run(row_count: usize) {
             MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>()),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x58; 16]),
-                author: AuthorId::SYSTEM,
+                author: AuthorSubject::SYSTEM,
             },
         )
         .with_id_source(SeededRowIdSource::new(0x5800)),
@@ -46,10 +46,8 @@ pub(crate) fn run(row_count: usize) {
     let seed_started = Instant::now();
     let seed = block_on(db.mergeable_tx()).unwrap();
     for index in 0..row_count {
-        block_on(seed.insert_with_id_in_branch(
+        block_on(seed.insert(
             "items",
-            base.clone(),
-            row(index),
             BTreeMap::from([
                 (
                     "title".to_owned(),
@@ -57,6 +55,11 @@ pub(crate) fn run(row_count: usize) {
                 ),
                 ("rank".to_owned(), Value::I64(index as i64)),
             ]),
+            jazz::db::InsertOptions {
+                row_id: Some(row(index)),
+                target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+                ..Default::default()
+            },
         ))
         .unwrap();
     }
@@ -67,15 +70,20 @@ pub(crate) fn run(row_count: usize) {
     let overlay = block_on(db.mergeable_tx()).unwrap();
     let overlaid = (row_count / 4).max(1);
     for index in 0..overlaid {
-        block_on(overlay.update_in_branch_view(
+        block_on(overlay.update(
             "items",
-            head.clone(),
-            Some(BranchViewBase::Current(base.clone())),
             row(index),
             BTreeMap::from([(
                 "title".to_owned(),
                 Value::String(format!("draft-{index:08}")),
             )]),
+            jazz::db::UpdateOptions {
+                target: jazz::db::WriteTarget::BranchView {
+                    head: head.clone(),
+                    base: Some(BranchViewBase::Current(base.clone())),
+                },
+                ..Default::default()
+            },
         ))
         .unwrap();
     }
@@ -126,14 +134,17 @@ pub(crate) fn run(row_count: usize) {
     let cross = block_on(db.mergeable_tx()).unwrap();
     let cross_row = row(row_count + 1);
     for (branch, title) in [(base.clone(), "base"), (head.clone(), "head")] {
-        block_on(cross.insert_with_id_in_branch(
+        block_on(cross.insert(
             "items",
-            branch,
-            cross_row,
             BTreeMap::from([
                 ("title".to_owned(), Value::String(title.to_owned())),
                 ("rank".to_owned(), Value::I64(row_count as i64 + 1)),
             ]),
+            jazz::db::InsertOptions {
+                row_id: Some(cross_row),
+                target: jazz::db::ExactWriteTarget::Branch(branch),
+                ..Default::default()
+            },
         ))
         .unwrap();
     }

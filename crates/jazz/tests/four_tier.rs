@@ -4,7 +4,7 @@ mod common;
 
 use jazz::block_on;
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::peer::{PeerRole, PeerState};
 use jazz::protocol::{SubscriptionKey, SyncMessage, VersionBundle};
@@ -31,7 +31,7 @@ fn schema() -> JazzSchema {
     // fixture writes intentionally public; declaring SELECT alone now closes
     // the remaining operation clauses.
     let policies = TablePolicies::new()
-        .with_select(session_eq("owner", &["claims", "sub"]))
+        .with_select(session_eq("owner", &["user"]))
         .with_insert(jazz::tools::PolicyExpr::True)
         .with_update(
             Some(jazz::tools::PolicyExpr::True),
@@ -43,7 +43,7 @@ fn schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new("todos")
                     .column("title", ColumnType::Text)
-                    .column("owner", ColumnType::Uuid)
+                    .column("owner", ColumnType::Text)
                     .policies(policies),
             )
             .build(),
@@ -58,14 +58,14 @@ fn public_write_schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new("todos")
                     .column("title", ColumnType::Text)
-                    .column("owner", ColumnType::Uuid),
+                    .column("owner", ColumnType::Text),
             )
             .build(),
     )
 }
 
 fn read_write_policy_schema() -> JazzSchema {
-    let owner = session_eq("owner", &["claims", "sub"]);
+    let owner = session_eq("owner", &["user"]);
     let policies = TablePolicies::new()
         .with_select(owner.clone())
         .with_insert(owner.clone())
@@ -76,7 +76,7 @@ fn read_write_policy_schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new("todos")
                     .column("title", ColumnType::Text)
-                    .column("owner", ColumnType::Uuid)
+                    .column("owner", ColumnType::Text)
                     .policies(policies),
             )
             .build(),
@@ -86,10 +86,7 @@ fn read_write_policy_schema() -> JazzSchema {
 fn access_write_policy_schema() -> JazzSchema {
     let canvas = exists(
         "canvasInvites",
-        vec![
-            outer_eq("canvas", "id"),
-            session_eq("userID", &["claims", "sub"]),
-        ],
+        vec![outer_eq("canvas", "id"), session_eq("userID", &["user"])],
     );
     let policies = TablePolicies::new()
         .with_select(canvas.clone())
@@ -106,7 +103,7 @@ fn access_write_policy_schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new("canvasInvites")
                     .fk_column("canvas", "canvases")
-                    .column("userID", ColumnType::Uuid),
+                    .column("userID", ColumnType::Text),
             )
             .build(),
     )
@@ -135,10 +132,13 @@ fn reopen_node(
     block_on(NodeState::new(node_uuid, schema, storage)).unwrap()
 }
 
-fn cells(title: &str, owner: AuthorId) -> BTreeMap<String, Value> {
+fn cells(title: &str, owner: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.to_owned())),
-        ("owner".to_owned(), Value::Uuid(owner.0)),
+        (
+            "owner".to_owned(),
+            Value::String(owner.canonical().to_owned()),
+        ),
     ])
 }
 
@@ -146,7 +146,11 @@ fn title_only_cells(title: &str) -> BTreeMap<String, Value> {
     BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))])
 }
 
-fn permission_scope_key(schema: &JazzSchema, table: &str, writer: AuthorId) -> SubscriptionKey {
+fn permission_scope_key(
+    schema: &JazzSchema,
+    table: &str,
+    writer: AuthorSubject,
+) -> SubscriptionKey {
     let _policy = schema
         .tables
         .iter()
@@ -154,9 +158,12 @@ fn permission_scope_key(schema: &JazzSchema, table: &str, writer: AuthorId) -> S
         .and_then(|table| table.write_policies.insert_check.clone())
         .expect("table should have a write policy");
     let mut values = BTreeMap::new();
-    values.insert("__jazz_claim_sub".to_owned(), Value::Uuid(writer.0));
+    values.insert(
+        "__jazz_claim_user".to_owned(),
+        Value::String(writer.canonical().to_owned()),
+    );
     let shape = Query::from(table)
-        .filter(eq(col("owner"), param("__jazz_claim_sub")))
+        .filter(eq(col("owner"), param("__jazz_claim_user")))
         .validate(schema)
         .expect("policy should validate as a scope shape");
     let binding = shape
@@ -179,10 +186,13 @@ fn whole_table_key(schema: &JazzSchema, table: &str) -> SubscriptionKey {
     }
 }
 
-fn invite_cells(canvas: RowUuid, user: AuthorId) -> BTreeMap<String, Value> {
+fn invite_cells(canvas: RowUuid, user: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("canvas".to_owned(), Value::Uuid(canvas.0)),
-        ("userID".to_owned(), Value::Uuid(user.0)),
+        (
+            "userID".to_owned(),
+            Value::String(user.canonical().to_owned()),
+        ),
     ])
 }
 
@@ -204,14 +214,15 @@ fn commit(
     row_uuid: RowUuid,
     made_at: u64,
     title: &str,
-    owner: AuthorId,
+    owner: AuthorSubject,
     parents: impl IntoIterator<Item = TxId>,
 ) -> (TxId, SyncMessage) {
+    let writer = AuthorSubject::for_test_bytes([7; 16]);
     block_on(async {
         let (published, unit) = ui
             .commit_mergeable_unit(
                 MergeableCommit::new("todos", row_uuid, made_at)
-                    .made_by(AuthorId::from_bytes([7; 16]))
+                    .made_by(writer)
                     .parents(parents.into_iter().collect())
                     .cells(cells(title, owner)),
             )
@@ -227,7 +238,7 @@ fn commit_as(
     row_uuid: RowUuid,
     made_at: u64,
     title: &str,
-    writer: AuthorId,
+    writer: AuthorSubject,
     parents: impl IntoIterator<Item = TxId>,
 ) -> (TxId, SyncMessage) {
     block_on(async {
@@ -256,7 +267,7 @@ fn deletion(
         let (published, unit) = ui
             .commit_mergeable_unit(
                 MergeableCommit::new("todos", row_uuid, made_at)
-                    .made_by(AuthorId::from_bytes([7; 16]))
+                    .made_by(AuthorSubject::for_test_bytes([7; 16]))
                     .deletion(event),
             )
             .await
@@ -270,6 +281,9 @@ fn relay_ingest(node: &mut NodeState<RocksDbStorage>, message: &SyncMessage) {
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
+    if let Some(identity) = tx.permission_subject {
+        install_uuid_sub_claim(node, identity);
+    }
     block_on(async {
         node.ingest_relay_commit_unit(tx.clone(), versions.clone())
             .await
@@ -298,6 +312,7 @@ fn edge_ingest(
     versions: Vec<jazz::protocol::VersionRecord>,
     now_ms: u64,
 ) -> Vec<SyncMessage> {
+    install_uuid_sub_claim(node, peer.identity());
     block_on(async {
         let outcome = peer
             .ingest_edge_mergeable_commit_unit(node, tx, versions, now_ms)
@@ -326,6 +341,9 @@ fn core_ingest(
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
+    if let Some(identity) = tx.permission_subject {
+        install_uuid_sub_claim(node, identity);
+    }
     let [fate] = block_on(async {
         let outcome = node
             .ingest_commit_unit(tx.clone(), versions.clone(), now)
@@ -336,6 +354,12 @@ fn core_ingest(
     .try_into()
     .unwrap();
     fate
+}
+
+fn install_uuid_sub_claim(node: &mut NodeState<RocksDbStorage>, identity: AuthorSubject) {
+    if identity != AuthorSubject::SYSTEM {
+        node.admit_test_session_claims(identity, BTreeMap::new());
+    }
 }
 
 fn apply_fate(node: &mut NodeState<RocksDbStorage>, fate: &SyncMessage) {
@@ -349,6 +373,7 @@ fn refresh(
     downstream: &mut NodeState<RocksDbStorage>,
     peer: &mut PeerState,
 ) {
+    install_uuid_sub_claim(upstream, peer.identity());
     let update = block_on(peer.current_rows_update(upstream, "todos")).unwrap();
     apply_message(downstream, update);
 }
@@ -386,9 +411,9 @@ fn subscription_rows(node: &mut NodeState<RocksDbStorage>) -> Vec<(RowUuid, Valu
 #[test]
 fn four_tier_topology_relays_pending_units_and_core_fates() {
     let schema = schema();
-    let ui_author = AuthorId::from_bytes([7; 16]);
+    let ui_author = AuthorSubject::for_test_bytes([7; 16]);
     let ui_owner = ui_author;
-    let other_owner = AuthorId::from_bytes([8; 16]);
+    let other_owner = AuthorSubject::for_test_bytes([8; 16]);
 
     let (_ui_dir, mut ui) = open_node(node(1), schema.clone());
     let (worker_dir, mut worker) = open_node(node(2), schema.clone());
@@ -442,7 +467,7 @@ fn four_tier_topology_relays_pending_units_and_core_fates() {
     refresh(&mut worker, &mut ui, &mut worker_to_ui);
 
     let tx_id = OpenTransactionId::new();
-    block_on(ui.open_exclusive(tx_id)).unwrap();
+    block_on(ui.open_exclusive_for_test(tx_id, ui_author)).unwrap();
     assert_eq!(
         block_on(ui.tx_read(tx_id, "todos", exclusive_row)).unwrap(),
         Some(cells("exclusive base", ui_owner))
@@ -536,8 +561,8 @@ fn four_tier_topology_relays_pending_units_and_core_fates() {
 #[test]
 fn edge_peer_terminates_client_identity_and_relays_upstream() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([7; 16]);
-    let other_owner = AuthorId::from_bytes([8; 16]);
+    let client_author = AuthorSubject::for_test_bytes([7; 16]);
+    let other_owner = AuthorSubject::for_test_bytes([8; 16]);
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
     let (_edge_dir, mut edge) = open_node(node(3), schema.clone());
@@ -591,13 +616,13 @@ fn edge_peer_terminates_client_identity_and_relays_upstream() {
     assert_eq!(rows(&mut core), expected_all);
     assert_eq!(rows(&mut edge), expected_all);
     assert_eq!(subscription_rows(&mut client), expected_client);
-    assert_eq!(core_to_edge.identity(), AuthorId::SYSTEM);
+    assert_eq!(core_to_edge.identity(), AuthorSubject::SYSTEM);
 }
 
 #[test]
 fn edge_defers_mergeable_fate_until_permission_scope_settles() {
     let schema = read_write_policy_schema();
-    let client_author = AuthorId::from_bytes([7; 16]);
+    let client_author = AuthorSubject::for_test_bytes([7; 16]);
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
     let (_edge_dir, mut edge) = open_node(node(3), schema);
@@ -654,7 +679,7 @@ fn edge_defers_mergeable_fate_until_permission_scope_settles() {
 #[test]
 fn edge_permission_scope_is_write_policy_claim_not_whole_table() {
     let schema = read_write_policy_schema();
-    let client_author = AuthorId::from_bytes([7; 16]);
+    let client_author = AuthorSubject::for_test_bytes([7; 16]);
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
     let (_edge_dir, mut edge) = open_node(node(3), schema.clone());
@@ -692,8 +717,8 @@ fn edge_permission_scope_is_write_policy_claim_not_whole_table() {
 #[test]
 fn edge_permission_scope_uses_link_identity_not_made_by_provenance() {
     let schema = read_write_policy_schema();
-    let backend_author = AuthorId::from_bytes([0xb0; 16]);
-    let attributed_user = AuthorId::from_bytes([0xa1; 16]);
+    let backend_author = AuthorSubject::for_test_bytes([0xb0; 16]);
+    let attributed_user = AuthorSubject::for_test_bytes([0xa1; 16]);
 
     let (_backend_dir, mut backend) = open_node(node(1), schema.clone());
     let (_edge_dir, mut edge) = open_node(node(3), schema.clone());
@@ -776,7 +801,7 @@ fn edge_permission_scope_uses_link_identity_not_made_by_provenance() {
 #[test]
 fn edge_deduplicates_scope_subscription_for_repeated_deferred_units() {
     let schema = read_write_policy_schema();
-    let client_author = AuthorId::from_bytes([7; 16]);
+    let client_author = AuthorSubject::for_test_bytes([7; 16]);
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
     let (_edge_dir, mut edge) = open_node(node(3), schema);
@@ -814,8 +839,8 @@ fn edge_deduplicates_scope_subscription_for_repeated_deferred_units() {
 #[test]
 fn edge_permission_scopes_are_keyed_by_policy_shape_and_writer_claim() {
     let schema = read_write_policy_schema();
-    let writer_a = AuthorId::from_bytes([0xa1; 16]);
-    let writer_b = AuthorId::from_bytes([0xb2; 16]);
+    let writer_a = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let writer_b = AuthorSubject::for_test_bytes([0xb2; 16]);
 
     let (_client_a_dir, mut client_a) = open_node(node(1), schema.clone());
     let (_client_b_dir, mut client_b) = open_node(node(2), schema.clone());
@@ -891,8 +916,8 @@ fn edge_permission_scopes_are_keyed_by_policy_shape_and_writer_claim() {
 #[test]
 fn settled_permission_scope_for_one_writer_claim_does_not_unlock_whole_table() {
     let schema = read_write_policy_schema();
-    let writer_a = AuthorId::from_bytes([0xa1; 16]);
-    let writer_b = AuthorId::from_bytes([0xb2; 16]);
+    let writer_a = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let writer_b = AuthorSubject::for_test_bytes([0xb2; 16]);
 
     let (_client_a_dir, mut client_a) = open_node(node(1), schema.clone());
     let (_client_b_dir, mut client_b) = open_node(node(2), schema.clone());
@@ -970,7 +995,7 @@ fn settled_permission_scope_for_one_writer_claim_does_not_unlock_whole_table() {
 #[test]
 fn edge_releases_scope_subscription_after_last_deferred_unit_resolves() {
     let schema = read_write_policy_schema();
-    let client_author = AuthorId::from_bytes([7; 16]);
+    let client_author = AuthorSubject::for_test_bytes([7; 16]);
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
     let (_edge_dir, mut edge) = open_node(node(3), schema);
@@ -1007,7 +1032,7 @@ fn edge_releases_scope_subscription_after_last_deferred_unit_resolves() {
 #[test]
 fn edge_restart_recovers_deferred_fate_from_client_outbox_redelivery() {
     let schema = read_write_policy_schema();
-    let client_author = AuthorId::from_bytes([7; 16]);
+    let client_author = AuthorSubject::for_test_bytes([7; 16]);
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
     let (edge_dir, mut edge) = open_node(node(3), schema.clone());
@@ -1113,7 +1138,7 @@ fn edge_restart_recovers_deferred_fate_from_client_outbox_redelivery() {
 #[test]
 fn edge_restart_preserves_edge_accepted_unit_without_redelivery() {
     let schema = public_write_schema();
-    let client_author = AuthorId::from_bytes([7; 16]);
+    let client_author = AuthorSubject::for_test_bytes([7; 16]);
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
     let (edge_dir, mut edge) = open_node(node(3), schema.clone());
@@ -1176,7 +1201,7 @@ fn edge_restart_preserves_edge_accepted_unit_without_redelivery() {
 #[test]
 fn edge_public_write_table_settles_without_deferral_or_scope() {
     let schema = public_write_schema();
-    let client_author = AuthorId::from_bytes([7; 16]);
+    let client_author = AuthorSubject::for_test_bytes([7; 16]);
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
     let (_edge_dir, mut edge) = open_node(node(3), schema);
@@ -1212,7 +1237,7 @@ fn edge_public_write_table_settles_without_deferral_or_scope() {
 #[test]
 fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
     let schema = access_write_policy_schema();
-    let client_author = AuthorId::from_bytes([7; 16]);
+    let client_author = AuthorSubject::for_test_bytes([7; 16]);
     let canvas_row = row(31);
     let invite_row = row(32);
 
@@ -1301,7 +1326,7 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
     apply_message(
         &mut core,
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             subscription: SubscriptionKey {
                 shape_id: shape.shape_id(),
                 binding_id: binding.binding_id(),
@@ -1324,7 +1349,7 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
             terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
-        },
+        }),
     );
 
     let (fate, global_time, durability) = transaction_state(&mut core, tx_id);

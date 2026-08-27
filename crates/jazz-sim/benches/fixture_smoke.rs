@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid};
+use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::node::{CurrentRow, NodeState};
 use jazz::peer::PeerState;
 use jazz::schema::{JazzSchema, TableSchema};
@@ -88,7 +88,7 @@ fn execute_fixture_smoke(ctx: &mut dyn DriverContext, seed: u64) -> Summary {
             FixtureCommitApply {
                 writer_name,
                 core_name: "core",
-                made_by: AuthorId::SYSTEM,
+                made_by: AuthorSubject::SYSTEM,
                 now_ms: 1_000 + idx as u64,
             },
         )
@@ -268,7 +268,7 @@ fn mix_current_row(hash: &mut u64, row: &CurrentRow, table: &TableSchema) {
     mix_str(hash, row.table());
     mix_bytes(hash, row.row_uuid().as_bytes());
     for (idx, column) in table.columns.iter().enumerate() {
-        mix_str(hash, &column.name);
+        mix_str(hash, column.name());
         if let Some(value) = row.cell_at(idx) {
             mix_str(hash, &format!("{value:?}"));
         }

@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::ivm::DurableStorage;
 use crate::records::RecordDescriptor;
-use crate::storage::{OrderedKvStorage, RecordStore};
+use crate::storage::{OrderedKvStorage, OwnedWriteOperation, RecordStore};
 
 use super::{
     IvmRuntimeError, RecordDeltas, encode_key_part, encode_ordered_bytes, index_record_descriptor,
@@ -125,7 +125,7 @@ async fn apply_index_persist_delta(
     for record_delta in &delta.deltas {
         let record = record_delta.borrowed(&delta.descriptor);
         let logical_key = record
-            .field_bytes_unchecked(0)
+            .get_bytes(0)
             .map_err(IvmRuntimeError::RecordEncoding)?;
         let key = persisted_index_record_key(durable_storage, logical_key);
 
@@ -165,28 +165,35 @@ async fn apply_index_persist_delta(
         }
     }
 
-    let mut final_writes = BTreeMap::<Vec<u8>, Option<Vec<u8>>>::new();
+    // `pending` is already ordered. Consume it directly into owned storage
+    // operations instead of building a second BTreeMap and then asking
+    // RecordStore to clone every key and record once more.
+    let mut operations = Vec::with_capacity(pending.len());
     for (key, entry) in pending {
         if entry.weight > 0 {
             let record = entry
                 .positive_record
                 .ok_or(IvmRuntimeError::PersistRecordMismatch)?;
-            final_writes.insert(key, Some(record));
+            operations.push(OwnedWriteOperation::Set {
+                cf: durable_storage.column_family.clone(),
+                key,
+                value: record,
+            });
         } else if entry.weight < 0 {
-            final_writes.insert(key, None);
+            operations.push(OwnedWriteOperation::Delete {
+                cf: durable_storage.column_family.clone(),
+                key,
+            });
         } else if let Some(record) = entry.positive_record
             && store.get_raw(&key).await?.is_some()
         {
-            final_writes.insert(key, Some(record));
+            operations.push(OwnedWriteOperation::Set {
+                cf: durable_storage.column_family.clone(),
+                key,
+                value: record,
+            });
         }
     }
-    let operations = final_writes
-        .iter()
-        .map(|(key, record)| match record {
-            Some(record) => store.set(key, record),
-            None => store.delete(key),
-        })
-        .collect::<Vec<_>>();
     Ok(store.write_many(operations).await?)
 }
 

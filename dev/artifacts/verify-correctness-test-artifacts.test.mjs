@@ -18,15 +18,15 @@ function fixture() {
   // checks and prove their planted drift is reported alongside provenance.
   writeFileSync(
     join(root, "packages/jazz-tools/src/types/jazz-wasm.d.ts"),
-    `declare module "jazz-wasm" { export class WasmDb {\nconnectUpstream(): any;\nconnectUpstreamWithSession(a: number): any;\nacceptSubscriber(a: Uint8Array, claims: Record<string, (value: unknown, source: string) => void>): any;\n} }`,
+    `declare module "jazz-wasm" { export class WasmDb {\nconnectUpstream(): any;\nconnectUpstreamWithSession(a: number): any;\nacceptSubscriber(a: Uint8Array, claims: Record<string, (value: unknown, source: string) => void>): any;\n}\nexport class WasmTransport {\nrecvAuxiliaryWireFrames(maxFrames?: number, maxBytes?: number): Uint8Array[];\n} }`,
   );
   writeFileSync(
     join(root, "crates/jazz-wasm/pkg/jazz_wasm.d.ts"),
-    `export class WasmDb {\nconnectUpstream(): any;\nconnectUpstreamWithSession(a: number): any;\nacceptSubscriber(a: Uint8Array, claims: Record<string, (value: unknown, source: string) => void>): any;\n}`,
+    `export class WasmDb {\nconnectUpstream(): any;\nconnectUpstreamWithSession(a: number): any;\nacceptSubscriber(a: Uint8Array, claims: Record<string, (value: unknown, source: string) => void>): any;\n}\nexport class WasmTransport {\nrecvAuxiliaryWireFrames(max_frames?: number, max_bytes?: number): Array<any>;\n}`,
   );
   writeFileSync(
     join(root, "crates/jazz-wasm/pkg/jazz_wasm.js"),
-    `export class WasmDb {\nconnectUpstream() {}\nconnectUpstreamWithSession(a) {}\nacceptSubscriber(a, claims) {}\n}`,
+    `export class WasmDb {\nconnectUpstream() {}\nconnectUpstreamWithSession(a) {}\nacceptSubscriber(a, claims) {}\n}\nexport class WasmTransport {\nrecvAuxiliaryWireFrames(max_frames, max_bytes) {}\n}`,
   );
   writeFileSync(
     join(root, "crates/jazz/src/wire.rs"),
@@ -61,6 +61,19 @@ test("reports a wire-version mismatch", () => {
   assert.match(
     verifyCorrectnessTestArtifacts(root).join("\n"),
     /wire protocol version mismatch: Rust=9, TS=8/,
+  );
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("reports stale generated bounded auxiliary transport arguments", () => {
+  const root = fixture();
+  writeFileSync(
+    join(root, "crates/jazz-wasm/pkg/jazz_wasm.js"),
+    `export class WasmDb {\nconnectUpstream() {}\nconnectUpstreamWithSession(a) {}\nacceptSubscriber(a, claims) {}\n}\nexport class WasmTransport {\nrecvAuxiliaryWireFrames() {}\n}`,
+  );
+  assert.match(
+    verifyCorrectnessTestArtifacts(root).join("\n"),
+    /WasmTransport\.recvAuxiliaryWireFrames: consumer=2, d\.ts=2, glue=0/,
   );
   rmSync(root, { recursive: true, force: true });
 });

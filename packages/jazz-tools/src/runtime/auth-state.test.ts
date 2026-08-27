@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { canonicalAuthorSubject } from "./author-id.js";
 import { createAuthStateStore, type AuthState } from "./auth-state.js";
 
 function toBase64Url(value: unknown): string {
@@ -11,14 +12,17 @@ function makeJwt(payload: Record<string, unknown>): string {
   return `${toBase64Url(header)}.${toBase64Url(payload)}.signature`;
 }
 
-const validJwt = makeJwt({ sub: "alice", iss: "urn:jazz:local-first" });
-const anonymousJwt = makeJwt({ sub: "anon-user", iss: "urn:jazz:anonymous" });
+const validJwt = makeJwt({ sub: "alice", iss: "https://issuer.example" });
 
 describe("auth-state", () => {
   it("keeps the last session while unauthenticated", () => {
     const store = createAuthStateStore({
       appId: "test-app",
-      jwtToken: makeJwt({ sub: "alice", claims: { role: "reader" } }),
+      jwtToken: makeJwt({
+        iss: "https://issuer.example",
+        sub: "alice",
+        claims: { role: "reader" },
+      }),
     });
 
     store.markUnauthenticated("expired");
@@ -27,11 +31,8 @@ describe("auth-state", () => {
       authMode: "external",
       error: "expired",
       session: {
-        user_id: "alice",
-        claims: {
-          role: "reader",
-          subject: "alice",
-        },
+        user: canonicalAuthorSubject("https://issuer.example", "alice"),
+        claims: { iss: "https://issuer.example", sub: "alice", role: "reader" },
         authMode: "external",
       },
     });
@@ -40,7 +41,7 @@ describe("auth-state", () => {
   it("deduplicates repeated auth-loss notifications", () => {
     const store = createAuthStateStore({
       appId: "test-app",
-      jwtToken: makeJwt({ sub: "alice" }),
+      jwtToken: makeJwt({ iss: "https://issuer.example", sub: "alice" }),
     });
     const states: AuthState[] = [];
 
@@ -61,12 +62,23 @@ describe("auth-state", () => {
   it("rejects principal hot-swap on a live client", () => {
     const store = createAuthStateStore({
       appId: "test-app",
-      jwtToken: makeJwt({ sub: "alice" }),
+      jwtToken: makeJwt({ iss: "https://issuer.example", sub: "alice" }),
     });
 
-    expect(() => store.applyJwtToken(makeJwt({ sub: "bob" }))).toThrow(
-      "Changing auth principal on a live client is not supported. Recreate the Db.",
-    );
+    expect(() =>
+      store.applyJwtToken(makeJwt({ iss: "https://issuer.example", sub: "bob" })),
+    ).toThrow("Changing auth principal on a live client is not supported. Recreate the Db.");
+  });
+
+  it("treats the issuer as part of the live principal identity", () => {
+    const store = createAuthStateStore({
+      appId: "test-app",
+      jwtToken: makeJwt({ iss: "https://issuer-a.example", sub: "alice" }),
+    });
+
+    expect(() =>
+      store.applyJwtToken(makeJwt({ iss: "https://issuer-b.example", sub: "alice" })),
+    ).toThrow("Changing auth principal on a live client is not supported. Recreate the Db.");
   });
 });
 
@@ -74,7 +86,7 @@ describe("AuthState — flattened shape", () => {
   it("authenticated state has authMode + session, no error", () => {
     const store = createAuthStateStore({ appId: "a", jwtToken: validJwt });
     const state = store.getState();
-    expect(state.session?.authMode).toBe("local-first"); // match fixture's iss
+    expect(state.session?.authMode).toBe("external");
     expect(state.error).toBeUndefined();
     // @ts-expect-error — status has been removed
     state.status;
@@ -98,8 +110,8 @@ describe("AuthState — flattened shape", () => {
     expect(store.getState().error).toBeUndefined();
   });
 
-  it("exposes authMode from JWT issuer at construction", () => {
-    const store = createAuthStateStore({ appId: "a", jwtToken: anonymousJwt });
-    expect(store.getState().authMode).toBe("anonymous");
+  it("exposes external authMode from generic JWTs at construction", () => {
+    const store = createAuthStateStore({ appId: "a", jwtToken: validJwt });
+    expect(store.getState().authMode).toBe("external");
   });
 });

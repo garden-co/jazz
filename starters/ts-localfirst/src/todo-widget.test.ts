@@ -1,6 +1,5 @@
 import { expect, test } from "vitest";
-import type { SubscriptionDelta } from "jazz-tools/client";
-import { mountTodoWidget, type TodoDb, type TodoSubscribeAll } from "./todo-widget.js";
+import { mountTodoWidget, type TodoDb } from "./todo-widget.js";
 
 type TestTodo = { id: string; title: string; done: boolean };
 
@@ -38,16 +37,15 @@ async function flush() {
   await Promise.resolve();
 }
 
-function mount(db: TodoDb) {
+function mount(db: Omit<TodoDb, "subscribe">) {
   const parent = document.createElement("div");
   let publishTodos: (todos: TestTodo[]) => void = () => {};
-  const subscribeAll: TodoSubscribeAll = (_query, callback) => {
-    callback({ all: [], delta: [] });
-    const publishTestTodos = callback as unknown as (delta: SubscriptionDelta<TestTodo>) => void;
-    publishTodos = (all) => publishTestTodos({ all, delta: [] });
+  const subscribe: TodoDb["subscribe"] = (_query, callback) => {
+    callback([]);
+    publishTodos = callback as unknown as (todos: TestTodo[]) => void;
     return () => {};
   };
-  mountTodoWidget(parent, db, subscribeAll);
+  mountTodoWidget(parent, { ...db, subscribe });
   return {
     form: parent.querySelector<HTMLFormElement>("form")!,
     input: parent.querySelector<HTMLInputElement>("input")!,

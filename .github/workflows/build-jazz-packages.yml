@@ -8,6 +8,11 @@ on:
         required: false
         type: string
         default: ""
+      napi_matrix:
+        description: JSON matrix for NAPI platform packages. Release callers use every platform; preview callers may omit expensive optional platforms.
+        required: false
+        type: string
+        default: '[{"os":"blacksmith-4vcpu-ubuntu-2404","target":"x86_64-unknown-linux-gnu","platform":"linux-x64-gnu","use_sccache":true},{"os":"blacksmith-6vcpu-macos-15","target":"x86_64-apple-darwin","platform":"darwin-x64","use_sccache":false},{"os":"blacksmith-6vcpu-macos-15","target":"aarch64-apple-darwin","platform":"darwin-arm64","use_sccache":false},{"os":"blacksmith-2vcpu-windows-2025","target":"x86_64-pc-windows-msvc","platform":"win32-x64-msvc","use_sccache":false}]'
     outputs:
       tools_artifact:
         description: Artifact name for the assembled jazz-tools package.
@@ -145,6 +150,9 @@ jobs:
         with:
           name: jazz-wasm-pkg
           path: crates/jazz-wasm/pkg
+          # The sealed provenance receipt is intentionally dot-prefixed. The
+          # upload action excludes hidden files unless this is explicit.
+          include-hidden-files: true
           if-no-files-found: error
 
   build-napi:
@@ -153,23 +161,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: blacksmith-4vcpu-ubuntu-2404
-            target: x86_64-unknown-linux-gnu
-            platform: linux-x64-gnu
-            use_sccache: true
-          - os: blacksmith-6vcpu-macos-15
-            target: x86_64-apple-darwin
-            platform: darwin-x64
-            use_sccache: false
-          - os: blacksmith-6vcpu-macos-15
-            target: aarch64-apple-darwin
-            platform: darwin-arm64
-            use_sccache: false
-          - os: blacksmith-2vcpu-windows-2025
-            target: x86_64-pc-windows-msvc
-            platform: win32-x64-msvc
-            use_sccache: false
+        include: ${{ fromJSON(inputs.napi_matrix) }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -201,7 +193,7 @@ jobs:
         run: |
           node dev/artifacts/build.mjs napi release --target ${{ matrix.target }}
           node dev/artifacts/provenance.mjs verify napi release --target ${{ matrix.target }}
-          cp crates/jazz-napi/.jazz-artifact-manifest.json crates/jazz-napi/jazz-napi.${{ matrix.platform }}.manifest.json
+          node dev/artifacts/stage-napi-loader.mjs ${{ matrix.platform }}
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -218,6 +210,8 @@ jobs:
           path: |
             crates/jazz-napi/index.js
             crates/jazz-napi/index.d.ts
+            crates/jazz-napi/native-loader.cjs
+            crates/jazz-napi/native-artifact-fingerprint.cjs
           if-no-files-found: error
 
   assemble-packages:
@@ -266,12 +260,19 @@ jobs:
           pnpm exec napi create-npm-dirs
           pnpm exec napi artifacts -d artifacts --npm-dir npm
 
+      - name: Remove Windows package omitted by this build
+        if: ${{ !contains(inputs.napi_matrix, 'win32-x64-msvc') }}
+        run: |
+          node -e 'require("node:fs").rmSync("crates/jazz-napi/npm/win32-x64-msvc", { recursive: true, force: true })'
+
       - name: Verify staged jazz-napi platform artifacts
         run: |
           test -f crates/jazz-napi/npm/linux-x64-gnu/jazz-napi.linux-x64-gnu.node
           test -f crates/jazz-napi/npm/darwin-x64/jazz-napi.darwin-x64.node
           test -f crates/jazz-napi/npm/darwin-arm64/jazz-napi.darwin-arm64.node
-          test -f crates/jazz-napi/npm/win32-x64-msvc/jazz-napi.win32-x64-msvc.node
+          if [[ '${{ inputs.napi_matrix }}' == *'win32-x64-msvc'* ]]; then
+            test -f crates/jazz-napi/npm/win32-x64-msvc/jazz-napi.win32-x64-msvc.node
+          fi
 
       - name: Sync jazz-napi platform package versions and optional deps
         run: |
@@ -280,7 +281,15 @@ jobs:
           node -e 'const fs=require("fs");const rootPath="package.json";const pkg=JSON.parse(fs.readFileSync(rootPath,"utf8"));const deps=[];for(const entry of fs.readdirSync("npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const child=JSON.parse(fs.readFileSync(`npm/${entry.name}/package.json`,"utf8"));deps.push([child.name,pkg.version]);}deps.sort((a,b)=>a[0].localeCompare(b[0]));pkg.optionalDependencies=Object.fromEntries(deps);fs.writeFileSync(rootPath,`${JSON.stringify(pkg,null,2)}\n`);'
 
       - name: Stage and verify jazz-napi provenance manifests
-        run: node dev/artifacts/stage-napi-manifests.mjs
+        run: |
+          if [[ '${{ inputs.napi_matrix }}' == *'win32-x64-msvc'* ]]; then
+            node dev/artifacts/stage-napi-manifests.mjs
+          else
+            node dev/artifacts/stage-napi-manifests.mjs linux-x64-gnu darwin-x64 darwin-arm64
+          fi
+
+      - name: Derive Jazz artifact expectations from sealed manifests
+        run: node dev/artifacts/stage-native-fingerprints.mjs
 
       - name: Build jazz-tools TypeScript package
         run: pnpm --filter jazz-tools build

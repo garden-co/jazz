@@ -1,0 +1,6 @@
+/pkg/
+/.pkg-stage-*/
+/.pkg-backup-*/
+/.pkg-transaction.json
+/.pkg-transaction.json.*
+.jazz-correctness-test-artifacts.json

@@ -10,7 +10,7 @@
 // | claim/provenance-scoped `$createdBy`         | `docs_created_by`                           |
 // | claim/provenance-scoped `$createdAt`         | `docs_created_at`                           |
 // | seeded reachable closure, edge-table seed    | `docs_edge_seeded_reachable`                |
-// | seeded reachable closure, same-table UUID seed | `resources_same_table_seeded_reachable`   |
+// | seeded reachable closure, same-table canonical subject seed | `resources_same_table_seeded_reachable`   |
 // | seeded reachable closure, same-table string seed | `string_resources_same_table_seeded_reachable` |
 // | inherits, 1-level                            | `children_inherit_doc`                      |
 // | inherits, 2-level                            | `grandchildren_inherit_child`               |
@@ -27,7 +27,7 @@ struct DifferentialShape {
     name: &'static str,
     shape: ValidatedQuery,
     binding: Binding,
-    identity: AuthorId,
+    identity: AuthorSubject,
     subscription: SubscriptionKey,
 }
 
@@ -42,7 +42,7 @@ struct AggregateDifferential {
     name: &'static str,
     shape: ValidatedQuery,
     binding: Binding,
-    identity: AuthorId,
+    identity: AuthorSubject,
     subscription: SubscriptionKey,
     peer: PeerState,
     output: &'static str,
@@ -874,7 +874,6 @@ fn m3_differential_schema() -> JazzSchema {
                 PublicTableSchemaBuilder::new("docs")
                     .column("title", PublicColumnType::Text)
                     .column("kind", PublicColumnType::Text)
-                    .column("createdBy", PublicColumnType::Uuid)
                     .column("createdAt", PublicColumnType::Timestamp)
                     .column("bucket", PublicColumnType::Timestamp)
                     .column("f64_value", PublicColumnType::Double)
@@ -898,7 +897,7 @@ fn m3_differential_schema() -> JazzSchema {
                 PublicTableSchemaBuilder::new("teams")
                     .column("id", PublicColumnType::Uuid)
                     .column("name", PublicColumnType::Text)
-                    .column("identity_key", PublicColumnType::Uuid)
+                    .column("identity_key", PublicColumnType::Text)
                     .column("identity_key_text", PublicColumnType::Text)
                     .policies(public_all_policies()),
             )
@@ -911,7 +910,7 @@ fn m3_differential_schema() -> JazzSchema {
             )
             .table(
                 PublicTableSchemaBuilder::new("group_access_edges")
-                    .column("user_id", PublicColumnType::Uuid)
+                    .column("user_id", PublicColumnType::Text)
                     .fk_column("group_id", "teams")
                     .policies(public_all_policies()),
             )
@@ -999,7 +998,7 @@ fn m3_differential_shapes(schema: &JazzSchema) -> Vec<DifferentialShape> {
                 "parent",
                 [],
             )
-            .seeded_by("group_access_edges", "user_id", "sub", "group_id")
+            .seeded_by("group_access_edges", "user_id", "user", "group_id")
             .validate(schema)
             .unwrap(),
     );
@@ -1131,7 +1130,7 @@ fn aggregate_differential_specs() -> Vec<AggregateSpec> {
 
 fn created_by_shape(schema: &JazzSchema) -> ValidatedQuery {
     Query::from("docs")
-        .filter(eq(col("createdBy"), claim("sub")))
+        .filter(eq(col("$createdBy"), claim("user")))
         .validate(schema)
         .unwrap()
 }
@@ -1194,10 +1193,13 @@ fn seed_m3_differential_base(core: &mut NodeState<RocksDbStorage>, seed: u64) {
             MergeableCommit::new("teams", team, 1).cells(BTreeMap::from([
                 ("id".to_owned(), Value::Uuid(team.0)),
                 ("name".to_owned(), Value::String(name.to_owned())),
-                ("identity_key".to_owned(), Value::Uuid(identity.0)),
+                (
+                    "identity_key".to_owned(),
+                    Value::String(identity.canonical().to_owned()),
+                ),
                 (
                     "identity_key_text".to_owned(),
-                    Value::String(identity.0.to_string()),
+                    Value::String(identity.canonical().to_owned()),
                 ),
             ])),
         );
@@ -1209,7 +1211,7 @@ fn seed_m3_differential_base(core: &mut NodeState<RocksDbStorage>, seed: u64) {
     accept_global(
         core,
         MergeableCommit::new("group_access_edges", row(0x42), 3).cells(BTreeMap::from([
-            ("user_id".to_owned(), Value::Uuid(alice.0)),
+            ("user_id".to_owned(), Value::String(alice.canonical().to_owned())),
             ("group_id".to_owned(), Value::Uuid(row(0x31).0)),
         ])),
     );
@@ -1277,7 +1279,7 @@ fn seed_m3_differential_base(core: &mut NodeState<RocksDbStorage>, seed: u64) {
     ] {
         accept_global(
             core,
-            MergeableCommit::new("docs", doc, 10 + seed % 3).cells(differential_doc_cells(
+            MergeableCommit::new("docs", doc, 10 + seed % 3).made_by(author).cells(differential_doc_cells(
                 title,
                 kind,
                 author,
@@ -1397,7 +1399,7 @@ fn m3_differential_parent_map(
 fn differential_doc_cells(
     title: &str,
     kind: &str,
-    author: AuthorId,
+    _author: AuthorSubject,
     created_at: u64,
     bucket: u64,
     f64_value: f64,
@@ -1408,7 +1410,6 @@ fn differential_doc_cells(
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.to_owned())),
         ("kind".to_owned(), Value::String(kind.to_owned())),
-        ("createdBy".to_owned(), Value::Uuid(author.0)),
         ("createdAt".to_owned(), Value::U64(created_at)),
         ("bucket".to_owned(), Value::U64(bucket)),
         ("f64_value".to_owned(), Value::F64(f64_value)),
@@ -1532,7 +1533,10 @@ fn grant_edge_access(
         row(0x42),
         180 + step,
         BTreeMap::from([
-            ("user_id".to_owned(), Value::Uuid(user(0xa1).0)),
+            (
+                "user_id".to_owned(),
+                Value::String(user(0xa1).canonical().to_owned()),
+            ),
             ("group_id".to_owned(), Value::Uuid(row(0x31).0)),
         ]),
     );
@@ -1604,7 +1608,7 @@ fn one_shot_rows<S: OrderedKvStorage>(
     core: &mut NodeState<S>,
     shape: &ValidatedQuery,
     binding: &Binding,
-    identity: AuthorId,
+    identity: AuthorSubject,
 ) -> BTreeSet<(String, RowUuid)> {
     core.query_rows_for_link(shape, binding, DurabilityTier::Global, identity)
         .unwrap()
@@ -1618,12 +1622,12 @@ fn apply_result_members(
     update: &SyncMessage,
     root_table: &str,
 ) {
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -1647,12 +1651,12 @@ fn apply_result_members(
 }
 
 fn apply_aggregate_payload(values: &mut BTreeMap<u64, Value>, update: &SyncMessage, output: &str) {
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         program_fact_adds,
         program_fact_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -1722,7 +1726,7 @@ fn one_shot_aggregate_values<S: OrderedKvStorage>(
     core: &mut NodeState<S>,
     shape: &ValidatedQuery,
     binding: &Binding,
-    identity: AuthorId,
+    identity: AuthorSubject,
     output: &str,
 ) -> BTreeMap<u64, Value> {
     core.query_rows_for_link(shape, binding, DurabilityTier::Global, identity)

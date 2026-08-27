@@ -15,7 +15,7 @@ fn required_include_rls_schema() -> JazzSchema {
                     .policies(
                         PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
                             "owner",
-                            vec!["claims".to_owned(), "sub".to_owned()],
+                            vec!["claims".to_owned(), "user_id".to_owned()],
                         )),
                     ),
             ),
@@ -61,7 +61,7 @@ fn parent_ref_join_matches_a_declared_id_column_instead_of_the_physical_row_uuid
         .join_via_column("chats", "id", "chat", [])
         .validate(&core.catalogue.schema)
         .unwrap();
-    let rows = required_include_rows(&mut core, &shape, AuthorId::SYSTEM);
+    let rows = required_include_rows(&mut core, &shape, AuthorSubject::SYSTEM);
     assert_eq!(
         rows.into_iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
         vec![membership]
@@ -75,6 +75,7 @@ fn parent_ref_join_matches_a_declared_id_column_instead_of_the_physical_row_uuid
 #[test]
 fn point_read_authorization_keeps_using_physical_row_uuid_with_declared_id() {
     let alice = user(0xa1);
+    let bob = user(0xa2);
     let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
         PublicTableSchemaBuilder::new("documents")
             .column("id", PublicColumnType::Uuid)
@@ -91,17 +92,55 @@ fn point_read_authorization_keeps_using_physical_row_uuid_with_declared_id() {
             ),
     ));
     let (_core_dir, mut core) = open_node_with_schema(node(0xa9), schema);
+    core.set_test_provider_claims(
+        alice,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(alice.test_uuid()))]),
+    );
+    core.set_test_provider_claims(
+        bob,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(bob.test_uuid()))]),
+    );
     let physical_row = row(0xc1);
+    let other_physical_row = row(0xc2);
     let declared_id = row(0xd1);
     let tx = core
         .commit_mergeable_unit_settled(
             MergeableCommit::new("documents", physical_row, 10).cells(BTreeMap::from([
                 ("id".to_owned(), Value::Uuid(declared_id.0)),
-                ("owner".to_owned(), Value::Uuid(alice.0)),
+                ("owner".to_owned(), Value::Uuid(alice.test_uuid())),
             ])),
         )
         .unwrap();
     core.accept_global_for_test(tx.0).unwrap();
+    let other_tx = core
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("documents", other_physical_row, 11).cells(BTreeMap::from([
+                ("id".to_owned(), Value::Uuid(row(0xd2).0)),
+                ("owner".to_owned(), Value::Uuid(alice.test_uuid())),
+            ])),
+        )
+        .unwrap();
+    core.accept_global_for_test(other_tx.0).unwrap();
+
+    let generic = Query::from("documents")
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let generic_binding = generic.bind(BTreeMap::new()).unwrap();
+    assert_eq!(
+        core.query_rows_for_link(&generic, &generic_binding, DurabilityTier::Global, alice)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([physical_row, other_physical_row]),
+        "the generic policy graph must initially authorize both of Alice's documents"
+    );
+    let cached_policy_graphs = core
+        .query
+        .policy_authorization_graph_cache
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
 
     core.reset_query_engine_read_metrics();
     assert!(
@@ -113,9 +152,104 @@ fn point_read_authorization_keeps_using_physical_row_uuid_with_declared_id() {
         1,
         "the authorization probe must point-scan the physical row"
     );
+    assert_eq!(
+        core.query
+            .policy_authorization_graph_cache
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        cached_policy_graphs,
+        "point authorization must preserve the reusable generic policy graph"
+    );
     assert!(
         core.dry_run_write_current_allows("documents", physical_row, alice)
             .unwrap()
+    );
+    assert!(
+        !core
+            .dry_run_read_current_allows("documents", physical_row, bob)
+            .unwrap(),
+        "a point-specialized policy proof must retain its session scope"
+    );
+    assert_eq!(
+        core.query
+            .policy_authorization_graph_cache
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        cached_policy_graphs,
+        "a denied point proof must not retain another identity's specialization"
+    );
+    assert_eq!(
+        core.query_rows_for_link(&generic, &generic_binding, DurabilityTier::Global, alice)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([physical_row, other_physical_row]),
+        "a generic query after a point proof must not inherit that point's bound"
+    );
+
+    let ownership_change = core
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("documents", physical_row, 20)
+                .cells(BTreeMap::from([("owner".to_owned(), Value::Uuid(bob.test_uuid()))])),
+        )
+        .unwrap();
+    core.accept_global_for_test(ownership_change.0).unwrap();
+    assert!(
+        !core
+            .dry_run_read_current_allows("documents", physical_row, alice)
+            .unwrap(),
+        "policy-dependency changes must revoke the former owner's point access"
+    );
+    assert!(
+        core.dry_run_read_current_allows("documents", physical_row, bob)
+            .unwrap(),
+        "policy-dependency changes must grant the new owner's point access"
+    );
+    assert_eq!(
+        core.query_rows_for_link(&generic, &generic_binding, DurabilityTier::Global, bob)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([physical_row]),
+        "a generic query after a point proof must use its generic policy graph"
+    );
+    assert_eq!(
+        core.query_rows_for_link(&generic, &generic_binding, DurabilityTier::Global, alice)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([other_physical_row]),
+        "the former owner keeps only the separately authorized generic result"
+    );
+
+    let deletion = core
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("documents", physical_row, 30).deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    core.accept_global_for_test(deletion.0).unwrap();
+    assert!(
+        !core
+            .dry_run_read_current_allows("documents", physical_row, bob)
+            .unwrap(),
+        "a deleted target must be a point-authorization miss"
+    );
+    let restoration = core
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("documents", physical_row, 40)
+                .deletion(DeletionEvent::Restored),
+        )
+        .unwrap();
+    core.accept_global_for_test(restoration.0).unwrap();
+    assert!(
+        core.dry_run_read_current_allows("documents", physical_row, bob)
+            .unwrap(),
+        "restoring the target must restore point authorization from current policy evidence"
     );
 }
 
@@ -129,14 +263,27 @@ fn required_include_shape(core: &NodeState<RocksDbStorage>, include: Include) ->
 fn required_include_rows(
     core: &mut NodeState<RocksDbStorage>,
     shape: &ValidatedQuery,
-    identity: AuthorId,
+    identity: AuthorSubject,
 ) -> Vec<CurrentRow> {
     let binding = shape.bind(BTreeMap::new()).unwrap();
+    if matches!(identity, AuthorSubject::Authenticated(_)) {
+        core.set_test_provider_claims(
+            identity,
+            BTreeMap::from([("user_id".to_owned(), Value::Uuid(identity.test_uuid()))]),
+        );
+    }
     core.query_rows_for_link(shape, &binding, DurabilityTier::Global, identity)
         .unwrap()
 }
 
-fn seed_required_include_fixture(core: &mut NodeState<RocksDbStorage>, readable_owner: AuthorId) {
+fn seed_required_include_fixture(core: &mut NodeState<RocksDbStorage>, readable_owner: AuthorSubject) {
+    core.set_test_provider_claims(
+        readable_owner,
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::Uuid(readable_owner.test_uuid()),
+        )]),
+    );
     let unreadable_owner = user(0xb2);
     let target_tx = core
         .commit_mergeable_many_settled(vec![
@@ -175,7 +322,7 @@ fn seed_missing_required_include_fixture(core: &mut NodeState<RocksDbStorage>) {
                 ("target".to_owned(), Value::Uuid(row(0xc2).0)),
             ])),
             MergeableCommit::new("targets", row(0xc2), 10)
-                .cells(owner_cells(AuthorId::SYSTEM, "existing target")),
+                .cells(owner_cells(user(0xc2), "existing target")),
         ])
         .unwrap();
     core.accept_global_for_test(root_tx).unwrap();
@@ -191,7 +338,7 @@ fn seed_null_required_include_fixture(core: &mut NodeState<RocksDbStorage>) {
                 ("target".to_owned(), Value::Uuid(row(0xc2).0)),
             ])),
             MergeableCommit::new("targets", row(0xc2), 10)
-                .cells(owner_cells(AuthorId::SYSTEM, "existing target")),
+                .cells(owner_cells(user(0xc2), "existing target")),
         ])
         .unwrap();
     core.accept_global_for_test(root_tx).unwrap();
@@ -217,7 +364,7 @@ fn multi_segment_required_include_rls_schema() -> JazzSchema {
                     .policies(
                         PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
                             "owner",
-                            vec!["claims".to_owned(), "sub".to_owned()],
+                            vec!["claims".to_owned(), "user_id".to_owned()],
                         )),
                     ),
             ),
@@ -226,8 +373,15 @@ fn multi_segment_required_include_rls_schema() -> JazzSchema {
 
 fn seed_multi_segment_include_fixture(
     core: &mut NodeState<RocksDbStorage>,
-    readable_owner: AuthorId,
+    readable_owner: AuthorSubject,
 ) {
+    core.set_test_provider_claims(
+        readable_owner,
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::Uuid(readable_owner.test_uuid()),
+        )]),
+    );
     let unreadable_owner = user(0xb2);
     let tx = core
         .commit_mergeable_many_settled(vec![
@@ -265,11 +419,11 @@ fn seed_multi_segment_include_fixture(
 }
 
 fn canonical_view_update_rows(update: &SyncMessage) -> (Vec<ResultRowEntry>, Vec<ResultRowEntry>) {
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -456,9 +610,9 @@ fn prepared_subscription_multi_segment_forward_include_keeps_root_delta() {
     core.accept_global_for_test(update_tx).unwrap();
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds, ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -604,7 +758,7 @@ fn inner_include_missing_target_drops_parent() {
     seed_missing_required_include_fixture(&mut core);
     let shape = required_include_shape(&core, Include::new("target"));
 
-    let rows = required_include_rows(&mut core, &shape, AuthorId::SYSTEM);
+    let rows = required_include_rows(&mut core, &shape, AuthorSubject::SYSTEM);
     assert_eq!(
         rows.into_iter()
             .map(|row| row.row_uuid())
@@ -620,7 +774,7 @@ fn inner_include_null_target_drops_parent() {
     seed_null_required_include_fixture(&mut core);
     let shape = required_include_shape(&core, Include::new("target"));
 
-    let rows = required_include_rows(&mut core, &shape, AuthorId::SYSTEM);
+    let rows = required_include_rows(&mut core, &shape, AuthorSubject::SYSTEM);
     assert_eq!(
         rows.into_iter()
             .map(|row| row.row_uuid())
@@ -636,7 +790,7 @@ fn holes_include_missing_target_keeps_parent() {
     seed_missing_required_include_fixture(&mut core);
     let shape = required_include_shape(&core, Include::new("target").join_mode(JoinMode::Holes));
 
-    let rows = required_include_rows(&mut core, &shape, AuthorId::SYSTEM);
+    let rows = required_include_rows(&mut core, &shape, AuthorSubject::SYSTEM);
     assert_eq!(
         rows.into_iter()
             .map(|row| row.row_uuid())
@@ -652,7 +806,7 @@ fn holes_include_keeps_parent_without_root_membership_filtering() {
     seed_missing_required_include_fixture(&mut core);
     let shape = required_include_shape(&core, Include::new("target").join_mode(JoinMode::Holes));
 
-    let rows = required_include_rows(&mut core, &shape, AuthorId::SYSTEM);
+    let rows = required_include_rows(&mut core, &shape, AuthorSubject::SYSTEM);
     assert_eq!(
         rows.into_iter()
             .map(|row| row.row_uuid())
@@ -706,7 +860,7 @@ fn system_identity_required_include_uses_existence_only_resolvability() {
     seed_required_include_fixture(&mut core, user(0xa1));
     let shape = required_include_shape(&core, Include::new("target").require_includes());
 
-    let rows = required_include_rows(&mut core, &shape, AuthorId::SYSTEM);
+    let rows = required_include_rows(&mut core, &shape, AuthorSubject::SYSTEM);
     assert_eq!(
         rows.into_iter()
             .map(|row| row.row_uuid())

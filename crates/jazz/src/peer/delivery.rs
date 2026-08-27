@@ -199,6 +199,7 @@ pub(super) fn storage_read_metrics_buckets(metrics: &StorageReadMetrics) -> Stri
     [
         ("history_rows", metrics.history_rows),
         ("history_indexes", metrics.history_indexes),
+        ("ahead_current_rows", metrics.ahead_current_rows),
         ("global_current_rows", metrics.global_current_rows),
         ("global_current_indexes", metrics.global_current_indexes),
         (
@@ -225,9 +226,9 @@ fn storage_read_bucket_field(name: &str, bucket: StorageReadBucket) -> String {
 }
 
 pub(super) fn view_update_reset_result_set(update: &mut SyncMessage) {
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set, ..
-    } = update
+    }) = update
     else {
         return;
     };

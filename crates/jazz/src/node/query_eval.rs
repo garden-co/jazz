@@ -86,6 +86,16 @@ pub(crate) fn exact_known_state_declaration_for_test(
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 const PENDING_BINDING_SOURCE_SHAPE: &str = "__jazz_pending_binding_source";
 
+#[cfg(test)]
+thread_local! {
+    static CLIENT_PHYSICAL_ROW_QUERY_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_client_physical_row_query_calls_for_test() -> usize {
+    CLIENT_PHYSICAL_ROW_QUERY_CALLS.with(|calls| calls.replace(0))
+}
+
 /// Aggregate terminal membership is structurally identified by the aggregate
 /// query plan and its synthetic group-key member. Its table label is not an
 /// identity and must not participate in public delivery decisions.
@@ -264,7 +274,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
         output: CurrentQueryProgramOutput,
     ) -> Result<QueryProgram, Error> {
         self.compile_current_query_program_in_authorization_mode(
@@ -283,7 +293,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
         output: CurrentQueryProgramOutput,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<QueryProgram, Error> {
@@ -306,7 +316,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
         output: CurrentQueryProgramOutput,
         read_view: &ReadViewSpec,
     ) -> Result<QueryProgram, Error> {
@@ -327,7 +337,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
         output: CurrentQueryProgramOutput,
         read_view: &ReadViewSpec,
         authorization_mode: QueryAuthorizationMode,
@@ -350,7 +360,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
         output: CurrentQueryProgramOutput,
         read_view: &ReadViewSpec,
         settled_binding_view: Option<BindingViewKey>,
@@ -375,7 +385,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
         output: CurrentQueryProgramOutput,
         read_view: &ReadViewSpec,
         settled_binding_view: Option<BindingViewKey>,
@@ -394,11 +404,13 @@ where
             prepared_claim_binding_mode,
             false,
         )?;
-        // Maintained/prepared programs must retain their established source
-        // graph. Physical source bounds are a one-shot-only optimization: even
-        // an otherwise unbounded optimized index source can settle against a
-        // different persisted frontier than the maintained full source.
-        self.compile_query_program_request(request).await
+        // Maintained index scans retain their established full source because
+        // an index can settle against a different persisted frontier. A
+        // physical primary-key source has no independent index frontier and
+        // remains incrementally complete for that one immutable row identity.
+        let access_paths = self.current_query_primary_key_access_paths(shape, binding)?;
+        self.compile_query_program_request_with_access_paths(request, access_paths)
+            .await
     }
 
     async fn compile_current_query_program_for_one_shot_read(
@@ -406,7 +418,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
         settled_binding_view: Option<BindingViewKey>,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<QueryProgram, Error> {
@@ -420,9 +432,11 @@ where
             settled_binding_view,
             authorization_mode,
         )?;
-        // One-shot reads are the only compilation mode allowed to attach a
-        // physical source cap. Prepared/maintained and policy programs keep
-        // their ordinary unbounded access paths.
+        // One-shot reads can use every eligible access path. Maintained reads
+        // deliberately retain their ordinary source except for the separately
+        // proved physical primary-key path: secondary indexes can settle at a
+        // frontier distinct from their maintained source, while one immutable
+        // physical row has no such independent frontier.
         let access_paths = self.one_shot_access_paths(shape, binding, tier)?;
         self.compile_query_program_request_with_access_paths(request, access_paths)
             .await
@@ -433,9 +447,10 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
         output: CurrentQueryProgramOutput,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<QueryProgram, Error> {
         let request = self.current_query_program_request_with_inline_binding_source(
             shape,
@@ -444,7 +459,7 @@ where
             identity,
             output,
             &ReadViewSpec::default(),
-            QueryAuthorizationMode::TrustedServing,
+            authorization_mode,
         )?;
         self.compile_query_program_request_with_access_paths(request, access_paths)
             .await
@@ -455,7 +470,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         position: GlobalTime,
-        identity: AuthorId,
+        identity: AuthorSubject,
         output: CurrentQueryProgramOutput,
     ) -> Result<QueryProgram, Error> {
         let query_schema = self
@@ -492,7 +507,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         snapshot: &Snapshot,
-        identity: AuthorId,
+        identity: AuthorSubject,
         output: CurrentQueryProgramOutput,
     ) -> Result<QueryProgram, Error> {
         let query_schema = self
@@ -529,7 +544,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
         authorization_mode: QueryAuthorizationMode,
         read_view: &ReadViewSpec,
     ) -> Result<QueryProgram, Error> {
@@ -589,7 +604,7 @@ where
         tx_id: OpenTransactionId,
         shape: &ValidatedQuery,
         binding: &Binding,
-        identity: AuthorId,
+        identity: AuthorSubject,
         output: CurrentQueryProgramOutput,
         include_deleted: bool,
         authorization_mode: QueryAuthorizationMode,
@@ -650,7 +665,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
         output: CurrentQueryProgramOutput,
         read_view: &ReadViewSpec,
         settled_binding_view: Option<BindingViewKey>,
@@ -675,7 +690,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
         output: CurrentQueryProgramOutput,
         read_view: &ReadViewSpec,
         authorization_mode: QueryAuthorizationMode,
@@ -699,7 +714,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
         output: CurrentQueryProgramOutput,
         read_view: &ReadViewSpec,
         settled_binding_view: Option<BindingViewKey>,
@@ -707,6 +722,44 @@ where
         prepared_claim_binding_mode: PreparedClaimBindingMode,
         force_inline_binding_source: bool,
     ) -> Result<QueryProgramRequest, Error> {
+        let policy = self.query_program_policy_context(identity);
+        // Linked client shapes carry their read-policy alternatives so an
+        // identity-scoped server can maintain the authorized result. System
+        // authority is different: it bypasses those alternatives entirely.
+        // Drop them before normalization, rather than merely clearing their
+        // prepared claim descriptor later. Otherwise normalization lowers a
+        // policy `Claim` into `__jazz_claim_*` and the System program still
+        // attempts to execute that unbound predicate.
+        let system_shape;
+        let system_binding;
+        let (shape, binding) = if matches!(policy, PolicyContext::System)
+            && !shape.query().policy_branches.is_empty()
+        {
+            let schema = if shape.schema_version() == self.catalogue.current_schema_version_id {
+                &self.catalogue.schema
+            } else {
+                &self
+                    .catalogue
+                    .catalogue_schemas
+                    .get(&shape.schema_version())
+                    .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?
+                    .schema
+            };
+            let mut query = shape.query().clone();
+            query.policy_branches.clear();
+            system_shape = query.validate_with_schema_version(schema, shape.schema_version())?;
+            system_binding = system_shape.bind(
+                binding
+                    .values()
+                    .iter()
+                    .filter(|(name, _)| system_shape.params().contains_key(*name))
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect(),
+            )?;
+            (&system_shape, &system_binding)
+        } else {
+            (shape, binding)
+        };
         let lowered_shape;
         let lowered_binding;
         // Prepared binding sources are a serving-side optimization. Client
@@ -748,7 +801,6 @@ where
             input_shape.nodes.remove(&input_shape.root);
             input_shape.root = input;
         }
-        let policy = self.query_program_policy_context(identity);
         let policy_schema_version = self.read_policy_schema_for_table_name(
             &shape.query().table,
             shape.schema_version(),
@@ -831,7 +883,7 @@ where
             binding,
             tier,
             prepared_plan,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
         )
         .await
     }
@@ -852,7 +904,7 @@ where
         binding: &Binding,
         tier: DurabilityTier,
         prepared_plan: Option<&PreparedQueryPlanHandle>,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.query_rows_with_options_for_identity(
             shape,
@@ -873,7 +925,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.query_rows_with_options_for_identity(
             shape,
@@ -934,7 +986,7 @@ where
             binding,
             DurabilityTier::Local,
             prepared_plan,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
         )
         .await
     }
@@ -945,7 +997,7 @@ where
         binding: &Binding,
         tier: DurabilityTier,
         prepared_plan: Option<&PreparedQueryPlanHandle>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.query_rows_with_options_for_identity(
@@ -966,7 +1018,7 @@ where
         binding: &Binding,
         tier: DurabilityTier,
         prepared_plan: Option<&PreparedQueryPlanHandle>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         include_deleted: bool,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
@@ -1007,13 +1059,14 @@ where
         {
             return Ok(Vec::new());
         }
+        let has_one_shot_access_path = settled_binding_view.is_none()
+            && !self.one_shot_access_paths(shape, binding, tier)?.is_empty();
         // A concrete one-shot access path is binding-specific. Inline that
         // binding so execution keeps the selected graph instead of replacing it
-        // with the generic cached parameterized plan.
-        let inline_query = if prepared_plan.is_none()
-            && settled_binding_view.is_none()
-            && !self.one_shot_access_paths(shape, binding, tier)?.is_empty()
-        {
+        // with the generic cached parameterized plan. Prepared Local reads also
+        // take this path: their reusable graph cannot embed the current binding's
+        // physical index prefix and would otherwise hydrate the complete table.
+        let inline_query = if has_one_shot_access_path {
             let schema = self
                 .catalogue
                 .catalogue_schemas
@@ -1030,8 +1083,10 @@ where
             .as_ref()
             .map(|(shape, binding)| (shape, binding))
             .unwrap_or((shape, binding));
-        let prepared_plan = prepared_plan
-            .filter(|plan| !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker));
+        let prepared_plan = prepared_plan.filter(|plan| {
+            !has_one_shot_access_path
+                && !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker)
+        });
         let program = if prepared_plan.is_some() {
             None
         } else {
@@ -1171,7 +1226,7 @@ where
         binding: &Binding,
         tier: DurabilityTier,
         prepared_plan: Option<&PreparedQueryPlanHandle>,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<(Vec<CurrentRow>, QueryReadProfile), Error> {
         let total_started = Instant::now();
         let phase_started = Instant::now();
@@ -1673,7 +1728,7 @@ where
         position: GlobalTime,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.require_catalogue_ready()?;
-        self.query_rows_at_for_identity(shape, binding, position, AuthorId::SYSTEM)
+        self.query_rows_at_for_identity(shape, binding, position, AuthorSubject::SYSTEM)
             .await
     }
 
@@ -1682,7 +1737,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         position: GlobalTime,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
         let mut rows = self
             .query_rows_at_with_query_engine(shape, binding, position, identity)
@@ -1697,7 +1752,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         position: GlobalTime,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
         let read_schema = self
             .catalogue
@@ -1746,7 +1801,7 @@ where
                 &lowered_shape,
                 &binding,
                 snapshot,
-                AuthorId::SYSTEM,
+                AuthorSubject::SYSTEM,
                 CurrentQueryProgramOutput::AppRows,
             )
             .await?;
@@ -1772,7 +1827,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
         authorization_mode: QueryAuthorizationMode,
         read_view: &ReadViewSpec,
     ) -> Result<Vec<CurrentRow>, Error> {
@@ -2013,7 +2068,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
         read_view: &ReadViewSpec,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<RelationSnapshot, Error> {
@@ -2062,7 +2117,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<(ValidatedQuery, Binding, PreparedQueryPlanHandle), Error> {
         let (shape, binding) = self.query_binding_for_link(shape, binding)?;
         let plan = self
@@ -2076,7 +2131,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<(ValidatedQuery, Binding, SubscriptionPreparedPlan), Error> {
         match authorization_mode {
@@ -2096,7 +2151,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<(ValidatedQuery, Binding, SubscriptionPreparedPlan), Error> {
         let (shape, binding, plan) = self
             .prepare_query_binding_for_link_with_shared_claim_fragments(
@@ -2118,7 +2173,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<(ValidatedQuery, Binding, SubscriptionPreparedPlan), Error> {
         let (shape, binding, plan) = self
             .prepare_query_binding_for_link(shape, binding, tier, identity)
@@ -2138,7 +2193,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<(ValidatedQuery, Binding, PreparedQueryPlanHandle), Error> {
         let (shape, binding) = self.query_binding_for_link(shape, binding)?;
         // This plan only keeps the local maintained subscription's graph alive.
@@ -2213,7 +2268,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.query_rows_with_prepared_plan_for_identity(shape, binding, tier, None, identity)
             .await
@@ -2222,13 +2277,54 @@ where
     /// Execute a serving query with its root constrained to a physical row
     /// UUID. This is for internal authorization probes: public `id` may be a
     /// declared user column and must not be used as the storage-row selector.
-    pub(in crate::node) async fn query_rows_for_link_physical_row(
+    pub(crate) async fn query_rows_for_link_physical_row(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
         row_uuid: RowUuid,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.query_rows_for_physical_row_in_authorization_mode(
+            shape,
+            binding,
+            tier,
+            identity,
+            row_uuid,
+            QueryAuthorizationMode::TrustedServing,
+        )
+        .await
+    }
+
+    pub(crate) async fn query_rows_for_client_physical_row(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorSubject,
+        row_uuid: RowUuid,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        #[cfg(test)]
+        CLIENT_PHYSICAL_ROW_QUERY_CALLS.with(|calls| calls.set(calls.get() + 1));
+        self.query_rows_for_physical_row_in_authorization_mode(
+            shape,
+            binding,
+            tier,
+            identity,
+            row_uuid,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .await
+    }
+
+    async fn query_rows_for_physical_row_in_authorization_mode(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorSubject,
+        row_uuid: RowUuid,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table = self
             .table_in_schema(&shape.query().table, shape.schema_version())?
@@ -2245,6 +2341,7 @@ where
                 identity,
                 CurrentQueryProgramOutput::AppRows,
                 access_paths,
+                authorization_mode,
             )
             .await?;
         // A policy can introduce claim parameters even though this physical
@@ -2286,7 +2383,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table = self
             .table_in_schema(&shape.query().table, shape.schema_version())?
@@ -2327,7 +2424,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<RelationSnapshot, Error> {
         self.query_relation_snapshot_for_serving_in_read_view(
             shape,
@@ -2344,7 +2441,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
         read_view: &ReadViewSpec,
     ) -> Result<RelationSnapshot, Error> {
         self.query_relation_snapshot_in_authorization_mode(
@@ -2363,7 +2460,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
         read_view: &ReadViewSpec,
     ) -> Result<RelationSnapshot, Error> {
         self.query_relation_snapshot_in_authorization_mode(
@@ -2382,7 +2479,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
         read_view: &ReadViewSpec,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<RelationSnapshot, Error> {
@@ -2427,7 +2524,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         position: GlobalTime,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.query_rows_at_for_identity(shape, binding, position, identity)
             .await
@@ -2491,7 +2588,7 @@ where
             tx_id,
             shape,
             binding,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             include_deleted,
             QueryAuthorizationMode::ClientLocal,
         )
@@ -2504,7 +2601,7 @@ where
         tx_id: OpenTransactionId,
         shape: &ValidatedQuery,
         binding: &Binding,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.tx_query_for_identity_with_options(tx_id, shape, binding, identity, false)
             .await
@@ -2517,7 +2614,7 @@ where
         tx_id: OpenTransactionId,
         shape: &ValidatedQuery,
         binding: &Binding,
-        identity: AuthorId,
+        identity: AuthorSubject,
         include_deleted: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.tx_query_in_authorization_mode(
@@ -2536,7 +2633,7 @@ where
         tx_id: OpenTransactionId,
         shape: &ValidatedQuery,
         binding: &Binding,
-        identity: AuthorId,
+        identity: AuthorSubject,
         include_deleted: bool,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
@@ -2598,7 +2695,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<PreparedQueryPlanHandle, Error> {
         let key = (
             shape.shape_id(),
@@ -2632,7 +2729,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-        identity: AuthorId,
+        identity: AuthorSubject,
         read_view: &ReadViewSpec,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<(), Error> {
@@ -2676,7 +2773,7 @@ where
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
-        identity: AuthorId,
+        identity: AuthorSubject,
         tier: DurabilityTier,
         read_view: &ReadViewSpec,
     ) -> Result<
@@ -2710,7 +2807,7 @@ where
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
-        identity: AuthorId,
+        identity: AuthorSubject,
         tier: DurabilityTier,
         read_view: &ReadViewSpec,
     ) -> Result<
@@ -2741,7 +2838,7 @@ where
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
-        identity: AuthorId,
+        identity: AuthorSubject,
         tier: DurabilityTier,
         read_view: &ReadViewSpec,
         authorization_mode: QueryAuthorizationMode,
@@ -2828,9 +2925,6 @@ where
                 transitions
                     .program_fact_removes
                     .extend(snapshot_transitions.program_fact_removes);
-                transitions
-                    .structured_app_row_changes
-                    .extend(snapshot_transitions.structured_app_row_changes);
                 true
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => false,
@@ -2864,9 +2958,6 @@ where
                         transitions
                             .program_fact_removes
                             .extend(delta_transitions.program_fact_removes);
-                        transitions
-                            .structured_app_row_changes
-                            .extend(delta_transitions.structured_app_row_changes);
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -3081,7 +3172,7 @@ fn apply_query_window(query: &crate::query::Query, rows: &mut Vec<CurrentRow>) {
 
 fn magic_current_column_type(column: &str) -> Option<&'static groove::schema::ColumnType> {
     match column {
-        "$createdBy" | "$updatedBy" => Some(&groove::schema::ColumnType::Uuid),
+        "$createdBy" | "$updatedBy" => Some(&groove::schema::ColumnType::String),
         "$createdAt" | "$updatedAt" => Some(&groove::schema::ColumnType::U64),
         _ => None,
     }

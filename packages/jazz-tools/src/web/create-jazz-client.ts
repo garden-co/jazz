@@ -1,7 +1,10 @@
-import type { Session } from "../runtime/context.js";
+import type { PublicSession } from "../runtime/context.js";
+import { createClientConfigKey } from "../runtime/client-config-key.js";
 import { acquireClient, releaseClient } from "../runtime/client-registry.js";
 import type { Db, DbConfig } from "../runtime/db.js";
-import { createDb } from "../runtime/db.js";
+import { createDb, getDbSubscriptionSource } from "../runtime/db.js";
+import { getDbInternalSession } from "../runtime/db-internal-session.js";
+import { runCleanupSteps } from "../runtime/run-cleanup-steps.js";
 import { SubscriptionsOrchestrator, trackPromise } from "../subscriptions-orchestrator.js";
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import { registerWindowJazzStorageClient } from "../window-client-storage.js";
@@ -10,18 +13,22 @@ export type JazzClientConfig = DbConfig;
 
 export interface JazzClient {
   db: Db;
-  session: Session | null;
+  session: PublicSession | null;
   shutdown(): Promise<void>;
 }
 
 async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
   const db = await createDb(config);
   let session = db.getAuthState().session;
-  const manager = new SubscriptionsOrchestrator({ appId: config.appId }, db, session);
+  const manager = new SubscriptionsOrchestrator(
+    { appId: config.appId },
+    getDbSubscriptionSource(db),
+    getDbInternalSession(db),
+  );
   await manager.init();
   const stopSessionSync = db.onAuthChanged(({ session: nextSession }) => {
     session = nextSession ?? null;
-    manager.setSession(nextSession ?? null);
+    manager.setSession(getDbInternalSession(db));
   });
   const unregisterWindowJazzStorageClient = registerWindowJazzStorageClient(db);
 
@@ -32,10 +39,12 @@ async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
         return session;
       },
       async shutdown() {
-        stopSessionSync?.();
-        unregisterWindowJazzStorageClient();
-        await manager.shutdown();
-        await db.shutdown();
+        await runCleanupSteps([
+          () => stopSessionSync?.(),
+          () => unregisterWindowJazzStorageClient(),
+          () => manager.shutdown(),
+          () => db.shutdown(),
+        ]);
       },
     },
     manager,
@@ -45,7 +54,7 @@ async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
 function configKey(config: DbConfig): string {
   // The React provider also uses the generic client registry. Namespace this
   // runtime lease so its wrapper cannot collide with the underlying client.
-  return `web:${JSON.stringify(config)}`;
+  return createClientConfigKey("web", config);
 }
 
 export function createJazzClient(config: DbConfig): Promise<JazzClient> {

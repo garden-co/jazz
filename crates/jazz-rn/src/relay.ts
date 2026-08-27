@@ -6,8 +6,8 @@ export interface NativeRelayAbiRange {
 }
 
 export const NATIVE_RELAY_ABI: NativeRelayAbiRange = {
-  minimum: 1,
-  maximum: 1,
+  minimum: 3,
+  maximum: 3,
 };
 
 function requireNativeRelay() {

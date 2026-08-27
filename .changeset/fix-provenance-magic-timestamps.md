@@ -2,6 +2,7 @@
 "jazz-tools": patch
 ---
 
-Fix `$createdAt` and `$updatedAt` provenance magic columns in `jazz-tools` so they round-trip as real JavaScript dates instead of far-future timestamps.
-
-Queries now convert JS millisecond `Date` and numeric filter values to the internal provenance timestamp format consistently, so selecting and filtering on those magic columns uses the same time scale.
+Unify all public timestamps on Unix milliseconds. `$createdAt` and `$updatedAt`
+now round-trip as ordinary JavaScript `Date`s without a provenance-only scale
+conversion; numeric query and write inputs use the same millisecond unit.
+Packed HLC values remain internal transaction/version ordering state.

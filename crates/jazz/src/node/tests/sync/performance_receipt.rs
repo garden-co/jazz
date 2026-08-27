@@ -24,8 +24,8 @@ fn policy_graph_row(kind: u8, idx: u32) -> RowUuid {
     RowUuid(policy_graph_uuid(kind, idx))
 }
 
-fn policy_graph_author(kind: u8, idx: u32) -> AuthorId {
-    AuthorId(policy_graph_uuid(kind, idx))
+fn policy_graph_author(kind: u8, idx: u32) -> AuthorSubject {
+    AuthorSubject::for_test_uuid(policy_graph_uuid(kind, idx))
 }
 
 fn nullable(value: Option<Value>) -> Value {
@@ -142,10 +142,10 @@ fn policy_graph_version(
         schema.version_id(),
         row_uuid,
         Vec::new(),
-        AuthorId::SYSTEM,
-        tx_id.time,
-        AuthorId::SYSTEM,
-        tx_id.time,
+        AuthorSubject::SYSTEM,
+        tx_id.time.physical_ms(),
+        AuthorSubject::SYSTEM,
+        tx_id.time.physical_ms(),
         cells,
         None,
     )
@@ -170,7 +170,7 @@ fn seed_policy_graph_known_global(
                 tx_id,
                 kind: TxKind::Mergeable,
                 n_total_writes: 1,
-                made_by: AuthorId::SYSTEM,
+                made_by: AuthorSubject::SYSTEM,
                 permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,
@@ -238,18 +238,18 @@ fn policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt() {
 
     let member = policy_graph_author(0x31, 1);
     let corp = policy_graph_row(0x32, 1);
-    let member_team = RowUuid(member.0);
+    let member_team = RowUuid(member.test_uuid());
     let access_team = policy_graph_row(0x33, 1);
     let dropdown_count = 30usize;
     let entry_count = 19_894usize;
     let mut seed_rows = Vec::new();
     let seed_start = std::time::Instant::now();
     let member_claims = BTreeMap::from([
-        ("sub".to_owned(), Value::Uuid(member.0)),
-        ("user_id".to_owned(), Value::Uuid(member.0)),
+        ("sub".to_owned(), Value::Uuid(member.test_uuid())),
+        ("user_id".to_owned(), Value::Uuid(member.test_uuid())),
         ("isAdmin".to_owned(), Value::Bool(false)),
     ]);
-    core.set_session_claims(member, member_claims.clone());
+    core.set_test_provider_claims(member, member_claims.clone());
 
     seed_rows.push((
         "t1",
@@ -336,11 +336,11 @@ fn policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt() {
     let serve_start = std::time::Instant::now();
     let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     let serve_elapsed = serve_start.elapsed();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         version_bundles,
         ..
-    } = &update
+    }) = &update
     else {
         panic!("expected view update");
     };

@@ -15,8 +15,8 @@ Invariant digest:
 - `INV-API-29`: A Db is a client: facade writes MUST keep permissionsubject == madeby, and a Db MUST reject any attempt to attribute a write to another author. Cross-author attributio...
 - `INV-BVIEW-18`: Read and write policy MUST use ordinary branch columns and the same effective branch view as the operation; missing reference/policy evidence fails closed, and Jazz MUST NOT impose a built-in branch-row existence or lifecycle gate.
 - `INV-RLS-1`: A non-system commit unit MUST be rejected with Fate::Rejected(RejectionReason::AuthorizationDenied) and MUST NOT ingest accepted version rows when any version in the u...
-- `INV-RLS-2`: AuthorId::SYSTEM MUST bypass both read and write policy checks.
-- `INV-RLS-3`: Policy::owneronly(table, column) MUST compare the named column to claim("sub"), where claim("sub") is bound from the authenticated AuthorId, not from caller-provided q...
+- `INV-RLS-2`: AuthorSubject::SYSTEM MUST bypass both read and write policy checks.
+- `INV-RLS-3`: Policy::owneronly(table, column) MUST compare the named column to claim("user"), where claim("user") is bound from the authenticated AuthorSubject, not from caller-provided q...
 - `INV-RLS-4`: A table policy MUST validate as a query shape rooted at the table that carries the policy.
 - `INV-RLS-5`: Downstream view emission for a non-system peer MUST only add result members, program facts, and version bundles whose relevant content/deletion versions pass that peer...
 - `INV-RLS-6`: Read-policy revocation MUST remove rows from future settled subscription result sets and MUST NOT redact previously delivered local copies from the receiving node.
@@ -24,11 +24,11 @@ Invariant digest:
 - `INV-RLS-8`: A deletion-register version MUST be readable to a non-system identity only when the row has a global content winner and that content winner satisfies the table read po...
 - `INV-RLS-9`: Join-based policies MUST require at least one matching global-current joined row that reaches the protected row and whose filters pass for the same authenticated ident...
 - `INV-RLS-10`: Query-driven sync MUST compose the root table read policy into the subscribed query and bind policy claims from server-authenticated identity so a client cannot widen...
-- `INV-RLS-11`: Relay peer links MUST use AuthorId::SYSTEM; edge-client peer links MUST use the terminated client AuthorId for policy-composed reads.
+- `INV-RLS-11`: Relay peer links MUST use AuthorSubject::SYSTEM; edge-client peer links MUST use the terminated client AuthorSubject for policy-composed reads.
 - `INV-RLS-12`: Exclusive transaction view shipping MUST be policy-atomic per recipient and maintained subscription view: a non-system recipient MUST NOT receive a result member or pr...
 - `INV-RLS-13`: Historical/as-of reads served for a link MUST evaluate read policy at the requested historical cut.
 - `INV-RLS-14`: Policy evaluation MUST deny when it cannot determine that a policy predicate is satisfied.
-- `INV-RLS-15`: A table with no declared policy clauses is public for every operation; once it declares any clause, every omitted operation is denied.
+- `INV-RLS-15`: A table with no declared policy clauses is public for reads and for writes by non-anonymous permission subjects; anonymous permission subjects are structurally read-only, and once a table declares any clause, every omitted operation is denied.
 - `INV-RLS-17`: A write whose Transaction.madeby differs from the authenticated permission subject MUST be accepted only via a trusted serving node (a core/edge Node accepting a Trust...
 - `INV-RLS-18`: An uploaded commit unit MUST be authorized under the authenticated link identity: a Session link's madeby MUST equal that identity or be rejected, while a TrustedBacke...
 - `INV-RLS-19`: A required include MUST be treated as resolvable for a non-system
@@ -36,8 +36,8 @@ Invariant digest:
   table's read policy for that reader; a parent whose required target is missing or
   unreadable MUST be dropped from the result set.
 - `INV-RLS-20`: Reads performed to execute a write MUST satisfy the target row's
-  read policy; partial updates and upserts therefore require read permission,
-  while full-row writes and row-id deletes do not.
+  read policy; every session-authored update and every upsert of an existing
+  target therefore require read permission, while row-id deletes do not.
 - `INV-RLS-21`: A policy subplan MUST read its dependency tables as raw policy
   evidence without recursively applying those tables' own read policies, while
   still enforcing the complete outer policy under authenticated claims.
@@ -45,6 +45,14 @@ Invariant digest:
   MUST resolve its stable physical table lineage back to the logical
   table/schema at the relevant frontier; shared deletion storage MUST NOT widen
   authority across tables.
+- `INV-RLS-23`: Jazz derives the reserved logical `session.user` and user
+  authorship from the exact trusted JWT subject pair `(iss, sub)`, represented
+  portably as canonical JSON `[iss,sub]`. Raw provider claims remain exclusively
+  under `session.claims[<name>]`, including `session.claims["iss"]`,
+  `session.claims["sub"]`, and a provider claim named `user`.
+  Jazz MUST NOT normalize either component, hash the pair into a UUID, or admit
+  the reserved system issuer. Local intern handles MUST never become wire,
+  storage, query, equality, or ordering values.
 
 ## Details
 
@@ -57,24 +65,53 @@ authenticated claims for the peer being evaluated. The stored core shape is
 `insert_check`, `update_using`, `update_check`, and `delete_using` clauses.
 
 `TableSchema::new` defaults every clause to `None`. Such a **policy-free table**
-is public for read, insert, update, and delete so an app can use ordinary data
-before it introduces authorization. Declaring any one clause closes that table's
-policy set: the declared operation is evaluated normally and every other
-operation with no clause is denied. For update, either `update_using` or
-`update_check` declares the update operation; when both are supplied, both must
-pass. An absent subclause within an otherwise declared update contributes no
-additional check. This rule is enforced by the fate authority and upstream read
-emission under the policy-owning schema, including after schema migration or
-lens projection (`INV-RLS-15`).
+is public for reads and for writes by non-anonymous permission subjects so an
+app can use ordinary data before it introduces authorization. An anonymous
+permission subject remains structurally read-only regardless of table policy.
+Declaring any one clause closes that table's policy set: the declared operation
+is evaluated normally and every other operation with no clause is denied. For
+update, either `update_using` or `update_check` declares the update operation;
+when both are supplied, both must pass. An absent subclause within an otherwise
+declared update contributes no additional check. This rule is enforced by the
+fate authority and upstream read emission under the policy-owning schema,
+including after schema migration or lens projection (`INV-RLS-15`).
 
 An owner-only policy is the canonical single-subject policy: it selects rows
 whose ownership column equals the authenticated subject
 (`Policy::owner_only(table, column)` is exactly
-`Query::from(table).filter(eq(col(column), claim("sub")))`). The `claim("sub")`
-operand is the authenticated `AuthorId`, not a caller-supplied parameter
+`Query::from(table).filter(eq(col(column), claim("user")))`). The
+`claim("user")` operand is the canonical authenticated `AuthorSubject`, not
+the provider's raw `sub` alone and not a caller-supplied parameter
 (`INV-RLS-3`). A policy must validate as a shape rooted at the table that carries
-it (`INV-RLS-4`), and `AuthorId::SYSTEM` bypasses both read and write checks
+it (`INV-RLS-4`), and `AuthorSubject::SYSTEM` bypasses both read and write checks
 (`INV-RLS-2`).
+
+#### Authenticated subjects and provenance
+
+Jazz does not define an application user. The authenticated identity and the
+author recorded in `$createdBy` / `$updatedBy` are instead one opaque,
+issuer-scoped subject. External JWT authentication retains the exact validated
+`iss` and `sub`; self-signed Jazz identities use a reserved Jazz issuer and
+their key-derived subject. The portable `AuthorSubject` is the canonical JSON
+encoding of the two-string array `[iss,sub]`, with no whitespace or
+normalization. The same `sub` from two issuers therefore denotes two authors.
+
+That canonical string is the logical `session.user` value in transactions,
+provenance, policy claims, storage, and sync. It does not replace the admitted
+provider claims. A provider's `user` claim is `session.claims["user"]` and can
+never shadow or spoof `session.user`. Implementations may intern it in memory, but the
+intern handle is process-local and has no observable meaning. Provenance
+supports equality, inequality, grouping, and equality-index lookup. It is not
+orderable: applications sort authors by joining the subject through their own
+identity/user rows and ordering an application field such as display name.
+
+The Jazz-owned issuers `urn:jazz:system`, `urn:jazz:local-first`,
+`urn:jazz:static-bearer`, and `urn:jazz:anonymous` are reserved. External JWTs
+must carry a non-empty issuer and cannot claim any reserved issuer. Internal
+admission paths select the latter three only for their named authentication
+modes. The distinguished system subject bypasses policy for
+internal authority work; it is not a JWT identity and cannot be forged by
+supplying claims (`INV-RLS-23`).
 
 Policy evaluation is **fail-closed**: it denies whenever it cannot determine that
 a policy predicate is satisfied (`INV-RLS-14`). With the interpreter removed,
@@ -86,8 +123,8 @@ which refuses an unresolved claim rather than binding it as an allowance. The
 compiler currently lowers equality and inequality, membership/containment,
 boolean composition, columns, literals, and authenticated,
 admission-controlled claims: `Eq`/`Ne`/`In`/`Contains`/`All`/`Any`/`Not` over
-column / literal / `claim(...)`. `claim("sub")` resolves to the authenticated
-`AuthorId`. Additional claim names are session claims supplied by the trusted
+column / literal / `claim(...)`. `claim("user")` resolves to the authenticated
+`AuthorSubject`; raw claim names are supplied by the trusted
 admission/session layer and must not be client-supplied query bindings. Predicate
 forms the compiler cannot authorize, such as range and null checks, deny until
 explicitly supported.
@@ -97,9 +134,9 @@ same claim predicate subset. `session.where({ "claims.role": "admin" })` lowers
 to claim/literal equality, and `SessionInList { path: ["claims", "role"],
 values: [...] }` lowers to a scalar claim membership check equivalent to an
 `OR` of claim/literal equality predicates. The core server shell accepts
-`session.user_id` / `session.userId` and one-level `session.claims.<name>` paths
-for these predicates; deeper claim paths and non-scalar session predicates remain
-unsupported at this boundary.
+`session.user`, `session.authMode`, and one-level `session.claims["name"]` paths
+for these predicates. Flat `session.someClaim` paths and deeper claim paths are
+rejected; non-scalar session predicates remain unsupported at this boundary.
 
 ### 7.2 Write authorization
 
@@ -111,12 +148,20 @@ rejected as
 `global_time`, makes no durability claim, is audit-only, contributes no accepted
 rows, and causes descendants to cascade as described in ch. 3 (`INV-RLS-1`).
 
+Before table-policy evaluation, the fate authority rejects a commit whose
+effective permission subject uses the reserved `urn:jazz:anonymous` issuer.
+This structural gate applies to inserts, updates, and deletes received directly
+from an anonymous session or relayed by a serving node. It does not change
+trusted-backend attribution: `made_by` may record anonymous provenance when the
+effective permission subject is the non-anonymous trusted backend.
+
 For an insert, `insert_check` is evaluated against the inserted row. For an
 update, `update_using` is evaluated against the previous content row and
 `update_check` is evaluated against the new content row; if both clauses are
 present both must pass. For a delete, `delete_using` is evaluated against the row
-being deleted. On a policy-free table, all of those operations are public. On a
-table with any declared clause, an omitted insert or delete clause denies; an
+being deleted. Subject to the structural anonymous-write gate, all of those
+operations are public on a policy-free table. On a table with any declared
+clause, an omitted insert or delete clause denies; an
 update with neither `update_using` nor `update_check` denies; and a missing read
 policy emits no rows. Missing clauses never fall back to another operation's
 policy.
@@ -129,12 +174,13 @@ permission implies read permission. The policy unit is the target **row**: jazz
 read policies are row-level rather than column-level, so it does not make a
 PostgreSQL-style per-column `SELECT` decision.
 
-An update is **partial** when its input omits any schema-declared column. A
-partial update reads the current target row to merge its omitted cells and MUST
-be rejected with an authorization error unless the writer may read that row. An
-update that specifies every schema-declared column is a full-row write: it reads
-no user data and therefore requires only the applicable write policy. It remains
-available to a write-only principal.
+Every session-authored update MUST be rejected with an authorization error unless
+the session may read the target row through its effective view, whether the input
+is a partial patch or a full-row replacement and whether it addresses the root
+or a branch view. A full replacement must not bypass this rule: identifying and
+versioning its target still depends on that target row. Trusted/internal paths
+may inspect the authoritative row as policy evidence, but that implementation
+privilege does not make a read-hidden row updateable by a session.
 
 An upsert asks whether its target row exists. If there is a current target row,
 that is a read and an upsert MUST be rejected unless the writer may read it. If
@@ -144,7 +190,7 @@ absent. Callers that only need to create a row use `insert`. A delete addressed
 by row id reads no user data and remains available to a write-only principal,
 subject to its delete write policy.
 
-`AuthorId::SYSTEM` is reserved here for internal bookkeeping, not for deciding
+`AuthorSubject::SYSTEM` is reserved here for internal bookkeeping, not for deciding
 whether a user read is convenient: causal parent links, index maintenance, and
 integrity checks such as `ensure_row_not_deleted` may inspect storage under
 system authority. Merging omitted user cells and deciding whether an upsert
@@ -174,12 +220,12 @@ attributing a mutation to a user. That **attribution-only** case stores user
 authorship while evaluating policy against the backend identity. Four identities
 are worth keeping distinct:
 
-| identity                            | what it is                                                   | used for                                                            |
-| ----------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------- |
-| `made_by` (author)                  | who a mutation is _attributed_ to (`Transaction.made_by`)    | provenance (`$createdBy`); _not_ necessarily the permission subject |
-| authenticated identity (`AuthorId`) | who a connection authenticated as                            | the subject read/write policies are evaluated against               |
-| attribution-only                    | a trusted backend authed as itself but attributing to a user | author ≠ permission identity (ch. 9, ch. 13)                        |
-| `AuthorId::SYSTEM`                  | the system identity                                          | bypasses all policies; relay links carry it (§7.3)                  |
+| identity                                 | what it is                                                   | used for                                                            |
+| ---------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------- |
+| `made_by` (author)                       | who a mutation is _attributed_ to (`Transaction.made_by`)    | provenance (`$createdBy`); _not_ necessarily the permission subject |
+| authenticated identity (`AuthorSubject`) | who a connection authenticated as                            | the subject read/write policies are evaluated against               |
+| attribution-only                         | a trusted backend authed as itself but attributing to a user | author ≠ permission identity (ch. 9, ch. 13)                        |
+| `AuthorSubject::SYSTEM`                  | the system identity                                          | bypasses all policies; relay links carry it (§7.3)                  |
 
 At the facade boundary, attributed writes are core-only unless `made_by ==
 authenticated identity`. This prevents a client from forging another user's
@@ -191,8 +237,8 @@ itself and store user attribution (`INV-RLS-17`, `INV-API-29`).
 Read policy is enforced at the point where data leaves an upstream node. For
 each peer identity, the upstream node narrows what it emits before producing any
 result-row add/remove, version bundle, rehydrate output, or query update
-(`INV-RLS-5`). A relay link carries `AuthorId::SYSTEM` and therefore does not
-narrow; an edge-client link narrows under its terminated `AuthorId`
+(`INV-RLS-5`). A relay link carries `AuthorSubject::SYSTEM` and therefore does not
+narrow; an edge-client link narrows under its terminated `AuthorSubject`
 (`INV-RLS-11`, ch. 9).
 
 Include modes participate in this narrowing rather than sitting outside it. A
@@ -202,7 +248,7 @@ current row and passes the target table's read policy for that reader. A parent
 row whose required target is missing or unreadable is dropped from the result set,
 so required-include membership cannot be used as an existence oracle for a row the
 reader may not read. Optional and `Holes` includes keep the parent and withhold the
-unreadable target instead (`INV-RLS-5`), and `AuthorId::SYSTEM` bypasses the policy
+unreadable target instead (`INV-RLS-5`), and `AuthorSubject::SYSTEM` bypasses the policy
 half and resolves on existence alone (`INV-RLS-2`, `INV-RLS-19`).
 
 The security boundary is _upstream emission_, not local storage. Read-policy
@@ -331,23 +377,12 @@ updates and history truncation. Public policy helpers such as `$createdBy`,
 after they can be lowered and validated through the same fail-closed policy
 machinery as ordinary columns.
 
-Auth-mode gating belongs in permissions rather than process-global flags. A
-policy should be able to distinguish anonymous/local/authenticated/backend/system
-admission modes through trusted session claims or first-class admission facts;
-client-supplied values must not widen those facts.
-
-### Established permission-introspection boundary
-
-Permission introspection is an authority dry-run API, not a family of magic
-columns. `$can*` columns cannot express can-insert or richer probes. The facade
-methods (`can_insert`, `can_read`, `can_update`, and `can_delete`; ch. 13)
-return `Allowed`, `Denied`, or `Unknown`; only the serving authority may return
-a definitive answer. A local, offline, incomplete, not-ready, or timed-out
-client receives `Unknown`, never a local policy decision. Requests run under
-the authenticated link identity and reveal only an opaque correlation id plus
-the advice value—not supporting rows, policy reasons, or hidden dependency
-facts. Advice is non-mutating and neither reserves nor authorizes a following
-optimistic write (`INV-API-28`).
+Application-specific auth-mode gating belongs in permissions rather than
+process-global flags. The structural anonymous-write denial is the exception:
+anonymous permission subjects are always read-only, while policies may further
+distinguish anonymous/local/authenticated/backend/system admission modes through
+trusted session claims or first-class admission facts. Client-supplied values
+must not widen those facts.
 
 ## Open Questions
 
@@ -359,3 +394,91 @@ optimistic write (`INV-API-28`).
 - 🔶 [#1762](https://github.com/garden-co/jazz/issues/1762) — Write authorization for read-hidden and inherited rows.
 - 🔶 [#1763](https://github.com/garden-co/jazz/issues/1763) — Bounded, cycle-safe policy graphs.
 - 🔶 [#1779](https://github.com/garden-co/jazz/issues/1779) — Policy replacement across schema evolution.
+
+### Detailed issue context
+
+- **Session/auth model for bindings.** `AuthorSubject` is the runtime
+  permission subject and reserved `claim("user")` value, but the product boundary needs
+  explicit account/user/session/default identity terminology. Define how
+  anonymous/local sessions, authenticated users, trusted backends, system links,
+  and attribution-only writes map to `AuthorSubject`, claims, and link roles.
+- **Admission API.** Server and edge shells need an admission hook that turns
+  connection credentials into a link identity, claims, role, expiry, and optional
+  backend trust. This hook must be the only source for policy claim bindings;
+  client-supplied query bindings must never widen claims (ch. 8, ch. 13).
+- **Admission-controlled claim vocabulary.** `claim("user")` is reserved, and
+  arbitrary runtime session claims are supported, but the product boundary still
+  needs to define which claims are minted by first-party auth integrations,
+  custom admission hooks, trusted backend assertions, and local-only sessions.
+- **Direct-evaluation predicate expansion.** Direct policy evaluation now
+  supports `In` and `Contains` in addition to equality/inequality and boolean
+  composition. Range/null predicates remain fail-closed. Decide whether to add
+  direct support for the remaining query predicates or reject them earlier in
+  policy-specific validation.
+- **Policy replacement across schema evolution.** The current implementation
+  selects the active policy-owning schema independently for each operation: a
+  newer schema replaces a read, insert, update, or delete policy only when it
+  declares the applicable clause; otherwise that operation can continue using
+  the preceding active policy definition. Decide whether this is the intended
+  migration model, or whether every newly activated schema must instead provide
+  a complete replacement policy bundle for every surviving table. A
+  policy-complete model must define whether an omitted clause means public,
+  inherited, or invalid, and catalogue validation must reject ambiguous partial
+  replacements. It must also define what replacement means when a table is
+  renamed, split, copied, or dropped: whether the old table's policy disappears,
+  remains available only for historical/old-schema operations, or must be
+  explicitly mapped or tombstoned by the lineage publication. The decision must
+  preserve deterministic authorization for old authored versions, live clients
+  on older schemas, historical reads, and operation-specific permission advice.
+- **History visibility rule.** Decide whether current-row readability should
+  imply visibility for all historical versions of that row, or whether history
+  sync/read must evaluate read policy per historical cut.
+- **Permission subscriptions and TTL.** Edge mergeable authorization uses
+  upstream permission-scope subscriptions (ch. 9). The current contract is
+  sync-level deduplication and fanout of those scopes; TTL/expiry behavior is a
+  future policy for cache lifetime, not a source of permission truth here.
+- **Write-denial surfacing to clients.** A permission-denied write currently
+  never reaches edge durability and `AsyncWriteHandle.wait({ tier })` hangs
+  instead of rejecting. Clients need a deterministic rejection signal (analogous
+  to `SubscribeRejected` on the read path) so denied writes fail fast. Exposed
+  by the auth example denial tests (both auth examples excluded from CI until
+  this lands; see `dev/CI_NOTES.md` 2026-07-19).
+- ✅ **Session references are explicit.** Policy conversion supports the canonical
+  `session.user`, the reserved `session.authMode`, and raw provider values only
+  under `session.claims.*`. Former flat identity aliases are not retained.
+- **String claim validation.** String claim type mismatches in seeded lookups
+  should become loud validation errors instead of depending on runtime
+  empty-result behavior.
+- **Uncorrelated policy `EXISTS`.** Server-shell policy conversion currently
+  rejects an uncorrelated membership predicate when the
+  predicate is used from another table and has no equality against the outer row
+  (`__jazz_outer_row`). Decide whether intentionally uncorrelated membership
+  checks are valid policy atoms, how to bound them, and how to lower them
+  without creating accidental whole-table authority scans. Exposed by
+  `world-tour`'s band-member policy.
+- ✅ **Permission introspection is an authority dry-run API, not magic
+  columns.** `$can*` columns cannot express _can-insert_ or richer probes. The
+  facade methods (`can_insert`, `can_read`, `can_update`, `can_delete`, ch. 13)
+  produce `Allowed`, `Denied`, or `Unknown`; only the serving authority may
+  issue a definitive result. A local, offline, incomplete, not-ready, or timed
+  out client receives `Unknown`, never a local policy decision. Requests are
+  evaluated under the authenticated link identity and return only an opaque
+  correlation id plus the advice value, never supporting rows, policy reasons,
+  or hidden dependency facts. Advice is non-mutating and does not reserve or
+  authorize the ordinary optimistic write that may follow (`INV-API-28`).
+- **Safe local permission fail-fast.** A future client-local `Denied` may be
+  added only when it is mechanically proven that every fact required for that
+  rejection is locally complete (for example, proposed-row or structural facts).
+  Missing policy support is never denial proof. Local `Allowed` remains
+  forbidden without the serving authority.
+- **Policy denial reasons.** Policy clauses should be able to return
+  structured denial reasons suitable for client errors without exposing data
+  from rows the caller cannot read.
+- **Partial schema visibility.** Decide whether schema/catalogue visibility is
+  all-or-nothing per app, scoped by policy, or split into public shape metadata
+  plus protected implementation details.
+- **`NOT(INHERITS)` semantics.** Negative inheritance-style predicates need a
+  precise fail-closed meaning before the DSL exposes them.
+- **Per-column encryption and authorization.** If encrypted columns are added,
+  policy evaluation must define what can be evaluated server-side, what requires
+  client-side keys, and how key loss/revocation interacts with read policy.

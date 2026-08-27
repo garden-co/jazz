@@ -1371,7 +1371,7 @@ export default s.definePermissions(app, ({ policy, session }) => {
   policy.cursors.allowRead.always();
   policy.cursors.allowInsert.always();
   policy.cursors.allowUpdate.where({
-    $createdBy: session.user_id,
+    $createdBy: session.user,
   });
 });
 ```

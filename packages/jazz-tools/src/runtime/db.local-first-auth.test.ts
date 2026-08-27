@@ -5,6 +5,7 @@ import type { Session } from "./context.js";
 const cookieSession: Session = {
   user_id: "alice",
   claims: { role: "reader" },
+  issuer: "https://issuer.example",
   authMode: "external",
 };
 
@@ -51,6 +52,7 @@ describe("DbConfig auth validation", () => {
     expect(db).toBeDefined();
     expect(db.getConfig()).toMatchObject({ jwtToken: expect.any(String) });
     expect(db.getConfig().secret).toBeUndefined();
+    expect(db.getConfig()).not.toHaveProperty("trustedReservedSession");
     await db.shutdown();
   });
 });

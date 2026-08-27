@@ -9,7 +9,7 @@ use support::BenchFutureExt as _;
 
 use hdrhistogram::Histogram;
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::peer::PeerState;
 use jazz::protocol::{SyncMessage, VersionRecord};
@@ -82,11 +82,15 @@ struct ValidationBench {
 impl ValidationBench {
     fn new(config: Config) -> Self {
         let schema = schema();
-        let (core_dir, core) = open_node(node(250), schema.clone());
+        let (core_dir, mut core) = open_node(node(250), schema.clone());
         let mut client_dirs = Vec::with_capacity(config.clients);
         let mut clients = Vec::with_capacity(config.clients);
         for idx in 0..config.clients {
-            let (dir, client) = open_node(node(idx as u8 + 1), schema.clone());
+            let (dir, mut client) = open_node(node(idx as u8 + 1), schema.clone());
+            let identity = author(idx);
+            let claims = BTreeMap::new();
+            client.admit_test_session_claims(identity, claims.clone());
+            core.admit_test_session_claims(identity, claims);
             client_dirs.push(dir);
             clients.push(client);
         }
@@ -152,7 +156,7 @@ impl ValidationBench {
             let client_idx = self.rng.usize(self.config.clients);
             let tx_id = OpenTransactionId::new();
             self.clients[client_idx]
-                .open_exclusive(tx_id)
+                .open_exclusive_for_test(tx_id, author(client_idx))
                 .expect("open exclusive");
 
             let read_count = 1 + self.rng.usize(3);
@@ -542,7 +546,7 @@ fn schema() -> JazzSchema {
         SchemaBuilder::new().table(
             TableSchemaBuilder::new(TABLE)
                 .column("title", ColumnType::Text)
-                .column("owner", ColumnType::Uuid)
+                .column("owner", ColumnType::Text)
                 .policies(schema_fixture::write_operations(owner)),
         ),
     )
@@ -605,17 +609,20 @@ fn commit_parts(unit: &SyncMessage) -> (Transaction, Vec<VersionRecord>) {
     (tx.clone(), versions.clone())
 }
 
-fn cells(title: &str, owner: AuthorId) -> BTreeMap<String, Value> {
+fn cells(title: &str, owner: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.to_owned())),
-        ("owner".to_owned(), Value::Uuid(owner.0)),
+        (
+            "owner".to_owned(),
+            Value::String(owner.canonical().to_owned()),
+        ),
     ])
 }
 
-fn author(idx: usize) -> AuthorId {
+fn author(idx: usize) -> AuthorSubject {
     let mut bytes = [0_u8; 16];
     bytes[0..8].copy_from_slice(&(idx as u64 + 1).to_be_bytes());
-    AuthorId::from_bytes(bytes)
+    AuthorSubject::for_test_bytes(bytes)
 }
 
 fn node(byte: u8) -> NodeUuid {

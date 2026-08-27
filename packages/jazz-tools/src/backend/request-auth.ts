@@ -8,9 +8,12 @@ import {
 } from "jose";
 import type { RequestLike } from "../runtime/client.js";
 import {
+  ANONYMOUS_JWT_ISSUER,
   LOCAL_FIRST_JWT_ISSUER,
+  SYSTEM_SESSION_ISSUER,
   parseJwtPayload,
-  sessionFromJwtPayload,
+  internalSessionFromVerifiedReservedJwtPayload,
+  internalSessionFromJwtPayload,
   type JwtPayload,
 } from "../runtime/client-session.js";
 import type { Session } from "../runtime/context.js";
@@ -20,6 +23,8 @@ export interface BackendRequestAuthConfig {
   appId: string;
   jwksUrl?: string;
   jwtPublicKey?: BackendJwtPublicKey;
+  jwtIssuer?: string;
+  jwtAudience?: string | readonly string[];
   allowLocalFirstAuth?: boolean;
 }
 
@@ -287,11 +292,22 @@ function requireJwtPayload(token: string): JwtPayload {
 }
 
 function requireJwtSession(payload: JwtPayload): Session {
-  const session = sessionFromJwtPayload(payload);
+  const session = internalSessionFromJwtPayload(payload);
   if (!session) {
     throw new Error("Invalid JWT payload");
   }
   return session;
+}
+
+function rejectReservedExternalJwtIssuer(session: Session): void {
+  if (
+    session.issuer === SYSTEM_SESSION_ISSUER ||
+    session.issuer === LOCAL_FIRST_JWT_ISSUER ||
+    session.issuer === ANONYMOUS_JWT_ISSUER ||
+    session.issuer === "urn:jazz:static-bearer"
+  ) {
+    throw new Error("Invalid JWT payload");
+  }
 }
 
 function ensureJwtNotExpired(payload: JwtPayload): void {
@@ -308,6 +324,26 @@ function ensureJwtNotExpired(payload: JwtPayload): void {
   }
 }
 
+function ensureJwtDomain(payload: JwtPayload, config: BackendRequestAuthConfig): void {
+  if (config.jwtIssuer !== undefined && payload.iss !== config.jwtIssuer) {
+    throw new Error("JWT issuer does not match the configured issuer");
+  }
+
+  if (config.jwtAudience === undefined) {
+    return;
+  }
+  const expected = Array.isArray(config.jwtAudience) ? config.jwtAudience : [config.jwtAudience];
+  const actual =
+    typeof payload.aud === "string"
+      ? [payload.aud]
+      : Array.isArray(payload.aud) && payload.aud.every((audience) => typeof audience === "string")
+        ? payload.aud
+        : [];
+  if (!expected.some((audience) => actual.includes(audience))) {
+    throw new Error("JWT audience does not match the configured audience");
+  }
+}
+
 async function verifyLocalFirstIdentityProof(token: string, appId: string): Promise<string> {
   const { verifyLocalFirstIdentityProof: verifyToken } = await import("jazz-napi");
   const result = verifyToken(token, appId);
@@ -318,7 +354,11 @@ async function verifyLocalFirstIdentityProof(token: string, appId: string): Prom
   return result.id;
 }
 
-async function verifyExternalJwt(token: string, config: BackendRequestAuthConfig): Promise<void> {
+async function verifyExternalJwt(
+  token: string,
+  payload: JwtPayload,
+  config: BackendRequestAuthConfig,
+): Promise<void> {
   if (config.jwtPublicKey !== undefined) {
     try {
       await verifyJwtSignatureWithStaticKey(token, config.jwtPublicKey);
@@ -327,7 +367,8 @@ async function verifyExternalJwt(token: string, config: BackendRequestAuthConfig
       throw new Error(`Invalid JWT: ${message}`);
     }
 
-    ensureJwtNotExpired(requireJwtPayload(token));
+    ensureJwtNotExpired(payload);
+    ensureJwtDomain(payload, config);
     return;
   }
 
@@ -345,7 +386,8 @@ async function verifyExternalJwt(token: string, config: BackendRequestAuthConfig
       }
     }
 
-    ensureJwtNotExpired(requireJwtPayload(token));
+    ensureJwtNotExpired(payload);
+    ensureJwtDomain(payload, config);
     return;
   }
 
@@ -360,7 +402,6 @@ export async function resolveRequestSession(
 ): Promise<Session> {
   const token = readBearerToken(request);
   const payload = requireJwtPayload(token);
-  const session = requireJwtSession(payload);
   const allowLocalFirstAuth = config.allowLocalFirstAuth ?? true;
 
   if (payload.iss === LOCAL_FIRST_JWT_ISSUER) {
@@ -371,12 +412,18 @@ export async function resolveRequestSession(
     }
 
     const verifiedUserId = await verifyLocalFirstIdentityProof(token, config.appId);
+    const session = internalSessionFromVerifiedReservedJwtPayload(payload, "local-first");
+    if (!session) {
+      throw new Error("Invalid JWT payload");
+    }
     if (session.user_id !== verifiedUserId) {
       throw new Error("Invalid local-first identity proof");
     }
     return session;
   }
 
-  await verifyExternalJwt(token, config);
+  const session = requireJwtSession(payload);
+  rejectReservedExternalJwtIssuer(session);
+  await verifyExternalJwt(token, payload, config);
   return session;
 }

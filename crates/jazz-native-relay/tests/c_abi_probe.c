@@ -5,11 +5,11 @@
 
 int main(void) {
   const uint16_t abi = jazz_native_relay_abi_version();
-  if (abi != 1) {
+  if (abi != 3) {
     fprintf(stderr, "unexpected Jazz native relay ABI: %u\n", abi);
     return 1;
   }
-  /* RelayCommandRequest::Probe's v1 postcard discriminant. The response is
+  /* RelayCommandRequest::Probe's postcard discriminant. The response is
    * intentionally opaque to JNI/C; only the shared Rust/JS codec decodes it. */
   const uint8_t probe[] = {0};
   jazz_native_relay_bytes response = {0};
@@ -37,6 +37,24 @@ int main(void) {
           JAZZ_NATIVE_RELAY_INVALID_ARGUMENT ||
       response.data != NULL || response.len != 0) {
     fprintf(stderr, "invalid host did not reset output\n");
+    return 1;
+  }
+  /* Trusted scope admission is a dedicated ABI, not an execute command. An
+   * invalid JSON fixture proves the symbol is linked without placing config or
+   * credentials on the generic command channel. */
+  const uint8_t invalid_admission[] = {'{'};
+  if (jazz_native_relay_host_admit_scope_json(host, invalid_admission,
+                                               sizeof(invalid_admission), &response) !=
+          JAZZ_NATIVE_RELAY_INVALID_COMMAND ||
+      response.data != NULL || response.len != 0) {
+    fprintf(stderr, "trusted admission JSON did not fail closed\n");
+    return 1;
+  }
+  uint8_t capability[32] = {0};
+  if (jazz_native_relay_host_revoke_scope_capability(host, capability,
+                                                      sizeof(capability)) !=
+      JAZZ_NATIVE_RELAY_OK) {
+    fprintf(stderr, "trusted capability revocation ABI failed\n");
     return 1;
   }
   jazz_native_relay_host_free(host);

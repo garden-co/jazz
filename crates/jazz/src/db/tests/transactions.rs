@@ -3,6 +3,203 @@
 use super::*;
 
 #[test]
+fn reopened_seeded_row_ids_do_not_claim_freshness() {
+    let schema = doctest_support::schema();
+    let column_families = schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let dir = tempfile::tempdir().unwrap();
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([0x92; 16]),
+        author: AuthorSubject::for_test_bytes([0xa2; 16]),
+    };
+
+    let open = |storage| {
+        block_on(Db::open(DbConfig {
+            schema: schema.clone(),
+            storage,
+            identity,
+            id_source: Some(Box::new(SeededRowIdSource::new(0x9292))),
+        }))
+        .unwrap()
+    };
+
+    let db = open(RocksDbStorage::open(dir.path(), &refs).unwrap());
+    let first_tx = OpenTransactionId::new();
+    db.begin_mergeable(first_tx).unwrap();
+    let first_row = db
+        .mergeable_tx_ref(first_tx)
+        .insert(
+            "todos",
+            doctest_support::todo_cells("first", false),
+            InsertOptions {
+                updated_at_ms: Some(100),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    block_on(db.commit_mergeable_handle(first_tx)).unwrap();
+    let first_provenance = prepared_one(&db, &db.table("todos"))
+        .unwrap()
+        .provenance()
+        .unwrap()
+        .unwrap();
+    block_on(db.close()).unwrap();
+    drop(db);
+
+    let reopened = open(RocksDbStorage::open(dir.path(), &refs).unwrap());
+    let repeated_tx = OpenTransactionId::new();
+    reopened.begin_mergeable(repeated_tx).unwrap();
+    let repeated_row = reopened
+        .mergeable_tx_ref(repeated_tx)
+        .insert(
+            "todos",
+            doctest_support::todo_cells("must conflict", true),
+            InsertOptions {
+                updated_at_ms: Some(200),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(repeated_row, first_row);
+    block_on(reopened.commit_mergeable_handle(repeated_tx)).unwrap();
+    let rows = prepared_all(&reopened, &reopened.table("todos"), ReadOpts::default());
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String("must conflict".to_owned()))
+    );
+    let repeated_provenance = rows[0].provenance().unwrap().unwrap();
+    assert_eq!(repeated_provenance.created_at, first_provenance.created_at);
+    assert_eq!(repeated_provenance.created_by, first_provenance.created_by);
+    assert!(repeated_provenance.updated_at > repeated_provenance.created_at);
+}
+
+#[test]
+fn exclusive_transactions_lower_oversized_scalars_before_publication() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let title = "x".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 91);
+    let row = row(0x4e);
+    let tx = db.exclusive_tx().unwrap();
+    tx.insert(
+        "todos",
+        doctest_support::todo_cells(&title, false),
+        InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tx.commit().unwrap();
+
+    let physical = block_on(async {
+        db.node
+            .node
+            .lock()
+            .await
+            .current_physical_cell_in_schema(db.schema_version_id, "todos", row, "title")
+            .await
+            .unwrap()
+            .unwrap()
+    });
+    assert!(matches!(physical, Value::Large(_)));
+    let result = db
+        .read(&db.prepare_query(&db.table("todos")).unwrap())
+        .unwrap();
+    assert_eq!(
+        result[0].cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String(title.clone()))
+    );
+
+    let update = db.exclusive_tx().unwrap();
+    assert_eq!(
+        update.read("todos", row).unwrap().unwrap().get("title"),
+        Some(&Value::String(title.clone())),
+        "public transaction reads must not expose the physical descriptor"
+    );
+    assert_eq!(
+        update.all("todos").unwrap()[0].cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String(title.clone()))
+    );
+    update
+        .update(
+            "todos",
+            row,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            Default::default(),
+        )
+        .unwrap();
+    update.commit().unwrap();
+    let after_update = block_on(async {
+        db.node
+            .node
+            .lock()
+            .await
+            .current_physical_cell_in_schema(db.schema_version_id, "todos", row, "title")
+            .await
+            .unwrap()
+            .unwrap()
+    });
+    assert_eq!(physical, after_update, "unchanged locators must be stable");
+
+    let upsert = db.exclusive_tx().unwrap();
+    upsert
+        .upsert(
+            "todos",
+            row,
+            BTreeMap::from([("done".to_owned(), Value::Bool(false))]),
+            Default::default(),
+        )
+        .unwrap();
+    upsert.commit().unwrap();
+    let after_upsert = block_on(async {
+        db.node
+            .node
+            .lock()
+            .await
+            .current_physical_cell_in_schema(db.schema_version_id, "todos", row, "title")
+            .await
+            .unwrap()
+            .unwrap()
+    });
+    assert_eq!(
+        physical, after_upsert,
+        "upserting unrelated cells must preserve unchanged locators"
+    );
+
+    let mergeable = db.mergeable_tx().unwrap();
+    assert_eq!(
+        mergeable.read("todos", row).unwrap().unwrap().get("title"),
+        Some(&Value::String(title.clone()))
+    );
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    assert_eq!(
+        mergeable.all_prepared(&prepared).unwrap()[0]
+            .cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String(title.clone()))
+    );
+
+    let forged = db.exclusive_tx().unwrap();
+    forged
+        .insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), physical),
+                ("done".to_owned(), Value::Bool(false)),
+            ]),
+            InsertOptions {
+                row_id: Some(RowUuid::from_bytes([0x4f; 16])),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let error = block_on(forged.commit()).unwrap_err();
+    assert!(error.message.contains("unverified large-value descriptor"));
+}
+
+#[test]
 fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
     let empty = build_public_db_test_schema(PublicSchemaBuilder::new());
     let refs = empty.column_families();
@@ -12,7 +209,7 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
         storage: doctest_support::MemoryStorage::new(&refs),
         identity: DbIdentity {
             node: NodeUuid::from_bytes([0x91; 16]),
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(91))),
     }))
@@ -29,11 +226,14 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
     owner.begin_mergeable(open).unwrap();
     let inserted = row(0x91);
     view.mergeable_tx_ref(open)
-        .insert_with_id_at_ms(
+        .insert(
             "todos",
-            inserted,
             doctest_support::todo_cells("attached", false),
-            1_704_067_200_123,
+            crate::db::InsertOptions {
+                row_id: Some(inserted),
+                updated_at_ms: Some(1_704_067_200_123),
+                ..Default::default()
+            },
         )
         .unwrap();
     owner.commit_mergeable_handle(open).unwrap();
@@ -83,11 +283,14 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
     let overlay_inserted = row(0x93);
     let overlay_tx = view.mergeable_tx_ref(overlay_open);
     overlay_tx
-        .insert_with_id_at_ms(
+        .insert(
             "todos",
-            overlay_inserted,
             doctest_support::todo_cells("overlay", true),
-            1_704_067_200_456,
+            crate::db::InsertOptions {
+                row_id: Some(overlay_inserted),
+                updated_at_ms: Some(1_704_067_200_456),
+                ..Default::default()
+            },
         )
         .unwrap();
     let prepared = view
@@ -122,8 +325,8 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
     );
     assert_eq!(overlay_row.cell_at(1), Some(Value::Bool(true)));
     let overlay_provenance = overlay_row.provenance().unwrap().unwrap();
-    assert_eq!(overlay_provenance.created_at, TxTime(1_704_067_200_456));
-    assert_eq!(overlay_provenance.updated_at, TxTime(1_704_067_200_456));
+    assert_eq!(overlay_provenance.created_at, 1_704_067_200_456);
+    assert_eq!(overlay_provenance.updated_at, 1_704_067_200_456);
     owner.abandon_transaction_handle(overlay_open).unwrap();
 
     let rows = block_on(view.all(&prepared, ReadOpts::default())).unwrap();
@@ -146,27 +349,36 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
 fn mergeable_overlay_uses_staged_provenance_and_preserves_it_at_commit() {
     let db = block_on(doctest_support::open_todos_db()).unwrap();
     let existing = row(0xa1);
-    db.insert_with_id_at_ms(
+    db.insert(
         "todos",
-        existing,
         doctest_support::todo_cells("existing", false),
-        100,
+        crate::db::InsertOptions {
+            row_id: Some(existing),
+            updated_at_ms: Some(100),
+            ..Default::default()
+        },
     )
     .unwrap();
     let inserted = row(0xa2);
     let tx = db.mergeable_tx().unwrap();
-    tx.insert_with_id_at_ms(
+    tx.insert(
         "todos",
-        inserted,
         doctest_support::todo_cells("inserted", false),
-        200,
+        crate::db::InsertOptions {
+            row_id: Some(inserted),
+            updated_at_ms: Some(200),
+            ..Default::default()
+        },
     )
     .unwrap();
-    tx.update_at_ms(
+    tx.update(
         "todos",
         existing,
         BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
-        300,
+        crate::db::UpdateOptions {
+            updated_at_ms: Some(300),
+            ..Default::default()
+        },
     )
     .unwrap();
     let query = db
@@ -186,8 +398,8 @@ fn mergeable_overlay_uses_staged_provenance_and_preserves_it_at_commit() {
         .provenance()
         .unwrap()
         .unwrap();
-    assert_eq!(inserted_overlay.created_at, TxTime(200));
-    assert_eq!(inserted_overlay.updated_at, TxTime(200));
+    assert_eq!(inserted_overlay.created_at, 200);
+    assert_eq!(inserted_overlay.updated_at, 200);
     assert_eq!(inserted_overlay.created_by, db.identity.author);
     let updated_overlay = overlay
         .iter()
@@ -196,8 +408,8 @@ fn mergeable_overlay_uses_staged_provenance_and_preserves_it_at_commit() {
         .provenance()
         .unwrap()
         .unwrap();
-    assert_eq!(updated_overlay.created_at, TxTime(100));
-    assert_eq!(updated_overlay.updated_at, TxTime(300));
+    assert_eq!(updated_overlay.created_at, 100);
+    assert_eq!(updated_overlay.updated_at, 300);
     assert_eq!(updated_overlay.updated_by, db.identity.author);
 
     tx.commit().unwrap();
@@ -221,25 +433,32 @@ fn mergeable_overlay_uses_staged_provenance_and_preserves_it_at_commit() {
 fn exclusive_overlay_reserves_stable_provenance_for_insert_and_update() {
     let db = block_on(doctest_support::open_todos_db()).unwrap();
     let existing = row(0xb1);
-    db.insert_with_id_at_ms(
+    db.insert(
         "todos",
-        existing,
         doctest_support::todo_cells("existing", false),
-        100,
+        crate::db::InsertOptions {
+            row_id: Some(existing),
+            updated_at_ms: Some(100),
+            ..Default::default()
+        },
     )
     .unwrap();
     let inserted = row(0xb2);
     let tx = db.exclusive_tx().unwrap();
-    tx.insert_with_id(
+    tx.insert(
         "todos",
-        inserted,
         doctest_support::todo_cells("inserted", false),
+        crate::db::InsertOptions {
+            row_id: Some(inserted),
+            ..Default::default()
+        },
     )
     .unwrap();
     tx.update(
         "todos",
         existing,
         BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        Default::default(),
     )
     .unwrap();
     let query = db
@@ -261,15 +480,147 @@ fn exclusive_overlay_reserves_stable_provenance_for_insert_and_update() {
     };
     let inserted_overlay = provenance(&overlay, inserted);
     let updated_overlay = provenance(&overlay, existing);
-    assert_ne!(inserted_overlay.created_at, TxTime(0));
+    assert_ne!(inserted_overlay.created_at, 0);
     assert_eq!(inserted_overlay.created_at, inserted_overlay.updated_at);
-    assert_eq!(updated_overlay.created_at, TxTime(100));
-    assert_ne!(updated_overlay.updated_at, TxTime(0));
+    assert_eq!(updated_overlay.created_at, 100);
+    assert_ne!(updated_overlay.updated_at, 0);
 
     tx.commit().unwrap();
     let committed = db.read(&query).unwrap();
     assert_eq!(provenance(&committed, inserted), inserted_overlay);
     assert_eq!(provenance(&committed, existing), updated_overlay);
+}
+
+#[test]
+fn exclusive_crud_preserves_explicit_updated_at() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let inserted = row(0xc1);
+    let upserted = row(0xc2);
+    let deleted = row(0xc3);
+    let restored = row(0xc4);
+
+    for (row, title, updated_at_ms) in [
+        (upserted, "upsert base", 10),
+        (deleted, "delete base", 20),
+        (restored, "restore base", 30),
+    ] {
+        db.insert(
+            "todos",
+            doctest_support::todo_cells(title, false),
+            InsertOptions {
+                row_id: Some(row),
+                updated_at_ms: Some(updated_at_ms),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    db.delete(
+        "todos",
+        restored,
+        DeleteOptions {
+            updated_at_ms: Some(40),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let tx = db.exclusive_tx().unwrap();
+    tx.insert(
+        "todos",
+        doctest_support::todo_cells("inserted", false),
+        InsertOptions {
+            row_id: Some(inserted),
+            updated_at_ms: Some(100),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tx.upsert(
+        "todos",
+        upserted,
+        BTreeMap::from([("title".to_owned(), Value::String("upserted".to_owned()))]),
+        UpsertOptions {
+            updated_at_ms: Some(200),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tx.delete(
+        "todos",
+        deleted,
+        DeleteOptions {
+            updated_at_ms: Some(300),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tx.restore(
+        "todos",
+        restored,
+        Some(doctest_support::todo_cells("restored", true)),
+        RestoreOptions {
+            updated_at_ms: Some(400),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tx.commit().unwrap();
+
+    let query = db
+        .prepare_query(
+            &db.table("todos")
+                .select(["title", "$createdAt", "$updatedAt"]),
+        )
+        .unwrap();
+    let rows = block_on(db.all(
+        &query,
+        ReadOpts {
+            include_deleted: true,
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let updated_at = |row_id| {
+        rows.iter()
+            .find(|row| row.row_uuid() == row_id)
+            .unwrap()
+            .provenance()
+            .unwrap()
+            .unwrap()
+            .updated_at
+    };
+
+    assert_eq!(updated_at(inserted), 100);
+    assert_eq!(updated_at(upserted), 200);
+    assert_eq!(updated_at(deleted), 300);
+    assert_eq!(updated_at(restored), 400);
+}
+
+#[test]
+fn out_of_range_explicit_timestamp_is_rejected_before_mutating() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let row_id = row(0xc5);
+    let result = block_on(db.insert(
+        "todos",
+        doctest_support::todo_cells("must not be written", false),
+        InsertOptions {
+            row_id: Some(row_id),
+            updated_at_ms: Some(crate::time::HLC_MAX_PHYSICAL_MS + 1),
+            ..Default::default()
+        },
+    ));
+    let error = match result {
+        Ok(_) => panic!("a timestamp outside the HLC physical range must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+
+    let query = db.prepare_query(&db.table("todos")).unwrap();
+    assert!(
+        db.read(&query).unwrap().is_empty(),
+        "rejected timestamp input must not leave a visible row"
+    );
 }
 
 /// This stays internal because transaction overlays are not sync-visible. The
@@ -345,7 +696,7 @@ fn exclusive_tx_overlay_scopes_same_row_uuid_by_table() {
             .table(table_schema("table_a"))
             .table(table_schema("table_b")),
     );
-    let db = open_db(0x5e, AuthorId::SYSTEM, &schema);
+    let db = open_db(0x5e, AuthorSubject::SYSTEM, &schema);
     let table_a = schema
         .tables
         .iter()
@@ -370,7 +721,16 @@ fn exclusive_tx_overlay_scopes_same_row_uuid_by_table() {
         ("table_b", shared_row, current_b.clone()),
         ("table_b", other_b, nonmatching_b.clone()),
     ] {
-        let write = db.insert_with_id(table, row_uuid, row_cells).unwrap();
+        let write = db
+            .insert(
+                table,
+                row_cells,
+                crate::db::InsertOptions {
+                    row_id: Some(row_uuid),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         block_on(write.wait(DurabilityTier::Local)).unwrap();
     }
 
@@ -388,8 +748,15 @@ fn exclusive_tx_overlay_scopes_same_row_uuid_by_table() {
         .unwrap();
     let tx = db.exclusive_tx().unwrap();
     let pending_a = cells("selected", "table A pending");
-    tx.insert_with_id("table_a", shared_row, pending_a.clone())
-        .unwrap();
+    tx.insert(
+        "table_a",
+        pending_a.clone(),
+        crate::db::InsertOptions {
+            row_id: Some(shared_row),
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     assert_reads(
         &tx,
@@ -405,8 +772,15 @@ fn exclusive_tx_overlay_scopes_same_row_uuid_by_table() {
     );
 
     let pending_b = cells("selected", "table B pending");
-    tx.insert_with_id("table_b", shared_row, pending_b.clone())
-        .unwrap();
+    tx.insert(
+        "table_b",
+        pending_b.clone(),
+        crate::db::InsertOptions {
+            row_id: Some(shared_row),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_reads(
         &tx,
         "table_a",
@@ -438,18 +812,21 @@ fn upsert_merges_existing_rows_but_writes_absent_rows_directly() {
         "todos",
         existing,
         doctest_support::todo_cells("draft", false),
+        Default::default(),
     )
     .unwrap();
     db.upsert(
         "todos",
         existing,
         BTreeMap::from([("title".to_owned(), Value::String("renamed".to_owned()))]),
+        Default::default(),
     )
     .unwrap();
     db.upsert(
         "todos",
         absent,
         BTreeMap::from([("title".to_owned(), Value::String("created".to_owned()))]),
+        Default::default(),
     )
     .unwrap();
 
@@ -480,10 +857,24 @@ fn mergeable_tx_commits_multiple_writes_under_one_tx_id() {
     let row_two = row(2);
     let tx = db.mergeable_tx().unwrap();
 
-    tx.insert_with_id("todos", row_one, doctest_support::todo_cells("one", false))
-        .unwrap();
-    tx.insert_with_id("todos", row_two, doctest_support::todo_cells("two", true))
-        .unwrap();
+    tx.insert(
+        "todos",
+        doctest_support::todo_cells("one", false),
+        crate::db::InsertOptions {
+            row_id: Some(row_one),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tx.insert(
+        "todos",
+        doctest_support::todo_cells("two", true),
+        crate::db::InsertOptions {
+            row_id: Some(row_two),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let tx_id = tx.commit().unwrap();
 
     let rows = prepared_read(&db, &db.table("todos"))
@@ -514,12 +905,20 @@ fn mergeable_tx_coalesces_insert_then_update_for_same_row() {
     let row = row(1);
     let tx = db.mergeable_tx().unwrap();
 
-    tx.insert_with_id("todos", row, doctest_support::todo_cells("draft", false))
-        .unwrap();
+    tx.insert(
+        "todos",
+        doctest_support::todo_cells("draft", false),
+        crate::db::InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     tx.update(
         "todos",
         row,
         BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        Default::default(),
     )
     .unwrap();
     let tx_id = tx.commit().unwrap();
@@ -547,18 +946,31 @@ fn mergeable_tx_coalesces_restore_then_update_for_same_row() {
     let table = &doctest_support::schema().tables[0];
     let row = row(1);
 
-    db.insert_with_id("todos", row, doctest_support::todo_cells("archived", false))
-        .unwrap();
-    db.delete("todos", row).unwrap();
+    db.insert(
+        "todos",
+        doctest_support::todo_cells("archived", false),
+        crate::db::InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.delete("todos", row, Default::default()).unwrap();
     assert!(prepared_read(&db, &db.table("todos")).is_empty());
 
     let tx = db.mergeable_tx().unwrap();
-    tx.restore("todos", row, doctest_support::todo_cells("restored", false))
-        .unwrap();
+    tx.restore(
+        "todos",
+        row,
+        Some(doctest_support::todo_cells("restored", false)),
+        Default::default(),
+    )
+    .unwrap();
     tx.update(
         "todos",
         row,
         BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        Default::default(),
     )
     .unwrap();
     let tx_id = tx.commit().unwrap();
@@ -601,18 +1013,27 @@ fn mergeable_tx_coalesces_repeated_same_row_updates() {
     let row = row(1);
     let tx = db.mergeable_tx().unwrap();
 
-    tx.insert_with_id("todos", row, doctest_support::todo_cells("first", false))
-        .unwrap();
+    tx.insert(
+        "todos",
+        doctest_support::todo_cells("first", false),
+        crate::db::InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     tx.update(
         "todos",
         row,
         BTreeMap::from([("title".to_owned(), Value::String("second".to_owned()))]),
+        Default::default(),
     )
     .unwrap();
     tx.update(
         "todos",
         row,
         BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        Default::default(),
     )
     .unwrap();
     let tx_id = tx.commit().unwrap();
@@ -639,16 +1060,24 @@ fn mergeable_tx_coalesces_update_then_delete_for_same_row() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let row = row(1);
 
-    db.insert_with_id("todos", row, doctest_support::todo_cells("base", false))
-        .unwrap();
+    db.insert(
+        "todos",
+        doctest_support::todo_cells("base", false),
+        crate::db::InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let tx = db.mergeable_tx().unwrap();
     tx.update(
         "todos",
         row,
         BTreeMap::from([("title".to_owned(), Value::String("ignored".to_owned()))]),
+        Default::default(),
     )
     .unwrap();
-    tx.delete("todos", row).unwrap();
+    tx.delete("todos", row, Default::default()).unwrap();
     let tx_id = tx.commit().unwrap();
 
     assert!(prepared_read(&db, &db.table("todos")).is_empty());
@@ -670,17 +1099,23 @@ fn mergeable_tx_and_ref_have_identical_restore_and_reinsert_results() {
     let reinserted = row(2);
 
     for db in [&builder, &handle] {
-        db.insert_with_id(
+        db.insert(
             "todos",
-            restored,
             doctest_support::todo_cells("archived", false),
+            crate::db::InsertOptions {
+                row_id: Some(restored),
+                ..Default::default()
+            },
         )
         .unwrap();
-        db.delete("todos", restored).unwrap();
-        db.insert_with_id(
+        db.delete("todos", restored, Default::default()).unwrap();
+        db.insert(
             "todos",
-            reinserted,
             doctest_support::todo_cells("original", false),
+            crate::db::InsertOptions {
+                row_id: Some(reinserted),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
@@ -690,7 +1125,8 @@ fn mergeable_tx_and_ref_have_identical_restore_and_reinsert_results() {
         .restore(
             "todos",
             restored,
-            doctest_support::todo_cells("restored", false),
+            Some(doctest_support::todo_cells("restored", false)),
+            Default::default(),
         )
         .unwrap();
     builder_tx
@@ -698,14 +1134,20 @@ fn mergeable_tx_and_ref_have_identical_restore_and_reinsert_results() {
             "todos",
             restored,
             BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            Default::default(),
         )
         .unwrap();
-    builder_tx.delete("todos", reinserted).unwrap();
     builder_tx
-        .insert_with_id(
+        .delete("todos", reinserted, Default::default())
+        .unwrap();
+    builder_tx
+        .insert(
             "todos",
-            reinserted,
             doctest_support::todo_cells("reinserted", true),
+            crate::db::InsertOptions {
+                row_id: Some(reinserted),
+                ..Default::default()
+            },
         )
         .unwrap();
     builder_tx.commit().unwrap();
@@ -717,20 +1159,25 @@ fn mergeable_tx_and_ref_have_identical_restore_and_reinsert_results() {
         tx.restore(
             "todos",
             restored,
-            doctest_support::todo_cells("restored", false),
+            Some(doctest_support::todo_cells("restored", false)),
+            Default::default(),
         )
         .unwrap();
         tx.update(
             "todos",
             restored,
             BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            Default::default(),
         )
         .unwrap();
-        tx.delete("todos", reinserted).unwrap();
-        tx.insert_with_id(
+        tx.delete("todos", reinserted, Default::default()).unwrap();
+        tx.insert(
             "todos",
-            reinserted,
             doctest_support::todo_cells("reinserted", true),
+            crate::db::InsertOptions {
+                row_id: Some(reinserted),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
@@ -786,17 +1233,30 @@ fn mergeable_tx_read_observes_its_staged_restore() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let row = row(1);
 
-    db.insert_with_id("todos", row, doctest_support::todo_cells("archived", false))
-        .unwrap();
-    db.delete("todos", row).unwrap();
+    db.insert(
+        "todos",
+        doctest_support::todo_cells("archived", false),
+        crate::db::InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.delete("todos", row, Default::default()).unwrap();
 
     let tx = db.mergeable_tx().unwrap();
-    tx.restore("todos", row, doctest_support::todo_cells("restored", false))
-        .unwrap();
+    tx.restore(
+        "todos",
+        row,
+        Some(doctest_support::todo_cells("restored", false)),
+        Default::default(),
+    )
+    .unwrap();
     tx.update(
         "todos",
         row,
         BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        Default::default(),
     )
     .unwrap();
 
@@ -812,8 +1272,15 @@ fn exclusive_tx_ref_survives_handle_reconstruction_until_explicit_commit() {
     let table = &doctest_support::schema().tables[0];
     let row = row(1);
 
-    db.insert_with_id("todos", row, doctest_support::todo_cells("base", false))
-        .unwrap();
+    db.insert(
+        "todos",
+        doctest_support::todo_cells("base", false),
+        crate::db::InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     let open_tx = OpenTransactionId::new();
     db.begin_exclusive(open_tx).unwrap();
@@ -827,6 +1294,7 @@ fn exclusive_tx_ref_survives_handle_reconstruction_until_explicit_commit() {
             "todos",
             row,
             BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            Default::default(),
         )
         .unwrap();
     }
@@ -845,8 +1313,8 @@ fn exclusive_tx_ref_survives_handle_reconstruction_until_explicit_commit() {
 #[test]
 fn identity_bound_exclusive_transaction_rejects_cross_identity_reads_and_commits_as_bound_author() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
-    let alice = AuthorId::from_bytes([0xc1; 16]);
-    let bob = AuthorId::from_bytes([0xb2; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
     let open = OpenTransactionId::new();
     let row = row(0xa1);
     assert_ne!(alice, db.identity.author);
@@ -859,7 +1327,14 @@ fn identity_bound_exclusive_transaction_rejects_cross_identity_reads_and_commits
 
     db.begin_exclusive_for_identity(open, alice).unwrap();
     db.exclusive_tx_ref(open)
-        .insert_with_id("todos", row, doctest_support::todo_cells("alice", false))
+        .insert(
+            "todos",
+            doctest_support::todo_cells("alice", false),
+            InsertOptions {
+                row_id: Some(row),
+                ..Default::default()
+            },
+        )
         .unwrap();
 
     // Planted positive: the bound identity can read the transaction overlay.
@@ -892,31 +1367,332 @@ fn identity_bound_exclusive_transaction_rejects_cross_identity_reads_and_commits
     assert_eq!(committed_provenance.updated_by, alice);
 }
 
+fn exclusive_read_for_write_schema() -> JazzSchema {
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_session_eq("owner", &["claims", "sub"]))
+                        .with_insert(PublicPolicyExpr::True)
+                        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True),
+                ),
+        ),
+    )
+}
+
+/// Alice's exclusive transaction cannot update or upsert Bob's read-hidden
+/// snapshot row. Full and partial updates return the same non-disclosing error.
+///
+/// alice tx ──full/partial UPDATE or UPSERT──► bob row ──► denied
+#[test]
+fn exclusive_session_mutations_deny_hidden_existing_targets_without_disclosure() {
+    let schema = exclusive_read_for_write_schema();
+    let db = open_db(0xd4, AuthorSubject::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa4; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb4; 16]);
+    let target = row(0xc4);
+    db.set_test_provider_claims(alice, test_provider_claims(alice));
+    db.insert(
+        "todos",
+        cells("bob secret", false, bob),
+        InsertOptions {
+            row_id: Some(target),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    assert!(
+        block_on(db.all_for_identity(&prepared, ReadOpts::default(), alice))
+            .unwrap()
+            .is_empty(),
+        "the planted target must be read-hidden from Alice"
+    );
+
+    for (label, patch) in [
+        ("full", cells("replacement", true, alice)),
+        (
+            "partial",
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        ),
+    ] {
+        let open = OpenTransactionId::new();
+        db.begin_exclusive_for_identity(open, alice).unwrap();
+        let error = db
+            .exclusive_tx_ref(open)
+            .update("todos", target, patch, Default::default())
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::WriteRejected, "{label} update");
+        assert_eq!(
+            error.message,
+            "read policy denied UPDATE on table todos: the operation requires read permission on the target row"
+        );
+        db.abandon_exclusive_handle(open).unwrap();
+    }
+
+    let open = OpenTransactionId::new();
+    db.begin_exclusive_for_identity(open, alice).unwrap();
+    let error = db
+        .exclusive_tx_ref(open)
+        .upsert(
+            "todos",
+            target,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            Default::default(),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+    assert_eq!(
+        error.message,
+        "read policy denied UPSERT on table todos: the operation requires read permission on the target row"
+    );
+    db.abandon_exclusive_handle(open).unwrap();
+}
+
+/// Exclusive upsert distinguishes hidden-existing from absent internally: an
+/// absent row is inserted, while an intervening insert conflicts with the
+/// recorded absence rather than silently overwriting it.
+///
+/// alice tx ──upsert(absent)──► overlay; concurrent insert ──► commit conflict
+#[test]
+fn exclusive_session_absent_upsert_records_absence_and_observes_its_overlay() {
+    let schema = exclusive_read_for_write_schema();
+    let db = open_db(0xd5, AuthorSubject::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa5; 16]);
+    db.set_test_provider_claims(alice, test_provider_claims(alice));
+
+    let successful = row(0xc5);
+    let success_open = OpenTransactionId::new();
+    db.begin_exclusive_for_identity(success_open, alice)
+        .unwrap();
+    let success = db.exclusive_tx_ref(success_open);
+    success
+        .upsert(
+            "todos",
+            successful,
+            cells("new", false, alice),
+            Default::default(),
+        )
+        .unwrap();
+    success
+        .update(
+            "todos",
+            successful,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            Default::default(),
+        )
+        .expect("the session can read and update its visible overlay row");
+    db.commit_exclusive_handle(success_open).unwrap();
+
+    let conflicted = row(0xc6);
+    let conflict_open = OpenTransactionId::new();
+    db.begin_exclusive_for_identity(conflict_open, alice)
+        .unwrap();
+    db.exclusive_tx_ref(conflict_open)
+        .upsert(
+            "todos",
+            conflicted,
+            cells("pending", false, alice),
+            Default::default(),
+        )
+        .unwrap();
+    db.insert(
+        "todos",
+        cells("concurrent", false, alice),
+        InsertOptions {
+            row_id: Some(conflicted),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let error = db.commit_exclusive_handle(conflict_open).unwrap_err();
+    assert_eq!(error.code, ErrorCode::TransactionConflict);
+}
+
+/// Read-for-update authorization uses the exclusive transaction's fixed
+/// snapshot. A concurrent owner change cannot retroactively hide the snapshot
+/// row, but the recorded row/predicate reads make commit fail.
+///
+/// alice tx snapshot(readable) ──concurrent owner change──► stage ✓, commit ✗
+#[test]
+fn exclusive_session_update_authorizes_snapshot_then_conflicts_on_toctou_change() {
+    let schema = exclusive_read_for_write_schema();
+    let db = open_db(0xd6, AuthorSubject::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa6; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb6; 16]);
+    let target = row(0xc7);
+    db.set_test_provider_claims(alice, test_provider_claims(alice));
+    db.insert(
+        "todos",
+        cells("snapshot", false, alice),
+        InsertOptions {
+            row_id: Some(target),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let open = OpenTransactionId::new();
+    db.begin_exclusive_for_identity(open, alice).unwrap();
+    db.update(
+        "todos",
+        target,
+        BTreeMap::from([("owner".to_owned(), Value::Uuid(bob.test_uuid()))]),
+        Default::default(),
+    )
+    .unwrap();
+    db.exclusive_tx_ref(open)
+        .update(
+            "todos",
+            target,
+            BTreeMap::from([("title".to_owned(), Value::String("staged".to_owned()))]),
+            Default::default(),
+        )
+        .expect("the fixed snapshot still exposes Alice's target");
+    let error = db.commit_exclusive_handle(open).unwrap_err();
+    assert_eq!(error.code, ErrorCode::TransactionConflict);
+}
+
+/// A session-authored mergeable transaction authorizes later mutations from
+/// its fixed overlay, not only from the pre-transaction current state.
+///
+/// alice tx: INSERT visible row ──UPDATE/UPSERT──► same staged row
+#[test]
+fn mergeable_session_mutations_observe_visible_rows_in_their_overlay() {
+    let schema = exclusive_read_for_write_schema();
+    let db = open_db(0xd7, AuthorSubject::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa7; 16]);
+    db.set_test_provider_claims(alice, test_provider_claims(alice));
+    let target = row(0xc8);
+    let open = OpenTransactionId::new();
+    db.begin_mergeable_for_identity(open, alice).unwrap();
+    let tx = db.mergeable_tx_ref(open);
+
+    tx.insert(
+        "todos",
+        cells("draft", false, alice),
+        InsertOptions {
+            row_id: Some(target),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tx.update(
+        "todos",
+        target,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        Default::default(),
+    )
+    .expect("the staged insert is visible to its session author");
+    tx.upsert(
+        "todos",
+        target,
+        BTreeMap::from([("title".to_owned(), Value::String("ready".to_owned()))]),
+        Default::default(),
+    )
+    .expect("upsert observes and merges the visible staged row");
+
+    db.commit_mergeable_handle(open).unwrap();
+    let committed = db.local_current_row("todos", target).unwrap().unwrap();
+    let table = &schema.tables[0];
+    assert_eq!(committed.cell(table, "done"), Some(Value::Bool(true)));
+    assert_eq!(
+        committed.cell(table, "title"),
+        Some(Value::String("ready".to_owned()))
+    );
+
+    // A different visible row must not satisfy the targeted policy proof for
+    // a staged row that Alice cannot read.
+    let hidden = row(0xc9);
+    let hidden_open = OpenTransactionId::new();
+    db.begin_mergeable_for_identity(hidden_open, alice).unwrap();
+    let hidden_tx = db.mergeable_tx_ref(hidden_open);
+    hidden_tx
+        .insert(
+            "todos",
+            cells("hidden", false, AuthorSubject::for_test_bytes([0xb7; 16])),
+            InsertOptions {
+                row_id: Some(hidden),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    for (label, error) in [
+        (
+            "update",
+            hidden_tx
+                .update(
+                    "todos",
+                    hidden,
+                    BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+                    Default::default(),
+                )
+                .expect_err("hidden overlay UPDATE must require visibility"),
+        ),
+        (
+            "upsert",
+            hidden_tx
+                .upsert(
+                    "todos",
+                    hidden,
+                    BTreeMap::from([("title".to_owned(), Value::String("nope".to_owned()))]),
+                    Default::default(),
+                )
+                .expect_err("hidden overlay UPSERT must require visibility"),
+        ),
+    ] {
+        assert_eq!(error.code, ErrorCode::WriteRejected, "{label}");
+        assert_eq!(
+            error.message,
+            format!(
+                "read policy denied {} on table todos: the operation requires read permission on the target row",
+                label.to_ascii_uppercase()
+            )
+        );
+    }
+    db.commit_mergeable_handle(hidden_open).unwrap();
+}
+
 /// Mergeable serving reads retain their existing per-call identity semantics.
 #[test]
 fn mergeable_transaction_identity_reads_are_not_forced_to_begin_author() {
     let schema = owner_read_schema();
-    let db = open_db(0xd3, AuthorId::SYSTEM, &schema);
-    let alice = AuthorId::from_bytes([0xa3; 16]);
-    let bob = AuthorId::from_bytes([0xb3; 16]);
+    let db = open_db(0xd3, AuthorSubject::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa3; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb3; 16]);
     let open = OpenTransactionId::new();
     let prepared = db
-        .prepare_query(&db.table("todos").filter(eq(col("owner"), claim("sub"))))
+        .prepare_query(&db.table("todos").filter(eq(
+            col("owner"),
+            claim(crate::query::provider_claim_key("sub")),
+        )))
         .unwrap();
-    db.set_identity_claims(
-        alice,
-        BTreeMap::from([("sub".to_owned(), Value::Uuid(alice.0))]),
-    );
-    db.set_identity_claims(
-        bob,
-        BTreeMap::from([("sub".to_owned(), Value::Uuid(bob.0))]),
-    );
+    db.set_test_provider_claims(alice, test_provider_claims(alice));
+    db.set_test_provider_claims(bob, test_provider_claims(bob));
     let alice_row = row(0xa3);
     let bob_row = row(0xb3);
-    db.insert_with_id("todos", alice_row, cells("alice", false, alice))
-        .unwrap();
-    db.insert_with_id("todos", bob_row, cells("bob", false, bob))
-        .unwrap();
+    db.insert(
+        "todos",
+        cells("alice", false, alice),
+        InsertOptions {
+            row_id: Some(alice_row),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "todos",
+        cells("bob", false, bob),
+        InsertOptions {
+            row_id: Some(bob_row),
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     assert_eq!(
         block_on(db.all_for_identity(&prepared, ReadOpts::default(), alice))
@@ -958,8 +1734,8 @@ fn mergeable_transaction_identity_reads_are_not_forced_to_begin_author() {
 #[test]
 fn exclusive_tx_rejects_conflicting_concurrent_update() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let core = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let core = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let table = &schema.tables[0];
     let row = row(1);
 
@@ -1004,8 +1780,8 @@ fn exclusive_tx_blind_writes_are_first_committer_wins() {
     // (INV-TX-20) can catch the conflict — this is the exact case the earlier
     // broken validator let through (it short-circuited to "ok" on empty reads).
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let core = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let core = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let table = &schema.tables[0];
     let row = row(1);
 
@@ -1045,10 +1821,13 @@ fn mergeable_tx_emits_one_subscription_delta_for_many_writes() {
 
     let tx = db.mergeable_tx().unwrap();
     for index in 0..100u8 {
-        tx.insert_with_id(
+        tx.insert(
             "todos",
-            RowUuid::from_bytes([index + 1; 16]),
             doctest_support::todo_cells(&format!("todo {index}"), false),
+            crate::db::InsertOptions {
+                row_id: Some(RowUuid::from_bytes([index + 1; 16])),
+                ..Default::default()
+            },
         )
         .unwrap();
     }

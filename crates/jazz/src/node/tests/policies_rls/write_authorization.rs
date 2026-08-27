@@ -1,6 +1,12 @@
 // Write attribution, ownership, joins, rejection, and cleanup.
 
 use crate::query::{Include, JoinMode, OrderDirection};
+use crate::tools::public_api::relation_ir::{
+    ColumnRef as PublicRelColumnRef, JoinCondition as PublicRelJoinCondition,
+    JoinKind as PublicRelJoinKind, PredicateCmpOp as PublicRelPredicateCmpOp,
+    PredicateExpr as PublicRelPredicateExpr, RelExpr as PublicRelExpr,
+    ValueRef as PublicRelValueRef,
+};
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -40,6 +46,14 @@ impl OrderedKvStorage for FailTransactionReadMemoryStorage {
             self.fail_after_transaction_reads.set(Some(remaining - 1));
         }
         self.inner.get(cf, key)
+    }
+
+    fn put_if_absent(&self, cf: String, key: Vec<u8>, value: Vec<u8>) -> groove::storage::StorageFuture<'_, Result<Option<StorageValue>, groove::storage::Error>> {
+        self.inner.put_if_absent(cf, key, value)
+    }
+
+    fn compare_and_delete(&self, cf: String, key: Vec<u8>, expected: Vec<u8>) -> groove::storage::StorageFuture<'_, Result<bool, groove::storage::Error>> {
+        self.inner.compare_and_delete(cf, key, expected)
     }
 
     fn set(
@@ -220,6 +234,67 @@ fn local_authority_keeps_insert_and_update_policies_distinct() {
     ), "the predecessor remains independently pending");
 }
 
+/// This stays at the node boundary because admission evaluates policy-pinned
+/// inline rows before a public client receives a write outcome. It proves the
+/// provenance visible to that inline program matches the public milliseconds
+/// contract at both its persisted-old-row and incoming-version boundaries.
+#[test]
+fn write_policy_timestamp_provenance_uses_physical_milliseconds() {
+    let created_at_ms = 1_777_777_777_777;
+    let updated_at_ms = created_at_ms + 1;
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .policies(
+                PublicTablePolicies::new()
+                    .with_insert(PublicPolicyExpr::eq_literal(
+                        "$createdAt",
+                        PublicValue::Timestamp(created_at_ms),
+                    ))
+                    .with_update(
+                        Some(PublicPolicyExpr::eq_literal(
+                            "$createdAt",
+                            PublicValue::Timestamp(created_at_ms),
+                        )),
+                        PublicPolicyExpr::eq_literal(
+                            "$updatedAt",
+                            PublicValue::Timestamp(updated_at_ms),
+                        ),
+                    ),
+            ),
+    ));
+    let (_core_dir, mut core) = open_node_with_schema(node(0x9a), schema);
+    let author = user(0xa1);
+    let row_uuid = row(0x9a);
+
+    let insert = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, created_at_ms)
+                .made_by(author)
+                .cells(title_cells("created")),
+        )
+        .unwrap();
+    core.finalize_local_mergeable_commit_settled(insert).unwrap();
+    assert!(matches!(
+        core.transaction_state_settled(insert),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ));
+
+    let update = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, updated_at_ms)
+                .made_by(author)
+                .parents(vec![insert])
+                .cells(title_cells("updated")),
+        )
+        .unwrap();
+    core.finalize_local_mergeable_commit_settled(update).unwrap();
+    assert!(matches!(
+        core.transaction_state_settled(update),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ));
+}
+
 #[test]
 fn local_insert_policy_classification_survives_finalization_retry() {
     let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
@@ -281,6 +356,7 @@ fn attributed_write_retry_preserves_permission_subject_after_rejection_error() {
         .collect::<Vec<_>>();
     let storage = FailTransactionReadMemoryStorage::new(&column_family_refs);
     let mut core = NodeState::new(node(0x90), schema, storage.clone()).unwrap();
+    install_test_uuid_sub_claim(&mut core, backend);
 
     let tx_id = core
         .commit_mergeable_settled(
@@ -337,6 +413,7 @@ fn attributed_write_checkpoint_error_cleans_up_terminal_permission_subject() {
         .collect::<Vec<_>>();
     let storage = FailTransactionReadMemoryStorage::new(&column_family_refs);
     let mut core = NodeState::new(node(0x90), schema, storage.clone()).unwrap();
+    install_test_uuid_sub_claim(&mut core, backend);
 
     let tx_id = core
         .commit_mergeable_settled(
@@ -413,6 +490,12 @@ fn session_owner_string_uuid_write_policy_accepts_matching_author() {
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let author = user(0xa1);
+    let claims = BTreeMap::from([(
+        "user_id".to_owned(),
+        Value::String(author.test_uuid().to_string()),
+    )]);
+    writer.set_test_provider_claims(author, claims.clone());
+    core.set_test_provider_claims(author, claims);
     let row_uuid = row(0x51);
     let (tx_id, unit) = writer
         .commit_mergeable_unit_settled(
@@ -420,7 +503,7 @@ fn session_owner_string_uuid_write_policy_accepts_matching_author() {
                 .made_by(author)
                 .cells(BTreeMap::from([
                     ("title".to_owned(), Value::String("owned".to_owned())),
-                    ("owner_id".to_owned(), Value::String(author.0.to_string())),
+                    ("owner_id".to_owned(), Value::String(author.test_uuid().to_string())),
                 ])),
         )
         .unwrap();
@@ -445,7 +528,7 @@ fn session_owner_string_uuid_write_policy_accepts_matching_author() {
             row_uuid,
             BTreeMap::from([
                 ("title".to_owned(), Value::String("owned".to_owned())),
-                ("owner_id".to_owned(), Value::String(author.0.to_string())),
+                ("owner_id".to_owned(), Value::String(author.test_uuid().to_string())),
             ]),
         )]
     );
@@ -588,7 +671,7 @@ fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
                 .made_by(alice)
                 .cells(BTreeMap::from([
                     ("body".to_owned(), v("alice private")),
-                    ("owner_id".to_owned(), Value::String(alice.0.to_string())),
+                    ("owner_id".to_owned(), Value::String(alice.test_uuid().to_string())),
                 ])),
         ])
         .unwrap();
@@ -607,14 +690,14 @@ fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
         .rehydrate_query(&mut core, &shape, &binding)
         .unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads, ..
             },
         result_member_adds,
         ..
-    } = &update
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -676,7 +759,7 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
 
     let tx_b = commit_core_owner_fixture(&mut core, row_uuid, author_b, "owned by B", 11);
     let update = link_a.current_rows_update(&mut core, "todos").unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         version_bundles,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
@@ -685,7 +768,7 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
         result_member_adds,
         result_member_removes,
         ..
-    } = &update
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -759,6 +842,8 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
     let (_invited_dir, mut invited_reader) = open_node_with_schema(node(3), schema.clone());
     let (_uninvited_dir, mut uninvited_reader) = open_node_with_schema(node(4), schema);
+    install_test_uuid_sub_claim(&mut core, invited);
+    install_test_uuid_sub_claim(&mut core, uninvited);
 
     let denied_tx = uninvited_writer
         .commit_mergeable_unit_settled(
@@ -787,7 +872,7 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
         .commit_mergeable_settled(MergeableCommit::new("canvasInvites", invite_row, 11).cells(
             BTreeMap::from([
                 ("canvas".to_owned(), Value::Uuid(canvas_row.0)),
-                ("userID".to_owned(), Value::Uuid(invited.0)),
+                ("userID".to_owned(), Value::Uuid(invited.test_uuid())),
             ]),
         ))
         .unwrap();
@@ -889,9 +974,9 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     let revoked_update = invited_link
         .current_rows_update(&mut core, "canvases")
         .unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_removes, ..
-    } = &revoked_update
+    }) = &revoked_update
     else {
         panic!("expected view update");
     };
@@ -908,6 +993,691 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     );
     // Closure-row policy revocation is still checked at emission; C2 composes
     // output-row policies into the subscription graph.
+}
+
+/// The authority accepts Alice's editor insert only when the candidate's
+/// canvas agrees with the referenced layer; changing only the candidate canvas
+/// must produce the ordinary authorization-denied fate.
+///
+/// This stays at the node boundary because only the authority's settled fate
+/// proves that the compiled policy joins constrain an incoming candidate.
+///
+/// ```text
+/// alice ──shape(layer A, canvas A)──► authority ──► Accepted
+/// alice ──shape(layer A, canvas B)──► authority ──► AuthorizationDenied
+/// ```
+#[test]
+fn nested_correlated_exists_insert_policy_rejects_cross_canvas_candidates() {
+    let alice = user(0xa3);
+    let canvas_a = row(0xa4);
+    let canvas_b = row(0xa5);
+    let layer_a = row(0xa6);
+    let editor_membership = row(0xa7);
+    let accepted_shape = row(0xa8);
+    let rejected_shape = row(0xa9);
+
+    let insert_policy = PublicPolicyExpr::Exists {
+        table: "layers".to_owned(),
+        condition: Box::new(PublicPolicyExpr::And(vec![
+            PublicPolicyExpr::Cmp {
+                column: "id".to_owned(),
+                op: PublicCmpOp::Eq,
+                value: PublicPolicyValue::SessionRef(vec![
+                    "__jazz_outer_row".to_owned(),
+                    "layer_id".to_owned(),
+                ]),
+            },
+            PublicPolicyExpr::Cmp {
+                column: "canvas_id".to_owned(),
+                op: PublicCmpOp::Eq,
+                value: PublicPolicyValue::SessionRef(vec![
+                    "__jazz_outer_row".to_owned(),
+                    "canvas_id".to_owned(),
+                ]),
+            },
+            PublicPolicyExpr::Exists {
+                table: "canvas_members".to_owned(),
+                condition: Box::new(PublicPolicyExpr::And(vec![
+                    PublicPolicyExpr::Cmp {
+                        column: "canvas_id".to_owned(),
+                        op: PublicCmpOp::Eq,
+                        value: PublicPolicyValue::SessionRef(vec![
+                            "__jazz_outer_row".to_owned(),
+                            "canvas_id".to_owned(),
+                        ]),
+                    },
+                    public_claim_eq("user_id", "sub"),
+                    public_literal_eq("role", PublicValue::Text("editor".to_owned())),
+                ])),
+            },
+        ])),
+    };
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("canvases")
+                    .column("title", PublicColumnType::Text),
+            )
+            .table(PublicTableSchemaBuilder::new("layers").fk_column("canvas_id", "canvases"))
+            .table(
+                PublicTableSchemaBuilder::new("canvas_members")
+                    .fk_column("canvas_id", "canvases")
+                    .column("user_id", PublicColumnType::Uuid)
+                    .column("role", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("shapes")
+                    .fk_column("layer_id", "layers")
+                    .fk_column("canvas_id", "canvases")
+                    .policies(PublicTablePolicies::new().with_insert(insert_policy)),
+            ),
+    );
+    let (_alice_dir, mut alice_node) = open_node_with_schema(node(3), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    install_test_uuid_sub_claim(&mut core, alice);
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("canvases", canvas_a, 10).cells(BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("canvas A".to_owned()),
+        )])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("canvases", canvas_b, 11).cells(BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("canvas B".to_owned()),
+        )])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("layers", layer_a, 12).cells(BTreeMap::from([(
+            "canvas_id".to_owned(),
+            Value::Uuid(canvas_a.0),
+        )])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("canvas_members", editor_membership, 13).cells(BTreeMap::from([
+            ("canvas_id".to_owned(), Value::Uuid(canvas_a.0)),
+            ("user_id".to_owned(), Value::Uuid(alice.test_uuid())),
+            ("role".to_owned(), Value::String("editor".to_owned())),
+        ])),
+    );
+
+    let accepted = alice_node
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("shapes", accepted_shape, 14)
+                .made_by(alice)
+                .cells(BTreeMap::from([
+                    ("layer_id".to_owned(), Value::Uuid(layer_a.0)),
+                    ("canvas_id".to_owned(), Value::Uuid(canvas_a.0)),
+                ])),
+        )
+        .unwrap();
+    let [accepted_fate] = core
+        .apply_sync_message_settled(accepted.1)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert!(matches!(
+        accepted_fate,
+        SyncMessage::FateUpdate {
+            fate: Fate::Accepted,
+            ..
+        }
+    ));
+
+    let rejected = alice_node
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("shapes", rejected_shape, 15)
+                .made_by(alice)
+                .cells(BTreeMap::from([
+                    ("layer_id".to_owned(), Value::Uuid(layer_a.0)),
+                    ("canvas_id".to_owned(), Value::Uuid(canvas_b.0)),
+                ])),
+        )
+        .unwrap();
+    let [rejected_fate] = core
+        .apply_sync_message_settled(rejected.1)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert!(matches!(
+        rejected_fate,
+        SyncMessage::FateUpdate {
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            ..
+        }
+    ));
+}
+
+/// `allowedTo.insert(release)` composes the release INSERT policy with the
+/// assignment's tenant-correlated existence checks: an eligible owner is
+/// accepted while that same owner cannot attach a foreign membership. The
+/// compiler-plan regression separately asserts occurrence-carrier suppression.
+/// A relation-backed `exists` must prove both the denormalized workspace and
+/// the referenced block together.  The same owner is deliberately a member of
+/// both workspaces, so authorizing the block reference without its workspace
+/// correlation would accept the cross-workspace write.
+#[test]
+fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_and_update() {
+    let owner = user(0xa1);
+    let owner_claim_subject = owner.test_uuid();
+    let workspace_a = row(0xb1);
+    let workspace_b = row(0xb2);
+    let owner_membership_a = row(0xc1);
+    let owner_membership_b = row(0xc2);
+    let block_a = row(0xd1);
+    let block_b = row(0xd2);
+    let accepted_task = row(0xe1);
+    let rejected_task = row(0xe2);
+
+    let column = |scope: &str, name: &str| PublicRelColumnRef {
+        scope: Some(scope.to_owned()),
+        column: name.to_owned(),
+    };
+    let outer = |scope: &str, name: &str, outer_name: &str| PublicRelPredicateExpr::Cmp {
+        left: column(scope, name),
+        op: PublicRelPredicateCmpOp::Eq,
+        right: PublicRelValueRef::OuterColumn(PublicRelColumnRef::unscoped(outer_name)),
+    };
+    let task_policy = PublicPolicyExpr::ExistsRel {
+        rel: PublicRelExpr::Filter {
+            input: Box::new(PublicRelExpr::Join {
+                left: Box::new(PublicRelExpr::TableScan {
+                    table: "blocks".into(),
+                    alias: Some("blocks".to_owned()),
+                }),
+                right: Box::new(PublicRelExpr::Filter {
+                    input: Box::new(PublicRelExpr::TableScan {
+                        table: "members".into(),
+                        alias: Some("members".to_owned()),
+                    }),
+                    predicate: PublicRelPredicateExpr::And(vec![
+                        outer("members", "workspace", "workspace"),
+                        PublicRelPredicateExpr::Cmp {
+                            left: column("members", "subject"),
+                            op: PublicRelPredicateCmpOp::Eq,
+                            right: PublicRelValueRef::SessionRef(vec![
+                                "claims".to_owned(),
+                                "sub".to_owned(),
+                            ]),
+                        },
+                    ]),
+                }),
+                on: vec![PublicRelJoinCondition {
+                    left: column("blocks", "workspace"),
+                    right: column("members", "workspace"),
+                }],
+                join_kind: PublicRelJoinKind::Inner,
+            }),
+            // The FK correlation is separate from the nested membership
+            // conjunction, mirroring `allOf([exists, workspaceId + FK])`.
+            predicate: PublicRelPredicateExpr::And(vec![outer("blocks", "id", "block")]),
+        },
+    };
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("workspaces")
+                    .column("name", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("members")
+                    .fk_column("workspace", "workspaces")
+                    .column("subject", PublicColumnType::Uuid),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("blocks")
+                    .fk_column("workspace", "workspaces"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("tasks")
+                    .fk_column("workspace", "workspaces")
+                    .fk_column("block", "blocks")
+                    .column("title", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_insert(task_policy.clone())
+                            .with_update(Some(task_policy.clone()), task_policy.clone())
+                            .with_delete(task_policy),
+                    ),
+            ),
+    );
+    let (_core_dir, mut core) = open_node_with_schema(node(0x9a), schema);
+    for (table, row_uuid, time, cells) in [
+        (
+            "workspaces",
+            workspace_a,
+            1,
+            BTreeMap::from([("name".to_owned(), Value::String("A".to_owned()))]),
+        ),
+        (
+            "workspaces",
+            workspace_b,
+            2,
+            BTreeMap::from([("name".to_owned(), Value::String("B".to_owned()))]),
+        ),
+        (
+            "members",
+            owner_membership_a,
+            3,
+            BTreeMap::from([
+                ("workspace".to_owned(), Value::Uuid(workspace_a.0)),
+                ("subject".to_owned(), Value::Uuid(owner_claim_subject)),
+            ]),
+        ),
+        (
+            "members",
+            owner_membership_b,
+            4,
+            BTreeMap::from([
+                ("workspace".to_owned(), Value::Uuid(workspace_b.0)),
+                ("subject".to_owned(), Value::Uuid(owner_claim_subject)),
+            ]),
+        ),
+        (
+            "blocks",
+            block_a,
+            5,
+            BTreeMap::from([("workspace".to_owned(), Value::Uuid(workspace_a.0))]),
+        ),
+        (
+            "blocks",
+            block_b,
+            6,
+            BTreeMap::from([("workspace".to_owned(), Value::Uuid(workspace_b.0))]),
+        ),
+    ] {
+        accept_global(&mut core, MergeableCommit::new(table, row_uuid, time).cells(cells));
+    }
+    core.set_test_provider_claims(
+        owner,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(owner_claim_subject))]),
+    );
+
+    let accepted = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("tasks", accepted_task, 7)
+                .made_by(owner)
+                .cells(BTreeMap::from([
+                    ("workspace".to_owned(), Value::Uuid(workspace_a.0)),
+                    ("block".to_owned(), Value::Uuid(block_a.0)),
+                    ("title".to_owned(), Value::String("same workspace".to_owned())),
+                ])),
+        )
+        .unwrap();
+    core.finalize_local_mergeable_commit_settled(accepted).unwrap();
+    assert!(matches!(
+        core.transaction_state_settled(accepted),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ));
+
+    let denied_insert = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("tasks", rejected_task, 8)
+                .made_by(owner)
+                .cells(BTreeMap::from([
+                    ("workspace".to_owned(), Value::Uuid(workspace_a.0)),
+                    ("block".to_owned(), Value::Uuid(block_b.0)),
+                    ("title".to_owned(), Value::String("cross workspace".to_owned())),
+                ])),
+        )
+        .unwrap();
+    core.finalize_local_mergeable_commit_settled(denied_insert).unwrap();
+    assert!(matches!(
+        core.transaction_state_settled(denied_insert),
+        Some((Fate::Rejected(RejectionReason::AuthorizationDenied), None, DurabilityTier::Local))
+    ));
+
+    let denied_update = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("tasks", accepted_task, 9)
+                .made_by(owner)
+                .cells(BTreeMap::from([
+                    ("workspace".to_owned(), Value::Uuid(workspace_a.0)),
+                    ("block".to_owned(), Value::Uuid(block_b.0)),
+                    ("title".to_owned(), Value::String("foreign replacement".to_owned())),
+                ])),
+        )
+        .unwrap();
+    core.finalize_local_mergeable_commit_settled(denied_update).unwrap();
+    assert!(matches!(
+        core.transaction_state_settled(denied_update),
+        Some((Fate::Rejected(RejectionReason::AuthorizationDenied), None, DurabilityTier::Local))
+    ));
+
+    // DELETE evaluates the persisted old row through USING, rather than a
+    // candidate payload. The rejected UPDATE above must not replace that old
+    // same-workspace authority.
+    let accepted_delete = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("tasks", accepted_task, 10)
+                .made_by(owner)
+                .deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    core.finalize_local_mergeable_commit_settled(accepted_delete)
+        .unwrap();
+    assert!(matches!(
+        core.transaction_state_settled(accepted_delete),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ));
+}
+
+#[test]
+fn exists_rel_rejects_nested_outer_correlation_off_the_join_key() {
+    let column = |scope: &str, name: &str| PublicRelColumnRef {
+        scope: Some(scope.to_owned()),
+        column: name.to_owned(),
+    };
+    let policy = PublicPolicyExpr::ExistsRel {
+        rel: PublicRelExpr::Filter {
+            input: Box::new(PublicRelExpr::Join {
+                left: Box::new(PublicRelExpr::TableScan {
+                    table: "blocks".into(),
+                    alias: Some("blocks".to_owned()),
+                }),
+                right: Box::new(PublicRelExpr::Filter {
+                    input: Box::new(PublicRelExpr::TableScan {
+                        table: "members".into(),
+                        alias: Some("members".to_owned()),
+                    }),
+                    predicate: PublicRelPredicateExpr::Cmp {
+                        // `subject` is not the blocks-members equality key;
+                        // accepting this would silently retarget the proof.
+                        left: column("members", "subject"),
+                        op: PublicRelPredicateCmpOp::Eq,
+                        right: PublicRelValueRef::OuterColumn(PublicRelColumnRef::unscoped(
+                            "workspace",
+                        )),
+                    },
+                }),
+                on: vec![PublicRelJoinCondition {
+                    left: column("blocks", "workspace"),
+                    right: column("members", "workspace"),
+                }],
+                join_kind: PublicRelJoinKind::Inner,
+            }),
+            predicate: PublicRelPredicateExpr::Cmp {
+                left: column("blocks", "id"),
+                op: PublicRelPredicateCmpOp::Eq,
+                right: PublicRelValueRef::OuterColumn(PublicRelColumnRef::unscoped("block")),
+            },
+        },
+    };
+    let public = PublicSchemaBuilder::new()
+        .table(PublicTableSchemaBuilder::new("workspaces"))
+        .table(
+            PublicTableSchemaBuilder::new("members")
+                .fk_column("workspace", "workspaces")
+                .column("subject", PublicColumnType::Uuid),
+        )
+        .table(
+            PublicTableSchemaBuilder::new("blocks").fk_column("workspace", "workspaces"),
+        )
+        .table(
+            PublicTableSchemaBuilder::new("tasks")
+                .fk_column("workspace", "workspaces")
+                .fk_column("block", "blocks")
+                .policies(PublicTablePolicies::new().with_insert(policy)),
+        )
+        .build();
+    let error = crate::schema::JazzSchema::new(&public)
+        .expect_err("mismatched nested correlation must fail closed");
+    assert!(error
+        .to_string()
+        .contains("nested outer correlation must use its join key"));
+}
+
+#[test]
+fn exists_rel_fails_closed_for_outer_correlation_beyond_one_nested_join() {
+    let column = |scope: &str, name: &str| PublicRelColumnRef {
+        scope: Some(scope.to_owned()),
+        column: name.to_owned(),
+    };
+    let policy = PublicPolicyExpr::ExistsRel {
+        rel: PublicRelExpr::Filter {
+            input: Box::new(PublicRelExpr::Join {
+                left: Box::new(PublicRelExpr::TableScan {
+                    table: "blocks".into(),
+                    alias: Some("blocks".to_owned()),
+                }),
+                right: Box::new(PublicRelExpr::Join {
+                    left: Box::new(PublicRelExpr::TableScan {
+                        table: "members".into(),
+                        alias: Some("members".to_owned()),
+                    }),
+                    right: Box::new(PublicRelExpr::Filter {
+                        input: Box::new(PublicRelExpr::TableScan {
+                            table: "grants".into(),
+                            alias: Some("grants".to_owned()),
+                        }),
+                        predicate: PublicRelPredicateExpr::Cmp {
+                            left: column("grants", "workspace"),
+                            op: PublicRelPredicateCmpOp::Eq,
+                            right: PublicRelValueRef::OuterColumn(PublicRelColumnRef::unscoped(
+                                "workspace",
+                            )),
+                        },
+                    }),
+                    on: vec![PublicRelJoinCondition {
+                        left: column("members", "workspace"),
+                        right: column("grants", "workspace"),
+                    }],
+                    join_kind: PublicRelJoinKind::Inner,
+                }),
+                on: vec![PublicRelJoinCondition {
+                    left: column("blocks", "workspace"),
+                    right: column("members", "workspace"),
+                }],
+                join_kind: PublicRelJoinKind::Inner,
+            }),
+            predicate: PublicRelPredicateExpr::Cmp {
+                left: column("blocks", "id"),
+                op: PublicRelPredicateCmpOp::Eq,
+                right: PublicRelValueRef::OuterColumn(PublicRelColumnRef::unscoped("block")),
+            },
+        },
+    };
+    let public = PublicSchemaBuilder::new()
+        .table(PublicTableSchemaBuilder::new("workspaces"))
+        .table(
+            PublicTableSchemaBuilder::new("blocks").fk_column("workspace", "workspaces"),
+        )
+        .table(
+            PublicTableSchemaBuilder::new("members").fk_column("workspace", "workspaces"),
+        )
+        .table(
+            PublicTableSchemaBuilder::new("grants").fk_column("workspace", "workspaces"),
+        )
+        .table(
+            PublicTableSchemaBuilder::new("tasks")
+                .fk_column("workspace", "workspaces")
+                .fk_column("block", "blocks")
+                .policies(PublicTablePolicies::new().with_insert(policy)),
+        )
+        .build();
+    let error = crate::schema::JazzSchema::new(&public)
+        .expect_err("deep outer correlation must fail closed until its scope is retained");
+    assert!(error
+        .to_string()
+        .contains("does not yet support outer correlations beyond one nested join"));
+}
+
+#[test]
+fn correlated_inherited_insert_policy_accepts_owner_and_denies_cross_tenant_membership() {
+    let owner = user(0xa1);
+    let outsider = user(0xb2);
+    let organization = row(0xc1);
+    let foreign_organization = row(0xc2);
+    let owner_membership = row(0xd1);
+    let foreign_membership = row(0xd2);
+    let artist = row(0xd3);
+    let release = row(0xe1);
+    let owner_assignment = row(0xf1);
+    let outsider_assignment = row(0xf2);
+
+    let same_outer_organization = || {
+        PublicPolicyExpr::eq_session(
+            "organization",
+            vec!["__jazz_outer_row".to_owned(), "organization".to_owned()],
+        )
+    };
+    let release_insert_policy = PublicPolicyExpr::And(vec![
+        public_outer_exists(
+            "memberships",
+            "organization",
+            "organization",
+            [
+                public_claim_eq("user", "sub"),
+                public_literal_eq("role", PublicValue::Text("admin".to_owned())),
+            ],
+        ),
+        public_outer_exists(
+            "artists",
+            "id",
+            "artist",
+            [same_outer_organization()],
+        ),
+    ]);
+    let assignment_insert_policy = PublicPolicyExpr::And(vec![
+        PublicPolicyExpr::Inherits {
+            operation: PublicOperation::Insert,
+            via_column: "release".to_owned(),
+            max_depth: None,
+        },
+        public_outer_exists("releases", "id", "release", [same_outer_organization()]),
+        public_outer_exists(
+            "memberships",
+            "id",
+            "membership",
+            [same_outer_organization()],
+        ),
+    ]);
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("organizations")
+                    .column("name", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("memberships")
+                    .fk_column("organization", "organizations")
+                    .column("user", PublicColumnType::Uuid)
+                    .column("role", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("releases")
+                    .fk_column("organization", "organizations")
+                    .fk_column("artist", "artists")
+                    .column("title", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_insert(release_insert_policy)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("artists")
+                    .fk_column("organization", "organizations")
+                    .column("name", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("release_assignments")
+                    .fk_column("organization", "organizations")
+                    .fk_column("release", "releases")
+                    .fk_column("membership", "memberships")
+                    .policies(PublicTablePolicies::new().with_insert(assignment_insert_policy)),
+            ),
+    );
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("organizations", organization, 1).cells(BTreeMap::from([(
+            "name".to_owned(),
+            Value::String("owner organization".to_owned()),
+        )])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("organizations", foreign_organization, 2).cells(BTreeMap::from([(
+            "name".to_owned(),
+            Value::String("foreign organization".to_owned()),
+        )])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("memberships", owner_membership, 3).cells(BTreeMap::from([
+            ("organization".to_owned(), Value::Uuid(organization.0)),
+            ("user".to_owned(), Value::Uuid(owner.test_uuid())),
+            ("role".to_owned(), Value::String("admin".to_owned())),
+        ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("memberships", foreign_membership, 4).cells(BTreeMap::from([
+            ("organization".to_owned(), Value::Uuid(foreign_organization.0)),
+            ("user".to_owned(), Value::Uuid(outsider.test_uuid())),
+            ("role".to_owned(), Value::String("admin".to_owned())),
+        ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("artists", artist, 5).cells(BTreeMap::from([
+            ("organization".to_owned(), Value::Uuid(organization.0)),
+            ("name".to_owned(), Value::String("artist".to_owned())),
+        ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("releases", release, 6).cells(BTreeMap::from([
+            ("organization".to_owned(), Value::Uuid(organization.0)),
+            ("artist".to_owned(), Value::Uuid(artist.0)),
+            ("title".to_owned(), Value::String("release".to_owned())),
+        ])),
+    );
+    core.set_test_provider_claims(
+        owner,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.test_uuid()))]),
+    );
+
+    let accepted = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("release_assignments", owner_assignment, 7)
+                .made_by(owner)
+                .cells(BTreeMap::from([
+                    ("organization".to_owned(), Value::Uuid(organization.0)),
+                    ("release".to_owned(), Value::Uuid(release.0)),
+                    ("membership".to_owned(), Value::Uuid(owner_membership.0)),
+                ])),
+        )
+        .unwrap();
+    core.finalize_local_mergeable_commit_settled(accepted).unwrap();
+    assert!(matches!(
+        core.transaction_state_settled(accepted),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ));
+
+    let denied = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("release_assignments", outsider_assignment, 8)
+                .made_by(owner)
+                .cells(BTreeMap::from([
+                    ("organization".to_owned(), Value::Uuid(organization.0)),
+                    ("release".to_owned(), Value::Uuid(release.0)),
+                    ("membership".to_owned(), Value::Uuid(foreign_membership.0)),
+                ])),
+        )
+        .unwrap();
+    core.finalize_local_mergeable_commit_settled(denied).unwrap();
+    assert!(matches!(
+        core.transaction_state_settled(denied),
+        Some((
+            Fate::Rejected(RejectionReason::AuthorizationDenied),
+            None,
+            DurabilityTier::Local
+        ))
+    ));
 }
 
 #[test]
@@ -944,12 +1714,14 @@ fn write_policy_branch_or_join_allows_either_literal_branch_or_membership_join()
     let (_invited_dir, mut invited_writer) = open_node_with_schema(node(1), schema.clone());
     let (_uninvited_dir, mut uninvited_writer) = open_node_with_schema(node(2), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    install_test_uuid_sub_claim(&mut core, invited);
+    install_test_uuid_sub_claim(&mut core, uninvited);
 
     let invite_tx = core
         .commit_mergeable_settled(MergeableCommit::new("canvasInvites", invite_row, 3).cells(
             BTreeMap::from([
                 ("canvas".to_owned(), Value::Uuid(private_canvas.0)),
-                ("userID".to_owned(), Value::Uuid(invited.0)),
+                ("userID".to_owned(), Value::Uuid(invited.test_uuid())),
             ]),
         ))
         .unwrap();
@@ -1062,6 +1834,20 @@ fn read_policy_branch_or_join_allows_public_or_membership_reads() {
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
     let (_member_dir, _member_reader) = open_node_with_schema(node(3), schema.clone());
     let (_other_dir, _other_reader) = open_node_with_schema(node(4), schema);
+    core.set_test_provider_claims(
+        member,
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::String(member.test_uuid().to_string()),
+        )]),
+    );
+    core.set_test_provider_claims(
+        other,
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::String(other.test_uuid().to_string()),
+        )]),
+    );
 
     accept_global(
         &mut core,
@@ -1070,7 +1856,7 @@ fn read_policy_branch_or_join_allows_public_or_membership_reads() {
             .cells(BTreeMap::from([
                 ("title".to_owned(), Value::String("public".to_owned())),
                 ("isPublic".to_owned(), Value::Bool(true)),
-                ("createdBy".to_owned(), Value::Uuid(member.0)),
+                ("createdBy".to_owned(), Value::Uuid(member.test_uuid())),
             ])),
     );
     accept_global(
@@ -1080,14 +1866,14 @@ fn read_policy_branch_or_join_allows_public_or_membership_reads() {
             .cells(BTreeMap::from([
                 ("title".to_owned(), Value::String("private".to_owned())),
                 ("isPublic".to_owned(), Value::Bool(false)),
-                ("createdBy".to_owned(), Value::Uuid(member.0)),
+                ("createdBy".to_owned(), Value::Uuid(member.test_uuid())),
             ])),
     );
     accept_global(
         &mut core,
         MergeableCommit::new("chatMembers", membership, 12).cells(BTreeMap::from([
             ("chatId".to_owned(), Value::Uuid(private_chat.0)),
-            ("userId".to_owned(), Value::String(member.0.to_string())),
+            ("userId".to_owned(), Value::String(member.test_uuid().to_string())),
         ])),
     );
     let shape = Query::from("chats").validate(&core.catalogue.schema).unwrap();

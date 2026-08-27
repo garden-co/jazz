@@ -681,6 +681,17 @@ mod tests {
 
     #[test]
     fn validates_order_by_columns_and_preserves_key_order() {
+        let err = Query::from("issues")
+            .order_by("$createdBy", OrderDirection::Asc)
+            .validate_runtime(&schema())
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QueryError::UnsupportedAuthorOrdering {
+                column: "$createdBy".to_owned()
+            }
+        );
+
         let validated = Query::from("issues")
             .order_by("state", OrderDirection::Asc)
             .order_by("priority", OrderDirection::Desc)
@@ -833,21 +844,11 @@ mod tests {
     }
 
     #[test]
-    fn claim_column_type_mismatch_errors_loudly() {
-        let err = Query::from("issues")
+    fn application_claims_are_not_statically_typed() {
+        Query::from("issues")
             .filter(eq(col("state"), claim("sub")))
             .validate_runtime(&schema())
-            .unwrap_err();
-
-        assert_eq!(
-            err,
-            QueryError::ClaimTypeMismatch {
-                claim_path: "sub".to_owned(),
-                column: "state".to_owned(),
-                claim_type: "Uuid".to_owned(),
-                column_type: "String".to_owned(),
-            }
-        );
+            .unwrap();
     }
 
     #[test]
@@ -909,7 +910,7 @@ mod tests {
         // when it selects the shared/default branch-local row.
         assert_eq!(
             validated.shape_id().0.to_string(),
-            "b0dc6f46-cbc2-5003-928c-f607d7943c77"
+            "0b44d6c0-6813-50e6-95fa-46332114b204"
         );
     }
 }

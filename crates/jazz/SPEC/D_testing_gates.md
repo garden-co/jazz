@@ -31,7 +31,7 @@ For ordinary Rust/core work, the full gate set is:
 1. `cargo test -p jazz`
 2. `cargo test -p groove`
 3. `cargo test -p jazz --no-default-features --features testing,transport-compression-zstd`
-4. `cargo check -p jazz-sim --benches`
+4. `cargo check -p jazz-sim --benches` on the realistic benchmark workflow
 5. `dev/gates/ts-wire-codec.sh`
 6. `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
 7. `cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --exact`
@@ -40,13 +40,15 @@ For ordinary Rust/core work, the full gate set is:
 
 For a benchmark edit, locally run
 `dev/gates/benchmark-smoke.sh <jazz|jazz-sim> <bench>`; it is a targeted debug
-compile check. CI runs `dev/gates/benchmark-smoke.sh --ci`, which checks all
-maintained benchmark APIs and executes deterministic core and jazz-sim scenario
-assertions. CodSpeed evaluates the example benchmark crates on benchmark-labeled
-PRs and nightly; native `jazz` and `jazz-sim` timing remains in the
-realistic benchmark workflow until it is ported. No local omnibus benchmark
-script is a push gate. A change to a public `jazz` type additionally gates the
-full workspace, including examples.
+compile check. Ordinary PR CI runs `dev/gates/benchmark-smoke.sh --ci`, which
+executes deterministic core and jazz-sim scenario assertions. The realistic
+benchmark workflow runs `dev/gates/benchmark-smoke.sh --compile-ci` to check
+all maintained benchmark APIs on same-repository benchmark-labeled PRs,
+non-bot default-branch pushes, manual runs, and nightly. CodSpeed evaluates the
+example benchmark crates on benchmark-labeled PRs and nightly; native `jazz`
+and `jazz-sim` timing remains in the realistic benchmark workflow until it is
+ported. No local omnibus benchmark script is a push gate. A change to a public
+`jazz` type additionally gates the full workspace, including examples.
 
 Use a `-j` appropriate for the box; see PR #1157 for the rationale behind
 replacing the former fixed `-j 2` guidance.
@@ -54,9 +56,10 @@ replacing the former fixed `-j 2` guidance.
 ### D.2 The tiers
 
 - **Crate tests** — integration and crate tests for `jazz` and `groove`.
-- **Bench API compilation** — `cargo check -p jazz-sim --benches` is always in
-  the ordinary gate set because benchmark API rot has previously hidden until
-  late in a lane.
+- **Bench API compilation** — `cargo check -p jazz-sim --benches` runs on the
+  realistic benchmark workflow (same-repository benchmark-labeled PRs,
+  non-bot default-branch pushes, manual runs, and nightly), where it catches
+  benchmark API rot without extending every ordinary PR's critical path.
 - **TS/native wire codec** — `dev/gates/ts-wire-codec.sh` is the current
   TypeScript/native-runtime wire-codec gate. `dev/gates/` currently contains
   this gate and no legacy JS ABI decoder or WASM binding script.
@@ -80,15 +83,17 @@ cargo test -p jazz --lib node::tests::harness::m3_maintained_one_shot_differenti
 - **Sensitive-data guard** — the guard in `jazz-private/dev/gates/` keeps
   customer-specific fixture names, domains, and ids out of the public
   repository.
-- **Benchmark API and scenario smoke** — CI compiles all maintained benchmark
-  targets and runs deterministic scenario assertions. CodSpeed compares example
-  benchmark crates; native `jazz` and `jazz-sim` timing stays in the
-  realistic workflow until migrated.
+- **Benchmark API and scenario smoke** — Ordinary CI runs deterministic
+  scenario assertions. The realistic benchmark workflow compiles all
+  maintained benchmark targets; CodSpeed compares example benchmark crates;
+  native `jazz` and `jazz-sim` timing stays in the realistic workflow until
+  migrated.
 - **Public type changes** — changes to public `jazz` types additionally gate the
   full workspace, including examples.
 - **Server shell** — the server-shell tests are included in the `jazz` package
   gates above. They exercise the in-memory Rust server shell over the public
-  frame pump, loopback HTTP and WebSocket listeners, and real ABI clients.
+  frame pump, production Axum HTTP routes, loopback WebSocket listeners, and
+  real ABI clients.
 
 ### D.3 Simulation-first discipline
 

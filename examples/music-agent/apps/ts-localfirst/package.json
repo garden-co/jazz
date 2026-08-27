@@ -1,0 +1,16 @@
+{
+  "name": "music-agent-ts-localfirst",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "jazz-tools": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "catalog:default",
+    "vitest": "catalog:default"
+  }
+}

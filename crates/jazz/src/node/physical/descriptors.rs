@@ -317,6 +317,11 @@ fn widen_projection_value_type(
 ) -> records::ValueType {
     use records::ValueType;
     match (logical, physical) {
+        // Large JSON is logical String-shaped but its durable cell is the
+        // internal stored-scalar enum. Physical-to-physical projections must
+        // retain that descriptor; logical materialization happens only at the
+        // Jazz boundary, not in Groove's raw variant projector.
+        (_, physical) if physical.is_internal_storage_type() => physical.clone(),
         // Projection crosses the physical interning boundary.  It must expose
         // the target schema's declaration-local enum descriptor after the
         // explicit tag remap above, not leak the physical descriptor/tag space.
@@ -775,9 +780,7 @@ pub(super) fn physical_version_storage_tables(
                         )?
                         .nullable()
                     }
-                    _ => column
-                        .column_type
-                        .clone()
+                    _ => physical_storage_value_type(column)
                         .nullable()
                         .rebind_variant_registries(&format!("physical-column/{}", column_id.0)),
                 };
@@ -842,7 +845,7 @@ pub(super) fn physical_version_storage_tables(
                     .filter_map(|column| mapping.columns.get(&column).copied())
             })
             .collect::<BTreeSet<_>>();
-        for column_id in indexed_columns {
+        for &column_id in &indexed_columns {
             physical_global = physical_global.with_index(GrooveIndexSchema::new(
                 physical_current_index_name(column_id),
                 [physical_user_column_field(column_id)],
@@ -858,6 +861,12 @@ pub(super) fn physical_version_storage_tables(
         );
         physical_ahead.primary_key = logical_ahead_tables[0].primary_key.clone();
         physical_ahead.indices = logical_ahead_tables[0].indices.clone();
+        for column_id in indexed_columns {
+            physical_ahead = physical_ahead.with_index(GrooveIndexSchema::new(
+                physical_current_index_name(column_id),
+                [physical_user_column_field(column_id)],
+            ));
+        }
         let mut register_ahead = logical_ahead_tables[1].clone();
         register_ahead.name = physical_register_ahead_current_table_name(table_id);
 
@@ -941,6 +950,24 @@ pub(super) fn physical_version_storage_tables(
         tables.push(rejected);
     }
     Ok(tables)
+}
+
+/// Physical history/current rows carry an engine-owned stored-scalar context
+/// rather than the logical String/Bytes type. The semantic kind is frozen in
+/// `ColumnSchema` by schema lowering; raw cells and public query bindings never
+/// choose it.
+fn physical_storage_value_type(column: &ColumnSchema) -> records::ValueType {
+    match column.large_value_kind {
+        // Text and bytes already have their own contextual scalar codecs at
+        // the Groove logical type boundary. JSON shares String logically, so
+        // only it needs an internal physical descriptor context.
+        crate::schema::LargeValueSemanticKind::Json => {
+            groove::large_values::physical_storage_value_type(
+                groove::large_values::LargeValueKind::Json,
+            )
+        }
+        _ => column.column_type.clone(),
+    }
 }
 
 fn variant_payload_fields_for_names(
@@ -1093,7 +1120,7 @@ fn physical_history_descriptor(
             "physical history descriptor width mismatch",
         ));
     }
-    physical_descriptor_with_enum_registries(logical_descriptor, physical_names, mapping)
+    physical_descriptor_with_enum_registries(table, logical_descriptor, physical_names, mapping)
 }
 
 fn physical_current_descriptor(
@@ -1107,7 +1134,7 @@ fn physical_current_descriptor(
             "physical current descriptor width mismatch",
         ));
     }
-    physical_descriptor_with_enum_registries(logical_descriptor, physical_names, mapping)
+    physical_descriptor_with_enum_registries(table, logical_descriptor, physical_names, mapping)
 }
 
 fn physical_rejected_version_descriptor(
@@ -1121,10 +1148,11 @@ fn physical_rejected_version_descriptor(
             "physical rejected-version descriptor width mismatch",
         ));
     }
-    physical_descriptor_with_enum_registries(logical_descriptor, physical_names, mapping)
+    physical_descriptor_with_enum_registries(table, logical_descriptor, physical_names, mapping)
 }
 
 fn physical_descriptor_with_enum_registries(
+    table: &TableSchema,
     logical: records::RecordDescriptor,
     physical_names: Vec<String>,
     mapping: &TablePhysicalMapping,
@@ -1142,6 +1170,17 @@ fn physical_descriptor_with_enum_registries(
                     if let Some(cases) = mapping.scalar_enum_cases.get(&id) {
                         physical_scalar_enum_schema(id, cases)
                             .map(|schema| records::ValueType::EnumTag(schema).nullable())?
+                    } else if let Some(column) = mapping
+                        .columns
+                        .iter()
+                        .find_map(|(name, candidate)| (*candidate == id).then_some(name))
+                        .and_then(|name| table.columns.iter().find(|column| column.name == *name))
+                    {
+                        // A physical history/current projection must use the
+                        // same schema-derived scalar descriptor as the
+                        // physical table. In particular JSON is logically a
+                        // String but physically an internal stored scalar.
+                        physical_storage_value_type(column).nullable()
                     } else {
                         match &field.value_type {
                             // Physical user cells are nullable for absence, but their
@@ -1166,6 +1205,7 @@ fn physical_descriptor_with_enum_registries(
             .collect::<Result<Vec<_>, Error>>()?,
     ))
 }
+
 
 fn physical_history_field_names(
     table: &TableSchema,

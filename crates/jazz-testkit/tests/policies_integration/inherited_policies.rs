@@ -59,7 +59,7 @@ fn make_multi_folder_documents_schema(
 }
 
 fn file_referencing_schema(array_edge: bool) -> Schema {
-    let owner_policy = pe::eq("owner_id", pe::session("user_id"));
+    let owner_policy = pe::eq("owner_id", pe::session(vec!["claims", "sub"]));
     let via_column = if array_edge { "images" } else { "image" };
 
     let files_policies = super::explicit_allow_all_policies(permissions(|p| {
@@ -149,7 +149,7 @@ fn multi_hop_inherited_parts_schema() -> Schema {
 // -- Policy helpers --
 
 fn folder_owner_policy() -> PolicyExpr {
-    pe::contains("owners", pe::session("user_id"))
+    pe::contains("owners", pe::session(vec!["claims", "sub"]))
 }
 
 fn inherited_non_null_policy(operation: Operation, via_column: &str) -> PolicyExpr {
@@ -708,7 +708,7 @@ async fn inherited_folder_access_extends_document_visibility_beyond_direct_owner
 }
 
 async fn inherited_folder_access_extends_document_visibility_beyond_direct_owner_inner() {
-    let owner_policy = pe::eq("owner_id", pe::session("user_id"));
+    let owner_policy = pe::eq("owner_id", pe::session(vec!["claims", "sub"]));
     let schema = SchemaBuilder::new()
         .table(make_folders_schema(
             "folders",
@@ -910,7 +910,7 @@ async fn inherited_folder_insert_requires_folder_owner_when_fk_present() {
 }
 
 async fn inherited_folder_insert_requires_folder_owner_when_fk_present_inner() {
-    let owner_policy = pe::eq("owner_id", pe::session("user_id"));
+    let owner_policy = pe::eq("owner_id", pe::session(vec!["claims", "sub"]));
     let schema = SchemaBuilder::new()
         .table(make_folders_schema(
             "folders",
@@ -1155,7 +1155,7 @@ async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_docume
 }
 
 async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_documents_inner() {
-    let owner_policy = pe::eq("owner_id", pe::session("user_id"));
+    let owner_policy = pe::eq("owner_id", pe::session(vec!["claims", "sub"]));
     let schema = SchemaBuilder::new()
         .table(make_folders_schema(
             "folders",
@@ -1309,7 +1309,7 @@ async fn inherited_folder_delete_allows_document_owner_but_blocks_other_non_owne
 }
 
 async fn inherited_folder_delete_allows_document_owner_but_blocks_other_non_owners_inner() {
-    let owner_policy = pe::eq("owner_id", pe::session("user_id"));
+    let owner_policy = pe::eq("owner_id", pe::session(vec!["claims", "sub"]));
     let schema = SchemaBuilder::new()
         .table(make_folders_schema(
             "folders",
@@ -1691,7 +1691,7 @@ async fn inherited_folder_update_allows_folder_owner_and_blocks_other_users() {
 }
 
 async fn inherited_folder_update_allows_folder_owner_and_blocks_other_users_inner() {
-    let owner_policy = pe::eq("owner_id", pe::session("user_id"));
+    let owner_policy = pe::eq("owner_id", pe::session(vec!["claims", "sub"]));
     let schema = SchemaBuilder::new()
         .table(make_folders_schema(
             "folders",
@@ -1905,7 +1905,6 @@ async fn inherited_referencing_scalar_paths_grant_visibility_and_compose_with_or
 /// Verifies that reverse inheritance invalidates active subscriptions when
 /// referencing rows are created, deleted, or retargeted.
 #[tokio::test]
-#[ignore = "#1764: deleting the last reverse-inheritance reference does not emit the required target-row removal delta"]
 async fn inherited_referencing_scalar_subscription_updates_follow_create_delete_and_retarget() {
     tokio::task::LocalSet::new().run_until(inherited_referencing_scalar_subscription_updates_follow_create_delete_and_retarget_inner()).await;
 }
@@ -2024,7 +2023,6 @@ async fn inherited_referencing_scalar_subscription_updates_follow_create_delete_
 /// Verifies that reverse inheritance over `UUID[] REFERENCES` grants access
 /// and that reordering or duplicating the array does not change semantics.
 #[tokio::test]
-#[ignore = "#1764: reordering a reverse-inherited UUID array emits spurious target-row update deltas despite unchanged set membership"]
 async fn inherited_referencing_array_membership_preserves_set_semantics() {
     tokio::task::LocalSet::new()
         .run_until(inherited_referencing_array_membership_preserves_set_semantics_inner())
@@ -2849,7 +2847,7 @@ async fn local_update_with_check_inherits_denies_when_parent_is_not_updateable()
 async fn local_update_with_check_inherits_denies_when_parent_is_not_updateable_inner() {
     let folders_policies = permissions(|p| {
         p.allow_update()
-            .where_old(pe::eq("owner_id", pe::session("user_id")))
+            .where_old(pe::eq("owner_id", pe::session(vec!["claims", "sub"])))
             .where_new(pe::allowed_to_update_with_depth("parent_id", 10));
     });
     let schema = SchemaBuilder::new()

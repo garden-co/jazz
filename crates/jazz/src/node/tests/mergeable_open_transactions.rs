@@ -292,7 +292,7 @@ fn abandoning_mergeable_open_transaction_discards_its_only_staged_representation
     let (_temp_dir, mut core) = open_node();
     let staged = row(0x31);
     let open_tx = OpenTransactionId::new();
-    core.open_mergeable(open_tx, AuthorId::SYSTEM, None).unwrap();
+    core.open_mergeable(open_tx, AuthorSubject::SYSTEM, None).unwrap();
     core.tx_write_mergeable(
         open_tx,
         "todos",
@@ -320,4 +320,57 @@ fn abandoning_mergeable_open_transaction_discards_its_only_staged_representation
         core.commit_mergeable_open_settled(open_tx, || 51).unwrap_err(),
         Error::MissingOpenBatch(missing) if missing == open_tx
     ));
+}
+
+/// A mergeable open batch preflights every lowered content/deletion write
+/// before the first valid write can advance the local HLC or publish rows.
+///
+/// alice ──open batch──► core
+///   valid @ 50, invalid @ max + 1 ──► typed error; clock remains zero
+#[test]
+fn mergeable_open_batch_rejects_late_invalid_provenance_without_advancing_clock() {
+    use crate::time::HLC_MAX_PHYSICAL_MS;
+
+    for deletion in [None, Some(DeletionEvent::Deleted)] {
+        let (_dir, mut core) = open_node();
+        let batch = OpenTransactionId::new();
+        core.open_mergeable(batch, AuthorSubject::SYSTEM, None).unwrap();
+        core.tx_write_mergeable(
+            batch,
+            "todos",
+            row(0x91),
+            title_cells("valid first"),
+            None,
+            Vec::new(),
+            Some(50),
+            false,
+        )
+        .unwrap();
+        core.tx_write_mergeable(
+            batch,
+            "todos",
+            row(0x92),
+            if deletion.is_some() {
+                BTreeMap::new()
+            } else {
+                title_cells("invalid second")
+            },
+            deletion,
+            Vec::new(),
+            Some(HLC_MAX_PHYSICAL_MS + 1),
+            false,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            core.commit_mergeable_open_settled(batch, || 99),
+            Err(Error::InvalidMergeableCommit(
+                "commit now_ms exceeds packed HLC physical-millisecond range"
+            ))
+        ));
+        assert_eq!(core.clock.tx_time, TxTime::default());
+        assert!(core.row_history("todos", row(0x91)).unwrap().is_empty());
+        assert!(core.row_history("todos", row(0x92)).unwrap().is_empty());
+        assert!(core.open_tx.open_transactions.contains_key(&batch));
+    }
 }

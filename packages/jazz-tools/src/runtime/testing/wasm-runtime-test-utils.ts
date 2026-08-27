@@ -1,13 +1,23 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Runtime } from "../client.js";
 import type { WasmSchema } from "../../drivers/types.js";
 import { onTestFinished } from "vitest";
 import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
+import { assertNativeArtifactCompatibility } from "../native-artifact-compatibility.js";
+import { readCorrectnessArtifactSnapshot } from "../../../../../dev/artifacts/test-artifact-store.mjs";
 
-export type TestRuntime = Runtime & { free?(): void };
+export type TestRuntime = Runtime & {
+  free?(): void;
+  setLargeValueStagingPolicy?(
+    incomingBytesPerWindow: number,
+    windowMs: number,
+    maxAgeMs?: number | null,
+  ): void;
+  evictExpiredStagedLargeValues?(): Promise<number>;
+};
 
 let wasmModulePromise: Promise<any> | null = null;
 
@@ -44,6 +54,15 @@ type JazzWasmPaths = {
 };
 
 function resolveJazzWasmPaths(): JazzWasmPaths | null {
+  const snapshot = readCorrectnessArtifactSnapshot(
+    fileURLToPath(new URL("../../../../..", import.meta.url)),
+  );
+  if (snapshot) {
+    const modulePath = resolve(snapshot.wasmPackage, "jazz_wasm.js");
+    const wasmPath = resolve(snapshot.wasmPackage, "jazz_wasm_bg.wasm");
+    if (existsSync(modulePath) && existsSync(wasmPath)) return { modulePath, wasmPath };
+    return null;
+  }
   const require = createRequire(import.meta.url);
   let packageJsonPath: string;
   try {
@@ -79,6 +98,7 @@ function loadWasmModule(): Promise<any> {
 
       const wasmModule: any = await import(pathToFileURL(paths.modulePath).href);
       wasmModule.initSync({ module: readFileSync(paths.wasmPath) });
+      assertNativeArtifactCompatibility(wasmModule, "WASM", ["initSync", "WasmDb"]);
       return wasmModule;
     })();
   }
@@ -101,7 +121,7 @@ export async function createWasmRuntime(
     wasmModule.WasmDb,
     schema,
     deterministicBytes(`${appId}:${env}:${peerId}:node`),
-    deterministicBytes(`${appId}:${env}:${peerId}:author`),
+    testAuthorBytes(`${appId}:${env}:${peerId}:author`),
     1,
     true,
   );
@@ -110,6 +130,10 @@ export async function createWasmRuntime(
   });
 
   return runtime;
+}
+
+function testAuthorBytes(seed: string): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify(["urn:jazz:test", seed]));
 }
 
 function deterministicBytes(seed: string): Uint8Array {

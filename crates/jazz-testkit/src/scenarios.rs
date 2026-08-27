@@ -13,7 +13,6 @@ use jazz_server::JazzServer;
 use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use uuid::Uuid;
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 #[allow(dead_code)]
@@ -55,6 +54,7 @@ fn split_base_url(server_url: &str) -> Result<(String, String), Box<dyn std::err
 #[derive(Debug, Serialize, Deserialize)]
 struct JwtClaims {
     sub: String,
+    iss: String,
     claims: JsonValue,
     exp: u64,
 }
@@ -113,16 +113,7 @@ impl<'a> TestingClient<'a> {
 
     pub fn with_user_id(mut self, user_id: impl Into<String>) -> Self {
         let user_id = user_id.into();
-        // WebSocket sessions now validate principals as UUIDs. Keep symbolic
-        // test identities useful while making their wire identity valid and
-        // deterministic; literal UUIDs remain unchanged.
-        self.user_id = Some(
-            Uuid::parse_str(&user_id)
-                .map(|uuid| uuid.to_string())
-                .unwrap_or_else(|_| {
-                    Uuid::new_v5(&Uuid::NAMESPACE_URL, user_id.as_bytes()).to_string()
-                }),
-        );
+        self.user_id = Some(user_id);
         self
     }
 
@@ -346,6 +337,7 @@ pub async fn connect_ready_claims(
 fn make_jwt(sub: &str, claims: JsonValue) -> String {
     let jwt_claims = JwtClaims {
         sub: sub.to_string(),
+        iss: "urn:jazz:test".to_owned(),
         claims,
         exp: SystemTime::now()
             .duration_since(UNIX_EPOCH)

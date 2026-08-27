@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use jazz::db::{Db, DbConfig, DbIdentity, MergeableTxOps, SeededRowIdSource, Transport};
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, NodeState};
 use jazz::peer::PeerState;
 use jazz::protocol::{
@@ -125,7 +125,7 @@ fn publish_chain(
     for (schema, lens) in schemas.iter().skip(1).zip(lenses) {
         let outcome = jazz::db::block_on(core.apply_trusted_catalogue_message(
             SyncMessage::PublishSchemaWithLens {
-                author: AuthorId::SYSTEM,
+                author: AuthorSubject::SYSTEM,
                 catalogue_seq: core.active_catalogue_seq() + 1,
                 publication: Box::new(SchemaLineagePublication::new(
                     SchemaVersion::new(schema.clone()),
@@ -140,7 +140,7 @@ fn publish_chain(
     }
     let outcome = jazz::db::block_on(core.apply_trusted_catalogue_message(
         SyncMessage::SetCurrentWriteSchema {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 4,
                 schema: schemas[3].version_id(),
@@ -199,7 +199,15 @@ fn commit_client_mergeable(
     cells: BTreeMap<String, Value>,
 ) -> SyncMessage {
     let tx = jazz::db::block_on(client.db.mergeable_tx()).unwrap();
-    jazz::db::block_on(tx.insert_with_id(table, row, cells)).unwrap();
+    jazz::db::block_on(tx.insert(
+        table,
+        cells,
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
     jazz::db::block_on(tx.commit()).unwrap();
     jazz::db::block_on(client.db.tick()).unwrap();
     client
@@ -382,7 +390,7 @@ fn measured_write_us(
     let mut timings = Vec::with_capacity(rows);
     for idx in 0..rows {
         let value = format!("write-{row_offset}-{idx}");
-        let cells = match schema.tables[0].columns[0].name.as_str() {
+        let cells = match schema.tables[0].columns[0].name() {
             "title" => BTreeMap::from([("title".to_owned(), v(value))]),
             "name" if schema.tables[0].columns.len() == 1 => {
                 BTreeMap::from([("name".to_owned(), v(value))])
@@ -420,8 +428,8 @@ fn row_cells(row: CurrentRow, table: &TableSchema) -> (RowUuid, BTreeMap<String,
         .columns
         .iter()
         .filter_map(|column| {
-            row.cell(table, &column.name)
-                .map(|value| (column.name.clone(), value))
+            row.cell(table, column.name())
+                .map(|value| (column.name().to_owned(), value))
         })
         .collect();
     (row.row_uuid(), cells)
@@ -521,7 +529,7 @@ fn open_client(node_uuid: NodeUuid, edge_uuid: NodeUuid, schema: JazzSchema) -> 
     let (dir, db) = open_db(
         node_uuid,
         schema.clone(),
-        AuthorId::from_bytes([node_uuid.as_bytes()[0]; 16]),
+        AuthorSubject::for_test_bytes([node_uuid.as_bytes()[0]; 16]),
     );
     let outbound = Rc::new(RefCell::new(Vec::new()));
     let upstream = jazz::db::block_on(db.connect_upstream(Box::new(QueueTransport {
@@ -542,7 +550,7 @@ fn open_client(node_uuid: NodeUuid, edge_uuid: NodeUuid, schema: JazzSchema) -> 
 fn open_db(
     node_uuid: NodeUuid,
     schema: JazzSchema,
-    author: AuthorId,
+    author: AuthorSubject,
 ) -> (tempfile::TempDir, Db<RocksDbStorage>) {
     let dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();

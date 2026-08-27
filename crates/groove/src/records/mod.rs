@@ -90,6 +90,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 pub use macros::{FieldKind, RecordField, assert_record_field_layout};
+pub use values::collect_by_ordered_scalar;
 pub use values::{
     EnumCase, EnumSchema, EnumValue, ScalarEnumSchema, SystemVariantRegistry, Value, ValueType,
     VariantRegistry, variant_registry_id_for_path,
@@ -111,6 +112,15 @@ pub(crate) fn encode_single_field_value(
     value_type: &ValueType,
 ) -> Result<Vec<u8>, Error> {
     encode_value(value, value_type)
+}
+
+/// Decode one value using the ordinary Groove value algebra. Engine-owned
+/// physical envelopes use this only behind declared logical schema types.
+pub(crate) fn decode_single_field_value(
+    bytes: &[u8],
+    value_type: &ValueType,
+) -> Result<Value, Error> {
+    decode_value(bytes, value_type)
 }
 
 /// Interned schema-side description needed to interpret compact record bytes.
@@ -1180,6 +1190,33 @@ impl<'a> BorrowedRecord<'a> {
             .collect()
     }
 
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        self.validate_inner(false)
+    }
+
+    pub(crate) fn validate_canonical(&self) -> Result<(), Error> {
+        self.validate_inner(true)
+    }
+
+    fn validate_inner(&self, canonical: bool) -> Result<(), Error> {
+        validate_record_header(self.raw, &self.descriptor)?;
+        self.descriptor
+            .fields
+            .iter()
+            .zip(&self.descriptor.layout.fields)
+            .try_for_each(|(field, layout)| {
+                let span = record_value_span_for_layout(self.raw, &self.descriptor, *layout)?;
+                if canonical {
+                    values::validate_canonical_value(
+                        &self.raw[span.start..span.end],
+                        &field.value_type,
+                    )
+                } else {
+                    values::validate_value(&self.raw[span.start..span.end], &field.value_type)
+                }
+            })
+    }
+
     pub fn get_u64(&self, field_idx: usize) -> Result<u64, Error> {
         let bytes = self.field_bytes(field_idx, &ValueType::U64)?;
         read_exact_array::<8>(bytes).map(u64::from_le_bytes)
@@ -1259,7 +1296,11 @@ impl<'a> BorrowedRecord<'a> {
     }
 
     pub fn get_bytes(&self, field_idx: usize) -> Result<&'a [u8], Error> {
-        self.field_bytes(field_idx, &ValueType::Bytes)
+        let bytes = self.field_bytes(field_idx, &ValueType::Bytes)?;
+        Ok(crate::large_values::inline_scalar_bytes(
+            crate::large_values::LargeValueKind::Bytes,
+            bytes,
+        )?)
     }
 
     pub fn get_uuid(&self, field_idx: usize) -> Result<uuid::Uuid, Error> {
@@ -1268,8 +1309,12 @@ impl<'a> BorrowedRecord<'a> {
     }
 
     pub fn get_str(&self, field_idx: usize) -> Result<&'a str, Error> {
-        str::from_utf8(self.field_bytes(field_idx, &ValueType::String)?)
-            .map_err(|_| Error::InvalidUtf8)
+        let bytes = self.field_bytes(field_idx, &ValueType::String)?;
+        str::from_utf8(crate::large_values::inline_scalar_bytes(
+            crate::large_values::LargeValueKind::String,
+            bytes,
+        )?)
+        .map_err(|_| Error::InvalidUtf8)
     }
 
     pub fn get_nullable_u64(&self, field_idx: usize) -> Result<Option<u64>, Error> {
@@ -1336,12 +1381,21 @@ impl<'a> BorrowedRecord<'a> {
 
     pub fn get_nullable_string(&self, field_idx: usize) -> Result<Option<&'a str>, Error> {
         self.nullable_field(field_idx, &ValueType::String, |payload| {
-            str::from_utf8(payload).map_err(|_| Error::InvalidUtf8)
+            str::from_utf8(crate::large_values::inline_scalar_bytes(
+                crate::large_values::LargeValueKind::String,
+                payload,
+            )?)
+            .map_err(|_| Error::InvalidUtf8)
         })
     }
 
     pub fn get_nullable_bytes(&self, field_idx: usize) -> Result<Option<&'a [u8]>, Error> {
-        self.nullable_field(field_idx, &ValueType::Bytes, Ok)
+        self.nullable_field(field_idx, &ValueType::Bytes, |payload| {
+            Ok(crate::large_values::inline_scalar_bytes(
+                crate::large_values::LargeValueKind::Bytes,
+                payload,
+            )?)
+        })
     }
 
     pub fn get_nullable_uuid(&self, field_idx: usize) -> Result<Option<uuid::Uuid>, Error> {
@@ -1658,6 +1712,14 @@ pub struct VariantRecord {
     record: OwnedRecord,
 }
 
+/// An encoded variant record whose bytes were produced by its descriptor.
+///
+/// This proof lets commit paths retain the descriptor-compatibility check
+/// while avoiding a second structural validation pass over freshly encoded
+/// bytes. Arbitrary stored or caller-supplied bytes remain [`VariantRecord`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedVariantRecord(VariantRecord);
+
 impl VariantRecord {
     pub fn new(variant_tag: u32, record: OwnedRecord) -> Self {
         Self {
@@ -1711,8 +1773,42 @@ impl VariantRecord {
         self.record
     }
 
+    pub(crate) fn into_parts(self) -> (u32, OwnedRecord) {
+        (self.variant_tag, self.record)
+    }
+
     pub fn into_stored_bytes(self) -> Vec<u8> {
         encode_variant_record(self.variant_tag, self.record.raw())
+    }
+}
+
+impl ValidatedVariantRecord {
+    pub fn create(
+        variant_tag: u32,
+        descriptor: RecordDescriptor,
+        values: &[Value],
+    ) -> Result<Self, Error> {
+        let raw = descriptor.create(values)?;
+        Ok(Self(VariantRecord::new(
+            variant_tag,
+            OwnedRecord::new(raw, descriptor),
+        )))
+    }
+
+    pub fn variant_tag(&self) -> u32 {
+        self.0.variant_tag()
+    }
+
+    pub fn descriptor(&self) -> &RecordDescriptor {
+        self.0.descriptor()
+    }
+
+    pub fn record(&self) -> &OwnedRecord {
+        self.0.record()
+    }
+
+    pub(crate) fn into_parts(self) -> (u32, OwnedRecord) {
+        self.0.into_parts()
     }
 }
 
@@ -1786,6 +1882,10 @@ impl OwnedRecord {
 
     pub fn to_values(&self) -> Result<Vec<Value>, Error> {
         self.borrowed().to_values()
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        self.borrowed().validate()
     }
 }
 
@@ -1888,6 +1988,8 @@ impl Deref for BorrowedRecord<'_> {
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum Error {
+    #[error(transparent)]
+    LargeValue(#[from] crate::large_values::Error),
     #[error("expected {expected} values, got {actual}")]
     ArityMismatch { expected: usize, actual: usize },
     #[error("field not found: {0}")]

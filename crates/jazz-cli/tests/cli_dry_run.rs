@@ -11,21 +11,19 @@ use std::time::{Duration, Instant};
 
 use futures_util::{FutureExt, StreamExt};
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ReadOpts, RowCells, SeededRowIdSource, SubscriptionEvent,
-    SubscriptionStream, WireTransportAdapter, block_on,
+    Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent, WireTransportAdapter,
+    block_on,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{ArraySubquery, Query};
 use jazz::schema::JazzSchema;
-use jazz::schema::TableSchema;
-use jazz::serving::auth_admission::author_id_from_subject;
 use jazz::tools::{
     ColumnType as PublicColumnType, SchemaBuilder as PublicSchemaBuilder,
     TableSchemaBuilder as PublicTableSchemaBuilder,
 };
-use jazz::tx::{DurabilityTier, Fate};
+use jazz::tx::DurabilityTier;
 use jazz::wire::{TransportError, WireTransport};
 use serde_json::json;
 use tungstenite::protocol::Message;
@@ -153,17 +151,6 @@ fn schema_hex(schema: &JazzSchema) -> String {
         .collect()
 }
 
-fn todos_schema() -> JazzSchema {
-    let source = PublicSchemaBuilder::new()
-        .table(
-            PublicTableSchemaBuilder::new("todos")
-                .column("title", PublicColumnType::Text)
-                .column("done", PublicColumnType::Boolean),
-        )
-        .build();
-    jazz::schema::JazzSchema::new(&source).unwrap()
-}
-
 fn structured_schema() -> JazzSchema {
     let source = PublicSchemaBuilder::new()
         .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text))
@@ -183,15 +170,15 @@ fn empty_schema() -> JazzSchema {
 fn identity_for_subject(node: u8, subject: &str) -> DbIdentity {
     DbIdentity {
         node: NodeUuid::from_bytes([node; 16]),
-        author: author_id_from_subject(subject),
+        // The loopback server authenticates this handshake using the configured
+        // static bearer, so the local runtime must use the exact same reserved
+        // issuer-and-subject identity as the authority.
+        author: AuthorSubject::from_canonical(
+            &serde_json::to_string(&(jazz::serving::auth_admission::STATIC_BEARER_ISSUER, subject))
+                .expect("serialize canonical static-bearer test identity"),
+        )
+        .expect("parse canonical static-bearer test identity"),
     }
-}
-
-fn todo_cells(title: &str, done: bool) -> RowCells {
-    BTreeMap::from([
-        ("title".to_owned(), Value::String(title.to_owned())),
-        ("done".to_owned(), Value::Bool(done)),
-    ])
 }
 
 fn connect_server_ws(ws_url: &str, subject: &str) -> WebSocket<MaybeTlsStream<TcpStream>> {
@@ -321,59 +308,6 @@ fn pump_websocket(
     saw_server_frames
 }
 
-fn subscription_fields(
-    subscription: &mut SubscriptionStream,
-    table: &TableSchema,
-) -> Vec<(String, bool)> {
-    let mut rows = BTreeMap::<RowUuid, (String, bool)>::new();
-    while let Some(event) = subscription.next().now_or_never() {
-        let Some(event) = event else {
-            break;
-        };
-        match event {
-            SubscriptionEvent::Delta {
-                reset,
-                added,
-                updated,
-                removed,
-                ..
-            } => {
-                if reset {
-                    rows.clear();
-                }
-                for removed in removed {
-                    rows.remove(&removed.row_uuid);
-                }
-                ingest_current_rows(&mut rows, table, added.iter().map(|output| &output.row));
-                ingest_current_rows(&mut rows, table, updated.iter().map(|output| &output.row));
-            }
-            SubscriptionEvent::Rejected { reason } => {
-                panic!("subscription rejected unexpectedly: {reason:?}")
-            }
-            SubscriptionEvent::Closed => break,
-        }
-    }
-    let mut fields = rows.into_values().collect::<Vec<_>>();
-    fields.sort();
-    fields
-}
-
-fn ingest_current_rows<'a>(
-    rows: &mut BTreeMap<RowUuid, (String, bool)>,
-    table: &TableSchema,
-    current: impl IntoIterator<Item = &'a jazz::node::CurrentRow>,
-) {
-    for row in current {
-        let Some(Value::String(title)) = row.cell(table, "title") else {
-            panic!("expected title");
-        };
-        let Some(Value::Bool(done)) = row.cell(table, "done") else {
-            panic!("expected done");
-        };
-        rows.insert(row.row_uuid(), (title.clone(), done));
-    }
-}
-
 fn read_available_binary_frames(socket: &mut WebSocket<MaybeTlsStream<TcpStream>>) -> Vec<Vec<u8>> {
     let mut frames = Vec::new();
     loop {
@@ -402,7 +336,6 @@ struct RunningServer {
     child: Child,
     stdin: Option<ChildStdin>,
     ws_url: String,
-    lines: Vec<String>,
 }
 
 impl RunningServer {
@@ -441,44 +374,6 @@ impl RunningServer {
             child,
             stdin,
             ws_url,
-            lines,
-        }
-    }
-
-    fn start(app_id: &str, data_dir: &Path) -> Self {
-        let mut child = jazz_server_command()
-            .args([
-                "server",
-                app_id,
-                "--data-dir",
-                data_dir.to_str().expect("temp path is utf-8"),
-                "--admin-secret",
-                "test-admin-secret",
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .expect("spawn jazz-server server");
-        let stdin = child.stdin.take();
-        let stdout = child.stdout.take().expect("child stdout");
-        let mut reader = BufReader::new(stdout);
-        let mut lines = Vec::new();
-        let ws_url = loop {
-            let mut line = String::new();
-            let bytes = reader.read_line(&mut line).expect("read server stdout");
-            assert_ne!(bytes, 0, "server exited before reporting ws_url");
-            let line = line.trim_end().to_owned();
-            let ws_url = line.strip_prefix("ws_url=").map(str::to_owned);
-            lines.push(line);
-            if let Some(ws_url) = ws_url {
-                break ws_url;
-            }
-        };
-        Self {
-            child,
-            stdin,
-            ws_url,
-            lines,
         }
     }
 
@@ -487,36 +382,6 @@ impl RunningServer {
         let status = self.child.wait().expect("wait for server command");
         assert!(status.success());
     }
-}
-
-fn publish_schema_to_data_dir(app_id: &str, data_dir: &Path) {
-    std::fs::create_dir_all(data_dir).expect("create durable data dir");
-    let schema = json!({
-        "tables": {
-          "todos": {
-            "columns": [
-                { "name": "title", "column_type": { "type": "Text" }, "nullable": false },
-                { "name": "done", "column_type": { "type": "Boolean" }, "nullable": false }
-            ]
-          }
-        }
-    });
-    let store = json!({
-        app_id: [
-            {
-                "hash": "seeded-lifecycle-schema",
-                "objectId": format!("schema:{app_id}:seeded-lifecycle-schema"),
-                "publishedAt": 1,
-                "schema": schema,
-                "permissions": null
-            }
-        ]
-    });
-    std::fs::write(
-        data_dir.join("admin-schemas.json"),
-        serde_json::to_vec_pretty(&store).expect("encode schema store"),
-    )
-    .expect("write durable schema store");
 }
 
 #[test]
@@ -667,9 +532,6 @@ fn server_command_reports_wired_loopback_shape() {
     assert!(lines.contains(&"auth.mode=static-bearer".to_owned()));
     assert!(lines.contains(&"schema_catalogue=empty".to_owned()));
     assert!(lines.contains(&"runtime_schema_loading=static_empty_schema".to_owned()));
-    assert!(lines.contains(&"admin_schema_api=not_started".to_owned()));
-    assert!(lines.contains(&"admin_schema_store=not_opened".to_owned()));
-    assert!(lines.contains(&"admin_schema_owner=loopback_http_only".to_owned()));
     assert!(!lines.iter().any(|line| line.contains("unimplemented")));
     assert!(
         lines
@@ -751,110 +613,12 @@ fn server_command_defaults_to_data_dir_and_accepts_aliases() {
     assert!(lines.contains(&"websocket_path=/custom-ws".to_owned()));
     assert!(lines.contains(&"storage=rocksdb".to_owned()));
     assert!(lines.contains(&format!("data_dir={}", data_dir.display())));
-    assert!(lines.contains(&"admin_schema_api=not_started".to_owned()));
-    assert!(lines.contains(&"admin_schema_store=not_opened".to_owned()));
-    assert!(lines.contains(&"admin_schema_owner=loopback_http_only".to_owned()));
     assert!(lines.contains(&"auth.mode=static-bearer".to_owned()));
     assert!(
         lines
             .iter()
             .any(|line| line.starts_with("ws_url=ws://127.0.0.1:") && line.ends_with("/custom-ws"))
     );
-}
-
-#[test]
-fn server_command_loads_published_schema_and_persists_ws_data_across_restart() {
-    let app_id = "app-lifecycle";
-    let data_dir = std::env::temp_dir().join(format!(
-        "jazz-server-command-lifecycle-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&data_dir);
-    publish_schema_to_data_dir(app_id, &data_dir);
-
-    let schema = todos_schema();
-    let server = RunningServer::start(app_id, &data_dir);
-    assert!(server.lines.contains(&"command=server".to_owned()));
-    assert!(server.lines.contains(&format!("app_id={app_id}")));
-    assert!(
-        server
-            .lines
-            .contains(&format!("websocket_path=/apps/{app_id}/ws"))
-    );
-    assert!(server.lines.contains(&"storage=rocksdb".to_owned()));
-    assert!(
-        server
-            .lines
-            .contains(&"schema_catalogue=admin_schema_store".to_owned())
-    );
-    assert!(
-        server
-            .lines
-            .contains(&"runtime_schema_loading=admin_schema_store_latest".to_owned())
-    );
-    assert!(
-        server
-            .lines
-            .contains(&"admin_schema_store=opened".to_owned())
-    );
-    assert!(server.ws_url.ends_with(&format!("/apps/{app_id}/ws")));
-
-    let subject = "cli-persistent-user";
-    let mut writer = open_connected_client(
-        schema.clone(),
-        &server.ws_url,
-        subject,
-        identity_for_subject(0xc1, subject),
-    );
-    let write = block_on(writer.db.insert_with_id(
-        "todos",
-        RowUuid::from_bytes([0x41; 16]),
-        todo_cells("durable cli row", true),
-    ))
-    .expect("write todo through client db");
-    assert!(pump_websocket(&mut writer.socket, &writer.db, &writer.wire,));
-    let state = block_on(write.write_state()).expect("write state");
-    assert_eq!(state.fate, Fate::Accepted);
-    drop(writer.socket);
-    server.shutdown();
-
-    let restarted = RunningServer::start(app_id, &data_dir);
-    assert!(
-        restarted
-            .lines
-            .contains(&"schema_catalogue=admin_schema_store".to_owned())
-    );
-
-    let mut reader = open_connected_client(
-        schema.clone(),
-        &restarted.ws_url,
-        subject,
-        identity_for_subject(0xc2, subject),
-    );
-    let prepared = reader
-        .db
-        .prepare_query(&Query::from("todos"))
-        .expect("prepare todos query");
-    let mut subscription = block_on(reader.db.subscribe(
-        &prepared,
-        ReadOpts {
-            tier: DurabilityTier::Global,
-            ..Default::default()
-        },
-    ))
-    .expect("subscribe to todos");
-    assert!(pump_websocket(&mut reader.socket, &reader.db, &reader.wire,));
-    assert_eq!(
-        subscription_fields(&mut subscription, &schema.tables[0]),
-        vec![("durable cli row".to_owned(), true)]
-    );
-
-    drop(reader.socket);
-    restarted.shutdown();
-    let store = std::fs::read_to_string(data_dir.join("admin-schemas.json"))
-        .expect("schema catalogue survives beside data dir");
-    assert!(store.contains(app_id));
-    let _ = std::fs::remove_dir_all(&data_dir);
 }
 
 #[test]
@@ -868,15 +632,17 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
         subject,
         identity_for_subject(0xd1, subject),
     );
-    block_on(writer.db.insert_with_id(
+    block_on(writer.db.insert(
         "users",
-        RowUuid::from_bytes([0xa1; 16]),
         BTreeMap::from([("name".to_owned(), Value::String("owner".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(RowUuid::from_bytes([0xa1; 16])),
+            ..Default::default()
+        },
     ))
     .unwrap();
-    block_on(writer.db.insert_with_id(
+    block_on(writer.db.insert(
         "todos",
-        RowUuid::from_bytes([0xb1; 16]),
         BTreeMap::from([
             ("title".to_owned(), Value::String("first".to_owned())),
             (
@@ -884,6 +650,10 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
                 Value::Uuid(RowUuid::from_bytes([0xa1; 16]).0),
             ),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(RowUuid::from_bytes([0xb1; 16])),
+            ..Default::default()
+        },
     ))
     .unwrap();
     assert!(pump_websocket(&mut writer.socket, &writer.db, &writer.wire));
@@ -925,9 +695,8 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
     // and the same SubscriptionStream.
     drop(reader.socket);
 
-    block_on(writer.db.insert_with_id(
+    block_on(writer.db.insert(
         "todos",
-        RowUuid::from_bytes([0xb2; 16]),
         BTreeMap::from([
             ("title".to_owned(), Value::String("second".to_owned())),
             (
@@ -935,6 +704,10 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
                 Value::Uuid(RowUuid::from_bytes([0xa1; 16]).0),
             ),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(RowUuid::from_bytes([0xb2; 16])),
+            ..Default::default()
+        },
     ))
     .unwrap();
     assert!(pump_websocket(&mut writer.socket, &writer.db, &writer.wire));
@@ -989,9 +762,8 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
     assert!(terminal_operations.is_empty());
     while subscription.next().now_or_never().flatten().is_some() {}
 
-    block_on(writer.db.insert_with_id(
+    block_on(writer.db.insert(
         "todos",
-        RowUuid::from_bytes([0xb3; 16]),
         BTreeMap::from([
             ("title".to_owned(), Value::String("third".to_owned())),
             (
@@ -999,6 +771,10 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
                 Value::Uuid(RowUuid::from_bytes([0xa1; 16]).0),
             ),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(RowUuid::from_bytes([0xb3; 16])),
+            ..Default::default()
+        },
     ))
     .unwrap();
     assert!(pump_websocket(&mut writer.socket, &writer.db, &writer.wire));
@@ -1088,9 +864,6 @@ fn dry_run_prints_stable_report() {
     assert!(lines.contains(&"metrics.active_sessions=0"));
     assert!(lines.contains(&"metrics.total_sessions=0"));
     assert!(lines.contains(&"metrics.rejected_sessions=0"));
-    assert!(lines.contains(&"admin_schema_api=not_started"));
-    assert!(lines.contains(&"admin_schema_store=not_opened"));
-    assert!(lines.contains(&"admin_schema_owner=loopback_http_only"));
     assert!(lines.contains(&"sockets_bound=false"));
     assert!(lines.contains(&"storage_opened=false"));
     assert!(lines.contains(&"runtime_started=false"));
@@ -1130,9 +903,6 @@ fn dry_run_accepts_alpha_cli_flags_without_opening_storage() {
     assert!(lines.contains(&"listener=127.0.0.1:1625"));
     assert!(lines.contains(&"storage=rocksdb"));
     assert!(lines.contains(&"runtime_plan.storage_kind=rocksdb"));
-    assert!(lines.contains(&"admin_schema_api=not_started"));
-    assert!(lines.contains(&"admin_schema_store=not_opened"));
-    assert!(lines.contains(&"admin_schema_owner=loopback_http_only"));
     assert!(lines.contains(&"storage_opened=false"));
     assert!(lines.contains(&"auth.mode=static-bearer"));
     assert!(lines.contains(&"auth.allow_local_first_auth=false"));

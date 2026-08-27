@@ -35,11 +35,64 @@ The relay is a normal non-history-complete `Db`:
 - No binding may read directly from SQLite or bypass a `Db` to answer an app
   query.
 
-The scope key has no token material. The platform wrapper derives an opaque
-`auth_scope` only after authentication; tokens and claims belong to upstream
-session negotiation. Logout explicitly closes the old scope and chooses either
+The scope key has no token material. Trusted platform code derives an opaque
+`auth_scope` only after authentication and admits the complete scope config to
+the native host: auth scope, SQLite path, schema, persistent `DbIdentity`, and
+validated session claims. JavaScript receives only an opaque random 256-bit
+admission capability
+and cannot choose or amend those values through the command codec. UI peer
+identities are derived inside the host from the admitted author and a fresh
+process-local node handle. Reusing a scope with a different path, schema, or
+identity fails. Trusted logout revokes the capability and atomically closes all
+relay/client aliases opened through it; guessed and revoked capabilities cannot
+open a scope. Tokens belong to upstream session negotiation. Logout also
+chooses either
 retention or deletion through a separate, user-visible storage-lifecycle API.
 No current host may reuse a relay after an auth-scope change.
+
+#### Trusted platform admission codec
+
+The host admission ABI is deliberately separate from the generic relay command
+ABI. Kotlin and Swift/Objective-C pass one complete strict JSON object to
+`jazz_native_relay_host_admit_scope_json`; JavaScript never receives that
+object or a method that accepts it. Its exact top-level fields are:
+
+```text
+{
+  scope: { app_namespace, storage_namespace, auth_scope },
+  sqlite_path,
+  schema_json,
+  identity: { node, author },
+  claims
+}
+```
+
+Unknown fields at the top level, scope, or identity level fail closed. Rust
+parses the schema JSON, serializes it to its normalized JSON spelling, builds
+the `JazzSchema`, validates scope and the non-`SYSTEM` author, and validates
+the typed claims before it admits the scope. Admission input is bounded to
+1 MiB independently of peer-frame limits. Credential-bearing claims named
+`authorization`, `access_token`, `refresh_token`, `id_token`,
+`bearer_token`, or `token` (case-insensitive) fail closed. This is a boundary
+rule, not a replacement for JWT verification: platform authentication verifies
+a credential first, derives `auth_scope` and validated claims, then discards
+the bearer material from this admission call.
+
+On success the ABI returns exactly 32 random bytes: the opaque admission
+capability. The trusted platform layer owns its lifetime and may hand that
+opaque value to foreground JavaScript only for relay lifecycle commands. It
+never logs, derives storage names from, or decodes the capability. A second
+admission for the same scope with different SQLite path, schema, durable
+identity, or claims fails before minting a capability, including when no relay
+alias has yet been opened.
+
+Auth switching is ordered: revoke every capability for the old authenticated
+scope (which atomically closes its relay and UI-client aliases), then admit the
+new complete scope. A revoked or guessed capability cannot open or attach a
+client. Platform host destruction occurs only after its foreground runtime
+leases and trusted capabilities are both gone, at which point it calls
+`jazz_native_relay_host_free`; it does not retain Rust `Db` pointers across
+that lifecycle.
 
 `Db` and its peer connections are executor-local. A native relay therefore owns
 all core values on one dedicated native owner thread. Host calls are encoded
@@ -56,9 +109,15 @@ storage with a clear **“new native development/release build required”** err
 This makes OTA JavaScript updates safe without pretending they can update an
 embedded Rust library.
 
+ABI version 3 introduces host-generated opaque admission capabilities and
+trusted revocation. Its postcard command contract is intentionally incompatible
+with version 2, whose `open` command carried a predictable integer scope handle.
+
 The ABI stays coarse and binary:
 
 - open/close relay scope and attach/detach UI client;
+- send and drain complete canonical peer frames for each UI client and the
+  relay's upstream transport; host diagnostics expose only handle/queue state;
 - encode/decode the same schema, row, query, error, and peer-frame contracts
   used by WASM/NAPI where they apply;
 - drain/push peer protocol frames and lifecycle notifications;
@@ -68,6 +127,22 @@ Host wrappers must not create an object-per-row native API. Subscription events
 remain the maintained event stream from chapter 16. The RN TurboModule is one
 such host; it is not part of the core crate.
 
+The C host serializes all commands internally. Every directional peer queue has
+both encoded-byte and message-count budgets. The transport seam returns its
+typed `Backpressure` outcome for capacity exhaustion, allowing the ordinary
+peer state machine to retain and retry a stateful send; diagnostics remain the
+separate source of queue depth. Receive calls drain a
+bounded batch, and each pump services a bounded round-robin subset of UI peers.
+Callers retry after draining or scheduling another pump rather than spinning an
+unbounded native turn.
+
+`execute` and the `JazzRelay` TurboModule expose only the opaque postcard
+`RelayCommandRequest` command/frame vocabulary. Neither admits nor revokes a
+scope, and neither accepts claims, tokens, storage paths, schema, or durable
+identity. The dedicated trusted admission/revocation C entries are callable
+only by platform lifecycle code; this prohibition is source-contract tested in
+the RN package in addition to the Rust ABI tests.
+
 ### 19.3 SQLite backend contract
 
 `jazz-storage-sqlite` is a native implementation of Groove's existing async
@@ -76,7 +151,7 @@ such host; it is not part of the core crate.
 - versioned `meta` format markers;
 - a stable interned-column-family catalog;
 - bytewise ordered `(column_family, key)` primary keys;
-- atomic `write_many`, including ordered storage deltas;
+- atomic `write_many` over ordinary ordered-key/value sets and deletes;
 - explicit close and flush boundaries;
 - reopen that adds requested column families without losing existing contents.
 
@@ -95,12 +170,12 @@ with an actionable instruction to enable it (Expo: add the `jazz-rn` config
 plugin, then run `expo prebuild`).
 
 **Current checkpoint (not device support).** The package autolinks an Android
-and iOS `JazzRelay` TurboModule stub. Both report ABI `0` and reject commands
-until a matching `jazz-native-relay` artifact is embedded. It contains no
-XCFramework, AAR, or Rust relay artifact, so a prebuilt Expo development build
-or bare RN app can prove package integration but must not be presented as a
-usable Jazz client. Stock Expo Go cannot load arbitrary native code and is
-unsupported.
+and iOS `JazzRelay` TurboModule. A source/package build without staged native
+artifacts reports ABI `0` and rejects commands. Trusted artifact jobs build the
+Android static libraries and iOS XCFramework, and the npm file contract includes
+them when the release assembly stages them; merely producing a CI artifact does
+not make an npm package usable. Stock Expo Go cannot load arbitrary native code
+and is unsupported.
 
 **Target shipping contract.** A published `jazz-rn` package is a standard
 current React Native New Architecture TurboModule package:
@@ -126,6 +201,10 @@ and Maven/Kotlin packages consume the same relay core and artifact slices.
    deltas, flush/close, and planted negative checks.
 2. Native relay contracts: two UI clients sharing one relay, distinct scopes,
    auth switch/logout, upstream reconnect, reload/reopen, and corrupted store.
+   The exact host receipt
+   `jazz_native_relay::tests::admitted_scope_capabilities_are_unguessable_and_revocation_closes_all_aliases`
+   proves that revocation closes every alias and that the old capability cannot
+   be reused; do not duplicate this lifecycle assertion in binding-only tests.
 3. First-party RN test app: scenarios emit structured machine-readable
    results; the app itself is not a Maestro test script.
 4. Linux Blacksmith: Rust/TS contracts, Android native artifact build, Android
@@ -139,12 +218,12 @@ independently from JS-only scenario changes.
 
 ## Implementation ledger
 
-| Layer                     | Status                 | Verification                                                                                        | Remaining work                                                           |
-| ------------------------- | ---------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| SQLite ordered-KV         | implemented            | crate conformance: order/prefix/range, atomic unknown-CF rejection, reopen, format rejection, close | add injected crash/durability and full differential receipt              |
-| Native owner-thread relay | implemented foundation | compile contract; normal `Db` peer links for persistent relay ↔ in-memory clients                   | expose codec command surface and add black-box two-client/upstream tests |
-| RN TurboModule/package    | checkpoint implemented | generated Android+iOS `JazzRelay` contract, unavailable ABI/error receipts                          | embed and package prebuilt artifacts                                     |
-| Expo/bare RN app          | prebuild scaffold      | New-Architecture config plugin plus Android/iOS prebuild commands                                   | first-party device app, Android/iOS runners, cache actions               |
+| Layer                     | Status                 | Verification                                                                                        | Remaining work                                                             |
+| ------------------------- | ---------------------- | --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| SQLite ordered-KV         | implemented            | crate conformance: order/prefix/range, atomic unknown-CF rejection, reopen, format rejection, close | add injected crash/durability and full differential receipt                |
+| Native owner-thread relay | implemented foundation | lifecycle/frame host codec; normal `Db` peer links for persistent relay ↔ in-memory clients         | platform artifact wrappers and black-box two-client/upstream restart tests |
+| RN TurboModule/package    | checkpoint implemented | generated Android+iOS `JazzRelay` contract, unavailable ABI/error receipts                          | embed and package prebuilt artifacts                                       |
+| Expo/bare RN app          | prebuild scaffold      | New-Architecture config plugin plus Android/iOS prebuild commands                                   | first-party device app, Android/iOS runners, cache actions                 |
 
 ## Open questions
 

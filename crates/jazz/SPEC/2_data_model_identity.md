@@ -13,14 +13,14 @@ names defined here, but their behavior is specified in those chapters.
 Invariant digest:
 
 - `INV-CLASS-1`: Column-class shipping principle: upstream-decided mutable state and node-local derived state MUST NOT be shipped as replicated row payload.
-- `INV-DATA-1`: Stable wire identity fields MUST use the UUID newtypes (`NodeUuid`, `RowUuid`, `SchemaVersionId`, `MigrationLensId`, `AuthorId`) in wire byte order; node-local alias types MUST NOT be part of wire identity.
+- `INV-DATA-1`: Stable UUID wire identity fields MUST use the UUID newtypes (`NodeUuid`, `RowUuid`, `SchemaVersionId`, `MigrationLensId`) in wire byte order; `AuthorSubject` MUST use its canonical `[iss,sub]` JSON string; node-local alias and intern types MUST NOT be part of wire identity.
 - `INV-DATA-2`: `NodeAlias` and `SchemaVersionAlias` MUST be node-local storage aliases allocated in `jazz_nodes` and `jazz_schema_versions`; all egress from stored rows MUST resolve aliases back to `NodeUuid` and `SchemaVersionId`.
-- `INV-DATA-3`: `AuthorId::SYSTEM` MUST equal the UUIDv5 derivation `Uuid::new_v5(&Uuid::NAMESPACE_OID, b"jazz:system-author")`.
-- `INV-DATA-4`: `TxTime` MUST encode physical milliseconds in the high 48 bits and a logical counter in the low 16 bits; construction MUST reject values outside those packed ranges.
+- `INV-DATA-3`: `AuthorSubject::SYSTEM` MUST have the exact portable value `["urn:jazz:system","system"]`, and no authenticated user may claim the reserved system issuer.
+- `INV-DATA-4`: `TxTime` MUST encode physical milliseconds in the high 46 bits and a logical counter in the low 18 bits. Its internal allocator MUST advance the physical component on logical exhaustion and return a typed overflow only after exhausting the final packed value.
 - `INV-DATA-5`: A `TxId` MUST identify a transaction as `(time: TxTime, node: NodeUuid)`; stored transaction rows MUST use primary key `(time, node_id)` where `node_id` is the local alias for the wire `NodeUuid`.
 - `INV-DATA-6`: `SchemaVersionId` MUST be UUIDv5 over `JazzSchema::canonical_bytes()` in namespace `SCHEMA_VERSION_NAMESPACE`.
 - `INV-DATA-7`: Canonical schema identity MUST change when a column's `MergeStrategy` changes.
-- `INV-DATA-9`: A declared `MergeStrategy::Counter` MUST be accepted only on non-nullable integer columns of type `U8`, `U16`, `U32`, or `U64`.
+- `INV-DATA-9`: A declared `MergeStrategy::Counter` MUST be accepted only on non-nullable integer columns. Public `Integer` and `BigInt` columns lower to `I32` and `I64`; internal schemas may use `U8`, `U16`, `U32`, `U64`, `I32`, or `I64`.
 - `INV-DATA-11`: A merge strategy declaration MUST name an existing user column of the containing `TableSchema`.
 - `INV-DATA-12`: A table read or write policy, when present, MUST name the table it is attached to and MUST validate against the complete `JazzSchema`.
 - `INV-DATA-14`: History storage MUST preserve each content version's row identity, transaction identity, schema identity, parent set, and user cells.
@@ -57,16 +57,17 @@ node-local derived state is never shipped.
 
 ### 2.2 Identity types
 
-Cross-node identity is stable because every durable name is a wire-stable UUID
-newtype (`ids.rs`): `NodeUuid`, `RowUuid`, `SchemaVersionId`,
-`MigrationLensId`, `AuthorId`, and
+Cross-node identity is stable because durable object names are wire-stable UUID
+newtypes (`ids.rs`): `NodeUuid`, `RowUuid`, `SchemaVersionId`,
+`MigrationLensId`, and
 `TxId { time: TxTime, node: NodeUuid }`. Global settlement ordering uses the
 distinct packed HLC newtype `GlobalTime` (ch. 3–4). A transaction id combines a
 packed hybrid logical clock (`TxTime`,
 physical milliseconds plus a logical counter) with the writing node; the
 transaction is identified and tie-broken by both values (`INV-DATA-5`). The
-well-known `AuthorId::SYSTEM` is a fixed, content-derived id that passes all
-policies (ch. 7, `INV-DATA-3`).
+An `AuthorSubject` is instead the exact canonical JSON string `[iss,sub]`; its
+in-memory intern is never durable or portable. The well-known
+`AuthorSubject::SYSTEM` string passes all policies (ch. 7, `INV-DATA-3`).
 
 Storage may use compact local aliases without changing the wire identity model.
 Each node interns `NodeUuid` and `SchemaVersionId` to local `u64` aliases
@@ -88,13 +89,13 @@ that column.
 
 The default merge strategy is column last-writer-wins by HLC
 (`MergeStrategy::Lww`). A counter declaration is accepted only on a non-nullable
-integer column (`U8`/`U16`/`U32`/`U64`) (`INV-DATA-9`).
+integer column (`INV-DATA-9`). Public `Integer` and `BigInt` columns lower to
+`I32` and `I64`; lower-level runtime schemas also support the unsigned fixed-width
+integer representations.
 
 **Implementation status.** The reference implementation currently provides
-`MergeStrategy::Counter` as its non-LWW built-in strategy. Its declaration
-constraints are covered by
-`schema::counter_merge_strategy_rejects_string_columns`,
-`schema::counter_merge_strategy_rejects_nullable_integer_columns`.
+`MergeStrategy::Counter` as its non-LWW built-in strategy. Public-schema
+conversion validates this constraint before installing the runtime schema.
 
 _Further invariants._ `INV-DATA-11` — a merge-strategy declaration names an
 existing user column. `INV-DATA-12` — a table policy validates against the whole
@@ -176,12 +177,17 @@ layout. It is useful for implementers and debugging, but exact table names,
 primary keys, and indexes are not the portable data-model contract. The layout
 is covered by `schema::storage_lowering_declares_system_columns_by_shape`.
 
-**Identity encoding.** `TxTime` packs physical milliseconds in the high 48 bits
-and a logical counter in the low 16; construction rejects values outside those
-ranges (`INV-DATA-4`). `AuthorId::SYSTEM` is
-`Uuid::new_v5(&NAMESPACE_OID, b"jazz:system-author")` (`= 93c209ee-…-c0bbcf6a`).
-Node-local aliases live in `jazz_nodes` / `jazz_schema_versions` and are rebuilt
-from those tables on recovery.
+**Identity encoding.** `TxTime` packs physical milliseconds in the high 46 bits
+and a logical counter in the low 18. It can represent Unix milliseconds through
+approximately year 4200 and 262,144 ordered positions per millisecond. On
+logical exhaustion it advances physical time by one millisecond; only the final
+packed position returns a typed clock-overflow (`INV-DATA-4`). `TxTime` remains
+an opaque ordering/version field: public row provenance exposes only physical
+Unix milliseconds. UUID object identities retain their newtype encodings;
+`AuthorSubject::SYSTEM` is the canonical JSON string
+`["urn:jazz:system","system"]`, and authenticated author subjects are exact
+canonical `[iss,sub]` JSON strings. Node-local aliases live in `jazz_nodes` /
+`jazz_schema_versions` and are rebuilt from those tables on recovery.
 
 **Lowered tables.** `lower_to_groove()` produces:
 

@@ -21,7 +21,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{Query, all_of, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -29,8 +29,16 @@ use jazz::tx::DurabilityTier;
 
 type CoreDb = Db<MemoryStorage>;
 
-const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
-const OTHER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
+const AUTHOR_UUID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-0000000000a1");
+const OTHER_AUTHOR_UUID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-0000000000b2");
+
+fn author() -> AuthorSubject {
+    AuthorSubject::for_test_uuid(AUTHOR_UUID)
+}
+
+fn other_author() -> AuthorSubject {
+    AuthorSubject::for_test_uuid(OTHER_AUTHOR_UUID)
+}
 const FANOUT_SUBSCRIPTIONS: usize = 100;
 
 fn schema() -> JazzSchema {
@@ -60,7 +68,7 @@ fn open_db(seed: u64) -> CoreDb {
             MemoryStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([seed as u8; 16]),
-                author: AUTHOR,
+                author: author(),
             },
         )
         .with_id_source(SeededRowIdSource::new(seed)),
@@ -83,7 +91,7 @@ fn cells(index: usize) -> BTreeMap<String, Value> {
             "content".to_owned(),
             Value::String(format!("Content body for document {index}")),
         ),
-        ("author".to_owned(), Value::Uuid(AUTHOR.0)),
+        ("author".to_owned(), Value::Uuid(AUTHOR_UUID)),
         ("created_at".to_owned(), Value::U64(index as u64)),
         ("done".to_owned(), Value::Bool(index.is_multiple_of(2))),
     ])
@@ -92,11 +100,11 @@ fn cells(index: usize) -> BTreeMap<String, Value> {
 fn filtered_cells(index: usize) -> BTreeMap<String, Value> {
     let mut cells = cells(index);
     let author = if index.is_multiple_of(2) {
-        AUTHOR
+        author()
     } else {
-        OTHER_AUTHOR
+        other_author()
     };
-    cells.insert("author".to_owned(), Value::Uuid(author.0));
+    cells.insert("author".to_owned(), Value::Uuid(author.test_uuid()));
     cells.insert("folder".to_owned(), Value::Uuid(row_uuid(index % 2).0));
     cells
 }
@@ -104,7 +112,7 @@ fn filtered_cells(index: usize) -> BTreeMap<String, Value> {
 fn seed_documents(db: &CoreDb, count: usize) {
     for index in 0..count {
         let write = db
-            .insert("documents", cells(index))
+            .insert("documents", cells(index), Default::default())
             .expect("seed core benchmark row");
         block_on(write.wait(DurabilityTier::Local)).expect("seed row should be local");
     }
@@ -113,7 +121,7 @@ fn seed_documents(db: &CoreDb, count: usize) {
 fn seed_filtered_documents(db: &CoreDb, count: usize) {
     for index in 0..count {
         let write = db
-            .insert("documents", filtered_cells(index))
+            .insert("documents", filtered_cells(index), Default::default())
             .expect("seed core benchmark row");
         block_on(write.wait(DurabilityTier::Local)).expect("seed row should be local");
     }
@@ -125,13 +133,13 @@ fn all_documents_query(db: &CoreDb) -> jazz::db::PreparedQuery {
 }
 
 fn author_filter_query(db: &CoreDb) -> jazz::db::PreparedQuery {
-    db.prepare_query(&Query::from("documents").filter(eq(col("author"), lit(AUTHOR.0))))
+    db.prepare_query(&Query::from("documents").filter(eq(col("author"), lit(AUTHOR_UUID))))
         .expect("prepare author-filtered documents query")
 }
 
 fn narrow_filter_query(db: &CoreDb) -> jazz::db::PreparedQuery {
     db.prepare_query(&Query::from("documents").filter(all_of([
-        eq(col("author"), lit(AUTHOR.0)),
+        eq(col("author"), lit(AUTHOR_UUID)),
         eq(col("folder"), lit(row_uuid(0).0)),
         eq(col("done"), lit(true)),
     ])))
@@ -175,7 +183,7 @@ fn single_subscription_latency(c: &mut Criterion) {
 
             b.iter(|| {
                 next += 1;
-                db.insert("documents", cells(next))
+                db.insert("documents", cells(next), Default::default())
                     .expect("core subscribed insert should succeed");
                 assert_eq!(read_added_len(block_on(subscription.next_event())), 1);
             });
@@ -211,7 +219,7 @@ fn fanout_latency(c: &mut Criterion) {
 
                 b.iter(|| {
                     next += 1;
-                    db.insert("documents", cells(next))
+                    db.insert("documents", cells(next), Default::default())
                         .expect("core fanout insert should succeed");
 
                     let notified = subscriptions
@@ -277,7 +285,7 @@ fn filtered_subscription_latency(c: &mut Criterion) {
 
                 b.iter(|| {
                     next += 2;
-                    db.insert("documents", filtered_cells(next))
+                    db.insert("documents", filtered_cells(next), Default::default())
                         .expect("core filtered insert should succeed");
                     assert_eq!(read_added_len(block_on(subscription.next_event())), 1);
                 });
@@ -313,7 +321,7 @@ fn batch_insert_subscription_latency(c: &mut Criterion) {
                         .expect("core batch transaction should open");
                     for _ in 0..batch_size {
                         next += 2;
-                        tx.insert("documents", filtered_cells(next))
+                        tx.insert("documents", filtered_cells(next), Default::default())
                             .expect("core batch insert should stage");
                     }
                     tx.commit().expect("core batch insert should commit");

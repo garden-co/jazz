@@ -18,10 +18,11 @@ a broken alternative runtime path.
 
 The package reserves a generated `JazzRelay` TurboModule boundary. Android and
 iOS autolink the module, report ABI `0` (unavailable), and explicitly reject
-commands until a development or release build embeds the shared Rust relay
-artifact. `expo prebuild` and bare React Native integration can therefore
-succeed without a stale native framework, but they do **not** make Jazz usable
-on a device yet.
+commands unless a development or release assembly stages the shared Rust relay
+artifact. Staged Android libraries, the shared header, and the iOS XCFramework
+are included by the npm package file contract. `expo prebuild` and bare React
+Native integration can therefore succeed without an artifact, but they do
+**not** make Jazz usable on a device yet.
 
 `jazz-rn` requires the React Native **New Architecture**. Android Gradle and
 iOS CocoaPods fail early with an install/configuration instruction otherwise.
@@ -34,10 +35,17 @@ inspects Expo's autolinking contracts for this package. It is intentionally not
 a native build receipt: this Linux development environment has neither Java
 nor CocoaPods, so Gradle configuration/build and `pod install` must run on the
 respective Blacksmith runners before claiming platform or device support.
-The shared host codec now stages `Open`, `Attach`, `CloseClient`, `CloseRelay`,
-and bounded `Pump`; no platform artifact calls it yet. This is a thin platform
-checkpoint, not device support: there is still no linked JNI artifact,
-XCFramework, AAR, or Expo development-build receipt.
+The shared host codec now stages trusted native scope admission/revocation via
+random 256-bit capabilities, client open-close, bounded `Pump`, directional
+bounded peer-frame send/drain, and handle/queue diagnostics. Kotlin and
+Swift/Objective-C application authentication code supplies the complete strict
+scope configuration to a dedicated native entrypoint; Rust validates and
+normalizes it, then returns only the opaque 32-byte capability. The generic
+TurboModule `execute` channel never accepts scope configuration, claims, or
+bearer tokens. On auth switch, trusted code revokes the old capability (closing
+all of its relay/client aliases) before admitting the new scope. This is still
+a platform checkpoint, not device support: there is no assembled release-package
+or Expo development-build receipt yet.
 
 The shared artifact seam is `jazz_native_relay_abi_version` from
 `jazz-native-relay`'s C ABI (`include/jazz_native_relay.h`). Android/JNI will
@@ -45,6 +53,9 @@ link that artifact directly when the Android build pipeline exists; it must not
 route through the obsolete UniFFI library. The remaining Android runner gate is
 a real Gradle/NDK AAR build and emulator installation against that linked
 artifact.
+
+The wrapper accepts ABI 3, which uses opaque host-generated admission
+capabilities and trusted revocation.
 
 ## What remains before React Native is supported
 

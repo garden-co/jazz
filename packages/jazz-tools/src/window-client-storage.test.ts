@@ -25,6 +25,7 @@ describe("registerWindowJazzStorageClient", () => {
         cookieSession: {
           user_id: "alice@example.com",
           claims: {},
+          issuer: "https://issuer.example",
           authMode: "external",
         },
       }),
@@ -36,6 +37,7 @@ describe("registerWindowJazzStorageClient", () => {
         cookieSession: {
           user_id: "ephemeral-visitor",
           claims: {},
+          issuer: "urn:jazz:anonymous",
           authMode: "anonymous",
         },
       }),
@@ -47,6 +49,7 @@ describe("registerWindowJazzStorageClient", () => {
         cookieSession: {
           user_id: "alice@example.com",
           claims: {},
+          issuer: "https://issuer.example",
           authMode: "external",
         },
       }),
@@ -58,6 +61,7 @@ describe("registerWindowJazzStorageClient", () => {
         cookieSession: {
           user_id: "bob@example.com",
           claims: {},
+          issuer: "https://issuer.example",
           authMode: "external",
         },
       }),
@@ -65,8 +69,8 @@ describe("registerWindowJazzStorageClient", () => {
 
     expect(window.__jazz?.listLiveStorageNamespaces()).toEqual([
       "chat-app",
-      "chat-app::alice%40example.com",
-      "chat-app::bob%40example.com",
+      "chat-app::%5B%22https%3A%2F%2Fissuer.example%22%2C%22alice%40example.com%22%5D",
+      "chat-app::%5B%22https%3A%2F%2Fissuer.example%22%2C%22bob%40example.com%22%5D",
     ]);
 
     unregisterExternal();

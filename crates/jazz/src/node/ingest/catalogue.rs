@@ -1,7 +1,23 @@
+// Global restart-persistent metadata ceiling across every connected peer.
+const MAX_PENDING_LARGE_VALUE_UPLOADS: usize = 1024;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CatalogueActivationMode {
     ColdOpen,
     Live,
+}
+
+fn large_value_upload_is_rejected(error: &groove::db::Error) -> bool {
+    matches!(
+        error,
+        groove::db::Error::InvalidLargeValueMetadata(_)
+            | groove::db::Error::IvmRuntime(
+                groove::ivm::runtime::IvmRuntimeError::LargeValue(_)
+                    | groove::ivm::runtime::IvmRuntimeError::Chunk(
+                        groove::chunks::ChunkError::Integrity
+                    )
+            )
+    )
 }
 
 impl<S> NodeState<S>
@@ -31,7 +47,7 @@ where
         self.apply_sync_message_with_ingest_context(
             message,
             Some(CommitUnitIngestContext {
-                identity: AuthorId::SYSTEM,
+                identity: AuthorSubject::SYSTEM,
                 trust: CommitUnitTrust::TrustedBackend,
                 edge_authority: false,
             }),
@@ -45,169 +61,332 @@ where
         message: SyncMessage,
         ingest_context: Option<CommitUnitIngestContext>,
     ) -> std::pin::Pin<
-        Box<
-            dyn Future<Output = Result<PublicationOutcome<Vec<SyncMessage>>, Error>> + 'a,
-        >,
+        Box<dyn Future<Output = Result<PublicationOutcome<Vec<SyncMessage>>, Error>> + 'a>,
     >
     where
         S: ReopenableStorage,
     {
         Box::pin(async move {
-        // A dynamic edge has exactly one admissible pre-ready transition: the
-        // authenticated upstream invokes `apply_trusted_catalogue_snapshot`
-        // directly.  Incremental catalogue/data/branch traffic has no
-        // authority lineage to validate against and must not leave durable
-        // pending rows that poison a later reopen.
-        self.require_catalogue_ready()?;
-        if self.catalogue_activation_failed {
-            return Err(Error::CatalogueActivationFailed);
-        }
-        let message = message
-            .expand_version_carriers_for_receive()
-            .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
-        match message {
-            SyncMessage::SessionClaims { identity, claims } => {
-                if let Some(context) = ingest_context
-                    && context.trust == CommitUnitTrust::TrustedBackend
-                {
-                    self.set_session_claims(identity, claims);
+            // A dynamic edge has exactly one admissible pre-ready transition: the
+            // authenticated upstream invokes `apply_trusted_catalogue_snapshot`
+            // directly.  Incremental catalogue/data/branch traffic has no
+            // authority lineage to validate against and must not leave durable
+            // pending rows that poison a later reopen.
+            self.require_catalogue_ready()?;
+            if self.catalogue_activation_failed {
+                return Err(Error::CatalogueActivationFailed);
+            }
+            let message = message
+                .expand_version_carriers_for_receive()
+                .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
+            match message {
+                SyncMessage::ChunkUploadStart(start) => {
+                    if !self.admit_large_value_ingress(
+                        super::LARGE_VALUE_UPLOAD_START_INGRESS_CHARGE_BYTES,
+                    ) {
+                        return Ok(PublicationOutcome::settled(vec![
+                            SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                                value_ref: start.value_ref,
+                                status: crate::protocol::ChunkUploadStatus::RateLimited,
+                            }),
+                        ]));
+                    }
+                    let progress = match self
+                        .database
+                        .begin_large_value_upload_with_pending_limit(
+                            start.value_ref.clone(),
+                            MAX_PENDING_LARGE_VALUE_UPLOADS,
+                        )
+                        .await
+                    {
+                        Ok(progress) => progress,
+                        Err(groove::db::Error::PendingLargeValueUploadLimitExceeded { .. }) => {
+                            return Ok(PublicationOutcome::settled(vec![
+                                SyncMessage::ChunkUploadResult(
+                                    crate::protocol::ChunkUploadResult {
+                                        value_ref: start.value_ref,
+                                        status: crate::protocol::ChunkUploadStatus::RateLimited,
+                                    },
+                                ),
+                            ]));
+                        }
+                        Err(error) if large_value_upload_is_rejected(&error) => {
+                            return Ok(PublicationOutcome::settled(vec![
+                                SyncMessage::ChunkUploadResult(
+                                    crate::protocol::ChunkUploadResult {
+                                        value_ref: start.value_ref,
+                                        status: crate::protocol::ChunkUploadStatus::Rejected,
+                                    },
+                                ),
+                            ]));
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
+                    let status = match progress {
+                        groove::large_values::LargeValueUploadProgress::Missing(mut nodes) => {
+                            nodes.truncate(64);
+                            crate::protocol::ChunkUploadStatus::Need(nodes)
+                        }
+                        groove::large_values::LargeValueUploadProgress::Staged(_) => {
+                            crate::protocol::ChunkUploadStatus::Staged
+                        }
+                    };
+                    Ok(PublicationOutcome::settled(vec![
+                        SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                            value_ref: start.value_ref,
+                            status,
+                        }),
+                    ]))
                 }
-                Ok(PublicationOutcome::settled(Vec::new()))
-            }
-            SyncMessage::CommitUnit { tx, versions } => {
-                let now_ms = if ingest_context.is_some() {
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_err(|_| Error::InvalidStoredValue("authority clock precedes Unix epoch"))?
-                        .as_millis()
-                        .try_into()
-                        .map_err(|_| Error::InvalidStoredValue("authority clock exceeds u64 milliseconds"))?
-                } else {
-                    tx.tx_id.time.physical_ms()
-                };
-                self.ingest_commit_unit_with_context(tx, versions, now_ms, ingest_context)
-                    .await
-            }
-            SyncMessage::FateUpdate {
-                tx_id,
-                fate,
-                global_time,
-                durability,
-            } => {
-                validate_received_fate_update_global_time_durability(global_time, durability)?;
-                self.apply_fate_update(tx_id, fate, global_time, durability)
-                    .await?;
-                self.drain_parked_commit_units().await
-            }
-            SyncMessage::ViewUpdate {
-                subscription,
-                settled_through,
-                reset_result_set,
-                version_carriers,
-                version_bundles,
-                peer_payload_inventory,
-                result_member_adds,
-                result_member_removes,
-                terminal_operations,
-                program_fact_adds,
-                program_fact_removes,
-            } => {
-                self.apply_view_update(ViewUpdateParts {
+                SyncMessage::ChunkUploadNodes(batch) => {
+                    let upload_exists = self
+                        .database
+                        .pending_large_value_uploads()
+                        .await?
+                        .into_iter()
+                        .any(|upload| upload.descriptor.as_ref() == Some(&batch.value_ref));
+                    if !upload_exists {
+                        return Ok(PublicationOutcome::settled(vec![
+                            SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                                value_ref: batch.value_ref,
+                                status: crate::protocol::ChunkUploadStatus::Rejected,
+                            }),
+                        ]));
+                    }
+                    let accounting = batch.chunks.iter().try_fold(
+                        groove::large_values::StagedLargeValueAccounting::default(),
+                        |mut total, chunk| {
+                            total.encoded_bytes = total
+                                .encoded_bytes
+                                .checked_add(u64::try_from(chunk.encoded.len()).map_err(|_| {
+                                    Error::UnsupportedSyncMessage("chunk upload batch is too large")
+                                })?)
+                                .ok_or(Error::UnsupportedSyncMessage(
+                                    "chunk upload accounting overflow",
+                                ))?;
+                            total.node_count = total.node_count.checked_add(1).ok_or(
+                                Error::UnsupportedSyncMessage("chunk upload accounting overflow"),
+                            )?;
+                            Ok::<_, Error>(total)
+                        },
+                    )?;
+                    if !self.admit_large_value_ingress(accounting.encoded_bytes) {
+                        return Ok(PublicationOutcome::settled(vec![
+                            SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                                value_ref: batch.value_ref,
+                                status: crate::protocol::ChunkUploadStatus::RateLimited,
+                            }),
+                        ]));
+                    }
+                    let progress = match self
+                        .database
+                        .continue_large_value_upload_if_current(
+                            batch.value_ref.clone(),
+                            batch.chunks,
+                        )
+                        .await
+                    {
+                        Ok(Some(progress)) => progress,
+                        Ok(None) => {
+                            return Ok(PublicationOutcome::settled(vec![
+                                SyncMessage::ChunkUploadResult(
+                                    crate::protocol::ChunkUploadResult {
+                                        value_ref: batch.value_ref,
+                                        status: crate::protocol::ChunkUploadStatus::Rejected,
+                                    },
+                                ),
+                            ]));
+                        }
+                        Err(error) if large_value_upload_is_rejected(&error) => {
+                            return Ok(PublicationOutcome::settled(vec![
+                                SyncMessage::ChunkUploadResult(
+                                    crate::protocol::ChunkUploadResult {
+                                        value_ref: batch.value_ref,
+                                        status: crate::protocol::ChunkUploadStatus::Rejected,
+                                    },
+                                ),
+                            ]));
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
+                    let status = match progress {
+                        groove::large_values::LargeValueUploadProgress::Missing(mut nodes) => {
+                            nodes.truncate(64);
+                            crate::protocol::ChunkUploadStatus::Need(nodes)
+                        }
+                        groove::large_values::LargeValueUploadProgress::Staged(_) => {
+                            crate::protocol::ChunkUploadStatus::Staged
+                        }
+                    };
+                    Ok(PublicationOutcome::settled(vec![
+                        SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                            value_ref: batch.value_ref,
+                            status,
+                        }),
+                    ]))
+                }
+                SyncMessage::ChunkUploadResult(_) => Err(Error::UnsupportedSyncMessage(
+                    "chunk upload result requires peer link context",
+                )),
+                SyncMessage::SessionClaims { identity, claims } => {
+                    if let Some(context) = ingest_context
+                        && context.trust == CommitUnitTrust::TrustedBackend
+                    {
+                        self.set_session_claims(identity, claims);
+                    }
+                    Ok(PublicationOutcome::settled(Vec::new()))
+                }
+                SyncMessage::CommitUnit { tx, versions } => {
+                    if ingest_context.is_some() {
+                        let descriptors = version_indirect_descriptors(&versions);
+                        self.current_staged_ids_for_descriptors(&descriptors, true)
+                            .await?;
+                    }
+                    let now_ms = if ingest_context.is_some() {
+                        web_time::SystemTime::now()
+                            .duration_since(web_time::UNIX_EPOCH)
+                            .map_err(|_| {
+                                Error::InvalidStoredValue("authority clock precedes Unix epoch")
+                            })?
+                            .as_millis()
+                            .try_into()
+                            .map_err(|_| {
+                                Error::InvalidStoredValue(
+                                    "authority clock exceeds u64 milliseconds",
+                                )
+                            })?
+                    } else {
+                        tx.tx_id.time.physical_ms()
+                    };
+                    self.ingest_commit_unit_with_context(tx, versions, now_ms, ingest_context)
+                        .await
+                }
+                SyncMessage::FateUpdate {
+                    tx_id,
+                    fate,
+                    global_time,
+                    durability,
+                } => {
+                    validate_received_fate_update_global_time_durability(global_time, durability)?;
+                    self.apply_fate_update(tx_id, fate, global_time, durability)
+                        .await?;
+                    self.drain_parked_commit_units().await
+                }
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
                     settled_through,
-                    defer_settlement: false,
                     reset_result_set,
                     version_carriers,
                     version_bundles,
-                    peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
-                    authorization_progress: peer_payload_inventory.authorization_progress,
-                    opening_pending: peer_payload_inventory.opening_pending,
+                    peer_payload_inventory,
                     result_member_adds,
                     result_member_removes,
                     terminal_operations,
                     program_fact_adds,
                     program_fact_removes,
-                })
-                .await?;
-                Ok(PublicationOutcome::settled(Vec::new()))
-            }
-            SyncMessage::RegisterShape {
-                shape_id,
-                ast,
-                opts: _,
-            } => {
-                validate_shape_ast_size(&ast)
-                    .map_err(|_| Error::UnsupportedSyncMessage("shape AST exceeds byte limit"))?;
-                self.register_shape(shape_id, ast)?;
-                Ok(PublicationOutcome::settled(Vec::new()))
-            }
-            SyncMessage::FetchRowVersions { .. } => Err(Error::UnsupportedSyncMessage(
-                "row-version repair fetch must be served by peer state",
-            )),
-            SyncMessage::RowVersionPayloads { .. } => Err(Error::UnsupportedSyncMessage(
-                "row-version repair payload requires outstanding request context",
-            )),
-            SyncMessage::CatalogueSnapshot(_) => Err(Error::UnsupportedSyncMessage(
-                "catalogue snapshot requires a trusted upstream link",
-            )),
-            SyncMessage::Subscribe(subscribe) => {
-                validate_known_state_declaration(&subscribe.known_state).map_err(|_| {
-                    Error::UnsupportedSyncMessage("known-state declaration exceeds limit")
-                })?;
-                self.apply_subscribe(subscribe)?;
-                Ok(PublicationOutcome::settled(Vec::new()))
-            }
-            SyncMessage::SubscribeRejected { .. } => Err(Error::UnsupportedSyncMessage(
-                "subscription rejection requires subscription stream context",
-            )),
-            SyncMessage::Unsubscribe { subscription } => {
-                self.apply_unsubscribe(subscription);
-                Ok(PublicationOutcome::settled(Vec::new()))
-            }
-            SyncMessage::PublishSchema { author, schema } => {
-                self.apply_publish_schema(author, ingest_context, *schema)
-                    .await
-            }
-            SyncMessage::PublishSchemaWithLens {
-                author,
-                catalogue_seq,
-                publication,
-            } => {
-                self.apply_publish_schema_with_lens(
+                }) => {
+                    self.apply_view_update(ViewUpdateParts {
+                        subscription,
+                        settled_through,
+                        defer_settlement: false,
+                        reset_result_set,
+                        version_carriers,
+                        version_bundles,
+                        peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+                        authorization_progress: peer_payload_inventory.authorization_progress,
+                        opening_pending: peer_payload_inventory.opening_pending,
+                        result_member_adds,
+                        result_member_removes,
+                        terminal_operations,
+                        program_fact_adds,
+                        program_fact_removes,
+                    })
+                    .await?;
+                    Ok(PublicationOutcome::settled(Vec::new()))
+                }
+                SyncMessage::RegisterShape {
+                    shape_id,
+                    ast,
+                    opts,
+                } => {
+                    validate_shape_registration_size(&ast, &opts).map_err(|_| {
+                        Error::UnsupportedSyncMessage("shape registration exceeds byte limit")
+                    })?;
+                    self.register_shape(shape_id, ast)?;
+                    Ok(PublicationOutcome::settled(Vec::new()))
+                }
+                SyncMessage::FetchRowVersions { .. } => Err(Error::UnsupportedSyncMessage(
+                    "row-version repair fetch must be served by peer state",
+                )),
+                SyncMessage::RowVersionPayloads { .. } => Err(Error::UnsupportedSyncMessage(
+                    "row-version repair payload requires outstanding request context",
+                )),
+                SyncMessage::CatalogueSnapshot(_) => Err(Error::UnsupportedSyncMessage(
+                    "catalogue snapshot requires a trusted upstream link",
+                )),
+                SyncMessage::Subscribe(subscribe) => {
+                    validate_known_state_declaration(&subscribe.known_state).map_err(|_| {
+                        Error::UnsupportedSyncMessage("known-state declaration exceeds limit")
+                    })?;
+                    self.apply_subscribe(subscribe)?;
+                    Ok(PublicationOutcome::settled(Vec::new()))
+                }
+                SyncMessage::SubscribeRejected { .. } => Err(Error::UnsupportedSyncMessage(
+                    "subscription rejection requires subscription stream context",
+                )),
+                SyncMessage::Unsubscribe { subscription } => {
+                    self.apply_unsubscribe(subscription);
+                    Ok(PublicationOutcome::settled(Vec::new()))
+                }
+                SyncMessage::PublishSchema { author, schema } => {
+                    self.apply_publish_schema(author, ingest_context, *schema)
+                        .await
+                }
+                SyncMessage::PublishSchemaWithLens {
                     author,
-                    ingest_context,
                     catalogue_seq,
-                    *publication,
-                )
-                .await
+                    publication,
+                } => {
+                    self.apply_publish_schema_with_lens(
+                        author,
+                        ingest_context,
+                        catalogue_seq,
+                        *publication,
+                    )
+                    .await
+                }
+                SyncMessage::PublishLens { author, lens } => self
+                    .apply_publish_lens(author, ingest_context, lens)
+                    .await
+                    .map(PublicationOutcome::settled),
+                SyncMessage::SetCurrentWriteSchema { author, pointer } => self
+                    .apply_set_current_write_schema(author, ingest_context, pointer)
+                    .await
+                    .map(PublicationOutcome::settled),
+                SyncMessage::CatalogueAck(_) => Ok(PublicationOutcome::settled(Vec::new())),
+                SyncMessage::ChunkRequestBatch(_) | SyncMessage::ChunkResponseBatch(_) => Err(
+                    Error::UnsupportedSyncMessage("chunk traffic requires peer link context"),
+                ),
+                SyncMessage::PermissionAdviceRequest { .. }
+                | SyncMessage::PermissionAdviceResponse { .. }
+                | SyncMessage::AuthorizationScopeSubscribe { .. }
+                | SyncMessage::AuthorizationScopeReceipt { .. }
+                | SyncMessage::AuthorizationScopeIntent { .. }
+                | SyncMessage::AuthorizationScopeView { .. }
+                | SyncMessage::AuthorizationScopeAggregateReceipt { .. }
+                | SyncMessage::AuthorizationScopeUnavailable { .. }
+                | SyncMessage::AuthorizationScopeDecision { .. } => {
+                    Err(Error::UnsupportedSyncMessage(
+                        "permission advice requires authenticated link context",
+                    ))
+                }
             }
-            SyncMessage::PublishLens { author, lens } => self
-                .apply_publish_lens(author, ingest_context, lens)
-                .await
-                .map(PublicationOutcome::settled),
-            SyncMessage::SetCurrentWriteSchema { author, pointer } => self
-                .apply_set_current_write_schema(author, ingest_context, pointer)
-                .await
-                .map(PublicationOutcome::settled),
-            SyncMessage::CatalogueAck(_) => Ok(PublicationOutcome::settled(Vec::new())),
-            SyncMessage::PermissionAdviceRequest { .. }
-            | SyncMessage::PermissionAdviceResponse { .. }
-            | SyncMessage::AuthorizationScopeSubscribe { .. }
-            | SyncMessage::AuthorizationScopeReceipt { .. }
-            | SyncMessage::AuthorizationScopeIntent { .. }
-            | SyncMessage::AuthorizationScopeView { .. }
-            | SyncMessage::AuthorizationScopeAggregateReceipt { .. }
-            | SyncMessage::AuthorizationScopeUnavailable { .. }
-            | SyncMessage::AuthorizationScopeDecision { .. } => Err(Error::UnsupportedSyncMessage(
-                "permission advice requires authenticated link context",
-            )),
-        }
         })
     }
 
     async fn apply_publish_schema(
         &mut self,
-        author: AuthorId,
+        author: AuthorSubject,
         ingest_context: Option<CommitUnitIngestContext>,
         schema: SchemaVersion,
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error>
@@ -268,7 +447,7 @@ where
 
     async fn apply_publish_schema_with_lens(
         &mut self,
-        author: AuthorId,
+        author: AuthorSubject,
         ingest_context: Option<CommitUnitIngestContext>,
         catalogue_seq: u64,
         publication: SchemaLineagePublication,
@@ -581,6 +760,7 @@ where
             .insert(staged.publication.schema.id, staged.mapping.clone());
         self.catalogue.lens_path_cache.clear();
         self.catalogue.compiled_lens_cache.clear();
+        self.catalogue.physical_write_plan_cache.clear();
         self.query.version_storage_sources_cache.clear();
         self.query.query_shape_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
@@ -602,6 +782,7 @@ where
             .remove(&staged.publication.schema.id);
         self.catalogue.lens_path_cache.clear();
         self.catalogue.compiled_lens_cache.clear();
+        self.catalogue.physical_write_plan_cache.clear();
         self.query.version_storage_sources_cache.clear();
         self.query.query_shape_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
@@ -610,7 +791,7 @@ where
 
     async fn apply_publish_lens(
         &mut self,
-        author: AuthorId,
+        author: AuthorSubject,
         ingest_context: Option<CommitUnitIngestContext>,
         lens: MigrationLens,
     ) -> Result<Vec<SyncMessage>, Error>
@@ -668,7 +849,7 @@ where
 
     async fn apply_set_current_write_schema(
         &mut self,
-        author: AuthorId,
+        author: AuthorSubject,
         ingest_context: Option<CommitUnitIngestContext>,
         pointer: CurrentWriteSchema,
     ) -> Result<Vec<SyncMessage>, Error>
@@ -761,13 +942,13 @@ where
 
     fn require_catalogue_admin(
         &self,
-        _claimed_author: AuthorId,
+        _claimed_author: AuthorSubject,
         ingest_context: Option<CommitUnitIngestContext>,
     ) -> Result<(), Error> {
         if matches!(
             ingest_context,
             Some(context)
-                if context.identity == AuthorId::SYSTEM
+                if context.identity == AuthorSubject::SYSTEM
                     && context.trust == CommitUnitTrust::TrustedBackend
         ) {
             Ok(())
@@ -808,8 +989,16 @@ where
                 .iter()
                 .find(|table| table.name == table_lens.target_table)
                 .ok_or(Error::InvalidCatalogueUpdate("table lens is unknown"))?;
-            let target_bindings = target_table.branch_by.iter().cloned().collect::<BTreeSet<_>>();
-            let mut branch_columns = source_table.branch_by.iter().cloned().collect::<BTreeSet<_>>();
+            let target_bindings = target_table
+                .branch_by
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let mut branch_columns = source_table
+                .branch_by
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>();
             let mut columns = source_table
                 .columns
                 .iter()
@@ -876,9 +1065,7 @@ where
                                 "added column is absent from target",
                             ))?;
                         columns.insert(column.clone(), target_column);
-                        if target_bindings.contains(column)
-                            && columns[column].default.is_none()
-                        {
+                        if target_bindings.contains(column) && columns[column].default.is_none() {
                             return Err(Error::InvalidCatalogueUpdate(
                                 "added branch column requires a migration default",
                             ));
@@ -917,9 +1104,9 @@ where
                         if !physical_value_epoch_is_compatible(
                             &source_column.column_type,
                             &target_column.column_type,
-                        ) {
+                        ) || source_column.large_value_kind != target_column.large_value_kind {
                             return Err(Error::InvalidCatalogueUpdate(
-                                "column transform changes variant registry non-additively",
+                                "column transform changes physical value or large-value semantic kind",
                             ));
                         }
                         columns.insert(column.clone(), target_column.clone());
@@ -944,8 +1131,12 @@ where
                 .map(|column| (column.name.clone(), column))
                 .collect::<BTreeMap<_, _>>();
             for branch_column in &branch_columns {
-                let Some(source_column) = columns.get(branch_column) else { continue; };
-                let Some(target_column) = target_columns.get(branch_column) else { continue; };
+                let Some(source_column) = columns.get(branch_column) else {
+                    continue;
+                };
+                let Some(target_column) = target_columns.get(branch_column) else {
+                    continue;
+                };
                 if source_column.column_type != target_column.column_type
                     || source_column.default != target_column.default
                 {
@@ -1076,5 +1267,4 @@ where
         }
         Ok(())
     }
-
 }

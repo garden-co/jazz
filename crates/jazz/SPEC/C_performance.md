@@ -74,7 +74,7 @@ current-row subscriptions through the global-current tables (receipt:
 `benches/cold_subscription.rs`).
 
 **Implementation status (verified).**
-`denormalized_current_content_witness_matches_history_payload_bytes` verifies
+`denormalized_current_content_witness_projects_history_provenance_to_unix_milliseconds` verifies
 the current-sourced witness bytes, and
 `maintained_relation_include_single_row_changes_are_scale_independent` is the
 canonical scale-independence canary.

@@ -1,7 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router";
+import { Link, MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TableDataGrid } from "./TableDataGrid";
+import { DataExplorer } from "../../pages/data-explorer";
 
 const mockUseAll = vi.fn();
 const mockUpdate = vi.fn();
@@ -12,6 +13,7 @@ const mockInsertWait = vi.fn();
 const mockDeleteWait = vi.fn();
 let currentRows: Array<Record<string, unknown>>;
 let currentReferenceRowsByTable: Record<string, Array<Record<string, unknown>>>;
+let currentTable: string;
 
 function getContainingCell(element: HTMLElement | null): HTMLElement | null {
   return element?.closest('[role="gridcell"], td') ?? null;
@@ -53,6 +55,22 @@ function renderGridUi() {
 
 function renderGrid() {
   return render(renderGridUi());
+}
+
+function renderRoutedGrid() {
+  return render(
+    <MemoryRouter initialEntries={["/data-explorer/todos/data"]}>
+      <Routes>
+        <Route path="data-explorer" element={<DataExplorer />}>
+          <Route path=":table/data" element={<TableDataGrid />} />
+          <Route
+            path=":table/schema"
+            element={<Link to="/data-explorer/todos/data">Return to data</Link>}
+          />
+        </Route>
+      </Routes>
+    </MemoryRouter>,
+  );
 }
 
 const mockWasmSchema = {
@@ -105,7 +123,7 @@ vi.mock("react-router", async () => {
   const actual = await vi.importActual<typeof import("react-router")>("react-router");
   return {
     ...actual,
-    useParams: () => ({ table: "todos" }),
+    useParams: () => ({ table: currentTable }),
   };
 });
 
@@ -117,6 +135,7 @@ describe("TableDataGrid", () => {
 
   beforeEach(() => {
     localStorage.clear();
+    currentTable = "todos";
     currentRows = [
       {
         id: "row-2",
@@ -772,6 +791,203 @@ describe("TableDataGrid", () => {
     });
 
     expect(screen.queryByText("row-2")).toBeNull();
+  });
+
+  it("keeps staged mutations scoped to their routed table", async () => {
+    const { rerender } = renderGrid();
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
+    expect(screen.getByText("1 staged insert")).not.toBeNull();
+
+    currentTable = "users";
+    currentRows = [];
+    rerender(renderGridUi());
+
+    await waitFor(() => {
+      expect(screen.queryByText("1 staged insert")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();
+    });
+    expect(mockInsert).not.toHaveBeenCalled();
+    expect(mockUpdate).not.toHaveBeenCalled();
+    expect(mockDelete).not.toHaveBeenCalled();
+
+    currentTable = "todos";
+    currentRows = [
+      {
+        id: "row-2",
+        title: "zeta",
+        done: false,
+        maybe_done: null,
+        meta: { done: true },
+        owner_id: "owner-a",
+        blob: new Uint8Array([1, 2]),
+        status: "open",
+      },
+    ];
+    rerender(renderGridUi());
+
+    expect(screen.getByText("1 staged insert")).not.toBeNull();
+  });
+
+  it("keeps a completed save scoped to its originating table after navigation", async () => {
+    let resolveSave: (() => void) | undefined;
+    mockUpdateWait.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    mockUpdateWait.mockImplementationOnce(() => Promise.reject(new Error("B save failed")));
+    const { rerender } = renderGrid();
+
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "zeta" }));
+    fireEvent.change(screen.getByLabelText("Edit title"), { target: { value: "A draft" } });
+    fireEvent.blur(screen.getByLabelText("Edit title"));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalledTimes(1));
+
+    currentTable = "users";
+    currentRows = [];
+    rerender(renderGridUi());
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "Alice" }));
+    fireEvent.change(screen.getByLabelText("Edit displayName"), { target: { value: "B draft" } });
+    fireEvent.blur(screen.getByLabelText("Edit displayName"));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("B save failed"));
+
+    await act(async () => resolveSave?.());
+
+    expect(screen.getByText("B draft")).not.toBeNull();
+    expect(screen.getByText("1 edit across 1 row")).not.toBeNull();
+    expect(screen.getByRole("alert").textContent).toContain("B save failed");
+
+    currentTable = "todos";
+    currentRows = [{ id: "row-2", title: "zeta", done: false, maybe_done: null, status: "open" }];
+    rerender(renderGridUi());
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull());
+  });
+
+  it("preserves a later same-table edit when an earlier save completes", async () => {
+    let resolveSave: (() => void) | undefined;
+    mockUpdateWait.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    renderGrid();
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "zeta" }));
+    fireEvent.change(screen.getByLabelText("Edit title"), { target: { value: "submitted" } });
+    fireEvent.blur(screen.getByLabelText("Edit title"));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalledTimes(1));
+
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "submitted" }));
+    fireEvent.change(screen.getByLabelText("Edit title"), { target: { value: "temporary" } });
+    fireEvent.blur(screen.getByLabelText("Edit title"));
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "temporary" }));
+    fireEvent.change(screen.getByLabelText("Edit title"), { target: { value: "submitted" } });
+    fireEvent.blur(screen.getByLabelText("Edit title"));
+    await act(async () => resolveSave?.());
+
+    expect(screen.getByText("submitted")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Save changes" })).not.toBeNull();
+  });
+
+  it("admits only one same-table save before React disables the button", async () => {
+    let resolveSave: (() => void) | undefined;
+    mockUpdateWait.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    renderGrid();
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "zeta" }));
+    fireEvent.change(screen.getByLabelText("Edit title"), { target: { value: "draft" } });
+    fireEvent.blur(screen.getByLabelText("Edit title"));
+    const save = screen.getByRole("button", { name: "Save changes" });
+    fireEvent.click(save);
+    fireEvent.click(save);
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalledTimes(1));
+    await act(async () => resolveSave?.());
+  });
+
+  it("keeps a failed save error scoped to its originating table after navigation", async () => {
+    let rejectSave: ((error: Error) => void) | undefined;
+    mockUpdateWait.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectSave = reject;
+        }),
+    );
+    const { rerender } = renderGrid();
+
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "zeta" }));
+    fireEvent.change(screen.getByLabelText("Edit title"), { target: { value: "A draft" } });
+    fireEvent.blur(screen.getByLabelText("Edit title"));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalledTimes(1));
+
+    currentTable = "users";
+    currentRows = [];
+    rerender(renderGridUi());
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "Alice" }));
+    fireEvent.change(screen.getByLabelText("Edit displayName"), { target: { value: "B draft" } });
+    fireEvent.blur(screen.getByLabelText("Edit displayName"));
+
+    await act(async () => rejectSave?.(new Error("A save failed")));
+
+    expect(screen.getByText("B draft")).not.toBeNull();
+    expect(screen.queryByText("A save failed")).toBeNull();
+
+    currentTable = "todos";
+    currentRows = [{ id: "row-2", title: "zeta", done: false, maybe_done: null, status: "open" }];
+    rerender(renderGridUi());
+    expect(screen.getByText("A draft")).not.toBeNull();
+    expect(screen.getByRole("alert").textContent).toContain("A save failed");
+  });
+
+  it("retains a deferred save failure across the schema route", async () => {
+    let rejectSave: ((error: Error) => void) | undefined;
+    mockUpdateWait.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectSave = reject;
+        }),
+    );
+    renderRoutedGrid();
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "zeta" }));
+    fireEvent.change(screen.getByLabelText("Edit title"), { target: { value: "route draft" } });
+    fireEvent.blur(screen.getByLabelText("Edit title"));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("link", { name: "Schema" }));
+    expect(screen.getByText("Return to data")).not.toBeNull();
+    await act(async () => rejectSave?.(new Error("route save failed")));
+    fireEvent.click(screen.getByRole("link", { name: "Return to data" }));
+    expect(screen.getByText("route draft")).not.toBeNull();
+    expect(screen.getByRole("alert").textContent).toContain("route save failed");
+  });
+
+  it("retains a deferred save success across the schema route", async () => {
+    let resolveSave: (() => void) | undefined;
+    mockUpdateWait.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    renderRoutedGrid();
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "zeta" }));
+    fireEvent.change(screen.getByLabelText("Edit title"), { target: { value: "route draft" } });
+    fireEvent.blur(screen.getByLabelText("Edit title"));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("link", { name: "Schema" }));
+    await act(async () => resolveSave?.());
+    fireEvent.click(screen.getByRole("link", { name: "Return to data" }));
+    expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("appends a staged insert row and inserts it from the banner", async () => {

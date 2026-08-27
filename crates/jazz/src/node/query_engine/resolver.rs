@@ -23,7 +23,7 @@ pub(crate) enum SourceAuthorizationRequest {
     /// User-visible source filtered by the active policy context.
     PolicyFiltered {
         /// Identity whose row-level read permission gates the source.
-        permission_subject: AuthorId,
+        permission_subject: AuthorSubject,
         /// Query-engine-owned authorization plan for the protected source.
         plan: PolicyAuthorizationPlan,
     },
@@ -32,7 +32,7 @@ pub(crate) enum SourceAuthorizationRequest {
     /// user-visible source resolution.
     PolicyProof {
         /// Identity whose row-level read permission gates the proof source.
-        permission_subject: AuthorId,
+        permission_subject: AuthorSubject,
         /// Query-engine-owned authorization plan for the proof source.
         plan: PolicyAuthorizationPlan,
     },

@@ -12,8 +12,55 @@ export declare class JazzServer {
 }
 
 export declare class NapiDb {
+  insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Write
+  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): Write
+  /**
+   * Binding-only entrypoint for typed partial-value updates. The public
+   * TypeScript API validates column-kind-specific descriptors before they
+   * reach this encoded boundary.
+   */
+  updateLargeValuesEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, mutations: JsonValue, updatedAtMs?: number | undefined | null): Write
+  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions | undefined | null): Write
+  deleteEncoded(table: string, rowId: Uint8Array, options?: DeleteOptions | undefined | null): Write
+  restoreEncoded(table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): Write
+  /**
+   * Backend-only root mutation entrypoints. They deliberately do not take
+   * branch selectors: attributed branch writes fail closed until #1881's
+   * split transaction/branch representation is designed.
+   */
+  insertWithIdEncodedAttributed(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array): Write
+  updateEncodedAttributed(table: string, rowId: Uint8Array, patch: Uint8Array, author: Uint8Array): Write
+  upsertEncodedAttributed(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array): Write
+  deleteAttributed(table: string, rowId: Uint8Array, author: Uint8Array): Write
+  restoreEncodedAttributed(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array): Write
+  beginStreamingMutationEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, mutation?: string | undefined | null, author?: Uint8Array | undefined | null, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
+  /**
+   * Trusted-backend streaming counterpart: SYSTEM remains the admission
+   * identity and `attribution` is retained only for final row provenance.
+   * Branch streaming is intentionally unsupported until its split state is
+   * designed, so it fails closed rather than silently losing attribution.
+   */
+  beginStreamingMutationAttributedEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, mutation: string | undefined | null, author: Uint8Array | undefined | null, attribution: Uint8Array, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
   static openMemory(schema: Uint8Array, config: Uint8Array): NapiDb
+  /**
+   * Open a deliberate backend runtime. Unlike the public raw-open entrypoint,
+   * this explicit ABI derives the canonical system author.
+   */
+  static openMemoryAsBackend(schema: Uint8Array, config: Uint8Array): NapiDb
+  /**
+   * Open with a verified Jazz self-signed client identity. This is a
+   * separate ABI entrypoint deliberately: a new client cannot accidentally
+   * hand proof bytes to an old constructor, and an old client cannot enter
+   * the proof-bearing path.
+   */
+  static openMemoryWithSelfSignedProof(schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string): NapiDb
   static openPersistent(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDb
+  /**
+   * Open a deliberate persistent backend runtime. This is intentionally a
+   * distinct ABI from the public raw-open entrypoint.
+   */
+  static openPersistentAsBackend(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDb
+  static openPersistentWithSelfSignedProof(dataPath: string, schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string): NapiDb
   /** Register and return a typed view backed by this same runtime owner. */
   registerSchema(schema: Uint8Array): NapiDb
   /**
@@ -25,6 +72,12 @@ export declare class NapiDb {
   attachExclusiveTx(openBatchId: string): Tx
   /** Begin one owner-wide transaction without creating an owning per-schema Tx. */
   beginTransaction(openBatchId: string, kind: string, author?: Uint8Array | undefined | null): void
+  /**
+   * Begin the only supported attributed transaction shape. Keeping this a
+   * distinct native ABI makes an older binding fail closed rather than
+   * silently treating provenance as ordinary SYSTEM authorship.
+   */
+  beginTransactionAttributed(openBatchId: string, attribution: Uint8Array): void
   /** Commit an owner-wide transaction by id and optional kind. */
   commitTransaction(openBatchId: string, kind?: string | undefined | null): Write
   /** Roll back an owner-wide open transaction by id. */
@@ -32,15 +85,15 @@ export declare class NapiDb {
   setTickScheduler(callback: ((err: Error | null, arg: string) => void)): void
   onMutationError(callback: (event: any) => void): void
   prepareQuery(query: Uint8Array): PreparedQuery
-  all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
-  /** Read an open transaction using the identity bound at begin. */
-  allInTransaction(query: PreparedQuery, tx: Tx, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
+  all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  /** Read through an open transaction using the identity bound at begin. */
+  allInTransaction(query: PreparedQuery, tx: Tx, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
-  allForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
-  allRelationSnapshot(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
-  allRelationSnapshotForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
-  allRelationQuery(queryJson: string, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
-  allRelationQueryForIdentity(queryJson: string, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
+  allForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  allRelationSnapshot(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  allRelationSnapshotForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  allRelationQuery(queryJson: string, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  allRelationQueryForIdentity(queryJson: string, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   localCurrentRow(table: string, rowId: Uint8Array): Uint8Array
   attachQuery(query: PreparedQuery, opts?: any | undefined | null): QueryAttachment
   attachQueryForIdentity(query: PreparedQuery, author: Uint8Array, opts?: any | undefined | null): QueryAttachment
@@ -50,34 +103,52 @@ export declare class NapiDb {
   subscribeForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
   subscribeRelationQuery(queryJson: string, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
   subscribeRelationQueryForIdentity(queryJson: string, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
-  insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): Write
-  insertWithIdEncodedInBranch(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue): Write
-  insertWithIdEncodedInBranchForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue, author: Uint8Array): Write
-  insertWithIdEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
-  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, updatedAtMs?: number | undefined | null): Write
-  updateEncodedInBranch(table: string, rowId: Uint8Array, patch: Uint8Array, branch: JsonValue): Write
-  updateEncodedInBranchView(table: string, rowId: Uint8Array, patch: Uint8Array, head: JsonValue, base?: JsonValue | undefined | null): Write
-  updateEncodedInBranchViewForIdentity(table: string, rowId: Uint8Array, patch: Uint8Array, head: JsonValue, base: JsonValue | undefined | null, author: Uint8Array): Write
-  updateEncodedForIdentity(table: string, rowId: Uint8Array, patch: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
-  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): Write
-  upsertEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
-  delete(table: string, rowId: Uint8Array, updatedAtMs?: number | undefined | null): Write
-  deleteInBranch(table: string, rowId: Uint8Array, branch: JsonValue): Write
-  deleteInBranchView(table: string, rowId: Uint8Array, head: JsonValue, base?: JsonValue | undefined | null): Write
-  deleteInBranchViewForIdentity(table: string, rowId: Uint8Array, head: JsonValue, base: JsonValue | undefined | null, author: Uint8Array): Write
-  deleteForIdentity(table: string, rowId: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
-  restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): Write
-  restoreInBranch(table: string, rowId: Uint8Array, branch: JsonValue): Write
-  restoreEncodedInBranch(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue): Write
-  restoreEncodedInBranchForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue, author: Uint8Array): Write
-  restoreEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
   tick(): void
+  /** Configure Jazz-owned upload ingress and unpublished-tree expiry limits. */
+  setLargeValueStagingPolicy(incomingBytesPerWindow: number, windowMs: number, maxAgeMs?: number | undefined | null): void
+  /** Run one idempotent expiry pass; native hosts normally call this on a timer. */
+  evictExpiredStagedLargeValues(): number
+  readValueRange(table: string, rowId: Uint8Array, column: string, start: number, end: number): Uint8Array | PendingNativeRead
+  readTextUtf16Range(table: string, rowId: Uint8Array, column: string, start: number, end: number): string | PendingNativeRead
+  readJsonPointer(table: string, rowId: Uint8Array, column: string, pointer: string): string | undefined | null | PendingNativeRead
+  appendValue(table: string, rowId: Uint8Array, column: string, bytes: Uint8Array): Write | PendingNativeWrite
+  spliceValue(table: string, rowId: Uint8Array, column: string, offset: number, deleteLength: number, insert: Uint8Array): Write | PendingNativeWrite
   setNonDurableClient(): void
   connectUpstream(): Transport
   connectUpstreamWithSession(protocolVersion: number, features: number, remoteNode: Buffer, remoteEpoch: bigint, localNode: Buffer, localEpoch: bigint): Transport
   mergeableTx(openBatchId: string): Tx
   mergeableTxForIdentity(openBatchId: string, author: Uint8Array): Tx
   close(): Promise<undefined>
+}
+
+/**
+ * A JavaScript-thread-owned binding read which suspended on asynchronous
+ * large-value storage. NAPI promises execute on a Send worker pool, whereas
+ * a Jazz runtime is deliberately `Rc`/thread-affine. The adapter drives this
+ * object after its peer transport makes progress instead of blocking Node.
+ */
+export declare class PendingNativeRead {
+  poll(): Uint8Array | null
+}
+
+/**
+ * Opaque marker returned while the next bounded native subscription batch is
+ * waiting for chunk I/O. Call `readAll` again after transport progress.
+ */
+export declare class PendingNativeSubscriptionBatch {
+  /**
+   * The host should wait this bounded delay before asking the subscription
+   * to retry a retained chunk-hydration batch.
+   */
+  retryAfterMs(): number | null
+}
+
+/**
+ * Thread-affine large-value mutation setup which is waiting for local or
+ * routed chunks. The completed value is the ordinary write receipt.
+ */
+export declare class PendingNativeWrite {
+  poll(): Write | null
 }
 
 export declare class PreparedQuery {
@@ -88,9 +159,20 @@ export declare class QueryAttachment {
 
 }
 
+/**
+ * Native bounded-memory sink used by the TypeScript async streaming-mutation
+ * adapter. Each push incrementally prepares and stages bounded Groove nodes,
+ * using the same ingress policy and resumable construction as WASM.
+ */
+export declare class StreamingMutation {
+  push(chunk: Uint8Array): void
+  finish(): Write
+  abort(): boolean
+}
+
 export declare class Subscription {
-  readAll(): Array<SubscriptionEvent>
-  drain(): Array<SubscriptionEvent>
+  readAll(): Array<SubscriptionEvent> | PendingNativeSubscriptionBatch
+  drain(): Array<SubscriptionEvent> | PendingNativeSubscriptionBatch
   close(): boolean
 }
 
@@ -102,6 +184,9 @@ export declare class TestJwtIssuer {
 }
 
 export declare class Transport {
+  routeAuxiliaryWireFrame(frame: Uint8Array): Uint8Array | null
+  recvAuxiliaryWireFrames(): Array<Uint8Array>
+  auxiliaryOutboundReady(): boolean
   sendWireFrame(frame: Uint8Array): void
   sendWireFrames(frames: Array<Uint8Array>): void
   recvWireFrames(): Array<Uint8Array>
@@ -110,15 +195,11 @@ export declare class Transport {
 }
 
 export declare class Tx {
-  insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): void
-  insertWithIdEncodedInBranch(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue): void
-  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, updatedAtMs?: number | undefined | null): void
-  updateEncodedInBranchView(table: string, rowId: Uint8Array, patch: Uint8Array, head: JsonValue, base?: JsonValue | undefined | null): void
-  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): void
-  delete(table: string, rowId: Uint8Array, updatedAtMs?: number | undefined | null): void
-  deleteInBranchView(table: string, rowId: Uint8Array, head: JsonValue, base?: JsonValue | undefined | null): void
-  restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): void
-  restoreEncodedInBranch(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue): void
+  insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Uint8Array
+  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): void
+  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions | undefined | null): void
+  deleteEncoded(table: string, rowId: Uint8Array, options?: DeleteOptions | undefined | null): void
+  restoreEncoded(table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): void
   commit(): Write
   rollback(): void
 }
@@ -126,12 +207,47 @@ export declare class Tx {
 export declare class Write {
   get batchId(): string
   get payload(): Uint8Array
+  get rowId(): Uint8Array
   writeState(): any
   wait(tier: string): Promise<undefined>
   close(): boolean
 }
 
+export interface DeleteOptions {
+  author?: Uint8Array
+  head?: JsonValue
+  base?: JsonValue
+  updatedAtMs?: number
+}
+
+export interface InsertOptions {
+  rowId?: Uint8Array
+  author?: Uint8Array
+  branch?: JsonValue
+  updatedAtMs?: number
+}
+
+/**
+ * Any JSON-compatible value crossing the native JavaScript boundary.
+ *
+ * Keep this alias exported through napi-rs rather than relying on its Rust
+ * import name: exported methods use `JsonValue` throughout their generated
+ * declarations, so the package must define that name for TypeScript
+ * consumers.
+ */
+export type JsonValue =
+  any
+
 export declare function mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
+
+/** Exact build/ABI fingerprint for the generated native artifact. */
+export declare function nativeArtifactFingerprint(): string
+
+export interface RestoreOptions {
+  author?: Uint8Array
+  branch?: JsonValue
+  updatedAtMs?: number
+}
 
 export interface SubscriptionClosedEvent {
   type: 'closed'
@@ -141,9 +257,7 @@ export interface SubscriptionDeltaEvent {
   type: 'delta'
   reset: boolean
   delta: Uint8Array
-  orderedSuffixStart?: number
   terminalOperations: Array<SubscriptionTerminalOperation>
-  terminalLayouts: Array<SubscriptionTerminalLayout>
   settled: boolean
   tier: 'None' | 'Local' | 'Edge' | 'Global'
 }
@@ -189,20 +303,6 @@ export interface SubscriptionTerminalKeyPathSegment {
   Key: Array<number>
 }
 
-/**
- * Immutable producer-owned root record contract.  The descriptor and public
- * slots are published once per NAPI subscription, before an operation may
- * reference `id`; TypeScript never has to infer a CurrentRow/layout family.
- */
-export interface SubscriptionTerminalLayout {
-  id: string
-  rootDescriptor: Array<number>
-  rootKeySlot: number
-  rootKeyFieldName: string
-  publicFields: Array<SubscriptionTerminalPublicField>
-  carrier: string
-}
-
 export interface SubscriptionTerminalMove {
   key: Array<number>
   index: number
@@ -213,7 +313,6 @@ export interface SubscriptionTerminalMoveEdit {
 }
 
 export interface SubscriptionTerminalOperation {
-  rootLayoutId: string
   root_key: Array<number>
   path: Array<SubscriptionTerminalPathSegment>
   edit: SubscriptionTerminalEdit
@@ -221,13 +320,6 @@ export interface SubscriptionTerminalOperation {
 
 export type SubscriptionTerminalPathSegment =
   SubscriptionTerminalCollectionPathSegment | SubscriptionTerminalKeyPathSegment
-
-export interface SubscriptionTerminalPublicField {
-  name: string
-  descriptorFieldName: string
-  slot: number
-  carrier: string
-}
 
 export interface SubscriptionTerminalRemove {
   key: Array<number>
@@ -249,6 +341,19 @@ export interface SubscriptionTerminalUpdateEdit {
 export interface SubscriptionUnsupportedShapeCapabilityReason {
   type: 'UnsupportedShapeCapability'
   detail: string
+}
+
+export interface UpdateOptions {
+  author?: Uint8Array
+  head?: JsonValue
+  base?: JsonValue
+  updatedAtMs?: number
+}
+
+export interface UpsertOptions {
+  author?: Uint8Array
+  branch?: JsonValue
+  updatedAtMs?: number
 }
 
 export declare function verifyLocalFirstIdentityProof(token: string | undefined | null, expectedAudience: string): VerifyTokenResult

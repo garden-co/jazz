@@ -1,18 +1,20 @@
 //! Shared simulation accounting for sync-message row delivery payloads.
 
-use jazz::protocol::{ResultMemberEntry, SyncMessage, VersionBundle, VersionRecord};
+use jazz::protocol::{
+    ResultMemberEntry, SyncMessage, VersionBundle, VersionRecord, ViewUpdatePayload,
+};
 use jazz::tx::Transaction;
 
 /// Estimate row-delivery bytes carried by a sync message.
 pub fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(ViewUpdatePayload {
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
             ..
-        } => {
+        }) => {
             version_bundles
                 .iter()
                 .map(version_bundle_bytes)
@@ -27,8 +29,13 @@ pub fn view_update_bytes(update: &SyncMessage) -> u64 {
         SyncMessage::FateUpdate { .. } => tx_id_wire_bytes() + 16,
         // An authority scope view carries an ordinary settlement-bearing view
         // update. Its row payload is part of the simulated delivery cost.
-        SyncMessage::AuthorizationScopeView { view, .. } => view_update_bytes(view),
+        SyncMessage::AuthorizationScopeView { view, .. } => scope_view_update_bytes(view),
         SyncMessage::RegisterShape { .. }
+        | SyncMessage::ChunkRequestBatch(_)
+        | SyncMessage::ChunkResponseBatch(_)
+        | SyncMessage::ChunkUploadStart(_)
+        | SyncMessage::ChunkUploadNodes(_)
+        | SyncMessage::ChunkUploadResult(_)
         | SyncMessage::Subscribe(_)
         | SyncMessage::PublishSchema { .. }
         | SyncMessage::PublishSchemaWithLens { .. }
@@ -55,16 +62,34 @@ pub fn view_update_bytes(update: &SyncMessage) -> u64 {
 /// Estimate the irreducible row-version payload bytes carried by a sync message.
 pub fn bytes_floor(update: &SyncMessage) -> u64 {
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(ViewUpdatePayload {
             version_bundles, ..
-        } => version_bundles
+        }) => version_bundles
             .iter()
             .flat_map(|bundle| &bundle.versions)
             .map(version_record_bytes)
             .sum(),
-        SyncMessage::AuthorizationScopeView { view, .. } => bytes_floor(view),
+        SyncMessage::AuthorizationScopeView { view, .. } => scope_view_bytes_floor(view),
         _ => 0,
     }
+}
+
+fn scope_view_update_bytes(view: &ViewUpdatePayload) -> u64 {
+    view.version_bundles
+        .iter()
+        .map(version_bundle_bytes)
+        .sum::<u64>()
+        + (view.peer_payload_inventory.complete_tx_payloads.len() as u64 * tx_id_wire_bytes())
+        + result_rows_bytes(&view.result_member_adds)
+        + result_rows_bytes(&view.result_member_removes)
+}
+
+fn scope_view_bytes_floor(view: &ViewUpdatePayload) -> u64 {
+    view.version_bundles
+        .iter()
+        .flat_map(|bundle| &bundle.versions)
+        .map(version_record_bytes)
+        .sum()
 }
 
 fn version_bundle_bytes(bundle: &VersionBundle) -> u64 {
@@ -106,7 +131,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use jazz::groove::records::Value;
-    use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+    use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
     use jazz::protocol::{
         AuthorizationSupportScopeKey, PeerPayloadInventory, PermissionAdviceRequestId, ReadViewKey,
         SubscriptionKey,
@@ -133,15 +158,15 @@ mod tests {
             schema.version_id(),
             RowUuid(uuid::Uuid::nil()),
             Vec::new(),
-            AuthorId(uuid::Uuid::nil()),
-            tx_id.time,
-            AuthorId(uuid::Uuid::nil()),
-            tx_id.time,
+            AuthorSubject::for_test_bytes([0; 16]),
+            tx_id.time.physical_ms(),
+            AuthorSubject::for_test_bytes([0; 16]),
+            tx_id.time.physical_ms(),
             &BTreeMap::<String, Value>::from([("name".to_owned(), Value::String("value".into()))]),
             None,
         )
         .expect("valid test wire record");
-        let nested = SyncMessage::ViewUpdate {
+        let nested = SyncMessage::ViewUpdate(ViewUpdatePayload {
             subscription: SubscriptionKey {
                 shape_id: ShapeId(uuid::Uuid::nil()),
                 binding_id: BindingId(uuid::Uuid::nil()),
@@ -155,7 +180,7 @@ mod tests {
                     tx_id,
                     kind: TxKind::Mergeable,
                     n_total_writes: 1,
-                    made_by: AuthorId(uuid::Uuid::nil()),
+                    made_by: AuthorSubject::for_test_bytes([0; 16]),
                     permission_subject: None,
                     base_snapshot: None,
                     row_read_set: None,
@@ -176,7 +201,7 @@ mod tests {
             terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
-        };
+        });
         let nested_bytes = view_update_bytes(&nested);
         let nested_floor = bytes_floor(&nested);
         assert!(nested_bytes > 0);
@@ -186,13 +211,14 @@ mod tests {
             request_id: PermissionAdviceRequestId([0; 16]),
             key: AuthorizationSupportScopeKey {
                 support_shape_digest: [0; 32],
-                subject: AuthorId(uuid::Uuid::nil()),
+                subject: AuthorSubject::for_test_bytes([0; 16]),
                 claims_digest: [0; 32],
                 policy_digest: [0; 32],
             },
             clause_index: 0,
             clause_count: 1,
-            view: Box::new(nested),
+            view: jazz::protocol::ViewUpdatePayload::from_view_update(nested)
+                .expect("fixture is a view update"),
         };
 
         assert_eq!(view_update_bytes(&wrapped), nested_bytes);

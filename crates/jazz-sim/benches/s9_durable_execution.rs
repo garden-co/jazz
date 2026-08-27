@@ -11,7 +11,7 @@ use std::time::Instant;
 use hdrhistogram::Histogram;
 use jazz::db::{Db, DbConfig, DbIdentity, ExclusiveTxOps, SeededRowIdSource, Transport};
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::peer::PeerState;
 use jazz::protocol::SyncMessage;
@@ -566,15 +566,18 @@ fn apply_transition(
     } else {
         "running"
     };
-    jazz::db::block_on(tx.insert_with_id(
+    jazz::db::block_on(tx.insert(
         INSTANCES,
-        row,
         cells_map([
             ("workflow", Value::Uuid(workflow.0)),
             ("state", Value::String(state.to_owned())),
             ("currentStep", Value::U64(next_step)),
             ("wakeAt", Value::U64(0)),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        },
     ))?;
     let _tx_id = jazz::db::block_on(tx.commit())?;
     jazz::db::block_on(client.db.tick())?;
@@ -1033,7 +1036,7 @@ fn open_worker(node_uuid: NodeUuid, edge_uuid: NodeUuid, schema: JazzSchema) -> 
     let (dir, db) = open_db(
         node_uuid,
         schema.clone(),
-        AuthorId::from_bytes([node_uuid.as_bytes()[0]; 16]),
+        AuthorSubject::for_test_bytes([node_uuid.as_bytes()[0]; 16]),
     );
     let outbound = Rc::new(RefCell::new(VecDeque::new()));
     let inbound = Rc::new(RefCell::new(VecDeque::new()));
@@ -1118,7 +1121,7 @@ fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState<Roc
 fn open_db(
     node_uuid: NodeUuid,
     schema: JazzSchema,
-    author: AuthorId,
+    author: AuthorSubject,
 ) -> (TempDir, Db<RocksDbStorage>) {
     let dir = tempfile::tempdir().unwrap();
     let refs = schema.column_families();
@@ -1171,13 +1174,13 @@ fn storage_bytes(path: &std::path::Path) -> u64 {
 
 fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
             ..
-        } => {
+        }) => {
             version_bundles
                 .iter()
                 .flat_map(|bundle| bundle.versions.iter())

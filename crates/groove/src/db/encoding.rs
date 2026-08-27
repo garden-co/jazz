@@ -1,55 +1,105 @@
 use super::*;
+use crate::records::ValidatedVariantRecord;
 
 pub(super) fn resolve_record_input(
     table: &TableSchema,
     input: &RecordInput,
+    descriptor: RecordDescriptor,
 ) -> Result<(u32, RecordDescriptor, Vec<u8>), Error> {
     match input {
         RecordInput::Values(values) => {
             let variant_tag = 0;
-            let descriptor = table
-                .record_schema_for_variant(variant_tag)
-                .ok_or_else(|| Error::UnknownTableVariant {
-                    table: table.name.clone(),
-                    version: u64::from(variant_tag),
-                })?;
             let record = encode_record(table, descriptor, values)?;
             Ok((variant_tag, descriptor, record))
         }
-        RecordInput::Record(record) => resolve_variant_record(table, record),
+        RecordInput::Record(record) => resolve_variant_record(table, record, descriptor),
     }
 }
 
 pub(super) fn resolve_raw_record_input(
     table: &TableSchema,
     input: &RawRecordInput,
+    descriptor: RecordDescriptor,
 ) -> Result<(u32, RecordDescriptor, Vec<u8>), Error> {
     match input {
         RawRecordInput::Payload(payload) => {
             let variant_tag = 0;
-            let descriptor = table
-                .record_schema_for_variant(variant_tag)
-                .ok_or_else(|| Error::UnknownTableVariant {
-                    table: table.name.clone(),
-                    version: u64::from(variant_tag),
-                })?;
             Ok((variant_tag, descriptor, payload.clone()))
         }
-        RawRecordInput::Record(record) => resolve_variant_record(table, record),
+        RawRecordInput::Record(record) => resolve_variant_record(table, record, descriptor),
+        RawRecordInput::ValidatedRecord(record) => {
+            resolve_validated_variant_record(table, record, descriptor)
+        }
     }
 }
 
-pub(super) fn resolve_variant_record(
+pub(super) fn resolve_owned_record_input(
     table: &TableSchema,
-    record: &VariantRecord,
+    input: RecordInput,
+    descriptor: RecordDescriptor,
+) -> Result<(u32, RecordDescriptor, Vec<u8>), Error> {
+    match input {
+        RecordInput::Values(values) => {
+            let variant_tag = 0;
+            let record = encode_record(table, descriptor, &values)?;
+            Ok((variant_tag, descriptor, record))
+        }
+        RecordInput::Record(record) => resolve_owned_variant_record(table, record, descriptor),
+    }
+}
+
+pub(super) fn resolve_owned_raw_record_input(
+    table: &TableSchema,
+    input: RawRecordInput,
+    descriptor: RecordDescriptor,
+) -> Result<(u32, RecordDescriptor, Vec<u8>), Error> {
+    match input {
+        RawRecordInput::Payload(payload) => Ok((0, descriptor, payload)),
+        RawRecordInput::Record(record) => resolve_owned_variant_record(table, record, descriptor),
+        RawRecordInput::ValidatedRecord(record) => {
+            resolve_owned_validated_variant_record(table, record, descriptor)
+        }
+    }
+}
+
+fn resolve_validated_variant_record(
+    table: &TableSchema,
+    record: &ValidatedVariantRecord,
+    descriptor: RecordDescriptor,
 ) -> Result<(u32, RecordDescriptor, Vec<u8>), Error> {
     let variant_tag = record.variant_tag();
-    let descriptor = table
-        .record_schema_for_variant(variant_tag)
-        .ok_or_else(|| Error::UnknownTableVariant {
+    if !record.descriptor().registry_compatible_with(&descriptor) {
+        return Err(Error::SchemaVersionDescriptorMismatch {
             table: table.name.clone(),
             version: u64::from(variant_tag),
-        })?;
+        });
+    }
+    let (_, record) = record.clone().into_parts();
+    Ok((variant_tag, descriptor, record.into_raw()))
+}
+
+fn resolve_owned_validated_variant_record(
+    table: &TableSchema,
+    record: ValidatedVariantRecord,
+    descriptor: RecordDescriptor,
+) -> Result<(u32, RecordDescriptor, Vec<u8>), Error> {
+    let variant_tag = record.variant_tag();
+    if !record.descriptor().registry_compatible_with(&descriptor) {
+        return Err(Error::SchemaVersionDescriptorMismatch {
+            table: table.name.clone(),
+            version: u64::from(variant_tag),
+        });
+    }
+    let (_, record) = record.into_parts();
+    Ok((variant_tag, descriptor, record.into_raw()))
+}
+
+fn resolve_owned_variant_record(
+    table: &TableSchema,
+    record: VariantRecord,
+    descriptor: RecordDescriptor,
+) -> Result<(u32, RecordDescriptor, Vec<u8>), Error> {
+    let variant_tag = record.variant_tag();
     if !record
         .record()
         .descriptor()
@@ -60,7 +110,28 @@ pub(super) fn resolve_variant_record(
             version: u64::from(variant_tag),
         });
     }
-    record.record().to_values()?;
+    record.record().validate()?;
+    let (_, record) = record.into_parts();
+    Ok((variant_tag, descriptor, record.into_raw()))
+}
+
+pub(super) fn resolve_variant_record(
+    table: &TableSchema,
+    record: &VariantRecord,
+    descriptor: RecordDescriptor,
+) -> Result<(u32, RecordDescriptor, Vec<u8>), Error> {
+    let variant_tag = record.variant_tag();
+    if !record
+        .record()
+        .descriptor()
+        .registry_compatible_with(&descriptor)
+    {
+        return Err(Error::SchemaVersionDescriptorMismatch {
+            table: table.name.clone(),
+            version: u64::from(variant_tag),
+        });
+    }
+    record.record().validate()?;
     Ok((variant_tag, descriptor, record.record().raw().to_vec()))
 }
 
@@ -135,30 +206,41 @@ pub(super) fn primary_key_bytes(
     Ok(bytes)
 }
 
-pub(super) fn decode_stored_table_record(
-    table: &TableSchema,
-    stored: Vec<u8>,
-) -> Result<VariantRecord, Error> {
-    let (variant_tag, payload) = split_variant_record(&stored)?;
-    let descriptor = table
-        .record_schema_for_variant(variant_tag)
-        .ok_or_else(|| Error::UnknownTableVariant {
-            table: table.name.clone(),
-            version: u64::from(variant_tag),
-        })?;
-    let record = OwnedRecord::new(payload.to_vec(), descriptor);
-    Ok(VariantRecord::new(variant_tag, record))
-}
-
-pub(super) fn decode_stored_key_value<'a>(
-    table: &TableSchema,
-    key: Vec<u8>,
-    stored: Vec<u8>,
-) -> Result<EncodedKeyValue<'a>, Error> {
-    Ok(EncodedKeyValue::from_variant(
-        key,
-        decode_stored_table_record(table, stored)?,
-    ))
+impl Database {
+    pub(super) fn decode_stored_key_value<'a>(
+        &self,
+        table: &TableSchema,
+        key: Vec<u8>,
+        stored: Vec<u8>,
+    ) -> Result<EncodedKeyValue<'a>, Error> {
+        let (variant_tag, payload) = split_variant_record(&stored)?;
+        let cached = self
+            .stored_record_descriptors
+            .borrow()
+            .get(&table.name)
+            .and_then(|variants| variants.get(&variant_tag))
+            .copied();
+        let descriptor = if let Some(descriptor) = cached {
+            descriptor
+        } else {
+            let descriptor = table
+                .record_schema_for_variant(variant_tag)
+                .ok_or_else(|| Error::UnknownTableVariant {
+                    table: table.name.clone(),
+                    version: u64::from(variant_tag),
+                })?;
+            self.stored_record_descriptors
+                .borrow_mut()
+                .entry(table.name.clone())
+                .or_default()
+                .insert(variant_tag, descriptor);
+            descriptor
+        };
+        Ok(EncodedKeyValue::from_variant(
+            key,
+            VariantRecord::new(variant_tag, OwnedRecord::new(payload.to_vec(), descriptor)),
+        ))
+    }
 }
 
 pub(crate) fn persisted_index_primary_key(
@@ -379,6 +461,7 @@ pub(super) fn encode_primary_key_part(key: &mut Vec<u8>, value: &Value) -> Resul
         | Value::Array(_)
         | Value::Nullable(_)
         | Value::Record(_)
+        | Value::Large(_)
         // Direct-store keys require a declared total order; enums do not have one.
         | Value::Enum(_) => {
             return Err(Error::InvalidDirectRecordStoreKey(
@@ -497,6 +580,7 @@ pub(super) fn decode_primary_key_part(
             Ok(Value::EnumTag(value))
         }
         records::ValueType::F64
+        | records::ValueType::Internal(_)
         | records::ValueType::Array(_)
         | records::ValueType::Nullable(_)
         | records::ValueType::Tuple(_)
@@ -631,9 +715,10 @@ pub(super) fn decode_index_key_part(
                 _ => Err(Error::InvalidPersistedIndex(index_name.to_owned())),
             }
         }
-        ColumnType::Array(_) | ColumnType::Record(_) | ColumnType::Enum(_) => {
-            Err(Error::InvalidPersistedIndex(index_name.to_owned()))
-        }
+        ColumnType::Internal(_)
+        | ColumnType::Array(_)
+        | ColumnType::Record(_)
+        | ColumnType::Enum(_) => Err(Error::InvalidPersistedIndex(index_name.to_owned())),
     }
 }
 

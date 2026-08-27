@@ -23,7 +23,7 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
 
     let update = core.view_update_for_current_rows("todos").unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
         reset_result_set,
@@ -34,7 +34,7 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -140,11 +140,11 @@ fn global_read_ignores_a_newer_unacknowledged_local_write() {
         BTreeMap::from([(target, title_cells("authoritative remote"))])
     );
 
-    let mut link = PeerState::client_link(AuthorId::SYSTEM);
+    let mut link = PeerState::client_link(AuthorSubject::SYSTEM);
     let update = link.current_rows_update(&mut core, "todos").unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         settled_through, ..
-    } = &update
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -179,7 +179,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
 
     let initial = core.view_update_for_current_rows("todos").unwrap();
     let version_bundles = version_bundles_for_update(&initial);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
         reset_result_set,
@@ -190,7 +190,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
         result_member_adds,
         result_member_removes,
         ..
-    } = initial
+    }) = initial
     else {
         panic!("expected view update");
     };
@@ -221,11 +221,11 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             [tx_id],
             [],
             [],
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
         )
         .unwrap();
     let version_bundles = version_bundles_for_update(&deduped);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         settled_through,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
@@ -234,7 +234,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
         result_member_adds,
         result_member_removes,
         ..
-    } = deduped
+    }) = deduped
     else {
         panic!("expected view update");
     };
@@ -311,9 +311,13 @@ fn wire_record_round_trips_through_history_bytes() {
         panic!("expected commit unit");
     };
     let original = versions[0].clone();
+    assert_eq!(original.created_at_ms(), 10);
+    assert_eq!(original.updated_at_ms(), 10);
     core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
     let stored = core.query_row_versions("todos", row).unwrap();
+    assert_eq!(stored[0].created_at(), TxTime::from(10));
+    assert_eq!(stored[0].updated_at(), TxTime::from(10));
     let projected = core.version_record_from_row(&stored[0]).unwrap();
     assert_eq!(projected.table(), original.table());
     assert_eq!(projected.record().raw(), original.record().raw());
@@ -361,7 +365,7 @@ fn duplicate_commit_units_compare_versions_without_wire_order() {
         tx_id: TxId::new(TxTime::from(10), node(1)),
         kind: TxKind::Mergeable,
         n_total_writes: 2,
-        made_by: AuthorId::SYSTEM,
+        made_by: AuthorSubject::SYSTEM,
         permission_subject: None,
         base_snapshot: None,
         row_read_set: None,

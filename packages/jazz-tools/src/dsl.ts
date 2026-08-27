@@ -13,13 +13,9 @@ import type {
   JsonSqlType,
   JsonSchema,
   JsonValue,
-  Lens,
-  LensOp,
   AddOp,
   DropOp,
   RenameOp,
-  MigrationOp,
-  TableMigration,
   ScalarSqlType,
   TSTypeFromSqlType,
 } from "./schema.js";
@@ -98,7 +94,7 @@ interface ColumnBuilder {
 }
 
 type MergeStrategyColumnType = {
-  counter: "INTEGER";
+  counter: "INTEGER" | "BIGINT";
   "g-set": { kind: "ARRAY" };
 };
 
@@ -373,8 +369,10 @@ function normalizeColumnMergeStrategy(
     }
     return "g-set";
   }
-  if (sqlType !== "INTEGER" || nullable) {
-    throw new Error("Counter merge strategy is only supported on non-nullable INTEGER columns.");
+  if ((sqlType !== "INTEGER" && sqlType !== "BIGINT") || nullable) {
+    throw new Error(
+      "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
+    );
   }
   return "counter";
 }
@@ -389,7 +387,9 @@ class ScalarBuilder implements ColumnBuilder {
 
   optional(): this {
     if (this._mergeStrategy === "counter") {
-      throw new Error("Counter merge strategy is only supported on non-nullable INTEGER columns.");
+      throw new Error(
+        "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
+      );
     }
     this._nullable = true;
     return this;
@@ -475,7 +475,9 @@ class EnumBuilder implements ColumnBuilder {
 
   optional(): this {
     if (this._mergeStrategy === "counter") {
-      throw new Error("Counter merge strategy is only supported on non-nullable INTEGER columns.");
+      throw new Error(
+        "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
+      );
     }
     this._nullable = true;
     return this;
@@ -532,7 +534,9 @@ class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
 
   optional(): this {
     if (this._mergeStrategy === "counter") {
-      throw new Error("Counter merge strategy is only supported on non-nullable INTEGER columns.");
+      throw new Error(
+        "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
+      );
     }
     this._nullable = true;
     return this;
@@ -582,7 +586,9 @@ class RefBuilder implements ColumnBuilder {
 
   optional(): this {
     if (this._mergeStrategy === "counter") {
-      throw new Error("Counter merge strategy is only supported on non-nullable INTEGER columns.");
+      throw new Error(
+        "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
+      );
     }
     this._nullable = true;
     return this;
@@ -957,11 +963,6 @@ export const col = {
   drop: new DropBuilder(),
   /**
    * Rename a column in the table
-   * @deprecated Use {@link col.renameFrom} instead
-   */
-  rename: (oldName: string): RenameOp => ({ _type: "rename", oldName }),
-  /**
-   * Rename a column in the table
    */
   renameFrom: <const TOldName extends string>(oldName: TOldName): RenameOp<TOldName> => ({
     _type: "rename",
@@ -970,11 +971,10 @@ export const col = {
 };
 
 // ============================================================================
-// Side-effect collection
+// Schema side-effect collection
 // ============================================================================
 
 let collectedTables: Table[] = [];
-let collectedMigrations: TableMigration[] = [];
 
 type ScalarIdColumnError<K extends string> =
   `Invalid reference key '${K}'. Rename it to '${K}_id' or '${K}Id'`;
@@ -1019,81 +1019,12 @@ export function table<const T extends Record<string, ColumnBuilder>>(
   });
 }
 
-export function migrate(tableName: string, ops: Record<string, MigrationOp>): void {
-  const operations = Object.entries(ops).map(([column, op]) => {
-    if (op._type !== "drop") {
-      assertUserColumnNameAllowed(column);
-    }
-    return { column, op };
-  });
-  collectedMigrations.push({ table: tableName, operations });
-}
-
 export function getCollectedSchema(): Schema {
   const schema = { tables: [...collectedTables] };
   collectedTables = [];
   return schema;
 }
 
-export function getCollectedMigration(): Lens | null {
-  const migration = collectedMigrations.shift();
-  if (!migration) {
-    return null;
-  }
-
-  const operations: LensOp[] = migration.operations.map(({ column, op }) => {
-    switch (op._type) {
-      case "add":
-        return {
-          type: "introduce" as const,
-          column,
-          sqlType: op.sqlType,
-          value: op.default,
-        };
-      case "drop":
-        return {
-          type: "drop" as const,
-          column,
-          sqlType: op.sqlType,
-          value: op.backwardsDefault,
-        };
-      case "rename":
-        return { type: "rename" as const, column, value: op.oldName };
-    }
-  });
-
-  return { table: migration.table, operations };
-}
-
-export function getCollectedMigrations(): Lens[] {
-  const migrations = [...collectedMigrations];
-  collectedMigrations = [];
-  return migrations.map((migration) => {
-    const operations: LensOp[] = migration.operations.map(({ column, op }) => {
-      switch (op._type) {
-        case "add":
-          return {
-            type: "introduce" as const,
-            column,
-            sqlType: op.sqlType,
-            value: op.default,
-          };
-        case "drop":
-          return {
-            type: "drop" as const,
-            column,
-            sqlType: op.sqlType,
-            value: op.backwardsDefault,
-          };
-        case "rename":
-          return { type: "rename" as const, column, value: op.oldName };
-      }
-    });
-    return { table: migration.table, operations };
-  });
-}
-
 export function resetCollectedState(): void {
   collectedTables = [];
-  collectedMigrations = [];
 }

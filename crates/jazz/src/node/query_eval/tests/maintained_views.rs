@@ -22,11 +22,23 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
     register_query_shape(&mut client, &shape, opts.clone());
     subscribe_query_binding(&mut client, &shape, &binding);
 
-    let initial_tx = commit_global_issue(&mut server, 0, "open", AuthorId::SYSTEM, 1);
-    let mut peer = PeerState::edge_client(AuthorId::SYSTEM);
+    let initial_tx = commit_global_issue(&mut server, 0, "open", author(0), 1);
+    let mut peer = PeerState::edge_client(AuthorSubject::SYSTEM);
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
     let initial = peer
-        .rehydrate_query_with_opts(&mut server, &shape, &binding, opts.clone())
-        .expect("serve initial settled issues view");
+        .rehydrate_query_for_subscription_with_opts(
+            &mut server,
+            subscription,
+            &shape,
+            &binding,
+            opts.clone(),
+        )
+        .expect("serve initial settled issues view")
+        .expect("initial settled issues view is ready");
     client
         .apply_sync_message_settled(initial)
         .expect("apply initial settled issues view");
@@ -43,7 +55,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
             &shape,
             &binding,
             DurabilityTier::Local,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             QueryAuthorizationMode::ClientLocal,
         )
         .expect("prepare client-local maintained issues query");
@@ -51,7 +63,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
         .open_maintained_view_subscription_in_authorization_mode(
             &local_shape,
             &local_binding,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             DurabilityTier::Local,
             &ReadViewSpec::default(),
             Some(local_plan),
@@ -64,7 +76,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
     let updated_tx = client
         .commit_mergeable_settled(
             MergeableCommit::new("issues", issue, 2_000)
-                .made_by(AuthorId::SYSTEM)
+                .made_by(AuthorSubject::SYSTEM)
                 .parents(vec![initial_tx])
                 .cells(BTreeMap::from([
                     (
@@ -72,7 +84,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
                         Value::String("updated title".to_owned()),
                     ),
                     ("state".to_owned(), Value::String("open".to_owned())),
-                    ("assignee".to_owned(), Value::Uuid(AuthorId::SYSTEM.0)),
+                    ("assignee".to_owned(), Value::Uuid(uuid::Uuid::nil())),
                     ("priority".to_owned(), Value::U64(0)),
                 ])),
         )
@@ -83,12 +95,20 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
         .drain_local_maintained_view_subscription(&mut local, Some(binding_view))
         .expect("drain client-local maintained update")
         .expect("ordinary content update produces a delta");
-    assert!(!update.authoritative_membership_changed);
+    let LocalMaintainedViewSubscriptionUpdate::Flat {
+        authoritative_membership_changed,
+        added,
+        removed,
+        ..
+    } = update
+    else {
+        panic!("flat issue query produced a structured maintained update");
+    };
+    assert!(!authoritative_membership_changed);
     let issue_occurrence = OutputOccurrenceId::single_source(ObjectId::from_uuid(issue.0));
-    assert!(update.added.iter().any(|(id, _)| id == &issue_occurrence));
-    assert!(update.removed.iter().any(|id| id == &issue_occurrence));
-    let updated = update
-        .added
+    assert!(added.iter().any(|(id, _)| id == &issue_occurrence));
+    assert!(removed.iter().any(|id| id == &issue_occurrence));
+    let updated = added
         .iter()
         .find(|(id, _)| id == &issue_occurrence)
         .expect("updated issue is paired as an add/remove update");
@@ -217,10 +237,10 @@ fn recursive_reachability_subscription_grants_and_revokes_incrementally() {
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     assert!(matches!(
         initial,
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             result_member_adds,
             ..
-        } if result_member_adds.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, _)| row_uuid == resource1)
+        }) if result_member_adds.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, _)| row_uuid == resource1)
             && result_member_adds.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).all(|(_, row_uuid, _)| row_uuid != resource2)
     ));
 
@@ -239,11 +259,11 @@ fn recursive_reachability_subscription_grants_and_revokes_incrementally() {
     let grant = peer.query_update(&mut core, &shape, &binding).unwrap();
     assert!(matches!(
         grant,
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             result_member_adds,
             result_member_removes,
             ..
-        } if result_member_adds.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, _)| row_uuid == resource2)
+        }) if result_member_adds.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, _)| row_uuid == resource2)
             && result_member_removes.is_empty()
     ));
 
@@ -251,11 +271,11 @@ fn recursive_reachability_subscription_grants_and_revokes_incrementally() {
     let revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
     assert!(matches!(
         revoke,
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             result_member_adds,
             result_member_removes,
             ..
-        } if result_member_adds.is_empty()
+        }) if result_member_adds.is_empty()
             && result_member_removes.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, _)| row_uuid == resource1)
             && result_member_removes.iter().filter_map(crate::protocol::ResultMemberEntry::as_row).any(|(_, row_uuid, _)| row_uuid == resource2)
     ));

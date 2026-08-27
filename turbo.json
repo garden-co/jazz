@@ -7,7 +7,8 @@
     "build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**", "pkg/**"],
-      "env": ["JAZZ_NAPI_RELEASE"]
+      "env": ["JAZZ_NAPI_RELEASE"],
+      "passThroughEnv": ["JAZZ_TEST_SEALED_TOOLS_DIST"]
     },
     "inspector#build": {
       "dependsOn": ["^build"],
@@ -20,6 +21,7 @@
         "todo-server-ts#build",
         "todo-client-localfirst-react-docs#build",
         "todo-client-localfirst-ts-docs#build",
+        "todo-client-localfirst-solid-docs#build",
         "todo-client-localfirst-svelte-docs#build",
         "todo-client-localfirst-vue-docs#build",
         "todo-client-localfirst-expo-docs#build",
@@ -36,6 +38,10 @@
         "src/**/*.rs",
         "$TURBO_ROOT$/dev/artifacts/**",
         "$TURBO_ROOT$/crates/jazz-napi/package.json",
+        "$TURBO_ROOT$/crates/jazz-napi/index.cjs",
+        "$TURBO_ROOT$/crates/jazz-napi/index.mjs",
+        "$TURBO_ROOT$/crates/jazz-napi/index.d.ts",
+        "$TURBO_ROOT$/crates/jazz-napi/native-binding.cjs",
         "$TURBO_ROOT$/crates/jazz-napi/Cargo.toml",
         "$TURBO_ROOT$/crates/jazz-napi/build.rs",
         "$TURBO_ROOT$/crates/jazz-napi/scripts/**",
@@ -52,7 +58,17 @@
         "$TURBO_ROOT$/pnpm-workspace.yaml",
         "$TURBO_ROOT$/turbo.json"
       ],
-      "outputs": ["*.node", "index.js", "index.d.ts", ".jazz-artifact-manifest.json"]
+      "passThroughEnv": [
+        "JAZZ_TEST_ARTIFACT_LOCK_PATH",
+        "JAZZ_ARTIFACT_BUILD_LEASE",
+        "JAZZ_ARTIFACT_BUILD_LOCK_PATH",
+        "JAZZ_TEST_SEALED_TOOLS_DIST"
+      ],
+      "outputs": [
+        "native-binding.pointer.cjs",
+        "native-artifact-fingerprint.cjs",
+        ".native-artifacts/**"
+      ]
     },
     "jazz-wasm#build": {
       "inputs": [
@@ -72,7 +88,14 @@
         "$TURBO_ROOT$/pnpm-workspace.yaml",
         "$TURBO_ROOT$/turbo.json"
       ],
-      "outputs": ["pkg/**"]
+      "passThroughEnv": [
+        "JAZZ_TEST_ARTIFACT_LOCK_PATH",
+        "JAZZ_ARTIFACT_BUILD_LEASE",
+        "JAZZ_ARTIFACT_BUILD_LOCK_PATH",
+        "JAZZ_TEST_SEALED_TOOLS_DIST"
+      ],
+      "cache": false,
+      "outputs": []
     },
     "jazz-wasm#build:fast": {
       "inputs": [
@@ -92,7 +115,14 @@
         "$TURBO_ROOT$/pnpm-workspace.yaml",
         "$TURBO_ROOT$/turbo.json"
       ],
-      "outputs": ["pkg/**"]
+      "passThroughEnv": [
+        "JAZZ_TEST_ARTIFACT_LOCK_PATH",
+        "JAZZ_ARTIFACT_BUILD_LEASE",
+        "JAZZ_ARTIFACT_BUILD_LOCK_PATH",
+        "JAZZ_TEST_SEALED_TOOLS_DIST"
+      ],
+      "cache": false,
+      "outputs": []
     },
     "jazz-tools#build": {
       "inputs": [
@@ -108,7 +138,8 @@
         "$TURBO_ROOT$/pnpm-workspace.yaml",
         "$TURBO_ROOT$/turbo.json"
       ],
-      "outputs": ["dist/**"]
+      "outputs": ["dist/**"],
+      "passThroughEnv": ["JAZZ_TEST_SEALED_TOOLS_DIST"]
     },
     "build:crates": {
       "dependsOn": ["^build:crates"],
@@ -139,7 +170,8 @@
     },
     "test": {
       "dependsOn": ["^build"],
-      "cache": false
+      "cache": false,
+      "passThroughEnv": ["JAZZ_TEST_SEALED_TOOLS_DIST"]
     }
   }
 }

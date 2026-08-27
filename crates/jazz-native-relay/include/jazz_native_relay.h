@@ -30,6 +30,7 @@ typedef enum jazz_native_relay_status {
   JAZZ_NATIVE_RELAY_LIFECYCLE_FAILURE = 5,
   JAZZ_NATIVE_RELAY_INVALID_ABI_RANGE = 6,
   JAZZ_NATIVE_RELAY_INCOMPATIBLE_ABI = 7,
+  JAZZ_NATIVE_RELAY_BACKPRESSURE = 8,
 } jazz_native_relay_status;
 
 typedef struct jazz_native_relay_host jazz_native_relay_host;
@@ -40,6 +41,23 @@ jazz_native_relay_status jazz_native_relay_host_execute(
     const uint8_t *request,
     size_t request_len,
     jazz_native_relay_bytes *out);
+
+/* Admit strict JSON from trusted Kotlin/Swift platform code. This is not a
+ * JavaScript command: unknown fields, malformed config, SYSTEM identity, and
+ * bearer-token claims are rejected by Rust. On success `out` is exactly the
+ * opaque 32-byte admission capability, never a config or claim echo. */
+jazz_native_relay_status jazz_native_relay_host_admit_scope_json(
+    jazz_native_relay_host *host,
+    const uint8_t *request,
+    size_t request_len,
+    jazz_native_relay_bytes *out);
+
+/* Revoke a raw opaque 32-byte admission capability held by trusted platform
+ * lifecycle code. This is intentionally not exposed through execute. */
+jazz_native_relay_status jazz_native_relay_host_revoke_scope_capability(
+    jazz_native_relay_host *host,
+    const uint8_t *capability,
+    size_t capability_len);
 
 /*
  * Execute one complete postcard RelayCommandRequest. On success, response

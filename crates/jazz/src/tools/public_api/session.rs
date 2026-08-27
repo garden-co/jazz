@@ -1,13 +1,14 @@
 //! Session context for policy evaluation.
 //!
 //! A Session represents the authenticated user's context, containing:
-//! - `user_id`: Required unique identifier for the user
+//! - `issuer` + `user_id`: Required authenticated JWT `iss` and `sub`
 //! - `claims`: JSON object with user-defined claims (roles, teams, etc.)
 //! - `auth_mode`: First-class auth-mode discriminator derived from the JWT `iss`
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
+use crate::ids::AuthorSubject;
 use crate::tools::metadata::SYSTEM_PRINCIPAL_ID;
 use crate::tools::transaction::OpenTransactionId;
 
@@ -29,6 +30,8 @@ pub enum AuthMode {
 /// expressions to check row access permissions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
+    /// Validated JWT issuer (`iss`).
+    pub issuer: String,
     /// Required user identifier.
     pub user_id: String,
     /// User-defined claims as a JSON object (e.g., `{"teams": ["eng", "design"]}`).
@@ -40,17 +43,31 @@ pub struct Session {
 }
 
 impl Session {
-    fn is_user_id_path(path: &[String]) -> bool {
-        matches!(path, [segment] if segment == "user_id" || segment == "userId")
+    /// Return the canonical author subject admitted by this session's auth mode.
+    /// Reserved issuers are valid only for their matching first-party modes.
+    pub fn author_subject(&self) -> Result<AuthorSubject, crate::ids::AuthorSubjectError> {
+        match self.auth_mode {
+            AuthMode::External => AuthorSubject::authenticated(&self.issuer, self.get_user_id()),
+            AuthMode::LocalFirst if self.issuer == AuthorSubject::LOCAL_FIRST_ISSUER => {
+                AuthorSubject::reserved(&self.issuer, self.get_user_id())
+            }
+            AuthMode::Anonymous if self.issuer == AuthorSubject::ANONYMOUS_ISSUER => {
+                AuthorSubject::reserved(&self.issuer, self.get_user_id())
+            }
+            _ => Err(crate::ids::AuthorSubjectError::ReservedIssuer(
+                self.issuer.clone(),
+            )),
+        }
     }
 
     fn is_auth_mode_path(path: &[String]) -> bool {
         matches!(path, [segment] if segment == "auth_mode" || segment == "authMode")
     }
 
-    /// Create a new session with just a user ID. Defaults to external auth mode.
-    pub fn new(user_id: impl Into<String>) -> Self {
+    /// Create a session from a validated issuer and subject.
+    pub fn new(issuer: impl Into<String>, user_id: impl Into<String>) -> Self {
         Self {
+            issuer: issuer.into(),
             user_id: user_id.into(),
             claims: JsonValue::Object(serde_json::Map::new()),
             auth_mode: AuthMode::External,
@@ -72,17 +89,10 @@ impl Session {
     /// Get a value at the given path.
     ///
     /// Path segments:
-    /// - `["user_id"]` -> returns the user_id as a string
     /// - `["claims", "key"]` -> returns claims.key
     /// - `["claims", "nested", "key"]` -> returns claims.nested.key
     pub fn get_path(&self, path: &[String]) -> Option<&JsonValue> {
         if path.is_empty() {
-            return None;
-        }
-
-        if Self::is_user_id_path(path) {
-            // Special case: user_id is stored as a String, not JsonValue
-            // Return None here; use get_user_id() instead
             return None;
         }
 
@@ -124,9 +134,6 @@ impl Session {
         if path.is_empty() {
             return false;
         }
-        if Self::is_user_id_path(path) {
-            return true;
-        }
         if Self::is_auth_mode_path(path) {
             return true;
         }
@@ -135,14 +142,10 @@ impl Session {
 
     /// Get a string value at the given path.
     ///
-    /// For `["user_id"]`, returns the user_id.
-    /// For other paths, returns the JSON string if present.
+    /// Returns the JSON string if present.
     pub fn get_string(&self, path: &[String]) -> Option<&str> {
         if path.is_empty() {
             return None;
-        }
-        if Self::is_user_id_path(path) {
-            return Some(&self.user_id);
         }
         if Self::is_auth_mode_path(path) {
             return Some(match self.auth_mode {
@@ -167,7 +170,11 @@ impl Session {
 /// `session` controls permission evaluation. `attribution`, when present,
 /// controls who is recorded as the commit author without changing permission
 /// identity. `updated_at`, when present, overrides the row provenance
-/// timestamp recorded for update-like writes.
+/// physical-millisecond timestamp recorded for update-like writes. Core packs
+/// this input into an HLC with a zero logical counter. Public reads expose the
+/// same Unix-millisecond value; packed HLCs remain internal ordering state. It
+/// cannot be combined with `transaction_id`, whose staged-write API has no
+/// per-write timestamp slot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WriteContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -193,6 +200,11 @@ impl WriteContext {
         }
     }
 
+    /// Override provenance for a non-transactional upsert or update.
+    ///
+    /// The value is physical milliseconds, not a packed HLC value. Combining
+    /// this with [`Self::with_transaction_id`] is rejected because staged
+    /// writes do not yet carry a per-write timestamp override.
     pub fn with_updated_at(mut self, updated_at: u64) -> Self {
         self.updated_at = Some(updated_at);
         self
@@ -243,17 +255,17 @@ mod tests {
 
     #[test]
     fn test_session_user_id() {
-        let session = Session::new("user123");
+        let session = Session::new("urn:jazz:test", "user123");
         assert_eq!(session.get_user_id(), "user123");
-        assert_eq!(session.get_string(&["user_id".into()]), Some("user123"));
-        assert_eq!(session.get_string(&["userId".into()]), Some("user123"));
-        assert!(session.has_path(&["user_id".into()]));
-        assert!(session.has_path(&["userId".into()]));
+        assert_eq!(session.get_string(&["user_id".into()]), None);
+        assert_eq!(session.get_string(&["userId".into()]), None);
+        assert!(!session.has_path(&["user_id".into()]));
+        assert!(!session.has_path(&["userId".into()]));
     }
 
     #[test]
     fn test_session_claims() {
-        let session = Session::new("user123").with_claims(json!({
+        let session = Session::new("urn:jazz:test", "user123").with_claims(json!({
             "teams": ["eng", "design"],
             "role": "admin",
             "nested": {
@@ -285,7 +297,7 @@ mod tests {
 
     #[test]
     fn test_session_missing_paths() {
-        let session = Session::new("user123");
+        let session = Session::new("urn:jazz:test", "user123");
 
         // Non-existent claim
         assert!(!session.has_path(&["claims".into(), "missing".into()]));
@@ -302,7 +314,7 @@ mod tests {
     #[test]
     fn test_write_context_author_principal_prefers_attribution() {
         let context = WriteContext {
-            session: Some(Session::new("session-user")),
+            session: Some(Session::new("urn:jazz:test", "session-user")),
             attribution: Some("attributed-user".into()),
             updated_at: None,
             transaction_id: None,
@@ -314,7 +326,8 @@ mod tests {
 
     #[test]
     fn test_write_context_author_principal_falls_back_to_session_then_system() {
-        let session_context = WriteContext::from_session(Session::new("session-user"));
+        let session_context =
+            WriteContext::from_session(Session::new("urn:jazz:test", "session-user"));
         assert_eq!(session_context.author_principal(), "session-user");
 
         let system_context = WriteContext::default();
@@ -324,7 +337,7 @@ mod tests {
     #[test]
     fn test_write_context_batch_id_override() {
         let transaction_id = OpenTransactionId::new();
-        let context = WriteContext::from_session(Session::new("session-user"))
+        let context = WriteContext::from_session(Session::new("urn:jazz:test", "session-user"))
             .with_transaction_id(transaction_id);
 
         assert_eq!(context.transaction_id(), Some(transaction_id));
@@ -332,7 +345,7 @@ mod tests {
 
     #[test]
     fn test_write_context_target_branch_name_override() {
-        let context = WriteContext::from_session(Session::new("session-user"))
+        let context = WriteContext::from_session(Session::new("urn:jazz:test", "session-user"))
             .with_target_branch_name("dev-111111111111-main");
 
         assert_eq!(context.target_branch_name(), Some("dev-111111111111-main"));
@@ -340,14 +353,15 @@ mod tests {
 
     #[test]
     fn test_write_context_updated_at_override() {
-        let context = WriteContext::from_session(Session::new("session-user")).with_updated_at(42);
+        let context = WriteContext::from_session(Session::new("urn:jazz:test", "session-user"))
+            .with_updated_at(42);
 
         assert_eq!(context.updated_at(), Some(42));
     }
 
     #[test]
     fn session_auth_mode_defaults_to_external() {
-        let session = Session::new("user-1");
+        let session = Session::new("urn:jazz:test", "user-1");
         assert_eq!(session.auth_mode, AuthMode::External);
     }
 
@@ -358,7 +372,12 @@ mod tests {
             AuthMode::LocalFirst,
             AuthMode::Anonymous,
         ] {
-            let session = Session::new("user-1").with_auth_mode(mode);
+            let issuer = match mode {
+                AuthMode::External => "https://issuer.example",
+                AuthMode::LocalFirst => AuthorSubject::LOCAL_FIRST_ISSUER,
+                AuthMode::Anonymous => AuthorSubject::ANONYMOUS_ISSUER,
+            };
+            let session = Session::new(issuer, "user-1").with_auth_mode(mode);
             let json = serde_json::to_string(&session).unwrap();
             let back: Session = serde_json::from_str(&json).unwrap();
             assert_eq!(back.auth_mode, mode);
@@ -367,14 +386,15 @@ mod tests {
 
     #[test]
     fn session_auth_mode_accepts_camel_case_alias() {
-        let json = r#"{"user_id":"u","claims":{},"authMode":"anonymous"}"#;
+        let json =
+            r#"{"issuer":"urn:jazz:anonymous","user_id":"u","claims":{},"authMode":"anonymous"}"#;
         let session: Session = serde_json::from_str(json).unwrap();
         assert_eq!(session.auth_mode, AuthMode::Anonymous);
     }
 
     #[test]
     fn session_get_string_returns_auth_mode_as_kebab_string() {
-        let s = Session::new("u").with_auth_mode(AuthMode::LocalFirst);
+        let s = Session::new("urn:jazz:test", "u").with_auth_mode(AuthMode::LocalFirst);
         assert_eq!(s.get_string(&["authMode".into()]), Some("local-first"));
         assert_eq!(s.get_string(&["auth_mode".into()]), Some("local-first"));
         assert!(s.has_path(&["authMode".into()]));

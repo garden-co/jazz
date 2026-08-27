@@ -55,7 +55,7 @@ pub(super) fn collect_layout(
             })
         })
         .collect::<Vec<_>>();
-    let root_occurrence_inputs = root_join_occurrence_fields(plan, resolved_sources)?
+    let root_occurrence_inputs = root_join_occurrence_fields(plan, resolved_sources, request)?
         .into_iter()
         .filter(|(name, _)| available_fields.contains(name))
         .map(|(name, value_type)| {
@@ -495,13 +495,16 @@ pub(super) fn collect_slot_builder(
 ) -> CollectBySlotBuilder {
     CollectBySlotBuilder::new(
         std::iter::once(parent_row_id.to_owned()).chain(route_fields.iter().cloned()),
-        slot.fields.iter().map(|field| {
-            if field.is_row_id || field.value_type == field.output_value_type {
-                CollectByField::renamed(&field.input, &field.output)
-            } else {
-                CollectByField::renamed_unwrap_nullable(&field.input, &field.output)
-            }
-        }),
+        slot.fields
+            .iter()
+            .filter(|field| field.is_output)
+            .map(|field| {
+                if field.is_row_id || field.value_type == field.output_value_type {
+                    CollectByField::renamed(&field.input, &field.output)
+                } else {
+                    CollectByField::renamed_unwrap_nullable(&field.input, &field.output)
+                }
+            }),
         &slot.collection_field,
         slot.children
             .iter()
@@ -551,6 +554,7 @@ fn collect_slot_output_descriptor(slot: &CollectSlotLayout) -> CapabilityResult<
     let mut fields = slot
         .fields
         .iter()
+        .filter(|field| field.is_output)
         .map(|field| (field.output.clone(), field.output_value_type.clone()))
         .collect::<Vec<_>>();
     fields.extend(

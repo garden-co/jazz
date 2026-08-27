@@ -1561,6 +1561,57 @@ async fn deep_retained_only_graph_ticks_through_the_dependency_queue() {
     assert!(runtime.retained_node_ids().contains(&output));
 }
 
+#[test]
+fn deeply_nested_recursive_graph_compiles_on_a_server_sized_stack() {
+    // Recursive INHERITS policy lowering can produce a deeply nested, but
+    // finite, seed. Installing its Recursive node also collects its read
+    // tables, so both compilation and recursive source discovery must remain
+    // iterative on the dedicated server shell's ordinary thread stack.
+    let compiled = std::thread::Builder::new()
+        .name("ivm-deep-graph-receipt".to_owned())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            let schema = albums_schema();
+            let albums = schema
+                .table("albums")
+                .expect("albums table")
+                .record_schema();
+            let mut runtime = IvmRuntime::new(schema).expect("build runtime");
+            let mut graph = GraphBuilder::table("albums");
+            for _ in 0..8_192 {
+                graph = graph.filter(PredicateExpr::gt("id", Value::U64(0)));
+            }
+            let graph = GraphBuilder::recursive(
+                graph,
+                GraphBuilder::frontier_source("frontier", albums),
+                "frontier",
+                1,
+            );
+            let compiled = runtime
+                .add_dedup_graph(&graph)
+                .expect("compile deeply nested recursive graph");
+            let recursive_node = runtime
+                .graph
+                .node(compiled.node)
+                .expect("compiled recursive node");
+            let OpType::Recursive(recursive) = &recursive_node.descriptor.operator else {
+                panic!("compiled root must remain recursive");
+            };
+            assert_eq!(recursive.read_tables, ["albums"]);
+            // The receipt targets compilation and recursive source discovery;
+            // dropping a deliberately 8k-deep builder would independently
+            // recurse through Boxes after that work has completed.
+            std::mem::forget(graph);
+        })
+        .expect("spawn server-sized stack receipt")
+        .join();
+
+    assert!(
+        compiled.is_ok(),
+        "deep recursive graph compilation and source discovery must complete"
+    );
+}
+
 #[futures_test::test]
 async fn unsubscribe_eagerly_collects_unretained_ephemeral_nodes_and_state() {
     let schema = albums_schema();

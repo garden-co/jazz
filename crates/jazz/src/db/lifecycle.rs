@@ -6,12 +6,22 @@ impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    /// Configure Jazz-owned ingress and expiry policy for unpublished large values.
+    pub fn set_large_value_staging_policy(&self, policy: crate::node::LargeValueStagingPolicy) {
+        self.node.set_large_value_staging_policy(policy);
+    }
+
+    /// Run one host-driven staging-expiry maintenance pass.
+    pub async fn evict_expired_staged_large_values(&self) -> Result<usize, Error> {
+        self.node.evict_expired_staged_large_values().await
+    }
+
     /// Open a database over the supplied storage and recover local state.
     ///
     /// ```rust
     /// # use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource};
     /// # use jazz::db::doctest_support::{block_on, schema, MemoryStorage};
-    /// # use jazz::ids::{AuthorId, NodeUuid};
+    /// # use jazz::ids::{AuthorSubject, NodeUuid};
     /// let schema = schema();
     /// let column_families = schema.column_families();
     /// let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
@@ -22,7 +32,7 @@ where
     ///     storage,
     ///     identity: DbIdentity {
     ///         node: NodeUuid::from_bytes([1; 16]),
-    ///         author: AuthorId::from_bytes([2; 16]),
+    ///         author: AuthorSubject::for_test_bytes([2; 16]),
     ///     },
     ///     id_source: Some(Box::new(SeededRowIdSource::new(1))),
     /// }))?;
@@ -41,6 +51,7 @@ where
             NodeState::new(config.identity.node, config.schema.clone(), config.storage).await?;
         let node = Node::new(node);
         node.restore_pending_uploads(config.identity)?;
+        let row_id_source_guarantees_fresh = config.id_source.is_none();
         Ok(Self {
             schema: config.schema,
             schema_version_id,
@@ -53,8 +64,23 @@ where
                     .id_source
                     .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
             )),
+            row_id_source_guarantees_fresh,
             next_now_ms: Rc::new(Cell::new(1)),
+            backend_attribution: false,
         })
+    }
+
+    /// Open a Db allowed to record external provenance while preserving this
+    /// Db's identity for permission admission.
+    ///
+    /// # Safety
+    /// The caller must authenticate trusted backend authority before calling
+    /// this constructor and must not expose it to ordinary application code.
+    #[doc(hidden)]
+    pub async unsafe fn open_with_backend_attribution(config: DbConfig<S>) -> Result<Self, Error> {
+        let mut db = Self::open(config).await?;
+        db.backend_attribution = true;
+        Ok(db)
     }
 
     #[cfg(feature = "testing")]
@@ -74,6 +100,7 @@ where
             false,
         )
         .await?;
+        let row_id_source_guarantees_fresh = config.id_source.is_none();
         let db = Self {
             schema: config.schema,
             schema_version_id,
@@ -86,7 +113,9 @@ where
                     .id_source
                     .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
             )),
+            row_id_source_guarantees_fresh,
             next_now_ms: Rc::new(Cell::new(1)),
+            backend_attribution: false,
         };
         Ok((db, receipt))
     }
@@ -107,6 +136,7 @@ where
             config.storage,
         )
         .await?;
+        let row_id_source_guarantees_fresh = config.id_source.is_none();
         Ok(Self {
             schema: config.schema,
             schema_version_id,
@@ -119,8 +149,23 @@ where
                     .id_source
                     .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
             )),
+            row_id_source_guarantees_fresh,
             next_now_ms: Rc::new(Cell::new(1)),
+            backend_attribution: false,
         })
+    }
+
+    /// History-complete counterpart to [`Db::open_with_backend_attribution`].
+    ///
+    /// # Safety
+    /// The caller must have authenticated trusted backend authority.
+    #[doc(hidden)]
+    pub async unsafe fn open_history_complete_with_backend_attribution(
+        config: DbConfig<S>,
+    ) -> Result<Self, Error> {
+        let mut db = Self::open_history_complete(config).await?;
+        db.backend_attribution = true;
+        Ok(db)
     }
 
     /// Open an edge whose durable store has no authority catalogue yet.
@@ -143,6 +188,7 @@ where
             NodeState::new_catalogue_uninitialized(config.identity.node, config.storage).await?;
         let node = Node::new(node);
         node.restore_pending_uploads(config.identity)?;
+        let row_id_source_guarantees_fresh = config.id_source.is_none();
         Ok(Self {
             schema: bootstrap_schema,
             schema_version_id,
@@ -155,7 +201,9 @@ where
                     .id_source
                     .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
             )),
+            row_id_source_guarantees_fresh,
             next_now_ms: Rc::new(Cell::new(1)),
+            backend_attribution: false,
         })
     }
 
@@ -264,7 +312,9 @@ where
             identity: self.identity,
             node: Rc::clone(&self.node),
             row_id_source: Rc::clone(&self.row_id_source),
+            row_id_source_guarantees_fresh: self.row_id_source_guarantees_fresh,
             next_now_ms: Rc::clone(&self.next_now_ms),
+            backend_attribution: self.backend_attribution,
         })
     }
 
@@ -324,7 +374,7 @@ where
         let outcome = {
             let mut node = self.node.node.lock().await;
             node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
-                author: AuthorId::SYSTEM,
+                author: AuthorSubject::SYSTEM,
                 catalogue_seq,
                 publication: Box::new(publication),
             })
@@ -335,7 +385,7 @@ where
             let outcome = {
                 let mut node = self.node.node.lock().await;
                 node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
-                    author: AuthorId::SYSTEM,
+                    author: AuthorSubject::SYSTEM,
                     pointer: CurrentWriteSchema {
                         revision: 1,
                         schema: target_id,
@@ -372,6 +422,16 @@ where
         self.node.set_non_durable_client();
     }
 
+    /// Restore unsettled writes relayed from a browser client sharing this
+    /// worker's author. Browser workers persist main-thread transactions whose
+    /// node differs from the worker node, so ordinary local-origin recovery
+    /// cannot discover them after a cold worker restart.
+    #[doc(hidden)]
+    pub fn restore_browser_relay_pending_uploads(&self) -> Result<(), Error> {
+        self.node
+            .restore_browser_relay_pending_uploads(self.identity.author)
+    }
+
     /// Let a single-threaded host return resident writes synchronously while
     /// its tick loop owns suspendable persistence and later peer visibility.
     pub fn set_deferred_local_persistence(&self, deferred: bool) {
@@ -404,7 +464,7 @@ where
         &self,
         table: &str,
         row: RowUuid,
-        made_by: AuthorId,
+        made_by: AuthorSubject,
         cells: RowCells,
     ) -> Result<TxId, Error> {
         let cells = self.apply_insert_defaults(table, cells)?;
@@ -577,7 +637,7 @@ where
     pub fn accept_subscriber(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node.accept_subscriber(transport, identity)
     }
@@ -586,7 +646,7 @@ where
     pub fn accept_subscriber_with_claims(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node
@@ -597,7 +657,7 @@ where
     pub fn accept_subscriber_with_claims_and_trust(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
         trust: CommitUnitTrust,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
@@ -609,7 +669,7 @@ where
     pub fn accept_edge_subscriber_with_claims(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node
@@ -620,7 +680,7 @@ where
     pub fn accept_edge_authority_subscriber_with_claims(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node
@@ -631,7 +691,7 @@ where
     pub fn accept_subscriber_with_resume(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         cursor: ResumeCursor,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node
@@ -738,6 +798,23 @@ where
     /// Test/bench-only runtime diagnostics used by performance receipts.
     pub fn runtime_stats_for_test(&self) -> groove::ivm::RuntimeStats {
         self.node.node.borrow().runtime_stats_for_test()
+    }
+
+    #[cfg(feature = "testing")]
+    /// Test-only count of relay-owned upstream usage sites. This deliberately
+    /// counts wire owners rather than coverage evaluators, so reconnect tests
+    /// can prove a detached downstream session left no orphaned owner behind.
+    pub fn relay_upstream_subscription_owner_count_for_test(&self) -> usize {
+        self.node.relay_upstream_subscription_owners.borrow().len()
+    }
+
+    #[cfg(feature = "testing")]
+    /// Test-only count of relay-registered downstream wire usage sites.
+    pub fn relay_registered_query_binding_count_for_test(&self) -> usize {
+        self.node
+            .node
+            .borrow()
+            .registered_query_binding_count_for_test()
     }
 
     #[cfg(feature = "testing")]
@@ -1006,7 +1083,7 @@ fn size_row<'a>(row: &CurrentRow, raw: &'a [u8]) -> SizeRow<'a> {
 fn validation_tuple_estimate_bytes(
     shape: &ValidatedQuery,
     binding: &Binding,
-    author: AuthorId,
+    author: AuthorSubject,
     tier: DurabilityTier,
     read_view: &ReadViewSpec,
 ) -> usize {
@@ -1017,7 +1094,7 @@ fn validation_tuple_estimate_bytes(
         schema_version: SchemaVersionId,
         canonical_query: &'a [u8],
         canonical_binding: &'a [u8],
-        author: AuthorId,
+        author: AuthorSubject,
         tier: DurabilityTier,
         read_view: &'a ReadViewSpec,
     }

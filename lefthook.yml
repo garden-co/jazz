@@ -25,7 +25,11 @@ pre-commit:
       run: sh dev/scripts/clippy-staged.sh {staged_files}
     oxfmt:
       glob: "*.{ts,tsx,js,jsx,md,mdx,json,html}"
-      exclude: "crates/jazz-napi/index.d.ts"
+      exclude:
+        - "crates/jazz-napi/index.d.ts"
+        # This package owns its Prettier policy (single quotes); root oxfmt
+        # otherwise rewrites it to its incompatible default.
+        - "crates/jazz-rn/react-native.config.js"
       run: pnpm exec oxfmt --ignore-path .oxfmtignore {staged_files}
       stage_fixed: true
     oxlint:

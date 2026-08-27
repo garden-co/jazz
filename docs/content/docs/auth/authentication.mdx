@@ -12,7 +12,7 @@ Jazz has three auth modes: `anonymous`, `local-first`, and `external`. You pick 
 | `local-first` | Stable identity from a device secret, no server needed                      | Production offline-first apps, try-before-signup |
 | `external`    | Validates a JWT from your auth provider via JWKS or a configured static key | Production apps with real user accounts          |
 
-Anonymous sessions can subscribe to queries but are **structurally denied writes** — every insert, update, and delete path checks the session's auth mode before any policy evaluation runs, and surfaces an `AnonymousWriteDeniedError` to the client. Gate reads the same way you gate any other access, via the permissions DSL (`session.where({ authMode: "anonymous" })`).
+Anonymous sessions can subscribe to queries but are **structurally denied writes**. Client APIs reject inserts, updates, and deletes with `AnonymousWriteDeniedError`; independently, the fate authority rejects raw-wire or relayed commits whose admitted permission subject is anonymous before evaluating table policy. Gate reads the same way you gate any other access, via the permissions DSL (`session.where({ authMode: "anonymous" })`).
 
 ## Local-first auth
 
@@ -69,8 +69,11 @@ For more details, the [Auth0 docs](https://auth0.com/docs/secure/tokens/json-web
   client.
 </Callout>
 
-Jazz uses the JWT `sub` claim as `session.user_id`. This is used internally by Jazz to record the
-identity for every write, permission check, and `$createdBy` reference. Use a stable value.
+Jazz requires both JWT `iss` and `sub`. It keeps their admitted values available as
+`session.claims.iss` and `session.claims.sub`, then derives the separate logical `session.user`
+from their canonical pair for every write. Two providers may issue the same
+`sub` without becoming the same Jazz author; `$createdBy` distinguishes them by `iss`.
+Treat `session.user` as opaque: it is not a user-row reference, display name, or raw `sub`.
 
 - In most cases, use your provider's internal user ID, as this is generally fixed for the lifetime
   of the user account
@@ -81,9 +84,9 @@ If your provider doesn't provide a stable ID in `sub` by default, either configu
 or remint the token through your own JWT layer that rewrites `sub`.
 
 <Callout type="info">
-  Policies are enforced based on the `sub` claim. If you ever change what you use for `sub` in your
-  application, Jazz will consider this to be a different user, which may lead to unintended
-  consequences when enforcing policies.
+  Policies use `session.user` when comparing `$createdBy` or `$updatedBy`; provider claims retain
+  their raw admitted values under `session.claims`. Authorship identity is the exact `[iss, sub]`
+  pair. Changing either component creates a different author.
 </Callout>
 
 ### Managing JWT changes on a live client
@@ -133,6 +136,7 @@ const db = await createDb({
   appId: "my-app",
   serverUrl: "https://sync.example.com",
   cookieSession: {
+    issuer: "https://auth.example.com",
     user_id: "user_123",
     claims: { role: "member" },
     authMode: "external",
@@ -173,7 +177,7 @@ the current token as expired, serialized so concurrent failed writes trigger a s
 Read auth state from any component with `useAuthState()`:
 
 ```ts
-const { authMode, userId, claims, error } = useAuthState();
+const { authMode, user, claims, error } = useAuthState();
 ```
 
 #### TypeScript: `db.onAuthChanged`

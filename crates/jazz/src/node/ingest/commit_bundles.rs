@@ -132,7 +132,7 @@ where
         tx: Transaction,
         versions: Vec<VersionRecord>,
         now_ms: u64,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error>
     where
         S: ReopenableStorage,
@@ -255,6 +255,17 @@ where
             .ok_or(Error::MissingTransaction(tx_id))?;
         if !matches!(stored.fate, Fate::Pending) {
             return Ok(PublicationOutcome::settled(stored.fate));
+        }
+        // Locally finalized exclusive commits bypass `ingest_commit_unit_once`,
+        // so they must still take the common fate-policy path before their
+        // optimistic local versions become globally accepted.
+        if !self
+            .commit_unit_satisfies_write_policies(&tx, &versions, None)
+            .await?
+        {
+            let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
+            self.ingest_rejected_transaction(tx, fate.clone()).await?;
+            return Ok(PublicationOutcome::settled(fate));
         }
         // Validate through the SAME authority path the core uses for an incoming
         // exclusive commit unit (§3.7): row/absent/predicate reads (INV-TX-16/17/18)
@@ -974,6 +985,7 @@ where
     pub(super) async fn ingest_reset_view_bundle_refs_in_bulk(
         &mut self,
         bundles: &[VersionBundleRef<'_>],
+        preflight_persisted_tx_ids: Option<&BTreeSet<TxId>>,
     ) -> Result<BTreeSet<TxId>, Error> {
         let mut bundles_by_tx = BTreeMap::<TxId, Vec<VersionBundleRef<'_>>>::new();
         for bundle in bundles {
@@ -990,8 +1002,19 @@ where
         let mut loaded_tx_ids = BTreeSet::new();
         for (tx_id, tx_bundles) in bundles_by_tx {
             let first = tx_bundles[0];
+            let view_scoped = first.scope == crate::protocol::VersionBundleScope::ViewScoped;
+            // Each view-scoped bundle declares only its own redacted fragment
+            // cardinality. Compare the immutable transaction identity here and
+            // synthesize the receiver-local authorized cardinality only after
+            // exact version deduplication below.
+            let mut first_tx_identity = first.tx.clone();
+            first_tx_identity.n_total_writes = 0;
             if tx_bundles.iter().any(|bundle| {
-                bundle.tx != first.tx
+                let mut tx_identity = bundle.tx.clone();
+                tx_identity.n_total_writes = 0;
+                tx_identity != first_tx_identity
+                    || (bundle.scope == crate::protocol::VersionBundleScope::ViewScoped)
+                        != view_scoped
                     || bundle.fate != first.fate
                     || bundle.global_time != first.global_time
                     || bundle.durability != first.durability
@@ -1011,7 +1034,6 @@ where
                 (String, BranchKey, RowUuid, crate::ids::SchemaVersionId, bool),
                 &VersionRecord,
             >::new();
-            let mut duplicate_conflict = false;
             for bundle in &tx_bundles {
                 for version in bundle.versions {
                     let key = (
@@ -1022,9 +1044,8 @@ where
                         version.deletion().is_some(),
                     );
                     match unique_versions.get(&key) {
-                        Some(existing) if existing.record().raw() != version.record().raw() => {
-                            duplicate_conflict = true;
-                            break;
+                        Some(existing) if *existing != version => {
+                            return Err(Error::ConflictingCommitUnit(tx_id));
                         }
                         Some(_) => {}
                         None => {
@@ -1032,20 +1053,18 @@ where
                         }
                     }
                 }
-                if duplicate_conflict {
-                    break;
-                }
-            }
-            if duplicate_conflict {
-                continue;
             }
             let version_count = unique_versions.len();
             if first.tx.kind == TxKind::Exclusive
+                && !view_scoped
                 && usize::try_from(first.tx.n_total_writes).ok() != Some(version_count)
             {
                 continue;
             }
-            if self.query_transaction(tx_id).await?.is_some() {
+            if preflight_persisted_tx_ids.is_some_and(|known| known.contains(&tx_id))
+                || preflight_persisted_tx_ids.is_none()
+                    && self.query_transaction(tx_id).await?.is_some()
+            {
                 continue;
             }
             let mut missing_refs = false;
@@ -1059,7 +1078,13 @@ where
                 continue;
             }
             if loaded_tx_ids.insert(tx_id) {
-                eligible.push(tx_bundles);
+                let mut local_tx = first.tx.clone();
+                if view_scoped {
+                    local_tx.n_total_writes = version_count
+                        .try_into()
+                        .map_err(|_| Error::InvalidStoredValue("view payload is too large"))?;
+                }
+                eligible.push((tx_bundles, local_tx, view_scoped));
             }
         }
         if eligible.is_empty() {
@@ -1067,7 +1092,9 @@ where
         }
         let eligible_versions = eligible
             .iter()
-            .flat_map(|tx_bundles| tx_bundles.iter().flat_map(|bundle| bundle.versions))
+            .flat_map(|(tx_bundles, _, _)| {
+                tx_bundles.iter().flat_map(|bundle| bundle.versions)
+            })
             .cloned()
             .collect::<Vec<_>>();
         self.prepare_authored_schema_variants_for_commit(&eligible_versions).await?;
@@ -1077,7 +1104,7 @@ where
         let mut batch = self.database.open_batch();
         let version_count = eligible
             .iter()
-            .flatten()
+            .flat_map(|(tx_bundles, _, _)| tx_bundles)
             .map(|bundle| bundle.versions.len())
             .sum::<usize>();
         batch.reserve(eligible.len() + version_count.saturating_mul(2));
@@ -1090,20 +1117,25 @@ where
             BTreeSet::<(PhysicalTableId, String, BranchKey, RowUuid)>::new();
         let mut applied_global_times = Vec::with_capacity(eligible.len());
 
-        for tx_bundles in eligible {
+        for (tx_bundles, local_tx, view_scoped) in eligible {
             let first = tx_bundles[0];
-            let tx = first.tx;
+            let tx = &local_tx;
             let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
             let global_time = first.global_time.expect("checked above");
             applied_global_times.push(global_time);
             batch.insert(
                 "jazz_transactions",
-                transaction_values(
+                // A reset may bulk-load only the view-authorized rows of an
+                // exclusive transaction. Preserve that scope marker even when
+                // the redacted write count equals this fragment's length, so a
+                // later sibling view can extend the same local projection.
+                transaction_values_with_cardinality_scope(
                     tx_node_alias,
                     tx,
                     (*first.fate).clone(),
                     first.global_time,
                     first.durability,
+                    view_scoped,
                 ),
             );
 

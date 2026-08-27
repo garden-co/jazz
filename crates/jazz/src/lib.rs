@@ -25,7 +25,7 @@
 //! ```no_run
 //! use std::collections::BTreeMap;
 //!
-//! use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+//! use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 //! use jazz::protocol::SyncMessage;
 //! use jazz::schema::JazzSchema;
 //! use jazz::node::{MergeableCommit, NodeState};
@@ -44,17 +44,17 @@
 //!     block_on(NodeState::new(node, schema, MemoryStorage::new(&refs))).unwrap()
 //! }
 //!
-//! let owner = AuthorId::from_bytes([0xa1; 16]);
+//! let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
 //! let owner_policy = PolicyExpr::Cmp {
 //!     column: "owner".to_owned(),
 //!     op: CmpOp::Eq,
-//!     value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+//!     value: PolicyValue::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
 //! };
 //! let source = SchemaBuilder::new()
 //!     .table(
 //!         TableSchemaBuilder::new("todos")
 //!             .column("title", ColumnType::Text)
-//!             .column("owner", ColumnType::Uuid)
+//!             .column("owner", ColumnType::Text)
 //!             .policies(
 //!                 TablePolicies::new()
 //!                     .with_select(owner_policy.clone())
@@ -71,7 +71,7 @@
 //! let row = RowUuid::from_bytes([7; 16]);
 //! let cells = BTreeMap::from([
 //!     ("title".to_owned(), Value::String("draft".to_owned())),
-//!     ("owner".to_owned(), Value::Uuid(owner.0)),
+//!     ("owner".to_owned(), Value::String(owner.canonical().to_owned())),
 //! ]);
 //!
 //! let (tx_id, unit) = block_on(writer
@@ -99,7 +99,7 @@
 //!     row,
 //!     BTreeMap::from([
 //!         ("title".to_owned(), Value::String("done".to_owned())),
-//!         ("owner".to_owned(), Value::Uuid(owner.0)),
+//!         ("owner".to_owned(), Value::String(owner.canonical().to_owned())),
 //!     ]),
 //!     None::<DeletionEvent>,
 //! ))
@@ -115,7 +115,7 @@
 pub(crate) mod legacy_test_future {
     use std::future::Future;
 
-    use crate::ids::{AuthorId, SchemaVersionId};
+    use crate::ids::{AuthorSubject, SchemaVersionId};
     use crate::node::{ContributionMergeRequest, Error, MergeableCommit, NodeState};
     use crate::protocol::{CatalogueSnapshot, SyncMessage, VersionRecord};
     use crate::time::{GlobalTime, TxTime};
@@ -257,7 +257,7 @@ pub(crate) mod legacy_test_future {
         fn commit_exclusive_settled(
             &mut self,
             tx_id: OpenTransactionId,
-            author: AuthorId,
+            author: AuthorSubject,
             now_ms: u64,
         ) -> Result<(TxId, SyncMessage), Error>;
         fn apply_sync_message_settled(
@@ -376,7 +376,7 @@ pub(crate) mod legacy_test_future {
         fn commit_exclusive_settled(
             &mut self,
             tx_id: OpenTransactionId,
-            author: AuthorId,
+            author: AuthorSubject,
             now_ms: u64,
         ) -> Result<(TxId, SyncMessage), Error> {
             crate::db::block_on(async {
@@ -441,6 +441,7 @@ pub use groove;
 pub mod authorization_scope;
 /// Shared binary row payload contract for the NAPI and WASM bindings.
 pub mod binding_codec;
+/// Opaque immutable chunk staging and retrieval used by Groove large values.
 
 /// Disabled-by-default counters used by the native cold-settle attribution bench.
 #[cfg(feature = "cold-settle-attribution")]

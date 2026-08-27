@@ -10,9 +10,12 @@ const TOGGLE_POS_KEY = "jazz-inspector-overlay:toggle-pos";
 // button is hidden and the overlay opens only via the keyboard shortcut. Stored
 // as JSON by the iframe, hence the `=== "true"` parse below.
 const HIDE_TOGGLE_KEY = "jazz-inspector-overlay:hide-toggle";
-// postMessage type the inspector's in-iframe Close button posts to the top
-// window to dismiss the dock; see packages/inspector/src/utility/overlay-settings.ts.
+// postMessage types the inspector iframe sends to dismiss the dock; see
+// packages/inspector/src/utility/overlay-settings.ts.
 const CLOSE_MESSAGE_TYPE = "jazz-inspector-overlay:close";
+const OVERLAY_CONTROL_GLOBAL = "__jazzInspectorOverlay";
+const OVERLAY_ROUTE_MESSAGE_TYPE = "jazz-inspector-overlay:route";
+const DETACHED_WINDOW_NAME = "jazz-inspector-detached";
 const MIN_HEIGHT = 200;
 const DEFAULT_RATIO = 0.42;
 const TOGGLE_SIZE = 44;
@@ -226,6 +229,7 @@ const TEMPLATE = `
 class HostBinding {
   #db: InspectorHostDb | undefined;
   #iframeWindow: Window | undefined;
+  #inspectorWindows = new Set<Window>();
   #bound: { db: InspectorHostDb; iframeWindow: Window; dispose: () => void } | undefined;
 
   setDb(db: InspectorHostDb): void {
@@ -242,6 +246,7 @@ class HostBinding {
   unbind(): void {
     this.#iframeWindow = undefined;
     this.#dispose();
+    this.#inspectorWindows.clear();
   }
 
   #rebind(): void {
@@ -257,7 +262,12 @@ class HostBinding {
     this.#bound = {
       db: this.#db,
       iframeWindow: this.#iframeWindow,
-      dispose: installInspectorHost(this.#db, this.#iframeWindow, window.location.origin),
+      dispose: installInspectorHost(
+        this.#db,
+        this.#iframeWindow,
+        window.location.origin,
+        this.#inspectorWindows,
+      ),
     };
   }
 
@@ -274,6 +284,7 @@ const hostBinding = new HostBinding();
 // registered against #ac.signal so disconnectedCallback() removes them at once.
 class JazzInspectorOverlay extends HTMLElement {
   #ac: AbortController | undefined;
+  #activeRoute = "/data-explorer";
 
   // Constructed once and shared by adoptedStyleSheets, so the (large) CSS is
   // parsed a single time rather than re-injected as a <style> per mount.
@@ -322,13 +333,16 @@ class JazzInspectorOverlay extends HTMLElement {
     applyTogglePos(togglePos);
 
     let open = readOpen();
+    let detachedWindow: Window | null = null;
+    let detachedWindowCheck: ReturnType<typeof setInterval> | undefined;
     // When the user opts into keyboard-only mode, the toggle stays hidden even
     // while the dock is closed; the shortcut is then the only way to open it.
     let hideToggle = readHideToggle();
     const apply = (): void => {
-      dock.dataset.open = open ? "true" : "false";
-      toggle.hidden = open || hideToggle;
-      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+      const dockOpen = open && detachedWindow === null;
+      dock.dataset.open = dockOpen ? "true" : "false";
+      toggle.hidden = dockOpen || detachedWindow !== null || hideToggle;
+      toggle.setAttribute("aria-expanded", dockOpen ? "true" : "false");
     };
     const setOpen = (next: boolean): void => {
       if (open === next) return;
@@ -338,6 +352,66 @@ class JazzInspectorOverlay extends HTMLElement {
       // Return focus to the toggle on close, but only if it's actually visible.
       if (!open && !toggle.hidden) toggle.focus();
     };
+    const stopDetachedWindowCheck = (): void => {
+      if (detachedWindowCheck === undefined) return;
+      clearInterval(detachedWindowCheck);
+      detachedWindowCheck = undefined;
+    };
+    const restoreDockIfDetachedWindowClosed = (): boolean => {
+      if (!detachedWindow?.closed) return false;
+      detachedWindow = null;
+      stopDetachedWindowCheck();
+      iframe.contentWindow?.postMessage(
+        { type: OVERLAY_ROUTE_MESSAGE_TYPE, route: this.#activeRoute },
+        window.location.origin,
+      );
+      apply();
+      return true;
+    };
+    const closeDetachedWindow = (): void => {
+      stopDetachedWindowCheck();
+      detachedWindow?.close();
+      detachedWindow = null;
+      apply();
+    };
+    const openDetachedWindow = (route: string): boolean => {
+      const url = new URL(iframe.src);
+      url.searchParams.set("detached", "1");
+      url.searchParams.set("route", route);
+      const rect = dock.getBoundingClientRect();
+      const width = Math.round(rect.width || window.innerWidth);
+      const height = Math.round(rect.height || readHeight() || MIN_HEIGHT);
+      const top = Math.round(window.screenY + window.outerHeight - height);
+      const popup = window.open(
+        url,
+        DETACHED_WINDOW_NAME,
+        `popup,width=${width},height=${height},left=${window.screenX},top=${top}`,
+      );
+      if (!popup) return false;
+      detachedWindow = popup;
+      popup.focus();
+      apply();
+      stopDetachedWindowCheck();
+      detachedWindowCheck = setInterval(restoreDockIfDetachedWindowClosed, 250);
+      return true;
+    };
+    signal.addEventListener("abort", closeDetachedWindow, { once: true });
+    window.addEventListener("pagehide", closeDetachedWindow, { signal });
+    const overlayControl = {
+      detach: openDetachedWindow,
+      setActiveRoute: (route: string) => {
+        this.#activeRoute = route;
+      },
+    };
+    (window as unknown as Record<string, unknown>)[OVERLAY_CONTROL_GLOBAL] = overlayControl;
+    signal.addEventListener(
+      "abort",
+      () => {
+        const host = window as unknown as Record<string, unknown>;
+        if (host[OVERLAY_CONTROL_GLOBAL] === overlayControl) delete host[OVERLAY_CONTROL_GLOBAL];
+      },
+      { once: true },
+    );
 
     // Drag to reposition; a click that didn't drag opens the inspector.
     let dragMoved = false;
@@ -391,8 +465,21 @@ class JazzInspectorOverlay extends HTMLElement {
         // "j". `e.code === "KeyJ"` is layout- and modifier-independent.
         if (e.altKey && e.shiftKey && e.code === "KeyJ") {
           e.preventDefault();
+          if (restoreDockIfDetachedWindowClosed()) return;
+          if (detachedWindow && !detachedWindow.closed) {
+            detachedWindow.focus();
+            return;
+          }
           setOpen(!open);
-        } else if (e.key === "Escape" && open) {
+        } else if (e.altKey && e.shiftKey && e.code === "KeyD") {
+          e.preventDefault();
+          restoreDockIfDetachedWindowClosed();
+          if (detachedWindow && !detachedWindow.closed) {
+            detachedWindow.focus();
+            return;
+          }
+          if (openDetachedWindow(this.#activeRoute)) setOpen(true);
+        } else if (e.key === "Escape" && open && detachedWindow === null) {
           setOpen(false);
         }
       },
@@ -449,16 +536,14 @@ class JazzInspectorOverlay extends HTMLElement {
     hostBinding.setIframeWindow(iframe.contentWindow ?? undefined);
     signal.addEventListener("abort", () => hostBinding.unbind(), { once: true });
 
-    // The in-iframe Close button posts up here (same-origin).
+    // The iframe posts here when the dock closes.
     window.addEventListener(
       "message",
       (event) => {
-        if (
-          event.origin === window.location.origin &&
-          (event.data as { type?: unknown } | null)?.type === CLOSE_MESSAGE_TYPE
-        ) {
-          setOpen(false);
-        }
+        if (event.origin !== window.location.origin || event.source !== iframe.contentWindow)
+          return;
+        const data = event.data as { type?: unknown } | null;
+        if (data?.type === CLOSE_MESSAGE_TYPE) setOpen(false);
       },
       { signal },
     );

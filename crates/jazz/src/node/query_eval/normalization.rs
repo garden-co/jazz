@@ -333,16 +333,19 @@ pub(super) fn select_current_access_path(
     if !has_declared_id && let Some(value) = equalities.get("id").cloned() {
         return Some(CurrentAccessPath::PrimaryKey(vec![value]));
     }
+    let mut probes = Vec::new();
     for column in table.global_current_indexed_columns() {
         if let Some(value) = equalities.get(&column).cloned() {
-            return Some(CurrentAccessPath::Index {
-                column,
-                prefix: vec![Value::Nullable(Some(Box::new(value)))],
-                source_limit: None,
-            });
+            probes.push((column, vec![Value::Nullable(Some(Box::new(value)))]));
         }
     }
-    None
+    let (column, prefix) = probes.first()?.clone();
+    Some(CurrentAccessPath::Index {
+        column,
+        prefix,
+        intersections: probes.into_iter().skip(1).collect(),
+        source_limit: None,
+    })
 }
 
 pub(super) fn static_scan_for_prefix(prefix: Vec<Value>, full_key_len: usize) -> StaticScanSpec {
@@ -666,7 +669,7 @@ fn normalize_enum_payload_operand(
         }
         Operand::Param(param) => Ok(NormalizedValueRef::Param(param.clone())),
         Operand::Claim(claim) => Ok(NormalizedValueRef::Claim(ClaimPath(
-            claim.split('.').map(str::to_owned).collect(),
+            crate::query::operand_claim_path(claim),
         ))),
         Operand::Literal(value) => {
             let value = target_type
@@ -840,7 +843,7 @@ fn normalize_operand_with_target_type_and_declared_id_and_flat_join_alias(
         },
         Operand::Param(param) => NormalizedValueRef::Param(param.clone()),
         Operand::Claim(claim) => {
-            NormalizedValueRef::Claim(ClaimPath(claim.split('.').map(str::to_owned).collect()))
+            NormalizedValueRef::Claim(ClaimPath(crate::query::operand_claim_path(claim)))
         }
         Operand::Literal(value) => {
             let value = target_type
@@ -1688,7 +1691,7 @@ fn normalize_reachable_seed(
         );
         let mut seed_current = seed_source_node;
         let claim_route_field = seed.user_claim.as_ref().map(|user_claim| {
-            let claim_path = ClaimPath(user_claim.split('.').map(str::to_owned).collect());
+            let claim_path = ClaimPath(crate::query::operand_claim_path(user_claim));
             (claim_path.clone(), claim_param_field(&claim_path))
         });
         if let (Some(user_column), Some((_, claim_field))) = (&seed.user_column, &claim_route_field)
@@ -1826,7 +1829,7 @@ fn reachable_seed_frontier_columns(
             ));
         };
         let user_column_ty = schema_column_type(schema, &seed.table, user_column)?;
-        let path = ClaimPath(user_claim.split('.').map(str::to_owned).collect());
+        let path = ClaimPath(crate::query::operand_claim_path(user_claim));
         columns.push(ValueSourceColumn {
             name: claim_param_field(&path),
             value: NormalizedValueRef::Claim(path),
@@ -1871,7 +1874,7 @@ fn reachable_frontier_columns(
         });
     }
     if let Operand::Claim(claim) = seed {
-        let path = ClaimPath(claim.split('.').map(str::to_owned).collect());
+        let path = ClaimPath(crate::query::operand_claim_path(claim));
         columns.push(ValueSourceColumn {
             name: claim_param_field(&path),
             value: NormalizedValueRef::Claim(path),
@@ -1896,7 +1899,7 @@ fn reachable_seed_value_ref(seed: &Operand) -> Result<NormalizedValueRef, Error>
         Operand::Param(param) => Ok(NormalizedValueRef::Param(param.clone())),
         Operand::Literal(Value::Uuid(uuid)) => literal_value_ref(&Value::Uuid(*uuid)),
         Operand::Claim(claim) => Ok(NormalizedValueRef::Claim(ClaimPath(
-            claim.split('.').map(str::to_owned).collect(),
+            crate::query::operand_claim_path(claim),
         ))),
         Operand::Column(_) | Operand::Literal(_) => Err(normalization_gap(
             "reachable_via currently supports uuid parameter/claim/literal seeds only",

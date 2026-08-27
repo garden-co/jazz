@@ -7,13 +7,16 @@
 //! storage for tests lives in [`super`], and all schema-aware behavior lives
 //! above this adapter.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use rocksdb::{
     BlockBasedOptions, Cache, ColumnFamilyDescriptor, DB, DBCompactionStyle, DBCompressionType,
-    DBIteratorWithThreadMode, Direction, IteratorMode, MergeOperands, Options, ReadOptions,
+    DBIteratorWithThreadMode, Direction, IteratorMode, Options, ReadOptions,
     UniversalCompactOptions, WriteBatch, WriteBufferManager, WriteOptions, properties,
 };
 use serde::Serialize;
@@ -21,7 +24,7 @@ use serde::Serialize;
 use groove::storage::{
     BoxedStorage, ColumnFamilyName, Error, KeyValue, OrderedKvStorage, OwnedWriteOperation,
     ReopenableStorage, ScanBounds, ScanDirection, ScanRequest, StorageCursor, StorageFactory,
-    StorageFuture, StorageScan, Value, apply_storage_delta, compact_storage_delta_operand,
+    StorageFuture, StorageScan, Value,
 };
 
 trait RocksResultExt<T> {
@@ -38,7 +41,11 @@ impl<T> RocksResultExt<T> for Result<T, rocksdb::Error> {
 }
 
 const ROCKSDB_BLOCK_CACHE_BYTES: usize = 256 * 1024 * 1024;
-const ROCKSDB_WRITE_BUFFER_MANAGER_BYTES: usize = 256 * 1024 * 1024;
+// Keep desktop reopen recovery debt bounded by allowing RocksDB to flush
+// incrementally during sustained writes. A 256 MiB budget left realistic
+// local datasets entirely in the WAL until exit; 16 MiB is the measured knee
+// between reopen latency and foreground ingest cost (see #2104).
+const ROCKSDB_WRITE_BUFFER_MANAGER_BYTES: usize = 16 * 1024 * 1024;
 const ROCKSDB_DEFAULT_BLOCK_BYTES: usize = 16 * 1024;
 const ROCKSDB_LARGE_BLOCK_BYTES: usize = 64 * 1024;
 const ROCKSDB_APPEND_TARGET_FILE_BYTES: u64 = 128 * 1024 * 1024;
@@ -51,6 +58,9 @@ const CLASS_AHEAD_CURRENT_CF: &str = "__groove_class_ahead_current";
 const CLASS_CHANGES_CF: &str = "__groove_class_changes";
 const CLASS_INDICES_CF: &str = "__groove_class_indices";
 const CLASS_META_CF: &str = "__groove_class_meta";
+const ROCKSDB_INTERNAL_CF: &str = "__groove_storage_internal_v3";
+const ROCKSDB_VALUE_FORMAT_KEY: &[u8] = b"value-format";
+const ROCKSDB_VALUE_FORMAT_V3: &[u8] = b"raw-v3";
 
 /// RocksDB durability tier used for writes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -69,7 +79,10 @@ pub struct RocksDbStorage {
     column_families: BTreeSet<String>,
     db: DB,
     write_options: WriteOptions,
+    mutation_gate: Mutex<()>,
     write_flush_cadence: RefCell<Option<WriteFlushCadence>>,
+    #[cfg(test)]
+    last_wal_flush_sync: Cell<Option<bool>>,
 }
 
 /// Opens a native persistent store at the exact shell-provided path.
@@ -218,30 +231,48 @@ impl RocksDbStorage {
         durability: Durability,
     ) -> Result<Self, Error> {
         let path = path.as_ref().to_path_buf();
-        // Share one 256MB block cache and one 256MB write-buffer budget across
+        if column_families.contains(&ROCKSDB_INTERNAL_CF) {
+            return Err(Error::InvalidStorageLayout(
+                "RocksDB internal column family name is reserved".to_owned(),
+            ));
+        }
+        // Share one 256MB block cache and one bounded write-buffer budget across
         // all column families opened by this storage instance.
         let block_cache = Cache::new_lru_cache(ROCKSDB_BLOCK_CACHE_BYTES);
         let write_buffer_manager =
             WriteBufferManager::new_write_buffer_manager(ROCKSDB_WRITE_BUFFER_MANAGER_BYTES, false);
-        let mut options = rocksdb_options(&block_cache, &write_buffer_manager);
-        options.create_if_missing(true);
-        options.create_missing_column_families(true);
-        if matches!(durability, Durability::FullSync) {
-            options.set_use_fsync(true);
-        }
-        if matches!(durability, Durability::WalNoSync) {
-            options.set_wal_bytes_per_sync(1 << 20);
-        }
-
-        let mut opened_column_families = column_families
+        let requested_column_families = column_families
             .iter()
             .map(|name| (*name).to_owned())
             .collect::<BTreeSet<_>>();
+
+        let mut write_options = WriteOptions::default();
+        write_options.disable_wal(false);
+        write_options.set_sync(matches!(durability, Durability::FullSync));
+
+        let listed_column_families = DB::list_cf(&Options::default(), &path).ok();
+        let initialize_format = match &listed_column_families {
+            Some(existing) => {
+                validate_raw_v3_store(&path, existing, &block_cache, &write_buffer_manager)?
+            }
+            None => true,
+        };
+
+        let mut opened_column_families = requested_column_families;
         opened_column_families.insert("default".to_owned());
-        if path.exists()
-            && let Ok(existing) = DB::list_cf(&options, &path)
-        {
+        if let Some(existing) = listed_column_families {
             opened_column_families.extend(existing);
+        }
+        opened_column_families.insert(ROCKSDB_INTERNAL_CF.to_owned());
+
+        let mut final_options = rocksdb_options(&block_cache, &write_buffer_manager);
+        final_options.create_if_missing(true);
+        final_options.create_missing_column_families(true);
+        if matches!(durability, Durability::FullSync) {
+            final_options.set_use_fsync(true);
+        }
+        if matches!(durability, Durability::WalNoSync) {
+            final_options.set_wal_bytes_per_sync(1 << 20);
         }
         let descriptors = opened_column_families
             .iter()
@@ -253,27 +284,48 @@ impl RocksDbStorage {
                     rocksdb_options_for_cf(name, &block_cache, &write_buffer_manager),
                 )
             });
-
-        let db = DB::open_cf_descriptors(&options, &path, descriptors).storage()?;
-
-        let mut write_options = WriteOptions::default();
-        write_options.disable_wal(false);
-        write_options.set_sync(matches!(durability, Durability::FullSync));
-
+        let db = DB::open_cf_descriptors(&final_options, &path, descriptors).storage()?;
+        let internal_cf = db
+            .cf_handle(ROCKSDB_INTERNAL_CF)
+            .expect("internal RocksDB column family was opened");
+        if initialize_format {
+            db.put_cf_opt(
+                internal_cf,
+                ROCKSDB_VALUE_FORMAT_KEY,
+                ROCKSDB_VALUE_FORMAT_V3,
+                &write_options,
+            )
+            .storage()?;
+        }
         Ok(Self {
             path,
             durability,
-            column_families: opened_column_families,
+            column_families: opened_column_families
+                .into_iter()
+                .filter(|name| name != ROCKSDB_INTERNAL_CF)
+                .collect(),
             db,
             write_options,
+            mutation_gate: Mutex::new(()),
             write_flush_cadence: RefCell::new(None),
+            #[cfg(test)]
+            last_wal_flush_sync: Cell::new(None),
         })
     }
 
     fn cf_handle(&self, cf: &ColumnFamilyName) -> Result<&rocksdb::ColumnFamily, Error> {
+        if !self.column_families.contains(cf) {
+            return Err(Error::ColumnFamilyNotFound(cf.to_owned()));
+        }
         self.db
             .cf_handle(cf)
             .ok_or_else(|| Error::ColumnFamilyNotFound(cf.to_owned()))
+    }
+
+    fn flush_wal(&self, sync: bool) -> Result<(), Error> {
+        #[cfg(test)]
+        self.last_wal_flush_sync.set(Some(sync));
+        self.db.flush_wal(sync).storage()
     }
 
     /// Snapshot RocksDB's per-column-family size and background-work
@@ -346,6 +398,63 @@ fn rocksdb_options_for_cf(
     rocksdb_options_for_profile(rocksdb_class_profile(cf), block_cache, write_buffer_manager)
 }
 
+fn validate_raw_v3_store(
+    path: &Path,
+    column_families: &[String],
+    block_cache: &Cache,
+    write_buffer_manager: &WriteBufferManager,
+) -> Result<bool, Error> {
+    let mut options = rocksdb_options(block_cache, write_buffer_manager);
+    options.create_if_missing(false);
+    options.create_missing_column_families(false);
+    let descriptors = column_families
+        .iter()
+        .map(String::as_str)
+        .filter(|name| *name != "default")
+        .map(|name| {
+            ColumnFamilyDescriptor::new(
+                name,
+                rocksdb_options_for_cf(name, block_cache, write_buffer_manager),
+            )
+        });
+    let db = DB::open_cf_descriptors(&options, path, descriptors).storage()?;
+    if let Some(internal) = db.cf_handle(ROCKSDB_INTERNAL_CF) {
+        match db
+            .get_cf(internal, ROCKSDB_VALUE_FORMAT_KEY)
+            .storage()?
+            .as_deref()
+        {
+            Some(ROCKSDB_VALUE_FORMAT_V3) => return Ok(false),
+            Some(_) => {
+                return Err(Error::InvalidStorageLayout(
+                    "incompatible RocksDB storage format marker".to_owned(),
+                ));
+            }
+            None => {}
+        }
+    }
+    let empty = column_families.iter().all(|cf| {
+        let first = if cf == "default" {
+            db.iterator(IteratorMode::Start).next()
+        } else {
+            db.iterator_cf(
+                db.cf_handle(cf)
+                    .expect("listed RocksDB column family was opened"),
+                IteratorMode::Start,
+            )
+            .next()
+        };
+        first.is_none()
+    });
+    if empty {
+        Ok(true)
+    } else {
+        Err(Error::InvalidStorageLayout(
+            "unmarked non-empty RocksDB store cannot be opened as raw-v3".to_owned(),
+        ))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RocksDbClassProfile {
     Default,
@@ -383,11 +492,6 @@ fn rocksdb_options_for_profile(
     options.set_target_file_size_base(profile.target_file_size());
     options.set_compression_type(profile.compression());
     options.set_bottommost_compression_type(profile.bottommost_compression());
-    options.set_merge_operator(
-        "groove_delta",
-        rocksdb_full_merge_delta,
-        rocksdb_partial_merge_delta,
-    );
     if matches!(profile, RocksDbClassProfile::AppendRange) {
         let mut universal = UniversalCompactOptions::default();
         universal.set_size_ratio(20);
@@ -460,11 +564,72 @@ impl ReopenableStorage for RocksDbStorage {
 impl OrderedKvStorage for RocksDbStorage {
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         Box::pin(async move {
-            if cf == "default" {
+            let value = if cf == "default" {
                 self.db.get(key).storage()
             } else {
                 self.db.get_cf(self.cf_handle(&cf)?, key).storage()
+            }?;
+            Ok(value)
+        })
+    }
+
+    fn put_if_absent(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+        Box::pin(async move {
+            let _guard = self
+                .mutation_gate
+                .lock()
+                .expect("RocksDB mutation gate poisoned");
+            let existing = if cf == "default" {
+                self.db.get(&key).storage()?
+            } else {
+                self.db.get_cf(self.cf_handle(&cf)?, &key).storage()?
+            };
+            if existing.is_some() {
+                return Ok(existing);
             }
+            if cf == "default" {
+                self.db.put_opt(key, value, &self.write_options).storage()?;
+            } else {
+                self.db
+                    .put_cf_opt(self.cf_handle(&cf)?, key, value, &self.write_options)
+                    .storage()?;
+            }
+            Ok(None)
+        })
+    }
+
+    fn compare_and_delete(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<bool, Error>> {
+        Box::pin(async move {
+            let _guard = self
+                .mutation_gate
+                .lock()
+                .expect("RocksDB mutation gate poisoned");
+            let existing = if cf == "default" {
+                self.db.get(&key).storage()?
+            } else {
+                self.db.get_cf(self.cf_handle(&cf)?, &key).storage()?
+            };
+            if existing.as_deref() != Some(expected.as_slice()) {
+                return Ok(false);
+            }
+            if cf == "default" {
+                self.db.delete_opt(key, &self.write_options).storage()?;
+            } else {
+                self.db
+                    .delete_cf_opt(self.cf_handle(&cf)?, key, &self.write_options)
+                    .storage()?;
+            }
+            Ok(true)
         })
     }
 
@@ -505,6 +670,10 @@ impl OrderedKvStorage for RocksDbStorage {
         value: Vec<u8>,
     ) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
+            let _guard = self
+                .mutation_gate
+                .lock()
+                .expect("RocksDB mutation gate poisoned");
             if cf == "default" {
                 self.db.put_opt(key, value, &self.write_options).storage()
             } else {
@@ -517,6 +686,10 @@ impl OrderedKvStorage for RocksDbStorage {
 
     fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
+            let _guard = self
+                .mutation_gate
+                .lock()
+                .expect("RocksDB mutation gate poisoned");
             if cf == "default" {
                 self.db.delete_opt(key, &self.write_options).storage()
             } else {
@@ -525,6 +698,10 @@ impl OrderedKvStorage for RocksDbStorage {
                     .storage()
             }
         })
+    }
+
+    fn close(&self) -> StorageFuture<'_, Result<(), Error>> {
+        self.flush_write_boundary()
     }
 
     fn set_write_flush_cadence(&self, every: usize) -> StorageFuture<'_, Result<(), Error>> {
@@ -537,7 +714,7 @@ impl OrderedKvStorage for RocksDbStorage {
 
     fn flush_write_boundary(&self) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
-            self.db.flush_wal(true).storage()?;
+            self.flush_wal(true)?;
             if let Some(cadence) = self.write_flush_cadence.borrow_mut().as_mut() {
                 cadence.pending = 0;
             }
@@ -622,6 +799,10 @@ impl OrderedKvStorage for RocksDbStorage {
         operations: Vec<OwnedWriteOperation>,
     ) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
+            let _guard = self
+                .mutation_gate
+                .lock()
+                .expect("RocksDB mutation gate poisoned");
             let mut batch = WriteBatch::default();
 
             for operation in operations {
@@ -638,13 +819,6 @@ impl OrderedKvStorage for RocksDbStorage {
                             batch.delete(key);
                         } else {
                             batch.delete_cf(self.cf_handle(&cf)?, key);
-                        }
-                    }
-                    OwnedWriteOperation::Delta { cf, key, delta } => {
-                        if cf == "default" {
-                            batch.merge(key, delta.encode()?);
-                        } else {
-                            batch.merge_cf(self.cf_handle(&cf)?, key, delta.encode()?);
                         }
                     }
                 }
@@ -666,7 +840,7 @@ impl OrderedKvStorage for RocksDbStorage {
             write_options.disable_wal(false);
             self.db.write_opt(&batch, &write_options).storage()?;
             if should_flush {
-                self.db.flush_wal(true).storage()?;
+                self.flush_wal(true)?;
             }
             Ok(())
         })
@@ -675,41 +849,6 @@ impl OrderedKvStorage for RocksDbStorage {
     fn column_family_names(&self) -> Option<Vec<String>> {
         Some(self.column_families.iter().cloned().collect())
     }
-}
-
-fn rocksdb_full_merge_delta(
-    _key: &[u8],
-    old_value: Option<&[u8]>,
-    operands: &MergeOperands,
-) -> Option<Vec<u8>> {
-    apply_merge_operands(old_value, operands).ok()
-}
-
-fn rocksdb_partial_merge_delta(
-    _key: &[u8],
-    left_operand: Option<&[u8]>,
-    operands: &MergeOperands,
-) -> Option<Vec<u8>> {
-    let mut value = match left_operand {
-        Some(operand) => Some(apply_storage_delta(None, operand).ok()?),
-        None => None,
-    };
-    let template = left_operand.or_else(|| operands.iter().next())?;
-    for operand in operands {
-        value = Some(apply_storage_delta(value.as_deref(), operand).ok()?);
-    }
-    compact_storage_delta_operand(template, value?).ok()
-}
-
-fn apply_merge_operands(
-    initial: Option<&[u8]>,
-    operands: &MergeOperands,
-) -> Result<Vec<u8>, Error> {
-    let mut value = initial.map(<[u8]>::to_vec);
-    for operand in operands {
-        value = Some(apply_storage_delta(value.as_deref(), operand)?);
-    }
-    value.ok_or_else(|| Error::InvalidStorageDelta("merge operator received no value".to_owned()))
 }
 
 fn advance_prefix_upper_bound(prefix: &mut [u8]) -> bool {
@@ -726,15 +865,18 @@ fn advance_prefix_upper_bound(prefix: &mut [u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use groove::storage::OrderedKvStorage;
     use std::future::Future;
     use std::pin::pin;
     use std::task::{Context, Poll, Waker};
 
     use crate::{
         CLASS_AHEAD_CURRENT_CF, CLASS_CHANGES_CF, CLASS_GLOBAL_CURRENT_CF, CLASS_HISTORY_CF,
-        CLASS_INDICES_CF, CLASS_META_CF, CLASS_REGISTER_CF, RocksDbClassProfile, RocksDbStorage,
-        any_available, rocksdb_class_profile, sum_available,
+        CLASS_INDICES_CF, CLASS_META_CF, CLASS_REGISTER_CF, ROCKSDB_INTERNAL_CF,
+        ROCKSDB_VALUE_FORMAT_KEY, RocksDbClassProfile, RocksDbStorage, any_available,
+        rocksdb_class_profile, sum_available,
     };
+    use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 
     fn ready<F: Future>(future: F) -> F::Output {
         let mut future = pin!(future);
@@ -783,6 +925,286 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
         assert!(storage.write_flush_cadence.borrow().is_none());
+    }
+
+    #[test]
+    fn raw_v3_round_trips_arbitrary_bytes_and_hides_its_marker() {
+        use groove::storage::OrderedKvStorage;
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        for (key, value) in [
+            (b"empty".to_vec(), Vec::new()),
+            (b"former-sentinel".to_vec(), vec![0xff, 0, 0xff, 17]),
+        ] {
+            ready(storage.set("records".into(), key, value)).unwrap();
+        }
+        assert!(
+            !storage
+                .column_family_names()
+                .unwrap()
+                .iter()
+                .any(|cf| cf == ROCKSDB_INTERNAL_CF)
+        );
+        drop(storage);
+        let reopened = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        assert_eq!(
+            ready(reopened.get("records".into(), b"empty".to_vec())).unwrap(),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            ready(reopened.get("records".into(), b"former-sentinel".to_vec())).unwrap(),
+            Some(vec![0xff, 0, 0xff, 17])
+        );
+    }
+
+    #[test]
+    fn unmarked_nonempty_store_is_rejected_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut options = Options::default();
+        options.create_if_missing(true);
+        options.create_missing_column_families(true);
+        let db = DB::open_cf_descriptors(
+            &options,
+            dir.path(),
+            [ColumnFamilyDescriptor::new("records", Options::default())],
+        )
+        .unwrap();
+        db.put_cf(db.cf_handle("records").unwrap(), b"key", b"value")
+            .unwrap();
+        drop(db);
+        for _ in 0..2 {
+            assert!(RocksDbStorage::open(dir.path(), &["records", "must-not-be-created"]).is_err());
+        }
+        assert!(
+            !DB::list_cf(&options, dir.path())
+                .unwrap()
+                .iter()
+                .any(|cf| cf == "must-not-be-created")
+        );
+        let db = DB::open_cf(&options, dir.path(), ["records"]).unwrap();
+        assert_eq!(
+            db.get_cf(db.cf_handle("records").unwrap(), b"key").unwrap(),
+            Some(b"value".to_vec())
+        );
+        assert!(db.cf_handle(ROCKSDB_INTERNAL_CF).is_none());
+    }
+
+    #[test]
+    fn unknown_raw_format_marker_is_rejected_repeatedly() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut options = Options::default();
+        options.create_if_missing(true);
+        options.create_missing_column_families(true);
+        let db = DB::open_cf_descriptors(
+            &options,
+            dir.path(),
+            [
+                ColumnFamilyDescriptor::new("records", Options::default()),
+                ColumnFamilyDescriptor::new(ROCKSDB_INTERNAL_CF, Options::default()),
+            ],
+        )
+        .unwrap();
+        db.put_cf(
+            db.cf_handle(ROCKSDB_INTERNAL_CF).unwrap(),
+            ROCKSDB_VALUE_FORMAT_KEY,
+            b"v2",
+        )
+        .unwrap();
+        drop(db);
+        for _ in 0..2 {
+            assert!(RocksDbStorage::open(dir.path(), &["records", "must-not-be-created"]).is_err());
+        }
+        assert!(
+            !DB::list_cf(&options, dir.path())
+                .unwrap()
+                .iter()
+                .any(|cf| cf == "must-not-be-created")
+        );
+    }
+
+    #[test]
+    fn interrupted_initialization_with_only_empty_families_is_recoverable() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut options = Options::default();
+        options.create_if_missing(true);
+        options.create_missing_column_families(true);
+        drop(
+            DB::open_cf_descriptors(
+                &options,
+                dir.path(),
+                [
+                    ColumnFamilyDescriptor::new("records", Options::default()),
+                    ColumnFamilyDescriptor::new(ROCKSDB_INTERNAL_CF, Options::default()),
+                ],
+            )
+            .unwrap(),
+        );
+        let storage = RocksDbStorage::open(dir.path(), &["records", "added"]).unwrap();
+        assert!(
+            storage
+                .column_family_names()
+                .unwrap()
+                .iter()
+                .any(|cf| cf == "added")
+        );
+    }
+
+    #[test]
+    fn close_flushes_a_partial_write_cadence() {
+        use groove::storage::{OrderedKvStorage, OwnedWriteOperation};
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        ready(storage.set_write_flush_cadence(8)).unwrap();
+        ready(storage.write_many(vec![OwnedWriteOperation::Set {
+            cf: "records".to_owned(),
+            key: b"pending".to_vec(),
+            value: b"value".to_vec(),
+        }]))
+        .unwrap();
+        assert_eq!(
+            storage
+                .write_flush_cadence
+                .borrow()
+                .as_ref()
+                .map(|cadence| cadence.pending),
+            Some(1)
+        );
+
+        ready(storage.close()).unwrap();
+
+        assert_eq!(
+            storage.last_wal_flush_sync.get(),
+            Some(true),
+            "close must synchronously flush the RocksDB WAL"
+        );
+
+        assert_eq!(
+            storage
+                .write_flush_cadence
+                .borrow()
+                .as_ref()
+                .map(|cadence| cadence.pending),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn pure_batches_match_memory_and_survive_reopen() {
+        use groove::storage::{MemoryStorage, OrderedKvStorage, OwnedWriteOperation};
+
+        let dir = tempfile::tempdir().unwrap();
+        let rocks = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        let memory = MemoryStorage::new(&["records"]);
+        assert_eq!(
+            ready(rocks.put_if_absent(
+                "records".to_owned(),
+                b"locator".to_vec(),
+                b"receipt-a".to_vec(),
+            ))
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            ready(rocks.put_if_absent(
+                "records".to_owned(),
+                b"locator".to_vec(),
+                b"receipt-b".to_vec(),
+            ))
+            .unwrap(),
+            Some(b"receipt-a".to_vec())
+        );
+        assert!(
+            !ready(rocks.compare_and_delete(
+                "records".to_owned(),
+                b"locator".to_vec(),
+                b"receipt-b".to_vec(),
+            ))
+            .unwrap()
+        );
+        assert!(
+            ready(rocks.compare_and_delete(
+                "records".to_owned(),
+                b"locator".to_vec(),
+                b"receipt-a".to_vec(),
+            ))
+            .unwrap()
+        );
+        assert_eq!(
+            ready(rocks.put_if_absent(
+                "records".to_owned(),
+                b"locator".to_vec(),
+                b"receipt-c".to_vec(),
+            ))
+            .unwrap(),
+            None
+        );
+        assert!(
+            !ready(rocks.compare_and_delete(
+                "records".to_owned(),
+                b"locator".to_vec(),
+                b"receipt-a".to_vec(),
+            ))
+            .unwrap()
+        );
+        let operations = vec![
+            OwnedWriteOperation::Set {
+                cf: "records".to_owned(),
+                key: b"same-key".to_vec(),
+                value: b"first".to_vec(),
+            },
+            OwnedWriteOperation::Set {
+                cf: "records".to_owned(),
+                key: b"same-key".to_vec(),
+                value: b"second".to_vec(),
+            },
+            OwnedWriteOperation::Delete {
+                cf: "records".to_owned(),
+                key: b"same-key".to_vec(),
+            },
+            OwnedWriteOperation::Set {
+                cf: "records".to_owned(),
+                key: b"same-key".to_vec(),
+                value: b"final".to_vec(),
+            },
+        ];
+        ready(memory.write_many(operations.clone())).unwrap();
+        ready(rocks.write_many(operations)).unwrap();
+        let expected = ready(memory.get("records".to_owned(), b"same-key".to_vec())).unwrap();
+        assert_eq!(expected, Some(b"final".to_vec()));
+        assert_eq!(
+            ready(rocks.get("records".to_owned(), b"same-key".to_vec())).unwrap(),
+            expected
+        );
+
+        let rejected = vec![
+            OwnedWriteOperation::Set {
+                cf: "records".to_owned(),
+                key: b"must-not-leak".to_vec(),
+                value: b"value".to_vec(),
+            },
+            OwnedWriteOperation::Set {
+                cf: "missing".to_owned(),
+                key: b"invalid".to_vec(),
+                value: b"value".to_vec(),
+            },
+        ];
+        assert!(ready(rocks.write_many(rejected)).is_err());
+        assert_eq!(
+            ready(rocks.get("records".to_owned(), b"must-not-leak".to_vec())).unwrap(),
+            None
+        );
+        drop(rocks);
+
+        let reopened = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        assert_eq!(
+            ready(reopened.get("records".to_owned(), b"same-key".to_vec())).unwrap(),
+            Some(b"final".to_vec())
+        );
+        assert_eq!(
+            ready(reopened.get("records".to_owned(), b"must-not-leak".to_vec())).unwrap(),
+            None
+        );
     }
 
     #[test]

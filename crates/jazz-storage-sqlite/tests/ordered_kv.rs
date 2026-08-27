@@ -163,6 +163,56 @@ fn ordered_prefix_range_atomic_batch_and_reopen_contract() {
 }
 
 #[test]
+fn conditional_mutations_are_atomic_across_handles_and_aba_safe() {
+    block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jazz.sqlite");
+        let first = SqliteStorage::open(&path, &["records"]).unwrap();
+        let second = SqliteStorage::open(&path, &["records"]).unwrap();
+        let key = b"locator".to_vec();
+        assert_eq!(
+            first
+                .put_if_absent("records".into(), key.clone(), b"receipt-a".to_vec())
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            second
+                .put_if_absent("records".into(), key.clone(), b"receipt-b".to_vec())
+                .await
+                .unwrap(),
+            Some(b"receipt-a".to_vec())
+        );
+        assert!(
+            !second
+                .compare_and_delete("records".into(), key.clone(), b"receipt-b".to_vec())
+                .await
+                .unwrap()
+        );
+        assert!(
+            first
+                .compare_and_delete("records".into(), key.clone(), b"receipt-a".to_vec())
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            second
+                .put_if_absent("records".into(), key.clone(), b"receipt-c".to_vec())
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(
+            !first
+                .compare_and_delete("records".into(), key.clone(), b"receipt-a".to_vec())
+                .await
+                .unwrap()
+        );
+    });
+}
+
+#[test]
 fn rejects_wrong_format_and_closed_store() {
     block_on(async {
         let dir = tempfile::tempdir().unwrap();

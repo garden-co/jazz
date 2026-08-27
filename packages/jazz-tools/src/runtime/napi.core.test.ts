@@ -81,6 +81,27 @@ const BYTEA_SCHEMA: WasmSchema = {
   },
 };
 
+it("accepts only canonical authors through the NAPI open-config codec", async () => {
+  const { NapiDb } = await loadNapiModule();
+  const canonical = new TextEncoder().encode('["https://issuer.example","canonical-author"]');
+  const db = NapiDb.openMemory(
+    encodeSchema(TEST_SCHEMA),
+    openConfig(deterministicBytes("napi-open-config:node"), canonical, 1, true),
+  );
+  db.close?.();
+  expect(() =>
+    NapiDb.openMemory(
+      encodeSchema(TEST_SCHEMA),
+      openConfig(
+        deterministicBytes("napi-open-config:legacy-node"),
+        deterministicBytes("napi-open-config:legacy-author"),
+        1,
+        true,
+      ),
+    ),
+  ).toThrow(/canonical UTF-8 JSON/i);
+});
+
 const SIGNED_DEFAULT_CASES: Array<{
   name: string;
   columnType: ColumnType;
@@ -138,7 +159,7 @@ const OWNED_TODOS_SCHEMA: WasmSchema = {
           type: "Cmp",
           column: "owner_id",
           op: "Eq",
-          value: { type: "SessionRef", path: ["user_id"] },
+          value: { type: "SessionRef", path: ["claims", "sub"] },
         },
       },
       insert: {
@@ -146,7 +167,7 @@ const OWNED_TODOS_SCHEMA: WasmSchema = {
           type: "Cmp",
           column: "owner_id",
           op: "Eq",
-          value: { type: "SessionRef", path: ["user_id"] },
+          value: { type: "SessionRef", path: ["claims", "sub"] },
         },
       },
       update: {
@@ -154,7 +175,7 @@ const OWNED_TODOS_SCHEMA: WasmSchema = {
           type: "Cmp",
           column: "owner_id",
           op: "Eq",
-          value: { type: "SessionRef", path: ["user_id"] },
+          value: { type: "SessionRef", path: ["claims", "sub"] },
         },
       },
       delete: {
@@ -162,7 +183,7 @@ const OWNED_TODOS_SCHEMA: WasmSchema = {
           type: "Cmp",
           column: "owner_id",
           op: "Eq",
-          value: { type: "SessionRef", path: ["user_id"] },
+          value: { type: "SessionRef", path: ["claims", "sub"] },
         },
       },
     },
@@ -203,7 +224,7 @@ const CHAT_POLICY_SCHEMA: WasmSchema = {
                     type: "Cmp",
                     column: "user_id",
                     op: "Eq",
-                    value: { type: "SessionRef", path: ["user_id"] },
+                    value: { type: "SessionRef", path: ["claims", "sub"] },
                   },
                 ],
               },
@@ -232,7 +253,7 @@ const CHAT_POLICY_SCHEMA: WasmSchema = {
           type: "Cmp",
           column: "user_id",
           op: "Eq",
-          value: { type: "SessionRef", path: ["user_id"] },
+          value: { type: "SessionRef", path: ["claims", "sub"] },
         },
       },
       insert: {
@@ -240,7 +261,7 @@ const CHAT_POLICY_SCHEMA: WasmSchema = {
           type: "Cmp",
           column: "user_id",
           op: "Eq",
-          value: { type: "SessionRef", path: ["user_id"] },
+          value: { type: "SessionRef", path: ["claims", "sub"] },
         },
       },
       update: { using: { type: "True" } },
@@ -249,7 +270,7 @@ const CHAT_POLICY_SCHEMA: WasmSchema = {
           type: "Cmp",
           column: "user_id",
           op: "Eq",
-          value: { type: "SessionRef", path: ["user_id"] },
+          value: { type: "SessionRef", path: ["claims", "sub"] },
         },
       },
     },
@@ -306,7 +327,7 @@ const CHAT_POLICY_SCHEMA: WasmSchema = {
                     type: "Cmp",
                     column: "user_id",
                     op: "Eq",
-                    value: { type: "SessionRef", path: ["user_id"] },
+                    value: { type: "SessionRef", path: ["claims", "sub"] },
                   },
                 ],
               },
@@ -335,6 +356,59 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     globalThis.WebSocket = previousWebSocket;
   });
 
+  it("selects and filters public provenance authors as canonical text", async () => {
+    const { NapiDb } = await loadNapiModule();
+    const authorSeed = "jazz-napi-public-provenance:author";
+    const author = JSON.stringify(["urn:jazz:test", authorSeed]);
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+      TEST_SCHEMA,
+      deterministicBytes("jazz-napi-public-provenance:node"),
+      testAuthorBytes(authorSeed),
+      1,
+      true,
+    );
+    runtimes.push(runtime);
+    const inserted = runtime.insert("todos", {
+      title: { type: "Text", value: "created by canonical author" },
+      done: { type: "Boolean", value: false },
+    });
+    await runtime.waitForTransaction(await committedBatchId(inserted), "local");
+
+    await expect(
+      runtime.query(
+        JSON.stringify({
+          table: "todos",
+          select_columns: ["title", "$createdBy", "$updatedBy"],
+          relation_ir: {
+            Filter: {
+              input: { TableScan: { table: "todos" } },
+              predicate: {
+                Cmp: {
+                  left: { column: "$createdBy" },
+                  op: "Eq",
+                  right: { Literal: { type: "Text", value: author } },
+                },
+              },
+            },
+          },
+        }),
+        null,
+        "local",
+      ),
+    ).resolves.toEqual([
+      {
+        table: "todos",
+        id: inserted.id,
+        values: [
+          { type: "Text", value: "created by canonical author" },
+          { type: "Text", value: author },
+          { type: "Text", value: author },
+        ],
+      },
+    ]);
+  });
+
   it("compiles the policy graph perf source fixture through NAPI", async () => {
     const { NapiDb } = await loadNapiModule();
     const source = JSON.parse(
@@ -348,7 +422,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       schema,
       openConfig(
         deterministicBytes("jazz-napi-native-runtime:policy-graph-perf-node"),
-        deterministicBytes("jazz-napi-native-runtime:policy-graph-perf-author"),
+        testAuthorBytes("jazz-napi-native-runtime:policy-graph-perf-author"),
         1,
         true,
       ),
@@ -362,7 +436,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const config = Buffer.from(
       openConfig(
         deterministicBytes("jazz-napi-native-runtime:retained-view-node"),
-        deterministicBytes("jazz-napi-native-runtime:retained-view-author"),
+        testAuthorBytes("jazz-napi-native-runtime:retained-view-author"),
         1,
         true,
       ),
@@ -387,7 +461,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       encodeSchema(TEST_SCHEMA),
       openConfig(
         deterministicBytes("jazz-napi-native-runtime:scheduler-node"),
-        deterministicBytes("jazz-napi-native-runtime:scheduler-author"),
+        testAuthorBytes("jazz-napi-native-runtime:scheduler-author"),
         1,
         true,
       ),
@@ -415,7 +489,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
       deterministicBytes("jazz-napi-native-runtime:node"),
-      deterministicBytes("jazz-napi-native-runtime:author"),
+      testAuthorBytes("jazz-napi-native-runtime:author"),
       1,
       true,
     );
@@ -456,13 +530,141 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([]);
   });
 
+  it("streams a typed text column through NAPI before publishing the row", async () => {
+    const { NapiDb } = await loadNapiModule();
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+      TEST_SCHEMA,
+      deterministicBytes("jazz-napi-streaming-insert:node"),
+      testAuthorBytes("jazz-napi-streaming-insert:author"),
+      1,
+      true,
+      { readAuthorizationHost: "trusted-serving" },
+    );
+    runtimes.push(runtime);
+
+    const inserted = await runtime.streamingMutation(
+      "insert",
+      "todos",
+      { done: { type: "Boolean", value: false } },
+      "title",
+      (async function* () {
+        yield "streamed ";
+        yield new TextEncoder().encode("through NAPI ");
+        yield "\ud83d";
+        yield "\ude80";
+      })(),
+      null,
+      "00000000-0000-4000-8000-000000000123",
+    );
+
+    await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([
+      {
+        id: inserted.id,
+        table: "todos",
+        values: [
+          { type: "Text", value: "streamed through NAPI 🚀" },
+          { type: "Boolean", value: false },
+        ],
+      },
+    ]);
+
+    await runtime.streamingMutation(
+      "update",
+      "todos",
+      { done: { type: "Boolean", value: true } },
+      "title",
+      (async function* () {
+        yield "streamed update";
+      })(),
+      JSON.stringify({
+        session: {
+          issuer: "https://issuer.example",
+          user_id: ALICE_ID,
+          claims: { role: "editor" },
+        },
+        updated_at: 42_000,
+      }),
+      inserted.id,
+    );
+    await runtime.streamingMutation(
+      "upsert",
+      "todos",
+      {},
+      "title",
+      (async function* () {
+        yield "streamed upsert";
+      })(),
+      null,
+      inserted.id,
+    );
+
+    await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([
+      {
+        id: inserted.id,
+        table: "todos",
+        values: [
+          { type: "Text", value: "streamed upsert" },
+          { type: "Boolean", value: true },
+        ],
+      },
+    ]);
+  });
+
+  it("allocates clock-backed ordered UUIDv7 ids in Rust for ordinary and staged inserts", async () => {
+    const { NapiDb } = await loadNapiModule();
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+      TEST_SCHEMA,
+      deterministicBytes("jazz-napi-native-runtime:uuidv7-node"),
+      testAuthorBytes("jazz-napi-native-runtime:uuidv7-author"),
+      1,
+      true,
+    );
+    runtimes.push(runtime);
+
+    const insert = (title: string, writeContext?: string) =>
+      runtime.insert(
+        "todos",
+        {
+          title: { type: "Text", value: title },
+          done: { type: "Boolean", value: false },
+        },
+        writeContext,
+      );
+
+    const first = insert("first");
+    const second = insert("second");
+    const openBatchId = beginTestBatch(runtime);
+    const writeContext = JSON.stringify({ batch_id: openBatchId });
+    const third = insert("third", writeContext);
+    const fourth = insert("fourth", writeContext);
+
+    for (const row of [first, second, third, fourth]) {
+      expect(row.id).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+    }
+
+    const generatedAtMs = Number.parseInt(first.id.replaceAll("-", "").slice(0, 12), 16);
+    expect(Math.abs(Date.now() - generatedAtMs)).toBeLessThan(60_000);
+    const ids = [first.id, second.id, third.id, fourth.id];
+    expect(ids).toEqual([...ids].sort());
+
+    await runtime.commitTransaction(openBatchId);
+    const rows = (await runtime.query(JSON.stringify({ table: "todos" }))) as Array<{
+      id: string;
+    }>;
+    expect(rows.map((row) => row.id)).toEqual([first.id, second.id, third.id, fourth.id]);
+  });
+
   it("applies column defaults for direct napi inserts with omitted cells", async () => {
     const { NapiDb } = await loadNapiModule();
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       DEFAULTS_SCHEMA,
       deterministicBytes("jazz-napi-native-runtime-defaults:node"),
-      deterministicBytes("jazz-napi-native-runtime-defaults:author"),
+      testAuthorBytes("jazz-napi-native-runtime-defaults:author"),
       1,
       true,
     );
@@ -500,7 +702,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
           },
         },
         deterministicBytes("jazz-napi-native-runtime-signed-defaults:node"),
-        deterministicBytes("jazz-napi-native-runtime-signed-defaults:author"),
+        testAuthorBytes("jazz-napi-native-runtime-signed-defaults:author"),
         1,
         true,
       );
@@ -527,7 +729,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
       deterministicBytes("jazz-napi-native-runtime-subscription:node"),
-      deterministicBytes("jazz-napi-native-runtime-subscription:author"),
+      testAuthorBytes("jazz-napi-native-runtime-subscription:author"),
       21,
       true,
     );
@@ -537,11 +739,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const updates: ReturnType<SubscriptionManager<WasmRow>["handleDelta"]>[] = [];
     const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "local");
     runtime.executeSubscription(handle, (delta: unknown) => {
+      if (delta instanceof Error) throw delta;
       updates.push(
         manager.handleDelta(
           delta as Parameters<SubscriptionManager<WasmRow>["handleDelta"]>[0],
           (row) => row,
-          TEST_SCHEMA.todos.columns,
         ),
       );
     });
@@ -598,7 +800,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
       deterministicBytes("jazz-napi-native-runtime-provisional-empty:node"),
-      deterministicBytes("jazz-napi-native-runtime-provisional-empty:author"),
+      testAuthorBytes("jazz-napi-native-runtime-provisional-empty:author"),
       25,
       true,
     );
@@ -627,10 +829,10 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     runtime.unsubscribe(localOnly);
   });
 
-  it("returns raw NAPI subscription payloads as Uint8Array with registered terminal layouts", async () => {
+  it("returns raw NAPI subscription payloads without duplicate root terminal edits", async () => {
     const { NapiDb } = await loadNapiModule();
     const node = deterministicBytes("jazz-napi-native-runtime-raw-subscription:node");
-    const author = deterministicBytes("jazz-napi-native-runtime-raw-subscription:author");
+    const author = testAuthorBytes("jazz-napi-native-runtime-raw-subscription:author");
     const rawEvents: NapiSubscriptionEvent[] = [];
     const expectRawBinaryPayload = (event: (typeof rawEvents)[number] | undefined) => {
       expect(event).toBeDefined();
@@ -696,11 +898,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const updates: ReturnType<SubscriptionManager<WasmRow>["handleDelta"]>[] = [];
     const handle = runtime.createSubscription(JSON.stringify({ table: "blobs" }), null, "local");
     runtime.executeSubscription(handle, (delta: unknown) => {
+      if (delta instanceof Error) throw delta;
       updates.push(
         manager.handleDelta(
           delta as Parameters<SubscriptionManager<WasmRow>["handleDelta"]>[0],
           (row) => row,
-          BYTEA_SCHEMA.blobs.columns,
         ),
       );
     });
@@ -719,26 +921,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       .find((event) => event.type === "delta" && event.reset === false);
 
     const rawIncremental = expectRawBinaryPayload(rawDelta);
-    expect(rawIncremental.terminalOperations).toHaveLength(1);
-    const rawOperation = rawIncremental.terminalOperations[0];
-    expect(rawIncremental.terminalLayouts).toHaveLength(1);
-    const rawLayout = rawIncremental.terminalLayouts[0];
-    expect(rawOperation?.rootLayoutId).toBe(rawLayout?.id);
-    expect(rawLayout?.rootDescriptor.length).toBeGreaterThan(0);
-    expect(
-      rawLayout?.rootDescriptor.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255),
-    ).toBe(true);
-    expect(rawOperation?.root_key.length).toBeGreaterThan(0);
-    expect(
-      rawOperation?.root_key.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255),
-    ).toBe(true);
-    expect(rawOperation?.path).toEqual([]);
-    if (!rawOperation || !("Insert" in rawOperation.edit)) {
-      throw new Error("expected an inserted terminal operation");
-    }
-    const rawTerminalValue = rawOperation.edit.Insert.value;
-    expect(rawOperation.edit.Insert.key).toEqual(rawOperation.root_key);
-    expect(rawTerminalValue.slice(-fullByteRange.byteLength)).toEqual(Array.from(fullByteRange));
+    expect(rawIncremental.terminalOperations).toEqual([]);
 
     const delivered = updates[1]?.delta[0];
     expect(delivered?.id).toBe(inserted.id);
@@ -836,7 +1019,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
           },
           TEST_SCHEMA,
           deterministicBytes(`jazz-napi-native-runtime-event-variants:${label}:node`),
-          deterministicBytes(`jazz-napi-native-runtime-event-variants:${label}:author`),
+          testAuthorBytes(`jazz-napi-native-runtime-event-variants:${label}:author`),
           24,
           true,
         );
@@ -910,7 +1093,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
       deterministicBytes("jazz-napi-native-runtime-transaction-delta:node"),
-      deterministicBytes("jazz-napi-native-runtime-transaction-delta:author"),
+      testAuthorBytes("jazz-napi-native-runtime-transaction-delta:author"),
       22,
       true,
     );
@@ -924,7 +1107,6 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         manager.handleDelta(
           delta as Parameters<SubscriptionManager<WasmRow>["handleDelta"]>[0],
           (row) => row,
-          TEST_SCHEMA.todos.columns,
         ),
       );
     });
@@ -973,12 +1155,12 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       OWNED_TODOS_SCHEMA,
       deterministicBytes("jazz-napi-native-runtime-policy:node"),
-      deterministicBytes("jazz-napi-native-runtime-policy:author"),
+      testAuthorBytes("jazz-napi-native-runtime-policy:author"),
       11,
       true,
     );
-    const aliceSession = JSON.stringify({ user_id: ALICE_ID });
-    const bobSession = JSON.stringify({ user_id: BOB_ID });
+    const aliceSession = JSON.stringify({ issuer: "https://issuer.example", user_id: ALICE_ID });
+    const bobSession = JSON.stringify({ issuer: "https://issuer.example", user_id: BOB_ID });
 
     const aliceTodo = runtime.insert(
       "todos",
@@ -1064,14 +1246,14 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       OWNED_TODOS_SCHEMA,
       deterministicBytes("jazz-napi-native-runtime-policy-subscription:node"),
-      deterministicBytes("jazz-napi-native-runtime-policy-subscription:author"),
+      testAuthorBytes("jazz-napi-native-runtime-policy-subscription:author"),
       14,
       true,
     );
     runtimes.push(runtime);
 
-    const aliceSession = JSON.stringify({ user_id: ALICE_ID });
-    const bobSession = JSON.stringify({ user_id: BOB_ID });
+    const aliceSession = JSON.stringify({ issuer: "https://issuer.example", user_id: ALICE_ID });
+    const bobSession = JSON.stringify({ issuer: "https://issuer.example", user_id: BOB_ID });
     const query = JSON.stringify({ table: "todos" });
     const aliceUpdates: unknown[] = [];
     // Terminal layouts are registered once at the subscription boundary and
@@ -1082,7 +1264,6 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       aliceSubscription.handleDelta(
         delta as Parameters<SubscriptionManager<WasmRow>["handleDelta"]>[0],
         (row) => row,
-        OWNED_TODOS_SCHEMA.todos.columns,
       );
     const aliceDecodedUpdates: ReturnType<SubscriptionManager<WasmRow>["handleDelta"]>[] = [];
 
@@ -1167,13 +1348,13 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       OWNED_TODOS_SCHEMA,
       deterministicBytes("jazz-napi-native-runtime-delete-policy:node"),
-      deterministicBytes("jazz-napi-native-runtime-delete-policy:author"),
+      testAuthorBytes("jazz-napi-native-runtime-delete-policy:author"),
       12,
       true,
       { readAuthorizationHost: "trusted-serving" },
     );
-    const aliceSession = JSON.stringify({ user_id: ALICE_ID });
-    const bobSession = JSON.stringify({ user_id: BOB_ID });
+    const aliceSession = JSON.stringify({ issuer: "https://issuer.example", user_id: ALICE_ID });
+    const bobSession = JSON.stringify({ issuer: "https://issuer.example", user_id: BOB_ID });
 
     const aliceTodo = runtime.insert(
       "todos",
@@ -1240,7 +1421,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       OWNED_TODOS_SCHEMA,
       deterministicBytes("jazz-napi-native-runtime-edge-delete-policy:node"),
-      deterministicBytes("jazz-napi-native-runtime-edge-delete-policy:author"),
+      testAuthorBytes("jazz-napi-native-runtime-edge-delete-policy:author"),
       13,
       true,
     );
@@ -1250,8 +1431,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       JSON.stringify({ backend_secret: server.backendSecret }),
     );
 
-    const aliceSession = JSON.stringify({ user_id: ALICE_ID });
-    const bobSession = JSON.stringify({ user_id: BOB_ID });
+    const aliceSession = JSON.stringify({ issuer: "https://issuer.example", user_id: ALICE_ID });
+    const bobSession = JSON.stringify({ issuer: "https://issuer.example", user_id: BOB_ID });
 
     const aliceTodo = runtime.insert(
       "todos",
@@ -1324,7 +1505,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         },
         OWNED_TODOS_SCHEMA,
         deterministicBytes("jazz-napi-native-runtime-persistent-edge-delete-policy:node"),
-        deterministicBytes("jazz-napi-native-runtime-persistent-edge-delete-policy:author"),
+        testAuthorBytes("jazz-napi-native-runtime-persistent-edge-delete-policy:author"),
         14,
         true,
         { persistentPath: join(tempDir, "db") },
@@ -1335,8 +1516,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         JSON.stringify({ backend_secret: server.backendSecret }),
       );
 
-      const aliceSession = JSON.stringify({ user_id: ALICE_ID });
-      const bobSession = JSON.stringify({ user_id: BOB_ID });
+      const aliceSession = JSON.stringify({ issuer: "https://issuer.example", user_id: ALICE_ID });
+      const bobSession = JSON.stringify({ issuer: "https://issuer.example", user_id: BOB_ID });
 
       const aliceTodo = runtime.insert(
         "todos",
@@ -1382,7 +1563,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
       deterministicBytes("jazz-napi-native-runtime-parity:node"),
-      deterministicBytes("jazz-napi-native-runtime-parity:author"),
+      testAuthorBytes("jazz-napi-native-runtime-parity:author"),
       2,
       true,
     );
@@ -1484,7 +1665,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
         TEST_SCHEMA,
         deterministicBytes(`jazz-napi-core-edge:${peer}:node`),
-        deterministicBytes(`jazz-napi-core-edge:${peer}:author`),
+        testAuthorBytes(`jazz-napi-core-edge:${peer}:author`),
         sourceId,
         true,
       );
@@ -1548,7 +1729,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
         TEST_SCHEMA,
         deterministicBytes(`jazz-napi-core-persistent-edge:${peer}:node`),
-        deterministicBytes(`jazz-napi-core-persistent-edge:${peer}:author`),
+        testAuthorBytes(`jazz-napi-core-persistent-edge:${peer}:author`),
         sourceId,
         true,
       );
@@ -1624,7 +1805,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
         CHAT_POLICY_SCHEMA,
         deterministicBytes(`jazz-napi-core-branch-policy:${userId}:node`),
-        uuidBytes(userId),
+        new TextEncoder().encode(JSON.stringify(["https://issuer.example", userId])),
         sourceId,
         true,
       );
@@ -1633,7 +1814,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         webSocketUrl(server!.url, appId),
         JSON.stringify({
           backend_secret: "core-napi-branch-policy-backend",
-          backend_session: { user_id: userId, claims: {} },
+          backend_session: { issuer: "https://issuer.example", user_id: userId, claims: {} },
         }),
       );
       return runtime;
@@ -1652,7 +1833,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       "writer public chat insert did not settle at edge",
     );
 
-    const bobSession = JSON.stringify({ user_id: BOB_ID, claims: {} });
+    const bobSession = JSON.stringify({
+      issuer: "https://issuer.example",
+      user_id: BOB_ID,
+      claims: {},
+    });
     const propagatedRow = await waitFor(async () => {
       const rows = (await reader.query(
         JSON.stringify({ table: "chats" }),
@@ -1713,7 +1898,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const tempDir = mkdtempSync(join(tmpdir(), "jazz-napi-core-"));
     const dataPath = join(tempDir, "db");
     const node = deterministicBytes("jazz-napi-core-persistent:node");
-    const author = deterministicBytes("jazz-napi-core-persistent:author");
+    const author = testAuthorBytes("jazz-napi-core-persistent:author");
     let firstRuntime: NativeRuntimeAdapter | null = null;
     let secondRuntime: NativeRuntimeAdapter | null = null;
 
@@ -1774,6 +1959,10 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
   });
 });
 
+function testAuthorBytes(seed: string): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify(["urn:jazz:test", seed]));
+}
+
 function deterministicBytes(seed: string): Uint8Array {
   let hash = 0x811c9dc5;
   const bytes = new Uint8Array(16);
@@ -1784,18 +1973,6 @@ function deterministicBytes(seed: string): Uint8Array {
       hash = Math.imul(hash, 0x01000193);
     }
     view.setUint32(round * 4, hash >>> 0, true);
-  }
-  return bytes;
-}
-
-function uuidBytes(value: string): Uint8Array {
-  const hex = value.replaceAll("-", "");
-  if (!/^[0-9a-fA-F]{32}$/.test(hex)) {
-    throw new Error(`invalid UUID: ${value}`);
-  }
-  const bytes = new Uint8Array(16);
-  for (let index = 0; index < 16; index += 1) {
-    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
   }
   return bytes;
 }

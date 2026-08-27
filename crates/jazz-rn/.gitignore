@@ -85,6 +85,12 @@ android/generated
 # React Native Uniffi Framework
 JazzRnFramework.xcframework/**
 
+# Staged shared native-relay artifacts are produced by trusted platform jobs
+# and copied into the package tarball there; they are not source files.
+JazzNativeRelay.xcframework/
+android/jazz-native-relay.manifest.json
+ios/jazz-native-relay.manifest.json
+
 cpp/generated/
 cpp/jazz_rn.cpp
 cpp/jazz_rn.hpp

@@ -10,13 +10,7 @@
  * - all/one are async (need storage I/O for queries)
  */
 
-import type {
-  ColumnDescriptor,
-  ColumnType,
-  WasmSchema,
-  WasmRow,
-  StorageDriver,
-} from "../drivers/types.js";
+import type { ColumnDescriptor, WasmSchema, WasmRow, StorageDriver } from "../drivers/types.js";
 import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
   ExclusiveWriteHandle,
@@ -34,11 +28,14 @@ import {
   type QueryPropagation,
   type QueryVisibility,
   resolveEffectiveQueryExecutionOptions,
+  resolveReadTier,
+  ReadTier,
   type BranchSelector,
   type BranchView,
   type OpenBatchId,
   type BatchId,
   type PermissionAdvice,
+  type StreamingValueSource,
 } from "./client.js";
 import { type RuntimeSource, type RuntimeTokenOptions } from "./runtime-source.js";
 import { DefaultRuntimeSource } from "./default-runtime-source.js";
@@ -48,16 +45,24 @@ import { transformRow, transformRows } from "./row-transformer.js";
 import { toValue, toWriteRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
-import { resolveClientSessionSync } from "./client-session.js";
+import {
+  parseJwtPayload,
+  internalSessionFromVerifiedReservedJwtPayload,
+  resolveClientInternalSessionSync,
+} from "./client-session.js";
+import { canonicalAuthorSubject } from "./author-id.js";
+import {
+  getDbInternalSession,
+  getTrustedReservedSession,
+  setDbInternalSession,
+  setTrustedReservedSession,
+} from "./db-internal-session.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
-import { isPermissionIntrospectionColumn, magicColumnType } from "../magic-columns.js";
 import {
   normalizeBuiltQuery,
   type BuiltRelation,
-  type NormalizedIncludeSpec,
   type NormalizedBuiltQuery,
 } from "./query-builder-shape.js";
-import { resolveSelectedColumns } from "./select-projection.js";
 import {
   BrowserConnectionManager,
   DirectConnectionManager,
@@ -145,17 +150,18 @@ export function resolveDefaultPersistentDbName(config: DbConfig): string {
     return explicitDbName;
   }
 
-  const session = resolveClientSessionSync({
+  const session = resolveClientInternalSessionSync({
     appId: config.appId,
     jwtToken: config.jwtToken,
     cookieSession: config.cookieSession,
+    trustedReservedSession: getTrustedReservedSession(config),
   });
 
   if (!session?.user_id || session.authMode === "anonymous") {
     return config.appId;
   }
 
-  return `${config.appId}::${encodeURIComponent(session.user_id)}`;
+  return `${config.appId}::${encodeURIComponent(canonicalAuthorSubject(session.issuer, session.user_id))}`;
 }
 
 /**
@@ -187,6 +193,30 @@ export type QueryOptions = Omit<InternalQueryExecutionOptions, "branch"> & {
   base?: BranchBase;
 };
 
+/** Package-internal subscription surface used by Jazz's UI bindings. */
+export interface DbSubscriptionSource {
+  all?<T extends { id: string }>(
+    query: QueryBuilder<T>,
+    options?: QueryOptions,
+    session?: Session,
+  ): Promise<T[]> | T[];
+  subscribeDelta<T extends { id: string }>(
+    query: QueryBuilder<T>,
+    callback: (delta: SubscriptionDelta<T>) => void,
+    options?: QueryOptions,
+    session?: Session,
+  ): () => void;
+}
+
+const dbSubscriptionSources = new WeakMap<Db, DbSubscriptionSource>();
+
+/** @internal Retrieve the incremental source associated with a public Db. */
+export function getDbSubscriptionSource(db: Db): DbSubscriptionSource {
+  const source = dbSubscriptionSources.get(db);
+  if (!source) throw new Error("Jazz Db is missing its internal subscription source.");
+  return source;
+}
+
 interface TimestampOverrideOptions {
   updatedAt?: number;
 }
@@ -195,6 +225,7 @@ export interface InsertOptions extends TimestampOverrideOptions {
   id?: string;
   branch?: Branch;
 }
+export type StreamingInsertOptions = Omit<InsertOptions, "branch">;
 
 export interface RestoreOptions extends TimestampOverrideOptions {
   branch?: Branch;
@@ -302,7 +333,10 @@ function nativeDbQueryOptions(
     if (base !== undefined) throw new Error("A branch base requires a branch head.");
     return rest;
   }
-  return { ...rest, branch: normalizeBranchView(schema, tableName, branch, base) };
+  return {
+    ...rest,
+    branch: normalizeBranchView(schema, tableName, branch, base),
+  };
 }
 
 function normalizeInsertOptions(
@@ -314,7 +348,10 @@ function normalizeInsertOptions(
   const { branch, ...rest } = options;
   return branch === undefined
     ? rest
-    : { ...rest, branch: normalizeBranchSelector(schema, tableName, branch, "table") };
+    : {
+        ...rest,
+        branch: normalizeBranchSelector(schema, tableName, branch, "table"),
+      };
 }
 
 function normalizeRestoreOptions(
@@ -326,7 +363,10 @@ function normalizeRestoreOptions(
   const { branch, ...rest } = options;
   return branch === undefined
     ? rest
-    : { ...rest, branch: normalizeBranchSelector(schema, tableName, branch, "table") };
+    : {
+        ...rest,
+        branch: normalizeBranchSelector(schema, tableName, branch, "table"),
+      };
 }
 
 function normalizeUpdateOptions(
@@ -340,7 +380,10 @@ function normalizeUpdateOptions(
     if (base !== undefined) throw new Error("A branch base requires a branch head.");
     return rest;
   }
-  return { ...rest, branch: normalizeBranchView(schema, tableName, branch, base) };
+  return {
+    ...rest,
+    branch: normalizeBranchView(schema, tableName, branch, base),
+  };
 }
 
 export function limitQueryToOne<T>(query: QueryBuilder<T>): QueryBuilder<T> {
@@ -414,7 +457,7 @@ function trimSubscriptionTraceStack(stack: string | undefined): string | undefin
   const isInternalFrame = (line: string): boolean => {
     return (
       line.includes("Db.registerActiveQuerySubscriptionTrace") ||
-      line.includes("Db.subscribeAll") ||
+      line.includes("Db.subscribe") ||
       line.includes("SubscriptionsOrchestrator.ensureEntryForKey") ||
       line.includes("SubscriptionsOrchestrator.getCacheEntry") ||
       line.includes("/node_modules/") ||
@@ -511,23 +554,6 @@ function requireSchemaWithTable(preferredSchema: WasmSchema, tableName: string):
   throw new Error(`Query schema is missing table "${tableName}".`);
 }
 
-function resolveOutputColumnDescriptor(
-  tableName: string,
-  schema: WasmSchema,
-  columnName: string,
-): ColumnDescriptor | undefined {
-  const magicType = magicColumnType(columnName);
-  if (magicType) {
-    return {
-      name: columnName,
-      column_type: magicType,
-      nullable: isPermissionIntrospectionColumn(columnName),
-    };
-  }
-
-  return schema[tableName]?.columns.find((column) => column.name === columnName);
-}
-
 function toWriteRecordForOperation(
   operation: WriteOperationName,
   data: Record<string, unknown>,
@@ -542,58 +568,258 @@ function toWriteRecordForOperation(
   }
 }
 
-function escapeWriteErrorReason(message: string): string {
-  return message.replaceAll('"', '\\"');
-}
+type WireSplicePage = { kind: "bytes" | "text_utf16" | "text_utf8"; from: number; to: number };
 
-function resolveNativeSubscriptionColumns(
-  tableName: string,
-  schema: WasmSchema,
-  includes: NormalizedIncludeSpec,
-  projection?: readonly string[],
-  rootTerminal = true,
-): ColumnDescriptor[] {
-  const wildcard = projection === undefined || projection.length === 0;
-  const columns = resolveSelectedColumns(tableName, schema, projection)
-    .map((columnName) => {
-      const column = resolveOutputColumnDescriptor(tableName, schema, columnName);
-      return column && wildcard && rootTerminal ? { ...column, sparse: true } : column;
-    })
-    .filter((column): column is ColumnDescriptor => column !== undefined);
-
-  if (Object.keys(includes).length === 0) {
-    return columns;
-  }
-
-  const relationsByTable = analyzeRelations(schema);
-  const relations = relationsByTable.get(tableName) ?? [];
-
-  for (const [relationName, include] of Object.entries(includes)) {
-    const relation = relations.find((candidate) => candidate.name === relationName);
-    if (!relation) {
-      throw new Error(`Unknown relation "${relationName}" on table "${tableName}"`);
+type WireLargeValueUpdate =
+  | {
+      kind: "splice";
+      column: string;
+      within: WireSplicePage;
+      splices: Array<{ at: number; delete: number; insert: number[] }>;
     }
-
-    const nestedColumns = resolveNativeSubscriptionColumns(
-      relation.toTable,
-      schema,
-      include.includes,
-      include.select.length > 0 ? include.select : undefined,
-      false,
-    );
-    const columnType: ColumnType = {
-      type: "Array",
-      element: { type: "Row", columns: nestedColumns },
+  | {
+      kind: "json_set";
+      column: string;
+      edits: Array<{ at: string; value: unknown }>;
     };
 
-    columns.push({
-      name: relationName,
-      column_type: columnType,
-      nullable: false,
-    });
-  }
+function isPartialLargeValueUpdate(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && ("splices" in value || "edits" in value);
+}
 
-  return columns;
+function requireRecord(value: unknown, message: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(message);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireNonNegativeCoordinate(value: unknown, label: string, column: string): number {
+  const coordinate = Number(value);
+  if (!Number.isSafeInteger(coordinate) || coordinate < 0) {
+    throw new Error(`${label} for "${column}" must be a non-negative safe integer.`);
+  }
+  return coordinate;
+}
+
+function requirePageRange(from: number, to: number, column: string): void {
+  if (from > to) {
+    throw new Error(`Large-value page for "${column}" must have from <= to.`);
+  }
+}
+
+function splitLargeValueUpdate(
+  data: Record<string, unknown>,
+  schema: WasmSchema,
+  table: string,
+): { ordinary: Record<string, unknown>; descriptors: WireLargeValueUpdate[] } {
+  const ordinary: Record<string, unknown> = {};
+  const descriptors: WireLargeValueUpdate[] = [];
+  const columns = schema[table]?.columns;
+  if (!columns) throw new Error(`Unknown table "${table}"`);
+  for (const [column, value] of Object.entries(data)) {
+    if (!isPartialLargeValueUpdate(value)) {
+      ordinary[column] = value;
+      continue;
+    }
+    const type = columns.find((candidate) => candidate.name === column)?.column_type;
+    if (!type) throw new Error(`Unknown column "${column}" in table "${table}"`);
+    if ("splices" in value && "within" in value) {
+      const within = requireRecord(
+        value.within,
+        `Large-value update "${column}" has an invalid page.`,
+      );
+      const splices = value.splices;
+      if (!Array.isArray(splices))
+        throw new Error(`Large-value update "${column}" has invalid splices.`);
+      let page: WireSplicePage;
+      if ("fromUtf8" in within || "toUtf8" in within) {
+        if (type.type !== "Text")
+          throw new Error(`UTF-8 splice requires a Text column, got "${column}".`);
+        const from = requireNonNegativeCoordinate(within.fromUtf8, "fromUtf8", column);
+        const to = requireNonNegativeCoordinate(within.toUtf8, "toUtf8", column);
+        requirePageRange(from, to, column);
+        page = { kind: "text_utf8", from, to };
+      } else if (type.type === "Bytea") {
+        const from = requireNonNegativeCoordinate(within.from, "from", column);
+        const to = requireNonNegativeCoordinate(within.to, "to", column);
+        requirePageRange(from, to, column);
+        page = { kind: "bytes", from, to };
+      } else if (type.type === "Text") {
+        const from = requireNonNegativeCoordinate(within.from, "from", column);
+        const to = requireNonNegativeCoordinate(within.to, "to", column);
+        requirePageRange(from, to, column);
+        page = { kind: "text_utf16", from, to };
+      } else {
+        throw new Error(`Splice requires a Text or Bytea column, got "${column}".`);
+      }
+      descriptors.push({
+        kind: "splice",
+        column,
+        within: page,
+        splices: splices.map((splice) => {
+          const item = requireRecord(splice, `Large-value splice for "${column}" is invalid.`);
+          const utf8 = page.kind === "text_utf8";
+          const at = requireNonNegativeCoordinate(utf8 ? item.atUtf8 : item.at, "at", column);
+          const deleted = requireNonNegativeCoordinate(
+            utf8 ? item.deleteUtf8 : item.delete,
+            "delete",
+            column,
+          );
+          const insert = item.insert;
+          let bytes: number[];
+          if (page.kind === "bytes") {
+            if (!(insert instanceof Uint8Array)) {
+              throw new Error(`Byte splice insert for "${column}" must be a Uint8Array.`);
+            }
+            bytes = [...insert];
+          } else {
+            if (typeof insert !== "string") {
+              throw new Error(`Text splice insert for "${column}" must be a string.`);
+            }
+            bytes = [...new TextEncoder().encode(insert)];
+          }
+          return { at, delete: deleted, insert: bytes };
+        }),
+      });
+      continue;
+    }
+    if ("edits" in value) {
+      if (type.type !== "Json")
+        throw new Error(`JSON set requires a JSON column, got "${column}".`);
+      if (!Array.isArray(value.edits))
+        throw new Error(`JSON update "${column}" has invalid edits.`);
+      descriptors.push({
+        kind: "json_set",
+        column,
+        edits: value.edits.map((edit) => {
+          const item = requireRecord(edit, `JSON update edit for "${column}" is invalid.`);
+          if (item.op !== "set" || typeof item.at !== "string") {
+            throw new Error(
+              `JSON update "${column}" supports only { op: "set", at, value } edits.`,
+            );
+          }
+          return { at: item.at, value: item.value };
+        }),
+      });
+      continue;
+    }
+    ordinary[column] = value;
+  }
+  return { ordinary, descriptors };
+}
+
+type PartialValueSelection =
+  | { from: number; to: number }
+  | { fromUtf8: number; toUtf8: number }
+  | { at: string };
+
+function utf16Boundary(text: string, offset: number): boolean {
+  if (offset < 0 || offset > text.length) return false;
+  if (offset === 0 || offset === text.length) return true;
+  const before = text.charCodeAt(offset - 1);
+  const after = text.charCodeAt(offset);
+  return !(before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff);
+}
+
+function jsonPointerToken(token: string): string {
+  let decoded = "";
+  for (let index = 0; index < token.length; index += 1) {
+    const character = token[index]!;
+    if (character !== "~") {
+      decoded += character;
+      continue;
+    }
+    const escape = token[++index];
+    if (escape === "0") decoded += "~";
+    else if (escape === "1") decoded += "/";
+    else throw new Error("JSON pointer has an invalid escape.");
+  }
+  return decoded;
+}
+
+function jsonPointerValue(value: unknown, pointer: string): unknown {
+  if (pointer === "") return value;
+  if (!pointer.startsWith("/")) throw new Error("JSON pointer must be empty or begin with '/'.");
+  let current: unknown = value;
+  for (const rawToken of pointer.slice(1).split("/")) {
+    const token = jsonPointerToken(rawToken);
+    if (Array.isArray(current)) {
+      if (!/^(0|[1-9]\d*)$/.test(token)) {
+        throw new Error("JSON array pointer token is not an index.");
+      }
+      const index = Number(token);
+      if (!Number.isSafeInteger(index) || index >= current.length) {
+        throw new Error("JSON pointer path does not exist.");
+      }
+      current = current[index];
+    } else if (typeof current === "object" && current !== null && Object.hasOwn(current, token)) {
+      current = (current as Record<string, unknown>)[token];
+    } else {
+      throw new Error("JSON pointer path does not exist.");
+    }
+  }
+  return current;
+}
+
+/**
+ * Temporary binding-level materialization until #2090 carries exact terminal
+ * demand into Groove. It preserves the public result/coordinate contract and
+ * only touches selected columns; it must not be used as a chunk-demand model.
+ */
+function applyPartialValueSelections<T>(
+  row: T,
+  selections: Record<string, PartialValueSelection>,
+): T {
+  if (Object.keys(selections).length === 0 || typeof row !== "object" || row === null) return row;
+  const projected = { ...(row as Record<string, unknown>) };
+  for (const [column, selection] of Object.entries(selections)) {
+    const value = projected[column];
+    if ("at" in selection) {
+      projected[column] = jsonPointerValue(value, selection.at);
+      continue;
+    }
+    if (value instanceof Uint8Array) {
+      if ("fromUtf8" in selection || selection.from > selection.to || selection.to > value.length) {
+        throw new Error(`Byte range for "${column}" is out of bounds.`);
+      }
+      projected[column] = value.slice(selection.from, selection.to);
+      continue;
+    }
+    if (typeof value !== "string") {
+      throw new Error(`Large-value selection for "${column}" has an incompatible column type.`);
+    }
+    if ("fromUtf8" in selection) {
+      const bytes = new TextEncoder().encode(value);
+      if (
+        selection.fromUtf8 > selection.toUtf8 ||
+        selection.toUtf8 > bytes.length ||
+        (selection.fromUtf8 < bytes.length &&
+          (bytes[selection.fromUtf8]! & 0b1100_0000) === 0b1000_0000) ||
+        (selection.toUtf8 < bytes.length &&
+          (bytes[selection.toUtf8]! & 0b1100_0000) === 0b1000_0000)
+      ) {
+        throw new Error(`UTF-8 range for "${column}" splits a code point or is out of bounds.`);
+      }
+      projected[column] = new TextDecoder("utf-8", { fatal: true }).decode(
+        bytes.slice(selection.fromUtf8, selection.toUtf8),
+      );
+      continue;
+    }
+    if (
+      selection.from > selection.to ||
+      !utf16Boundary(value, selection.from) ||
+      !utf16Boundary(value, selection.to)
+    ) {
+      throw new Error(`UTF-16 range for "${column}" splits a surrogate pair or is out of bounds.`);
+    }
+    projected[column] = value.slice(selection.from, selection.to);
+  }
+  return projected as T;
+}
+
+function escapeWriteErrorReason(message: string): string {
+  return message.replaceAll('"', '\\"');
 }
 
 /**
@@ -603,7 +829,13 @@ function resolveNativeSubscriptionColumns(
  * @typeParam T - The row type (e.g., `{ id: string; title: string; done: boolean }`)
  * @typeParam Init - The init type for inserts (e.g., `{ title: string; done: boolean }`)
  */
-export interface TableProxy<T, Init> {
+export interface TableProxy<
+  T,
+  Init,
+  StreamingInit = unknown,
+  StreamingUpdate = unknown,
+  LargeValueUpdate = unknown,
+> {
   /** Table name */
   readonly _table: string;
   /** Schema reference */
@@ -614,6 +846,12 @@ export interface TableProxy<T, Init> {
   readonly _rowType: T;
   /** @internal Phantom brand — enables TypeScript to infer Init from usage */
   readonly _initType: Init;
+  /** @internal Phantom brand — enables exact streaming-insert inference. */
+  readonly _streamingInitType?: StreamingInit;
+  /** @internal Phantom brand — enables exact streaming update/upsert inference. */
+  readonly _streamingUpdateType?: StreamingUpdate;
+  /** @internal Phantom — preserves typed page-edit descriptors on table handles. */
+  readonly _largeValueUpdateType?: LargeValueUpdate;
 }
 
 export interface ColumnTransform {
@@ -665,7 +903,7 @@ function transformOutputColumns(
 }
 
 function transformInputColumns(
-  table: TableProxy<unknown, unknown>,
+  table: TableProxy<any, any, any, any, any>,
   data: unknown,
 ): Record<string, unknown> {
   const record = data as Record<string, unknown>;
@@ -680,6 +918,69 @@ function transformInputColumns(
     }
   }
   return transformed;
+}
+
+function splitStreamingMutation(
+  table: TableProxy<any, any, any, any, any>,
+  data: unknown,
+): {
+  column: string;
+  source: StreamingValueSource;
+  values: Record<string, unknown>;
+} {
+  if (typeof data !== "object" || data === null) {
+    throw new Error("Streaming insert data must be an object");
+  }
+  const record = data as Record<string, unknown>;
+  const streamableColumns = table._schema[table._table]?.columns.filter((column) =>
+    ["Text", "Json", "Bytea"].includes(column.column_type.type),
+  );
+  const streamed = streamableColumns?.filter(
+    (column) => Object.hasOwn(record, column.name) && isStreamingValueSource(record[column.name]),
+  );
+  if (streamed?.length !== 1) {
+    throw new Error("Streaming insert requires exactly one streamed Text, Json, or Bytea column");
+  }
+  const column = streamed[0]!.name;
+  if (table._schema[table._table]?.branchBy?.includes(column)) {
+    throw new Error(`Streaming a branchBy column is not supported: ${table._table}.${column}`);
+  }
+  const source = record[column] as StreamingValueSource;
+  const values = { ...record };
+  delete values[column];
+  return { column, source, values };
+}
+
+function isStreamingValueSource(value: unknown): value is StreamingValueSource {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as {
+    getReader?: unknown;
+    [Symbol.asyncIterator]?: unknown;
+  };
+  return (
+    typeof candidate.getReader === "function" ||
+    typeof candidate[Symbol.asyncIterator] === "function"
+  );
+}
+
+function deriveStreamingInsertBranch(
+  table: TableProxy<unknown, unknown, unknown, unknown>,
+  values: Record<string, unknown>,
+): Branch | undefined {
+  const branchColumns = table._schema[table._table]?.branchBy ?? [];
+  if (branchColumns.length === 0) return undefined;
+  const branch: QualifiedBranch = {};
+  for (const column of branchColumns) {
+    const value = values[column];
+    if (isStreamingValueSource(value)) {
+      throw new Error(`Streaming a branchBy column is not supported: ${table._table}.${column}`);
+    }
+    if (typeof value !== "string" && typeof value !== "number" && typeof value !== "bigint") {
+      throw new Error(`Streaming insert requires branch column ${table._table}.${column}`);
+    }
+    branch[column] = value;
+  }
+  return branch;
 }
 
 export type { TransactionKind } from "./client.js";
@@ -802,7 +1103,9 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     if (ownerClient) this.bindOwnerClient(ownerClient);
   }
 
-  private bindTable<T, Init>(table: TableProxy<T, Init>): DbTransactionHandleBinding {
+  private bindTable<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate>(
+    table: TableProxy<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate>,
+  ): DbTransactionHandleBinding {
     const client = this.resolveClient(table._schema);
     if (!dbTxHandleBindings.has(this)) this.bindOwnerClient(client);
     return this.requireBinding("table operation");
@@ -932,6 +1235,8 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     options?: UpdateOptions,
   ): void {
     this.bindTable(table);
+    // `edits` is valid ordinary JSON data. Only `applyDiffs` interprets the
+    // descriptor-shaped DSL, so upsert must preserve that JSON shape exactly.
     const transformedData = transformInputColumns(table, data);
     const values = toWriteRecordForOperation(
       "Upsert",
@@ -1042,7 +1347,10 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       builtQuery.select,
     );
     return transformedRows.map((row) =>
-      transformOutputRow(outputTable === builtQuery.table ? query : {}, row),
+      transformOutputRow(
+        outputTable === builtQuery.table ? query : {},
+        applyPartialValueSelections(row, builtQuery.partialSelect),
+      ),
     );
   }
 
@@ -1081,9 +1389,8 @@ export type TransactionScope<TKind extends TransactionKind = TransactionKind> = 
  * const todo = await db.one(app.todos.where({ id: inserted.id }));
  *
  * // Subscriptions
- * const unsubscribe = db.subscribeAll(app.todos, (delta) => {
- *   console.log("All todos:", delta.all);
- *   console.log("Changes:", delta.delta);
+ * const unsubscribe = db.subscribe(app.todos, (todos) => {
+ *   console.log("All todos:", todos);
  * });
  * ```
  */
@@ -1117,8 +1424,18 @@ export class Db {
   ) {
     this.config = config;
     this.runtimeSource = runtimeSource;
-    this.authStateStore = createAuthStateStore(config, authStateOptions);
+    const sessionInput = {
+      ...config,
+      trustedReservedSession: getTrustedReservedSession(config),
+    };
+    setDbInternalSession(this, resolveClientInternalSessionSync(sessionInput));
+    this.authStateStore = createAuthStateStore(sessionInput, authStateOptions);
     this.connection = new DirectConnectionManager(this.dbForConnection());
+    dbSubscriptionSources.set(this, {
+      all: (query, options) => this.all(query, options),
+      subscribeDelta: (query, callback, options, session) =>
+        this.subscribeDelta(query, callback, options, session),
+    });
   }
 
   private dbForConnection(): DbForConnection {
@@ -1169,7 +1486,14 @@ export class Db {
         this.config.appId,
         ttlSeconds,
       );
-      this.updateAuthToken(newToken);
+      const trustedReservedSession = internalSessionFromVerifiedReservedJwtPayload(
+        parseJwtPayload(newToken) ?? {},
+        "local-first",
+      );
+      if (!trustedReservedSession) {
+        throw new Error("Minted local-first token is missing its reserved session identity");
+      }
+      this.applyAuthUpdate(newToken, trustedReservedSession);
       this.scheduleLocalFirstRefresh(ttlSeconds);
     } catch (e) {
       console.error("Failed to refresh local-first token:", e);
@@ -1189,20 +1513,44 @@ export class Db {
     this.authStateStore.markUnauthenticated(reason);
   }
 
-  protected applyAuthUpdate(token: string | null): boolean {
+  private publishAuthStateWithInternalSession<T>(
+    nextSession: Session | null,
+    publish: () => T,
+  ): { value: T; rollback: () => void } {
+    const previousSession = getDbInternalSession(this);
+    setDbInternalSession(this, nextSession);
+    const rollback = () => setDbInternalSession(this, previousSession);
+    try {
+      return { value: publish(), rollback };
+    } catch (error) {
+      rollback();
+      throw error;
+    }
+  }
+
+  protected applyAuthUpdate(token: string | null, trustedReservedSession?: Session): boolean {
     const jwtToken = token ?? undefined;
     const previousToken = this.config.jwtToken;
     const previousState = this.authStateStore.getState();
-    const nextState = this.authStateStore.applyJwtToken(jwtToken);
+    const nextInternalSession = resolveClientInternalSessionSync({
+      ...this.config,
+      jwtToken,
+      trustedReservedSession,
+    });
+    const published = this.publishAuthStateWithInternalSession(nextInternalSession, () =>
+      this.authStateStore.applyJwtToken(jwtToken, trustedReservedSession),
+    );
     const tokenChanged = previousToken !== jwtToken;
 
-    if (!tokenChanged && nextState === previousState) {
+    if (!tokenChanged && published.value === previousState) {
+      published.rollback();
       return false;
     }
 
     this.config.jwtToken = jwtToken;
+    setTrustedReservedSession(this.config, trustedReservedSession);
 
-    this.connection.updateAuth({ jwtToken });
+    this.connection.updateAuth({ jwtToken, trustedReservedSession });
 
     return true;
   }
@@ -1211,10 +1559,17 @@ export class Db {
     const cookieSession = session ?? undefined;
     const previousSession = this.config.cookieSession;
     const previousState = this.authStateStore.getState();
-    const nextState = this.authStateStore.applyCookieSession(cookieSession);
+    const nextInternalSession = resolveClientInternalSessionSync({
+      ...this.config,
+      cookieSession,
+    });
+    const published = this.publishAuthStateWithInternalSession(nextInternalSession, () =>
+      this.authStateStore.applyCookieSession(cookieSession),
+    );
     const sessionChanged = JSON.stringify(previousSession) !== JSON.stringify(cookieSession);
 
-    if (!sessionChanged && nextState === previousState) {
+    if (!sessionChanged && published.value === previousState) {
+      published.rollback();
       return false;
     }
 
@@ -1456,6 +1811,101 @@ export class Db {
   }
 
   /**
+   * Stream one Text, Json, or Bytea column into a new row. The column's runtime
+   * schema determines encoding; callers never pass a large-value kind.
+   *
+   * Unlike {@link insert}, this is asynchronous because it consumes the source
+   * before publishing. Its handle returns only the generated id so the complete
+   * streamed value is not copied back into JavaScript memory.
+   */
+  async insertStreaming<T, Init, StreamingInit>(
+    table: TableProxy<T, Init, StreamingInit>,
+    data: StreamingInit,
+    options?: StreamingInsertOptions,
+  ): Promise<WriteHandle<{ id: string }>> {
+    const client = this.getClient(table._schema);
+    const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
+    const transformedData = transformInputColumns(table, ordinaryData);
+    const values = toWriteRecordForOperation(
+      "Insert",
+      transformedData,
+      table._schema,
+      table._table,
+    );
+    const context = this.getRuntimeOperationContext();
+    const branch = deriveStreamingInsertBranch(table, ordinaryData);
+    return client.insertStreaming(
+      table._table,
+      values,
+      column,
+      source,
+      normalizeInsertOptions(
+        table._schema,
+        table._table,
+        branch ? { ...options, branch } : options,
+      ),
+      context?.session,
+      context?.attribution,
+    );
+  }
+
+  async updateStreaming<T, Init, StreamingInit, StreamingUpdate>(
+    table: TableProxy<T, Init, StreamingInit, StreamingUpdate>,
+    id: string,
+    data: StreamingUpdate,
+    options?: UpdateOptions,
+  ): Promise<WriteHandle<{ id: string }>> {
+    const client = this.getClient(table._schema);
+    const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
+    const transformedData = transformInputColumns(table, ordinaryData);
+    const values = toWriteRecordForOperation(
+      "Update",
+      transformedData,
+      table._schema,
+      table._table,
+    );
+    const context = this.getRuntimeOperationContext();
+    return client.updateStreaming(
+      table._table,
+      id,
+      values,
+      column,
+      source,
+      normalizeUpdateOptions(table._schema, table._table, options),
+      context?.session,
+      context?.attribution,
+    );
+  }
+
+  async upsertStreaming<T, Init, StreamingInit, StreamingUpdate>(
+    table: TableProxy<T, Init, StreamingInit, StreamingUpdate>,
+    id: string,
+    data: StreamingUpdate,
+    options?: UpdateOptions,
+  ): Promise<WriteHandle<{ id: string }>> {
+    const client = this.getClient(table._schema);
+    const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
+    const transformedData = transformInputColumns(table, ordinaryData);
+    const values = toWriteRecordForOperation(
+      "Upsert",
+      transformedData,
+      table._schema,
+      table._table,
+    );
+    const context = this.getRuntimeOperationContext();
+    return client.upsertStreaming(
+      table._table,
+      id,
+      values,
+      column,
+      source,
+      normalizeUpdateOptions(table._schema, table._table, options),
+      context?.session,
+      context?.attribution,
+    );
+  }
+
+  /**
    * Restore a soft-deleted row without waiting for durability.
    *
    * Use {@link WriteResult.wait} to wait for durable confirmation.
@@ -1502,6 +1952,8 @@ export class Db {
     options?: UpdateOptions,
   ): WriteHandle {
     const client = this.getClient(table._schema);
+    // `edits` is valid ordinary JSON data. Only `applyDiffs` interprets the
+    // descriptor-shaped DSL, so upsert must preserve that JSON shape exactly.
     const transformedData = transformInputColumns(table, data);
     const values = toWriteRecordForOperation(
       "Upsert",
@@ -1547,6 +1999,42 @@ export class Db {
         table._table,
         id,
         updates,
+        normalizeUpdateOptions(table._schema, table._table, options),
+        context?.session,
+        context?.attribution,
+      ),
+    );
+  }
+
+  /**
+   * Apply page-relative text/bytes splices or JSON edits to an existing value.
+   * This works for either inline or indirect storage; whole-column replacement
+   * remains {@link update}.
+   */
+  applyDiffs<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate>(
+    table: TableProxy<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate>,
+    id: string,
+    data: LargeValueUpdate,
+    options?: UpdateOptions,
+  ): WriteHandle {
+    const client = this.getClient(table._schema);
+    const { ordinary, descriptors } = splitLargeValueUpdate(
+      data as Record<string, unknown>,
+      table._schema,
+      table._table,
+    );
+    if (Object.keys(ordinary).length > 0 || descriptors.length === 0) {
+      throw new Error(
+        "applyDiffs accepts one or more field diff descriptors, not whole-column values.",
+      );
+    }
+    const context = this.getRuntimeOperationContext();
+    return this.wrapWriteWait(
+      client.updateLargeValues(
+        table._table,
+        id,
+        {},
+        descriptors,
         normalizeUpdateOptions(table._schema, table._table, options),
         context?.session,
         context?.attribution,
@@ -1730,6 +2218,9 @@ export class Db {
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = requireSchemaWithTable(query._schema, outputTable);
     const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
+    const remoteIfPossibleOffline =
+      options?.tier === ReadTier.RemoteIfPossible && this.connection.isExplicitlyOffline();
+    if (remoteIfPossibleOffline) queryOptions.tier = "local";
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
     const context = this.getRuntimeOperationContext();
@@ -1748,7 +2239,10 @@ export class Db {
       builtQuery.select,
     );
     return transformedRows.map((row) =>
-      transformOutputRow(outputTable === builtQuery.table ? query : {}, row),
+      transformOutputRow(
+        outputTable === builtQuery.table ? query : {},
+        applyPartialValueSelections(row, builtQuery.partialSelect),
+      ),
     );
   }
 
@@ -1762,6 +2256,26 @@ export class Db {
   async one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {
     const results = await this.all(limitQueryToOne(query), options);
     return results[0] ?? null;
+  }
+
+  /** Subscribe to a query and receive its complete current result whenever it changes. */
+  subscribe<T extends { id: string }>(
+    query: QueryBuilder<T>,
+    callback: (rows: T[]) => void,
+    options?: QueryOptions,
+    session?: Session,
+  ): () => void {
+    return this.subscribeDelta(
+      query,
+      (update) => {
+        if (update.all === undefined) {
+          throw new Error("Jazz subscription update is missing its materialized result.");
+        }
+        callback(update.all);
+      },
+      options,
+      session,
+    );
   }
 
   /**
@@ -1783,7 +2297,7 @@ export class Db {
    * ```typescript
    * import { RowChangeKind } from "jazz-tools";
    *
-   * const unsubscribe = db.subscribeAll(app.todos, (delta) => {
+   * const unsubscribe = db.subscribeDelta(app.todos, (delta) => {
    *   setTodos(delta.all);
    *   for (const change of delta.delta) {
    *     if (change.kind === RowChangeKind.Added) {
@@ -1796,7 +2310,7 @@ export class Db {
    * unsubscribe();
    * ```
    */
-  subscribeAll<T extends { id: string }>(
+  private subscribeDelta<T extends { id: string }>(
     query: QueryBuilder<T>,
     callback: (delta: SubscriptionDelta<T>) => void,
     options?: QueryOptions,
@@ -1810,41 +2324,78 @@ export class Db {
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = requireSchemaWithTable(query._schema, outputTable);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
-    const nativeOutputColumns = resolveNativeSubscriptionColumns(
-      outputTable,
-      outputSchema,
-      outputIncludes,
-      builtQuery.select,
-    );
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
     const transform = (row: WasmRow): T =>
       transformOutputRow(
         outputTable === builtQuery.table ? query : {},
-        transformRow(row, outputSchema, outputTable, outputIncludes, builtQuery.select),
+        applyPartialValueSelections(
+          transformRow(row, outputSchema, outputTable, outputIncludes, builtQuery.select),
+          builtQuery.partialSelect,
+        ),
       );
     const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
-      const typedDelta = manager.handleDelta(delta, transform, nativeOutputColumns);
+      const typedDelta = manager.handleDelta(delta, transform);
       callback(typedDelta);
     };
 
     const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
+    const remoteIfPossibleOffline =
+      options?.tier === ReadTier.RemoteIfPossible && this.connection.isExplicitlyOffline();
+    const strictRemoteReadTier =
+      options?.tier === ReadTier.Remote || options?.tier === ReadTier.RemoteIfPossible;
+    if (remoteIfPossibleOffline) queryOptions.tier = "local";
     const context = this.getRuntimeOperationContext();
-    let subId: number | null = null;
+    type NativeSubscription = { id: number; generation: number };
+    let activeSubscription: NativeSubscription | null = null;
+    let nextSubscriptionGeneration = 1;
     let unsubscribed = false;
     const readyAbort = new AbortController();
-    const startNativeSubscription = () => {
-      if (unsubscribed || subId !== null) return;
-      subId = client.subscribe(
-        wasmQuery,
-        handleDelta,
-        queryOptions,
-        context?.readSession ?? context?.session ?? session,
-      );
-      if (unsubscribed) {
-        client.unsubscribe(subId);
-        subId = null;
+    const startNativeSubscription = (subscriptionOptions = queryOptions, replace = false) => {
+      if (unsubscribed || (!replace && activeSubscription !== null)) return null;
+      const generation = nextSubscriptionGeneration++;
+      const previous = activeSubscription;
+      // Select the new stream before entering the native call because a runtime
+      // may synchronously publish its opening snapshot from subscribe(). A
+      // callback retained by a retired runtime is rejected by this generation.
+      activeSubscription = { id: -1, generation };
+      const openingDeltas: Parameters<SubscriptionManager<T>["handleDelta"]>[0][] = [];
+      let installationComplete = false;
+      let id: number;
+      try {
+        id = client.subscribe(
+          wasmQuery,
+          (delta) => {
+            if (unsubscribed || activeSubscription?.generation !== generation) return;
+            if (!installationComplete) {
+              openingDeltas.push(delta);
+              return;
+            }
+            handleDelta(delta);
+          },
+          subscriptionOptions,
+          context?.readSession ?? context?.session ?? session,
+        );
+      } catch (error) {
+        activeSubscription = previous;
+        throw error;
       }
+      const subscription = { id, generation };
+      activeSubscription = subscription;
+      installationComplete = true;
+      if (unsubscribed) {
+        client.unsubscribe(id);
+        activeSubscription = null;
+        return null;
+      }
+      try {
+        for (const delta of openingDeltas) handleDelta(delta);
+      } catch (error) {
+        client.unsubscribe(id);
+        activeSubscription = previous;
+        throw error;
+      }
+      return subscription;
     };
     const traceId = this.registerActiveQuerySubscriptionTrace(
       wasmQuery,
@@ -1854,13 +2405,15 @@ export class Db {
     if (queryOptions.tier == null || queryOptions.tier === "local") {
       callback(manager.seed([]));
     }
-    if (this.connection.shouldDeferSubscriptionStart(queryOptions.tier)) {
+    if (
+      this.connection.shouldDeferSubscriptionStart(resolveReadTier(queryOptions.tier ?? "local"))
+    ) {
       // The worker can only classify the initial authority-tier snapshot as
       // settled after its own server transport is attached. Delay native
       // subscription creation until that topology is ready; the native stream
       // then owns the settled-snapshot gate and remains the sole data source.
-      void this.ensureReady(queryOptions.tier, readyAbort.signal)
-        .then(startNativeSubscription)
+      void this.ensureReady(resolveReadTier(queryOptions.tier ?? "local"), readyAbort.signal)
+        .then(() => startNativeSubscription())
         .catch((error: unknown) => {
           if (unsubscribed || readyAbort.signal.aborted || this.isShuttingDown) return;
           setTimeout(() => {
@@ -1870,19 +2423,54 @@ export class Db {
     } else {
       startNativeSubscription();
     }
+    // A remote-if-possible subscription opened during an explicit disconnect
+    // truthfully starts from local state, then replaces that native stream with
+    // the ordinary edge-gated stream after reconnect. Transport errors never
+    // take this branch.
+    if (remoteIfPossibleOffline) {
+      void this.connection
+        .waitForReconnect(readyAbort.signal)
+        .then(async () => {
+          if (unsubscribed || readyAbort.signal.aborted) return;
+          await this.ensureReady("edge", readyAbort.signal);
+          if (unsubscribed || readyAbort.signal.aborted) return;
+          const retired = activeSubscription;
+          // Keep the local stream live while the remote authority is not ready.
+          // Installing the replacement changes the accepted callback generation
+          // atomically; only then is the retired local stream detached.
+          const replacement = startNativeSubscription({ ...queryOptions, tier: "edge" }, true);
+          if (retired && replacement?.generation !== retired.generation) {
+            client.unsubscribe(retired.id);
+          }
+        })
+        .catch((error: unknown) => {
+          if (!unsubscribed && !readyAbort.signal.aborted)
+            setTimeout(() => {
+              throw error;
+            }, 0);
+        });
+    }
     if (
       this.config.serverUrl &&
+      !remoteIfPossibleOffline &&
+      !strictRemoteReadTier &&
       // `edge` and `global` promise that their first callback is the worker's
       // authority-tier snapshot.  A browser worker cannot establish that
       // snapshot until its server transport is ready, so never race it with a
       // main-thread local-storage seed (including after Db.disconnect()).
-      !this.connection.shouldDeferSubscriptionStart(queryOptions.tier) &&
+      !this.connection.shouldDeferSubscriptionStart(
+        resolveReadTier(queryOptions.tier ?? "local"),
+      ) &&
       queryOptions.propagation !== "local-only" &&
-      queryOptions.tier !== "global" &&
+      resolveReadTier(queryOptions.tier ?? "local") !== "global" &&
       !queryUsesRelationTraversal(builtQuery)
     ) {
       const seedQuery = () =>
-        this.all(query, { ...options, tier: "local", propagation: "local-only" });
+        this.all(query, {
+          ...options,
+          tier: "local",
+          propagation: "local-only",
+        });
       const seedRows =
         session == null
           ? seedQuery()
@@ -1904,9 +2492,10 @@ export class Db {
       unsubscribed = true;
       readyAbort.abort();
       this.unregisterActiveQuerySubscriptionTrace(traceId);
-      if (subId !== null) {
-        client.unsubscribe(subId);
+      if (activeSubscription !== null && activeSubscription.id >= 0) {
+        client.unsubscribe(activeSubscription.id);
       }
+      activeSubscription = null;
       manager.clear();
     };
   }
@@ -1995,7 +2584,10 @@ export class Db {
 
   private parseRuntimeQueryTracePayload(queryJson: string): RuntimeQueryTracePayload {
     try {
-      const parsed = JSON.parse(queryJson) as { table?: unknown; branches?: unknown };
+      const parsed = JSON.parse(queryJson) as {
+        table?: unknown;
+        branches?: unknown;
+      };
       const table = typeof parsed.table === "string" ? parsed.table : "unknown";
       const branches = Array.isArray(parsed.branches)
         ? parsed.branches.filter((branch): branch is string => typeof branch === "string")
@@ -2094,7 +2686,12 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
       const jwtToken = runtimeSource.mintLocalFirstToken(
         createRuntimeTokenOptions(secret, config.appId, 3600),
       );
+      const trustedReservedSession = internalSessionFromVerifiedReservedJwtPayload(
+        parseJwtPayload(jwtToken) ?? {},
+        "local-first",
+      );
       resolvedConfig = { ...configWithoutAuth, jwtToken };
+      setTrustedReservedSession(resolvedConfig, trustedReservedSession);
     }
   } else if (!config.jwtToken && !config.cookieSession && !config.adminSecret) {
     // Anonymous: mint an ephemeral keypair + anonymous JWT.
@@ -2104,7 +2701,12 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
     const jwtToken = runtimeSource.mintAnonymousToken(
       createRuntimeTokenOptions(ephemeralSeed, config.appId, 3600),
     );
+    const trustedReservedSession = internalSessionFromVerifiedReservedJwtPayload(
+      parseJwtPayload(jwtToken) ?? {},
+      "anonymous",
+    );
     resolvedConfig = { ...configWithoutAuth, jwtToken };
+    setTrustedReservedSession(resolvedConfig, trustedReservedSession);
   }
 
   const driver = resolveStorageDriver(resolvedConfig.driver);

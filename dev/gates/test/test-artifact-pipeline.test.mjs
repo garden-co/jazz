@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -230,7 +230,7 @@ test("signal during NAPI repair drains the parent scope before unlock", async ()
   const holder = childWithLock(
     lockPath,
     `await withArtifactBuildLock((scope) => buildTestArtifacts((command, args, label, { signal }) => {
-      if (label === 'load release NAPI') return Promise.reject(new Error('load failed'));
+      if (label === 'preflight release NAPI') return Promise.reject(new Error('load failed'));
       if (label === 'repair release NAPI') return new Promise((resolve) => {
         fs.writeFileSync(${JSON.stringify(repairing)}, 'repairing');
         const timer = setInterval(() => {}, 1000);
@@ -292,33 +292,107 @@ test("parallel build failure drains an aborting sibling before leaving the lock"
 
 test("test artifact pipeline overlaps independent bindings and repairs NAPI only after a failed load", async () => {
   const calls = [];
+  const snapshots = [];
   let releaseLoadAttempts = 0;
-  await buildTestArtifacts(async (command, args, label, options) => {
-    calls.push({ command, args, label, options });
-    if (label === "load release NAPI" && ++releaseLoadAttempts === 1)
-      throw new Error("simulated corrupt binding");
-  });
+  await buildTestArtifacts(
+    async (command, args, label, options) => {
+      calls.push({ command, args, label, options });
+      if (label === "preflight release NAPI" && ++releaseLoadAttempts === 1)
+        throw new Error("simulated corrupt binding");
+    },
+    undefined,
+    undefined,
+    () => snapshots.push(calls.at(-1)?.label),
+  );
 
   const labels = calls.map((call) => call.label);
   assert.deepEqual(labels.slice(0, 5), [
     "release NAPI",
     "CLI",
     "fast WASM",
-    "seal fast WASM provenance",
-    "jazz-tools",
+    "derive local artifact expectations",
+    "preflight release NAPI",
   ]);
   assert.equal(labels.filter((label) => label === "release NAPI").length, 1);
   assert.equal(labels.filter((label) => label === "repair release NAPI").length, 1);
   assert.ok(labels.indexOf("jazz-tools") > labels.indexOf("fast WASM"));
+  assert.ok(labels.indexOf("derive local artifact expectations") < labels.indexOf("jazz-tools"));
   assert.ok(labels.indexOf("verify fast WASM provenance") < labels.indexOf("load release NAPI"));
-  assert.ok(labels.indexOf("load repaired release NAPI") > labels.indexOf("repair release NAPI"));
   assert.ok(
-    labels.indexOf("verify release NAPI provenance") > labels.indexOf("load repaired release NAPI"),
+    labels.indexOf("refresh repaired artifact expectations") >
+      labels.indexOf("repair release NAPI"),
   );
+  assert.ok(
+    labels.lastIndexOf("preflight release NAPI") >
+      labels.indexOf("refresh repaired artifact expectations"),
+  );
+  assert.deepEqual(snapshots, ["preflight release NAPI"]);
+  assert.ok(labels.indexOf("verify release NAPI provenance") > labels.indexOf("load release NAPI"));
   for (const call of calls.filter(({ label }) =>
     ["CLI", "fast WASM", "release NAPI", "repair release NAPI"].includes(label),
   ))
     assert.equal(call.options.env?.CARGO_TARGET_DIR, undefined, call.label);
+});
+
+test("aggregate CI lock selection reaches every Turbo artifact producer", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "jazz-ci-artifact-lock-"));
+  const lockPath = join(fixture, "runner-temp-selected.lock");
+  const calls = [];
+  try {
+    await withArtifactBuildLock(
+      (scope, lease) =>
+        buildTestArtifacts(
+          async (command, args, label, options) => {
+            calls.push({ command, args, label, options });
+          },
+          scope,
+          lease,
+        ),
+      lockPath,
+    );
+    for (const call of calls.filter(({ label }) =>
+      ["release NAPI", "CLI", "fast WASM", "jazz-tools", "repair release NAPI"].includes(label),
+    )) {
+      assert.equal(
+        call.options.env.JAZZ_TEST_ARTIFACT_LOCK_PATH,
+        lockPath,
+        `${call.label} lost the parent-selected CI lock path`,
+      );
+      assert.equal(
+        call.options.env.JAZZ_ARTIFACT_BUILD_LOCK_PATH,
+        lockPath,
+        `${call.label} received a child-selected lease path`,
+      );
+      assert.ok(call.options.env.JAZZ_ARTIFACT_BUILD_LEASE, `${call.label} lost the lease token`);
+    }
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("a strict Turbo-like child verifies the CI parent's runner-temp lease", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "jazz-ci-strict-artifact-lock-"));
+  const lockPath = join(fixture, "runner-temp-selected.lock");
+  try {
+    await withArtifactBuildLock(async (unusedScope, lease) => {
+      const child = spawnSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `import { verifyArtifactBuildLease } from ${JSON.stringify(new URL("../build-test-artifacts.mjs", import.meta.url).href)}; verifyArtifactBuildLease({ token: process.env.JAZZ_ARTIFACT_BUILD_LEASE, lockPath: process.env.JAZZ_ARTIFACT_BUILD_LOCK_PATH });`,
+        ],
+        {
+          // Turbo's strict environment is intentionally modelled as exactly
+          // the declared inputs, not the ambient parent process.
+          env: { PATH: process.env.PATH, ...lease },
+        },
+      );
+      assert.equal(child.status, 0, child.stderr.toString());
+    }, lockPath);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
 });
 
 test("a failed build aborts its still-running sibling commands", async () => {
@@ -432,7 +506,9 @@ test("CI uses the correctness artifact path while package builds keep release WA
   );
   const packageJson = readFileSync(new URL("../../../package.json", import.meta.url), "utf8");
   const pipeline = readFileSync(new URL("../build-test-artifacts.mjs", import.meta.url), "utf8");
-  assert.match(workflow, /pnpm build:test-artifacts/);
+  const localCi = readFileSync(new URL("../local-ci-equivalent.mjs", import.meta.url), "utf8");
+  assert.match(workflow, /local-ci-equivalent\.mjs --ci-partition typescript/);
+  assert.match(localCi, /correctness-test artifacts[\s\S]*pnpm[\s\S]*build:test-artifacts/);
   assert.match(packageJson, /"build:test-artifacts": "node dev\/gates\/build-test-artifacts\.mjs"/);
   assert.match(
     packageJson,
@@ -442,6 +518,14 @@ test("CI uses the correctness artifact path while package builds keep release WA
     packageJson,
     /"build:ci": "turbo run build:crates.*jazz-wasm.*jazz-napi.*jazz-tools/,
   );
+  for (const script of ["build", "build:core", "build:ci"])
+    assert.match(
+      packageJson,
+      new RegExp(
+        `"${script.replace(":", "\\:")}": "turbo run build:crates.*jazz-wasm.*turbo run build`,
+      ),
+      `${script} must leave atomic WASM publication as the sole provenance writer`,
+    );
   assert.doesNotMatch(workflow, /CARGO_TARGET_DIR/);
   assert.doesNotMatch(pipeline, /target\/test-artifacts-(?:wasm|napi)/);
   for (const task of ["build", "build:crates", "build:fast"])
@@ -449,6 +533,26 @@ test("CI uses the correctness artifact path while package builds keep release WA
       pipeline,
       new RegExp(`"exec", "turbo", "run", "${task.replace(":", "\\:")}"`),
       `${task} correctness artifact must run through Turbo`,
+    );
+
+  const turbo = JSON.parse(readFileSync(new URL("../../../turbo.json", import.meta.url), "utf8"));
+  const expectedLease = [
+    "JAZZ_TEST_ARTIFACT_LOCK_PATH",
+    "JAZZ_ARTIFACT_BUILD_LEASE",
+    "JAZZ_ARTIFACT_BUILD_LOCK_PATH",
+    "JAZZ_TEST_SEALED_TOOLS_DIST",
+  ];
+  for (const task of ["jazz-napi#build", "jazz-wasm#build", "jazz-wasm#build:fast"])
+    assert.deepEqual(
+      turbo.tasks[task].passThroughEnv,
+      expectedLease,
+      `${task} must preserve the aggregate parent's selected artifact lock`,
+    );
+  for (const task of ["build", "jazz-tools#build", "test"])
+    assert.deepEqual(
+      turbo.tasks[task].passThroughEnv,
+      ["JAZZ_TEST_SEALED_TOOLS_DIST"],
+      `${task} must preserve the sealed shared test surface for child package scripts`,
     );
 });
 

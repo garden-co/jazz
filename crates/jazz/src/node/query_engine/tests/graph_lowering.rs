@@ -534,6 +534,35 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
 
 #[test]
 fn current_join_via_can_use_union_relation_input() {
+    assert_current_join_via_union_relation_input(
+        source("todo_tags", SourceRole::Policy("direct".to_owned())),
+        source("todo_tags", SourceRole::Policy("inherited".to_owned())),
+        false,
+    );
+}
+
+/// A UNION may have a common aliased source even when each arm has different
+/// predicates. The root source is then available, but must not be mistaken
+/// for a non-union join occurrence.
+#[test]
+fn current_join_via_shared_alias_union_keeps_arm_and_row_carriers() {
+    let shared = source("todo_tags", SourceRole::Alias("policy_branch".to_owned()));
+    assert_current_join_via_union_relation_input(shared.clone(), shared, false);
+}
+
+/// The shared-alias UNION must retain its full `(arm, row)` occurrence identity
+/// when an additional INNER JOIN causes the first join input to be flattened.
+#[test]
+fn current_join_via_shared_alias_union_keeps_carriers_through_consecutive_inner_join() {
+    let shared = source("todo_tags", SourceRole::Alias("policy_branch".to_owned()));
+    assert_current_join_via_union_relation_input(shared.clone(), shared, true);
+}
+
+fn assert_current_join_via_union_relation_input(
+    direct_source: SourceId,
+    inherited_source: SourceId,
+    consecutive_inner_join: bool,
+) {
     let root = RowSetNodeId("root".to_owned());
     let direct_source_node = RowSetNodeId("direct-source".to_owned());
     let direct_project = RowSetNodeId("direct-project".to_owned());
@@ -541,28 +570,37 @@ fn current_join_via_can_use_union_relation_input() {
     let inherited_project = RowSetNodeId("inherited-project".to_owned());
     let union_node = RowSetNodeId("authorized-union".to_owned());
     let join_node = RowSetNodeId("join".to_owned());
+    let ordinary_source_node = RowSetNodeId("ordinary-source".to_owned());
+    let ordinary_project = RowSetNodeId("ordinary-project".to_owned());
+    let terminal_join = RowSetNodeId("terminal-join".to_owned());
     let root_source = source("todos", SourceRole::Root);
-    let direct_source = source("todo_tags", SourceRole::Policy("direct".to_owned()));
-    let inherited_source = source("todo_tags", SourceRole::Policy("inherited".to_owned()));
+    let ordinary_source = source("todo_tags", SourceRole::Alias("ordinary".to_owned()));
+    let mut sources = BTreeMap::from([
+        (
+            root_source.clone(),
+            requested_current_source(DurabilityTier::Global),
+        ),
+        (
+            direct_source.clone(),
+            requested_current_source(DurabilityTier::Global),
+        ),
+        (
+            inherited_source.clone(),
+            requested_current_source(DurabilityTier::Global),
+        ),
+    ]);
+    if consecutive_inner_join {
+        sources.insert(
+            ordinary_source.clone(),
+            requested_current_source(DurabilityTier::Global),
+        );
+    }
     let request = QueryProgramRequest {
         authorization_mode: QueryAuthorizationMode::TrustedServing,
         reads: QueryReadSet::primary(ReadView {
             read_schema: schema(0x10),
             policy_schema: schema(0x11),
-            sources: BTreeMap::from([
-                (
-                    root_source.clone(),
-                    requested_current_source(DurabilityTier::Global),
-                ),
-                (
-                    direct_source.clone(),
-                    requested_current_source(DurabilityTier::Global),
-                ),
-                (
-                    inherited_source.clone(),
-                    requested_current_source(DurabilityTier::Global),
-                ),
-            ]),
+            sources,
         }),
         policy: system_policy_context(),
         input: RowSetProgramInput {
@@ -571,7 +609,11 @@ fn current_join_via_can_use_union_relation_input() {
                     shape_id: shape(0x7a),
                     canonical: vec![0x7a],
                 },
-                root: join_node.clone(),
+                root: if consecutive_inner_join {
+                    terminal_join.clone()
+                } else {
+                    join_node.clone()
+                },
                 result: ResultId::RealRow {
                     table: "todos".to_owned(),
                     row: ResultRowRef::Source(root_source.clone()),
@@ -580,94 +622,140 @@ fn current_join_via_can_use_union_relation_input() {
                 closure_paths: Vec::new(),
                 join_contributions: Vec::new(),
                 reachable_contributions: Vec::new(),
-                nodes: BTreeMap::from([
-                    (
-                        root.clone(),
-                        RowSetExpr::Source {
-                            source: root_source.clone(),
-                            visibility: RowVisibility::Visible,
-                        },
-                    ),
-                    (
-                        direct_source_node.clone(),
-                        RowSetExpr::Source {
-                            source: direct_source.clone(),
-                            visibility: RowVisibility::Visible,
-                        },
-                    ),
-                    (
-                        direct_project.clone(),
-                        RowSetExpr::Project {
-                            input: direct_source_node,
-                            columns: vec![RowProjection {
-                                output: TypedOutputField {
-                                    name: "todo".to_owned(),
-                                    ty: ColumnType::Uuid,
-                                },
-                                value: NormalizedValueRef::SourceField {
-                                    source: direct_source,
-                                    field: "todo".to_owned(),
-                                },
-                            }],
-                        },
-                    ),
-                    (
-                        inherited_source_node.clone(),
-                        RowSetExpr::Source {
-                            source: inherited_source.clone(),
-                            visibility: RowVisibility::Visible,
-                        },
-                    ),
-                    (
-                        inherited_project.clone(),
-                        RowSetExpr::Project {
-                            input: inherited_source_node,
-                            columns: vec![RowProjection {
-                                output: TypedOutputField {
-                                    name: "todo".to_owned(),
-                                    ty: ColumnType::Uuid,
-                                },
-                                value: NormalizedValueRef::SourceField {
-                                    source: inherited_source,
-                                    field: "todo".to_owned(),
-                                },
-                            }],
-                        },
-                    ),
-                    (
-                        union_node.clone(),
-                        RowSetExpr::Union {
-                            inputs: vec![
-                                UnionInput {
-                                    node: direct_project,
-                                    label: "direct".to_owned(),
-                                },
-                                UnionInput {
-                                    node: inherited_project,
-                                    label: "inherited".to_owned(),
-                                },
-                            ],
-                        },
-                    ),
-                    (
-                        join_node,
-                        RowSetExpr::Join {
-                            left: root,
-                            right: union_node,
-                            mode: JoinMode::Inner,
-                            on: PredicateExpr::Compare {
-                                left: NormalizedValueRef::RowId(RowIdRef::Source(
-                                    root_source.clone(),
-                                )),
-                                op: ComparisonOp::Eq,
-                                right: NormalizedValueRef::SourceField {
-                                    source: root_source.clone(),
-                                    field: "todo".to_owned(),
+                nodes: {
+                    let mut nodes = BTreeMap::from([
+                        (
+                            root.clone(),
+                            RowSetExpr::Source {
+                                source: root_source.clone(),
+                                visibility: RowVisibility::Visible,
+                            },
+                        ),
+                        (
+                            direct_source_node.clone(),
+                            RowSetExpr::Source {
+                                source: direct_source.clone(),
+                                visibility: RowVisibility::Visible,
+                            },
+                        ),
+                        (
+                            direct_project.clone(),
+                            RowSetExpr::Project {
+                                input: direct_source_node,
+                                columns: vec![RowProjection {
+                                    output: TypedOutputField {
+                                        name: "todo".to_owned(),
+                                        ty: ColumnType::Uuid,
+                                    },
+                                    value: NormalizedValueRef::SourceField {
+                                        source: direct_source.clone(),
+                                        field: "todo".to_owned(),
+                                    },
+                                }],
+                            },
+                        ),
+                        (
+                            inherited_source_node.clone(),
+                            RowSetExpr::Source {
+                                source: inherited_source.clone(),
+                                visibility: RowVisibility::Visible,
+                            },
+                        ),
+                        (
+                            inherited_project.clone(),
+                            RowSetExpr::Project {
+                                input: inherited_source_node,
+                                columns: vec![RowProjection {
+                                    output: TypedOutputField {
+                                        name: "todo".to_owned(),
+                                        ty: ColumnType::Uuid,
+                                    },
+                                    value: NormalizedValueRef::SourceField {
+                                        source: inherited_source.clone(),
+                                        field: "todo".to_owned(),
+                                    },
+                                }],
+                            },
+                        ),
+                        (
+                            union_node.clone(),
+                            RowSetExpr::Union {
+                                inputs: vec![
+                                    UnionInput {
+                                        node: direct_project,
+                                        label: "direct".to_owned(),
+                                    },
+                                    UnionInput {
+                                        node: inherited_project,
+                                        label: "inherited".to_owned(),
+                                    },
+                                ],
+                            },
+                        ),
+                        (
+                            join_node.clone(),
+                            RowSetExpr::Join {
+                                left: root,
+                                right: union_node,
+                                mode: JoinMode::Inner,
+                                on: PredicateExpr::Compare {
+                                    left: NormalizedValueRef::RowId(RowIdRef::Source(
+                                        root_source.clone(),
+                                    )),
+                                    op: ComparisonOp::Eq,
+                                    right: NormalizedValueRef::SourceField {
+                                        source: root_source.clone(),
+                                        field: "todo".to_owned(),
+                                    },
                                 },
                             },
-                        },
-                    ),
-                ]),
+                        ),
+                    ]);
+                    if consecutive_inner_join {
+                        nodes.insert(
+                            ordinary_source_node.clone(),
+                            RowSetExpr::Source {
+                                source: ordinary_source.clone(),
+                                visibility: RowVisibility::Visible,
+                            },
+                        );
+                        nodes.insert(
+                            ordinary_project.clone(),
+                            RowSetExpr::Project {
+                                input: ordinary_source_node,
+                                columns: vec![RowProjection {
+                                    output: TypedOutputField {
+                                        name: "todo".to_owned(),
+                                        ty: ColumnType::Uuid,
+                                    },
+                                    value: NormalizedValueRef::SourceField {
+                                        source: ordinary_source.clone(),
+                                        field: "todo".to_owned(),
+                                    },
+                                }],
+                            },
+                        );
+                        nodes.insert(
+                            terminal_join,
+                            RowSetExpr::Join {
+                                left: join_node,
+                                right: ordinary_project,
+                                mode: JoinMode::Inner,
+                                on: PredicateExpr::Compare {
+                                    left: NormalizedValueRef::RowId(RowIdRef::Source(
+                                        root_source.clone(),
+                                    )),
+                                    op: ComparisonOp::Eq,
+                                    right: NormalizedValueRef::SourceField {
+                                        source: ordinary_source,
+                                        field: "todo".to_owned(),
+                                    },
+                                },
+                            },
+                        );
+                    }
+                    nodes
+                },
             },
             binding: ProgramBinding {
                 id: BindingId(uuid::Uuid::from_bytes([0x7a; 16])),
@@ -736,6 +824,16 @@ fn current_join_via_can_use_union_relation_input() {
             if fields.iter().any(|field| field.output_name == "__root_join_arm_0")
                 && fields.iter().any(|field| field.output_name == "__root_join_row_0")
     )));
+    if consecutive_inner_join {
+        assert!(graph_any(&membership.graph, &|graph| matches!(
+            graph,
+            GraphBuilder::Project { input, fields }
+                if fields.iter().any(|field| field.output_name == "__root_join_arm_0")
+                    && fields.iter().any(|field| field.output_name == "__root_join_row_0")
+                    && matches!(input.as_ref(), GraphBuilder::Join { right, .. }
+                        if !matches!(right.as_ref(), GraphBuilder::Union { .. }))
+        )));
+    }
 }
 
 #[test]
@@ -1638,6 +1736,284 @@ fn prepared_policy_union_joins_claimless_arm_to_binding_route() {
     )));
 }
 
+/// Keeps a public assignment occurrence address through an inherited-policy
+/// semi-join while Alice's allowed release and tenant-correlated checks are
+/// lowered as consecutive joins.
+///
+/// ```text
+/// alice ──insert assignment──► release + membership + organization checks
+///                                  │
+///                                  └──► public assignment result occurrence
+/// ```
+///
+/// The matching authorization subplan keeps the same join inputs internal:
+/// its policy proof must never expose public occurrence carriers.
+#[test]
+fn authorization_subplan_with_correlated_allowed_to_joins_lowers_without_occurrence_carriers() {
+    let root = RowSetNodeId("assignment".to_owned());
+    let release_input = RowSetNodeId("release-source".to_owned());
+    let release_join = RowSetNodeId("release-allowed-to".to_owned());
+    let membership_input = RowSetNodeId("membership-source".to_owned());
+    let membership_join = RowSetNodeId("membership-tenant-check".to_owned());
+    let organization_input = RowSetNodeId("organization-source".to_owned());
+    let policy_root = RowSetNodeId("organization-tenant-check".to_owned());
+    let assignment = source("assignments", SourceRole::Root);
+    let release = source(
+        "releases",
+        SourceRole::Alias("allowed-to:release".to_owned()),
+    );
+    let membership = source(
+        "memberships",
+        SourceRole::Alias("exists:membership-tenant".to_owned()),
+    );
+    let organization = source(
+        "organizations",
+        SourceRole::Alias("exists:organization-tenant".to_owned()),
+    );
+    let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
+        reads: QueryReadSet::primary(ReadView {
+            read_schema: schema(0x91),
+            policy_schema: schema(0x92),
+            sources: BTreeMap::from([
+                (
+                    assignment.clone(),
+                    requested_current_source(DurabilityTier::Global),
+                ),
+                (
+                    release.clone(),
+                    requested_current_source(DurabilityTier::Global),
+                ),
+                (
+                    membership.clone(),
+                    requested_current_source(DurabilityTier::Global),
+                ),
+                (
+                    organization.clone(),
+                    requested_current_source(DurabilityTier::Global),
+                ),
+            ]),
+        }),
+        policy: PolicyContext::AuthorizationSubplan {
+            protected_source: assignment.clone(),
+            role: PolicyDecisionRole::Write,
+            mode: PolicyEnforcementMode::Enforcing,
+            permission_subject: author(0x91),
+            claims: BTreeMap::new(),
+            attribution: None,
+        },
+        input: RowSetProgramInput {
+            shape: NormalizedRowSetShape {
+                identity: NormalizedShapeIdentity {
+                    shape_id: shape(0x91),
+                    canonical: vec![0x91],
+                },
+                root: policy_root.clone(),
+                result: ResultId::RealRow {
+                    table: "assignments".to_owned(),
+                    row: ResultRowRef::Source(assignment.clone()),
+                },
+                auxiliary_sources: BTreeSet::new(),
+                closure_paths: Vec::new(),
+                join_contributions: Vec::new(),
+                reachable_contributions: Vec::new(),
+                nodes: BTreeMap::from([
+                    (
+                        root.clone(),
+                        RowSetExpr::Source {
+                            source: assignment.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        release_input,
+                        RowSetExpr::Source {
+                            source: release.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        release_join.clone(),
+                        RowSetExpr::Join {
+                            left: root,
+                            right: RowSetNodeId("release-source".to_owned()),
+                            mode: JoinMode::Inner,
+                            on: PredicateExpr::Compare {
+                                left: NormalizedValueRef::RowId(RowIdRef::Source(
+                                    assignment.clone(),
+                                )),
+                                op: ComparisonOp::Eq,
+                                right: NormalizedValueRef::SourceField {
+                                    source: release.clone(),
+                                    field: "todo".to_owned(),
+                                },
+                            },
+                        },
+                    ),
+                    (
+                        membership_input,
+                        RowSetExpr::Source {
+                            source: membership.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        membership_join,
+                        RowSetExpr::Join {
+                            left: release_join,
+                            right: RowSetNodeId("membership-source".to_owned()),
+                            mode: JoinMode::Inner,
+                            on: PredicateExpr::Compare {
+                                left: NormalizedValueRef::RowId(RowIdRef::Source(
+                                    assignment.clone(),
+                                )),
+                                op: ComparisonOp::Eq,
+                                right: NormalizedValueRef::SourceField {
+                                    source: membership,
+                                    field: "todo".to_owned(),
+                                },
+                            },
+                        },
+                    ),
+                    (
+                        organization_input,
+                        RowSetExpr::Source {
+                            source: organization.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        policy_root,
+                        RowSetExpr::Join {
+                            left: RowSetNodeId("membership-tenant-check".to_owned()),
+                            right: RowSetNodeId("organization-source".to_owned()),
+                            mode: JoinMode::Inner,
+                            on: PredicateExpr::Compare {
+                                left: NormalizedValueRef::RowId(RowIdRef::Source(
+                                    assignment.clone(),
+                                )),
+                                op: ComparisonOp::Eq,
+                                right: NormalizedValueRef::SourceField {
+                                    source: organization,
+                                    field: "todo".to_owned(),
+                                },
+                            },
+                        },
+                    ),
+                ]),
+            },
+            binding: ProgramBinding {
+                id: BindingId(uuid::Uuid::from_bytes([0x91; 16])),
+                source_shape: None,
+                extra_user_params: BTreeMap::new(),
+                param_types: BTreeMap::new(),
+                claim_params: BTreeMap::new(),
+                values: BTreeMap::new(),
+            },
+        },
+        output: RowSetOutputRequest {
+            app_rows: None,
+            facts: BTreeSet::from([ProgramFactKey::ResultMembership]),
+        },
+    };
+
+    let program = lower_query_program(request, &mut FakeSourceResolver::default())
+        .expect("correlated write authorization should lower");
+    let graph = format!("{:?}", program.lowered.terminals);
+    assert!(
+        !graph.contains("__flat_join_source_"),
+        "authorization decision graph must not request public occurrence carriers: {graph}"
+    );
+    assert!(
+        graph.contains("__policy_join_source_0_"),
+        "the next correlated predicate still needs the first join's internal values: {graph}"
+    );
+    let OutputTerminalSchema::Fact(ProgramFactOutput {
+        schema: ProgramFactSchema::ResultMembership(schema),
+        ..
+    }) = program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == "maintained.result_current")
+        .map(|terminal| &terminal.output)
+        .expect("result-membership terminal")
+    else {
+        panic!("result-membership terminal must retain its schema");
+    };
+    assert_eq!(schema.occurrence_id_fields, vec!["row_uuid"]);
+
+    // The source-read terminal uses an ordinary identity context, not the
+    // authorization-subplan context above. Its trailing inherited-policy
+    // semi-join must keep the first two public join carriers.
+    let mut public_input = program.request.input.clone();
+    let public_root = public_input.shape.root.clone();
+    let RowSetExpr::Join { mode, .. } = public_input
+        .shape
+        .nodes
+        .get_mut(&public_root)
+        .expect("public assignment root join")
+    else {
+        panic!("public assignment root must be a join");
+    };
+    *mode = JoinMode::Semi;
+    let public_request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
+        reads: program.request.reads.clone(),
+        policy: PolicyContext::Identity {
+            mode: PolicyEnforcementMode::Enforcing,
+            permission_subject: author(0x91),
+            claims: BTreeMap::new(),
+            attribution: None,
+        },
+        input: public_input,
+        output: row_set_output(BTreeSet::new()),
+    };
+    let public_program = lower_query_program(public_request, &mut FakeSourceResolver::default())
+        .expect("public correlated assignment read should lower");
+    let public_terminal = public_program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| matches!(terminal.output, OutputTerminalSchema::AppRows(_)))
+        .expect("public app-rows terminal");
+    let public_graph = format!("{:#?}", public_terminal.graph);
+    assert!(
+        !public_graph.contains("__policy_join_source_"),
+        "policy-proof carriers must not reach a public query terminal: {public_graph}"
+    );
+    let OutputTerminalSchema::AppRows(public_schema) = &public_terminal.output else {
+        panic!("public app-rows terminal must retain its public descriptor");
+    };
+    assert!(
+        public_schema
+            .descriptor
+            .fields()
+            .iter()
+            .filter_map(|field| field.name.as_deref())
+            .all(|field| !field.starts_with("__policy_join_source_")),
+        "private policy carriers must not appear in the public descriptor: {public_schema:#?}"
+    );
+    let collector_inputs = BTreeSet::from([
+        "__collect_root___flat_join_source_0_row_uuid".to_owned(),
+        "__collect_root___flat_join_source_1_row_uuid".to_owned(),
+    ]);
+    assert!(
+        graph_any(&public_terminal.graph, &|graph| matches!(
+            graph,
+            GraphBuilder::Project { fields, .. }
+                if collector_inputs.is_subset(
+                    &fields
+                        .iter()
+                        .map(|field| field.output_name.clone())
+                        .collect()
+                )
+        )),
+        "the collector must receive every projected public occurrence carrier: {:#?}",
+        public_terminal.graph
+    );
+}
+
 #[test]
 fn claim_filter_lowers_from_identity_policy_context() {
     let request = QueryProgramRequest {
@@ -1789,7 +2165,7 @@ fn binding_descriptor_types_do_not_depend_on_runtime_array_values() {
 
 #[test]
 fn nested_binding_value_source_keeps_sibling_nullable_claim_route() {
-    let user_id = ClaimPath(vec!["user_id".to_owned()]);
+    let user_id = ClaimPath(vec!["user".to_owned()]);
     let join_code = ClaimPath(vec!["join_code".to_owned()]);
     let typed_user_id = claim_param_field(&user_id);
     let typed_join_code = claim_param_field(&join_code);
@@ -1834,7 +2210,7 @@ fn nested_binding_value_source_keeps_sibling_nullable_claim_route() {
 }
 
 #[test]
-fn built_in_sub_claim_lowers_to_permission_subject() {
+fn missing_sub_claim_lowers_to_deny_predicate() {
     let subject = author(0xa5);
     let request = QueryProgramRequest {
         authorization_mode: QueryAuthorizationMode::TrustedServing,
@@ -1850,9 +2226,51 @@ fn built_in_sub_claim_lowers_to_permission_subject() {
     };
 
     let program = lower_query_program(request, &mut FakeSourceResolver::default())
-        .expect("built-in sub claim lowers");
+        .expect("missing sub claim lowers");
     let graph = format!("{:?}", program.lowered.terminals[0].graph);
-    assert!(graph.contains(&subject.0.to_string()), "{graph}");
+    assert!(graph.contains("Filter"), "{graph}");
+    assert!(graph.contains("Or([])"), "{graph}");
+}
+
+/// This is deliberately a lowering-level receipt: the parameter domain is an
+/// internal compiler boundary, while the policy integration receipt exercises
+/// the corresponding public behavior.
+#[test]
+fn only_ordered_scalar_claims_enter_collector_routing() {
+    let scalar = ClaimPath(vec!["tier".to_owned()]);
+    let array = ClaimPath(vec!["teams".to_owned()]);
+    let mut input = row_set_input(0xd3);
+    let root = input.shape.root.clone();
+    input.shape.nodes.insert(
+        root,
+        RowSetExpr::ValueSource {
+            shape: "claim-routing".to_owned(),
+            columns: vec![
+                ValueSourceColumn {
+                    name: "tier".to_owned(),
+                    value: NormalizedValueRef::Claim(scalar.clone()),
+                    ty: ColumnType::String.nullable(),
+                },
+                ValueSourceColumn {
+                    name: "teams".to_owned(),
+                    value: NormalizedValueRef::Claim(array.clone()),
+                    ty: ColumnType::Array(Box::new(ColumnType::Uuid)),
+                },
+            ],
+            mode: ValueSourceMode::Binding,
+        },
+    );
+
+    let domain = super::super::lowering::parameter_domain_for_shape_for_test(&input.shape);
+    let scalar_field = claim_param_field(&scalar);
+    let array_field = claim_param_field(&array);
+    assert!(domain.claim_params.contains_key(&scalar_field));
+    assert!(domain.claim_params.contains_key(&array_field));
+    assert!(domain.routing_params.contains(&scalar_field));
+    assert!(
+        !domain.routing_params.contains(&array_field),
+        "compound claim stays a prepared predicate input and never becomes a collector key"
+    );
 }
 
 #[test]

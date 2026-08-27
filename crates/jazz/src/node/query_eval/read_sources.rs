@@ -12,6 +12,11 @@ pub(super) struct JazzSourceGraphPreparer<'a, S> {
     pub(super) read_view: &'a ReadView<RequestedSourceStage>,
     pub(super) inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
     pub(super) access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+    /// Whether access-path metrics should account for this logical graph
+    /// fragment. A policy proof specialized from its outer source reuses the
+    /// same deduplicated physical source node, so only the outer fragment owns
+    /// that source-plan receipt.
+    pub(super) count_access_path_metrics: bool,
     /// Query-local enum boundary targets, keyed by logical source.  Defining
     /// a variant target invalidates table inputs, so reuse it across the main
     /// source, access path, and metadata sidecars of one compiled program.
@@ -30,6 +35,7 @@ pub(super) enum CurrentAccessPath {
     Index {
         column: String,
         prefix: Vec<Value>,
+        intersections: Vec<(String, Vec<Value>)>,
         /// A proved physical source cap for an ordinary one-shot read. This is
         /// never selected by policy compilation or subscriptions.
         source_limit: Option<usize>,
@@ -222,14 +228,23 @@ where
         };
         if let Some(rows) = self.inline_sources.get(&request.source) {
             if request.visibility != RowVisibility::Visible
-                || !request.requirements.metadata.is_empty()
                 || !matches!(authorization, SourceAuthorizationRequest::System)
             {
                 return Err(source_resolution_error(request, SourceGap::Coverage));
             }
-            let graph = inline_current_graph(&table, rows.clone())
+            let schema_version_alias = self
+                .node
+                .ensure_schema_version_alias(self.read_view.read_schema)
+                .await
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-            let descriptor = current_row_descriptor(&table);
+            let (graph, descriptor, metadata) = inline_current_graph_with_source_metadata(
+                &table,
+                rows.clone(),
+                schema_version_alias,
+                "inline-current",
+                &request.requirements,
+            )
+            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
             return Ok(ResolvedSource {
                 table_schema: table,
                 graph,
@@ -237,7 +252,7 @@ where
                     source: request.source.clone(),
                     descriptor,
                     row_uuid_field: "row_uuid".to_owned(),
-                    metadata: BTreeMap::new(),
+                    metadata,
                 },
                 routing_fields: BTreeSet::new(),
                 requires_result_payload: false,
@@ -478,8 +493,8 @@ where
                 let branch_witness_field =
                     (!table.branch_by.is_empty()).then_some("supplying_branch_key");
                 let tier = graph_tier.expect("branch view has a current tier");
-                let frozen_base_key = match base {
-                    Some(BranchViewSourceBase::Snapshot(key, _)) => key,
+                let (frozen_base_key, frozen_snapshot) = match base {
+                    Some(BranchViewSourceBase::Snapshot(key, snapshot)) => (key, snapshot),
                     _ => unreachable!("guarded frozen branch base"),
                 };
                 let head_keys = self
@@ -499,11 +514,15 @@ where
                 let head_content_presence = head_content.clone().project(["row_uuid"]);
                 let head_deletion_presence = head_deletions.clone().project(["row_uuid"]);
                 let deleted = head_deletions
+                    .clone()
                     .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
+                    .project(["row_uuid"]);
+                let restored = head_deletions
+                    .filter(PredicateExpr::eq("_deletion", Value::EnumTag(1)))
                     .project(["row_uuid"]);
                 let selected_head = GraphBuilder::anti_join(
                     head_content.clone(),
-                    deleted,
+                    deleted.clone(),
                     ["row_uuid"],
                     ["row_uuid"],
                 )
@@ -530,17 +549,18 @@ where
                     &metadata,
                     branch_witness_field.is_some(),
                 );
-                // Capture the full opening view once. Anti-joining it against
-                // live head presence leaves only inherited frozen rows; all
-                // subsequent head changes remain maintained table inputs.
-                let opening_rows = self
+                // Capture only the base snapshot once. The live head is kept
+                // entirely in maintained table inputs so pending rejection,
+                // replacement, deletion and restoration cannot leak into the
+                // frozen relation.
+                let (frozen_base_rows, frozen_base_deleted_rows) = self
                     .node
-                    .branch_view_rows_for_schema(
+                    .branch_snapshot_rows_for_schema(
                         &request.source.table,
                         self.read_view.read_schema,
-                        tier,
                         head,
-                        base,
+                        frozen_base_key,
+                        frozen_snapshot,
                     )
                     .await
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
@@ -552,7 +572,7 @@ where
                 let (opening, opening_descriptor, opening_metadata) =
                     inline_current_graph_with_source_metadata_and_branch_witness(
                         &table,
-                        opening_rows,
+                        frozen_base_rows,
                         schema_version_alias,
                         "frozen-branch-base",
                         &request.requirements,
@@ -571,12 +591,58 @@ where
                     ["row_uuid"],
                     ["row_uuid"],
                 );
-                let inherited = GraphBuilder::anti_join(
-                    inherited,
-                    head_deletion_presence,
-                    ["row_uuid"],
-                    ["row_uuid"],
-                );
+                // A deletion-register winner is explicit for both states. Use
+                // its positive Restored row as a positive maintained input;
+                // relying only on retraction from a filtered Deleted relation
+                // would not publish a deletion-only restore transition.
+                let inherited = if frozen_base_deleted_rows.is_empty() {
+                    // Do not add an empty static anti-join to the maintained
+                    // path: its static witness cannot publish the inherited
+                    // row when a pending head content winner retracts.
+                    GraphBuilder::union([
+                        GraphBuilder::anti_join(
+                            inherited.clone(),
+                            head_deletion_presence,
+                            ["row_uuid"],
+                            ["row_uuid"],
+                        ),
+                        GraphBuilder::semi_join(inherited, restored, ["row_uuid"], ["row_uuid"]),
+                    ])
+                } else {
+                    let (frozen_base_deletions, deletion_descriptor, deletion_metadata) =
+                        inline_current_graph_with_source_metadata_and_branch_witness(
+                            &table,
+                            frozen_base_deleted_rows,
+                            schema_version_alias,
+                            "frozen-branch-base-deletions",
+                            &request.requirements,
+                            branch_witness_field.map(|field| (field, frozen_base_key)),
+                        )
+                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                    if descriptor != deletion_descriptor || metadata != deletion_metadata {
+                        return Err(source_resolution_error(
+                            request,
+                            SourceGap::SchemaProjection,
+                        ));
+                    }
+                    let inherited_without_frozen_deletions = GraphBuilder::anti_join(
+                        inherited.clone(),
+                        frozen_base_deletions.project(["row_uuid"]),
+                        ["row_uuid"],
+                        ["row_uuid"],
+                    );
+                    GraphBuilder::union([
+                        GraphBuilder::anti_join(
+                            inherited_without_frozen_deletions,
+                            head_deletion_presence,
+                            ["row_uuid"],
+                            ["row_uuid"],
+                        ),
+                        // A head Restored winner deliberately also reveals a
+                        // base row whose frozen deletion winner was Deleted.
+                        GraphBuilder::semi_join(inherited, restored, ["row_uuid"], ["row_uuid"]),
+                    ])
+                };
                 let unfiltered = GraphBuilder::union([live_head, inherited]);
                 let graph = match &authorization {
                     SourceAuthorizationRequest::System => unfiltered,
@@ -1356,7 +1422,9 @@ where
     ) -> Result<Option<GraphBuilder>, SourceResolutionError> {
         match access_path {
             CurrentAccessPath::PrimaryKey(prefix) => {
-                self.node.query_engine_read_metrics.source_primary_key_scans += 1;
+                if self.count_access_path_metrics {
+                    self.node.query_engine_read_metrics.source_primary_key_scans += 1;
+                }
                 Ok(Some(selected_visible_current_primary_key_graph(
                     table, tier, prefix,
                 )))
@@ -1364,6 +1432,7 @@ where
             CurrentAccessPath::Index {
                 column,
                 prefix,
+                intersections,
                 source_limit,
             } => {
                 if tier != DurabilityTier::Global {
@@ -1380,11 +1449,13 @@ where
                         self.read_view.read_schema,
                         &column,
                         &prefix,
+                        &intersections,
                         source_limit,
                         &projection_target,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                self.node.query_engine_read_metrics.source_index_probes += 1;
+                self.node.query_engine_read_metrics.source_index_probes +=
+                    1 + intersections.len() as u64;
                 Ok(Some(rows))
             }
         }
@@ -1652,7 +1723,9 @@ where
             let projection_target = self.current_projection_target(request, read_table)?;
             let content = match self.access_paths.get(&request.source).cloned() {
                 Some(CurrentAccessPath::PrimaryKey(prefix)) => {
-                    self.node.query_engine_read_metrics.source_primary_key_scans += 1;
+                    if self.count_access_path_metrics {
+                        self.node.query_engine_read_metrics.source_primary_key_scans += 1;
+                    }
                     self.node
                         .physical_current_source_scan_graph_with_projection_target(
                             self.read_view.read_schema,
@@ -1668,16 +1741,19 @@ where
                 Some(CurrentAccessPath::Index {
                     column,
                     prefix,
+                    intersections,
                     source_limit,
                 }) => {
                     let source_limit = (!exclude_deleted).then_some(source_limit).flatten();
-                    self.node.query_engine_read_metrics.source_index_probes += 1;
+                    self.node.query_engine_read_metrics.source_index_probes +=
+                        1 + intersections.len() as u64;
                     self.node
                         .physical_global_current_source_for_index_scan(
                             read_table,
                             self.read_view.read_schema,
                             &column,
                             &prefix,
+                            &intersections,
                             source_limit,
                             &projection_target,
                         )
@@ -1742,7 +1818,9 @@ where
         let access_path = self.access_paths.get(&request.source).cloned();
         let global = match &access_path {
             Some(CurrentAccessPath::PrimaryKey(prefix)) => {
-                self.node.query_engine_read_metrics.source_primary_key_scans += 1;
+                if self.count_access_path_metrics {
+                    self.node.query_engine_read_metrics.source_primary_key_scans += 1;
+                }
                 self.node
                     .physical_current_source_scan_graph_with_projection_target(
                         self.read_view.read_schema,
@@ -1756,19 +1834,21 @@ where
             Some(CurrentAccessPath::Index {
                 column,
                 prefix,
+                intersections,
                 source_limit,
-            }) if tier == DurabilityTier::Global => {
-                // A Global index already selects from the canonical settled
-                // winner relation. Project those raw physical rows first, then
-                // apply the compatibility boundary below.
+            }) => {
+                // Select settled candidates before combining them with the
+                // corresponding Local ahead candidates below.
                 let source_limit = (!exclude_deleted).then_some(*source_limit).flatten();
-                self.node.query_engine_read_metrics.source_index_probes += 1;
+                self.node.query_engine_read_metrics.source_index_probes +=
+                    1 + intersections.len() as u64;
                 self.node
                     .physical_global_current_source_for_index_scan_with_output(
                         read_table,
                         self.read_view.read_schema,
                         column,
                         prefix,
+                        intersections,
                         source_limit,
                         &projection_target,
                         raw_global_output.clone(),
@@ -1801,6 +1881,22 @@ where
                         projection_target.clone(),
                         static_scan_for_prefix(prefix.clone(), 3),
                     ),
+                Some(CurrentAccessPath::Index { .. }) => {
+                    // A Local-ahead winner can change the indexed column and
+                    // therefore no longer be present under the settled
+                    // candidate's prefix.  Scan the ahead current table in
+                    // full before arg-max so that every possible dominating
+                    // row participates.  The settled side remains safely
+                    // index-bounded through this same access-path mechanism.
+                    self.node.query_engine_read_metrics.source_full_scans += 1;
+                    self.node
+                        .physical_current_source_graph_with_projection_target(
+                            self.read_view.read_schema,
+                            &request.source.table,
+                            PhysicalCurrentClass::Ahead,
+                            projection_target,
+                        )
+                }
                 _ => self
                     .node
                     .physical_current_source_graph_with_projection_target(
@@ -2727,9 +2823,9 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch(
             (user_column_field(&column.name), value_type)
         }))
         .chain([
-            ("$createdBy".to_owned(), ValueType::Uuid),
+            ("$createdBy".to_owned(), ValueType::String),
             ("$createdAt".to_owned(), ValueType::U64),
-            ("$updatedBy".to_owned(), ValueType::Uuid),
+            ("$updatedBy".to_owned(), ValueType::String),
             ("$updatedAt".to_owned(), ValueType::U64),
             ("tx_time".to_owned(), ValueType::U64),
             ("tx_node_id".to_owned(), ValueType::U64),
@@ -2751,9 +2847,9 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch(
                 "authored_columns".to_owned(),
                 ValueType::Nullable(Box::new(ValueType::Bytes)),
             ),
-            ("created_by".to_owned(), ValueType::Uuid),
+            ("created_by".to_owned(), ValueType::String),
             ("created_at".to_owned(), ValueType::U64),
-            ("updated_by".to_owned(), ValueType::Uuid),
+            ("updated_by".to_owned(), ValueType::String),
             ("updated_at".to_owned(), ValueType::U64),
         ]);
         if let Some(SourceMetadataFields::VersionWitnesses {
@@ -2798,10 +2894,28 @@ where
         &self,
         request: &QueryProgramRequest,
     ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
+        // A policy proof may contain both an owner arm and a correlated
+        // membership arm for the same protected source. Walking its nested
+        // nodes independently would see the owner's claim equality and apply
+        // that index path to the entire union, incorrectly excluding rows
+        // that only the membership arm authorizes. The small planner does not
+        // prove per-arm coverage, so any alternative or relational proof
+        // retains full source scans.
+        if request.input.shape.nodes.values().any(|node| {
+            matches!(
+                node,
+                RowSetExpr::Union { .. }
+                    | RowSetExpr::Join { .. }
+                    | RowSetExpr::RecursiveRelation { .. }
+            )
+        }) {
+            return Ok(BTreeMap::new());
+        }
         self.normalized_program_access_paths(
             &request.input,
             &request.reads.primary,
             &request.policy,
+            false,
         )
     }
 
@@ -2810,6 +2924,7 @@ where
         input: &RowSetProgramInput,
         read_view: &ReadView<RequestedSourceStage>,
         policy: &PolicyContext,
+        allow_local: bool,
     ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
         let mut equalities_by_source = BTreeMap::new();
         // This deliberately small access-path selector only recognizes a
@@ -2837,13 +2952,20 @@ where
                 continue;
             };
             let table = self.table_in_schema(&source.table, read_view.read_schema)?;
-            let Some(path) = select_current_access_path(&table, &equalities) else {
+            let Some(mut path) = select_current_access_path(&table, &equalities) else {
                 continue;
             };
-            // All automatically derived paths are Global-only. Local and Edge
-            // reads include ahead rows, so retaining their ordinary source
-            // preserves complete tier semantics.
-            if tier == DurabilityTier::Global {
+            // Multi-index intersection is an ephemeral one-shot source. Keep
+            // maintained programs and reusable policy graphs on their existing
+            // single-index path until the fused source has incremental-update
+            // semantics of its own.
+            if !allow_local && let CurrentAccessPath::Index { intersections, .. } = &mut path {
+                intersections.clear();
+            }
+            // Generic maintained programs remain Global-only. A one-shot Local
+            // caller opts in only after arranging equivalent index scans over
+            // both the settled and ahead physical sources.
+            if tier == DurabilityTier::Global || (allow_local && tier == DurabilityTier::Local) {
                 paths.insert(source, path);
             }
         }
@@ -2856,7 +2978,7 @@ where
         binding: &Binding,
         tier: DurabilityTier,
     ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
-        if tier != DurabilityTier::Global {
+        if !matches!(tier, DurabilityTier::Local | DurabilityTier::Global) {
             return Ok(BTreeMap::new());
         }
         let normalized = self.normalized_row_set_shape(shape, binding)?;
@@ -2878,8 +3000,12 @@ where
             None,
             false,
         );
-        let mut paths =
-            self.normalized_program_access_paths(&input, &reads.primary, &PolicyContext::System)?;
+        let mut paths = self.normalized_program_access_paths(
+            &input,
+            &reads.primary,
+            &PolicyContext::System,
+            true,
+        )?;
 
         // A source cap is stronger than an index access path: it is only safe
         // when the source is itself the final result prefix. In particular,
@@ -2910,7 +3036,13 @@ where
         if table.has_any_policy() {
             return Ok(paths);
         }
-        if let Some(CurrentAccessPath::Index { source_limit, .. }) = paths.get_mut(&root) {
+        // A Local ahead winner can remove an otherwise matching settled row,
+        // making a prefix cap miss a later settled candidate that must fill
+        // the public limit after arg-max. Only the Global physical winner is
+        // stable enough for this source bound.
+        if tier == DurabilityTier::Global
+            && let Some(CurrentAccessPath::Index { source_limit, .. }) = paths.get_mut(&root)
+        {
             *source_limit = Some(limit);
         }
         Ok(paths)
@@ -2925,8 +3057,15 @@ where
         let mut access_paths = BTreeMap::new();
         let equalities = root_literal_equalities(query, binding)?;
         let table = self.table_in_schema(&query.table, shape.schema_version())?;
+        // A maintained authorization scope reacts to both the content winner
+        // and its deletion register. The point source is only incrementally
+        // complete for an unscoped row: inside a policy graph, its content cap
+        // can strand the deletion-driven membership transition.
         let has_declared_id = table.columns.iter().any(|column| column.name == "id");
-        if !has_declared_id && let Some(value) = equalities.get("id").cloned() {
+        if !table.has_any_policy()
+            && !has_declared_id
+            && let Some(value) = equalities.get("id").cloned()
+        {
             access_paths.insert(
                 root_source_id(&query.table),
                 CurrentAccessPath::PrimaryKey(vec![value]),
@@ -3003,6 +3142,7 @@ where
         schema_version: SchemaVersionId,
         column: &str,
         prefix: &[Value],
+        intersections: &[(String, Vec<Value>)],
         source_limit: Option<usize>,
         projection_target: &str,
     ) -> Result<GraphBuilder, Error> {
@@ -3011,6 +3151,7 @@ where
             schema_version,
             column,
             prefix,
+            intersections,
             source_limit,
             projection_target,
             table.global_current_storage_tables()[0].record_schema(),
@@ -3023,6 +3164,7 @@ where
         schema_version: SchemaVersionId,
         column: &str,
         prefix: &[Value],
+        intersections: &[(String, Vec<Value>)],
         source_limit: Option<usize>,
         projection_target: &str,
         _output: RecordDescriptor,
@@ -3043,19 +3185,40 @@ where
                 "physical current index column mapping missing",
             ))?;
         let storage_table = physical_global_current_table_name(mapping.table_id);
-        Ok(GraphBuilder::variant_index_scan(
+        let scan = match source_limit {
+            Some(max_items) => StaticScanSpec::PrefixLimit {
+                prefix: prefix.iter().cloned().map(LiteralValue::from).collect(),
+                max_items,
+            },
+            None => {
+                StaticScanSpec::Prefix(prefix.iter().cloned().map(LiteralValue::from).collect())
+            }
+        };
+        let intersections = intersections
+            .iter()
+            .map(|(column, prefix)| {
+                let column_id =
+                    mapping
+                        .columns
+                        .get(column)
+                        .copied()
+                        .ok_or(Error::InvalidStoredValue(
+                            "physical current intersected index column mapping missing",
+                        ))?;
+                Ok((
+                    physical_current_index_name(column_id),
+                    StaticScanSpec::Prefix(
+                        prefix.iter().cloned().map(LiteralValue::from).collect(),
+                    ),
+                ))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(GraphBuilder::variant_index_intersection_scan(
             storage_table,
             physical_current_index_name(column_id),
+            scan,
+            intersections,
             projection_target,
-            match source_limit {
-                Some(max_items) => StaticScanSpec::PrefixLimit {
-                    prefix: prefix.iter().cloned().map(LiteralValue::from).collect(),
-                    max_items,
-                },
-                None => {
-                    StaticScanSpec::Prefix(prefix.iter().cloned().map(LiteralValue::from).collect())
-                }
-            },
         ))
     }
 }
@@ -3265,9 +3428,9 @@ fn current_row_descriptor(table: &TableSchema) -> RecordDescriptor {
                 )
             }))
             .chain([
-                ("$createdBy".to_owned(), ValueType::Uuid),
+                ("$createdBy".to_owned(), ValueType::String),
                 ("$createdAt".to_owned(), ValueType::U64),
-                ("$updatedBy".to_owned(), ValueType::Uuid),
+                ("$updatedBy".to_owned(), ValueType::String),
                 ("$updatedAt".to_owned(), ValueType::U64),
                 ("tx_time".to_owned(), ValueType::U64),
                 ("tx_node_id".to_owned(), ValueType::U64),
@@ -3293,14 +3456,14 @@ fn inline_current_record(
         values.push(Value::Nullable(row.cell(table, &column.name).map(Box::new)));
     }
     if let Some(provenance) = row.provenance()? {
-        values.push(Value::Uuid(provenance.created_by.0));
-        values.push(Value::U64(provenance.created_at.0));
-        values.push(Value::Uuid(provenance.updated_by.0));
-        values.push(Value::U64(provenance.updated_at.0));
+        values.push(Value::String(provenance.created_by.canonical().to_owned()));
+        values.push(Value::U64(provenance.created_at));
+        values.push(Value::String(provenance.updated_by.canonical().to_owned()));
+        values.push(Value::U64(provenance.updated_at));
     } else {
-        values.push(Value::Uuid(AuthorId::SYSTEM.0));
+        values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
         values.push(Value::U64(0));
-        values.push(Value::Uuid(AuthorId::SYSTEM.0));
+        values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
         values.push(Value::U64(0));
     }
     let (tx_time, tx_node_alias) = row
@@ -3344,6 +3507,30 @@ fn inline_current_graph_with_source_metadata(
     )
 }
 
+#[cfg(test)]
+pub(super) fn inline_current_graph_with_source_metadata_for_test(
+    table: &TableSchema,
+    rows: Vec<CurrentRow>,
+    schema_version_alias: SchemaVersionAlias,
+    coverage: &str,
+    requirements: &SourceRequirements,
+) -> Result<
+    (
+        GraphBuilder,
+        RecordDescriptor,
+        BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
+    ),
+    Error,
+> {
+    inline_current_graph_with_source_metadata(
+        table,
+        rows,
+        schema_version_alias,
+        coverage,
+        requirements,
+    )
+}
+
 fn inline_current_graph_with_source_metadata_and_branch_witness(
     table: &TableSchema,
     rows: Vec<CurrentRow>,
@@ -3360,10 +3547,18 @@ fn inline_current_graph_with_source_metadata_and_branch_witness(
     Error,
 > {
     let mut metadata = BTreeMap::new();
-    if requirements
+    // Provenance is carried by the same content-version witness as ordinary
+    // table sources.  Inline candidates must expose that full capability too:
+    // a provenance-only requirement still needs the hidden version fields the
+    // query program uses to prove and evaluate the source.
+    let needs_version_witnesses = requirements
         .metadata
         .contains(&SourceMetadataRequirement::VersionWitnesses)
-    {
+        || requirements
+            .metadata
+            .iter()
+            .any(|requirement| matches!(requirement, SourceMetadataRequirement::Provenance(_)));
+    if needs_version_witnesses {
         metadata.insert(
             SourceMetadataRequirement::VersionWitnesses,
             SourceMetadataFields::VersionWitnesses {
@@ -3453,16 +3648,16 @@ fn inline_current_record_with_source_metadata(
         }
     }
     let provenance = row.provenance()?.unwrap_or(RowProvenance {
-        created_by: AuthorId::SYSTEM,
-        created_at: TxTime(0),
-        updated_by: AuthorId::SYSTEM,
-        updated_at: TxTime(0),
+        created_by: AuthorSubject::SYSTEM,
+        created_at: 0,
+        updated_by: AuthorSubject::SYSTEM,
+        updated_at: 0,
     });
     values.extend([
-        Value::Uuid(provenance.created_by.0),
-        Value::U64(provenance.created_at.0),
-        Value::Uuid(provenance.updated_by.0),
-        Value::U64(provenance.updated_at.0),
+        Value::String(provenance.created_by.canonical().to_owned()),
+        Value::U64(provenance.created_at),
+        Value::String(provenance.updated_by.canonical().to_owned()),
+        Value::U64(provenance.updated_at),
     ]);
     let (tx_time, tx_node_alias) = row
         .projected_tx_alias()
@@ -3475,10 +3670,10 @@ fn inline_current_record_with_source_metadata(
             Value::U64(schema_version_alias.0),
             Value::Array(Vec::new()),
             Value::Nullable(None),
-            Value::Uuid(provenance.created_by.0),
-            Value::U64(provenance.created_at.0),
-            Value::Uuid(provenance.updated_by.0),
-            Value::U64(provenance.updated_at.0),
+            Value::String(provenance.created_by.canonical().to_owned()),
+            Value::U64(provenance.created_at),
+            Value::String(provenance.updated_by.canonical().to_owned()),
+            Value::U64(provenance.updated_at),
         ]);
     }
     if let Some((_, branch_key)) = branch_witness {
@@ -3506,14 +3701,14 @@ fn inline_snapshot_include_deleted_current_graph(
             values.push(Value::Nullable(row.cell(table, &column.name).map(Box::new)));
         }
         if let Some(provenance) = row.provenance()? {
-            values.push(Value::Uuid(provenance.created_by.0));
-            values.push(Value::U64(provenance.created_at.0));
-            values.push(Value::Uuid(provenance.updated_by.0));
-            values.push(Value::U64(provenance.updated_at.0));
+            values.push(Value::String(provenance.created_by.canonical().to_owned()));
+            values.push(Value::U64(provenance.created_at));
+            values.push(Value::String(provenance.updated_by.canonical().to_owned()));
+            values.push(Value::U64(provenance.updated_at));
         } else {
-            values.push(Value::Uuid(AuthorId::SYSTEM.0));
+            values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
             values.push(Value::U64(0));
-            values.push(Value::Uuid(AuthorId::SYSTEM.0));
+            values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
             values.push(Value::U64(0));
         }
         let (tx_time, tx_node_alias) = row
@@ -3648,9 +3843,9 @@ fn include_deleted_current_row_descriptor(table: &TableSchema) -> RecordDescript
                 )
             }))
             .chain([
-                ("$createdBy".to_owned(), ValueType::Uuid),
+                ("$createdBy".to_owned(), ValueType::String),
                 ("$createdAt".to_owned(), ValueType::U64),
-                ("$updatedBy".to_owned(), ValueType::Uuid),
+                ("$updatedBy".to_owned(), ValueType::String),
                 ("$updatedAt".to_owned(), ValueType::U64),
                 ("tx_time".to_owned(), ValueType::U64),
                 ("tx_node_id".to_owned(), ValueType::U64),

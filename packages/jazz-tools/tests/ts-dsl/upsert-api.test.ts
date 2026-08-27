@@ -162,7 +162,7 @@ describe("TS Upsert API", () => {
 
   it("can use caller-supplied updatedAt on new-row upsert", async () => {
     const id = "00000000-0000-0000-0000-000000000000";
-    const updatedAt = 1_704_067_200_123_000;
+    const updatedAt = 1_704_067_200_123;
     db.upsert(app.projects, id, { name: "Backfilled Project" }, { updatedAt });
 
     const project = await db.one(app.projects.select("name", "$updatedAt").where({ id }));
@@ -170,12 +170,12 @@ describe("TS Upsert API", () => {
     expect(project).toEqual({
       id: project?.id,
       name: "Backfilled Project",
-      $updatedAt: new Date(Math.trunc(updatedAt / 1_000)),
+      $updatedAt: new Date(updatedAt),
     });
   });
 
   it("can use caller-supplied updatedAt on existing-row upsert", async () => {
-    const updatedAt = 1_704_067_200_123_000;
+    const updatedAt = 1_704_067_200_123;
     const originalProject = insertProject(db, "Test Project");
 
     db.upsert(app.projects, originalProject.id, { name: "Backfilled Project" }, { updatedAt });
@@ -187,7 +187,7 @@ describe("TS Upsert API", () => {
     expect(project).toEqual({
       id: originalProject.id,
       name: "Backfilled Project",
-      $updatedAt: new Date(Math.trunc(updatedAt / 1_000)),
+      $updatedAt: new Date(updatedAt),
     });
   });
 });

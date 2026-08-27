@@ -4,7 +4,15 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 function git(root, args, options = {}) {
-  const result = spawnSync("git", ["-C", root, ...args], { encoding: null, ...options });
+  // CI container checkouts can be owned by the runner while commands execute
+  // as the container user. Scope this exception to each read rather than
+  // mutating the runner's global Git configuration. The identity still comes
+  // from the exact checked-out repository and remains fail-closed on any Git
+  // error.
+  const result = spawnSync("git", ["-c", `safe.directory=${root}`, "-C", root, ...args], {
+    encoding: null,
+    ...options,
+  });
   if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed`);
   return result.stdout;
 }
@@ -44,4 +52,21 @@ export function sourceIdentity(root) {
     ),
     dirty: headTree !== indexTree || unstaged !== sha256("") || untracked.length !== 0,
   };
+}
+
+export function checkedOutCommit(root) {
+  return git(root, ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+}
+
+// Dependency setup is allowed to create ignored build products, but it must
+// never alter the checked-out source used by a receipt.  A baseline captured
+// immediately after checkout therefore remains the source attestation when
+// the later measurement has the same tracked-source identity.
+export function sameTrackedSource(left, right) {
+  return (
+    left?.commit === right?.commit &&
+    left?.headTree === right?.headTree &&
+    left?.indexTree === right?.indexTree &&
+    left?.unstaged === right?.unstaged
+  );
 }

@@ -6,10 +6,20 @@
  */
 
 import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
-import type { InsertValues, Value, SubscriptionWireDelta, WasmSchema } from "../drivers/types.js";
+import type {
+  InsertValues,
+  RuntimeSubscriptionDelta,
+  Value,
+  WasmSchema,
+} from "../drivers/types.js";
 import { normalizeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { AuthFailureReason } from "./auth-state.js";
-import { resolveClientSessionStateSync } from "./client-session.js";
+import {
+  TRUSTED_RESERVED_SESSION_TOKEN_FIELD,
+  resolveClientSessionStateSync,
+  trustedReservedSessionToken,
+} from "./client-session.js";
+import { getTrustedReservedSession, setTrustedReservedSession } from "./db-internal-session.js";
 import { mapAuthReason } from "./auth-state.js";
 import {
   resolveRuntimeConfigSyncInitInput,
@@ -17,6 +27,22 @@ import {
 } from "./runtime-config.js";
 import { httpUrlToWs } from "./url.js";
 import { PostcardWriter } from "./native-runtime/native-codec.js";
+import { assertNativeArtifactCompatibility } from "./native-artifact-compatibility.js";
+
+type RuntimeSerializedSession = Pick<Session, "issuer" | "user_id" | "claims" | "authMode"> & {
+  [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]?: string;
+};
+
+function serializeRuntimeSession(session: Session): RuntimeSerializedSession {
+  const token = trustedReservedSessionToken(session);
+  return {
+    issuer: session.issuer,
+    user_id: session.user_id,
+    claims: session.claims,
+    authMode: session.authMode,
+    ...(token ? { [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: token } : {}),
+  };
+}
 
 function encodeBranchColumnValue(value: Value): Uint8Array {
   const writer = new PostcardWriter();
@@ -29,7 +55,7 @@ function encodeBranchColumnValue(value: Value): Uint8Array {
       ) {
         throw new Error("branch Integer values must be signed 32-bit integers");
       }
-      writer.enumUnit(14); // groove::Value::I32
+      writer.enumUnit(15); // groove::Value::I32
       writer.i64(value.value);
       break;
     case "BigInt": {
@@ -40,12 +66,12 @@ function encodeBranchColumnValue(value: Value): Uint8Array {
       if (integer < -(1n << 63n) || integer > (1n << 63n) - 1n) {
         throw new Error("branch BigInt values must be signed 64-bit integers");
       }
-      writer.enumUnit(13); // groove::Value::I64
+      writer.enumUnit(14); // groove::Value::I64
       writer.i64(integer);
       break;
     }
     case "Uuid": {
-      writer.enumUnit(8); // groove::Value::Uuid
+      writer.enumUnit(9); // groove::Value::Uuid
       const hex = value.value.replaceAll("-", "");
       if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new Error(`invalid branch UUID ${value.value}`);
       writer.bytes(
@@ -112,6 +138,15 @@ export interface Runtime {
     write_context_json?: string | null,
     object_id?: string | null,
   ): InsertResult;
+  streamingMutation?(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    write_context_json?: string | null,
+    object_id?: string | null,
+  ): Promise<StreamingInsertResult>;
   restore(
     table: string,
     object_id: string,
@@ -124,6 +159,14 @@ export interface Runtime {
     values: Record<string, Value>,
     write_context_json?: string | null,
   ): MutationResult;
+  /** Internal binding entrypoint for the typed page-edit update DSL. */
+  updateLargeValues?(
+    table: string,
+    objectId: string,
+    updates: Record<string, Value>,
+    descriptors: readonly unknown[],
+    writeContextJson?: string | null,
+  ): MutationResult;
   upsert(
     table: string,
     object_id: string,
@@ -131,6 +174,40 @@ export interface Runtime {
     write_context_json?: string | null,
   ): MutationResult;
   delete(table: string, object_id: string, write_context_json?: string | null): MutationResult;
+  readValueRange?(
+    table: string,
+    objectId: string,
+    column: string,
+    start: number,
+    end: number,
+  ): Promise<Uint8Array>;
+  readTextUtf16Range?(
+    table: string,
+    objectId: string,
+    column: string,
+    start: number,
+    end: number,
+  ): Promise<string>;
+  readJsonPointer?(
+    table: string,
+    objectId: string,
+    column: string,
+    pointer: string,
+  ): Promise<unknown>;
+  appendValue?(
+    table: string,
+    objectId: string,
+    column: string,
+    bytes: Uint8Array,
+  ): Promise<MutationResult>;
+  spliceValue?(
+    table: string,
+    objectId: string,
+    column: string,
+    offset: number,
+    deleteLength: number,
+    insert: Uint8Array,
+  ): Promise<MutationResult>;
   canInsertLocally?(table: string, values: InsertValues, session?: Session): PermissionAdvice;
   canReadLocally?(table: string, objectId: string, session?: Session): PermissionAdvice;
   canUpdateLocally?(
@@ -175,7 +252,10 @@ export interface Runtime {
     tier?: string | null,
     options_json?: string | null,
   ): number;
-  executeSubscription(handle: number, on_update: Function): void;
+  executeSubscription(
+    handle: number,
+    onUpdate: (result: RuntimeSubscriptionDelta | Error) => void,
+  ): void;
   unsubscribe(handle: number): void;
   close?(): void | Promise<void>;
   /** Abandon a runtime whose backing persistence epoch was invalidated. */
@@ -263,6 +343,15 @@ export interface AuthConfig {
  * - `global`: Persisted at global server
  */
 export type DurabilityTier = "local" | "edge" | "global";
+/** Product-facing policy for reads. It deliberately does not change write durability. */
+export enum ReadTier {
+  LocalFirst = "local-first",
+  Remote = "remote",
+  RemoteIfPossible = "remote-if-possible",
+}
+/** @deprecated Read APIs also accept these legacy durability names unchanged. */
+export type LegacyReadDurabilityTier = DurabilityTier;
+export type QueryReadTier = ReadTier | LegacyReadDurabilityTier;
 /**
  * Controls when a write is visible to subscriptions.
  *
@@ -304,7 +393,8 @@ export interface BranchView {
 }
 
 export interface QueryExecutionOptions {
-  tier?: DurabilityTier;
+  /** `ReadTier.RemoteIfPossible` falls back only after an explicit disconnect. @deprecated DurabilityTier values remain accepted with their old meaning. */
+  tier?: QueryReadTier;
   localUpdates?: LocalUpdatesMode;
   propagation?: QueryPropagation;
   visibility?: QueryVisibility;
@@ -408,6 +498,12 @@ export type WriteReceipt =
   | { readonly kind: "staged"; readonly openBatchId: OpenBatchId };
 
 export type InsertResult = Row & WriteReceipt;
+export type StreamingValueChunk = Uint8Array | string;
+export type StreamingValueSource =
+  | ReadableStream<StreamingValueChunk>
+  | AsyncIterable<StreamingValueChunk>;
+export type StreamingInsertResult = { id: string } & WriteReceipt;
+export type StreamingMutationKind = "insert" | "update" | "upsert";
 export type MutationResult = WriteReceipt;
 
 interface WriteContextPayload {
@@ -422,7 +518,7 @@ interface WriteContextPayload {
 /**
  * Subscription callback type.
  */
-export type SubscriptionCallback = (delta: SubscriptionWireDelta) => void;
+export type SubscriptionCallback = (delta: RuntimeSubscriptionDelta) => void;
 
 export interface ConnectRuntimeOptions {
   onAuthFailure?: (reason: AuthFailureReason) => void;
@@ -454,12 +550,21 @@ export function resolveEffectiveQueryExecutionOptions(
   options?: QueryExecutionOptions,
 ): ResolvedQueryExecutionOptions {
   return {
-    tier: options?.tier ?? resolveDefaultDurabilityTier(context),
+    tier: resolveReadTier(options?.tier ?? resolveDefaultDurabilityTier(context)),
     localUpdates: options?.localUpdates ?? "immediate",
     propagation: options?.propagation ?? "full",
     visibility: options?.visibility ?? "public",
     branch: options?.branch,
   };
+}
+
+/** @internal Low-level runtimes retain the legacy three-tier wire contract. */
+export function resolveReadTier(tier: QueryReadTier): DurabilityTier {
+  return tier === ReadTier.LocalFirst
+    ? "local"
+    : tier === ReadTier.Remote || tier === ReadTier.RemoteIfPossible
+      ? "edge"
+      : tier;
 }
 
 function isBrowserRuntime(): boolean {
@@ -527,25 +632,6 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
   }
 
   return JSON.stringify(payload);
-}
-
-function normalizeSubscriptionCallbackArgs(
-  args: unknown[],
-): Error | SubscriptionWireDelta | string | undefined {
-  if (args.length === 2 && args[0] instanceof Error) {
-    return args[0];
-  }
-
-  if (args.length === 1) {
-    return args[0] as SubscriptionWireDelta | string;
-  }
-
-  if (args.length === 2 && args[0] == null) {
-    return args[1] as SubscriptionWireDelta | string | undefined;
-  }
-
-  console.error("Invalid subscription callback arguments", args);
-  return undefined;
 }
 
 function requireTransactionalRuntime(runtime: Runtime): TransactionalRuntime {
@@ -730,7 +816,8 @@ export class JazzClient {
       appId: this.context.appId,
       jwtToken: this.context.jwtToken,
       cookieSession: this.context.cookieSession,
-    }).session;
+      trustedReservedSession: getTrustedReservedSession(this.context),
+    }).internalSession;
   }
 
   private buildTransportAuthPayload(): {
@@ -839,11 +926,20 @@ export class JazzClient {
 
   updateAuthToken(jwtToken?: string): void {
     this.context.jwtToken = jwtToken;
+    setTrustedReservedSession(this.context, undefined);
     this.resolvedSession = this.resolveSessionFromContext();
     // Push the refreshed credentials into the Rust transport.
     // Carry forward admin/backend secrets from context — omitting them here
     // would deserialise to None on the Rust side and silently erase any
     // privileged credentials the transport was connected with.
+    this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
+  }
+
+  /** @internal Update a token minted by a dedicated first-party reserved auth flow. */
+  updateTrustedAuthToken(jwtToken: string, session: Session): void {
+    this.context.jwtToken = jwtToken;
+    setTrustedReservedSession(this.context, session);
+    this.resolvedSession = this.resolveSessionFromContext();
     this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
   }
 
@@ -892,12 +988,12 @@ export class JazzClient {
       updatedAt === undefined &&
       !branch
     ) {
-      return JSON.stringify(session);
+      return JSON.stringify(serializeRuntimeSession(session));
     }
 
     const payload: WriteContextPayload = {};
     if (session) {
-      payload.session = session;
+      payload.session = serializeRuntimeSession(session);
     }
     if (attribution !== undefined) {
       payload.attribution = attribution;
@@ -939,6 +1035,119 @@ export class JazzClient {
   ): WriteResult<Row> {
     const row = this.insertInternal(table, values, options, session, attribution);
     return new WriteResult(row, committedBatchId(row), this);
+  }
+
+  /**
+   * Consume one host byte/text stream and atomically insert the resulting
+   * scalar with the other row values. The streamed value is intentionally not
+   * copied back into the returned handle.
+   */
+  async insertStreaming(
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    options?: InsertOptions,
+    session?: Session,
+    attribution?: string,
+  ): Promise<WriteHandle<{ id: string }>> {
+    return this.streamingMutation(
+      "insert",
+      table,
+      values,
+      column,
+      source,
+      options,
+      session,
+      attribution,
+    );
+  }
+
+  async updateStreaming(
+    table: string,
+    objectId: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    options?: UpdateOptions,
+    session?: Session,
+    attribution?: string,
+  ): Promise<WriteHandle<{ id: string }>> {
+    return this.streamingMutation(
+      "update",
+      table,
+      values,
+      column,
+      source,
+      options,
+      session,
+      attribution,
+      objectId,
+    );
+  }
+
+  async upsertStreaming(
+    table: string,
+    objectId: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    options?: UpdateOptions,
+    session?: Session,
+    attribution?: string,
+  ): Promise<WriteHandle<{ id: string }>> {
+    return this.streamingMutation(
+      "upsert",
+      table,
+      values,
+      column,
+      source,
+      options,
+      session,
+      attribution,
+      objectId,
+    );
+  }
+
+  private async streamingMutation(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    options?: InsertOptions | UpdateOptions,
+    session?: Session,
+    attribution?: string,
+    objectId?: string,
+  ): Promise<WriteHandle<{ id: string }>> {
+    if (!this.runtime.streamingMutation) {
+      throw new Error("This runtime does not support streaming mutations");
+    }
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    const writeContext = this.encodeWriteContext(
+      effectiveSession,
+      attribution,
+      undefined,
+      options?.updatedAt,
+      options?.branch
+        ? mutation === "insert"
+          ? { head: options.branch as BranchSelector }
+          : (options.branch as BranchView)
+        : undefined,
+    );
+    const result = await this.runtime.streamingMutation(
+      mutation,
+      table,
+      values,
+      column,
+      source,
+      writeContext,
+      objectId ?? ("id" in (options ?? {}) ? (options as InsertOptions).id : undefined),
+    );
+    if (result.kind !== "committed") {
+      throw new Error("Streaming mutations cannot be staged inside an open transaction");
+    }
+    return new WriteHandle(result.batchId, this, { id: result.id });
   }
 
   /**
@@ -1060,7 +1269,9 @@ export class JazzClient {
   ): Promise<Row[]> {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
     const effectiveSession = session ?? this.resolvedSession;
-    const sessionJson = effectiveSession ? JSON.stringify(effectiveSession) : undefined;
+    const sessionJson = effectiveSession
+      ? JSON.stringify(serializeRuntimeSession(effectiveSession))
+      : undefined;
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
     const results = await this.runtime.query(
       query,
@@ -1095,6 +1306,60 @@ export class JazzClient {
       options?.branch,
     );
     return new WriteHandle(committedBatchId(result), this);
+  }
+
+  /** @internal Typed `Db.applyDiffs` lowering; not exposed as an imperative API. */
+  updateLargeValues(
+    table: string,
+    objectId: string,
+    updates: Record<string, Value>,
+    descriptors: readonly unknown[],
+    options?: UpdateOptions,
+    session?: Session,
+    attribution?: string,
+  ): WriteHandle {
+    const result = this.updateLargeValuesInternal(
+      table,
+      objectId,
+      updates,
+      descriptors,
+      options?.updatedAt,
+      session,
+      attribution,
+      undefined,
+      options?.branch,
+    );
+    return new WriteHandle(committedBatchId(result), this);
+  }
+
+  /** @internal */
+  updateLargeValuesInternal(
+    table: string,
+    objectId: string,
+    updates: Record<string, Value>,
+    descriptors: readonly unknown[],
+    updatedAt?: number,
+    session?: Session,
+    attribution?: string,
+    openBatchId?: OpenBatchId,
+    branch?: BranchView,
+  ): MutationResult {
+    if (openBatchId || branch) {
+      throw new Error(
+        "Partial-value updates are not yet supported inside transactions or branch views.",
+      );
+    }
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    const writeContext = this.encodeWriteContext(
+      effectiveSession,
+      attribution,
+      undefined,
+      updatedAt,
+    );
+    if (!this.runtime.updateLargeValues) {
+      throw new Error("Native runtime does not support typed partial-value updates.");
+    }
+    return this.runtime.updateLargeValues(table, objectId, updates, descriptors, writeContext);
   }
 
   /**
@@ -1290,7 +1555,9 @@ export class JazzClient {
   ): number {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
     const effectiveSession = session ?? this.resolvedSession;
-    const sessionJson = effectiveSession ? JSON.stringify(effectiveSession) : undefined;
+    const sessionJson = effectiveSession
+      ? JSON.stringify(serializeRuntimeSession(effectiveSession))
+      : undefined;
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
 
     const handle = this.runtime.createSubscription(
@@ -1300,19 +1567,18 @@ export class JazzClient {
       optionsJson,
     );
 
-    this.runtime.executeSubscription(handle, (...args: unknown[]) => {
-      const deltaJsonOrObject = normalizeSubscriptionCallbackArgs(args);
-      if (deltaJsonOrObject === undefined) {
-        return;
-      }
-      if (deltaJsonOrObject instanceof Error) {
-        throw deltaJsonOrObject;
-      }
-
-      const delta: SubscriptionWireDelta =
-        typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
-      callback(delta);
-    });
+    try {
+      this.runtime.executeSubscription(handle, (result) => {
+        if (result instanceof Error) throw result;
+        callback(result);
+      });
+    } catch (error) {
+      // createSubscription already transferred ownership to this facade. If
+      // callback installation fails synchronously, no caller can own the
+      // handle because subscribe() has not returned it yet.
+      this.runtime.unsubscribe(handle);
+      throw error;
+    }
 
     return handle;
   }
@@ -1471,6 +1737,7 @@ async function initializeWasmModule(runtime?: RuntimeSourcesConfig): Promise<Was
 
   if (syncInitInput) {
     wasmModule.initSync(syncInitInput);
+    assertNativeArtifactCompatibility(wasmModule, "WASM", ["initSync", "WasmDb"]);
     return wasmModule;
   }
 
@@ -1496,11 +1763,35 @@ async function initializeWasmModule(runtime?: RuntimeSourcesConfig): Promise<Was
         : null;
 
     if (wasmUrl) {
-      await wasmModule.default({ module_or_path: wasmUrl });
+      await initializeWasmFromUrl(wasmModule, wasmUrl);
     } else {
       await wasmModule.default();
     }
   }
 
+  assertNativeArtifactCompatibility(wasmModule, "WASM", ["initSync", "WasmDb"]);
   return wasmModule;
+}
+
+async function initializeWasmFromUrl(wasmModule: any, wasmUrl: string): Promise<void> {
+  const response = await fetch(wasmUrl);
+  if (!response.ok) {
+    throw new Error(
+      `WASM asset request failed (${response.status} ${response.statusText}) for ${wasmUrl}`,
+    );
+  }
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (
+    bytes.length < 4 ||
+    bytes[0] !== 0x00 ||
+    bytes[1] !== 0x61 ||
+    bytes[2] !== 0x73 ||
+    bytes[3] !== 0x6d
+  ) {
+    const contentType = response.headers.get("content-type") ?? "unknown content type";
+    throw new Error(
+      `WASM asset response is not a WebAssembly binary for ${wasmUrl} (${contentType})`,
+    );
+  }
+  await wasmModule.default({ module_or_path: bytes });
 }

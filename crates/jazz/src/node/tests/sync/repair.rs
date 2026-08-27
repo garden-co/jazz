@@ -1,5 +1,83 @@
 // Authorized row-version fetch and canonical known-state repair.
 
+/// A repair response preflights every requested bundle before ingesting any
+/// transaction. A malformed later carrier therefore cannot partially publish
+/// an earlier valid carrier from the same `RowVersionPayloads` frame.
+///
+/// relay ──[valid A, malformed B @ max + 1]──► reader
+/// reader ──typed error──► no transaction, history, or clock mutation
+#[test]
+fn repair_frame_rejects_late_invalid_provenance_before_any_ingest() {
+    use crate::time::HLC_MAX_PHYSICAL_MS;
+
+    let schema = schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
+    let (_reader_dir, mut reader) = open_node_with_schema(node(3), schema.clone());
+    let mut requests = Vec::new();
+    for (now_ms, row_uuid) in [(10, row(0xa1)), (11, row(0xa2))] {
+        let tx_id = commit_mergeable_global(
+            &mut writer,
+            &mut core,
+            MergeableCommit::new("todos", row_uuid, now_ms).cells(title_cells("repair")),
+        );
+        requests.push(crate::protocol::RowVersionRef::new("todos", row_uuid, tx_id));
+    }
+    let mut peer = PeerState::relay();
+    let messages = peer
+        .handle_row_versions_fetch(
+            &mut core,
+            SyncMessage::FetchRowVersions {
+                requests: requests.clone(),
+            },
+        )
+        .unwrap();
+    assert_eq!(messages.len(), 1);
+    let SyncMessage::RowVersionPayloads {
+        mut version_bundles,
+    } = messages.into_iter().next().unwrap()
+    else {
+        panic!("expected row-version repair payloads");
+    };
+    version_bundles.sort_by_key(|bundle| bundle.tx.tx_id);
+    assert_eq!(version_bundles.len(), 2);
+    let original = version_bundles[1].versions[0].clone();
+    version_bundles[1].versions[0] = VersionRecord::encode(
+        &schema.tables[0],
+        original.schema_version(),
+        original.row_uuid(),
+        original.parents(),
+        original.created_by(),
+        HLC_MAX_PHYSICAL_MS + 1,
+        original.updated_by(),
+        HLC_MAX_PHYSICAL_MS + 1,
+        &[original.cell_at(0)],
+        original.deletion(),
+    )
+    .unwrap()
+    .with_authored_columns(original.authored_columns().cloned());
+
+    let clock_before = reader.clock.tx_time;
+    assert!(matches!(
+        reader
+            .apply_row_version_payloads_for_requests(&requests, version_bundles)
+            .resolve(),
+        Err(Error::MalformedViewUpdate(
+            "row version provenance exceeds packed HLC physical-millisecond range"
+        ))
+    ));
+    assert_eq!(reader.clock.tx_time, clock_before);
+    for request in requests {
+        assert!(
+            reader
+                .row_history("todos", request.row_uuid)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(reader.transaction_record(request.tx_id()).is_none());
+    }
+}
+
 #[test]
 fn row_version_fetch_returns_authorized_versions_and_omits_unauthorized_rows() {
     let schema = owner_policy_schema();
@@ -7,6 +85,8 @@ fn row_version_fetch_returns_authorized_versions_and_omits_unauthorized_rows() {
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let alice = user(0xa1);
     let bob = user(0xb2);
+    install_test_uuid_sub_claim(&mut core, alice);
+    install_test_uuid_sub_claim(&mut core, bob);
     let alice_row = row(7);
     let bob_row = row(8);
 
@@ -92,12 +172,12 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
         .unwrap();
 
     let mut update = core.view_update_for_current_rows("todos").unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         version_carriers,
         version_bundles,
         result_member_adds,
         ..
-    } = &mut update
+    }) = &mut update
     else {
         panic!("expected view update");
     };
@@ -232,7 +312,7 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: renamed.id,
@@ -250,7 +330,7 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
     let (shape, binding) = core.whole_table_shape_binding("tasks").unwrap();
     register_shape_binding(&mut reader, &shape, &binding);
 
-    let update = SyncMessage::ViewUpdate {
+    let update = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription: crate::protocol::SubscriptionKey {
             shape_id: shape.shape_id(),
             binding_id: binding.binding_id(),
@@ -266,11 +346,11 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
         terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
-    };
-    let SyncMessage::ViewUpdate {
+    });
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         ..
-    } = &update
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -305,10 +385,10 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
     assert_eq!(version_bundles[0].versions[0].table(), "todos");
     assert_eq!(version_bundles[0].versions[0].schema_version(), base_version);
     let mut inline_update = update.clone();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         version_bundles: inline_bundles,
         ..
-    } = &mut inline_update
+    }) = &mut inline_update
     else {
         unreachable!();
     };
@@ -360,10 +440,10 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
         renamed.id,
         row_uuid,
         Vec::new(),
-        AuthorId::SYSTEM,
-        tx_id.time,
-        AuthorId::SYSTEM,
-        tx_id.time,
+        AuthorSubject::SYSTEM,
+        tx_id.time.physical_ms(),
+        AuthorSubject::SYSTEM,
+        tx_id.time.physical_ms(),
         &BTreeMap::from([("body".to_owned(), v("wrong physical table"))]),
         None,
     )
@@ -408,7 +488,7 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
     // payload is considered: logical-name matching must fail closed.
     let unknown = crate::protocol::RowVersionRef::new("unknown", row_uuid, tx_id);
     assert!(
-        core.row_version_payloads_for_refs(std::slice::from_ref(&unknown), AuthorId::SYSTEM)
+        core.row_version_payloads_for_refs(std::slice::from_ref(&unknown), AuthorSubject::SYSTEM)
             .is_err(),
         "the serving repair path must reject an unknown projected table too"
     );
@@ -475,7 +555,7 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
     .unwrap();
     receiver
         .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 2,
                 schema: reintroduced_version.id,
@@ -501,7 +581,7 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
         tx_id,
         kind: TxKind::Mergeable,
         n_total_writes: 1,
-        made_by: AuthorId::SYSTEM,
+        made_by: AuthorSubject::SYSTEM,
         permission_subject: None,
         base_snapshot: None,
         row_read_set: None,
@@ -516,15 +596,15 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
         original.version_id(),
         task_row,
         Vec::new(),
-        AuthorId::SYSTEM,
-        tx_id.time,
-        AuthorId::SYSTEM,
-        tx_id.time,
+        AuthorSubject::SYSTEM,
+        tx_id.time.physical_ms(),
+        AuthorSubject::SYSTEM,
+        tx_id.time.physical_ms(),
         &BTreeMap::from([("name".to_owned(), v("old physical task"))]),
         None,
     )
     .unwrap();
-    let update = SyncMessage::ViewUpdate {
+    let update = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription: crate::protocol::SubscriptionKey {
             shape_id: shape.shape_id(),
             binding_id: binding.binding_id(),
@@ -547,7 +627,7 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
         terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
-    };
+    });
     assert_eq!(
         receiver.missing_known_state_row_version_refs(&update).unwrap(),
         vec![RowVersionRef::new("tasks", task_row, tx_id)],

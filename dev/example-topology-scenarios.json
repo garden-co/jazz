@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "scenarios": [
+    {
+      "id": "harness.fixture.cross-topology-faults",
+      "topology": ["fixture"],
+      "cwd": ".",
+      "argv": ["pnpm", "--filter", "jazz-tools", "test:topology-fixture"]
+    },
+    {
+      "id": "band-chat.topology.room-recovery",
+      "topology": ["browser", "core"],
+      "cwd": ".",
+      "argv": [
+        "pnpm",
+        "--dir",
+        "examples/band-chat/apps/nextjs-betterauth",
+        "test:browser:focused",
+        "--",
+        "tests/browser/topology.e2e.test.tsx"
+      ]
+    }
+  ]
+}

@@ -1,10 +1,11 @@
 import { exportJWK, generateKeyPair, SignJWT, type JWK } from "jose";
 
 const KID = "auth-betterauth-chat-test-key";
+const ISSUER = "http://127.0.0.1:3000";
 
 export interface TestKeySet {
   publicJwk: JWK;
-  mintJwt(sub: string): Promise<string>;
+  mintJwt(sub: string, role: "admin" | "member"): Promise<string>;
 }
 
 export async function createTestKeySet(): Promise<TestKeySet> {
@@ -16,13 +17,11 @@ export async function createTestKeySet(): Promise<TestKeySet> {
     alg: "ES256",
   };
 
-  // The Jazz permission only checks `authMode: "external"`, which is satisfied
-  // by any verified JWT. Better Auth's role/identity claims aren't read by the
-  // policy, so a minimal JWT with just `sub` is enough to exercise the rules.
-  async function mintJwt(sub: string): Promise<string> {
-    return new SignJWT({})
+  async function mintJwt(sub: string, role: "admin" | "member"): Promise<string> {
+    return new SignJWT({ claims: { role } })
       .setProtectedHeader({ alg: "ES256", kid: KID })
       .setSubject(sub)
+      .setIssuer(ISSUER)
       .setIssuedAt()
       .setExpirationTime("1h")
       .sign(privateKey);

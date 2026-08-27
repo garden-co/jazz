@@ -1,4 +1,5 @@
 use super::*;
+use crate::records::ValidatedVariantRecord;
 
 /// Mutable staged table writes whose reads observe writes already added to the
 /// stage. Commit runs one normal database batch commit, so current callers of
@@ -48,11 +49,14 @@ pub struct DatabaseBatch {
     pub(super) txn_operations: RefCell<StagedWriteState>,
     pub(super) txn_indexed_operations: Cell<usize>,
     pub(super) notification_timing: NotificationTiming,
+    pub(super) accepted_large_values: Vec<crate::large_values::StagedLargeValueId>,
 }
 
 impl PartialEq for DatabaseBatch {
     fn eq(&self, other: &Self) -> bool {
-        self.operations == other.operations && self.notification_timing == other.notification_timing
+        self.operations == other.operations
+            && self.notification_timing == other.notification_timing
+            && self.accepted_large_values == other.accepted_large_values
     }
 }
 
@@ -75,6 +79,15 @@ impl DatabaseBatch {
 
     pub fn reserve(&mut self, additional: usize) {
         self.operations.reserve(additional);
+    }
+
+    /// Atomically consume a Groove staging root with this physical-record
+    /// batch. The id is opaque to callers and acceptance is idempotent only as
+    /// part of retrying the same uncommitted batch.
+    pub fn accept_large_value(&mut self, id: crate::large_values::StagedLargeValueId) {
+        if !self.accepted_large_values.contains(&id) {
+            self.accepted_large_values.push(id);
+        }
     }
 
     pub fn insert(&mut self, table: impl Into<String>, record: impl Into<RecordInput>) {
@@ -102,7 +115,12 @@ impl DatabaseBatch {
     /// This avoids a storage lookup during delta computation. It is only sound for
     /// internal append-only tables whose enclosing transaction identity proves
     /// freshness; ordinary insert callers must use [`Self::insert_raw`].
-    pub fn insert_raw_fresh(
+    /// # Safety
+    ///
+    /// The caller must guarantee that `key` is absent from both persisted storage
+    /// and earlier operations in this batch. A false proof would omit the previous
+    /// record's negative maintained-view delta.
+    pub unsafe fn insert_raw_fresh(
         &mut self,
         table: impl Into<String>,
         key: PrimaryKeyValue,
@@ -179,6 +197,7 @@ impl From<VariantRecord> for RecordInput {
 pub enum RawRecordInput {
     Payload(Vec<u8>),
     Record(VariantRecord),
+    ValidatedRecord(ValidatedVariantRecord),
 }
 
 impl From<Vec<u8>> for RawRecordInput {
@@ -190,6 +209,12 @@ impl From<Vec<u8>> for RawRecordInput {
 impl From<VariantRecord> for RawRecordInput {
     fn from(record: VariantRecord) -> Self {
         Self::Record(record)
+    }
+}
+
+impl From<ValidatedVariantRecord> for RawRecordInput {
+    fn from(record: ValidatedVariantRecord) -> Self {
+        Self::ValidatedRecord(record)
     }
 }
 
@@ -238,7 +263,8 @@ pub enum PrimaryKeyValue {
 }
 
 impl PrimaryKeyValue {
-    pub(super) fn into_bytes(self) -> Vec<u8> {
+    /// Encode this logical primary key exactly as Groove stores it.
+    pub fn into_bytes(self) -> Vec<u8> {
         let mut bytes = Vec::new();
         match self {
             Self::U8(value) => encode_primary_key_part(&mut bytes, &Value::U8(value))

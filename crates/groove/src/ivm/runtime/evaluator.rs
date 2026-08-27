@@ -1,6 +1,21 @@
 //! Per-tick evaluator state, memoization, arrangements, and recursive execution.
 
 use super::*;
+
+fn plan_expr_fields(expressions: &[PlanExpr]) -> BTreeSet<String> {
+    expressions
+        .iter()
+        .filter_map(|expression| match expression {
+            PlanExpr::Field(field)
+            | PlanExpr::Nullable(field)
+            | PlanExpr::NullableFlat(field)
+            | PlanExpr::EnumTagRemap { field, .. }
+            | PlanExpr::EnumRemap { field, .. }
+            | PlanExpr::RecursiveEnumRemap { field, .. } => Some(field.clone()),
+            PlanExpr::Literal(_) | PlanExpr::Null(_) => None,
+        })
+        .collect()
+}
 use crate::storage::StorageFuture;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
@@ -11,8 +26,23 @@ pub(super) enum OperatorState {
     Join(JoinState),
     SemiJoin(AntiJoinState),
     AntiJoin(AntiJoinState),
+    TopBy(AsOf<TopByIncrementalState, SubTick>),
     Recursive(AsOf<RecursiveState, Tick>),
     CollectBy(CollectByIncrementalState),
+    StreamingChecksum(Box<StreamingChecksumOperatorState>),
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct StreamingChecksumOperatorState {
+    pending: Option<PendingStreamingChecksum>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingStreamingChecksum {
+    input: Arc<RecordDeltas>,
+    next_delta: usize,
+    current: Option<crate::large_values::StreamingChecksum>,
+    output: Vec<RecordDelta>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -55,8 +85,33 @@ mod collect_by_state_tests {
     }
 }
 
-type CollectByOrderKey = (Vec<TopBySortPart>, Bytes);
+pub(super) type CollectByOrderKey = (Vec<TopBySortPart>, Bytes);
 type CollectByGroups = BTreeMap<Vec<u8>, BTreeMap<CollectByOrderKey, i64>>;
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct TopByIncrementalState {
+    groups: CollectByGroups,
+}
+
+impl TopByIncrementalState {
+    /// Remove only groups touched by this update so a long-lived subscription
+    /// does not retain one empty map for every departed group.
+    fn remove_empty_touched_groups<I>(&mut self, groups: I)
+    where
+        I: IntoIterator<Item = Vec<u8>>,
+    {
+        for group in groups {
+            if self.groups.get(&group).is_some_and(BTreeMap::is_empty) {
+                self.groups.remove(&group);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn group_count(&self) -> usize {
+        self.groups.len()
+    }
+}
 
 pub(super) fn operator_state_for(operator: &OpType) -> OperatorState {
     match operator {
@@ -64,7 +119,9 @@ pub(super) fn operator_state_for(operator: &OpType) -> OperatorState {
         OpType::SemiJoin(_) => OperatorState::SemiJoin(AntiJoinState),
         OpType::AntiJoin(_) => OperatorState::AntiJoin(AntiJoinState),
         OpType::Recursive(_) => OperatorState::Recursive(AsOf::new(RecursiveState::default())),
+        OpType::TopBy(_) => OperatorState::TopBy(AsOf::new(TopByIncrementalState::default())),
         OpType::CollectBy(_) => OperatorState::CollectBy(CollectByIncrementalState::default()),
+        OpType::StreamingChecksum(_) => OperatorState::StreamingChecksum(Box::default()),
         _ => OperatorState::Stateless,
     }
 }
@@ -95,30 +152,10 @@ pub(super) fn record_deltas_digest(deltas: &RecordDeltas) -> u64 {
 }
 
 pub(super) fn builder_contains_recursive(graph: &GraphBuilder) -> bool {
-    match graph {
-        GraphBuilder::Recursive { .. } => true,
-        GraphBuilder::Filter { input, .. }
-        | GraphBuilder::Project { input, .. }
-        | GraphBuilder::UnwrapNullable { input, .. }
-        | GraphBuilder::Unnest { input, .. }
-        | GraphBuilder::VariantProject { input, .. }
-        | GraphBuilder::ArgMaxBy { input, .. }
-        | GraphBuilder::ArgMinBy { input, .. }
-        | GraphBuilder::TopBy { input, .. }
-        | GraphBuilder::CollectBy { input, .. }
-        | GraphBuilder::Aggregate { input, .. } => builder_contains_recursive(input),
-        GraphBuilder::Union { inputs } => inputs.iter().any(builder_contains_recursive),
-        GraphBuilder::Join { left, right, .. }
-        | GraphBuilder::SemiJoin { left, right, .. }
-        | GraphBuilder::AntiJoin { left, right, .. } => {
-            builder_contains_recursive(left) || builder_contains_recursive(right)
-        }
-        GraphBuilder::Table { .. }
-        | GraphBuilder::InlineRecords { .. }
-        | GraphBuilder::Index { .. }
-        | GraphBuilder::FrontierSource { .. }
-        | GraphBuilder::BindingSource { .. } => false,
-    }
+    graph
+        .postorder()
+        .iter()
+        .any(|node| matches!(node, GraphBuilder::Recursive { .. }))
 }
 
 pub(super) fn validate_arg_by_primary_key_indices(
@@ -447,10 +484,10 @@ impl TickEvaluator<'_> {
         Ok(())
     }
 
-    pub(super) fn take_terminal_deltas_for_output(
-        &mut self,
+    pub(super) fn terminal_delta_node_for_output(
+        &self,
         node: NodeId,
-    ) -> Result<Option<TerminalDeltas>, IvmRuntimeError> {
+    ) -> Result<Option<NodeId>, IvmRuntimeError> {
         let mut pending = vec![node];
         let mut seen = HashSet::new();
         let mut fallback = None;
@@ -470,16 +507,25 @@ impl TickEvaluator<'_> {
             has_public_root |= is_public_root;
             if self.terminal_deltas.contains_key(&node) {
                 if is_public_root {
-                    return Ok(self.terminal_deltas.remove(&node));
+                    return Ok(Some(node));
                 }
                 fallback.get_or_insert(node);
             }
             pending.extend(graph_node.descriptor.inputs.iter().copied());
         }
-        Ok((!has_public_root)
-            .then_some(fallback)
-            .flatten()
-            .and_then(|node| self.terminal_deltas.remove(&node)))
+        Ok((!has_public_root).then_some(fallback).flatten())
+    }
+
+    pub(super) fn terminal_deltas_for_consumer(
+        &mut self,
+        node: NodeId,
+        last_consumer: bool,
+    ) -> Option<TerminalDeltas> {
+        if last_consumer {
+            self.terminal_deltas.remove(&node)
+        } else {
+            self.terminal_deltas.get(&node).cloned()
+        }
     }
 
     pub(super) fn output_is_structured_collect_by(
@@ -734,7 +780,37 @@ impl TickEvaluator<'_> {
                 }
                 OpType::Filter(filter) => {
                     let input = self.update_unary_input(graph_node, node).await?;
-                    NodeState::update_filter(filter, output_desc, &input)
+                    if filter.predicate.supports_indirect_literal_attempt()
+                        && self.evaluation_inputs.is_some()
+                    {
+                        let inputs = self
+                            .evaluation_inputs
+                            .as_deref_mut()
+                            .expect("checked evaluation inputs");
+                        let mut deltas = Vec::new();
+                        for delta in &input.deltas {
+                            let record = delta.borrowed(&input.descriptor);
+                            let matches = match filter
+                                .predicate
+                                .matches_indirect_literal_attempt(record, inputs)?
+                            {
+                                Some(matches) => matches,
+                                None => filter.predicate.matches(record, filter.comparison)?,
+                            };
+                            if matches {
+                                deltas.push(delta.clone());
+                            }
+                        }
+                        Ok(RecordDeltas {
+                            descriptor: output_desc,
+                            deltas,
+                        })
+                    } else {
+                        let mut referenced = BTreeSet::new();
+                        filter.predicate.referenced_fields(&mut referenced);
+                        let input = self.materialize_indirect_fields(&input, &referenced)?;
+                        NodeState::update_filter(filter, output_desc, &input)
+                    }
                 }
                 OpType::MapProject(project) => {
                     let input = self.update_unary_input(graph_node, node).await?;
@@ -758,6 +834,11 @@ impl TickEvaluator<'_> {
                     }
                     result
                 }
+                OpType::StreamingChecksum(checksum) => {
+                    let input = self.update_unary_input(graph_node, node).await?;
+                    self.update_streaming_checksum(node, checksum, output_desc, input)
+                        .await
+                }
                 OpType::UnwrapNullable(unwrap) => {
                     let input = self.update_unary_input(graph_node, node).await?;
                     NodeState::update_unwrap_nullable(unwrap, output_desc, &input)
@@ -772,6 +853,10 @@ impl TickEvaluator<'_> {
                 }
                 OpType::ArgMaxBy(arg_max_by) => {
                     let input = self.update_unary_input(graph_node, node).await?;
+                    let input = self.materialize_indirect_field_indices(
+                        &input,
+                        &arg_max_by.primary_key_field_indices,
+                    )?;
                     self.update_arg_by(
                         node,
                         ArgBySpec {
@@ -786,6 +871,10 @@ impl TickEvaluator<'_> {
                 }
                 OpType::ArgMinBy(arg_min_by) => {
                     let input = self.update_unary_input(graph_node, node).await?;
+                    let input = self.materialize_indirect_field_indices(
+                        &input,
+                        &arg_min_by.primary_key_field_indices,
+                    )?;
                     self.update_arg_by(
                         node,
                         ArgBySpec {
@@ -800,18 +889,59 @@ impl TickEvaluator<'_> {
                 }
                 OpType::TopBy(top_by) => {
                     let input = self.update_unary_input(graph_node, node).await?;
+                    let mut fields = top_by.group_field_indices.clone();
+                    fields.extend(top_by.sort_field_indices.iter().copied());
+                    fields.sort_unstable();
+                    fields.dedup();
+                    let input = self.materialize_indirect_field_indices(&input, &fields)?;
                     self.update_top_by(node, top_by, output_desc, &input)
                 }
                 OpType::CollectBy(collect_by) => {
                     let input = self.update_unary_input(graph_node, node).await?;
+                    let input = self.materialize_indirect_input(&input)?;
                     self.update_collect_by(node, collect_by, output_desc, &input)
                 }
                 OpType::Aggregate(aggregate) => {
                     let input = self.update_unary_input(graph_node, node).await?;
+                    // COUNT(*) without grouping observes only row weights. Its
+                    // exact result cannot depend on any scalar bytes, so retain
+                    // indirect columns and issue no chunk requests.
+                    let needs_values = !aggregate.group_key.is_empty()
+                        || aggregate.aggregates.iter().any(|expr| {
+                            expr.function != AggregateFunction::Count
+                                || expr.expression.is_some()
+                                || expr.distinct
+                        });
+                    let input = if needs_values {
+                        let mut fields = aggregate.group_field_indices.clone();
+                        let expression_fields = aggregate
+                            .aggregates
+                            .iter()
+                            .filter_map(|aggregate| aggregate.expression.as_ref())
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        for field in plan_expr_fields(&expression_fields) {
+                            fields.push(input.descriptor.field_index(&field).ok_or_else(|| {
+                                IvmRuntimeError::GraphFieldNotFound(field.clone())
+                            })?);
+                        }
+                        fields.sort_unstable();
+                        fields.dedup();
+                        self.materialize_indirect_field_indices(&input, &fields)?
+                    } else {
+                        input
+                    };
                     self.update_aggregate(node, aggregate, output_desc, &input)
                 }
                 OpType::IndexBy(index_by) => {
                     let input = self.update_unary_input(graph_node, node).await?;
+                    let mut fields = index_by.key_fields.clone();
+                    if index_by.append_value_to_key {
+                        fields.extend(index_by.value_fields.iter().copied());
+                    }
+                    fields.sort_unstable();
+                    fields.dedup();
+                    let input = self.materialize_indirect_field_indices(&input, &fields)?;
                     let trace = std::env::var_os("GROOVE_TRACE_INDEX_BY").is_some();
                     let start = trace.then(std::time::Instant::now);
                     let input_len = input.deltas.len();
@@ -858,6 +988,19 @@ impl TickEvaluator<'_> {
                     };
                     let left = self.update_node(*left_input).await?;
                     let right = self.update_node(*right_input).await?;
+                    let (left, right) = if join.residual_predicate.is_some() {
+                        (
+                            self.materialize_indirect_input(&left)?,
+                            self.materialize_indirect_input(&right)?,
+                        )
+                    } else {
+                        let left_fields = plan_expr_fields(&join.left_key);
+                        let right_fields = plan_expr_fields(&join.right_key);
+                        (
+                            self.materialize_indirect_fields(&left, &left_fields)?,
+                            self.materialize_indirect_fields(&right, &right_fields)?,
+                        )
+                    };
                     self.update_join(
                         node,
                         join,
@@ -874,6 +1017,10 @@ impl TickEvaluator<'_> {
                     };
                     let left = self.update_node(*left_input).await?;
                     let right = self.update_node(*right_input).await?;
+                    let left_fields = plan_expr_fields(&join.left_key);
+                    let right_fields = plan_expr_fields(&join.right_key);
+                    let left = self.materialize_indirect_fields(&left, &left_fields)?;
+                    let right = self.materialize_indirect_fields(&right, &right_fields)?;
                     self.update_semi_join(
                         node,
                         join,
@@ -890,6 +1037,10 @@ impl TickEvaluator<'_> {
                     };
                     let left = self.update_node(*left_input).await?;
                     let right = self.update_node(*right_input).await?;
+                    let left_fields = plan_expr_fields(&join.left_key);
+                    let right_fields = plan_expr_fields(&join.right_key);
+                    let left = self.materialize_indirect_fields(&left, &left_fields)?;
+                    let right = self.materialize_indirect_fields(&right, &right_fields)?;
                     self.update_anti_join(
                         node,
                         join,
@@ -1135,6 +1286,7 @@ impl TickEvaluator<'_> {
                 graph_node
                     .descriptor
                     .output
+                    .records()
                     .fields()
                     .iter()
                     .any(|candidate| candidate.name.as_deref() == Some(field))
@@ -1528,59 +1680,34 @@ impl TickEvaluator<'_> {
         if input.deltas.is_empty() || top_by.limit == TopByLimit::Finite(0) {
             return Ok(RecordDeltas::empty(output_desc));
         }
-        let [input_node] = self
-            .graph
-            .node(node)
-            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?
-            .descriptor
-            .inputs
-            .as_slice()
-        else {
-            return Err(IvmRuntimeError::GraphInputArityMismatch(node));
+        let operator_key = self.operator_key(node)?;
+        let mut operator = self
+            .operator_states
+            .remove(&operator_key)
+            .unwrap_or_else(|| operator_state_for(&OpType::TopBy(top_by.clone())));
+        let OperatorState::TopBy(state) = &mut operator else {
+            return Err(IvmRuntimeError::NodeStateOperatorMismatch(node));
         };
-        let arrangement_key = self.arrangement_key(
-            *input_node,
-            output_desc,
-            &top_by.group_fields,
-            ValueComparison::Exact,
-        )?;
-        let sub_tick = self.arrangement_sub_tick(&arrangement_key);
-        let mut arrangement = self
-            .arrangement_states
-            .remove(&arrangement_key)
-            .unwrap_or_default();
-        let should_apply_arrangement = self.context.arrangement_update_mode
-            == ArrangementUpdateMode::Replace
-            || arrangement.as_of() != Some(sub_tick);
-        if should_apply_arrangement {
-            let replace_within_same_tick = self.context.arrangement_update_mode
-                == ArrangementUpdateMode::Replace
-                && arrangement
-                    .as_of()
-                    .is_some_and(|current| current.tick == sub_tick.tick);
-            if !replace_within_same_tick
-                && arrangement
-                    .as_of()
-                    .is_some_and(|current| current > sub_tick)
-            {
-                return Err(IvmRuntimeError::OutOfOrderRuntimeState {
-                    current: format!("{:?}", arrangement.as_of().expect("checked above")),
-                    next: format!("{sub_tick:?}"),
-                });
-            }
-            arrangement.value_mut().apply_record_deltas(
-                output_desc,
-                &top_by.group_fields,
-                &input.deltas,
-                self.context.arrangement_update_mode,
-            )?;
-            if replace_within_same_tick {
-                arrangement.replace_as_of_at_least(sub_tick);
+        let sub_tick = SubTick {
+            tick: self.current_tick,
+            sub_tick: if operator_key.scope == ScopeId::root() {
+                0
             } else {
-                arrangement.mark_forward_as_of(sub_tick)?;
-            }
+                self.context.sub_tick
+            },
+        };
+        if state.as_of().is_some_and(|current| current > sub_tick) {
+            return Err(IvmRuntimeError::OutOfOrderRuntimeState {
+                current: format!("{:?}", state.as_of().expect("checked above")),
+                next: format!("{sub_tick:?}"),
+            });
         }
-
+        if self.context.arrangement_update_mode == ArrangementUpdateMode::Accumulate
+            && state.as_of() == Some(sub_tick)
+        {
+            self.operator_states.insert(operator_key, operator);
+            return Ok(RecordDeltas::empty(output_desc));
+        }
         let mut touched_groups = BTreeMap::<Vec<u8>, Vec<RecordDelta>>::new();
         for delta in &input.deltas {
             let group_key =
@@ -1592,17 +1719,55 @@ impl TickEvaluator<'_> {
         }
 
         let mut output = Vec::new();
-        for (group_prefix, group_deltas) in touched_groups {
-            let after_records = arrangement.value().records_for_key(&group_prefix);
-            let after = top_by_window_from_records(output_desc, after_records.clone(), top_by)?;
-            let before =
-                top_by_window_before_from_deltas(output_desc, after_records, group_deltas, top_by)?;
+        let replace = self.context.arrangement_update_mode == ArrangementUpdateMode::Replace;
+        let before = touched_groups
+            .keys()
+            .map(|group| {
+                Ok((
+                    group.clone(),
+                    if replace {
+                        Vec::new()
+                    } else {
+                        top_by_window_from_ordered_group(state.value().groups.get(group), top_by)
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, IvmRuntimeError>>()?;
+        if replace {
+            state.value_mut().groups.clear();
+        }
+        for (group_prefix, group_deltas) in &touched_groups {
+            let group = state
+                .value_mut()
+                .groups
+                .entry(group_prefix.clone())
+                .or_default();
+            for delta in group_deltas {
+                let order_key = (
+                    top_by_sort_key(output_desc, delta.raw(), top_by)?,
+                    delta.record.clone(),
+                );
+                let weight = group.entry(order_key.clone()).or_default();
+                *weight += delta.weight;
+                if *weight == 0 {
+                    group.remove(&order_key);
+                }
+            }
+        }
+        state
+            .value_mut()
+            .remove_empty_touched_groups(touched_groups.keys().cloned());
+        state.mark_forward_as_of(sub_tick)?;
+        for group_prefix in touched_groups.keys() {
+            let before = before.get(group_prefix).cloned().unwrap_or_default();
+            let after =
+                top_by_window_from_ordered_group(state.value().groups.get(group_prefix), top_by);
             let windows = self.root_ordering_windows.entry(node).or_default();
             extend_root_window_positions(output_desc, &before, &mut windows.before)?;
             extend_root_window_positions(output_desc, &after, &mut windows.after)?;
             output.extend(diff_record_windows(before, after));
         }
-        self.insert_arrangement(arrangement_key, arrangement);
+        self.operator_states.insert(operator_key, operator);
 
         Ok(RecordDeltas {
             descriptor: output_desc,
@@ -2308,4 +2473,223 @@ impl TickEvaluator<'_> {
             .ok_or(IvmRuntimeError::GraphInputMissing(node))?;
         self.update_node(input).await
     }
+
+    async fn update_streaming_checksum(
+        &mut self,
+        node: NodeId,
+        checksum: &StreamingChecksumOp,
+        output_desc: RecordDescriptor,
+        input: Arc<RecordDeltas>,
+    ) -> Result<RecordDeltas, IvmRuntimeError> {
+        let operator_key = self.operator_key(node)?;
+        let operator = self
+            .operator_states
+            .remove(&operator_key)
+            .unwrap_or_else(|| operator_state_for(&OpType::StreamingChecksum(checksum.clone())));
+        let OperatorState::StreamingChecksum(mut state) = operator else {
+            return Err(IvmRuntimeError::NodeStateOperatorMismatch(node));
+        };
+        let replace_pending = state
+            .pending
+            .as_ref()
+            .is_none_or(|pending| pending.input.as_ref() != input.as_ref());
+        if replace_pending {
+            state.pending = Some(PendingStreamingChecksum {
+                input: Arc::clone(&input),
+                next_delta: 0,
+                current: None,
+                output: Vec::with_capacity(input.deltas.len()),
+            });
+        }
+        let pending = state.pending.as_mut().expect("initialized above");
+
+        while pending.next_delta < pending.input.deltas.len() {
+            let delta = &pending.input.deltas[pending.next_delta];
+            let mut values = delta.borrowed(&pending.input.descriptor).to_values()?;
+            let value = values.get(checksum.field_idx).ok_or(
+                IvmRuntimeError::GraphFieldIndexOutOfBounds(checksum.field_idx),
+            )?;
+
+            let digest = match value {
+                Value::String(value) => Some(*blake3::hash(value.as_bytes()).as_bytes()),
+                Value::Bytes(value) => Some(*blake3::hash(value).as_bytes()),
+                Value::Large(value) => {
+                    if pending.current.is_none() {
+                        pending.current = Some(crate::large_values::StreamingChecksum::new(
+                            value.clone(),
+                            checksum.window_bytes,
+                            checksum.max_bytes_per_turn,
+                        )?);
+                    }
+                    let streaming = pending.current.as_mut().expect("initialized above");
+                    if streaming.cursor().remaining_bytes() != 0 {
+                        let range = streaming
+                            .cursor()
+                            .next_range()
+                            .expect("non-complete cursor has a range");
+                        let inputs = self
+                            .evaluation_inputs
+                            .as_deref_mut()
+                            .ok_or(IvmRuntimeError::EvaluationBlocked)?;
+                        let bytes = match crate::large_values::byte_range_attempt(
+                            streaming.cursor().value(),
+                            range,
+                            inputs,
+                        ) {
+                            Ok(bytes) => bytes,
+                            Err(IvmRuntimeError::EvaluationBlocked) => {
+                                self.operator_states
+                                    .insert(operator_key, OperatorState::StreamingChecksum(state));
+                                return Err(IvmRuntimeError::EvaluationBlocked);
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        let should_yield = streaming.consume_window(&bytes)?;
+                        inputs.release_chunks();
+                        if should_yield {
+                            streaming.record_yield()?;
+                            self.operator_states
+                                .insert(operator_key, OperatorState::StreamingChecksum(state));
+                            cooperative_operator_yield().await;
+                            unreachable!("yielded operator futures resume through saved state")
+                        }
+                    }
+                    if streaming.cursor().remaining_bytes() == 0 {
+                        let completed = pending.current.take().expect("complete state exists");
+                        Some(completed.finish()?.0.0)
+                    } else {
+                        None
+                    }
+                }
+                _ => return Err(IvmRuntimeError::StreamingChecksumTypeMismatch),
+            };
+            let Some(digest) = digest else {
+                continue;
+            };
+            values[checksum.field_idx] = Value::Bytes(digest.to_vec());
+            pending.output.push(RecordDelta {
+                record: output_desc.create(&values)?.into(),
+                weight: delta.weight,
+            });
+            pending.next_delta += 1;
+        }
+
+        let completed = state.pending.take().expect("completed batch exists");
+        self.operator_states.insert(
+            operator_key,
+            OperatorState::StreamingChecksum(Box::default()),
+        );
+        Ok(RecordDeltas {
+            descriptor: output_desc,
+            deltas: completed.output,
+        })
+    }
+
+    pub(super) fn materialize_indirect_input(
+        &mut self,
+        input: &Arc<RecordDeltas>,
+    ) -> Result<Arc<RecordDeltas>, IvmRuntimeError> {
+        let Some(evaluation_inputs) = self.evaluation_inputs.as_deref_mut() else {
+            return Ok(Arc::clone(input));
+        };
+        let mut deltas = Vec::with_capacity(input.deltas.len());
+        let mut changed = false;
+        for delta in &input.deltas {
+            let raw = crate::large_values::materialize_record_attempt(
+                &input.descriptor,
+                delta.raw(),
+                evaluation_inputs,
+            )?;
+            changed |= raw.as_slice() != delta.raw();
+            deltas.push(RecordDelta {
+                record: raw.into(),
+                weight: delta.weight,
+            });
+        }
+        if changed {
+            Ok(Arc::new(RecordDeltas {
+                descriptor: input.descriptor,
+                deltas,
+            }))
+        } else {
+            Ok(Arc::clone(input))
+        }
+    }
+
+    fn materialize_indirect_fields(
+        &mut self,
+        input: &Arc<RecordDeltas>,
+        fields: &BTreeSet<String>,
+    ) -> Result<Arc<RecordDeltas>, IvmRuntimeError> {
+        let indices = fields
+            .iter()
+            .map(|field| {
+                input
+                    .descriptor
+                    .field_index(field)
+                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(field.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.materialize_indirect_field_indices(input, &indices)
+    }
+
+    fn materialize_indirect_field_indices(
+        &mut self,
+        input: &Arc<RecordDeltas>,
+        indices: &[usize],
+    ) -> Result<Arc<RecordDeltas>, IvmRuntimeError> {
+        let Some(evaluation_inputs) = self.evaluation_inputs.as_deref_mut() else {
+            return Ok(Arc::clone(input));
+        };
+        let fields = input.descriptor.fields();
+        let requires_materialization = indices.iter().try_fold(false, |required, index| {
+            let field = fields
+                .get(*index)
+                .ok_or(crate::records::Error::FieldIndexOutOfBounds {
+                    index: *index,
+                    len: fields.len(),
+                })?;
+            Ok::<_, crate::records::Error>(required || field.value_type.may_contain_stored_scalar())
+        })?;
+        if !requires_materialization {
+            return Ok(Arc::clone(input));
+        }
+        let mut deltas = Vec::with_capacity(input.deltas.len());
+        let mut changed = false;
+        for delta in &input.deltas {
+            let raw = crate::large_values::materialize_record_fields_attempt(
+                &input.descriptor,
+                delta.raw(),
+                indices,
+                evaluation_inputs,
+            )?;
+            changed |= raw.as_slice() != delta.raw();
+            deltas.push(RecordDelta {
+                record: raw.into(),
+                weight: delta.weight,
+            });
+        }
+        if changed {
+            Ok(Arc::new(RecordDeltas {
+                descriptor: input.descriptor,
+                deltas,
+            }))
+        } else {
+            Ok(Arc::clone(input))
+        }
+    }
+}
+
+async fn cooperative_operator_yield() {
+    let mut yielded = false;
+    std::future::poll_fn(move |context| {
+        if yielded {
+            std::task::Poll::Ready(())
+        } else {
+            yielded = true;
+            context.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    })
+    .await
 }

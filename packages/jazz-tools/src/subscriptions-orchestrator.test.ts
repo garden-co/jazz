@@ -70,14 +70,14 @@ function createUnitHarness(
   let throwOnSubscribe: Error | null = null;
 
   const db: {
-    subscribeAll<T extends { id: string }>(
+    subscribeDelta<T extends { id: string }>(
       query: QueryBuilder<T>,
       callback: (delta: SubscriptionDelta<T>) => void,
       options?: QueryOptions,
       session?: Session,
     ): () => void;
   } = {
-    subscribeAll<T extends { id: string }>(
+    subscribeDelta<T extends { id: string }>(
       query: QueryBuilder<T>,
       callback: (delta: SubscriptionDelta<T>) => void,
       options?: QueryOptions,
@@ -260,7 +260,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     }
   });
 
-  it("SO-U09b getCacheEntry forwards full QueryOptions to subscribeAll", async () => {
+  it("SO-U09b getCacheEntry forwards full QueryOptions to the delta source", async () => {
     const harness = createUnitHarness();
     try {
       const options = {
@@ -370,7 +370,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
 
   it("SO-U14 subscribe setup exception marks entry rejected and emits onError", async () => {
     const harness = createUnitHarness();
-    const setupError = new Error("subscribeAll failed");
+    const setupError = new Error("delta subscription failed");
     harness.setThrowOnSubscribe(setupError);
 
     try {
@@ -525,11 +525,13 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     const initialSession: Session = {
       user_id: "alice",
       claims: { role: "reader" },
+      issuer: "https://issuer.example",
       authMode: "external",
     };
     const nextSession: Session = {
       user_id: "alice",
       claims: { role: "writer" },
+      issuer: "https://issuer.example",
       authMode: "external",
     };
     const harness = createUnitHarness("orchestrator-unit-session", initialSession);
@@ -554,6 +556,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     const session: Session = {
       user_id: "alice",
       claims: { role: "reader" },
+      issuer: "https://issuer.example",
       authMode: "external",
     };
     const harness = createUnitHarness("orchestrator-unit-same-session", session);
@@ -566,6 +569,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       harness.manager.setSession({
         user_id: "alice",
         claims: { role: "reader" },
+        issuer: "https://issuer.example",
         authMode: "external",
       });
 
@@ -655,8 +659,18 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
   });
 
   it("SO-U29 a session change clears cached rows and reloads from the new session", async () => {
-    const sessionA: Session = { user_id: "a", claims: { role: "reader" }, authMode: "external" };
-    const sessionB: Session = { user_id: "b", claims: { role: "reader" }, authMode: "external" };
+    const sessionA: Session = {
+      issuer: "https://issuer.example",
+      user_id: "a",
+      claims: { role: "reader" },
+      authMode: "external",
+    };
+    const sessionB: Session = {
+      issuer: "https://issuer.example",
+      user_id: "b",
+      claims: { role: "reader" },
+      authMode: "external",
+    };
     const harness = createUnitHarness("app-so-u29", sessionA);
 
     try {

@@ -12,7 +12,7 @@ use jazz::db::{
 };
 use jazz::groove::records::{EnumValue, Value};
 use jazz::groove::schema::ColumnType;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, MergeableCommit, NodeState};
 use jazz::protocol::SyncMessage;
 use jazz::query::Query;
@@ -97,7 +97,7 @@ fn assert_core_visibility(
             let system_rows = jazz::db::block_on(seeded.core.all_for_identity(
                 &prepared,
                 read_opts.clone(),
-                AuthorId::SYSTEM,
+                AuthorSubject::SYSTEM,
             ))
             .unwrap_or_default();
             let policy_debug = if table == "t105" {
@@ -128,7 +128,7 @@ fn emit_visibility_report(
         .into_iter()
         .map(|table| {
             let member_rows = visible_count(seeded, &table, author);
-            let system_rows = visible_count(seeded, &table, AuthorId::SYSTEM);
+            let system_rows = visible_count(seeded, &table, AuthorSubject::SYSTEM);
             let expected = expected[&table];
             json!({
                 "table": table,
@@ -171,11 +171,11 @@ fn emit_visibility_report(
     );
 }
 
-fn t105_access_debug(seeded: &Seeded, member: AuthorId) -> String {
+fn t105_access_debug(seeded: &Seeded, member: AuthorSubject) -> String {
     let t1_member = visible_count(seeded, "t1", member);
     let t188_member = visible_count(seeded, "t188", member);
     let t190_member = visible_count(seeded, "t190", member);
-    let t190_system = visible_count(seeded, "t190", AuthorId::SYSTEM);
+    let t190_system = visible_count(seeded, "t190", AuthorSubject::SYSTEM);
     let prepared = seeded
         .core
         .prepare_query(&Query::from("t190"))
@@ -186,7 +186,7 @@ fn t105_access_debug(seeded: &Seeded, member: AuthorId) -> String {
             tier: DurabilityTier::Global,
             ..ReadOpts::default()
         },
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
     ))
     .unwrap_or_default();
     let table = find_table(&seeded.schema, "t190");
@@ -223,11 +223,11 @@ fn t105_access_debug(seeded: &Seeded, member: AuthorId) -> String {
     )
 }
 
-fn visible_count(seeded: &Seeded, table: &str, author: AuthorId) -> usize {
+fn visible_count(seeded: &Seeded, table: &str, author: AuthorSubject) -> usize {
     visible_rows(seeded, table, author).len()
 }
 
-fn visible_rows(seeded: &Seeded, table: &str, author: AuthorId) -> Vec<CurrentRow> {
+fn visible_rows(seeded: &Seeded, table: &str, author: AuthorSubject) -> Vec<CurrentRow> {
     let prepared = seeded
         .core
         .prepare_query(&Query::from(table))
@@ -412,9 +412,9 @@ enum BenchIdentity {
 }
 
 impl BenchIdentity {
-    fn author(self, seeded: &Seeded) -> AuthorId {
+    fn author(self, seeded: &Seeded) -> AuthorSubject {
         match self {
-            Self::System => AuthorId::SYSTEM,
+            Self::System => AuthorSubject::SYSTEM,
             Self::Member => seeded.member,
         }
     }
@@ -431,7 +431,7 @@ struct Seeded {
     _core_dir: Rc<tempfile::TempDir>,
     core: Db<RocksDbStorage>,
     schema: JazzSchema,
-    member: AuthorId,
+    member: AuthorSubject,
     claims: BTreeMap<String, Value>,
     seed_cache_hit: bool,
     seed_ms: u128,
@@ -532,7 +532,10 @@ struct ClientTransportCounters {
 impl Transport for QueueTransport {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         self.metrics.messages.set(self.metrics.messages.get() + 1);
-        if matches!(message, SyncMessage::ViewUpdate { .. }) {
+        if matches!(
+            message,
+            SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload { .. })
+        ) {
             self.metrics
                 .view_updates
                 .set(self.metrics.view_updates.get() + 1);
@@ -611,9 +614,13 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
 
     let core_dir = tempfile::tempdir().expect("create core dir");
     copy_dir_contents(&cache_dir, core_dir.path()).expect("copy cached policy graph seed");
-    let core_db =
-        open_history_complete_db_at(core_dir.path(), schema.clone(), node(1), AuthorId::SYSTEM);
-    let member = AuthorId(
+    let core_db = open_history_complete_db_at(
+        core_dir.path(),
+        schema.clone(),
+        node(1),
+        AuthorSubject::SYSTEM,
+    );
+    let member = AuthorSubject::for_test_uuid(
         uuid::Uuid::parse_str(&dump.identity.member_row)
             .expect("member seed row dump member_row uuid"),
     );
@@ -652,11 +659,11 @@ fn write_seed_rows(core: &Node<RocksDbStorage>, schema: &JazzSchema, rows: &[See
                 let column_schema = table
                     .columns
                     .iter()
-                    .find(|candidate| candidate.name == *column)
+                    .find(|candidate| candidate.name() == column)
                     .unwrap_or_else(|| panic!("seed row missing column {}/{}", row.table, column));
                 (
                     column.clone(),
-                    json_to_cell_value(value, &column_schema.column_type),
+                    json_to_cell_value(value, column_schema.column_type()),
                 )
             })
             .collect::<BTreeMap<_, _>>();
@@ -664,7 +671,7 @@ fn write_seed_rows(core: &Node<RocksDbStorage>, schema: &JazzSchema, rows: &[See
         jazz_sim::fixture::commit_mergeable_unit_settled(
             &mut node,
             MergeableCommit::new(&row.table, row_id, (idx + 1) as u64)
-                .made_by(AuthorId::SYSTEM)
+                .made_by(AuthorSubject::SYSTEM)
                 .cells(cells),
         )
         .unwrap_or_else(|error| panic!("seed commit row {}/{row_id:?}: {error}", row.table));
@@ -789,6 +796,9 @@ fn json_to_cell_value(value: &JsonValue, column_type: &ColumnType) -> Value {
                 }),
             )
         }
+        ColumnType::Internal(_) => {
+            panic!("policy-graph JSON seed fixtures cannot target internal physical columns")
+        }
     }
 }
 
@@ -885,7 +895,7 @@ fn run_cold(
             run_connect_and_subscribe(seeded, None, client, expected, config)
         }
         BenchTopology::ThreeHop => {
-            let relay = open_db(schema.clone(), node(2), AuthorId::SYSTEM);
+            let relay = open_db(schema.clone(), node(2), AuthorSubject::SYSTEM);
             let client = open_db(schema.clone(), node(3), config.identity.author(seeded));
             run_connect_and_subscribe(seeded, Some(relay), client, expected, config)
         }
@@ -904,7 +914,7 @@ fn run_warm(
             run_connect_and_subscribe(seeded, None, client, expected, config)
         }
         BenchTopology::ThreeHop => {
-            let relay = open_db(schema.clone(), node(4), AuthorId::SYSTEM);
+            let relay = open_db(schema.clone(), node(4), AuthorSubject::SYSTEM);
             let client = open_db(schema.clone(), node(5), config.identity.author(seeded));
             run_connect_and_subscribe(seeded, Some(relay), client, expected, config)
         }
@@ -916,7 +926,7 @@ fn run_warm(
             run_connect_and_subscribe(seeded, None, client, expected, config)
         }
         BenchTopology::ThreeHop => {
-            let relay = open_db(schema.clone(), node(6), AuthorId::SYSTEM);
+            let relay = open_db(schema.clone(), node(6), AuthorSubject::SYSTEM);
             let client = open_db(schema.clone(), node(7), config.identity.author(seeded));
             run_connect_and_subscribe(seeded, Some(relay), client, expected, config)
         }
@@ -957,7 +967,7 @@ fn run_connect_and_subscribe(
             ));
             _core_sub = seeded
                 .core
-                .accept_subscriber(relay_core.right_transport, AuthorId::SYSTEM);
+                .accept_subscriber(relay_core.right_transport, AuthorSubject::SYSTEM);
             _client_upstream =
                 jazz::db::block_on(client.db.connect_upstream(client_relay.left_transport));
             _relay_sub = Some(relay_node.db.accept_edge_subscriber_with_claims(
@@ -1375,7 +1385,7 @@ fn emit_phase_receipt(config: &Config, session_id: &str, phase: &str, summary: &
     );
 }
 
-fn open_db(schema: JazzSchema, node_uuid: NodeUuid, author: AuthorId) -> DbNode {
+fn open_db(schema: JazzSchema, node_uuid: NodeUuid, author: AuthorSubject) -> DbNode {
     let dir = Rc::new(tempfile::tempdir().expect("create db tempdir"));
     let db = open_db_at(dir.path(), schema, node_uuid, author, false);
     DbNode { _dir: dir, db }
@@ -1385,7 +1395,7 @@ fn open_history_complete_db_at(
     path: &Path,
     schema: JazzSchema,
     node_uuid: NodeUuid,
-    author: AuthorId,
+    author: AuthorSubject,
 ) -> Db<RocksDbStorage> {
     open_db_at(path, schema, node_uuid, author, true)
 }
@@ -1405,7 +1415,7 @@ fn open_db_at(
     path: &Path,
     schema: JazzSchema,
     node_uuid: NodeUuid,
-    author: AuthorId,
+    author: AuthorSubject,
     history_complete: bool,
 ) -> Db<RocksDbStorage> {
     let storage = open_storage_at(path, &schema);

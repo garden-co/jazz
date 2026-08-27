@@ -12,7 +12,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::db::ConnectionSessionContext;
-use crate::ids::AuthorId;
+use crate::ids::AuthorSubject;
 use crate::protocol::CatalogueSnapshot;
 use crate::tools::AppId;
 use crate::tools::websocket_prelude_auth::AuthConfig;
@@ -26,7 +26,7 @@ use crate::wire::WireTransport;
 pub struct NativeTransportRequest {
     pub server_url: String,
     pub app_id: AppId,
-    pub peer_identity: AuthorId,
+    pub peer_identity: AuthorSubject,
     pub auth: AuthConfig,
     pub wake: Arc<dyn Fn() + Send + Sync>,
 }
@@ -157,7 +157,7 @@ mod tests {
     fn connector_receives_composition_inputs_without_a_socket_dependency() {
         let connector = RecordingConnector(Mutex::new(None));
         let app_id = AppId::random();
-        let peer_identity = AuthorId::SYSTEM;
+        let peer_identity = AuthorSubject::SYSTEM;
         let connected = futures::executor::block_on(connector.connect(NativeTransportRequest {
             server_url: "https://example.invalid".to_owned(),
             app_id,
@@ -188,7 +188,7 @@ mod tests {
         let request = NativeTransportRequest {
             server_url: "https://example.invalid".to_owned(),
             app_id: AppId::random(),
-            peer_identity: AuthorId::SYSTEM,
+            peer_identity: AuthorSubject::SYSTEM,
             auth: AuthConfig {
                 jwt_token: Some(marker.to_owned()),
                 backend_secret: Some(marker.to_owned()),

@@ -81,14 +81,14 @@ fn make_folders_schema(table_name: &str, policies: TablePolicies) -> TableSchema
 fn shared_document_select_policy() -> PolicyExpr {
     pe::exists(pe::table("document_shares").where_(pe::rel::all_of([
         pe::rel::eq_outer("document_id", "id"),
-        pe::rel::eq_session("user_id", "user_id"),
+        pe::rel::eq_session("user_id", vec!["claims", "sub"]),
     ])))
 }
 
 fn editor_document_update_policy() -> PolicyExpr {
     pe::exists(pe::table("document_editors").where_(pe::rel::all_of([
         pe::rel::eq_outer("document_id", "id"),
-        pe::rel::eq_session("user_id", "user_id"),
+        pe::rel::eq_session("user_id", vec!["claims", "sub"]),
     ])))
 }
 
@@ -134,7 +134,7 @@ fn join_membership_select_policy() -> PolicyExpr {
                 PredicateExpr::Cmp {
                     left: scoped_column("group_memberships", "user_id"),
                     op: PredicateCmpOp::Eq,
-                    right: ValueRef::SessionRef(vec!["user_id".into()]),
+                    right: ValueRef::SessionRef(vec!["user".to_owned()]),
                 },
             ]),
         },
@@ -154,7 +154,7 @@ fn hop_membership_select_policy() -> PolicyExpr {
                         predicate: PredicateExpr::Cmp {
                             left: scoped_column("group_memberships", "user_id"),
                             op: PredicateCmpOp::Eq,
-                            right: ValueRef::SessionRef(vec!["user_id".into()]),
+                            right: ValueRef::SessionRef(vec!["user".to_owned()]),
                         },
                     }),
                     right: Box::new(RelExpr::TableScan {
@@ -185,13 +185,15 @@ fn mixed_complex_select_policy() -> PolicyExpr {
     pe::all_of([
         pe::eq("published", true),
         pe::in_session("team_slug", "claims.team_slugs"),
-        pe::exists(pe::table("document_flags").where_(pe::rel::all_of([
-            pe::rel::eq_outer("document_id", "id"),
-            pe::rel::eq_literal("flag", "allow"),
-        ]))),
         pe::all_of([
-            pe::is_not_null("folder_id"),
-            pe::allowed_to_read("folder_id"),
+            pe::exists(pe::table("document_flags").where_(pe::rel::all_of([
+                pe::rel::eq_outer("document_id", "id"),
+                pe::rel::eq_literal("flag", "allow"),
+            ]))),
+            pe::all_of([
+                pe::is_not_null("folder_id"),
+                pe::allowed_to_read("folder_id"),
+            ]),
         ]),
     ])
 }
@@ -253,7 +255,7 @@ fn joined_table_select_policy_schema() -> Schema {
                 .policies(permissions(|p| {
                     p.allow_insert().always();
                     p.allow_read()
-                        .where_(pe::eq("owner_name", pe::session("user_id")));
+                        .where_(pe::eq("owner_name", pe::session(vec!["claims", "sub"])));
                 })),
         )
         .build()
@@ -288,7 +290,7 @@ fn mixed_complex_policy_schema() -> Schema {
             permissions(|p| {
                 p.allow_insert().always();
                 p.allow_read()
-                    .where_(pe::eq("owner_id", pe::session("user_id")));
+                    .where_(pe::eq("owner_id", pe::session(vec!["claims", "sub"])));
             }),
         ))
         .table(make_complex_documents_schema(
@@ -757,7 +759,6 @@ async fn exists_rel_hop_grants_and_denies_correctly_inner() {
 /// alice(claims=sales) ───────────────────────────────► sees only sales-matching row
 /// ```
 #[tokio::test]
-#[ignore = "#1761: mixed SELECT policy stays closed once EXISTS / INHERITS composition is involved"]
 async fn mixed_predicates_claims_exists_and_inherits_fail_closed() {
     tokio::task::LocalSet::new()
         .run_until(mixed_predicates_claims_exists_and_inherits_fail_closed_inner())

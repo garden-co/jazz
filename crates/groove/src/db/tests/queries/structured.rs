@@ -236,6 +236,30 @@ async fn collect_by_rejects_join_and_nested_collector_consumers() {
 }
 
 #[futures_test::test]
+async fn collect_by_rejects_filter_consumer() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
+    let graph = history_collect_by(2).filter(PredicateExpr::gt("row", Value::U64(0)));
+
+    assert!(matches!(
+        database.subscribe_one_sink(graph).await,
+        Err(Error::IvmRuntime(IvmRuntimeError::CollectByMustBeTerminal))
+    ));
+}
+
+#[futures_test::test]
+async fn collect_by_rejects_project_consumer() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
+    let graph = history_collect_by(2).project(["row"]);
+
+    assert!(matches!(
+        database.subscribe_one_sink(graph).await,
+        Err(Error::IvmRuntime(IvmRuntimeError::CollectByMustBeTerminal))
+    ));
+}
+
+#[futures_test::test]
 async fn collect_by_suppresses_unchanged_rendered_group_and_replaces_once_at_boundary() {
     let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
     let mut database = Database::new(history_schema(), storage).await.unwrap();

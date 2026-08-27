@@ -1,5 +1,4 @@
 import { createDb, type Db, type QueryBuilder, type QueryOptions } from "../../src/runtime/db.js";
-import { applySubscriptionDelta } from "../../src/runtime/subscription-manager.js";
 import { afterEach, beforeEach, describe, it, expect, assert, expectTypeOf } from "vitest";
 import { app, type Project, type Todo, type User } from "./fixtures/basic/schema";
 import { insertProject, insertTodo, insertUser } from "./factories";
@@ -364,6 +363,21 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
       });
     });
 
+    describe("notIn operator", () => {
+      it("excludes listed values, retains nullable values under two-valued ne semantics, and treats an empty list as true", async () => {
+        const owner = insertUser(db, "Included");
+        const excluded = insertTodo(db, { title: "Excluded", ownerId: owner.id });
+        const retained = insertTodo(db, { title: "Retained", ownerId: null });
+
+        const results = await readAll(app.todos.where({ ownerId: { notIn: [owner.id] } }));
+        expect(results.map((todo) => todo.id)).toContain(retained.id);
+        expect(results.map((todo) => todo.id)).not.toContain(excluded.id);
+
+        const all = await readAll(app.todos.where({ id: { notIn: [] } }));
+        expect(all.map((todo) => todo.id)).toEqual([excluded.id, retained.id].sort());
+      });
+    });
+
     it("filters int columns with multiple range operators on the same column", async () => {
       db.insert(app.table_with_defaults, { integer: 5 });
       const { value: aliceTask } = db.insert(app.table_with_defaults, { integer: 10 });
@@ -553,6 +567,140 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
   });
 
   describe("include", () => {
+    it("filters forward and reverse included relations with in without filtering the parent", async () => {
+      const matchingProject = insertProject(db, "Matching");
+      const otherProject = insertProject(db, "Other");
+      const todo = insertTodo(db, { projectId: otherProject.id, title: "Task" });
+      const matchingTodo = insertTodo(db, {
+        projectId: matchingProject.id,
+        title: "Matching task",
+      });
+      insertTodo(db, { projectId: matchingProject.id, title: "Other task" });
+
+      const forward = await readOne(
+        app.todos
+          .where({ id: { eq: todo.id } })
+          .include({ project: app.projects.where({ id: { in: [matchingProject.id] } }) }),
+      );
+      assert(forward, "Todo is not defined");
+      expect(forward.project).toBeNull();
+
+      const emptyForward = await readOne(
+        app.todos
+          .where({ id: { eq: todo.id } })
+          .include({ project: app.projects.where({ id: { in: [] } }) }),
+      );
+      assert(emptyForward, "Todo is not defined");
+      expect(emptyForward.project).toBeNull();
+
+      const reverse = await readOne(
+        app.projects
+          .where({ id: { eq: matchingProject.id } })
+          .include({ todosViaProject: app.todos.where({ id: { in: [matchingTodo.id] } }) }),
+      );
+      assert(reverse, "Project is not defined");
+      expect(reverse.todosViaProject.map((child) => child.id)).toEqual([matchingTodo.id]);
+
+      const emptyReverse = await readOne(
+        app.projects
+          .where({ id: { eq: matchingProject.id } })
+          .include({ todosViaProject: app.todos.where({ id: { in: [] } }) }),
+      );
+      assert(emptyReverse, "Project is not defined");
+      expect(emptyReverse.todosViaProject).toEqual([]);
+    });
+
+    it("keeps a parent when its included relation is empty unless requireIncludes is explicit", async () => {
+      const includedProject = insertProject(db, "Included");
+      const excludedProject = insertProject(db, "Excluded");
+      const todo = insertTodo(db, { projectId: excludedProject.id, title: "Task" });
+
+      const optional = await readOne(
+        app.todos
+          .where({ id: { eq: todo.id } })
+          .include({ project: app.projects.where({ id: { in: [includedProject.id] } }) }),
+      );
+      expect(optional?.id).toBe(todo.id);
+      expect(optional?.project).toBeNull();
+
+      const required = await readOne(
+        app.todos
+          .where({ id: { eq: todo.id } })
+          .include({ project: app.projects.where({ id: { in: [includedProject.id] } }) })
+          .requireIncludes(),
+      );
+      expect(required).toBeNull();
+    });
+
+    it("updates a live included relation as an in filter starts matching", async () => {
+      const project = insertProject(db, "Announcements");
+      const todo = insertTodo(db, { projectId: project.id, title: "Draft" });
+      let unsubscribe = () => {};
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const matching = new Promise<void>((resolve, reject) => {
+        timeout = setTimeout(() => {
+          unsubscribe();
+          reject(new Error("Timed out waiting for included in-filter update"));
+        }, 10_000);
+        unsubscribe = db.subscribe(
+          app.projects
+            .where({ id: { eq: project.id } })
+            .select("id")
+            .include({
+              todosViaProject: app.todos.where({ title: { in: ["Published"] } }).select("id"),
+            }),
+          (rows) => {
+            if (rows[0]?.todosViaProject.map((child) => child.id).includes(todo.id)) resolve();
+          },
+        );
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      db.update(app.todos, todo.id, { title: "Published" });
+      await matching;
+      if (timeout) clearTimeout(timeout);
+      unsubscribe();
+    });
+
+    it("updates a live reverse include as a notIn filter changes from excluded to included", async () => {
+      const project = insertProject(db, "Announcements");
+      const todo = insertTodo(db, { projectId: project.id, title: "Blocked" });
+      let unsubscribe = () => {};
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      let resolveInitial: (() => void) | undefined;
+      let rejectInitial: ((error: Error) => void) | undefined;
+      const initial = new Promise<void>((resolve, reject) => {
+        resolveInitial = resolve;
+        rejectInitial = reject;
+      });
+      const included = new Promise<void>((resolve, reject) => {
+        timeout = setTimeout(() => {
+          unsubscribe();
+          const error = new Error("Timed out waiting for included notIn-filter update");
+          rejectInitial?.(error);
+          reject(error);
+        }, 10_000);
+        unsubscribe = db.subscribe(
+          app.projects
+            .where({ id: { eq: project.id } })
+            .select("id")
+            .include({
+              todosViaProject: app.todos.where({ title: { notIn: ["Blocked"] } }).select("id"),
+            }),
+          (rows) => {
+            if (rows[0]?.todosViaProject.length === 0) resolveInitial?.();
+            if (rows[0]?.todosViaProject.map((child) => child.id).includes(todo.id)) resolve();
+          },
+        );
+      });
+
+      await initial;
+      db.update(app.todos, todo.id, { title: "Published" });
+      await included;
+      if (timeout) clearTimeout(timeout);
+      unsubscribe();
+    });
+
     it("include returns the related entity", async () => {
       const { id: projectId } = insertProject(db, "Announcements");
       const { id: ownerId } = insertUser(db);
@@ -1049,7 +1197,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
       expect(assignee.$updatedAt.getTime()).toBeGreaterThanOrEqual(startedAt - 60_000);
     });
 
-    it("subscribeAll preserves projected root columns with includes", async () => {
+    it("subscribe preserves projected root columns with includes", async () => {
       const { id: projectId } = insertProject(db, "Announcements");
       const { id: ownerId } = insertUser(db);
 
@@ -1059,29 +1207,24 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
         project: {
           id: string;
           name: string;
-        };
+        } | null;
       };
 
       let unsubscribe = () => {};
       let timeout: ReturnType<typeof setTimeout> | undefined;
-      const current: SubscribedTodo[] = [];
       const deltaPromise = new Promise<SubscribedTodo[]>((resolve, reject) => {
         timeout = setTimeout(() => {
           unsubscribe();
-          reject(new Error("Timed out waiting for subscribeAll projection update"));
+          reject(new Error("Timed out waiting for subscribe projection update"));
         }, 10_000);
 
-        unsubscribe = db.subscribeAll(
-          app.todos.select("title").include({ project: true }),
-          (delta) => {
-            const all = applySubscriptionDelta(current, delta as any);
-            if (all.length !== 1) {
-              return;
-            }
+        unsubscribe = db.subscribe(app.todos.select("title").include({ project: true }), (rows) => {
+          if (rows.length !== 1) {
+            return;
+          }
 
-            resolve([...all]);
-          },
-        );
+          resolve(rows);
+        });
       });
 
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -1116,7 +1259,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
       expect("tags" in all[0]).toBe(false);
     });
 
-    it("subscribeAll returns null for selected nullable columns while omitting unselected columns", async () => {
+    it("subscribe returns null for selected nullable columns while omitting unselected columns", async () => {
       const { id: projectId } = insertProject(db, "Announcements");
 
       type SubscribedTodo = {
@@ -1127,20 +1270,17 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
 
       let unsubscribe = () => {};
       let timeout: ReturnType<typeof setTimeout> | undefined;
-      const current: SubscribedTodo[] = [];
       const deltaPromise = new Promise<SubscribedTodo[]>((resolve, reject) => {
         timeout = setTimeout(() => {
           unsubscribe();
-          reject(new Error("Timed out waiting for subscribeAll nullable update"));
+          reject(new Error("Timed out waiting for subscribe nullable update"));
         }, 10_000);
 
-        unsubscribe = db.subscribeAll(app.todos.select("title", "ownerId"), (delta) => {
-          const all = applySubscriptionDelta(current, delta as any);
-          if (all.length !== 1) {
+        unsubscribe = db.subscribe(app.todos.select("title", "ownerId"), (rows) => {
+          if (rows.length !== 1) {
             return;
           }
-
-          resolve([...all]);
+          resolve(rows);
         });
       });
 

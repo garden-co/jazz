@@ -52,6 +52,22 @@ function isWasmValueLike(value: unknown): value is WasmValue {
   ].includes(value.type);
 }
 
+function normalizeTimestampLiteral(value: unknown): WasmValue {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(
+      "Permissions policy timestamp literals must be non-negative safe integer milliseconds.",
+    );
+  }
+  return { type: "Timestamp", value };
+}
+
+function normalizeDoubleLiteral(value: unknown): WasmValue {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error("Permissions policy floating-point literals must be finite numbers.");
+  }
+  return { type: "Double", value };
+}
+
 function normalizeLegacyTaggedValue(type: string, value: unknown): WasmValue {
   switch (type) {
     case "Null":
@@ -92,10 +108,12 @@ function normalizeLegacyTaggedValue(type: string, value: unknown): WasmValue {
         return { type: "BigInt", value };
       }
       return { type, value } as WasmValue;
+    case "Timestamp":
+      return normalizeTimestampLiteral(value);
     case "Double":
+      return normalizeDoubleLiteral(value);
     case "Boolean":
     case "Text":
-    case "Timestamp":
     case "Uuid":
       return { type, value } as WasmValue;
     default:
@@ -108,7 +126,16 @@ function normalizeWasmLiteral(value: unknown): WasmValue {
     return { type: "Null" };
   }
   if (value instanceof Date) {
-    return { type: "Timestamp", value: value.getTime() };
+    const timestamp = value.getTime();
+    if (!Number.isFinite(timestamp)) {
+      throw new Error("Permissions policy Date literals must be valid.");
+    }
+    if (timestamp < 0) {
+      throw new Error(
+        "Permissions policy Date literals must be on or after 1970-01-01T00:00:00.000Z.",
+      );
+    }
+    return normalizeTimestampLiteral(timestamp);
   }
   if (value instanceof Uint8Array) {
     return { type: "Bytea", value };
@@ -118,10 +145,10 @@ function normalizeWasmLiteral(value: unknown): WasmValue {
   }
   if (typeof value === "number") {
     if (!Number.isFinite(value)) {
-      throw new Error("Permissions literals only support finite numbers.");
+      return normalizeDoubleLiteral(value);
     }
     if (!Number.isInteger(value)) {
-      return { type: "Double", value };
+      return normalizeDoubleLiteral(value);
     }
     if (value >= -2147483648 && value <= 2147483647) {
       return { type: "Integer", value };
@@ -129,7 +156,7 @@ function normalizeWasmLiteral(value: unknown): WasmValue {
     if (Number.isSafeInteger(value)) {
       return { type: "BigInt", value: BigInt(value) };
     }
-    return { type: "Double", value };
+    return normalizeDoubleLiteral(value);
   }
   if (typeof value === "bigint") {
     return { type: "BigInt", value };
@@ -141,6 +168,18 @@ function normalizeWasmLiteral(value: unknown): WasmValue {
     return { type: "Array", value: value.map((entry) => normalizeWasmLiteral(entry)) };
   }
   if (isWasmValueLike(value)) {
+    if (value.type === "Timestamp") {
+      return normalizeTimestampLiteral(value.value);
+    }
+    if (value.type === "Double") {
+      return normalizeDoubleLiteral(value.value);
+    }
+    if (value.type === "Array") {
+      return {
+        type: "Array",
+        value: value.value.map((entry) => normalizeWasmLiteral(entry)),
+      };
+    }
     return value;
   }
   if (isRecord(value) && Object.keys(value).length === 1) {
@@ -195,6 +234,15 @@ function normalizeRelationPredicateForWasm(predicate: RelPredicateExpr): RelPred
       Contains: {
         ...predicate.Contains,
         right: normalizeRelationValueRefForWasm(predicate.Contains.right),
+      },
+    };
+  }
+
+  if ("EnumMatch" in predicate) {
+    return {
+      EnumMatch: {
+        ...predicate.EnumMatch,
+        payload: normalizeRelationPredicateForWasm(predicate.EnumMatch.payload),
       },
     };
   }

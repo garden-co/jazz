@@ -26,6 +26,15 @@ as soon as work begins or that first commit exists; the PR may be red/WIP and
 must not wait for completion or review. Lanes remain local-only: they must not
 push, create or modify PRs, comment on GitHub, or merge.
 
+### Pull-request descriptions
+
+Every behavior-changing PR description explains the before/after behavior,
+the governing invariants, and important non-goals or unchanged cases. Include
+worked examples for the normal path and meaningful edge, failure, retry, or
+handoff cases. For nuanced or large changes, make these concrete enough for an
+adversarial reviewer to verify the behavior and for a future reader to recover
+the decision without reconstructing it from the diff or conversation history.
+
 **Testing:** prefer black-boxed integration tests over unit tests or white-box tests.
 Do not use JSON-like schema/permissions/query definitions. Always use the public API to build them in the tests.
 Before writing any test in Rust crates, always read `crates/jazz/TESTING_GUIDELINES.md` in full and follow it.
@@ -43,6 +52,27 @@ core gate's `-p jazz --no-default-features --features testing,transport-compress
 **Canonical gates:** do not let born-red or rotted targets accumulate silently.
 For ordinary Rust/core work, the full gate set is:
 
+**Local CI-equivalent gate.** `node dev/gates/local-ci-equivalent.mjs
+--ci-equivalent` is the only local command that may be described as
+_CI-equivalent_. It executes the exact named correctness/build command
+partitions invoked by `.github/workflows/ci-suite.yml` (serialized locally;
+CI schedules them in parallel). It fails closed on a missing partition and
+includes the exhaustive workspace `--lib --bins --tests --examples --benches`
+compile with CI's required features before TypeScript artifacts or suites.
+The default `node dev/gates/local-ci-equivalent.mjs` is deliberately a faster
+**focused** iteration mode and prints that it is **not CI-equivalent**. Lanes
+must never call a focused, crate-only, or partial-artifact receipt
+CI-equivalent. Use `--ci-partition <name>` only when reproducing one named CI
+job during diagnosis; it is likewise not a full CI-equivalent result.
+
+**Generated correctness bindings.** `pnpm build:test-artifacts` seals the
+fast-WASM/release-NAPI pair into a fingerprint-addressed store under the
+current worktree's ignored `target/` directory. Browser and native correctness
+tests consume that immutable pair, not the mutable package output directories. Do not copy
+or share generated `pkg/` or NAPI generations between lanes; rebuild in the
+checkout whose tests you are running. The explicit ABI/provenance preflight is
+intentional and must remain fail-closed.
+
 - `cargo test -p jazz`
 - `cargo test -p groove`
 - `cargo test -p jazz --no-default-features --features testing,transport-compression-zstd` (matches `crates/jazz/TESTING_GUIDELINES.md`).
@@ -54,7 +84,10 @@ For ordinary Rust/core work, the full gate set is:
 - `cargo test -p jazz-otel` covers exporter/provider construction. Its ignored
   `sync_telemetry_otel` target is a manual receipt because it does not
   programmatically assert collector delivery.
-- `cargo check -p jazz-sim --benches` (always; it is cheap enough and catches bench API rot)
+- `cargo check -p jazz-sim --benches` on the realistic benchmark workflow
+  (same-repository PRs bearing `benchmark`, non-bot default-branch pushes,
+  manual runs, and nightly); it catches bench API rot without extending every
+  ordinary PR's critical path.
 - `dev/gates/ts-wire-codec.sh` for TypeScript/native-runtime wire-codec coverage
   (Anselm-approved 2026-07-07)
 - `dev/gates/invariant-registry.sh` parses both invariant registries and fails on
@@ -91,15 +124,19 @@ Benchmark work has three deliberately separate gates:
   `dev/gates/benchmark-smoke.sh <jazz|jazz-sim> <bench>`. This is a debug
   `cargo check`, not `cargo bench`; it avoids release-wide RocksDB rebuilds and
   timing noise.
-- CI runs `dev/gates/benchmark-smoke.sh --ci`: benchmark API compilation plus
-  deterministic core and jazz-sim scenario assertions. Keep correctness
-  assertions in tests, not in a timing receipt.
+- Ordinary PR CI runs `dev/gates/benchmark-smoke.sh --ci`: deterministic core
+  and jazz-sim scenario assertions. The realistic benchmark workflow runs
+  `dev/gates/benchmark-smoke.sh --compile-ci` to compile every maintained
+  benchmark API on same-repository benchmark-labeled PRs, non-bot
+  default-branch pushes, manual runs, and nightly. Keep correctness assertions
+  in tests, not in a timing receipt.
 - CodSpeed currently compares the example benchmark crates only. Apply the
   `benchmark` label when that coverage is relevant; it refreshes nightly on the
   default branch. Native `jazz` and `jazz-sim` timing remains in the
-  realistic benchmark workflow (labeled PRs plus scheduled/default-branch
-  runs) until those suites are ported to CodSpeed. Do not run a repository-wide
-  benchmark suite before push.
+  realistic benchmark workflow (same-repository benchmark-labeled PRs,
+  non-bot default-branch pushes, manual runs, and nightly) until those suites
+  are ported to CodSpeed. Do not run a repository-wide benchmark suite before
+  push.
 
 Any change to a public `jazz` type additionally gates the full workspace,
 including examples.
@@ -113,6 +150,16 @@ bench compilation two steps before the bench gate caught it.
 Wide maintained-vs-one-shot soaks use
 `JAZZ_SEED_COUNT=2000 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
 alongside the existing m3 soak conventions.
+
+**Continuous simulation soak.** `.github/workflows/continuous-simulation-soak.yml`
+runs the deterministic M3 sync-convergence and maintained-vs-one-shot oracle
+nightly on the trusted `jazz-ci` runner, with individual seed receipts. Run the
+same driver locally with `dev/gates/run-continuous-simulation-soak.sh --sync-seeds
+2 --differential-seeds 2`; copy a failed case's replay command from
+`target/simulation-soak/summary.json`. The nightly default is sync 100×200
+commits and differential 50×20 steps at churn depths 10,1000. The 100000-depth
+churn is deliberately deferred from nightly: it is available through
+`--churn-depths 10,1000,100000` when a bounded weekly budget is established.
 
 **Don't rewrite existing tests without permission.** Existing tests encode decisions about what correct behaviour looks like. If the task explicitly involves changing behaviour, updating the tests to match is the right thing to do. But if a test is failing simply because the implementation diverges from what the test expects, rewriting the test to match the new behaviour is risky — the test may well be correct and the implementation wrong. Treat that as a human-in-the-loop decision: surface it to the user rather than resolving it unilaterally.
 

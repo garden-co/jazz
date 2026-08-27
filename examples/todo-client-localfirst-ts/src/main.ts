@@ -53,20 +53,19 @@ export async function startApp(
 ): Promise<{ db: Db; destroy: () => Promise<void> }> {
   const appId = config?.appId ?? readEnvAppId() ?? "019d4349-241f-71c6-a453-e4754063b3dc";
 
-  const secret =
-    config?.auth?.localFirstSecret ?? (await BrowserAuthSecretStore.getOrCreateSecret({ appId }));
+  const secret = config?.secret ?? (await BrowserAuthSecretStore.getOrCreateSecret({ appId }));
 
   const resolvedConfig: DbConfig = {
     appId,
     env: "dev",
-    auth: { localFirstSecret: secret },
+    secret,
     ...config,
   };
 
   // #region context-setup-ts-client
   const db = await createDb(resolvedConfig);
   // #endregion context-setup-ts-client
-  let sessionUserId = db.getAuthState().session?.user_id ?? null;
+  let sessionUserId = db.getAuthState().session?.user ?? null;
 
   // Build DOM
   const h1 = document.createElement("h1");
@@ -121,7 +120,7 @@ export async function startApp(
 
   // Subscribe to all todos.
   const query = app.todos;
-  const unsubscribe = db.subscribeAll(query, ({ all: todos }) => {
+  const unsubscribe = db.subscribe(query, (todos) => {
     const ordered = orderTodosWithDepth(todos);
     parentSelect.innerHTML = "";
     parentSelect.appendChild(noParentOption);
@@ -146,7 +145,7 @@ export async function startApp(
       .join("");
   });
   const stopAuthSync = db.onAuthChanged(({ session }) => {
-    syncAuthState(session?.user_id ?? null);
+    syncAuthState(session?.user ?? null);
   });
 
   // Add todo form

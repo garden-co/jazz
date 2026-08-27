@@ -150,19 +150,20 @@ pub(super) fn rewrite_claim_predicate_for_binding(
     }
 }
 
-pub(super) fn default_permission_scope_claim_values(writer: AuthorId) -> BTreeMap<String, Value> {
+pub(super) fn default_permission_scope_claim_values(
+    writer: AuthorSubject,
+) -> BTreeMap<String, Value> {
     default_policy_claim_values(writer)
 }
 
-pub(super) fn default_policy_claim_values(writer: AuthorId) -> BTreeMap<String, Value> {
+pub(super) fn default_policy_claim_values(writer: AuthorSubject) -> BTreeMap<String, Value> {
     // Alpha-compat built-ins live at the node admission/query boundary, not in
     // the compiler: lowering receives ordinary claim values plus spec `sub`.
     BUILTIN_POLICY_CLAIMS
         .iter()
         .map(|name| {
             let value = match *name {
-                "sub" => Value::Uuid(writer.0),
-                "user_id" => Value::String(writer.0.to_string()),
+                "user" => Value::String(writer.canonical().to_owned()),
                 "isAdmin" => Value::Bool(false),
                 _ => unreachable!("unknown built-in policy claim"),
             };
@@ -171,7 +172,7 @@ pub(super) fn default_policy_claim_values(writer: AuthorId) -> BTreeMap<String, 
         .collect()
 }
 
-const BUILTIN_POLICY_CLAIMS: &[&str] = &["sub", "user_id", "isAdmin"];
+const BUILTIN_POLICY_CLAIMS: &[&str] = &["user", "isAdmin"];
 
 fn is_builtin_policy_claim(name: &str) -> bool {
     BUILTIN_POLICY_CLAIMS.contains(&name)
@@ -284,10 +285,11 @@ fn bind_scope_claim_operand(
     let Operand::Claim(name) = operand else {
         return;
     };
-    let Some(value) = claim_values.get(name).cloned() else {
+    let storage_name = crate::query::operand_claim_storage_key(name);
+    let Some(value) = claim_values.get(&storage_name).cloned() else {
         return;
     };
-    let param = claim_param_field(&ClaimPath(vec![name.clone()]));
+    let param = claim_param_field(&ClaimPath(crate::query::operand_claim_path(name)));
     binding_values.insert(param.clone(), value);
     *operand = Operand::Param(param);
 }
@@ -487,7 +489,10 @@ fn operand_contains_unbound_claim(
     operand: &Operand,
     claims: Option<&BTreeMap<String, Value>>,
 ) -> bool {
-    matches!(operand, Operand::Claim(name) if !is_builtin_policy_claim(name) && !claims.is_some_and(|claims| claims.contains_key(name)))
+    matches!(operand, Operand::Claim(name) if !is_builtin_policy_claim(name) && !claims.is_some_and(|claims| {
+        let storage = crate::query::operand_claim_storage_key(name);
+        claims.contains_key(&storage)
+    }))
 }
 
 #[derive(Clone, Copy)]
@@ -838,7 +843,7 @@ pub(super) fn collect_reachable_seed_claim_params(
             .ok_or(Error::InvalidStoredValue(
                 "reachable seed column is missing from schema",
             ))?;
-        let path = ClaimPath(user_claim.split('.').map(str::to_owned).collect());
+        let path = ClaimPath(crate::query::operand_claim_path(user_claim));
         params.insert(
             claim_param_field(&path),
             ProgramClaimParam {
@@ -1267,6 +1272,28 @@ where
         policy: &PolicyContext,
         prepared_claim_binding_mode: PreparedClaimBindingMode,
     ) -> Result<ProgramBinding, Error> {
+        // System authority bypasses row policy entirely.  It consequently has
+        // no identity context from which a policy claim could be bound. Some
+        // authorization builders receive claim slots from an enclosing
+        // prepared plan, so enforce the descriptor invariant at the shared
+        // binding boundary as well as in the current-query path.
+        //
+        // The binding-source key includes every claim slot.  Retaining the
+        // caller's key after dropping the slots would let a System program
+        // reuse an identity-scoped descriptor, so derive a replacement key
+        // from its ordinary query/user parameters only.
+        let (source_shape, claim_params) = if matches!(policy, PolicyContext::System) {
+            let mut param_types = shape.params().clone();
+            param_types.extend(extra_user_params.clone());
+            (
+                source_shape.and_then(|_| {
+                    query_binding_source_shape_for_parts_if_needed(&param_types, &BTreeMap::new())
+                }),
+                BTreeMap::new(),
+            )
+        } else {
+            (source_shape, claim_params)
+        };
         let mut program_binding = self.program_binding_for_shape(
             shape,
             binding,

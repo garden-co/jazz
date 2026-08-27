@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::groove::records::Value;
-use crate::ids::AuthorId;
+use crate::ids::{AuthorSubject, AuthorSubjectError};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 
@@ -153,10 +153,12 @@ pub struct AuthHandshake {
 /// Admitted session binding for a transport.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AdmittedSession {
+    /// Trusted issuer paired with `subject` to derive the logical author.
+    pub issuer: String,
     /// Auth subject from the accepted credential.
     pub subject: String,
     /// Deterministic Jazz author identity derived from `subject`.
-    pub author: AuthorId,
+    pub author: AuthorSubject,
     /// Application claims admitted for this session.
     pub claims: BTreeMap<String, Value>,
     /// Admission source.
@@ -187,6 +189,8 @@ pub enum AuthAdmissionError {
     InvalidJwt(String),
     /// The first-frame handshake was malformed.
     InvalidHandshake(String),
+    /// The credential attempted to claim an invalid or Jazz-reserved author identity.
+    InvalidAuthorSubject(AuthorSubjectError),
 }
 
 impl fmt::Display for AuthAdmissionError {
@@ -196,11 +200,18 @@ impl fmt::Display for AuthAdmissionError {
             Self::InvalidBearer => write!(f, "invalid bearer auth"),
             Self::InvalidJwt(error) => write!(f, "invalid bearer JWT: {error}"),
             Self::InvalidHandshake(error) => write!(f, "invalid auth handshake: {error}"),
+            Self::InvalidAuthorSubject(error) => write!(f, "invalid author subject: {error}"),
         }
     }
 }
 
 impl std::error::Error for AuthAdmissionError {}
+
+impl From<AuthorSubjectError> for AuthAdmissionError {
+    fn from(error: AuthorSubjectError) -> Self {
+        Self::InvalidAuthorSubject(error)
+    }
+}
 
 /// Admit a static bearer credential.
 pub fn admit_static_bearer(
@@ -232,8 +243,15 @@ pub fn admit_static_bearer_with_claims(
             "sub must be non-empty".to_owned(),
         ));
     }
+    let issuer = match source {
+        AdmissionSource::Anonymous => ANONYMOUS_ISSUER,
+        _ => STATIC_BEARER_ISSUER,
+    };
+    let author = AuthorSubject::reserved(issuer, &subject)?;
+    let claims = admitted_session_claims(issuer, &subject, author, claims);
     Ok(AdmittedSession {
-        author: author_id_from_subject(&subject),
+        issuer: issuer.to_owned(),
+        author,
         subject,
         claims,
         source,
@@ -254,16 +272,24 @@ pub fn admit_bearer_jwt(
     let key = jwt_decoding_key(verifier)?;
     let mut validation = Validation::new(verifier.algorithm);
     validation.required_spec_claims.insert("exp".to_owned());
+    validation.required_spec_claims.insert("iss".to_owned());
     validation.required_spec_claims.insert("sub".to_owned());
     let decoded = decode::<JwtClaims>(token, &key, &validation).map_err(jwt_error)?;
     if !crate::tools::identity::principal_is_nonempty(&decoded.claims.sub) {
         return Err(AuthAdmissionError::InvalidJwt("missing sub".to_owned()));
     }
+    let issuer = decoded.claims.iss;
     let subject = decoded.claims.sub;
-    let mut claims = jwt_json_claims_to_policy_claims(decoded.claims.extra)?;
-    claims.insert("sub".to_owned(), Value::String(subject.clone()));
+    let author = author_subject_from_issuer_and_subject(&issuer, &subject)?;
+    let claims = admitted_session_claims(
+        &issuer,
+        &subject,
+        author,
+        jwt_json_claims_to_policy_claims(decoded.claims.extra)?,
+    );
     Ok(AdmittedSession {
-        author: author_id_from_subject(&subject),
+        issuer,
+        author,
         subject,
         claims,
         source,
@@ -271,7 +297,11 @@ pub fn admit_bearer_jwt(
 }
 
 /// Issuer required for local-first admission tokens.
-pub const LOCAL_FIRST_JWT_ISSUER: &str = "urn:jazz:local-first";
+pub const LOCAL_FIRST_JWT_ISSUER: &str = AuthorSubject::LOCAL_FIRST_ISSUER;
+/// Reserved issuer for subjects admitted by the process-local static bearer gate.
+pub const STATIC_BEARER_ISSUER: &str = AuthorSubject::STATIC_BEARER_ISSUER;
+/// Reserved issuer for sessions admitted without an external credential.
+pub const ANONYMOUS_ISSUER: &str = AuthorSubject::ANONYMOUS_ISSUER;
 
 /// Admit a signed local-first JWT.
 ///
@@ -323,18 +353,48 @@ pub fn admit_local_first_jwt(
         }
     }
     let subject = decoded.claims.sub;
-    let mut claims = jwt_json_claims_to_policy_claims(decoded.claims.extra)?;
-    claims.insert("sub".to_owned(), Value::String(subject.clone()));
-    claims.insert(
-        "iss".to_owned(),
-        Value::String(LOCAL_FIRST_JWT_ISSUER.to_owned()),
+    let author = AuthorSubject::reserved(LOCAL_FIRST_JWT_ISSUER, &subject)?;
+    let claims = admitted_session_claims(
+        LOCAL_FIRST_JWT_ISSUER,
+        &subject,
+        author,
+        jwt_json_claims_to_policy_claims(decoded.claims.extra)?,
     );
     Ok(AdmittedSession {
-        author: author_id_from_subject(&subject),
+        issuer: LOCAL_FIRST_JWT_ISSUER.to_owned(),
+        author,
         subject,
         claims,
         source: AdmissionSource::LocalFirstJwt,
     })
+}
+
+/// Inject the trusted session vocabulary once after provider claims are
+/// admitted. Provider `sub` maps to the documented raw `user_id`; `user` is
+/// the distinct reserved canonical `[iss,sub]` logical identity.
+pub fn admitted_session_claims(
+    issuer: &str,
+    subject: &str,
+    author: AuthorSubject,
+    claims: BTreeMap<String, Value>,
+) -> BTreeMap<String, Value> {
+    let mut admitted = claims
+        .into_iter()
+        .map(|(name, value)| (crate::query::provider_claim_key(&name), value))
+        .collect::<BTreeMap<_, _>>();
+    admitted.insert(
+        crate::query::provider_claim_key("iss"),
+        Value::String(issuer.to_owned()),
+    );
+    admitted.insert(
+        crate::query::provider_claim_key("sub"),
+        Value::String(subject.to_owned()),
+    );
+    admitted.insert(
+        "user".to_owned(),
+        Value::String(author.canonical().to_owned()),
+    );
+    admitted
 }
 
 fn jwt_decoding_key(verifier: &JwtVerifierConfig) -> Result<DecodingKey, AuthAdmissionError> {
@@ -352,6 +412,7 @@ fn jwt_decoding_key(verifier: &JwtVerifierConfig) -> Result<DecodingKey, AuthAdm
 
 #[derive(Clone, Debug, Deserialize)]
 struct JwtClaims {
+    iss: String,
     sub: String,
     #[serde(rename = "exp")]
     _exp: u64,
@@ -374,7 +435,9 @@ fn jwt_error(error: jsonwebtoken::errors::Error) -> AuthAdmissionError {
     AuthAdmissionError::InvalidJwt(error.to_string())
 }
 
-fn jwt_json_claims_to_policy_claims(
+/// Convert verified JWT JSON claims into scalar policy values. Registered
+/// identity fields are excluded because admission supplies verified values.
+pub fn jwt_json_claims_to_policy_claims(
     extra: BTreeMap<String, serde_json::Value>,
 ) -> Result<BTreeMap<String, Value>, AuthAdmissionError> {
     let mut claims = BTreeMap::new();
@@ -444,9 +507,12 @@ fn json_claim_to_policy_claim(
     }
 }
 
-/// Deterministically map an auth subject to a Jazz author id.
-pub fn author_id_from_subject(subject: &str) -> AuthorId {
-    crate::tools::identity::author_id_from_principal(subject)
+/// Bind an exact issuer/subject pair into the logical Jazz author identity.
+pub fn author_subject_from_issuer_and_subject(
+    issuer: &str,
+    subject: &str,
+) -> Result<AuthorSubject, AuthAdmissionError> {
+    AuthorSubject::authenticated(issuer, subject).map_err(AuthAdmissionError::InvalidAuthorSubject)
 }
 
 /// Extract a bearer token from an `Authorization` header value.
@@ -460,14 +526,110 @@ pub fn bearer_from_authorization(value: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jsonwebtoken::{EncodingKey, Header, encode};
+    use serde_json::json;
+
+    const TEST_JWT_SECRET: &[u8] = b"auth-admission-test-secret";
+
+    fn signed_test_jwt(issuer: &str, subject: &str) -> String {
+        encode(
+            &Header::new(Algorithm::HS256),
+            &json!({
+                "iss": issuer,
+                "sub": subject,
+                "exp": 4_102_444_800_u64,
+                "claims": {
+                    "role": "editor",
+                },
+            }),
+            &EncodingKey::from_secret(TEST_JWT_SECRET),
+        )
+        .unwrap()
+    }
+
+    fn test_jwt_config() -> AuthAdmissionConfig {
+        AuthAdmissionConfig::jwt(JwtVerifierConfig::hmac_secret(
+            Algorithm::HS256,
+            TEST_JWT_SECRET,
+        ))
+    }
 
     #[test]
-    fn uuid_subjects_preserve_author_identity() {
+    fn issuer_and_subject_define_author_identity() {
         let subject = "00000000-0000-4000-8000-0000000000b2";
         assert_eq!(
-            author_id_from_subject(subject),
-            AuthorId::from_bytes(*uuid::Uuid::parse_str(subject).unwrap().as_bytes())
+            author_subject_from_issuer_and_subject("https://issuer.example", subject).unwrap(),
+            AuthorSubject::authenticated("https://issuer.example", subject).unwrap()
         );
+    }
+
+    #[test]
+    fn external_author_admission_rejects_missing_and_reserved_issuers_with_typed_errors() {
+        assert_eq!(
+            author_subject_from_issuer_and_subject("", "user"),
+            Err(AuthAdmissionError::InvalidAuthorSubject(
+                AuthorSubjectError::MissingIssuer
+            ))
+        );
+        for issuer in [
+            AuthorSubject::SYSTEM_ISSUER,
+            LOCAL_FIRST_JWT_ISSUER,
+            STATIC_BEARER_ISSUER,
+            ANONYMOUS_ISSUER,
+        ] {
+            assert_eq!(
+                author_subject_from_issuer_and_subject(issuer, "user"),
+                Err(AuthAdmissionError::InvalidAuthorSubject(
+                    AuthorSubjectError::ReservedIssuer(issuer.to_owned())
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn signed_external_jwt_preserves_exact_issuer_and_subject() {
+        let token = signed_test_jwt(" https://issuer.example ", " user ");
+        let admitted = admit_bearer_jwt(
+            &test_jwt_config(),
+            Some(&token),
+            AdmissionSource::AuthorizationHeader,
+        )
+        .unwrap();
+
+        assert_eq!(admitted.issuer, " https://issuer.example ");
+        assert_eq!(admitted.subject, " user ");
+        assert_eq!(
+            admitted.author.canonical(),
+            r#"[" https://issuer.example "," user "]"#
+        );
+        assert_eq!(
+            admitted
+                .claims
+                .get(&crate::query::provider_claim_key("iss")),
+            Some(&Value::String(" https://issuer.example ".to_owned()))
+        );
+    }
+
+    #[test]
+    fn signed_external_jwt_rejects_reserved_issuers_during_resolution() {
+        for issuer in [
+            AuthorSubject::SYSTEM_ISSUER,
+            LOCAL_FIRST_JWT_ISSUER,
+            STATIC_BEARER_ISSUER,
+            ANONYMOUS_ISSUER,
+        ] {
+            let token = signed_test_jwt(issuer, "user");
+            assert_eq!(
+                admit_bearer_jwt(
+                    &test_jwt_config(),
+                    Some(&token),
+                    AdmissionSource::AuthorizationHeader,
+                ),
+                Err(AuthAdmissionError::InvalidAuthorSubject(
+                    AuthorSubjectError::ReservedIssuer(issuer.to_owned())
+                ))
+            );
+        }
     }
 
     #[test]

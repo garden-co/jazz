@@ -6,7 +6,7 @@ reviewedAt: "b29b48d1a"
 
 After [setting up authentication](/docs/auth/authentication), you can read the current session to scope queries and inserts to the logged-in user.
 
-## Get the session and user ID
+## Get the session and canonical user identity
 
 <Tabs
   groupId="jazz-framework"
@@ -19,7 +19,7 @@ After [setting up authentication](/docs/auth/authentication), you can read the c
       ../examples/docs/todo-client-localfirst-react/src/AuthSessionExamples.tsx#auth-session-react-hook
     </include>
     <include cwd lang="tsx">
-      ../examples/docs/todo-client-localfirst-react/src/AuthSessionExamples.tsx#auth-session-react-user-id
+      ../examples/docs/todo-client-localfirst-react/src/AuthSessionExamples.tsx#auth-session-react-user
     </include>
   </Tab>
   <Tab value="Vue">
@@ -27,7 +27,7 @@ After [setting up authentication](/docs/auth/authentication), you can read the c
       ../examples/docs/todo-client-localfirst-vue/src/AuthSessionExamples.vue#auth-session-vue-hook
     </include>
     <include cwd lang="vue">
-      ../examples/docs/todo-client-localfirst-vue/src/AuthSessionExamples.vue#auth-session-vue-user-id
+      ../examples/docs/todo-client-localfirst-vue/src/AuthSessionExamples.vue#auth-session-vue-user
     </include>
   </Tab>
   <Tab value="Svelte">
@@ -35,7 +35,7 @@ After [setting up authentication](/docs/auth/authentication), you can read the c
       ../examples/docs/todo-client-localfirst-svelte/src/AuthSessionExamples.svelte#auth-session-svelte-hook
     </include>
     <include cwd lang="svelte">
-      ../examples/docs/todo-client-localfirst-svelte/src/AuthSessionExamples.svelte#auth-session-svelte-user-id
+      ../examples/docs/todo-client-localfirst-svelte/src/AuthSessionExamples.svelte#auth-session-svelte-user
     </include>
   </Tab>
   <Tab value="Solid">
@@ -48,14 +48,14 @@ After [setting up authentication](/docs/auth/authentication), you can read the c
       ../examples/docs/todo-client-localfirst-ts/src/auth-session-snippets.ts#auth-session-ts-hook
     </include>
     <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-ts/src/auth-session-snippets.ts#auth-session-ts-user-id
+      ../examples/docs/todo-client-localfirst-ts/src/auth-session-snippets.ts#auth-session-ts-user
     </include>
   </Tab>
 </Tabs>
 
 ## Read rows for the current user
 
-Use the session's user ID with [`.where()`](/docs/reading/filters-and-sorting) to scope [queries](/docs/reading/queries) to the current user.
+Use the session's canonical user identity with [`.where()`](/docs/reading/filters-and-sorting) to scope [queries](/docs/reading/queries) to the current user.
 
 <Tabs
   groupId="jazz-framework"
@@ -92,7 +92,7 @@ Use the session's user ID with [`.where()`](/docs/reading/filters-and-sorting) t
 
 ## Insert a user-owned row
 
-[Insert](/docs/writing/writing-data) a row with the session's user ID to associate it with the current user.
+[Insert](/docs/writing/writing-data) a row with the session's canonical user identity to associate it with the current user.
 
 <Tabs
   groupId="jazz-framework"
@@ -143,16 +143,43 @@ field really has one of those names, mark that one field explicitly with
 See [Queries](/docs/reading/queries#edit-metadata-columns) for how to select and filter on these
 columns.
 
-On clients, writes are automatically attributed to the current session user. On backends,
+Jazz exposes admitted provider claims under `session.claims`; verified `iss` and `sub` override any
+same-named values supplied inside a provider claims payload. Jazz separately derives the reserved
+logical `session.user` from that exact `[iss, sub]` pair. Its portable value is an opaque canonical
+JSON encoding and is used for transaction authorship, `$createdBy`, `$updatedBy`, and provenance
+policies; it is interned only inside a running core. On backends,
 `await context.forRequest(...)` and `context.forSession(...)` both run as that user for permissions and
-also stamp authorship as that user.
+also stamp authorship as that user. Client bindings expose the same derived value as
+`session.user`; use it when an application needs to store or compare an author. Raw transport
+fields such as `issuer` and `user_id` are intentionally not exposed on public session objects.
+
+`session.user` is not a user-row reference, a display name, or the JWT `sub` alone. An application
+may store it in an ordinary string column to associate its own user/profile row with Jazz
+authorship, then compare that column with `session.user` or a row's `$createdBy`.
+The name `user` is reserved in policy evaluation. A provider claim named `user` remains visible in
+the public session's raw `claims` object and can be referenced explicitly as
+`session.claims["user"]`; it can never shadow the canonical `session.user` identity.
+
+For trusted invite or membership input where you have an issuer and subject but no active Jazz
+session, use the shared constructor:
+
+```ts
+import { userIdentity } from "jazz-tools";
+
+const invitedAuthor = userIdentity(trustedIssuer, trustedSubject);
+await db.insert(app.members, { roomId, author: invitedAuthor });
+```
+
+`userIdentity(...)` only validates and canonically encodes the two components. It does not verify a
+JWT, authenticate the subject, or admit that identity to Jazz; only use identity components obtained
+from a trusted authentication boundary.
 
 ### Attribution without impersonation
 
 Sometimes backend code should keep backend-level permissions but still record a user's identity in
 edit metadata. Use the attribution helpers for this:
 
-- `context.withAttribution(userId)`&hairsp;—&hairsp;stamps writes as the given user ID
+- `context.withAttribution(issuer, userId)`&hairsp;—&hairsp;stamps writes as the exact issuer/user pair
 - `context.withAttributionForSession(session)`&hairsp;—&hairsp;derives authorship from a resolved session
 - `await context.withAttributionForRequest(req)`&hairsp;—&hairsp;derives authorship from an authenticated request
 

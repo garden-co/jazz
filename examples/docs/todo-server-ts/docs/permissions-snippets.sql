@@ -1,12 +1,12 @@
 -- #region permissions-simple-sql
 -- Users can only read their own todos
-CREATE POLICY todos_select_policy ON todos FOR SELECT USING (owner_id = @session.user_id);
+CREATE POLICY todos_select_policy ON todos FOR SELECT USING (owner_id = @session.user);
 -- Users cannot create todos with different owners
-CREATE POLICY todos_insert_policy ON todos FOR INSERT WITH CHECK (owner_id = @session.user_id);
+CREATE POLICY todos_insert_policy ON todos FOR INSERT WITH CHECK (owner_id = @session.user);
 -- Users can update their own todos, but only if not already done
-CREATE POLICY todos_update_policy ON todos FOR UPDATE USING ((owner_id = @session.user_id) AND (done = FALSE)) WITH CHECK (owner_id = @session.user_id);
+CREATE POLICY todos_update_policy ON todos FOR UPDATE USING ((owner_id = @session.user) AND (done = FALSE)) WITH CHECK (owner_id = @session.user);
 -- Users can only delete their own todos
-CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (owner_id = @session.user_id);
+CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (owner_id = @session.user);
 -- #endregion permissions-simple-sql
 
 -- #region permissions-always-sql
@@ -28,7 +28,7 @@ CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (FALSE);
 -- #region permissions-combinators-sql
 -- Users can read a todo if they own it, or if it's not done and they can read its project
 CREATE POLICY todos_select_policy ON todos FOR SELECT USING (
-  (owner_id = @session.user_id)
+  (owner_id = @session.user)
   OR ((done = FALSE) AND (INHERITS SELECT VIA project))
 );
 -- #endregion permissions-combinators-sql
@@ -36,7 +36,7 @@ CREATE POLICY todos_select_policy ON todos FOR SELECT USING (
 -- #region permissions-session-claims-sql
 -- Users can read a todo if they own it, or if their JWT role claim is 'manager'
 CREATE POLICY todos_select_policy ON todos FOR SELECT USING (
-  (owner_id = @session.user_id)
+  (owner_id = @session.user)
   OR (@session.claims.role = 'manager')
 );
 -- #endregion permissions-session-claims-sql
@@ -51,11 +51,11 @@ CREATE POLICY todos_update_policy ON todos FOR UPDATE USING ((INHERITS UPDATE VI
 -- #region permissions-shares-sql
 -- Users can read a todo if they own it, or if someone shared it with them
 CREATE POLICY todos_select_policy ON todos FOR SELECT USING (
-  (owner_id = @session.user_id)
+  (owner_id = @session.user)
   OR EXISTS (
     SELECT 1 FROM todo_shares
     WHERE todo_shares.todo_id = todos.id
-    AND todo_shares.user_id = @session.user_id
+    AND todo_shares.user_id = @session.user
     AND todo_shares.can_read = TRUE
   )
 );

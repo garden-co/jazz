@@ -1,10 +1,15 @@
-import { createJazzContext, Db, Session, type JazzContext } from "../backend/index.js";
+import { createJazzContext, Db, type JazzContext } from "../backend/index.js";
+import type { Session } from "../runtime/context.js";
 import type { WasmSchema } from "../drivers/types.js";
 import type { CompiledPermissions } from "../permissions/index.js";
 import { deploy } from "../dev/catalogue.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../dev/dev-server.js";
 
 type PolicyTestAppSchema = { wasmSchema: WasmSchema };
+export type PolicyTestAppOptions = {
+  /** Override only the client credential; the local authority keeps its configured secret. */
+  clientBackendSecret?: string | null;
+};
 type ExpectLike = (value: unknown) => {
   not: {
     toThrow(expected?: unknown): void;
@@ -135,6 +140,7 @@ export async function createPolicyTestApp(
   app: PolicyTestAppSchema,
   permissions: CompiledPermissions,
   expectFn: ExpectLike,
+  options: PolicyTestAppOptions = {},
 ): Promise<PolicyTestApp> {
   const backendSecret = `backend-secret`;
   const adminSecret = `admin-secret`;
@@ -157,7 +163,10 @@ export async function createPolicyTestApp(
     permissions,
     driver: { type: "memory" },
     serverUrl: server.url,
-    backendSecret,
+    backendSecret:
+      options.clientBackendSecret === undefined
+        ? backendSecret
+        : (options.clientBackendSecret ?? undefined),
     env: "test",
   });
 

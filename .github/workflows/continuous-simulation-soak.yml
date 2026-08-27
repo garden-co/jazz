@@ -1,0 +1,165 @@
+name: Continuous simulation soak
+
+on:
+  schedule:
+    - cron: "30 7 * * *"
+  workflow_dispatch:
+    inputs:
+      sync_seeds: { description: "Sync seed count", required: false, default: "100" }
+      sync_commits: { description: "Commits per sync seed", required: false, default: "200" }
+      differential_seeds: { description: "Differential seed count", required: false, default: "50" }
+      differential_steps:
+        { description: "Steps per differential seed", required: false, default: "20" }
+      churn_depths:
+        { description: "Comma-separated churn depths", required: false, default: "10,1000" }
+
+permissions:
+  contents: read
+
+concurrency:
+  group: continuous-simulation-soak
+  cancel-in-progress: false
+
+jobs:
+  soak:
+    # A dispatch may be requested from another same-repository ref.  Do not run
+    # that ref on the persistent runner: both entry points are default-branch
+    # only, and checkout below independently pins the executed source.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: [self-hosted, Linux, X64, jazz-ci]
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    env:
+      SYNC_SEEDS: ${{ inputs.sync_seeds || '100' }}
+      SYNC_COMMITS: ${{ inputs.sync_commits || '200' }}
+      DIFFERENTIAL_SEEDS: ${{ inputs.differential_seeds || '50' }}
+      DIFFERENTIAL_STEPS: ${{ inputs.differential_steps || '20' }}
+      CHURN_DEPTHS: ${{ inputs.churn_depths || '10,1000' }}
+      # Two sequential 150-minute shards plus a separately bounded 15-minute
+      # cold compile leave 45 minutes for checkout, artifacts, and reporting.
+      SHARD_BUDGET_SECONDS: "9000"
+      PRECOMPILE_TIMEOUT_SECONDS: "900"
+      # GNU timeout's 30s kill grace makes this phase's hard ceiling 930s.
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Configure runner-local paths
+        run: |
+          echo "SOAK_DIR=$RUNNER_TEMP/simulation-soak" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/cargo-target" >> "$GITHUB_ENV"
+      - name: Record trusted source revision
+        id: source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Runner baseline
+        run: |
+          set -euo pipefail
+          mkdir -p "$SOAK_DIR"
+          df -h > "$SOAK_DIR/df-before.txt"
+          free -h > "$SOAK_DIR/memory-before.txt"
+          sccache --show-stats > "$SOAK_DIR/sccache-before.txt" || true
+      - name: Precompile exact Jazz soak test binary
+        id: precompile
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          started="$(date -u +%FT%TZ)"
+          timeout --kill-after=30s "${PRECOMPILE_TIMEOUT_SECONDS}s" \
+            cargo test -p jazz --lib --no-default-features \
+              --features testing,transport-compression-zstd --no-run \
+            >"$SOAK_DIR/precompile.log" 2>&1
+          status=$?
+          set -e
+          result=passed
+          if ((status == 124 || status == 137)); then result=timeout; elif ((status != 0)); then result=failed; fi
+          node -e 'const fs=require("fs"); const [file,started,status,result,sha]=process.argv.slice(1); fs.writeFileSync(file, JSON.stringify({schema_version:1,phase:"precompile",started_at:started,status:result,exit_code:Number(status),sha},null,2)+"\n")' \
+            "$SOAK_DIR/precompile.json" "$started" "$status" "$result" "$(git rev-parse HEAD)"
+          exit "$status"
+      - name: Run deterministic shard 1 of 2
+        id: shard_one
+        if: steps.precompile.outcome == 'success'
+        continue-on-error: true
+        run: dev/gates/run-continuous-simulation-soak.sh --output "$SOAK_DIR/shard-1" --shard-index 1 --shard-count 2 --sync-seeds "$SYNC_SEEDS" --sync-commits "$SYNC_COMMITS" --differential-seeds "$DIFFERENTIAL_SEEDS" --differential-steps "$DIFFERENTIAL_STEPS" --churn-depths "$CHURN_DEPTHS" --watchdog-seconds 80 --budget-seconds "$SHARD_BUDGET_SECONDS"
+      - name: Run deterministic shard 2 of 2
+        id: shard_two
+        if: steps.precompile.outcome == 'success'
+        continue-on-error: true
+        run: dev/gates/run-continuous-simulation-soak.sh --output "$SOAK_DIR/shard-2" --shard-index 2 --shard-count 2 --sync-seeds "$SYNC_SEEDS" --sync-commits "$SYNC_COMMITS" --differential-seeds "$DIFFERENTIAL_SEEDS" --differential-steps "$DIFFERENTIAL_STEPS" --churn-depths "$CHURN_DEPTHS" --watchdog-seconds 80 --budget-seconds "$SHARD_BUDGET_SECONDS"
+      - name: Runner final snapshot
+        if: always()
+        run: |
+          df -h > "$SOAK_DIR/df-after.txt"
+          free -h > "$SOAK_DIR/memory-after.txt"
+          sccache --show-stats > "$SOAK_DIR/sccache-after.txt" || true
+      - name: Upload soak receipts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: continuous-simulation-soak-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/simulation-soak
+          retention-days: 14
+          if-no-files-found: warn
+      - name: Fail job when a shard failed
+        if: ${{ steps.precompile.outcome == 'failure' || steps.shard_one.outcome == 'failure' || steps.shard_two.outcome == 'failure' }}
+        run: exit 1
+
+  report-nightly:
+    # This separate job is the only holder of the issue token. It consumes only
+    # artifacts produced by trusted default-branch scheduled code.
+    if: ${{ always() && github.event_name == 'schedule' }}
+    needs: soak
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - name: Download soak receipts
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: continuous-simulation-soak-${{ github.run_id }}-${{ github.run_attempt }}
+          path: soak-receipts
+      - name: Publish deduplicated nightly failures
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const fs = require("fs"), path = require("path");
+            const summaries = [1, 2].flatMap(n => { const f = path.join("soak-receipts", `shard-${n}`, "summary.json"); return fs.existsSync(f) ? [JSON.parse(fs.readFileSync(f, "utf8"))] : []; });
+            const failures = summaries.flatMap(s => s.failures || []);
+            const precompileFile = path.join("soak-receipts", "precompile.json");
+            if (fs.existsSync(precompileFile)) {
+              const precompile = JSON.parse(fs.readFileSync(precompileFile, "utf8"));
+              if (precompile.status !== "passed") failures.push({suite:"precompile",seed:0,status:precompile.status,sha:precompile.sha,config:{sync_commits:1,differential_steps:1,churn_depths:"1",watchdog_seconds:900,effective_timeout_seconds:900}});
+            }
+            if (!failures.length) return;
+            const issues = await github.paginate(github.rest.issues.listForRepo, { ...context.repo, state: "all", per_page: 100 });
+            const reportErrors = [];
+            for (const f of failures) {
+              try {
+              const fail = message => { throw new Error(`invalid soak receipt: ${message}`); };
+                if (!["sync", "differential", "soak", "precompile"].includes(f.suite)) fail("suite");
+              if (!["failed", "timeout", "budget_exhausted"].includes(f.status)) fail("status");
+              if (!Number.isSafeInteger(f.seed) || f.seed < 0 || f.seed > 9_999_999 || (f.suite === "soak" && f.seed !== 0)) fail("seed");
+                const c = f.config, sha = f.sha || summaries.find(s => s.failures?.includes(f))?.sha;
+              if (!c || !/^[0-9a-f]{40}$/.test(sha || "")) fail("config or SHA");
+              for (const key of ["sync_commits", "differential_steps", "watchdog_seconds", "effective_timeout_seconds"]) {
+                if (!Number.isSafeInteger(c[key]) || c[key] < 1 || c[key] > 10_000) fail(key);
+              }
+              if (c.effective_timeout_seconds > c.watchdog_seconds) fail("effective timeout");
+              if (typeof c.churn_depths !== "string" || !/^[1-9][0-9]*(,[1-9][0-9]*)*$/.test(c.churn_depths) || c.churn_depths.split(",").some(value => Number(value) > 100_000)) fail("churn depths");
+              const key = `continuous-simulation-soak:${f.suite}:${f.seed}:${c.sync_commits}:${c.differential_steps}:${c.churn_depths}:${c.effective_timeout_seconds}`, marker = `<!-- ${key} -->`;
+              const env = f.suite === "sync" ? `JAZZ_SEED=${f.seed} JAZZ_COMMIT_COUNT=${c.sync_commits}` : `JAZZ_SEED=${f.seed} JAZZ_DIFFERENTIAL_STEP_COUNT=${c.differential_steps} JAZZ_DIFFERENTIAL_CHURN_DEPTHS=${c.churn_depths}`;
+              const test = f.suite === "sync" ? "node::tests::sync::convergence_and_fates::m3_seeded_sync_interleavings_converge_against_oracle -- --exact" : "node::tests::harness::m3_maintained_one_shot_differential_oracle -- --exact --ignored";
+                const replay = f.suite === "soak" ? "Re-run the trusted workflow with a larger bounded budget." : f.suite === "precompile" ? "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-target} timeout --kill-after=30s 900s cargo test -p jazz --lib --no-default-features --features testing,transport-compression-zstd --no-run" : `CARGO_TARGET_DIR=\${CARGO_TARGET_DIR:-target} timeout --kill-after=30s ${c.effective_timeout_seconds}s env ${env} cargo test -p jazz --lib --no-default-features --features testing,transport-compression-zstd ${test}`;
+              const url = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`, body = `🤖 Nightly simulation soak failed.\n${marker}\n\nSHA: \`${sha}\`\nResult: \`${f.status}\`\n\nReplay:\n\`\`\`sh\n${replay}\n\`\`\`\n\n[Run](${url}) · [Artifacts](${url}#artifacts)`;
+              const existing = issues.find(i => i.body?.includes(marker));
+              if (existing) await github.rest.issues.update({ ...context.repo, issue_number: existing.number, title: `Simulation soak failure: ${f.suite} seed ${f.seed}`, body, state: "open" }); else await github.rest.issues.create({ ...context.repo, title: `Simulation soak failure: ${f.suite} seed ${f.seed}`, body });
+              } catch (error) {
+                reportErrors.push(`${typeof f?.suite === "string" ? f.suite : "unknown"}: ${error instanceof Error ? error.message : String(error)}`);
+              }
+            }
+            if (reportErrors.length) core.warning(`Could not publish ${reportErrors.length} soak issue(s): ${reportErrors.join(" | ")}`);

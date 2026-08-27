@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { WebSocket as UndiciWebSocket } from "undici";
+import { userIdentity } from "jazz-tools";
 import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
 import permissions from "../permissions.js";
 import { app } from "../schema.js";
@@ -166,22 +167,27 @@ describe("Todo Server Integration", () => {
       const bobTitle = `Bob private ${Date.now()}`;
       const aliceId = randomUUID();
       const bobId = randomUUID();
+      const issuer = "urn:jazz:docs";
+      const aliceOwner = userIdentity(issuer, aliceId);
+      const bobOwner = userIdentity(issuer, bobId);
 
       const createAlice = await fetch(`${baseUrl}/todos`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: aliceTitle, owner_id: aliceId }),
+        body: JSON.stringify({ title: aliceTitle, owner_id: aliceOwner }),
       });
       expect(createAlice.status).toBe(201);
       const aliceTodo: Todo = await createAlice.json();
+      expect(aliceTodo.owner_id).toBe(aliceOwner);
 
       const createBob = await fetch(`${baseUrl}/todos`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: bobTitle, owner_id: bobId }),
+        body: JSON.stringify({ title: bobTitle, owner_id: bobOwner }),
       });
       expect(createBob.status).toBe(201);
       const bobTodo: Todo = await createBob.json();
+      expect(bobTodo.owner_id).toBe(bobOwner);
 
       const aliceViewRes = await fetch(`${baseUrl}/todos/as/${aliceId}`);
       expect(aliceViewRes.status).toBe(200);
@@ -264,9 +270,12 @@ describe("Todo Server Integration", () => {
         0,
       );
 
-      const listRes = await fetch(`${server2.baseUrl}/todos`);
-      expect(listRes.status).toBe(200);
-      const todos: Todo[] = await listRes.json();
+      // This receipt is specifically about the local Fjall store surviving a
+      // cold restart. Read it explicitly at Local: an Edge read asks the
+      // upstream for canonical membership, and its read-your-writes behavior
+      // immediately after reopening is intentionally tracked separately in
+      // https://github.com/garden-co/jazz/issues/1995.
+      const todos = await server2.db.all(app.todos, { tier: "local" });
 
       // Both todos should be present
       expect(todos.length).toBe(2);

@@ -5,17 +5,23 @@ use super::*;
 #[test]
 fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
     let schema = relation_schema();
-    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
-    db.insert_with_id(
+    let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
+    db.insert(
         "users",
-        row(0xa1),
         BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa1)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "users",
-        row(0xb1),
         BTreeMap::from([("name".to_owned(), Value::String("bob".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xb1)),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -43,13 +49,16 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
     );
     assert!(snapshot.edges.is_empty());
 
-    db.insert_with_id(
+    db.insert(
         "todos",
-        row(0x11),
         BTreeMap::from([
             ("title".to_owned(), Value::String("first".to_owned())),
             ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x11)),
+            ..Default::default()
+        },
     )
     .unwrap();
     db.tick().unwrap();
@@ -86,6 +95,7 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
         "todos",
         row(0x11),
         BTreeMap::from([("owner_id".to_owned(), Value::Uuid(row(0xb1).0))]),
+        Default::default(),
     )
     .unwrap();
     let removed_child = block_on(subscription.next_raw()).unwrap();
@@ -99,6 +109,7 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
         "todos",
         row(0x11),
         BTreeMap::from([("owner_id".to_owned(), Value::Uuid(row(0xa1).0))]),
+        Default::default(),
     )
     .unwrap();
     let restored_child = block_on(subscription.next_raw()).unwrap();
@@ -112,11 +123,14 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
 #[test]
 fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     let schema = relation_schema();
-    let db = open_db(0xc4, AuthorId::from_bytes([0xc4; 16]), &schema);
-    db.insert_with_id(
+    let db = open_db(0xc4, AuthorSubject::for_test_bytes([0xc4; 16]), &schema);
+    db.insert(
         "users",
-        row(0xa1),
         BTreeMap::from([("name".to_owned(), Value::String("zulu".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa1)),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -134,10 +148,13 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     let snapshot = snapshot_from_event(initial);
     assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1)]);
 
-    db.insert_with_id(
+    db.insert(
         "users",
-        row(0xb1),
         BTreeMap::from([("name".to_owned(), Value::String("alpha".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xb1)),
+            ..Default::default()
+        },
     )
     .unwrap();
     db.tick().unwrap();
@@ -145,6 +162,7 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     let SubscriptionEvent::Delta {
         reset,
         added,
+        updated,
         removed,
         terminal_operations,
         ..
@@ -154,18 +172,11 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     };
     assert!(!*reset, "root reordering must remain incremental");
     assert!(removed.is_empty());
-    assert!(added.is_empty());
-    assert!(
-        matches!(
-            terminal_operations.as_slice(),
-            [groove::ivm::TerminalOperation {
-                path,
-                edit: groove::ivm::TerminalEdit::Insert { index: 0, .. },
-                ..
-            }] if path.is_empty()
-        ),
-        "unexpected root operations: {terminal_operations:?}"
-    );
+    assert!(updated.is_empty());
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row.row_uuid(), row(0xb1));
+    assert_eq!(added[0].index, 0);
+    assert!(terminal_operations.is_empty());
 
     let binding_view_key = BindingViewKey::new(
         prepared_query.shape().shape_id(),
@@ -200,6 +211,7 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
         "users",
         row(0xb1),
         BTreeMap::from([("name".to_owned(), Value::String("zzzz".to_owned()))]),
+        Default::default(),
     )
     .unwrap();
     db.tick().unwrap();
@@ -207,6 +219,7 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     let SubscriptionEvent::Delta {
         reset,
         added,
+        updated,
         removed,
         terminal_operations,
         ..
@@ -217,61 +230,64 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     assert!(!*reset);
     assert!(removed.is_empty());
     assert!(added.is_empty());
-    assert!(matches!(
-        terminal_operations.as_slice(),
-        [
-            groove::ivm::TerminalOperation {
-                path: remove_path,
-                edit: groove::ivm::TerminalEdit::Remove { .. },
-                ..
-            },
-            groove::ivm::TerminalOperation {
-                path: insert_path,
-                edit: groove::ivm::TerminalEdit::Insert { index: 1, .. },
-                ..
-            }
-        ] if remove_path.is_empty() && insert_path.is_empty()
-    ));
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].row.row_uuid(), row(0xb1));
+    assert_eq!(updated[0].previous_index, Some(0));
+    assert_eq!(updated[0].index, 1);
+    assert!(terminal_operations.is_empty());
 
-    db.delete("users", row(0xa1)).unwrap();
+    db.delete("users", row(0xa1), Default::default()).unwrap();
     db.tick().unwrap();
     let removed = block_on(subscription.next_raw()).unwrap();
     let SubscriptionEvent::Delta { reset, .. } = &removed else {
         panic!("expected removal splice")
     };
     assert!(!*reset);
-    assert!(matches!(
+    let SubscriptionEvent::Delta {
         removed,
-        SubscriptionEvent::Delta { terminal_operations, .. }
-            if matches!(
-                terminal_operations.as_slice(),
-                [groove::ivm::TerminalOperation {
-                    path,
-                    edit: groove::ivm::TerminalEdit::Remove { .. },
-                    ..
-                }] if path.is_empty()
-            )
-    ));
+        terminal_operations,
+        ..
+    } = removed
+    else {
+        unreachable!()
+    };
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0].row_uuid, row(0xa1));
+    assert_eq!(removed[0].index, 0);
+    assert!(terminal_operations.is_empty());
 }
 
+/// A normal reader rehydrates a structured message subscription after a
+/// separately invite-scoped connection writes its membership.
+///
+/// Alice's invite-scoped connection ──membership──► server ──coverage──►
+/// Alice's normal connection ──structured subscribe──► message + sender.
+///
+/// This also exercises the bounded-stack peer admission path: the server must
+/// process the membership commit without carrying inactive Subscribe-arm state.
 #[test]
 fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_shot() {
     let schema = membership_scoped_relation_schema();
-    let reader = AuthorId::from_bytes([0xb2; 16]);
-    let normal_claims =
-        BTreeMap::from([("user_id".to_owned(), Value::String(reader.0.to_string()))]);
+    let reader = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let normal_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("sub"),
+        Value::String(reader.test_uuid().to_string()),
+    )]);
     let invite_claims = BTreeMap::from([
-        ("user_id".to_owned(), Value::String(reader.0.to_string())),
         (
-            "join_code".to_owned(),
+            crate::query::provider_claim_key("sub"),
+            Value::String(reader.test_uuid().to_string()),
+        ),
+        (
+            crate::query::provider_claim_key("join_code"),
             Value::String("invite-code".to_owned()),
         ),
     ]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc4, reader, &schema);
     let invite_client = open_db(0xc5, reader, &schema);
-    client.set_identity_claims(reader, normal_claims.clone());
-    invite_client.set_identity_claims(reader, invite_claims.clone());
+    client.set_test_provider_claims(reader, normal_claims.clone());
+    invite_client.set_test_provider_claims(reader, invite_claims.clone());
     // The normal connection remains live while a separately scoped invite
     // connection writes its membership. This is the production handoff.
     let (client_transport, server_transport) = duplex();
@@ -380,14 +396,20 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
     client.detach_query(normal_chat_attachment);
 
     let accepted_membership = invite_client
-        .insert_with_id(
+        .insert(
             "chat_members",
-            row(0xc2),
             BTreeMap::from([
                 ("chat_id".to_owned(), Value::Uuid(chat.0)),
-                ("user_id".to_owned(), Value::String(reader.0.to_string())),
+                (
+                    "user_id".to_owned(),
+                    Value::String(reader.test_uuid().to_string()),
+                ),
                 ("join_code".to_owned(), Value::Nullable(None)),
             ]),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xc2)),
+                ..Default::default()
+            },
         )
         .unwrap();
     invite_client.tick().unwrap();
@@ -488,17 +510,23 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
 #[test]
 fn flat_subscription_hydrates_in_declared_root_order() {
     let schema = relation_schema();
-    let db = open_db(0xd4, AuthorId::from_bytes([0xd4; 16]), &schema);
-    db.insert_with_id(
+    let db = open_db(0xd4, AuthorSubject::for_test_bytes([0xd4; 16]), &schema);
+    db.insert(
         "users",
-        row(0xa1),
         BTreeMap::from([("name".to_owned(), Value::String("zulu".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa1)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "users",
-        row(0xb1),
         BTreeMap::from([("name".to_owned(), Value::String("alpha".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xb1)),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -513,12 +541,15 @@ fn flat_subscription_hydrates_in_declared_root_order() {
 #[test]
 fn flat_subscription_hydrates_in_default_row_id_order() {
     let schema = relation_schema();
-    let db = open_db(0xd7, AuthorId::from_bytes([0xd7; 16]), &schema);
+    let db = open_db(0xd7, AuthorSubject::for_test_bytes([0xd7; 16]), &schema);
     for id in [0xb1, 0xa1] {
-        db.insert_with_id(
+        db.insert(
             "users",
-            row(id),
             BTreeMap::from([("name".to_owned(), Value::String(format!("user-{id}")))]),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
@@ -533,37 +564,41 @@ fn flat_subscription_hydrates_in_default_row_id_order() {
 #[test]
 fn flat_subscription_inserts_at_declared_root_position() {
     let schema = relation_schema();
-    let db = open_db(0xd5, AuthorId::from_bytes([0xd5; 16]), &schema);
+    let db = open_db(0xd5, AuthorSubject::for_test_bytes([0xd5; 16]), &schema);
     let query = Query::from("users").order_by("name", OrderDirection::Desc);
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
     let _initial = block_on(subscription.next_raw()).unwrap();
 
     for (id, name) in [(0xa1, "zulu"), (0xb1, "zzzz")] {
-        db.insert_with_id(
+        db.insert(
             "users",
-            row(id),
             BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
         )
         .unwrap();
         db.tick().unwrap();
         let event = block_on(subscription.next_raw()).unwrap();
         if id == 0xb1 {
-            assert!(
-                matches!(
-                    &event,
-                    SubscriptionEvent::Delta { terminal_operations, .. }
-                        if matches!(
-                            terminal_operations.as_slice(),
-                            [groove::ivm::TerminalOperation {
-                                path,
-                                edit: groove::ivm::TerminalEdit::Insert { index: 0, .. },
-                                ..
-                            }] if path.is_empty()
-                        )
-                ),
-                "unexpected flat root event: {event:?}"
-            );
+            let SubscriptionEvent::Delta {
+                added,
+                updated,
+                removed,
+                terminal_operations,
+                ..
+            } = &event
+            else {
+                panic!("unexpected flat root event: {event:?}");
+            };
+            assert_eq!(added.len(), 1);
+            assert_eq!(added[0].row.row_uuid(), row(0xb1));
+            assert_eq!(added[0].index, 0);
+            assert!(updated.is_empty());
+            assert!(removed.is_empty());
+            assert!(terminal_operations.is_empty());
         }
     }
 
@@ -571,18 +606,28 @@ fn flat_subscription_inserts_at_declared_root_position() {
         "users",
         row(0xa1),
         BTreeMap::from([("name".to_owned(), Value::String("yyyy".to_owned()))]),
+        Default::default(),
     )
     .unwrap();
     db.tick().unwrap();
     let event = block_on(subscription.next_raw()).unwrap();
-    assert!(matches!(
-        event,
-        SubscriptionEvent::Delta { terminal_operations, .. }
-            if terminal_operations.iter().any(|operation| matches!(
-                operation.edit,
-                groove::ivm::TerminalEdit::Update { .. }
-            ))
-    ));
+    let SubscriptionEvent::Delta {
+        added,
+        updated,
+        removed,
+        terminal_operations,
+        ..
+    } = event
+    else {
+        panic!("expected an indexed root update");
+    };
+    assert!(added.is_empty());
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].row.row_uuid(), row(0xa1));
+    assert_eq!(updated[0].previous_index, Some(1));
+    assert_eq!(updated[0].index, 1);
+    assert!(removed.is_empty());
+    assert!(terminal_operations.is_empty());
 }
 
 #[test]
@@ -594,20 +639,22 @@ fn flat_subscription_updates_with_nullable_sort_payload() {
                 .nullable_column("rank", PublicColumnType::Integer),
         ),
     );
-    let db = open_db(0xd6, AuthorId::from_bytes([0xd6; 16]), &schema);
-    db.insert_with_id(
+    let db = open_db(0xd6, AuthorSubject::for_test_bytes([0xd6; 16]), &schema);
+    db.insert(
         "users",
-        row(0xa1),
         BTreeMap::from([
             ("name".to_owned(), Value::String("before".to_owned())),
             ("rank".to_owned(), Value::Nullable(None)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa1)),
+            ..Default::default()
+        },
     )
     .unwrap();
     for (id, rank) in [(0xb1, 1), (0xc1, 2)] {
-        db.insert_with_id(
+        db.insert(
             "users",
-            row(id),
             BTreeMap::from([
                 ("name".to_owned(), Value::String(format!("rank-{rank}"))),
                 (
@@ -615,6 +662,10 @@ fn flat_subscription_updates_with_nullable_sort_payload() {
                     Value::Nullable(Some(Box::new(Value::I32(rank)))),
                 ),
             ]),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
@@ -627,31 +678,27 @@ fn flat_subscription_updates_with_nullable_sort_payload() {
         "users",
         row(0xa1),
         BTreeMap::from([("name".to_owned(), Value::String("after".to_owned()))]),
+        Default::default(),
     )
     .unwrap();
     db.tick().unwrap();
     let SubscriptionEvent::Delta {
+        added,
+        updated,
+        removed,
         terminal_operations,
         ..
     } = block_on(subscription.next_raw()).unwrap()
     else {
-        panic!("title-only update must emit a terminal delta");
+        panic!("title-only update must emit an indexed delta");
     };
-    assert!(
-        terminal_operations
-            .iter()
-            .any(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Update { .. })),
-        "title-only update must retain its root payload"
-    );
-    assert!(
-        !terminal_operations.iter().any(|operation| matches!(
-            operation.edit,
-            groove::ivm::TerminalEdit::Move { .. }
-                | groove::ivm::TerminalEdit::Remove { .. }
-                | groove::ivm::TerminalEdit::Insert { .. }
-        )),
-        "unchanged nullable sort key must not reposition the root"
-    );
+    assert!(added.is_empty());
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].row.row_uuid(), row(0xa1));
+    assert_eq!(updated[0].previous_index, Some(0));
+    assert_eq!(updated[0].index, 0);
+    assert!(removed.is_empty());
+    assert!(terminal_operations.is_empty());
 }
 
 #[test]
@@ -663,15 +710,18 @@ fn flat_subscription_update_respects_descending_row_id_tie_break() {
                 .column("rank", PublicColumnType::Integer),
         ),
     );
-    let db = open_db(0xd8, AuthorId::from_bytes([0xd8; 16]), &schema);
+    let db = open_db(0xd8, AuthorSubject::for_test_bytes([0xd8; 16]), &schema);
     for (id, rank) in [(0xf0, 1), (0xe0, 1), (0x10, 2)] {
-        db.insert_with_id(
+        db.insert(
             "users",
-            row(id),
             BTreeMap::from([
                 ("name".to_owned(), Value::String(format!("user-{id}"))),
                 ("rank".to_owned(), Value::I32(rank)),
             ]),
+            InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
@@ -690,23 +740,27 @@ fn flat_subscription_update_respects_descending_row_id_tie_break() {
         "users",
         row(0x10),
         BTreeMap::from([("rank".to_owned(), Value::I32(1))]),
+        Default::default(),
     )
     .unwrap();
     db.tick().unwrap();
     let SubscriptionEvent::Delta {
+        added,
+        updated,
+        removed,
         terminal_operations,
         ..
     } = block_on(subscription.next_raw()).unwrap()
     else {
-        panic!("rank update must emit a terminal delta");
+        panic!("rank update must emit an indexed delta");
     };
-    assert!(
-        !terminal_operations.iter().any(|operation| matches!(
-            operation.edit,
-            groove::ivm::TerminalEdit::Move { index: 0, .. }
-        )),
-        "the smallest descending id must not move to the front: {terminal_operations:?}"
-    );
+    assert!(added.is_empty());
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].row.row_uuid(), row(0x10));
+    assert_eq!(updated[0].previous_index, Some(2));
+    assert_eq!(updated[0].index, 2);
+    assert!(removed.is_empty());
+    assert!(terminal_operations.is_empty());
 }
 
 #[test]
@@ -718,15 +772,18 @@ fn flat_subscription_update_moves_largest_descending_row_id_to_front() {
                 .column("rank", PublicColumnType::Integer),
         ),
     );
-    let db = open_db(0xd9, AuthorId::from_bytes([0xd9; 16]), &schema);
+    let db = open_db(0xd9, AuthorSubject::for_test_bytes([0xd9; 16]), &schema);
     for (id, rank) in [(0xf0, 1), (0xe0, 1), (0xff, 2)] {
-        db.insert_with_id(
+        db.insert(
             "users",
-            row(id),
             BTreeMap::from([
                 ("name".to_owned(), Value::String(format!("user-{id}"))),
                 ("rank".to_owned(), Value::I32(rank)),
             ]),
+            InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
@@ -741,34 +798,41 @@ fn flat_subscription_update_moves_largest_descending_row_id_to_front() {
         "users",
         row(0xff),
         BTreeMap::from([("rank".to_owned(), Value::I32(1))]),
+        Default::default(),
     )
     .unwrap();
     db.tick().unwrap();
     let SubscriptionEvent::Delta {
+        added,
+        updated,
+        removed,
         terminal_operations,
         ..
     } = block_on(subscription.next_raw()).unwrap()
     else {
-        panic!("rank update must emit a terminal delta");
+        panic!("rank update must emit an indexed delta");
     };
-    assert!(
-        terminal_operations.iter().any(|operation| matches!(
-            operation.edit,
-            groove::ivm::TerminalEdit::Move { index: 0, .. }
-        )),
-        "the largest descending id must move to the front: {terminal_operations:?}"
-    );
+    assert!(added.is_empty());
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].row.row_uuid(), row(0xff));
+    assert_eq!(updated[0].previous_index, Some(2));
+    assert_eq!(updated[0].index, 0);
+    assert!(removed.is_empty());
+    assert!(terminal_operations.is_empty());
 }
 
 #[test]
 fn flat_subscription_shifts_offset_window_when_leading_row_is_deleted() {
     let schema = relation_schema();
-    let db = open_db(0xd8, AuthorId::from_bytes([0xd8; 16]), &schema);
+    let db = open_db(0xd8, AuthorSubject::for_test_bytes([0xd8; 16]), &schema);
     for (id, name) in [(0xa1, "a"), (0xb1, "b"), (0xc1, "c"), (0xd1, "d")] {
-        db.insert_with_id(
+        db.insert(
             "users",
-            row(id),
             BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
@@ -781,28 +845,120 @@ fn flat_subscription_shifts_offset_window_when_leading_row_is_deleted() {
     let initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
     assert_eq!(row_ids(&initial.rows), vec![row(0xb1), row(0xc1)]);
 
-    db.delete("users", row(0xa1)).unwrap();
+    db.delete("users", row(0xa1), Default::default()).unwrap();
     db.tick().unwrap();
     let event = block_on(subscription.next_raw()).unwrap();
-    assert!(matches!(
-        event,
-        SubscriptionEvent::Delta { terminal_operations, .. }
-            if terminal_operations.iter().any(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Remove { .. }))
-                && terminal_operations.iter().any(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Insert { index: 1, .. }))
-    ));
+    let SubscriptionEvent::Delta {
+        added,
+        updated,
+        removed,
+        terminal_operations,
+        ..
+    } = event
+    else {
+        panic!("expected an indexed window shift");
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row.row_uuid(), row(0xd1));
+    assert_eq!(added[0].index, 1);
+    assert!(updated.is_empty());
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0].row_uuid, row(0xb1));
+    assert_eq!(removed[0].index, 0);
+    assert!(terminal_operations.is_empty());
+}
+
+/// Alice removes two adjacent visible rows in one transaction while Bob keeps
+/// an ordered, offset subscription. Both removals retain their positions in
+/// the complete result before that transaction's frame is applied.
+///
+/// alice ──delete b,c──► maintained view ──one delta──► bob
+#[test]
+fn flat_subscription_batch_removals_keep_pre_frame_indices() {
+    let schema = relation_schema();
+    let db = open_db(0xda, AuthorSubject::for_test_bytes([0xda; 16]), &schema);
+    for (id, name) in [(0xa1, "a"), (0xb1, "b"), (0xc1, "c"), (0xd1, "d")] {
+        db.insert(
+            "users",
+            BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+            InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let prepared_query = prepared(
+        &db,
+        &Query::from("users").order_by("name", OrderDirection::Asc),
+    );
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    let initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(
+        row_ids(&initial.rows),
+        vec![row(0xa1), row(0xb1), row(0xc1), row(0xd1)]
+    );
+
+    let tx = block_on(db.mergeable_tx()).unwrap();
+    block_on(tx.delete("users", row(0xb1), Default::default())).unwrap();
+    block_on(tx.delete("users", row(0xc1), Default::default())).unwrap();
+    block_on(tx.commit()).unwrap();
+    db.tick().unwrap();
+
+    let SubscriptionEvent::Delta {
+        added,
+        updated,
+        removed,
+        terminal_operations,
+        ..
+    } = block_on(subscription.next_raw()).unwrap()
+    else {
+        panic!("expected one indexed batch-removal delta");
+    };
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert!(terminal_operations.is_empty());
+    assert_eq!(
+        removed
+            .iter()
+            .map(|removed| (removed.row_uuid, removed.index))
+            .collect::<Vec<_>>(),
+        vec![(row(0xb1), 1), (row(0xc1), 2)],
+        "removed indices address the snapshot before this delta"
+    );
+
+    db.update(
+        "users",
+        row(0xd1),
+        BTreeMap::from([("name".to_owned(), Value::String("z".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    db.tick().unwrap();
+    let SubscriptionEvent::Delta { updated, .. } = block_on(subscription.next_raw()).unwrap()
+    else {
+        panic!("the retained root must remain indexed after a batch removal");
+    };
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].row.row_uuid(), row(0xd1));
+    assert_eq!(updated[0].previous_index, Some(1));
+    assert_eq!(updated[0].index, 1);
 }
 
 #[test]
 fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
     let schema = relation_schema();
-    let db = open_db(0xc2, AuthorId::from_bytes([0xc2; 16]), &schema);
-    db.insert_with_id(
+    let db = open_db(0xc2, AuthorSubject::for_test_bytes([0xc2; 16]), &schema);
+    db.insert(
         "todos",
-        row(0x21),
         BTreeMap::from([
             ("title".to_owned(), Value::String("parent".to_owned())),
             ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x21)),
+            ..Default::default()
+        },
     )
     .unwrap();
     let query = Query::from("todos")
@@ -816,13 +972,16 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
         Vec::<String>::new()
     );
 
-    db.insert_with_id(
+    db.insert(
         "comments",
-        row(0xc1),
         BTreeMap::from([
             ("body".to_owned(), Value::String("first".to_owned())),
             ("todo_id".to_owned(), Value::Uuid(row(0x21).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xc1)),
+            ..Default::default()
+        },
     )
     .unwrap();
     assert!(matches!(
@@ -838,6 +997,7 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
         "comments",
         row(0xc1),
         BTreeMap::from([("body".to_owned(), Value::String("edited".to_owned()))]),
+        Default::default(),
     )
     .unwrap();
     let SubscriptionEvent::Delta {
@@ -868,7 +1028,8 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
         "canonical replacement must address one stable child identity"
     );
 
-    db.delete("comments", row(0xc1)).unwrap();
+    db.delete("comments", row(0xc1), Default::default())
+        .unwrap();
     assert!(matches!(
         block_on(subscription.next_raw()).unwrap(),
         SubscriptionEvent::Delta { terminal_operations, .. }
@@ -878,13 +1039,16 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
             ))
     ));
 
-    db.insert_with_id(
+    db.insert(
         "comments",
-        row(0xc2),
         BTreeMap::from([
             ("body".to_owned(), Value::String("second".to_owned())),
             ("todo_id".to_owned(), Value::Uuid(row(0x21).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xc2)),
+            ..Default::default()
+        },
     )
     .unwrap();
     assert!(matches!(
@@ -896,28 +1060,32 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
             ))
     ));
 
-    db.delete("todos", row(0x21)).unwrap();
+    db.delete("todos", row(0x21), Default::default()).unwrap();
     assert!(matches!(
         block_on(subscription.next_raw()).unwrap(),
-        SubscriptionEvent::Delta { terminal_operations, .. }
-            if terminal_operations.iter().any(|operation| operation.path.is_empty() && matches!(
-                operation.edit,
-                groove::ivm::TerminalEdit::Remove { .. }
-            ))
+        SubscriptionEvent::Delta {
+            removed,
+            terminal_operations,
+            ..
+        } if removed.iter().any(|removed| removed.row_uuid == row(0x21))
+            && terminal_operations.iter().all(|operation| !operation.path.is_empty())
     ));
 }
 
 #[test]
 fn array_subquery_subscription_updates_child_order_limit_boundary() {
     let schema = relation_schema();
-    let db = open_db(0xc3, AuthorId::from_bytes([0xc3; 16]), &schema);
-    db.insert_with_id(
+    let db = open_db(0xc3, AuthorSubject::for_test_bytes([0xc3; 16]), &schema);
+    db.insert(
         "todos",
-        row(0x31),
         BTreeMap::from([
             ("title".to_owned(), Value::String("parent".to_owned())),
             ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x31)),
+            ..Default::default()
+        },
     )
     .unwrap();
     let query = Query::from("todos").array_subquery(
@@ -935,13 +1103,16 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
         Vec::<String>::new()
     );
 
-    db.insert_with_id(
+    db.insert(
         "comments",
-        row(0xd1),
         BTreeMap::from([
             ("body".to_owned(), Value::String("b".to_owned())),
             ("todo_id".to_owned(), Value::Uuid(row(0x31).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xd1)),
+            ..Default::default()
+        },
     )
     .unwrap();
     db.tick().unwrap();
@@ -954,13 +1125,16 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
         Vec::<String>::new()
     );
 
-    db.insert_with_id(
+    db.insert(
         "comments",
-        row(0xd2),
         BTreeMap::from([
             ("body".to_owned(), Value::String("c".to_owned())),
             ("todo_id".to_owned(), Value::Uuid(row(0x31).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xd2)),
+            ..Default::default()
+        },
     )
     .unwrap();
     db.tick().unwrap();
@@ -983,13 +1157,16 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     };
     expect_inserted_child(block_on(subscription.next_raw()).unwrap(), row(0xd2));
 
-    db.insert_with_id(
+    db.insert(
         "comments",
-        row(0xd3),
         BTreeMap::from([
             ("body".to_owned(), Value::String("a".to_owned())),
             ("todo_id".to_owned(), Value::Uuid(row(0x31).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xd3)),
+            ..Default::default()
+        },
     )
     .unwrap();
     db.tick().unwrap();
@@ -999,6 +1176,7 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
         "comments",
         row(0xd3),
         BTreeMap::from([("body".to_owned(), Value::String("z".to_owned()))]),
+        Default::default(),
     )
     .unwrap();
     db.tick().unwrap();
@@ -1008,28 +1186,43 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
 #[test]
 fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
     let schema = policy_relation_schema();
-    let member = AuthorId::from_bytes([0xa1; 16]);
-    let other = AuthorId::from_bytes([0xb1; 16]);
-    let spy = AuthorId::from_bytes([0xc1; 16]);
-    let db = open_db(0xc4, AuthorId::SYSTEM, &schema);
-    db.insert_with_id(
+    let member = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let other = AuthorSubject::for_test_bytes([0xb1; 16]);
+    let spy = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let db = open_db(0xc4, AuthorSubject::SYSTEM, &schema);
+    for identity in [member, other, spy] {
+        db.set_test_provider_claims(
+            identity,
+            BTreeMap::from([(
+                crate::query::provider_claim_key("sub"),
+                Value::Uuid(identity.test_uuid()),
+            )]),
+        );
+    }
+    db.insert(
         "todos",
-        row(0x41),
         BTreeMap::from([("title".to_owned(), Value::String("parent".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x41)),
+            ..Default::default()
+        },
     )
     .unwrap();
     for (id, body, owner) in [
         (0xe1, "member-visible", member),
         (0xe2, "other-visible", other),
     ] {
-        db.insert_with_id(
+        db.insert(
             "comments",
-            row(id),
             BTreeMap::from([
                 ("body".to_owned(), Value::String(body.to_owned())),
                 ("todo_id".to_owned(), Value::Uuid(row(0x41).0)),
-                ("owner".to_owned(), Value::Uuid(owner.0)),
+                ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
             ]),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
@@ -1040,7 +1233,7 @@ fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
     let admin = block_on(db.all_relation_snapshot_for_identity(
         &prepared_query,
         ReadOpts::default(),
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
     ))
     .unwrap();
     assert_eq!(
@@ -1071,24 +1264,30 @@ fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
 #[test]
 fn array_subquery_one_shot_and_maintained_subscription_are_equivalent() {
     let schema = relation_schema();
-    let db = open_db(0xc5, AuthorId::from_bytes([0xc5; 16]), &schema);
-    db.insert_with_id(
+    let db = open_db(0xc5, AuthorSubject::for_test_bytes([0xc5; 16]), &schema);
+    db.insert(
         "todos",
-        row(0x51),
         BTreeMap::from([
             ("title".to_owned(), Value::String("parent".to_owned())),
             ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x51)),
+            ..Default::default()
+        },
     )
     .unwrap();
     for (id, body) in [(0xf1, "first"), (0xf2, "second")] {
-        db.insert_with_id(
+        db.insert(
             "comments",
-            row(id),
             BTreeMap::from([
                 ("body".to_owned(), Value::String(body.to_owned())),
                 ("todo_id".to_owned(), Value::Uuid(row(0x51).0)),
             ]),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
@@ -1111,11 +1310,14 @@ fn array_subquery_one_shot_and_maintained_subscription_are_equivalent() {
 #[test]
 fn array_subquery_subscription_projects_late_root_and_existing_forward_target() {
     let schema = relation_schema();
-    let db = open_db(0xc7, AuthorId::from_bytes([0xc7; 16]), &schema);
-    db.insert_with_id(
+    let db = open_db(0xc7, AuthorSubject::for_test_bytes([0xc7; 16]), &schema);
+    db.insert(
         "users",
-        row(0xa1),
         BTreeMap::from([("name".to_owned(), Value::String("owner".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa1)),
+            ..Default::default()
+        },
     )
     .unwrap();
     let query = Query::from("todos")
@@ -1126,33 +1328,48 @@ fn array_subquery_subscription_projects_late_root_and_existing_forward_target() 
     let opened = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
     assert!(opened.rows.is_empty());
 
-    db.insert_with_id(
+    db.insert(
         "todos",
-        row(0x52),
         BTreeMap::from([
             ("title".to_owned(), Value::String("late root".to_owned())),
             ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x52)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    assert!(matches!(
-        block_on(subscription.next_raw()).unwrap(),
-        SubscriptionEvent::Delta { terminal_operations, .. }
-            if terminal_operations.iter().any(|operation| operation.path.is_empty() && matches!(
-                operation.edit,
-                groove::ivm::TerminalEdit::Insert { index: 0, .. }
-            ))
-    ));
+    let SubscriptionEvent::Delta {
+        added,
+        terminal_operations,
+        ..
+    } = block_on(subscription.next_raw()).unwrap()
+    else {
+        panic!("expected an indexed late-root insertion");
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row.row_uuid(), row(0x52));
+    assert_eq!(added[0].index, 0);
+    assert!(
+        terminal_operations
+            .iter()
+            .all(|operation| !operation.path.is_empty()),
+        "the root insertion is indexed while its existing child is a descendant patch"
+    );
 }
 
 #[test]
 fn array_subquery_subscription_projects_late_camel_case_root_and_existing_forward_target() {
     let schema = issue_schema();
-    let db = open_db(0xc8, AuthorId::from_bytes([0xc8; 16]), &schema);
-    db.insert_with_id(
+    let db = open_db(0xc8, AuthorSubject::for_test_bytes([0xc8; 16]), &schema);
+    db.insert(
         "projects",
-        row(0xa2),
         BTreeMap::from([("name".to_owned(), Value::String("project".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa2)),
+            ..Default::default()
+        },
     )
     .unwrap();
     let query = Query::from("issues").select(["title"]).array_subquery(
@@ -1163,35 +1380,47 @@ fn array_subquery_subscription_projects_late_camel_case_root_and_existing_forwar
     let opened = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
     assert!(opened.rows.is_empty());
 
-    db.insert_with_id(
+    db.insert(
         "issues",
-        row(0x53),
         issue_cells(
             "late issue",
             "open",
-            AuthorId::from_bytes([0xa8; 16]),
+            AuthorSubject::for_test_bytes([0xa8; 16]),
             row(0xa2),
             1,
             &[],
             None,
         ),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x53)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    assert!(matches!(
-        block_on(subscription.next_raw()).unwrap(),
-        SubscriptionEvent::Delta { terminal_operations, .. }
-            if terminal_operations.iter().any(|operation| operation.path.is_empty() && matches!(
-                operation.edit,
-                groove::ivm::TerminalEdit::Insert { index: 0, .. }
-            ))
-    ));
+    let SubscriptionEvent::Delta {
+        added,
+        terminal_operations,
+        ..
+    } = block_on(subscription.next_raw()).unwrap()
+    else {
+        panic!("expected an indexed late-root insertion");
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row.row_uuid(), row(0x53));
+    assert_eq!(added[0].index, 0);
+    assert!(
+        terminal_operations
+            .iter()
+            .all(|operation| !operation.path.is_empty()),
+        "the root insertion is indexed while its existing child is a descendant patch"
+    );
 }
 
 #[test]
 fn array_subquery_remote_subscription_hydrates_edge_referenced_child_rows() {
     let schema = relation_schema();
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let client_author = AuthorId::from_bytes([0xc6; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let client_author = AuthorSubject::for_test_bytes([0xc6; 16]);
     let client = open_db(0xc6, client_author, &schema);
     let (client_transport, server_transport) = byte_duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
@@ -1290,18 +1519,21 @@ fn array_subquery_remote_subscription_hydrates_edge_referenced_child_rows() {
 }
 
 #[test]
-fn ordered_suffix_delta_preserves_typed_union_occurrence_ids_for_duplicate_rows() {
+fn indexed_root_delta_preserves_typed_union_occurrence_ids_for_duplicate_rows() {
     let schema = schema();
-    let db = open_db(0xd1, AuthorId::SYSTEM, &schema);
+    let db = open_db(0xd1, AuthorSubject::SYSTEM, &schema);
     let root = row(0xd2);
-    db.insert_with_id(
+    db.insert(
         "todos",
-        root,
         BTreeMap::from([
             ("title".to_owned(), Value::String("same source".to_owned())),
             ("done".to_owned(), Value::Bool(false)),
             ("owner".to_owned(), Value::Uuid(row(0xd3).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(root),
+            ..Default::default()
+        },
     )
     .unwrap();
     let source_row = prepared_one(&db, &Query::from("todos")).expect("inserted source row");
@@ -1336,24 +1568,31 @@ fn ordered_suffix_delta_preserves_typed_union_occurrence_ids_for_duplicate_rows(
         &current,
         std::slice::from_ref(&right),
     )
-    .expect("sidecar-preserving ordered suffix delta");
-    let SubscriptionEvent::Delta { removed, added, .. } = event else {
+    .expect("sidecar-preserving indexed root delta");
+    let SubscriptionEvent::Delta {
+        removed,
+        added,
+        updated,
+        ..
+    } = event
+    else {
         panic!("expected delta");
     };
+    assert!(added.is_empty());
     assert_eq!(
         removed
-            .into_iter()
-            .map(|row| row.occurrence_id)
+            .iter()
+            .map(|row| (&row.occurrence_id, row.index))
             .collect::<Vec<_>>(),
-        vec![left, right.clone()],
-        "the ordered suffix carries the exact typed occurrences it retracts"
+        vec![(&left, 0)],
+        "the removed arm keeps its exact typed identity and prior position"
     );
     assert_eq!(
-        added
-            .into_iter()
-            .map(|row| row.occurrence_id)
+        updated
+            .iter()
+            .map(|row| (&row.occurrence_id, row.previous_index, row.index))
             .collect::<Vec<_>>(),
-        vec![right],
-        "the surviving arm is re-added with its original typed identity"
+        vec![(&right, Some(1), 0)],
+        "the surviving arm moves under its original typed identity"
     );
 }

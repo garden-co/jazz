@@ -12,7 +12,7 @@ use jazz::db::{
     SubscriptionEvent, SubscriptionStream, Transport,
 };
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::MergeableCommit;
 use jazz::protocol::{SubscriptionKey, SyncMessage};
 use jazz::query::Query;
@@ -404,11 +404,11 @@ impl Config {
         self.phases.iter().any(|candidate| candidate == phase)
     }
 
-    fn client_author(&self, seeded: &Seeded) -> AuthorId {
+    fn client_author(&self, seeded: &Seeded) -> AuthorSubject {
         match self.identity {
-            BenchIdentity::Member => AuthorId(seeded.ordinary_user.0),
-            BenchIdentity::Spy => AuthorId(row(9_999_999).0),
-            BenchIdentity::Admin => AuthorId::SYSTEM,
+            BenchIdentity::Member => AuthorSubject::for_test_uuid(seeded.ordinary_user.0),
+            BenchIdentity::Spy => AuthorSubject::for_test_uuid(row(9_999_999).0),
+            BenchIdentity::Admin => AuthorSubject::SYSTEM,
         }
     }
 
@@ -755,13 +755,13 @@ struct CountedDuplex {
 impl Transport for DuplexTransport {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         self.metrics.messages.set(self.metrics.messages.get() + 1);
-        if let SyncMessage::ViewUpdate {
+        if let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             subscription,
             reset_result_set,
             version_bundles,
             result_member_adds,
             ..
-        } = &message
+        }) = &message
         {
             self.metrics
                 .view_updates
@@ -970,7 +970,7 @@ fn resource_policy(access_table: &str) -> PolicyExpr {
         &[("administrator", PublicValue::Boolean(false))],
         GROUP_ACCESS,
         "user_id",
-        &["user_id"],
+        &["user"],
         "group_id",
     )
 }
@@ -1352,7 +1352,7 @@ fn run_cold(
     let relay = open_db_node(
         node(2),
         schema.clone(),
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         Some(Rc::new(tempfile::tempdir().unwrap())),
     );
     let client = open_client_db(
@@ -1375,7 +1375,7 @@ fn run_warm(
     let relay = open_db_node(
         node(4),
         schema.clone(),
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         Some(Rc::clone(&relay_dir)),
     );
     let client = open_client_db(
@@ -1393,7 +1393,7 @@ fn run_warm(
     let relay = open_db_node(
         node(4),
         schema.clone(),
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         Some(Rc::clone(&relay_dir)),
     );
     let client = open_client_db(
@@ -1431,7 +1431,7 @@ fn run_connect_and_subscribe(
     let _relay_upstream = block_on(relay.db.connect_upstream(relay_core.left_transport));
     let _core_sub = seeded
         .core
-        .accept_subscriber(relay_core.right_transport, AuthorId::SYSTEM);
+        .accept_subscriber(relay_core.right_transport, AuthorSubject::SYSTEM);
     let _client_upstream = block_on(client.db.connect_upstream(client_relay.left_transport));
     let _relay_sub = relay
         .db
@@ -1881,7 +1881,7 @@ fn seed_db(core: &Node<RocksDbStorage>, table: &str, row: RowUuid, cells: BTreeM
     jazz_sim::fixture::commit_mergeable_unit_settled(
         &mut node,
         MergeableCommit::new(table, row, next_seed_time())
-            .made_by(AuthorId::SYSTEM)
+            .made_by(AuthorSubject::SYSTEM)
             .cells(cells),
     )
     .unwrap();
@@ -1890,7 +1890,7 @@ fn seed_db(core: &Node<RocksDbStorage>, table: &str, row: RowUuid, cells: BTreeM
 fn open_db_node(
     node_uuid: NodeUuid,
     schema: JazzSchema,
-    author: AuthorId,
+    author: AuthorSubject,
     dir: Option<Rc<tempfile::TempDir>>,
 ) -> DbNode {
     let dir = dir.unwrap_or_else(|| Rc::new(tempfile::tempdir().unwrap()));
@@ -1911,7 +1911,7 @@ fn open_db_node(
 fn open_client_db(
     node_uuid: NodeUuid,
     schema: JazzSchema,
-    author: AuthorId,
+    author: AuthorSubject,
     initial_sync_flush_cadence: usize,
     dir: Option<Rc<tempfile::TempDir>>,
 ) -> DbClient {

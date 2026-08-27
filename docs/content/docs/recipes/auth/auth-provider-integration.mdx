@@ -30,7 +30,7 @@ Jazz supports external JWT-based authentication for production use. This recipe 
 1. The user signs in with your auth provider and gets a JWT.
 2. Your client passes that JWT to Jazz.
 3. The Jazz server validates the JWT signature against the provider's JWKS endpoint.
-4. On success, Jazz uses the JWT's `sub` claim as `session.user_id`.
+4. On success, Jazz keeps JWT `iss` and `sub` under `session.claims` and exposes their canonical pair as the opaque `session.user` author identity.
 
 If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authentication page](/docs/auth/authentication#external-auth-for-production).
 
@@ -128,6 +128,6 @@ Any provider that issues JWTs and exposes a JWKS endpoint will work. The key pat
 | Auth0       | `https://<tenant>.auth0.com/.well-known/jwks.json`                                          | `auth0\|<id>`      |
 | Firebase    | `https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com` | Firebase UID       |
 
-Jazz uses the JWT `sub` claim as `session.user_id`. If your provider keeps `sub` fixed to its own user ID, mint the JWT with `sub` set to the Jazz user ID yourself — either via a custom `getSubject` hook on the provider or by issuing the JWT directly from your server.
+Jazz uses the exact JWT `iss` and `sub` pair as the author identity. It is fine for a provider to keep `sub` fixed to its own user ID: model any link from that identity to your application's user row explicitly.
 
 Full working examples: [Better Auth chat](https://github.com/garden-co/jazz2/tree/main/examples/auth-betterauth-chat), [WorkOS chat](https://github.com/garden-co/jazz2/tree/main/examples/auth-workos-chat).

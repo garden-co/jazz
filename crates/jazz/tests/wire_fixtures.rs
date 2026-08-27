@@ -5,7 +5,7 @@ use groove::records::{RecordDescriptor, Value, ValueType};
 use jazz::binding_codec::{
     RelationSnapshotPayload, RemovedRowPayload, Row, RowBatch, SubscriptionDeltaPayload,
 };
-use jazz::ids::{AuthorId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
+use jazz::ids::{AuthorSubject, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
 use jazz::protocol::{
     CatalogueAck, CatalogueSnapshot, CurrentWriteSchema, LensOp, MigrationLens,
     PeerPayloadInventory, RegisterShapeOptions, ResultRowEntry, RowVersionRef,
@@ -136,7 +136,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
     let binding_id = BindingId(uuid::Uuid::from_bytes([0x33; 16]));
     let schema_version = SchemaVersionId::from_bytes([0x44; 16]);
     let target_schema_version = SchemaVersionId::from_bytes([0x45; 16]);
-    let author = AuthorId::from_bytes([0x55; 16]);
+    let author = AuthorSubject::for_test_bytes([0x55; 16]);
     let row = RowUuid::from_bytes([0x77; 16]);
     let subscription = SubscriptionKey {
         shape_id,
@@ -170,8 +170,46 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         Vec::<String>::new(),
         Vec::<String>::new(),
     );
+    let mut large_value = groove::large_values::prepare(
+        groove::large_values::LargeValueKind::Bytes,
+        &vec![0x5a; groove::large_values::INLINE_VALUE_MAX_BYTES + 1],
+    )
+    .expect("large-value wire fixture prepares");
+    assert_eq!(
+        large_value.staged_chunks.len(),
+        1,
+        "fixture stays a single leaf so replacing its retrieval capability cannot alter encoded nodes"
+    );
+    let locator_bytes = large_value.value_ref.root.object_hash.0.to_vec();
+    let locator: groove::large_values::Locator = postcard::from_bytes(
+        &postcard::to_allocvec(&locator_bytes).expect("encode deterministic fixture locator"),
+    )
+    .expect("decode deterministic fixture locator through the public wire contract");
+    large_value.value_ref.root.locator = locator;
+    large_value.staged_chunks[0].node_ref.locator = locator;
+    let root_chunk = large_value
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref == large_value.value_ref.root)
+        .expect("prepared fixture has its root")
+        .clone();
 
     vec![
+        (
+            "chunk_upload_start_root_descriptor",
+            "ChunkUploadStart",
+            SyncMessage::ChunkUploadStart(jazz::protocol::ChunkUploadStart {
+                value_ref: large_value.value_ref.clone(),
+            }),
+        ),
+        (
+            "chunk_upload_nodes_requested_root",
+            "ChunkUploadNodes",
+            SyncMessage::ChunkUploadNodes(jazz::protocol::ChunkUploadNodes {
+                value_ref: large_value.value_ref,
+                chunks: vec![root_chunk],
+            }),
+        ),
         (
             "session_claims_role_editor",
             "SessionClaims",
@@ -253,7 +291,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         (
             "view_update_reset_with_row_add",
             "ViewUpdate",
-            SyncMessage::ViewUpdate {
+            SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
                 subscription,
                 settled_through: GlobalTime(7),
                 reset_result_set: true,
@@ -269,12 +307,12 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
-            },
+            }),
         ),
         (
             "view_update_mixed_version_carrier_runs",
             "ViewUpdate",
-            SyncMessage::ViewUpdate {
+            SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
                 subscription,
                 settled_through: GlobalTime(8),
                 reset_result_set: false,
@@ -286,12 +324,12 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
-            },
+            }),
         ),
         (
             "view_update_terminal_patch",
             "ViewUpdate",
-            SyncMessage::ViewUpdate {
+            SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
                 subscription,
                 settled_through: GlobalTime(9),
                 reset_result_set: false,
@@ -311,7 +349,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 }],
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
-            },
+            }),
         ),
         (
             "commit_unit_mergeable_empty",
@@ -437,7 +475,7 @@ fn result_row_entry(tx_id: TxId) -> ResultRowEntry {
 
 fn mixed_version_carriers(
     schema_version: SchemaVersionId,
-    author: AuthorId,
+    author: AuthorSubject,
 ) -> Vec<VersionCarrier> {
     let schema = compiled_todos_schema(&["title"]);
     let table = &schema.tables()[0];
@@ -466,9 +504,9 @@ fn mixed_version_carriers(
                         RowUuid::from_bytes([0x90 + index as u8; 16]),
                         Vec::new(),
                         author,
-                        TxTime(100 + index),
+                        100 + index,
                         author,
-                        TxTime(100 + index),
+                        100 + index,
                         &BTreeMap::from([("title".to_owned(), format!("run-{index}"))]),
                         None,
                     )
@@ -517,7 +555,7 @@ fn fixture_manifest() -> Manifest {
         .collect();
 
     Manifest {
-        fixture_set: "jazz-wire-message-frames-v11",
+        fixture_set: "jazz-wire-message-frames-v14",
         codec: "postcard WireFrame::Message(WireEnvelope { payload: encode_sync_message(..) })",
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: FEATURE_SYNC_MESSAGE_PAYLOAD,
@@ -877,44 +915,23 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
         added_occurrence_keys: vec![v1],
         updated_occurrence_keys: vec![v2.clone()],
         removed_occurrence_keys: vec![v2],
+        added_indices: vec![2],
+        updated_previous_indices: vec![4],
+        updated_indices: vec![1],
+        removed_indices: vec![3],
     };
 
-    let current_layout = jazz::db::TerminalRootLayout {
-        id: "current-row-v1".to_owned(),
-        root_descriptor: current_descriptor,
-        root_key_slot: 0,
-        root_key_field_name: "row_uuid".to_owned(),
-        public_fields: vec![jazz::db::TerminalRootPublicField {
-            name: "title".to_owned(),
-            descriptor_field_name: "user_title".to_owned(),
-            slot: 1,
-            carrier: jazz::db::TerminalRootCarrier::CurrentRow,
-        }],
-        carrier: jazz::db::TerminalRootCarrier::CurrentRow,
-    };
-    let logical_layout = jazz::db::TerminalRootLayout {
-        id: "logical-v1".to_owned(),
-        root_descriptor: logical_descriptor,
-        root_key_slot: 0,
-        root_key_field_name: "row_uuid".to_owned(),
-        public_fields: vec![jazz::db::TerminalRootPublicField {
-            name: "title".to_owned(),
-            descriptor_field_name: "title".to_owned(),
-            slot: 1,
-            carrier: jazz::db::TerminalRootCarrier::Logical,
-        }],
-        carrier: jazz::db::TerminalRootCarrier::Logical,
-    };
     let current_key = std::iter::once(10)
         .chain(todo_one_id.0.as_bytes().iter().copied())
         .collect::<Vec<_>>();
     let logical_key = std::iter::once(10)
         .chain(note_id.0.as_bytes().iter().copied())
         .collect::<Vec<_>>();
+    let child_path = vec![TerminalPathSegment::Collection("children".to_owned())];
     let current_insert = TerminalOperation {
         root_descriptor: current_descriptor,
         root_key: current_key.clone(),
-        path: Vec::new(),
+        path: child_path.clone(),
         edit: TerminalEdit::Insert {
             index: 0,
             key: current_key.clone(),
@@ -924,7 +941,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
     let logical_insert = TerminalOperation {
         root_descriptor: logical_descriptor,
         root_key: logical_key.clone(),
-        path: Vec::new(),
+        path: child_path.clone(),
         edit: TerminalEdit::Insert {
             index: 0,
             key: logical_key.clone(),
@@ -934,7 +951,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
     let current_update = TerminalOperation {
         root_descriptor: current_descriptor,
         root_key: current_key.clone(),
-        path: Vec::new(),
+        path: child_path.clone(),
         edit: TerminalEdit::Update {
             key: current_key.clone(),
             value: todo_updated,
@@ -943,7 +960,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
     let logical_remove = TerminalOperation {
         root_descriptor: logical_descriptor,
         root_key: logical_key.clone(),
-        path: Vec::new(),
+        path: child_path.clone(),
         edit: TerminalEdit::Remove {
             key: logical_key.clone(),
         },
@@ -951,7 +968,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
     let logical_move = TerminalOperation {
         root_descriptor: logical_descriptor,
         root_key: logical_key.clone(),
-        path: Vec::new(),
+        path: child_path,
         edit: TerminalEdit::Move {
             key: logical_key,
             index: 1,
@@ -978,33 +995,16 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
             payload_hex: hex(&postcard::to_allocvec(&delta).expect("subscription delta encodes")),
         }],
         terminal: BindingCodecGoldenTerminal {
-            // These are the exact NAPI/WASM event field names.  Publication is
-            // represented by a non-empty `terminalLayouts` list, not an
-            // invented flag on a layout object.
             events: serde_json::json!([
                 {
                     "type": "delta",
-                    "terminalLayouts": [jazz::binding_codec::terminal_layout_to_json(&current_layout).expect("current layout encodes")],
-                    "terminalOperations": jazz::binding_codec::terminal_operations_to_json(&[current_insert], &current_layout.id).expect("current insert encodes")
-                },
-                {
-                    "type": "delta",
-                    "terminalLayouts": [jazz::binding_codec::terminal_layout_to_json(&logical_layout).expect("logical layout encodes")],
-                    "terminalOperations": jazz::binding_codec::terminal_operations_to_json(&[logical_insert], &logical_layout.id).expect("logical insert encodes")
-                },
-                {
-                    "type": "delta",
-                    "terminalLayouts": [],
-                    "terminalOperations": jazz::binding_codec::terminal_operations_to_json(&[current_update], &current_layout.id).expect("current update encodes")
-                },
-                {
-                    "type": "delta",
-                    "terminalLayouts": [],
-                    "terminalOperations": jazz::binding_codec::terminal_operations_to_json(&[logical_move, logical_remove], &logical_layout.id).expect("logical move/remove encodes")
+                    "terminalOperations": jazz::binding_codec::terminal_operations_to_json(
+                        &[current_insert, logical_insert, current_update, logical_move, logical_remove]
+                    ).expect("descendant terminal operations encode")
                 }
             ]),
             rejections: serde_json::json!([
-                { "type": "UnsupportedShapeCapability", "detail": "terminal layout missing" },
+                { "type": "UnsupportedShapeCapability", "detail": "unsupported descendant terminal shape" },
                 { "type": "ServerFailure", "code": "TableNotFound" }
             ]),
         },

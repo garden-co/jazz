@@ -11,7 +11,7 @@ use std::hash::{BuildHasher, Hash, Hasher};
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use crate::records::{RecordDescriptor, Value, ValueType};
+use crate::records::{RecordDescriptor, Value, ValueType, collect_by_ordered_scalar};
 use thiserror::Error;
 
 use super::op_types::*;
@@ -154,6 +154,10 @@ pub enum GraphBuilder {
         table: String,
         index: String,
         scan: Option<StaticScanSpec>,
+        /// Additional index prefixes whose primary keys must also match.
+        /// Row projection sources intersect these encoded index entries before
+        /// fetching table records, so surviving rows are decoded only once.
+        intersections: Vec<(String, StaticScanSpec)>,
         /// When present, fetch indexed table rows and project their variants
         /// instead of exposing the index's encoded key/value records.
         row_projection: Option<String>,
@@ -194,6 +198,13 @@ pub enum GraphBuilder {
     Project {
         input: Box<GraphBuilder>,
         fields: Vec<ProjectField>,
+    },
+    StreamingChecksum {
+        input: Box<GraphBuilder>,
+        field: FieldRef,
+        output_field: String,
+        window_bytes: usize,
+        max_bytes_per_turn: usize,
     },
     Union {
         inputs: Vec<GraphBuilder>,
@@ -446,6 +457,7 @@ impl GraphBuilder {
             table: table.into(),
             index: index.into(),
             scan: None,
+            intersections: Vec::new(),
             row_projection: None,
         }
     }
@@ -459,6 +471,7 @@ impl GraphBuilder {
             table: table.into(),
             index: index.into(),
             scan: Some(scan),
+            intersections: Vec::new(),
             row_projection: None,
         }
     }
@@ -475,6 +488,25 @@ impl GraphBuilder {
             table: table.into(),
             index: index.into(),
             scan: Some(scan),
+            intersections: Vec::new(),
+            row_projection: Some(projection_target.into()),
+        }
+    }
+
+    /// Read projected table rows selected by the intersection of durable
+    /// secondary-index scans.
+    pub fn variant_index_intersection_scan(
+        table: impl Into<String>,
+        index: impl Into<String>,
+        scan: StaticScanSpec,
+        intersections: impl IntoIterator<Item = (String, StaticScanSpec)>,
+        projection_target: impl Into<String>,
+    ) -> Self {
+        Self::Index {
+            table: table.into(),
+            index: index.into(),
+            scan: Some(scan),
+            intersections: intersections.into_iter().collect(),
             row_projection: Some(projection_target.into()),
         }
     }
@@ -511,6 +543,53 @@ impl GraphBuilder {
         Self::Union {
             inputs: inputs.into_iter().collect(),
         }
+    }
+
+    /// Return all builder fragments in child-before-parent order without
+    /// recursion. Runtime setup uses this for deeply nested valid query and
+    /// policy graphs, which must not consume the owner thread's call stack.
+    pub(crate) fn postorder(&self) -> Vec<&Self> {
+        let mut pending = vec![(self, false)];
+        let mut ordered = Vec::new();
+        while let Some((graph, visited)) = pending.pop() {
+            if visited {
+                ordered.push(graph);
+                continue;
+            }
+            pending.push((graph, true));
+            match graph {
+                Self::Filter { input, .. }
+                | Self::Project { input, .. }
+                | Self::StreamingChecksum { input, .. }
+                | Self::UnwrapNullable { input, .. }
+                | Self::Unnest { input, .. }
+                | Self::VariantProject { input, .. }
+                | Self::ArgMaxBy { input, .. }
+                | Self::ArgMinBy { input, .. }
+                | Self::TopBy { input, .. }
+                | Self::CollectBy { input, .. }
+                | Self::Aggregate { input, .. } => pending.push((input, false)),
+                Self::Union { inputs } => {
+                    pending.extend(inputs.iter().rev().map(|input| (input, false)));
+                }
+                Self::Join { left, right, .. }
+                | Self::SemiJoin { left, right, .. }
+                | Self::AntiJoin { left, right, .. } => {
+                    pending.push((right, false));
+                    pending.push((left, false));
+                }
+                Self::Recursive { seed, step, .. } => {
+                    pending.push((step, false));
+                    pending.push((seed, false));
+                }
+                Self::Table { .. }
+                | Self::InlineRecords { .. }
+                | Self::Index { .. }
+                | Self::FrontierSource { .. }
+                | Self::BindingSource { .. } => {}
+            }
+        }
+        ordered
     }
 
     pub fn join(
@@ -854,6 +933,27 @@ impl GraphBuilder {
         Self::Project {
             input: Box::new(self),
             fields: fields.into_iter().collect(),
+        }
+    }
+
+    /// Internal conformance operator for exercising bounded streaming-node
+    /// scheduling and scaling invariants. It is public so black-box integration
+    /// and benchmark harnesses can build a graph through the ordinary API; it
+    /// is not intended as an endorsed application-level checksum facility.
+    #[doc(hidden)]
+    pub fn streaming_checksum(
+        self,
+        field: impl Into<String>,
+        output_field: impl Into<String>,
+        window_bytes: usize,
+        max_bytes_per_turn: usize,
+    ) -> Self {
+        Self::StreamingChecksum {
+            input: Box::new(self),
+            field: FieldRef::name(field),
+            output_field: output_field.into(),
+            window_bytes,
+            max_bytes_per_turn,
         }
     }
 }
@@ -1217,12 +1317,7 @@ impl IvmGraph {
                 .get(input)
                 .is_some_and(|node| matches!(node.descriptor.operator, OpType::CollectBy(_)))
         });
-        if consumes_collect_by
-            && !matches!(
-                descriptor.operator,
-                OpType::Filter(_) | OpType::MapProject(_)
-            )
-        {
+        if consumes_collect_by {
             return Err(GraphValidationError::CollectByInputIsTerminal);
         }
         Ok(())
@@ -1823,6 +1918,19 @@ impl NodeDescriptor {
                 }
                 Ok(())
             }
+            OpType::StreamingChecksum(checksum) => {
+                expect_arity(&self.inputs, 1)?;
+                if checksum.field_idx >= input_outputs[0].fields().len() {
+                    return Err(GraphValidationError::FieldIndexOutOfBounds {
+                        index: checksum.field_idx,
+                        len: input_outputs[0].fields().len(),
+                    });
+                }
+                if checksum.window_bytes == 0 || checksum.max_bytes_per_turn == 0 {
+                    return Err(GraphValidationError::OutputDescriptorMismatch);
+                }
+                Ok(())
+            }
             OpType::IndexBy(index) => {
                 expect_arity(&self.inputs, 1)?;
                 for &field_idx in index.key_fields.iter().chain(&index.value_fields) {
@@ -1926,25 +2034,6 @@ fn expect_arrangement_inputs(inputs: &[NodeOutput]) -> Result<(), GraphValidatio
     }
 }
 
-fn collect_by_ordered_scalar(value_type: &ValueType) -> bool {
-    match value_type {
-        ValueType::Nullable(inner) => collect_by_ordered_scalar(inner),
-        ValueType::U8
-        | ValueType::U16
-        | ValueType::U32
-        | ValueType::U64
-        | ValueType::I32
-        | ValueType::I64
-        | ValueType::F64
-        | ValueType::Bool
-        | ValueType::String
-        | ValueType::Bytes
-        | ValueType::Uuid
-        | ValueType::EnumTag(_) => true,
-        _ => false,
-    }
-}
-
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum GraphValidationError {
     #[error("operator has an incompatible typed output")]
@@ -1989,6 +2078,7 @@ pub enum OpType {
     Persist(PersistOp),
     Filter(FilterOp),
     MapProject(MapProjectOp),
+    StreamingChecksum(StreamingChecksumOp),
     UnwrapNullable(UnwrapNullableOp),
     Unnest(UnnestOp),
     VariantProject(VariantProjectOp),
@@ -2350,10 +2440,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_allows_terminal_route_filter_over_collect_by() {
-        // Prepared terminals use this narrow consumer to route one already
-        // assembled terminal value to its binding. It must not reopen nested
-        // assembly or feed arbitrary relational operators.
+    fn validation_rejects_ordinary_consumers_over_collect_by() {
         let mut graph = IvmGraph::new();
         let source = graph.dedup_node(
             NodeDescriptor::new(
@@ -2426,14 +2513,30 @@ mod tests {
             ),
             NodeDurability::Ephemeral,
         );
-        let consumer = NodeDescriptor::new(
-            OpType::Filter(FilterOp {
-                predicate: PredicateExpr::is_not_null("f0"),
-                comparison: ValueComparison::Exact,
-            }),
-            [collector],
-            collected_output,
-        );
-        assert_eq!(graph.validate_node(&consumer), Ok(()));
+        let consumers = [
+            NodeDescriptor::new(
+                OpType::Filter(FilterOp {
+                    predicate: PredicateExpr::is_not_null("f0"),
+                    comparison: ValueComparison::Exact,
+                }),
+                [collector],
+                collected_output,
+            ),
+            NodeDescriptor::new(
+                OpType::MapProject(MapProjectOp {
+                    expressions: Vec::new(),
+                    mapping: vec![(0, 0)],
+                }),
+                [collector],
+                output(),
+            ),
+        ];
+
+        for consumer in consumers {
+            assert_eq!(
+                graph.validate_node(&consumer),
+                Err(GraphValidationError::CollectByInputIsTerminal)
+            );
+        }
     }
 }

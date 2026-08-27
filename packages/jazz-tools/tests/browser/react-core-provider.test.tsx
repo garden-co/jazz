@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import {
   JazzClientProvider as JazzProvider,
+  JazzProvider as ConfiguredJazzProvider,
   useDb,
   useSession,
 } from "../../src/react-core/provider.js";
@@ -16,7 +17,8 @@ import {
 } from "../../src/subscriptions-orchestrator.js";
 import { attachSubscriptionStore } from "../../src/subscription-store-internal.js";
 import type { AuthState } from "../../src/runtime/auth-state.js";
-import type { Session } from "../../src/runtime/context.js";
+import { canonicalAuthorSubject } from "../../src/runtime/author-id.js";
+import type { PublicSession, Session } from "../../src/runtime/context.js";
 import type { QueryBuilder, QueryOptions } from "../../src/runtime/db.js";
 import type { SubscriptionDelta } from "../../src/runtime/subscription-manager.js";
 
@@ -82,8 +84,20 @@ class ControlledManager {
 type TestClientOptions = {
   db?: unknown;
   manager?: ControlledManager;
-  session?: Session | null;
+  session?: PublicSession | null;
 };
+
+function publicSession(
+  issuer: string,
+  subject: string,
+  claims: Record<string, unknown> = {},
+): PublicSession {
+  return Object.freeze({
+    user: canonicalAuthorSubject(issuer, subject),
+    claims: Object.freeze({ ...claims, iss: issuer, sub: subject }),
+    authMode: "external",
+  });
+}
 
 const BASE_QUERY: QueryBuilder<Todo> = {
   _table: "todos",
@@ -119,6 +133,52 @@ afterEach(() => {
 });
 
 describe("react-core provider/hooks browser coverage", () => {
+  it("acquires configured clients after browser mount and releases replacements", async () => {
+    const initialClient = makeClient({ db: { name: "initial-db" } });
+    initialClient.shutdown = vi.fn(async () => {});
+    const replacementClient = makeClient({ db: { name: "replacement-db" } });
+    replacementClient.shutdown = vi.fn(async () => {});
+    const createJazzClient = vi
+      .fn()
+      .mockResolvedValueOnce(initialClient)
+      .mockResolvedValueOnce(replacementClient);
+
+    render(
+      <ConfiguredJazzProvider
+        config={{ appId: "provider-browser-lifecycle", secret: "anonymous" }}
+        createJazzClient={createJazzClient}
+        fallback={<div data-testid="configured-provider">loading</div>}
+      >
+        <DbNameView />
+      </ConfiguredJazzProvider>,
+    );
+
+    await expectText("db-name", "initial-db");
+    expect(createJazzClient).toHaveBeenCalledTimes(1);
+
+    render(
+      <ConfiguredJazzProvider
+        config={{ appId: "provider-browser-lifecycle", jwtToken: "token" }}
+        createJazzClient={createJazzClient}
+        fallback={<div data-testid="configured-provider">loading</div>}
+      >
+        <DbNameView />
+      </ConfiguredJazzProvider>,
+    );
+
+    await expectText("db-name", "replacement-db");
+    expect(initialClient.shutdown).toHaveBeenCalledOnce();
+    expect(createJazzClient).toHaveBeenCalledTimes(2);
+
+    render(null);
+
+    await waitForCondition(
+      () => vi.mocked(replacementClient.shutdown).mock.calls.length === 1,
+      3000,
+      "Expected the replacement configured client to shut down after unmount",
+    );
+  });
+
   it("RCB-B01: provider accepts already-resolved client object", async () => {
     const client = makeClient({ db: { name: "resolved-db" } });
 
@@ -157,11 +217,7 @@ describe("react-core provider/hooks browser coverage", () => {
   });
 
   it("RCB-B04: useSession returns session when present", async () => {
-    const session: Session = {
-      user_id: "user-123",
-      claims: { role: "writer" },
-      authMode: "external",
-    };
+    const session = publicSession("https://issuer.example", "user-123", { role: "writer" });
     const client = makeClient({ session });
 
     render(
@@ -170,15 +226,16 @@ describe("react-core provider/hooks browser coverage", () => {
       </JazzProvider>,
     );
 
-    await expectText("session", "user-123");
+    await expectText("session", canonicalAuthorSubject("https://issuer.example", "user-123"));
+    expect(container?.querySelector('[data-testid="session"]')?.getAttribute("data-user")).toBe(
+      canonicalAuthorSubject("https://issuer.example", "user-123"),
+    );
   });
 
   it("RCB-B04A: useSession reacts to db auth-state changes", async () => {
-    const db = createAuthAwareDb({
-      user_id: "alice",
-      claims: { role: "reader" },
-      authMode: "external",
-    });
+    const db = createAuthAwareDb(
+      publicSession("https://issuer.example", "alice", { role: "reader" }),
+    );
     const client = makeAuthAwareClient(db);
 
     render(
@@ -187,7 +244,10 @@ describe("react-core provider/hooks browser coverage", () => {
       </JazzProvider>,
     );
 
-    await expectText("session", "alice");
+    await expectText("session", canonicalAuthorSubject("https://issuer.example", "alice"));
+    expect(container?.querySelector('[data-testid="session"]')?.getAttribute("data-user")).toBe(
+      canonicalAuthorSubject("https://issuer.example", "alice"),
+    );
 
     db.emitAuthChange(null);
 
@@ -195,11 +255,9 @@ describe("react-core provider/hooks browser coverage", () => {
   });
 
   it("RCB-B04B: provider subscribes once for multiple session consumers", async () => {
-    const db = createAuthAwareDb({
-      user_id: "alice",
-      claims: { role: "reader" },
-      authMode: "external",
-    });
+    const db = createAuthAwareDb(
+      publicSession("https://issuer.example", "alice", { role: "reader" }),
+    );
     const client = makeAuthAwareClient(db);
 
     render(
@@ -208,8 +266,14 @@ describe("react-core provider/hooks browser coverage", () => {
       </JazzProvider>,
     );
 
-    await expectText("session-a", "alice");
-    await expectText("session-b", "alice");
+    await expectText("session-a", canonicalAuthorSubject("https://issuer.example", "alice"));
+    await expectText("session-b", canonicalAuthorSubject("https://issuer.example", "alice"));
+    expect(container?.querySelector('[data-testid="session-a"]')?.getAttribute("data-user")).toBe(
+      canonicalAuthorSubject("https://issuer.example", "alice"),
+    );
+    expect(container?.querySelector('[data-testid="session-b"]')?.getAttribute("data-user")).toBe(
+      canonicalAuthorSubject("https://issuer.example", "alice"),
+    );
     expect(db.onAuthChanged).toHaveBeenCalledTimes(2);
 
     db.emitAuthChange(null);
@@ -220,11 +284,9 @@ describe("react-core provider/hooks browser coverage", () => {
   });
 
   it("RCB-B04C: useDb consumers rerender when auth state changes", async () => {
-    const db = createAuthAwareDb({
-      user_id: "alice",
-      claims: { role: "reader" },
-      authMode: "external",
-    });
+    const db = createAuthAwareDb(
+      publicSession("https://issuer.example", "alice", { role: "reader" }),
+    );
     const client = makeAuthAwareClient(db);
 
     render(
@@ -233,11 +295,11 @@ describe("react-core provider/hooks browser coverage", () => {
       </JazzProvider>,
     );
 
-    await expectText("db-session", "alice");
+    await expectText("db-session", canonicalAuthorSubject("https://issuer.example", "alice"));
 
-    db.emitAuthChange({ user_id: "bob", claims: { role: "writer" }, authMode: "external" });
+    db.emitAuthChange(publicSession("https://issuer.example", "bob", { role: "writer" }));
 
-    await expectText("db-session", "bob");
+    await expectText("db-session", canonicalAuthorSubject("https://issuer.example", "bob"));
   });
 
   it("RCB-B05: useAll returns loading state during pending phase", async () => {
@@ -451,16 +513,22 @@ describe("react-core provider/hooks browser coverage", () => {
   });
 
   it("RCB-B12B: stale empty-refresh snapshots do not publish across session resubscribe", async () => {
-    const sessionA = {
+    const internalSessionA: Session = {
+      issuer: "https://issuer.example",
       user_id: "alice",
       claims: { role: "reader" },
       authMode: "external",
-    } as Session;
-    const sessionB = {
+    };
+    const internalSessionB: Session = {
+      issuer: "https://issuer.example",
       user_id: "bob",
       claims: { role: "reader" },
       authMode: "external",
-    } as Session;
+    };
+    const sessionA = publicSession("https://issuer.example", "alice", { role: "reader" });
+    const sessionB = publicSession("https://issuer.example", "bob", { role: "reader" });
+    const aliceUser = sessionA.user;
+    const bobUser = sessionB.user;
     const listeners = new Set<(state: AuthState) => void>();
     const refreshes = {
       alice: makeDeferred<Todo[]>(),
@@ -472,7 +540,7 @@ describe("react-core provider/hooks browser coverage", () => {
       session: string;
       callback: (delta: SubscriptionDelta<Todo>) => void;
     }> = [];
-    let liveSession: Session | null = sessionA;
+    let liveSession: PublicSession | null = sessionA;
     const db = {
       getAuthState(): AuthState {
         return { authMode: "external", session: liveSession };
@@ -483,35 +551,41 @@ describe("react-core provider/hooks browser coverage", () => {
           listeners.delete(listener);
         };
       },
-      subscribeAll(
+      subscribeDelta(
         _query: QueryBuilder<Todo>,
         callback: (delta: SubscriptionDelta<Todo>) => void,
         _options?: QueryOptions,
         session?: Session,
       ) {
         subscribeCalls.push({
-          session: session?.user_id ?? liveSession?.user_id ?? "anon",
+          session: session
+            ? canonicalAuthorSubject(session.issuer, session.user_id)
+            : (liveSession?.user ?? "anon"),
           callback,
         });
         return () => {};
       },
       all(_query: QueryBuilder<Todo>, _options?: QueryOptions, session?: Session) {
-        const userId = session?.user_id ?? liveSession?.user_id ?? "anon";
-        if (userId === "alice") {
+        const user = session
+          ? canonicalAuthorSubject(session.issuer, session.user_id)
+          : (liveSession?.user ?? "anon");
+        if (user === aliceUser) {
           if (!aliceRefreshStartedResolved) {
             aliceRefreshStartedResolved = true;
             aliceRefreshStarted.resolve();
           }
           return refreshes.alice;
         }
-        if (userId === "bob") return refreshes.bob;
+        if (user === bobUser) return refreshes.bob;
         return Promise.resolve([]);
       },
     };
-    const manager = new SubscriptionsOrchestrator({ appId: "rcb-b12b" }, db, sessionA);
+    const manager = new SubscriptionsOrchestrator({ appId: "rcb-b12b" }, db, internalSessionA);
     const stopSessionSync = db.onAuthChanged(({ session: nextSession }) => {
       liveSession = nextSession;
-      manager.setSession(nextSession ?? null);
+      manager.setSession(
+        nextSession ? (nextSession.user === bobUser ? internalSessionB : internalSessionA) : null,
+      );
     });
     const client = attachSubscriptionStore(
       {
@@ -620,7 +694,11 @@ function DbIdentityView({ expected }: { expected: unknown }) {
 
 function SessionView() {
   const session = useSession();
-  return <div data-testid="session">{session ? session.user_id : "null"}</div>;
+  return (
+    <div data-testid="session" data-user={session?.user}>
+      {session ? session.user : "null"}
+    </div>
+  );
 }
 
 function SessionPairView() {
@@ -628,18 +706,22 @@ function SessionPairView() {
   const sessionB = useSession();
   return (
     <>
-      <div data-testid="session-a">{sessionA ? sessionA.user_id : "null"}</div>
-      <div data-testid="session-b">{sessionB ? sessionB.user_id : "null"}</div>
+      <div data-testid="session-a" data-user={sessionA?.user}>
+        {sessionA ? sessionA.user : "null"}
+      </div>
+      <div data-testid="session-b" data-user={sessionB?.user}>
+        {sessionB ? sessionB.user : "null"}
+      </div>
     </>
   );
 }
 
 function DbAuthStateView() {
   const db = useDb<{
-    getAuthState(): { session: Session | null };
+    getAuthState(): { session: PublicSession | null };
   }>();
   const session = db.getAuthState().session;
-  return <div data-testid="db-session">{session ? session.user_id : "null"}</div>;
+  return <div data-testid="db-session">{session ? session.user : "null"}</div>;
 }
 
 function UseAllView({ query, options }: { query: QueryBuilder<Todo>; options?: QueryOptions }) {
@@ -740,7 +822,7 @@ function makeAuthAwareClient(db: ReturnType<typeof createAuthAwareDb>) {
   );
 }
 
-function createAuthAwareDb(initialSession: Session | null) {
+function createAuthAwareDb(initialSession: PublicSession | null) {
   let session = initialSession;
   const listeners = new Set<(state: AuthState) => void>();
   const onAuthChanged = vi.fn((listener: (state: AuthState) => void) => {
@@ -750,7 +832,7 @@ function createAuthAwareDb(initialSession: Session | null) {
     };
   });
 
-  const toAuthState = (s: Session | null): AuthState =>
+  const toAuthState = (s: PublicSession | null): AuthState =>
     s ? { authMode: s.authMode, session: s } : { authMode: "external", session: null };
 
   return {
@@ -758,7 +840,7 @@ function createAuthAwareDb(initialSession: Session | null) {
       return toAuthState(session);
     },
     onAuthChanged,
-    emitAuthChange(nextSession: Session | null) {
+    emitAuthChange(nextSession: PublicSession | null) {
       session = nextSession;
       const authState = toAuthState(session);
       for (const listener of listeners) {

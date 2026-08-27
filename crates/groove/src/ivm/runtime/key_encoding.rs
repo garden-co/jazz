@@ -648,7 +648,7 @@ pub(crate) fn encode_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), Iv
             key.push(9);
             encode_key_part(key, value)?;
         }
-        Value::Array(_) | Value::Record(_) | Value::Enum(_) => {
+        Value::Array(_) | Value::Record(_) | Value::Enum(_) | Value::Large(_) => {
             return Err(IvmRuntimeError::UnsupportedJoinKey);
         }
     }

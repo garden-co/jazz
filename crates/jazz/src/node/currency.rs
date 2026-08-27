@@ -962,10 +962,15 @@ where
                 record.get_enum(TransactionRowRecord::FIELD_KIND_IDX)?,
             )?,
             n_total_writes: record.get_u32(TransactionRowRecord::FIELD_N_TOTAL_WRITES_IDX)?,
-            made_by: AuthorId(record.get_uuid(TransactionRowRecord::FIELD_MADE_BY_IDX)?),
+            made_by: AuthorSubject::from_canonical(
+                record.get_str(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
+            )
+            .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
             permission_subject: record
-                .get_nullable_uuid(TransactionRowRecord::FIELD_PERMISSION_SUBJECT_IDX)?
-                .map(AuthorId),
+                .get_nullable_string(TransactionRowRecord::FIELD_PERMISSION_SUBJECT_IDX)?
+                .map(AuthorSubject::from_canonical)
+                .transpose()
+                .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
             base_snapshot: None,
             row_read_set: None,
             absent_read_set: None,

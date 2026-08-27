@@ -7,18 +7,29 @@ fn maintained_subscription_view_top_by_partitions_windows_by_policy_claim_bindin
             .column("owner", PublicColumnType::Uuid)
             .column("updated_at", PublicColumnType::Timestamp)
             .policies(
-                PublicTablePolicies::new().with_select(public_claim_eq("owner", "sub")),
+                PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
+                    "owner",
+                    vec!["claims".to_owned(), "user_id".to_owned()],
+                )),
             ),
     ));
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let owner_a = user(0xa1);
     let owner_b = user(0xb2);
+    core.set_test_provider_claims(
+        owner_a,
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(owner_a.test_uuid()))]),
+    );
+    core.set_test_provider_claims(
+        owner_b,
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(owner_b.test_uuid()))]),
+    );
 
     for index in 0..100_u64 {
         accept_global(
             &mut core,
             MergeableCommit::new("documents", row(index as u8), index).cells(BTreeMap::from([
-                ("owner".to_owned(), Value::Uuid(owner_a.0)),
+                ("owner".to_owned(), Value::Uuid(owner_a.test_uuid())),
                 ("updated_at".to_owned(), Value::U64(index)),
             ])),
         );
@@ -26,7 +37,7 @@ fn maintained_subscription_view_top_by_partitions_windows_by_policy_claim_bindin
             &mut core,
             MergeableCommit::new("documents", row((index + 100) as u8), index + 100)
                 .cells(BTreeMap::from([
-                    ("owner".to_owned(), Value::Uuid(owner_b.0)),
+                    ("owner".to_owned(), Value::Uuid(owner_b.test_uuid())),
                     ("updated_at".to_owned(), Value::U64(index + 100)),
                 ])),
         );
@@ -64,7 +75,10 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
             "documentAccess",
             "document",
             "id",
-            [public_claim_eq("reader", "sub")],
+            [PublicPolicyExpr::eq_session(
+                "reader",
+                vec!["claims".to_owned(), "user_id".to_owned()],
+            )],
         ),
         public_literal_eq("published", PublicValue::Boolean(true)),
     ]);
@@ -83,6 +97,10 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
             ),
     );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    core.set_test_provider_claims(
+        reader,
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(reader.test_uuid()))]),
+    );
     let mut document_txs = Vec::new();
     let mut grant_txs = Vec::new();
     for index in 0..100_u64 {
@@ -99,7 +117,7 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
             &mut core,
             MergeableCommit::new("documentAccess", grant, index * 3 + 2).cells(BTreeMap::from([
                 ("document".to_owned(), Value::Uuid(document.0)),
-                ("reader".to_owned(), Value::Uuid(reader.0)),
+                ("reader".to_owned(), Value::Uuid(reader.test_uuid())),
             ])),
         ));
     }
@@ -139,7 +157,7 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
         &mut core,
         MergeableCommit::new("documentAccess", duplicate_grant, 302).cells(BTreeMap::from([
             ("document".to_owned(), Value::Uuid(row(99).0)),
-            ("reader".to_owned(), Value::Uuid(reader.0)),
+            ("reader".to_owned(), Value::Uuid(reader.test_uuid())),
         ])),
     );
     let duplicate = peer.query_update(&mut core, &shape, &binding).unwrap();

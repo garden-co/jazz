@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { anyOf, definePermissions } from "../permissions/index.js";
+import { canonicalAuthorSubject } from "../runtime/author-id.js";
 import { schema as s } from "../index.js";
 import {
   createPolicyTestApp,
@@ -25,10 +26,8 @@ const testSchema = {
 type TestSchema = s.Schema<typeof testSchema>;
 const testApp: s.App<TestSchema> = s.defineApp(testSchema);
 const testPermissions = definePermissions(testApp, ({ policy, session }) => {
-  policy.todos.allowRead.where(
-    anyOf([{ ownerId: session.user_id }, { ownerId: { isNull: true } }]),
-  );
-  policy.todos.allowInsert.where({ ownerId: session.user_id });
+  policy.todos.allowRead.where(anyOf([{ ownerId: session.user }, { ownerId: { isNull: true } }]));
+  policy.todos.allowInsert.where({ ownerId: session.user });
 });
 
 afterEach(async () => {
@@ -137,27 +136,30 @@ describe("startLocalJazzServer", () => {
     }
   }, 15_000);
 
-  it("allocates a fresh port when no explicit port is provided", async () => {
+  it("atomically assigns distinct ports to concurrent automatic servers", async () => {
     const firstRoot = await createTempRoot("jazz-tools-testing-auto-port-a-");
     const secondRoot = await createTempRoot("jazz-tools-testing-auto-port-b-");
 
-    const firstServer = await startTrackedLocalJazzServer({
-      appId: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
-      dataDir: join(firstRoot, "data-dir"),
-    });
-    const firstPort = firstServer.port;
-    await stopTrackedLocalJazzServer(firstServer);
-
-    const secondServer = await startTrackedLocalJazzServer({
-      appId: "ffffffff-ffff-ffff-ffff-ffffffffffff",
-      dataDir: join(secondRoot, "data-dir"),
-    });
+    const [firstServer, secondServer] = await Promise.all([
+      startTrackedLocalJazzServer({
+        appId: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+        dataDir: join(firstRoot, "data-dir"),
+      }),
+      startTrackedLocalJazzServer({
+        appId: "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        dataDir: join(secondRoot, "data-dir"),
+      }),
+    ]);
 
     try {
-      expect(secondServer.port).not.toBe(firstPort);
-      const healthResponse = await fetch(`${secondServer.url}/health`);
-      expect(healthResponse.status).toBe(200);
+      expect(firstServer.port).not.toBe(secondServer.port);
+      const healthResponses = await Promise.all([
+        fetch(`${firstServer.url}/health`),
+        fetch(`${secondServer.url}/health`),
+      ]);
+      expect(healthResponses.map((response) => response.status)).toEqual([200, 200]);
     } finally {
+      await stopTrackedLocalJazzServer(firstServer);
       await stopTrackedLocalJazzServer(secondServer);
     }
   }, 20_000);
@@ -348,12 +350,22 @@ describe("createPolicyTestApp", () => {
         return db.insert(testApp.todos, {
           title: "Ship the direct app API",
           done: false,
-          ownerId: "alice",
+          ownerId: canonicalAuthorSubject("https://policy-test.example", "alice"),
         });
       });
 
-      const alice = policyTestApp.as({ user_id: "alice", claims: {}, authMode: "local-first" });
-      const bob = policyTestApp.as({ user_id: "bob", claims: {}, authMode: "local-first" });
+      const alice = policyTestApp.as({
+        issuer: "https://policy-test.example",
+        user_id: "alice",
+        claims: {},
+        authMode: "external",
+      });
+      const bob = policyTestApp.as({
+        issuer: "https://policy-test.example",
+        user_id: "bob",
+        claims: {},
+        authMode: "external",
+      });
 
       await expect(alice.all(testApp.todos.where({ id: seeded.id }))).resolves.toEqual([
         expect.objectContaining({ id: seeded.id }),
@@ -364,18 +376,56 @@ describe("createPolicyTestApp", () => {
     }
   }, 10_000);
 
+  it("limits backend SYSTEM bootstrap to the configured authority credential", async () => {
+    const noCredential = await createPolicyTestApp(testApp, testPermissions, expect, {
+      clientBackendSecret: null,
+    });
+    try {
+      await expect(
+        noCredential.seed((db) =>
+          db.insert(testApp.todos, { title: "no credential", done: false }),
+        ),
+      ).rejects.toThrow(/backendSecret required/);
+    } finally {
+      await noCredential.shutdown();
+    }
+
+    const wrongCredential = await createPolicyTestApp(testApp, testPermissions, expect, {
+      clientBackendSecret: "wrong-backend-secret",
+    });
+    try {
+      await expect(
+        wrongCredential.seed((db) =>
+          db.insert(testApp.todos, { title: "wrong credential", done: false }),
+        ),
+      ).rejects.toThrow(/authorization|credential|backend|rejected/i);
+    } finally {
+      await wrongCredential.shutdown();
+    }
+  }, 10_000);
+
   it("exposes expectAllowed and expectDenied on session-scoped test dbs", async () => {
     const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
 
     try {
-      const alice = policyTestApp.as({ user_id: "alice", claims: {}, authMode: "local-first" });
-      const bob = policyTestApp.as({ user_id: "bob", claims: {}, authMode: "local-first" });
+      const alice = policyTestApp.as({
+        issuer: "https://policy-test.example",
+        user_id: "alice",
+        claims: {},
+        authMode: "external",
+      });
+      const bob = policyTestApp.as({
+        issuer: "https://policy-test.example",
+        user_id: "bob",
+        claims: {},
+        authMode: "external",
+      });
 
       alice.expectAllowed((db) => {
         db.insert(testApp.todos, {
           title: "Alice can insert her own todo",
           done: false,
-          ownerId: "alice",
+          ownerId: canonicalAuthorSubject("https://policy-test.example", "alice"),
         });
       });
 
@@ -383,7 +433,7 @@ describe("createPolicyTestApp", () => {
         return db.insert(testApp.todos, {
           title: "Bob cannot insert Alice's todo",
           done: false,
-          ownerId: "alice",
+          ownerId: canonicalAuthorSubject("https://policy-test.example", "alice"),
         });
       });
 

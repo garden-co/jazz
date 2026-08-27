@@ -20,18 +20,22 @@ Invariant digest: no `INV-*` ids are defined or cited by this chapter.
 
 ### Identity (ch. 2)
 
-- **`NodeUuid` / `RowUuid` / `AuthorId` / `SchemaVersionId` /
-  `MigrationLensId`** — wire-stable UUID identities.
+- **`NodeUuid` / `RowUuid` / `SchemaVersionId` / `MigrationLensId`** —
+  wire-stable UUID identities.
+- **`AuthorSubject`** — the interned in-memory form of the canonical portable
+  `[iss,sub]` JSON string. Intern handles are never portable or orderable
+  (ch. 7).
 - **`NodeAlias` / `SchemaVersionAlias`** — node-local `u64` interned identities;
   never on the wire (ch. 14).
-- **`AuthorId::SYSTEM`** — the internal author that bypasses all policy (ch. 7).
+- **`AuthorSubject::SYSTEM`** — the internal author that bypasses all policy (ch. 7).
 
 ### Time & order (ch. 2–4)
 
-- **`TxTime`** — packed HLC time: 48-bit ms + 16-bit counter.
+- **`TxTime`** — opaque packed HLC time: 46-bit Unix ms + 18-bit counter.
+  It is used only for version ordering; public provenance is physical Unix ms.
 - **`TxId`** — `TxTime` + creating `NodeUuid`; the transaction's identity.
-- **`GlobalTime`** — the core-assigned packed HLC settlement position: 48-bit
-  physical milliseconds plus a 16-bit logical counter. It is strictly monotone
+- **`GlobalTime`** — the core-assigned packed HLC settlement position: 46-bit
+  physical milliseconds plus an 18-bit logical counter. It is strictly monotone
   per core authority but not dense. A
   persisted `settled_through: GlobalTime` is known-state possession for
   payload dedup/repair, not proof of a live authority connection or a settled
@@ -93,7 +97,7 @@ Restored}`) · **global-current overwrite table** — node-local derived current
   `RegisterShape`, `Subscribe`, `Unsubscribe`, `ViewUpdate`, catalogue + content
   messages).
 - **`PeerState` / `PeerRole::{Relay, ClientLink}`** — link-local sync state and
-  role; **relay** (uses `AuthorId::SYSTEM`, no fate), **edge** (terminates a
+  role; **relay** (uses `AuthorSubject::SYSTEM`, no fate), **edge** (terminates a
   client identity; mergeable fate authority), **core** (exclusive authority,
   history-complete), **client**. The sync participant type is `Node`: a local
   `NodeState` engine plus connections and serving. Relay, edge, and core are

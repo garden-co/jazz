@@ -3,10 +3,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const wasmDefaultInit = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
 const wasmInitSync = vi.fn();
 
-vi.mock("jazz-wasm", () => ({
-  default: wasmDefaultInit,
-  initSync: wasmInitSync,
-}));
+vi.mock("jazz-wasm", async () => {
+  const { EXPECTED_NATIVE_ARTIFACT_FINGERPRINTS } =
+    await import("./native-artifact-fingerprints.js");
+  return {
+    default: wasmDefaultInit,
+    initSync: wasmInitSync,
+    nativeArtifactFingerprint: () => EXPECTED_NATIVE_ARTIFACT_FINGERPRINTS.wasm,
+    WasmDb: class {},
+  };
+});
 
 import { loadWasmModule } from "./client.js";
 

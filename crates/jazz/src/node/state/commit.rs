@@ -9,7 +9,7 @@ where
     ) -> Result<PublishedTransaction, Error> {
         commit.validate()?;
         self.merge_commit_parent_times(std::slice::from_ref(&commit))?;
-        let made_at = self.mint_tx_time(commit.now_ms);
+        let made_at = self.mint_tx_time(commit.now_ms)?;
         self.commit_mergeable_at(commit, made_at).await
     }
 
@@ -47,7 +47,7 @@ where
             }
         }
         self.merge_commit_parent_times(&commits)?;
-        let made_at = self.mint_tx_time(commits[0].now_ms);
+        let made_at = self.mint_tx_time(commits[0].now_ms)?;
         self.commit_mergeable_many_at(commits, made_at).await
     }
 
@@ -151,7 +151,7 @@ where
             ));
         }
         self.merge_commit_parent_times(&commits)?;
-        let made_at = self.mint_tx_time(commits[0].now_ms);
+        let made_at = self.mint_tx_time(commits[0].now_ms)?;
         self.commit_mergeable_many_at_with_schema_versions_and_provenance(
             commits
                 .into_iter()
@@ -193,7 +193,7 @@ where
             }
         }
         self.merge_commit_parent_times(&commits)?;
-        let made_at = self.mint_tx_time(commits[0].now_ms);
+        let made_at = self.mint_tx_time(commits[0].now_ms)?;
         self.commit_mergeable_many_at_with_schema_versions(
             commits
                 .into_iter()
@@ -251,10 +251,22 @@ where
 
     pub(super) async fn commit_mergeable_many_at_with_schema_versions_and_provenance(
         &mut self,
-        commits: Vec<(SchemaVersionId, MergeableCommit)>,
+        mut commits: Vec<(SchemaVersionId, MergeableCommit)>,
         made_at: TxTime,
         contribution_merge: Option<ContributionMergeProvenance>,
     ) -> Result<PublishedTransaction, Error> {
+        // `*_at` is also used by trusted internal paths, so do not rely on the
+        // public `commit_mergeable[_many]` wrapper to validate a public
+        // provenance millisecond before any staging or batch mutation begins.
+        for (_, commit) in &commits {
+            commit.validate()?;
+        }
+        self.prepare_and_stage_large_commit_values(&mut commits).await?;
+        let staged_ids = commits
+            .iter()
+            .flat_map(|(_, commit)| commit.staged_large_values.iter().copied())
+            .collect::<BTreeSet<_>>();
+        self.ensure_large_value_stages_current(&staged_ids).await?;
         let tx_id = TxId::new(made_at, self.node_uuid);
         let made_by = commits[0].1.made_by;
         let permission_subject = commits[0].1.effective_permission_subject();
@@ -276,6 +288,11 @@ where
         };
         let tx_node_alias = self.ensure_node_alias(tx_id.node).await?;
         let mut batch = self.database.open_batch();
+        for (_, commit) in &commits {
+            for staged_id in &commit.staged_large_values {
+                batch.accept_large_value(*staged_id);
+            }
+        }
         batch.insert(
             "jazz_transactions",
             transaction_values(
@@ -288,7 +305,13 @@ where
         );
         let mut stored_versions = Vec::new();
         let mut pending_parents = BTreeSet::new();
+        let mut authored_content_rows = BTreeSet::new();
         for (write_schema_version, commit) in commits {
+            let provenance_at = TxTime::from_physical_ms(commit.now_ms).map_err(|_| {
+                Error::InvalidMergeableCommit(
+                    "commit now_ms exceeds packed HLC physical-millisecond range",
+                )
+            })?;
             let schema_version_alias = self
                 .ensure_schema_version_alias(write_schema_version)
                 .await?;
@@ -321,21 +344,43 @@ where
                 }
             }
             let layer = VersionLayer::for_commit(&commit);
-            let previous_current =
-                match self.query_local_layer_winner_in_branch(
+            let first_content_occurrence_in_batch = layer != VersionLayer::Content
+                || authored_content_rows.insert((
+                    table_id,
+                    branch_key.clone(),
+                    commit.row_uuid,
+                ));
+            let known_fresh_content_row = commit.known_fresh_row
+                && layer == VersionLayer::Content
+                && first_content_occurrence_in_batch;
+            let previous_local_current = if known_fresh_content_row {
+                None
+            } else {
+                self.query_local_layer_winner_in_branch(
                     &table_schema.name,
                     &branch_key,
                     commit.row_uuid,
                     layer,
-                ).await? {
-                    Some(previous) => Some(previous),
-                    None => self.query_global_layer_winner_in_branch(
+                )
+                .await?
+            };
+            let known_first_local_content_version =
+                layer == VersionLayer::Content
+                    && first_content_occurrence_in_batch
+                    && (known_fresh_content_row || previous_local_current.is_none());
+            let previous_current = match previous_local_current {
+                Some(previous) => Some(previous),
+                None if !known_fresh_content_row => {
+                    self.query_global_layer_winner_in_branch(
                         &table_schema.name,
                         &branch_key,
                         commit.row_uuid,
                         layer,
-                    ).await?,
-                };
+                    )
+                    .await?
+                }
+                None => None,
+            };
             let creator_source = if let Some(previous) = previous_current.as_ref() {
                 Some(previous.clone())
             } else if layer == VersionLayer::Deletion {
@@ -359,7 +404,7 @@ where
             let (created_by, created_at) = creator_source
                 .as_ref()
                 .map(|version| (version.created_by(), version.created_at()))
-                .unwrap_or((commit.made_by, TxTime(commit.now_ms)));
+                .unwrap_or((commit.made_by, provenance_at));
 
             let parents = if commit.parents.is_empty() {
                 Vec::new()
@@ -383,6 +428,18 @@ where
                     .clone()
                     .unwrap_or_else(|| cells.keys().cloned().collect()),
             );
+            let history_descriptor = if commit.deletion.is_none() {
+                Some(
+                    self.prepared_physical_write_plan(
+                        write_schema_version,
+                        &table_schema.name,
+                        PhysicalWriteTarget::History,
+                    )?
+                    .logical_descriptor,
+                )
+            } else {
+                None
+            };
             let stored = VersionRow::from_parts_with_schema_version(
                 &table_schema,
                 VersionRowParts {
@@ -396,13 +453,14 @@ where
                     created_by,
                     created_at,
                     updated_by: commit.made_by,
-                    updated_at: TxTime(commit.now_ms),
+                    updated_at: provenance_at,
                     cells,
                     authored_columns,
                     deletion: commit.deletion,
                 },
                 (write_schema_version != self.catalogue.current_schema_version_id)
                     .then_some(write_schema_version),
+                history_descriptor,
             )?;
             let previous_winner = if let Some(previous) = previous_current.as_ref() {
                 Some((
@@ -422,8 +480,12 @@ where
                 self.version_storage_primary_key(&stored)?,
                 groove_record,
             );
-            self.update_merge_heads_for_content_version(&mut batch, &stored)
-                .await?;
+            self.update_merge_heads_for_content_version(
+                &mut batch,
+                &stored,
+                known_first_local_content_version,
+            )
+            .await?;
             self.write_ahead_current_insert(&mut batch, &stored)?;
             pending_parents.extend(stored.parents());
             stored_versions.push(stored);
@@ -467,6 +529,106 @@ where
         }
         self.pending_persistence.insert(tx_id);
         Ok(PublishedTransaction { tx_id, persistence })
+    }
+
+    /// Lower oversized ordinary scalar cells through Groove and atomically
+    /// stage their immutable nodes before row publication begins.
+    async fn prepare_and_stage_large_commit_values(
+        &mut self,
+        commits: &mut [(SchemaVersionId, MergeableCommit)],
+    ) -> Result<(), Error> {
+        for (schema_version, commit) in commits.iter_mut() {
+            let table_schema = self.table_in_schema(&commit.table, *schema_version)?;
+            let inherited = if commit.cells.values().any(value_contains_indirect_descriptor) {
+                self.current_physical_cells_in_branch_schema(
+                    *schema_version,
+                    &commit.table,
+                    &commit.branch,
+                    commit.row_uuid,
+                )
+                .await?
+                .unwrap_or_default()
+            } else {
+                BTreeMap::new()
+            };
+            for (column, value) in commit.cells.iter_mut() {
+                if value_contains_indirect_descriptor(value)
+                    && inherited.get(column) == Some(value)
+                {
+                    commit.prepared_large_columns.insert(column.clone());
+                    continue;
+                }
+                let semantic_kind = table_schema
+                    .columns
+                    .iter()
+                    .find(|candidate| candidate.name == *column)
+                    .map(|column| column.large_value_kind)
+                    .unwrap_or(crate::schema::LargeValueSemanticKind::NotLarge);
+                let Some(staged) = self
+                    .prepare_and_stage_large_scalar(value, semantic_kind)
+                    .await?
+                else {
+                    continue;
+                };
+                commit.staged_large_values.push(staged.id);
+            }
+        }
+        Ok(())
+    }
+
+    /// Lower one top-level scalar cell, preserving its nullable wrapper. This
+    /// is shared by mergeable and exclusive publication so neither write path
+    /// can leak an oversized inline scalar onto the wire.
+    pub(crate) async fn prepare_and_stage_large_scalar(
+        &mut self,
+        value: &mut Value,
+        semantic_kind: crate::schema::LargeValueSemanticKind,
+    ) -> Result<Option<groove::large_values::StagedLargeValue>, Error> {
+        use groove::large_values::{INLINE_VALUE_MAX_BYTES, LargeValueKind};
+
+        let candidate = match value {
+            Value::String(text) if text.len() > INLINE_VALUE_MAX_BYTES => Some((
+                match semantic_kind {
+                    crate::schema::LargeValueSemanticKind::Json => LargeValueKind::Json,
+                    _ => LargeValueKind::String,
+                },
+                text.as_bytes().to_vec(),
+                false,
+            )),
+            Value::Bytes(bytes) if bytes.len() > INLINE_VALUE_MAX_BYTES => {
+                Some((LargeValueKind::Bytes, bytes.clone(), false))
+            }
+            Value::Nullable(Some(inner)) => match inner.as_ref() {
+                Value::String(text) if text.len() > INLINE_VALUE_MAX_BYTES => Some((
+                    match semantic_kind {
+                        crate::schema::LargeValueSemanticKind::Json => LargeValueKind::Json,
+                        _ => LargeValueKind::String,
+                    },
+                    text.as_bytes().to_vec(),
+                    true,
+                )),
+                Value::Bytes(bytes) if bytes.len() > INLINE_VALUE_MAX_BYTES => {
+                    Some((LargeValueKind::Bytes, bytes.clone(), true))
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some((kind, bytes, nullable)) = candidate else {
+            return Ok(None);
+        };
+        let staged = self
+            .database
+            .prepare_and_stage_large_value(kind, &bytes)
+            .await?;
+        self.enforce_large_value_staging_policy(&staged).await?;
+        let descriptor = Value::Large(staged.value_ref.clone());
+        *value = if nullable {
+            Value::Nullable(Some(Box::new(descriptor)))
+        } else {
+            descriptor
+        };
+        Ok(Some(staged))
     }
 
     /// Commit a local mergeable write and return its sync commit unit.
@@ -610,12 +772,48 @@ where
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeMap<String, Value>>, Error> {
         let schema_version = self.catalogue.current_write_schema.schema;
+        self.visible_current_physical_cells_in_branch_schema(
+            schema_version,
+            table,
+            branch,
+            row_uuid,
+        )
+        .await
+    }
+
+    /// Read a branch-local winner projected into one registered schema while
+    /// retaining indirect scalar descriptors rather than hydrating them.
+    pub(crate) async fn visible_current_physical_cells_in_branch_schema(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        branch: &BranchSelector,
+        row_uuid: RowUuid,
+    ) -> Result<Option<BTreeMap<String, Value>>, Error> {
+        Ok(self
+            .visible_current_physical_cells_and_winner_in_branch_schema(
+                schema_version,
+                table,
+                branch,
+                row_uuid,
+            )
+            .await?
+            .map(|(cells, _)| cells))
+    }
+
+    pub(crate) async fn visible_current_physical_cells_and_winner_in_branch_schema(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        branch: &BranchSelector,
+        row_uuid: RowUuid,
+    ) -> Result<Option<(BTreeMap<String, Value>, TxId)>, Error> {
         let table_schema = self.table_in_schema(table, schema_version)?;
         let schema = &self
             .catalogue
             .catalogue_schemas
             .get(&schema_version)
-            .ok_or(Error::InvalidStoredValue("current write schema missing"))?
+            .ok_or(Error::InvalidStoredValue("registered read schema missing"))?
             .schema;
         let (branch_key, _) = schema
             .project_branch_selector(&table_schema, branch)
@@ -661,8 +859,25 @@ where
         else {
             return Ok(None);
         };
-        self.materialized_cells_for_version(&table_schema, &content)
-            .map(Some)
+        let content_tx = self.version_tx_id(&content)?;
+        let authored_schema = self
+            .schema_version_for_alias(content.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "current version schema alias must exist",
+            ))?;
+        let authored_table = self.table_in_schema(content.table(), authored_schema)?.clone();
+        let mut cells = self.materialized_cells_for_version(&authored_table, &content)?;
+        let Some(projected_table) =
+            self.translate_cells(authored_schema, schema_version, content.table(), &mut cells)?
+        else {
+            return Ok(None);
+        };
+        if projected_table != table_schema.name {
+            return Err(Error::InvalidStoredValue(
+                "current version projects to an unexpected table",
+            ));
+        }
+        Ok(Some((cells, content_tx)))
     }
 
     /// Return the exact local content parent for a branch-local row.
@@ -808,8 +1023,6 @@ where
         #[cfg(feature = "testing")] mut receipt: Option<&mut NodeOpenReceipt>,
     ) -> Result<(), Error> {
         self.ahead_current_keys.clear();
-        self.ahead_current_rows.clear();
-        self.ahead_current_latest.clear();
         let physical_table_ids = self
             .catalogue
             .physical_mappings
@@ -817,83 +1030,31 @@ where
             .flat_map(|mapping| mapping.tables.values().map(|table| table.table_id))
             .collect::<BTreeSet<_>>();
         for table_id in physical_table_ids {
+            let content_table = physical_ahead_current_table_name(table_id);
             let content_rows = self
                 .database
-                .primary_key_scan_raw(&physical_ahead_current_table_name(table_id), &[])
-                .await?
-                .into_iter()
-                .map(|raw| {
-                    let record = raw.record();
-                    Ok((
-                        BranchKey::from_canonical_bytes(
-                            record.get_bytes(GlobalCurrentRowRecord::FIELD_BRANCH_KEY_IDX)?,
-                        )
-                        .map_err(|_| Error::InvalidStoredValue("invalid ahead-current branch key"))?,
-                        SchemaVersionAlias(
-                            record.get_u64(GlobalCurrentRowRecord::FIELD_SCHEMA_VERSION_IDX)?,
-                        ),
-                        RowUuid(record.get_uuid(GlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?),
-                        TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?),
-                        NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?),
-                    ))
-                })
-                .collect::<Result<Vec<_>, Error>>()?;
-            for (branch_key, alias, row_uuid, tx_time, tx_node_alias) in content_rows {
+                .primary_key_scan_raw(&content_table, &[])
+                .await?;
+            for raw in content_rows {
                 #[cfg(feature = "testing")]
                 if let Some(receipt) = &mut receipt {
                     receipt.ahead_current_entries += 1;
                 }
-                self.insert_ahead_current_key(
-                    self.logical_table_for_physical_alias(table_id, alias)?,
-                    branch_key,
-                    VersionLayer::Content,
-                    row_uuid,
-                    tx_time,
-                    tx_node_alias,
-                );
+                self.ahead_current_keys
+                    .insert((table_id, VersionLayer::Content, raw.key().to_vec()));
             }
+            let deletion_table = physical_register_ahead_current_table_name(table_id);
             let deletion_rows = self
                 .database
-                .primary_key_scan_raw(&physical_register_ahead_current_table_name(table_id), &[])
-                .await?
-                .into_iter()
-                .map(|raw| {
-                    let record = raw.record();
-                    Ok((
-                        BranchKey::from_canonical_bytes(
-                            record.get_bytes(
-                                RegisterGlobalCurrentRowRecord::FIELD_BRANCH_KEY_IDX,
-                            )?,
-                        )
-                        .map_err(|_| Error::InvalidStoredValue("invalid ahead-current branch key"))?,
-                        SchemaVersionAlias(
-                            record.get_u64(
-                                RegisterGlobalCurrentRowRecord::FIELD_SCHEMA_VERSION_IDX,
-                            )?,
-                        ),
-                        RowUuid(
-                            record.get_uuid(RegisterGlobalCurrentRowRecord::FIELD_ROW_UUID_IDX)?,
-                        ),
-                        TxTime(record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?),
-                        NodeAlias(
-                            record.get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?,
-                        ),
-                    ))
-                })
-                .collect::<Result<Vec<_>, Error>>()?;
-            for (branch_key, alias, row_uuid, tx_time, tx_node_alias) in deletion_rows {
+                .primary_key_scan_raw(&deletion_table, &[])
+                .await?;
+            for raw in deletion_rows {
                 #[cfg(feature = "testing")]
                 if let Some(receipt) = &mut receipt {
                     receipt.ahead_current_entries += 1;
                 }
-                self.insert_ahead_current_key(
-                    self.logical_table_for_physical_alias(table_id, alias)?,
-                    branch_key,
-                    VersionLayer::Deletion,
-                    row_uuid,
-                    tx_time,
-                    tx_node_alias,
-                );
+                self.ahead_current_keys
+                    .insert((table_id, VersionLayer::Deletion, raw.key().to_vec()));
             }
         }
         Ok(())
@@ -901,74 +1062,22 @@ where
 
     fn insert_ahead_current_key(
         &mut self,
-        table: String,
-        branch_key: BranchKey,
+        table_id: PhysicalTableId,
         layer: VersionLayer,
-        row_uuid: RowUuid,
-        tx_time: TxTime,
-        tx_node_alias: NodeAlias,
+        encoded_primary_key: Vec<u8>,
     ) {
         self.ahead_current_keys
-            .insert((table.clone(), branch_key, layer, row_uuid, tx_time, tx_node_alias));
-        self.ahead_current_rows.insert((table.clone(), row_uuid));
-        self.ahead_current_latest
-            .entry((table, layer, row_uuid))
-            .and_modify(|latest| {
-                if (tx_time, tx_node_alias) > *latest {
-                    *latest = (tx_time, tx_node_alias);
-                }
-            })
-            .or_insert((tx_time, tx_node_alias));
+            .insert((table_id, layer, encoded_primary_key));
     }
 
     fn remove_ahead_current_key(
         &mut self,
-        table: &str,
-        branch_key: &BranchKey,
+        table_id: PhysicalTableId,
         layer: VersionLayer,
-        row_uuid: RowUuid,
-        tx_time: TxTime,
-        tx_node_alias: NodeAlias,
+        encoded_primary_key: Vec<u8>,
     ) {
-        let table_key = table.to_owned();
-        self.ahead_current_keys.remove(&(
-            table_key.clone(),
-            branch_key.clone(),
-            layer,
-            row_uuid,
-            tx_time,
-            tx_node_alias,
-        ));
-        let latest_key = (table_key.clone(), layer, row_uuid);
-        if self.ahead_current_latest.get(&latest_key) == Some(&(tx_time, tx_node_alias)) {
-            if let Some((_, _, _, _, next_time, next_alias)) = self
-                .ahead_current_keys
-                .iter()
-                .filter(|(candidate_table, _, candidate_layer, candidate_row, _, _)| {
-                    candidate_table == &table_key
-                        && *candidate_layer == layer
-                        && *candidate_row == row_uuid
-                })
-                .max_by_key(|(_, _, _, _, time, alias)| (*time, *alias))
-                .cloned()
-            {
-                self.ahead_current_latest
-                    .insert(latest_key, (next_time, next_alias));
-            } else {
-                self.ahead_current_latest.remove(&latest_key);
-            }
-        }
-        if !self.ahead_current_latest.contains_key(&(
-            table_key.clone(),
-            VersionLayer::Content,
-            row_uuid,
-        )) && !self.ahead_current_latest.contains_key(&(
-            table_key.clone(),
-            VersionLayer::Deletion,
-            row_uuid,
-        )) {
-            self.ahead_current_rows.remove(&(table_key, row_uuid));
-        }
+        self.ahead_current_keys
+            .remove(&(table_id, layer, encoded_primary_key));
     }
 
     pub(super) fn cached_tx_version_tables(&self, tx_id: TxId) -> Option<BTreeSet<String>> {
@@ -1057,6 +1166,155 @@ where
             self.catalogue.current_write_schema.schema,
         )
         .await
+    }
+
+    /// Resolve an engine-owned indirect descriptor from the current physical
+    /// row. Callers must perform ordinary Jazz row authorization before using
+    /// this helper; the descriptor never crosses the public API boundary.
+    pub(crate) async fn current_physical_cell_in_schema(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+        column: &str,
+    ) -> Result<Option<Value>, Error> {
+        Ok(self
+            .current_physical_cells_in_schema(schema_version, table, row_uuid)
+            .await?
+            .and_then(|mut cells| cells.remove(column)))
+    }
+
+    pub(crate) async fn current_physical_cells_in_schema(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Option<BTreeMap<String, Value>>, Error> {
+        self.current_physical_cells_in_branch_schema(
+            schema_version,
+            table,
+            &BranchSelector::default(),
+            row_uuid,
+        )
+        .await
+    }
+
+    pub(crate) async fn current_physical_cells_and_winner_in_schema(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Option<(BTreeMap<String, Value>, TxId)>, Error> {
+        self.visible_current_physical_cells_and_winner_in_branch_schema(
+            schema_version,
+            table,
+            &BranchSelector::default(),
+            row_uuid,
+        )
+        .await
+    }
+
+    async fn current_physical_cells_in_branch_schema(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        branch: &BranchSelector,
+        row_uuid: RowUuid,
+    ) -> Result<Option<BTreeMap<String, Value>>, Error> {
+        self.visible_current_physical_cells_in_branch_schema(
+            schema_version,
+            table,
+            branch,
+            row_uuid,
+        )
+        .await
+    }
+
+    /// Seal several independently staged large values into one ordinary row
+    /// commit. This is the atomic publication boundary used by the public
+    /// partial-update DSL: every indirect descriptor in the patch must be one
+    /// of the freshly staged targets, and all remaining descriptors must be
+    /// inherited verbatim from the observed row.
+    pub(crate) async fn seal_large_value_updates(
+        &mut self,
+        mut commit: MergeableCommit,
+        staged: &[(String, groove::large_values::StagedLargeValue)],
+        schema_version: SchemaVersionId,
+    ) -> Result<MergeableCommit, Error> {
+        let inherited = self
+            .current_physical_cells_in_branch_schema(
+                schema_version,
+                &commit.table,
+                &commit.branch,
+                commit.row_uuid,
+            )
+            .await?
+            .ok_or(Error::InvalidMergeableCommit(
+                "partial large-value update target is not observed",
+            ))?;
+        for (column, value) in &commit.cells {
+            if !value_contains_indirect_descriptor(value) {
+                continue;
+            }
+            let staged_value = staged
+                .iter()
+                .find(|(target, _)| target == column)
+                .map(|(_, staged)| &staged.value_ref);
+            let valid = match staged_value {
+                Some(target) => {
+                    let mut descriptors = Vec::new();
+                    collect_indirect_descriptors(value, &mut descriptors);
+                    descriptors.as_slice() == [target.clone()]
+                }
+                None => inherited.get(column) == Some(value),
+            };
+            if !valid {
+                return Err(Error::InvalidMergeableCommit(
+                    "partial large-value update contains an unverified descriptor",
+                ));
+            }
+            commit.prepared_large_columns.insert(column.clone());
+        }
+        commit
+            .staged_large_values
+            .extend(staged.iter().map(|(_, value)| value.id));
+        Ok(commit)
+    }
+
+    pub(crate) async fn seal_inherited_large_values(
+        &mut self,
+        mut commit: MergeableCommit,
+        schema_version: SchemaVersionId,
+        allow_inherited_descriptors: bool,
+    ) -> Result<MergeableCommit, Error> {
+        if !commit.cells.values().any(value_contains_indirect_descriptor) {
+            return Ok(commit);
+        }
+        if !allow_inherited_descriptors {
+            return Err(Error::InvalidMergeableCommit(
+                "complete row replacement contains an unverified large-value descriptor",
+            ));
+        }
+        let inherited = self
+            .current_physical_cells_in_branch_schema(
+                schema_version,
+                &commit.table,
+                &commit.branch,
+                commit.row_uuid,
+            )
+            .await?
+            .unwrap_or_default();
+        for (column, value) in &commit.cells {
+            if value_contains_indirect_descriptor(value) {
+                if inherited.get(column) != Some(value) {
+                    return Err(Error::InvalidMergeableCommit(
+                        "row update contains an unverified large-value descriptor",
+                    ));
+                }
+                commit.prepared_large_columns.insert(column.clone());
+            }
+        }
+        Ok(commit)
     }
 
     pub(crate) async fn local_current_row_in_schema(

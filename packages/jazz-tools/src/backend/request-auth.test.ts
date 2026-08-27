@@ -169,11 +169,9 @@ describe("backend request auth", () => {
         },
       ),
     ).resolves.toEqual({
+      issuer: "urn:jazz:local-first",
       user_id: userId,
-      claims: {
-        subject: userId,
-        issuer: "urn:jazz:local-first",
-      },
+      claims: {},
       authMode: "local-first",
     });
   });
@@ -223,12 +221,9 @@ describe("backend request auth", () => {
         },
       ),
     ).resolves.toEqual({
+      issuer: "https://issuer.example",
       user_id: "user-subject",
-      claims: {
-        role: "editor",
-        subject: "user-subject",
-        issuer: "https://issuer.example",
-      },
+      claims: { role: "editor" },
       authMode: "external",
     });
   });
@@ -258,13 +253,151 @@ describe("backend request auth", () => {
         },
       ),
     ).resolves.toEqual({
+      issuer: "https://issuer.example",
       user_id: "user-subject",
-      claims: {
-        role: "editor",
-        subject: "user-subject",
-        issuer: "https://issuer.example",
-      },
+      claims: { role: "editor" },
       authMode: "external",
     });
+  });
+
+  it("rejects a signed external JWT from a different configured issuer", async () => {
+    const token = signHs256Jwt({
+      sub: "user-subject",
+      iss: "https://other-issuer.example",
+      aud: "jazz-api",
+    });
+
+    await expect(
+      resolveRequestSession(
+        {
+          headers: {
+            authorization: `Bearer ${token}`,
+          },
+        },
+        {
+          appId: "issuer-bound-app",
+          jwtPublicKey: {
+            kty: "oct",
+            kid: JWT_KID,
+            alg: "HS256",
+            k: base64Url(JWT_SECRET),
+          },
+          jwtIssuer: "https://issuer.example",
+          jwtAudience: "jazz-api",
+        },
+      ),
+    ).rejects.toThrow(/issuer/i);
+  });
+
+  it("rejects a signed external JWT for a different configured audience", async () => {
+    const token = signHs256Jwt({
+      sub: "user-subject",
+      iss: "https://issuer.example",
+      aud: "other-service",
+    });
+
+    await expect(
+      resolveRequestSession(
+        {
+          headers: {
+            authorization: `Bearer ${token}`,
+          },
+        },
+        {
+          appId: "audience-bound-app",
+          jwtPublicKey: {
+            kty: "oct",
+            kid: JWT_KID,
+            alg: "HS256",
+            k: base64Url(JWT_SECRET),
+          },
+          jwtIssuer: "https://issuer.example",
+          jwtAudience: "jazz-api",
+        },
+      ),
+    ).rejects.toThrow(/audience/i);
+  });
+
+  it("preserves exact signed external JWT issuer spelling after validation", async () => {
+    const token = signHs256Jwt({
+      sub: " user-subject ",
+      iss: " https://issuer.example ",
+      claims: { role: "editor" },
+    });
+
+    await expect(
+      resolveRequestSession(
+        {
+          headers: {
+            authorization: `Bearer ${token}`,
+          },
+        },
+        {
+          appId: "app-with-static-key-spaced-issuer",
+          jwtPublicKey: {
+            kty: "oct",
+            kid: JWT_KID,
+            alg: "HS256",
+            k: base64Url(JWT_SECRET),
+          },
+        },
+      ),
+    ).resolves.toEqual({
+      issuer: " https://issuer.example ",
+      user_id: " user-subject ",
+      claims: { role: "editor" },
+      authMode: "external",
+    });
+  });
+
+  it("rejects Jazz-reserved issuers on signed external JWTs", async () => {
+    for (const issuer of ["urn:jazz:system", "urn:jazz:anonymous", "urn:jazz:static-bearer"]) {
+      const token = signHs256Jwt({
+        sub: "user-subject",
+        iss: issuer,
+      });
+
+      await expect(
+        resolveRequestSession(
+          {
+            headers: {
+              authorization: `Bearer ${token}`,
+            },
+          },
+          {
+            appId: `app-rejects-${issuer}`,
+            jwtPublicKey: {
+              kty: "oct",
+              kid: JWT_KID,
+              alg: "HS256",
+              k: base64Url(JWT_SECRET),
+            },
+          },
+        ),
+      ).rejects.toThrow(/Invalid JWT payload/);
+    }
+
+    await expect(
+      resolveRequestSession(
+        {
+          headers: {
+            authorization: `Bearer ${signHs256Jwt({
+              sub: "user-subject",
+              iss: "urn:jazz:local-first",
+            })}`,
+          },
+        },
+        {
+          appId: "app-rejects-local-first-without-local-first-auth",
+          allowLocalFirstAuth: false,
+          jwtPublicKey: {
+            kty: "oct",
+            kid: JWT_KID,
+            alg: "HS256",
+            k: base64Url(JWT_SECRET),
+          },
+        },
+      ),
+    ).rejects.toThrow(/local-first/i);
   });
 });

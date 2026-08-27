@@ -84,6 +84,21 @@ android {
 
 }
 
+def relayNativeArtifactsPresent = ["arm64-v8a", "armeabi-v7a", "x86", "x86_64"].every { abi ->
+  file("src/main/jniLibs/${abi}/libjazz_native_relay.a").isFile()
+} && file("../native/include/jazz_native_relay.h").isFile()
+
+if (relayNativeArtifactsPresent) {
+  android {
+    defaultConfig {
+      externalNativeBuild {
+        cmake { arguments "-DANDROID_STL=c++_shared" }
+      }
+    }
+    externalNativeBuild { cmake { path "CMakeLists.txt" } }
+  }
+}
+
 repositories {
   mavenCentral()
   google()

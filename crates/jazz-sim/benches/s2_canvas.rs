@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use hdrhistogram::Histogram;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent};
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, MergeableCommit, NodeState};
 use jazz::peer::PeerState;
 use jazz::protocol::{RegisterShapeOptions, ShapeAst, Subscribe, SubscriptionKey, SyncMessage};
@@ -264,11 +264,18 @@ fn run_live(ctx: &mut dyn DriverContext, config: &Config, coalesced: bool) -> Li
     let canvas = canvas_id();
     let (_core_dir, mut core) = open_node(node(250), schema.clone());
     let (_writer_dir, mut writer) = open_node(node(1), schema.clone());
+    install_participant_claims(&mut core, config);
+    install_participant_claims(&mut writer, config);
     seed_fixture(ctx, config, &mut writer, &mut core);
 
     let (shape, binding) = shape_subscription(&schema, canvas);
     let mut participants = open_participants(config, &schema);
-    let mut spy = open_participant("spy", node(90), schema, AuthorId::from_bytes([0x55; 16]));
+    let mut spy = open_participant(
+        "spy",
+        node(90),
+        schema,
+        AuthorSubject::for_test_bytes([0x55; 16]),
+    );
     for participant in &mut participants {
         hydrate(ctx, &mut core, participant, &shape, &binding);
     }
@@ -673,9 +680,12 @@ fn run_concurrent_live(
     };
     let (core_dir, mut core) = open_node(node(250), schema.clone());
     let (_fixture_writer_dir, mut fixture_writer) = open_node(node(1), schema.clone());
+    install_participant_claims(&mut core, config);
+    install_participant_claims(&mut fixture_writer, config);
     seed_concurrent_fixture(&mut setup_ctx, config, &mut fixture_writer, &mut core);
 
     let (edge_dir, mut edge_node) = open_node(node(240), schema.clone());
+    install_participant_claims(&mut edge_node, config);
     apply_core_binding(&mut core, &shape, &binding);
     apply_binding(&mut edge_node, &shape, &binding);
     let mut policy_peer = PeerState::relay();
@@ -685,6 +695,7 @@ fn run_concurrent_live(
     let mut writer_edge_peers = BTreeMap::new();
     for writer_idx in 0..config.active {
         let (dir, mut writer_node) = open_node(node(20 + writer_idx as u8), schema.clone());
+        install_claims(&mut writer_node, participant_author(writer_idx));
         apply_binding(&mut writer_node, &shape, &binding);
         writer_nodes.push((dir, writer_node));
         writer_edge_peers.insert(
@@ -698,6 +709,7 @@ fn run_concurrent_live(
     for passive_idx in 0..config.passive {
         let participant_idx = config.active + passive_idx;
         let (dir, mut reader_node) = open_node(node(20 + participant_idx as u8), schema.clone());
+        install_claims(&mut reader_node, participant_author(participant_idx));
         apply_binding(&mut reader_node, &shape, &binding);
         passive_reader_positions.push(reader_nodes.len());
         reader_nodes.push((
@@ -817,6 +829,9 @@ fn run_concurrent_live(
         let edge_schema = schema.clone();
         move || {
             let mut edge_node = reopen_node(&edge_dir, node(240), edge_schema);
+            for writer_idx in 0..active_count {
+                install_claims(&mut edge_node, participant_author(writer_idx));
+            }
             apply_binding(&mut edge_node, &edge_shape, &edge_binding);
             run_edge_actor(
                 edge_dir,
@@ -848,6 +863,9 @@ fn run_concurrent_live(
         let core_schema = schema.clone();
         move || {
             let mut core = reopen_node(&core_dir, node(250), core_schema);
+            for writer_idx in 0..active_count {
+                install_claims(&mut core, participant_author(writer_idx));
+            }
             apply_core_binding(&mut core, &core_shape, &core_binding);
             run_core_actor(
                 core_dir,
@@ -882,6 +900,7 @@ fn run_concurrent_live(
         let write_wait_tier = writer_write_wait_tiers[writer_idx];
         writer_handles.push(thread::spawn(move || {
             let mut node = reopen_node(&dir, node(20 + writer_idx as u8), writer_schema);
+            install_claims(&mut node, participant_author(writer_idx));
             apply_binding(&mut node, &writer_shape, &writer_binding);
             run_writer_actor(
                 writer_idx,
@@ -1640,9 +1659,9 @@ fn observed_shape_tx_ids(update: &SyncMessage, read_tier: DurabilityTier) -> Vec
         return Vec::new();
     }
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             result_member_adds, ..
-        } => result_member_adds
+        }) => result_member_adds
             .iter()
             .filter_map(|entry| entry.as_row())
             .filter_map(|(table, _, tx_id)| (table.as_ref() == SHAPES).then_some(tx_id))
@@ -1656,9 +1675,9 @@ fn observed_at_read_tier(update: &SyncMessage, tier: DurabilityTier) -> bool {
         return true;
     }
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             version_bundles, ..
-        } => version_bundles
+        }) => version_bundles
             .iter()
             .any(|bundle| bundle.durability >= tier && matches!(bundle.fate, Fate::Accepted)),
         SyncMessage::FateUpdate { durability, .. } => durability.is_some_and(|seen| seen >= tier),
@@ -1714,6 +1733,8 @@ fn run_historical_loads(
     let canvas = canvas_id();
     let (_core_dir, mut core) = open_history_complete_node(node(250), schema.clone());
     let (_writer_dir, mut writer) = open_node(node(1), schema.clone());
+    install_participant_claims(&mut core, config);
+    install_participant_claims(&mut writer, config);
     seed_fixture(ctx, config, &mut writer, &mut core);
     let (shape, binding) = shape_subscription(&schema, canvas);
     let table = schema
@@ -1822,17 +1843,30 @@ fn run_db_surface(config: &Config, coalesced: bool) -> DbSurfaceSummary {
     let canvas = canvas_id();
     let (_dir, db) = open_db(node(70), participant_author(0), schema.clone());
 
-    let canvas_write =
-        block_on(db.insert_with_id(CANVASES, canvas, canvas_cells())).expect("db canvas insert");
+    let canvas_write = block_on(db.insert(
+        CANVASES,
+        canvas_cells(),
+        jazz::db::InsertOptions {
+            row_id: Some(canvas),
+            ..Default::default()
+        },
+    ))
+    .expect("db canvas insert");
     block_on(canvas_write.wait(DurabilityTier::Local)).expect("db canvas local wait");
     for idx in 0..(config.active + config.passive) {
-        let invite = block_on(db.insert_with_id(
+        let invite = block_on(db.insert(
             INVITES,
-            row(10_000 + idx),
             BTreeMap::from([
                 ("canvas".to_owned(), Value::Uuid(canvas.0)),
-                ("userID".to_owned(), Value::Uuid(participant_author(idx).0)),
+                (
+                    "userID".to_owned(),
+                    Value::String(participant_author(idx).canonical().to_owned()),
+                ),
             ]),
+            jazz::db::InsertOptions {
+                row_id: Some(row(10_000 + idx)),
+                ..Default::default()
+            },
         ))
         .expect("db invite insert");
         block_on(invite.wait(DurabilityTier::Local)).expect("db invite local wait");
@@ -1841,8 +1875,12 @@ fn run_db_surface(config: &Config, coalesced: bool) -> DbSurfaceSummary {
     let mut shape_rows = Vec::with_capacity(config.shapes);
     let mut expected = BTreeMap::new();
     for idx in 0..config.shapes {
-        let write = block_on(db.insert(SHAPES, shape_cells(canvas, idx, idx as f64, idx as f64)))
-            .expect("db shape insert");
+        let write = block_on(db.insert(
+            SHAPES,
+            shape_cells(canvas, idx, idx as f64, idx as f64),
+            Default::default(),
+        ))
+        .expect("db shape insert");
         let row_uuid = write.row_uuid();
         block_on(write.wait(DurabilityTier::Local)).expect("db shape local wait");
         shape_rows.push(row_uuid);
@@ -1896,7 +1934,8 @@ fn run_db_surface(config: &Config, coalesced: bool) -> DbSurfaceSummary {
                 ("y".to_owned(), Value::F64(y)),
             ]);
             let start = Instant::now();
-            let write = block_on(db.update(SHAPES, row_uuid, patch)).expect("db shape update");
+            let write = block_on(db.update(SHAPES, row_uuid, patch, Default::default()))
+                .expect("db shape update");
             block_on(write.wait(DurabilityTier::Local)).expect("db update local wait");
             write_latencies.push(start.elapsed().as_micros() as u64);
             expected.insert(row_uuid, (x.to_bits(), y.to_bits()));
@@ -1943,6 +1982,8 @@ fn run_failure(ctx: &mut dyn DriverContext, config: &Config) -> FailureSummary {
     let canvas = canvas_id();
     let (core_dir, mut core) = open_node(node(250), schema.clone());
     let (_writer_dir, mut writer) = open_node(node(1), schema.clone());
+    install_participant_claims(&mut core, config);
+    install_participant_claims(&mut writer, config);
     seed_fixture(ctx, config, &mut writer, &mut core);
     let (shape, binding) = shape_subscription(&schema, canvas);
     let mut participant =
@@ -1955,7 +1996,7 @@ fn run_failure(ctx: &mut dyn DriverContext, config: &Config) -> FailureSummary {
         "spy",
         node(62),
         schema.clone(),
-        AuthorId::from_bytes([0x44; 16]),
+        AuthorSubject::for_test_bytes([0x44; 16]),
     );
     hydrate(ctx, &mut core, &mut spy, &shape, &binding);
 
@@ -1982,6 +2023,7 @@ fn run_failure(ctx: &mut dyn DriverContext, config: &Config) -> FailureSummary {
                 RocksDbStorage::open_with_durability(core_dir.path(), &refs, Durability::WalNoSync)
                     .unwrap();
             core = block_on(NodeState::new(node(250), schema.clone(), storage)).unwrap();
+            install_participant_claims(&mut core, config);
         }
     }
     let core_update = block_on(
@@ -2023,7 +2065,7 @@ fn schema() -> JazzSchema {
     let invite_policy = public_policy_expr::exists(public_policy_expr::table(INVITES).where_(
         public_policy_expr::rel::all_of([
             public_policy_expr::rel::eq_outer("canvas", "canvas"),
-            public_policy_expr::rel::eq_session("userID", "user_id"),
+            public_policy_expr::rel::eq_session("userID", vec!["user"]),
         ]),
     ));
     compile_public_schema(
@@ -2032,7 +2074,7 @@ fn schema() -> JazzSchema {
             .table(
                 PublicTableSchema::builder(INVITES)
                     .fk_column("canvas", CANVASES)
-                    .column("userID", PublicColumnType::Uuid),
+                    .column("userID", PublicColumnType::Text),
             )
             .table(
                 PublicTableSchema::builder(SHAPES)
@@ -2060,7 +2102,7 @@ fn seed_fixture(
         core,
         CANVASES,
         canvas,
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         canvas_cells(),
         1,
     );
@@ -2071,10 +2113,13 @@ fn seed_fixture(
             core,
             INVITES,
             row(10_000 + idx),
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             BTreeMap::from([
                 ("canvas".to_owned(), Value::Uuid(canvas.0)),
-                ("userID".to_owned(), Value::Uuid(participant_author(idx).0)),
+                (
+                    "userID".to_owned(),
+                    Value::String(participant_author(idx).canonical().to_owned()),
+                ),
             ]),
             100 + idx as u64,
         );
@@ -2086,7 +2131,7 @@ fn seed_fixture(
             core,
             SHAPES,
             shape_row(idx),
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             shape_cells(canvas, idx, idx as f64, idx as f64),
             1_000 + idx as u64,
         );
@@ -2106,7 +2151,7 @@ fn seed_concurrent_fixture(
         core,
         CANVASES,
         canvas,
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         canvas_cells(),
         0,
     );
@@ -2117,10 +2162,13 @@ fn seed_concurrent_fixture(
             core,
             INVITES,
             row(10_000 + idx),
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             BTreeMap::from([
                 ("canvas".to_owned(), Value::Uuid(canvas.0)),
-                ("userID".to_owned(), Value::Uuid(participant_author(idx).0)),
+                (
+                    "userID".to_owned(),
+                    Value::String(participant_author(idx).canonical().to_owned()),
+                ),
             ]),
             0,
         );
@@ -2132,7 +2180,7 @@ fn seed_concurrent_fixture(
             core,
             SHAPES,
             shape_row(idx),
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             shape_cells(canvas, idx, idx as f64, idx as f64),
             0,
         );
@@ -2146,7 +2194,7 @@ fn commit_global(
     core: &mut NodeState<RocksDbStorage>,
     table: &str,
     row_uuid: RowUuid,
-    made_by: AuthorId,
+    made_by: AuthorSubject,
     cells: BTreeMap<String, Value>,
     seq: u64,
 ) {
@@ -2169,7 +2217,7 @@ fn commit_global_at(
     core: &mut NodeState<RocksDbStorage>,
     table: &str,
     row_uuid: RowUuid,
-    made_by: AuthorId,
+    made_by: AuthorSubject,
     cells: BTreeMap<String, Value>,
     made_at: u64,
 ) {
@@ -2209,6 +2257,7 @@ fn hydrate(
     shape: &ValidatedQuery,
     binding: &Binding,
 ) {
+    install_claims(core, participant.peer.identity());
     register_binding(ctx, core, &participant.edge.name, shape, binding);
     apply_binding(&mut participant.edge.node, shape, binding);
     apply_binding(&mut participant.node, shape, binding);
@@ -2331,12 +2380,14 @@ fn open_participant(
     name: &str,
     node_uuid: NodeUuid,
     schema: JazzSchema,
-    identity: AuthorId,
+    identity: AuthorSubject,
 ) -> Participant {
     let edge_schema = schema.clone();
-    let (dir, participant_node) = open_node(node_uuid, schema);
+    let (dir, mut participant_node) = open_node(node_uuid, schema);
     let edge_uuid = node((node_uuid.as_bytes()[15]).saturating_add(100));
-    let (edge_dir, edge_node) = open_node(edge_uuid, edge_schema);
+    let (edge_dir, mut edge_node) = open_node(edge_uuid, edge_schema);
+    install_claims(&mut participant_node, identity);
+    install_claims(&mut edge_node, identity);
     Participant {
         name: name.to_owned(),
         node: participant_node,
@@ -2379,7 +2430,7 @@ fn reopen_node(
 
 fn open_db(
     node_uuid: NodeUuid,
-    author: AuthorId,
+    author: AuthorSubject,
     schema: JazzSchema,
 ) -> (tempfile::TempDir, Db<RocksDbStorage>) {
     let dir = tempfile::tempdir().unwrap();
@@ -2401,6 +2452,7 @@ fn open_db(
         )))),
     }))
     .expect("db open");
+    install_db_claims(&db, author);
     (dir, db)
 }
 
@@ -2536,11 +2588,11 @@ fn merge_counters(core: &mut NodeState<RocksDbStorage>, shapes: usize) -> (usize
     let mut merges_of_merges = 0;
     for idx in 0..shapes {
         for entry in block_on(core.row_history(SHAPES, shape_row(idx))).unwrap() {
-            if entry.parents().len() > 1 && entry.made_by() == AuthorId::SYSTEM {
+            if entry.parents().len() > 1 && entry.made_by() == AuthorSubject::SYSTEM {
                 merges += 1;
                 if entry.parents().iter().any(|parent| {
                     block_on(core.transaction_record(*parent))
-                        .is_some_and(|record| record.made_by == AuthorId::SYSTEM)
+                        .is_some_and(|record| record.made_by == AuthorSubject::SYSTEM)
                 }) {
                     merges_of_merges += 1;
                 }
@@ -2559,7 +2611,7 @@ fn assert_merges_are_concurrent(core: &mut NodeState<RocksDbStorage>, shapes: us
             .collect::<BTreeMap<_, _>>();
         for entry in &history {
             let parents = entry.parents();
-            if parents.len() <= 1 || entry.made_by() != AuthorId::SYSTEM {
+            if parents.len() <= 1 || entry.made_by() != AuthorSubject::SYSTEM {
                 continue;
             }
             for (left_idx, left) in parents.iter().enumerate() {
@@ -2597,9 +2649,9 @@ fn is_ancestor(
 
 fn result_output_count(update: &SyncMessage, table: &str) -> usize {
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             result_member_adds, ..
-        } => result_member_adds
+        }) => result_member_adds
             .iter()
             .filter_map(|entry| entry.as_row())
             .filter(|entry| entry.0.as_ref() == table)
@@ -3037,8 +3089,39 @@ fn shape_row(idx: usize) -> RowUuid {
     row(1_000 + idx)
 }
 
-fn participant_author(idx: usize) -> AuthorId {
-    AuthorId(row(20_000 + idx).0)
+fn participant_author(idx: usize) -> AuthorSubject {
+    AuthorSubject::for_test_uuid(row(20_000 + idx).0)
+}
+
+fn raw_claims(author: AuthorSubject) -> BTreeMap<String, Value> {
+    let sub = author.test_uuid().to_string();
+    BTreeMap::from([
+        ("iss".to_owned(), Value::String("urn:jazz:test".to_owned())),
+        (
+            "issuer".to_owned(),
+            Value::String("urn:jazz:test".to_owned()),
+        ),
+        ("sub".to_owned(), Value::String(sub.clone())),
+        ("user_id".to_owned(), Value::String(sub)),
+    ])
+}
+
+fn install_claims(node: &mut NodeState<RocksDbStorage>, author: AuthorSubject) {
+    if author != AuthorSubject::SYSTEM {
+        node.admit_test_session_claims(author, raw_claims(author));
+    }
+}
+
+fn install_participant_claims(node: &mut NodeState<RocksDbStorage>, config: &Config) {
+    for idx in 0..(config.active + config.passive) {
+        install_claims(node, participant_author(idx));
+    }
+}
+
+fn install_db_claims(db: &Db<RocksDbStorage>, author: AuthorSubject) {
+    if author != AuthorSubject::SYSTEM {
+        db.set_identity_claims(author, raw_claims(author));
+    }
 }
 
 fn node(byte: u8) -> NodeUuid {

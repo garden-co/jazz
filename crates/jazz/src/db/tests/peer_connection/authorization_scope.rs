@@ -19,9 +19,9 @@ fn schema_with_explicit_public_read() -> JazzSchema {
 // Final convergence is still asserted through the receiver's public read.
 fn assert_delayed_duplicate_usage_reset(replacement_row: bool) {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
     let stale = row(0x61);
     server
@@ -117,7 +117,7 @@ fn assert_delayed_duplicate_usage_reset(replacement_row: bool) {
         if server_sent.borrow().iter().any(|message| {
             matches!(
                 message,
-                SyncMessage::ViewUpdate { subscription, .. }
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { subscription, .. })
                     if *subscription == second_subscription
             )
         }) {
@@ -131,21 +131,19 @@ fn assert_delayed_duplicate_usage_reset(replacement_row: bool) {
         .iter()
         .rev()
         .find_map(|message| match message {
-            SyncMessage::ViewUpdate { subscription, .. }
-                if *subscription == second_subscription =>
-            {
-                Some(message.clone())
-            }
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+                subscription, ..
+            }) if *subscription == second_subscription => Some(message.clone()),
             _ => None,
         })
         .expect("duplicate usage site must receive its own ViewUpdate");
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         peer_payload_inventory,
         result_member_adds,
         result_member_removes,
         ..
-    } = &second_update
+    }) = &second_update
     else {
         unreachable!();
     };
@@ -178,8 +176,8 @@ fn delayed_duplicate_usage_resets_stale_authorization_with_replacement_row() {
 #[test]
 fn legacy_authorization_scope_subscribe_is_rejected_before_shape_admission() {
     let schema = schema_with_explicit_public_read();
-    let identity = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let identity = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let shape = Query::from("todos").validate(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let subscription = SubscriptionKey {
@@ -219,10 +217,10 @@ fn legacy_authorization_scope_subscribe_is_rejected_before_shape_admission() {
     while let Some(message) = client_transport.try_recv() {
         match message {
             SyncMessage::CatalogueSnapshot(_) => {}
-            SyncMessage::ViewUpdate {
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription: received,
                 ..
-            } => {
+            }) => {
                 assert_eq!(received, subscription);
                 received_view = true;
             }
@@ -232,7 +230,7 @@ fn legacy_authorization_scope_subscribe_is_rejected_before_shape_admission() {
             } => {
                 assert!(received_view, "receipt must follow its support view");
                 assert_eq!(received, subscription);
-                assert_eq!(receipt.link, *identity.as_bytes());
+                assert_eq!(receipt.link, identity);
                 assert_eq!(receipt.key.subject, identity);
                 received_receipt = true;
             }
@@ -246,7 +244,7 @@ fn legacy_authorization_scope_subscribe_is_rejected_before_shape_admission() {
 /* Retired with the caller-authored scope protocol.  Authority-owned intent
  * coverage lives with the permission advice tests above.
 fn legacy_authorization_scope_subscribe_refreshes_claims() {
-    server.node().borrow_mut().set_session_claims(
+    server.node().borrow_mut().set_test_provider_claims(
         identity,
         BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
     );
@@ -255,7 +253,7 @@ fn legacy_authorization_scope_subscribe_refreshes_claims() {
     let mut refreshed_receipt = None;
     while let Some(message) = client_transport.try_recv() {
         match message {
-            SyncMessage::ViewUpdate { .. } => refreshed_view = true,
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) => refreshed_view = true,
             SyncMessage::AuthorizationScopeReceipt { receipt, .. } => {
                 assert!(
                     refreshed_view,
@@ -274,8 +272,8 @@ fn legacy_authorization_scope_subscribe_refreshes_claims() {
 #[test]
 fn authorization_scope_rejects_unrelated_caller_intent() {
     let schema = schema_with_explicit_public_read();
-    let identity = AuthorId::from_bytes([0xc2; 16]);
-    let server = open_core(0x5f, AuthorId::SYSTEM, &schema);
+    let identity = AuthorSubject::for_test_bytes([0xc2; 16]);
+    let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema);
     let shape = Query::from("todos").validate(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let subscription = SubscriptionKey {
@@ -329,8 +327,8 @@ fn legacy_authorization_scope_subscribe_never_assembles_multiple_clauses() {
             .table(PublicTableSchemaBuilder::new("support_using"))
             .table(PublicTableSchemaBuilder::new("support_check")),
     );
-    let identity = AuthorId::from_bytes([0xc3; 16]);
-    let server = open_core(0x60, AuthorId::SYSTEM, &schema);
+    let identity = AuthorSubject::for_test_bytes([0xc3; 16]);
+    let server = open_core(0x60, AuthorSubject::SYSTEM, &schema);
     server
         .node()
         .borrow_mut()
@@ -409,7 +407,9 @@ fn legacy_authorization_scope_subscribe_never_assembles_multiple_clauses() {
     let mut saw_receipt = false;
     while let Some(message) = client_transport.try_recv() {
         match message {
-            SyncMessage::ViewUpdate { .. } => saw_second_view = true,
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) => {
+                saw_second_view = true
+            }
             SyncMessage::AuthorizationScopeReceipt { receipt, .. } => {
                 assert!(
                     saw_second_view,
@@ -458,7 +458,7 @@ fn authorization_scope_claims_or_policy_away_and_back_requires_fresh_every_claus
     ]);
     let key = AuthorizationSupportScopeKey {
         support_shape_digest: [0x41; 32],
-        subject: AuthorId::from_bytes([0x42; 16]),
+        subject: AuthorSubject::for_test_bytes([0x42; 16]),
         claims_digest: [0x43; 32],
         policy_digest: [0x44; 32],
     };
@@ -520,7 +520,7 @@ fn authorization_scope_claims_or_policy_away_and_back_requires_fresh_every_claus
 
 #[test]
 fn authorization_scope_transport_rejects_stale_component_after_applied_view() {
-    let link = [0x8b; 16];
+    let link = AuthorSubject::for_test_bytes([0x8b; 16]);
     let context = AuthorityContext {
         authority: [0x8a; 16],
         link,
@@ -533,7 +533,7 @@ fn authorization_scope_transport_rejects_stale_component_after_applied_view() {
     };
     let key = AuthorizationSupportScopeKey {
         support_shape_digest: [1; 32],
-        subject: AuthorId::from_bytes(link),
+        subject: link,
         claims_digest: [2; 32],
         policy_digest: [3; 32],
     };
@@ -625,7 +625,7 @@ fn authorization_scope_requires_canonical_current_global_support_options() {
 #[test]
 fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
     let schema = schema_with_explicit_public_read();
-    let identity = AuthorId::from_bytes([0xc4; 16]);
+    let identity = AuthorSubject::for_test_bytes([0xc4; 16]);
     let shape = Query::from("todos").validate(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let historical = RegisterShapeOptions {
@@ -660,7 +660,7 @@ fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
         binding_id: binding.binding_id(),
         read_view: canonical_opts.read_view_key(),
     };
-    let canonical_server = open_core(0x64, AuthorId::SYSTEM, &schema);
+    let canonical_server = open_core(0x64, AuthorSubject::SYSTEM, &schema);
     let (mut canonical_client, canonical_transport) = duplex();
     let canonical_subscriber = canonical_server.accept_subscriber(canonical_transport, identity);
     canonical_client
@@ -692,7 +692,7 @@ fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
     while let Some(message) = canonical_client.try_recv() {
         match message {
             SyncMessage::CatalogueSnapshot(_) => {}
-            SyncMessage::ViewUpdate { .. } => saw_view = true,
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) => saw_view = true,
             SyncMessage::AuthorizationScopeReceipt { .. } => {
                 assert!(saw_view, "canonical receipt follows its support view");
                 saw_receipt = true;
@@ -706,7 +706,7 @@ fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
     );
 
     for opts in variants {
-        let server = open_core(0x63, AuthorId::SYSTEM, &schema);
+        let server = open_core(0x63, AuthorSubject::SYSTEM, &schema);
         let subscription = SubscriptionKey {
             shape_id: shape.shape_id(),
             binding_id: binding.binding_id(),
@@ -750,7 +750,7 @@ fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
 #[test]
 fn subscriber_cannot_spoof_authority_view_updates() {
     let schema = schema();
-    let edge = open_db(0x7a, AuthorId::SYSTEM, &schema);
+    let edge = open_db(0x7a, AuthorSubject::SYSTEM, &schema);
     let (edge_transport, mut authority_transport) = duplex();
     let _upstream = crate::db::block_on(edge.connect_upstream(edge_transport));
     let query = Query::from("todos");
@@ -765,21 +765,23 @@ fn subscriber_cannot_spoof_authority_view_updates() {
             _ => continue,
         }
     };
-    let view_update = |opening_pending, settled_through| SyncMessage::ViewUpdate {
-        subscription,
-        settled_through: GlobalTime(settled_through),
-        reset_result_set: true,
-        version_carriers: Vec::new(),
-        version_bundles: Vec::new(),
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory {
-            opening_pending,
-            ..Default::default()
-        },
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
+    let view_update = |opening_pending, settled_through| {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+            subscription,
+            settled_through: GlobalTime(settled_through),
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory {
+                opening_pending,
+                ..Default::default()
+            },
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
     };
     authority_transport.send(view_update(true, 1)).unwrap();
     edge.tick().unwrap();
@@ -809,7 +811,8 @@ fn subscriber_cannot_spoof_authority_view_updates() {
         .sync_metrics()
         .dropped_peer_request_messages;
     let (mut client_transport, server_transport) = duplex();
-    let subscriber = edge.accept_subscriber(server_transport, AuthorId::from_bytes([0x7b; 16]));
+    let subscriber =
+        edge.accept_subscriber(server_transport, AuthorSubject::for_test_bytes([0x7b; 16]));
 
     client_transport.send(view_update(false, 100)).unwrap();
     subscriber.borrow_mut().tick().unwrap();
@@ -845,11 +848,64 @@ fn subscriber_cannot_spoof_authority_view_updates() {
     assert!(!node.opening_pending_for_binding_view(binding_view));
 }
 
+// This stays internal because the admission ordering and retained peer registration
+// state are not exposed through the public client API.
+#[test]
+fn oversized_register_shape_read_view_is_rejected_before_key_derivation_or_retention() {
+    let schema = schema();
+    let server = open_core(0x5d, AuthorSubject::SYSTEM, &schema);
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let oversized_opts = RegisterShapeOptions {
+        read_view: ReadViewSpec {
+            source: ReadViewSourceSpec::Snapshot {
+                snapshot: SnapshotRef {
+                    owner: NodeUuid::from_bytes([0x98; 16]),
+                    global_base: GlobalTime(0),
+                    local_base: TxTime(0),
+                    dots: vec![
+                        TxId::new(TxTime(1), NodeUuid::from_bytes([0x97; 16]));
+                        MAX_SHAPE_REGISTRATION_BYTES
+                    ],
+                },
+            },
+        },
+        ..RegisterShapeOptions::default()
+    };
+    let shape_id = shape.shape_id();
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber =
+        server.accept_subscriber(server_transport, AuthorSubject::for_test_bytes([0x96; 16]));
+
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id,
+            ast: ShapeAst::from_validated(&shape),
+            opts: oversized_opts,
+        })
+        .unwrap();
+    let error = subscriber.borrow_mut().tick().unwrap_err();
+
+    assert_eq!(error.code, crate::db::ErrorCode::Protocol);
+    assert!(error.message.contains("shape registration size"));
+    assert!(
+        client_transport.try_recv().is_none(),
+        "an invalid oversized registration must terminate the link instead of using a new wire-level rejection convention"
+    );
+    let subscriber = subscriber.borrow();
+    let crate::db::peer_connection::ConnectionLink::Subscriber(state) = &subscriber.link else {
+        panic!("accepted subscriber must retain subscriber connection state");
+    };
+    assert!(
+        state.shape_registrations.is_empty(),
+        "oversized read-view options must not be retained"
+    );
+}
+
 #[test]
 fn oversized_register_shape_is_rejected_at_admission() {
     let schema = schema();
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let huge_table = "t".repeat(MAX_SHAPE_AST_BYTES + 1);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let huge_table = "t".repeat(MAX_SHAPE_REGISTRATION_BYTES + 1);
     let ast = ShapeAst::new(Query::from(huge_table), schema.version_id());
     let error = server
         .node()
@@ -862,23 +918,26 @@ fn oversized_register_shape_is_rejected_at_admission() {
         .unwrap_err();
     assert!(matches!(
         error,
-        crate::node::Error::UnsupportedSyncMessage("shape AST exceeds byte limit")
+        crate::node::Error::UnsupportedSyncMessage("shape registration exceeds byte limit")
     ));
 }
 
 #[test]
 fn resume_cursor_restores_connection_claims_before_serving_same_identity_siblings() {
     let schema = membership_scoped_relation_schema();
-    let reader = AuthorId::from_bytes([0xb3; 16]);
+    let reader = AuthorSubject::for_test_bytes([0xb3; 16]);
     let normal_claims = BTreeMap::new();
     let invite_claims = BTreeMap::from([
-        ("user_id".to_owned(), Value::String(reader.0.to_string())),
+        (
+            "user_id".to_owned(),
+            Value::String(reader.test_uuid().to_string()),
+        ),
         (
             "join_code".to_owned(),
             Value::String("resume-only-invite".to_owned()),
         ),
     ]);
-    let server = open_core(0x5f, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc6, reader, &schema);
     let sibling = open_db(0xc7, reader, &schema);
     let chat = row(0xc3);
@@ -941,17 +1000,22 @@ fn resume_cursor_restores_connection_claims_before_serving_same_identity_sibling
 #[test]
 fn subscriber_wire_claims_cannot_escalate_host_admission() {
     let schema = membership_scoped_relation_schema();
-    let reader = AuthorId::from_bytes([0xb4; 16]);
-    let normal_claims =
-        BTreeMap::from([("user_id".to_owned(), Value::String(reader.0.to_string()))]);
+    let reader = AuthorSubject::for_test_bytes([0xb4; 16]);
+    let normal_claims = BTreeMap::from([(
+        "user_id".to_owned(),
+        Value::String(reader.test_uuid().to_string()),
+    )]);
     let self_asserted_invite = BTreeMap::from([
-        ("user_id".to_owned(), Value::String(reader.0.to_string())),
+        (
+            "user_id".to_owned(),
+            Value::String(reader.test_uuid().to_string()),
+        ),
         (
             "join_code".to_owned(),
             Value::String("self-asserted-invite".to_owned()),
         ),
     ]);
-    let server = open_core(0x60, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x60, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc8, reader, &schema);
     let chat = row(0xc4);
     server
@@ -984,7 +1048,7 @@ fn subscriber_wire_claims_cannot_escalate_host_admission() {
     // This is an unverified wire message from an already admitted session,
     // not an authenticated host refresh. It must not replace the admission
     // claim map even though it carries the connection's real identity.
-    client.set_identity_claims(reader, self_asserted_invite);
+    client.set_test_provider_claims(reader, self_asserted_invite);
     client.tick().unwrap();
     server.tick().unwrap();
     assert_eq!(

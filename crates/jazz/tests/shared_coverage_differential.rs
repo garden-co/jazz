@@ -11,7 +11,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
@@ -47,7 +47,7 @@ struct RowSummary {
     table: String,
     row: RowUuid,
     title: Option<String>,
-    owner: Option<AuthorId>,
+    owner: Option<AuthorSubject>,
 }
 
 fn block_on<F: Future>(future: F) -> F::Output {
@@ -88,7 +88,7 @@ fn schema() -> JazzSchema {
     compile_schema(&builder.build())
 }
 
-fn open_client(seed: u8, author: AuthorId, schema: JazzSchema) -> Db<TestStorage> {
+fn open_client(seed: u8, author: AuthorSubject, schema: JazzSchema) -> Db<TestStorage> {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(
@@ -114,7 +114,7 @@ fn open_server(seed: u8, schema: JazzSchema) -> Db<TestStorage> {
             TestStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([seed; 16]),
-                author: AuthorId::SYSTEM,
+                author: AuthorSubject::SYSTEM,
             },
         )
         .with_id_source(SeededRowIdSource::new(seed as u64)),
@@ -132,20 +132,27 @@ fn global_read_opts() -> ReadOpts {
     }
 }
 
-fn cells(title: &str, owner: AuthorId) -> BTreeMap<String, Value> {
+fn cells(title: &str, owner: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.to_owned())),
-        ("owner".to_owned(), Value::Uuid(owner.0)),
+        (
+            "owner".to_owned(),
+            Value::String(owner.canonical().to_owned()),
+        ),
     ])
 }
 
-fn seed_fixture(server: &Db<TestStorage>, visible_owner: AuthorId, hidden_owner: AuthorId) {
+fn seed_fixture(
+    server: &Db<TestStorage>,
+    visible_owner: AuthorSubject,
+    hidden_owner: AuthorSubject,
+) {
     for (idx, table) in TABLES.iter().enumerate() {
         server
             .seed_settled_mergeable_for_bootstrap(
                 table,
                 row(100 + idx as u64),
-                AuthorId::SYSTEM,
+                AuthorSubject::SYSTEM,
                 cells(&format!("{table}-visible"), visible_owner),
             )
             .expect("seed visible row");
@@ -153,7 +160,7 @@ fn seed_fixture(server: &Db<TestStorage>, visible_owner: AuthorId, hidden_owner:
             .seed_settled_mergeable_for_bootstrap(
                 table,
                 row(200 + idx as u64),
-                AuthorId::SYSTEM,
+                AuthorSubject::SYSTEM,
                 cells(&format!("{table}-hidden"), hidden_owner),
             )
             .expect("seed hidden row");
@@ -166,7 +173,7 @@ fn row_summary(table_schema: &TableSchema, row: &jazz::node::CurrentRow) -> RowS
         other => panic!("unexpected title cell: {other:?}"),
     };
     let owner = match row.cell(table_schema, "owner") {
-        Some(Value::Uuid(value)) => Some(AuthorId(value)),
+        Some(Value::String(value)) => AuthorSubject::from_canonical(&value).ok(),
         other => panic!("unexpected owner cell: {other:?}"),
     };
     RowSummary {
@@ -297,8 +304,8 @@ fn run_scenario(mode: CoverageMode) -> ScenarioReceipt {
         .iter()
         .map(|table| (table_name(table.name.clone()), table.clone()))
         .collect::<BTreeMap<_, _>>();
-    let visible_owner = AuthorId::from_bytes([0xa1; 16]);
-    let hidden_owner = AuthorId::from_bytes([0xb2; 16]);
+    let visible_owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let hidden_owner = AuthorSubject::for_test_bytes([0xb2; 16]);
     let server = open_server(0x5e, schema.clone());
     let client = open_client(0xc1, visible_owner, schema);
     seed_fixture(&server, visible_owner, hidden_owner);
@@ -333,21 +340,29 @@ fn run_scenario(mode: CoverageMode) -> ScenarioReceipt {
             "title".to_owned(),
             Value::String("alpha-updated".to_owned()),
         )]),
+        Default::default(),
     ))
     .expect("update visible row");
-    block_on(server.insert_with_id(
+    block_on(server.insert(
         "beta_items",
-        row(310),
         cells("beta-inserted-visible", visible_owner),
+        jazz::db::InsertOptions {
+            row_id: Some(row(310)),
+            ..Default::default()
+        },
     ))
     .expect("insert visible row");
-    block_on(server.insert_with_id(
+    block_on(server.insert(
         "gamma_items",
-        row(320),
         cells("gamma-inserted-hidden", hidden_owner),
+        jazz::db::InsertOptions {
+            row_id: Some(row(320)),
+            ..Default::default()
+        },
     ))
     .expect("insert hidden row");
-    block_on(server.delete("delta_items", row(103))).expect("delete visible row");
+    block_on(server.delete("delta_items", row(103), Default::default()))
+        .expect("delete visible row");
 
     drive(&server, &client, &mut streams, &table_schemas, &mut traces);
 

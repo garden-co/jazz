@@ -416,6 +416,38 @@ describe("db.all browser integration", () => {
     expect(Array.from(rows[0]?.payload ?? [])).toEqual([0, 1, 2, 255]);
   });
 
+  it("generates clock-backed UUIDv7 row ids and returns them in insertion order by default", async () => {
+    const db = track(
+      await createDb({
+        appId: "db-all-test",
+        driver: { type: "persistent", dbName: uniqueDbName("uuidv7-order") },
+      }),
+    );
+
+    const ids: string[] = [];
+    for (const title of ["first", "second", "third"]) {
+      const result = await db.insert(todos, {
+        title,
+        done: false,
+        priority: undefined,
+        owner_id: undefined,
+        tags: [],
+        payload: undefined,
+      });
+      ids.push(result.value.id);
+    }
+
+    for (const id of ids) {
+      expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    }
+    const generatedAtMs = Number.parseInt(ids[0]!.replaceAll("-", "").slice(0, 12), 16);
+    expect(Math.abs(Date.now() - generatedAtMs)).toBeLessThan(60_000);
+    expect(ids).toEqual([...ids].sort());
+
+    const rows = await db.all<Todo>(makeQuery<Todo>("todos", {}));
+    expect(rows.map((row) => row.id)).toEqual(ids);
+  });
+
   it("supports orderBy + limit + offset", async () => {
     const db = track(
       await createDb({

@@ -192,8 +192,8 @@ describe("world-tour Jazz + Vue integration", () => {
 
     const { el, client } = await mount(StopList);
 
-    const userId = client.session?.user_id;
-    if (!userId) throw new Error("test session is missing user_id");
+    const userId = client.session?.user;
+    if (!userId) throw new Error("test session is missing user");
 
     // Each dependent insert awaits edge-tier confirmation. The stop's policy
     // check (isBandMember) and the include-resolution of `venue` both require
@@ -245,7 +245,7 @@ describe("world-tour Jazz + Vue integration", () => {
       setup() {
         const session = useSession();
         return () =>
-          h("p", { id: "session" }, session.value ? `id:${session.value.user_id}` : "anonymous");
+          h("p", { id: "session" }, session.value ? `id:${session.value.user}` : "anonymous");
       },
     });
 
@@ -253,7 +253,7 @@ describe("world-tour Jazz + Vue integration", () => {
     const text = el.querySelector("#session")!.textContent ?? "";
 
     if (client.session) {
-      expect(text).toBe(`id:${client.session.user_id}`);
+      expect(text).toBe(`id:${client.session.user}`);
     } else {
       expect(text).toBe("anonymous");
     }

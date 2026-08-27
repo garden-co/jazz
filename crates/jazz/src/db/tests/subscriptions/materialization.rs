@@ -3,12 +3,63 @@
 use super::*;
 
 #[test]
+fn maintained_physical_point_subscription_stays_live_for_only_its_row() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let db = open_db(0xc1, author, &schema);
+    let target = row(0x71);
+    let other = row(0x72);
+    for (row_id, title) in [(target, "target"), (other, "other")] {
+        db.insert(
+            "todos",
+            cells(title, false, author),
+            crate::db::InsertOptions {
+                row_id: Some(row_id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    let query = Query::from("todos").filter(eq(col("id"), lit(Value::Uuid(target.0))));
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_raw()).unwrap() else {
+        panic!("expected opening point-subscription delta");
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row_uuid(), target);
+
+    db.update(
+        "todos",
+        other,
+        BTreeMap::from([("title".to_owned(), Value::String("unrelated".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    assert!(subscription.try_next_event().is_none());
+
+    db.update(
+        "todos",
+        target,
+        BTreeMap::from([("title".to_owned(), Value::String("changed".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    let SubscriptionEvent::Delta { updated, .. } = block_on(subscription.next_raw()).unwrap()
+    else {
+        panic!("expected target-row point-subscription delta");
+    };
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].row_uuid(), target);
+}
+
+#[test]
 fn server_reset_subscription_materializes_without_local_snapshot_eval() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
 
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
 
     seed(&server, "todos", cells("first", false, owner));
@@ -63,20 +114,41 @@ fn server_reset_subscription_materializes_without_local_snapshot_eval() {
 #[test]
 fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
 
     let first = row(0x71);
     let middle = row(0x72);
     let last = row(0x73);
     let first_write = client
-        .insert_with_id("todos", first, cells("alpha", false, client_author))
+        .insert(
+            "todos",
+            cells("alpha", false, client_author),
+            crate::db::InsertOptions {
+                row_id: Some(first),
+                ..Default::default()
+            },
+        )
         .unwrap();
     let _middle_write = client
-        .insert_with_id("todos", middle, cells("middle", false, client_author))
+        .insert(
+            "todos",
+            cells("middle", false, client_author),
+            crate::db::InsertOptions {
+                row_id: Some(middle),
+                ..Default::default()
+            },
+        )
         .unwrap();
     let last_write = client
-        .insert_with_id("todos", last, cells("omega", false, client_author))
+        .insert(
+            "todos",
+            cells("omega", false, client_author),
+            crate::db::InsertOptions {
+                row_id: Some(last),
+                ..Default::default()
+            },
+        )
         .unwrap();
     client.tick().unwrap();
 
@@ -97,6 +169,7 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
             "todos",
             first,
             BTreeMap::from([("title".to_owned(), Value::String("zulu".to_owned()))]),
+            Default::default(),
         )
         .unwrap();
     let binding_view_key = BindingViewKey::new(
@@ -191,8 +264,8 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
 #[test]
 fn authoritative_reset_with_missing_payload_falls_back_to_refresh() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
 
     let (client_transport, server_transport) = duplex();
@@ -268,7 +341,7 @@ fn authoritative_reset_with_missing_payload_falls_back_to_refresh() {
 #[test]
 fn authoritative_reset_skips_stale_member_without_falling_back() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
 
     let query = Query::from("todos");
@@ -359,8 +432,8 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
     // only the published row. This guards against an Edge facade widening
     // server scope by re-scanning a broad local transport cache.
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let db = open_db(0xc1, client_author, &schema);
     let published = seed(&server, "todos", cells("published", false, client_author));
     let server_overemitted = row(0x72);
@@ -525,10 +598,10 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
     assert!(db.query_attachment_is_covered(&refresh_attachment));
     db.detach_query(refresh_attachment);
     assert_eq!(
-        ids(
-            block_on(db.all_for_identity(&prepared, edge_subscribe_opts(), AuthorId::SYSTEM,))
-                .unwrap()
-        ),
+        ids(block_on(
+            db.all_for_identity(&prepared, edge_subscribe_opts(), AuthorSubject::SYSTEM,)
+        )
+        .unwrap()),
         BTreeSet::from([published, server_overemitted]),
         "serving hosts remain TrustedServing and do not consume a client result cache"
     );
@@ -545,8 +618,8 @@ fn client_settled_file_member_reads_bytes_for_bound_id_read() {
             )
             .table(PublicTableSchemaBuilder::new("attachments").fk_column("file_id", "files")),
     );
-    let client_author = AuthorId::from_bytes([0xc2; 16]);
-    let server = open_core(0x5f, AuthorId::SYSTEM, &schema);
+    let client_author = AuthorSubject::for_test_bytes([0xc2; 16]);
+    let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema);
     let db = open_db(0xc2, client_author, &schema);
     let bytes = vec![0, 1, 9, 3, 255, 64, 128, 200];
     let file = seed(
@@ -603,7 +676,7 @@ fn client_settled_file_member_reads_bytes_for_bound_id_read() {
 #[test]
 fn propagated_authoritative_reset_uses_delivered_binding_view() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
 
     let query = Query::from("todos");
@@ -700,7 +773,7 @@ fn view_update_is_not_empty_when_it_only_carries_program_facts() {
         binding_id: crate::query::BindingId(uuid::Uuid::from_bytes([0x22; 16])),
         read_view: Default::default(),
     };
-    let empty = SyncMessage::ViewUpdate {
+    let empty = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through: crate::time::GlobalTime(0),
         reset_result_set: false,
@@ -712,10 +785,10 @@ fn view_update_is_not_empty_when_it_only_carries_program_facts() {
         terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
-    };
+    });
     assert!(view_update_is_empty(&empty));
 
-    let fact_only = SyncMessage::ViewUpdate {
+    let fact_only = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through: crate::time::GlobalTime(0),
         reset_result_set: false,
@@ -735,6 +808,6 @@ fn view_update_is_not_empty_when_it_only_carries_program_facts() {
             },
         )],
         program_fact_removes: Vec::new(),
-    };
+    });
     assert!(!view_update_is_empty(&fact_only));
 }

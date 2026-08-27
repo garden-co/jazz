@@ -326,6 +326,7 @@ pub struct StorageReadMetrics {
     pub total: StorageReadBucket,
     pub history_rows: StorageReadBucket,
     pub history_indexes: StorageReadBucket,
+    pub ahead_current_rows: StorageReadBucket,
     pub global_current_rows: StorageReadBucket,
     pub global_current_indexes: StorageReadBucket,
     pub register_global_current_rows: StorageReadBucket,
@@ -359,6 +360,9 @@ impl StorageReadMetrics {
         match destination {
             StorageReadDestination::HistoryRows => self.history_rows.record(reads, ranges),
             StorageReadDestination::HistoryIndexes => self.history_indexes.record(reads, ranges),
+            StorageReadDestination::AheadCurrentRows => {
+                self.ahead_current_rows.record(reads, ranges)
+            }
             StorageReadDestination::GlobalCurrentRows => {
                 self.global_current_rows.record(reads, ranges)
             }
@@ -534,6 +538,29 @@ where
         self.storage.get(cf, key)
     }
 
+    fn put_if_absent(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> crate::storage::StorageFuture<
+        '_,
+        Result<Option<crate::storage::Value>, crate::storage::Error>,
+    > {
+        self.metrics.borrow_mut().record_point(&cf, &key);
+        self.storage.put_if_absent(cf, key, value)
+    }
+
+    fn compare_and_delete(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> crate::storage::StorageFuture<'_, Result<bool, crate::storage::Error>> {
+        self.metrics.borrow_mut().record_point(&cf, &key);
+        self.storage.compare_and_delete(cf, key, expected)
+    }
+
     fn set(
         &self,
         cf: String,
@@ -661,7 +688,6 @@ pub(super) fn write_operation_bytes(operation: &crate::storage::WriteOperation<'
     match operation {
         crate::storage::WriteOperation::Set { key, value, .. } => key.len() + value.len(),
         crate::storage::WriteOperation::Delete { key, .. } => key.len(),
-        crate::storage::WriteOperation::Delta { key, delta, .. } => key.len() + delta.payload.len(),
     }
 }
 
@@ -683,6 +709,7 @@ pub(super) enum StorageWriteDestination {
 pub(super) enum StorageReadDestination {
     HistoryRows,
     HistoryIndexes,
+    AheadCurrentRows,
     GlobalCurrentRows,
     GlobalCurrentIndexes,
     RegisterGlobalCurrentRows,
@@ -698,8 +725,7 @@ pub(super) fn storage_write_destination(
 ) -> StorageWriteDestination {
     match operation {
         crate::storage::WriteOperation::Set { cf, key, .. }
-        | crate::storage::WriteOperation::Delete { cf, key }
-        | crate::storage::WriteOperation::Delta { cf, key, .. } => {
+        | crate::storage::WriteOperation::Delete { cf, key } => {
             if *cf == "indices" {
                 storage_index_write_destination(key)
             } else {
@@ -764,6 +790,11 @@ pub(super) fn storage_read_destination(cf: &str, key: &[u8]) -> StorageReadDesti
 }
 
 pub(super) fn storage_table_read_destination(table: &str) -> StorageReadDestination {
+    if table.starts_with("jazz_")
+        && (table.ends_with("_ahead_current") || table.ends_with("_register_ahead_current"))
+    {
+        return StorageReadDestination::AheadCurrentRows;
+    }
     match storage_table_write_destination(table) {
         StorageWriteDestination::HistoryRows => StorageReadDestination::HistoryRows,
         StorageWriteDestination::GlobalCurrentRows => StorageReadDestination::GlobalCurrentRows,
@@ -866,11 +897,18 @@ where
     // Reads see earlier writes in the same batch through this overlay. Without
     // it, same-key insert/update/delete sequences emit deltas against stale
     // pre-batch storage and corrupt maintained views.
-    let mut overlay = HashMap::<(String, Vec<u8>), Option<Vec<u8>>>::new();
-    let mut table_deltas = Vec::with_capacity(pending_writes.len());
+    // The keys already live for the duration of this computation. Borrow them
+    // instead of allocating a second table name and primary-key buffer for
+    // every write merely to track same-batch visibility.
+    let mut overlay =
+        HashMap::<(&str, &[u8]), Option<Vec<u8>>>::with_capacity(pending_writes.len());
+    // Accumulate directly into the homogeneous groups consumed by IVM. The
+    // previous path allocated a singleton TableDelta (and Vec) per old/new
+    // record, then hashed every group and record again in a second pass.
+    let mut by_table = HashMap::<(&str, u32, RecordDescriptor), HashMap<bytes::Bytes, i64>>::new();
 
     for (write, store) in pending_writes.iter().zip(stores) {
-        let overlay_key = (write.table().to_owned(), write.key().to_vec());
+        let overlay_key = (write.table(), write.key());
         let current = if let Some(record) = overlay.get(&overlay_key) {
             record.clone()
         } else if matches!(
@@ -901,7 +939,18 @@ where
             .table(write.table())
             .ok_or_else(|| Error::TableNotFound(write.table().to_owned()))?;
         if let Some(current) = current.as_deref() {
-            table_deltas.push(table_delta_from_stored(table_schema, current, -1)?);
+            let (variant_tag, payload) = split_variant_record(current)?;
+            let descriptor = table_schema
+                .record_schema_for_variant(variant_tag)
+                .ok_or_else(|| Error::UnknownTableVariant {
+                    table: table_schema.name.clone(),
+                    version: u64::from(variant_tag),
+                })?;
+            *by_table
+                .entry((write.table(), variant_tag, descriptor))
+                .or_default()
+                .entry(bytes::Bytes::copy_from_slice(payload))
+                .or_default() -= 1;
         }
         if let PendingTableWrite::Set {
             variant_tag,
@@ -910,44 +959,33 @@ where
             ..
         } = write
         {
-            table_deltas.push(TableDelta {
-                table: write.table().to_owned(),
-                variant_tag: *variant_tag,
-                descriptor: *descriptor,
-                deltas: vec![RecordDelta {
-                    record: record.clone().into(),
-                    weight: 1,
-                }],
-            });
+            *by_table
+                .entry((write.table(), *variant_tag, *descriptor))
+                .or_default()
+                .entry(bytes::Bytes::copy_from_slice(record))
+                .or_default() += 1;
         }
         let next = write.stored_record();
         overlay.insert(overlay_key, next);
     }
 
-    Ok(consolidate_table_deltas(table_deltas))
-}
-
-pub(super) fn table_delta_from_stored(
-    table: &TableSchema,
-    stored: &[u8],
-    weight: i64,
-) -> Result<TableDelta, Error> {
-    let (variant_tag, payload) = split_variant_record(stored)?;
-    let descriptor = table
-        .record_schema_for_variant(variant_tag)
-        .ok_or_else(|| Error::UnknownTableVariant {
-            table: table.name.clone(),
-            version: u64::from(variant_tag),
-        })?;
-    Ok(TableDelta {
-        table: table.name.clone(),
-        variant_tag,
-        descriptor,
-        deltas: vec![RecordDelta {
-            record: bytes::Bytes::copy_from_slice(payload),
-            weight,
-        }],
-    })
+    Ok(by_table
+        .into_iter()
+        .filter_map(|((table, variant_tag, descriptor), records)| {
+            let deltas = records
+                .into_iter()
+                .filter_map(|(record, weight)| {
+                    (weight != 0).then_some(RecordDelta { record, weight })
+                })
+                .collect::<Vec<_>>();
+            (!deltas.is_empty()).then_some(TableDelta {
+                table: table.to_owned(),
+                variant_tag,
+                descriptor,
+                deltas,
+            })
+        })
+        .collect())
 }
 
 pub(super) fn record_store_for_table<'a, S>(
@@ -970,38 +1008,4 @@ pub(super) fn primary_key_descriptor(primary_key: &PrimaryKey) -> RecordDescript
             .iter()
             .map(|column| (column.column.clone(), column.key_type.column_type().clone())),
     )
-}
-
-pub(super) fn consolidate_table_deltas(table_deltas: Vec<TableDelta>) -> Vec<TableDelta> {
-    let mut by_table =
-        HashMap::<(String, u32, RecordDescriptor), HashMap<bytes::Bytes, i64>>::new();
-    for table_delta in table_deltas {
-        let records = by_table
-            .entry((
-                table_delta.table,
-                table_delta.variant_tag,
-                table_delta.descriptor,
-            ))
-            .or_default();
-        for delta in table_delta.deltas {
-            *records.entry(delta.record).or_default() += delta.weight;
-        }
-    }
-    by_table
-        .into_iter()
-        .filter_map(|((table, variant_tag, descriptor), records)| {
-            let deltas = records
-                .into_iter()
-                .filter_map(|(record, weight)| {
-                    (weight != 0).then_some(RecordDelta { record, weight })
-                })
-                .collect::<Vec<_>>();
-            (!deltas.is_empty()).then_some(TableDelta {
-                table,
-                variant_tag,
-                descriptor,
-                deltas,
-            })
-        })
-        .collect()
 }

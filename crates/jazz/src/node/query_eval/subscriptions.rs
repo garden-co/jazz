@@ -169,7 +169,10 @@ where
             .entry(subscribe.shape_id)
             .or_default()
             .insert(
-                subscribe.subscription.binding_id,
+                (
+                    subscribe.subscription.binding_id,
+                    subscribe.subscription.read_view,
+                ),
                 RegisteredBinding {
                     values: subscribe.values,
                     read_view: subscribe.subscription.read_view,
@@ -186,7 +189,7 @@ where
             .registered_bindings
             .get_mut(&subscription.shape_id)
         {
-            bindings.remove(&subscription.binding_id);
+            bindings.remove(&(subscription.binding_id, subscription.read_view));
         }
         if let Some(binding_view_key) = binding_view_key
             && !self.registered_binding_resolves_to_binding_view_key(binding_view_key)
@@ -203,6 +206,17 @@ where
                 .pending_opening_binding_views
                 .remove(&binding_view_key);
         }
+    }
+
+    #[cfg(feature = "testing")]
+    /// Test-only count of live wire binding registrations. This is deliberately
+    /// usage-site state, rather than the deduplicated evaluator count.
+    pub fn registered_query_binding_count_for_test(&self) -> usize {
+        self.query
+            .registered_bindings
+            .values()
+            .map(BTreeMap::len)
+            .sum()
     }
 
     fn registered_binding_resolves_to_binding_view_key(
@@ -428,7 +442,6 @@ where
                 result_payload_removes,
                 program_fact_adds,
                 program_fact_removes,
-                structured_app_row_changes: BTreeSet::new(),
                 allow_storage_witness_fallback: true,
                 observed_result_delta_batches: 0,
                 requires_authoritative_membership_reconcile: false,
@@ -540,7 +553,7 @@ where
         binding: &Binding,
         subscription: SubscriptionKey,
         values: &[Value],
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<Option<KnownStateDeclaration>, Error> {
         let binding_view_key = BindingViewKey {
             shape_id: shape.shape_id(),
@@ -637,7 +650,7 @@ where
             .query
             .registered_bindings
             .get(&subscription.shape_id)
-            .and_then(|bindings| bindings.get(&subscription.binding_id))
+            .and_then(|bindings| bindings.get(&(subscription.binding_id, subscription.read_view)))
         {
             return Ok(registered.binding_view_key);
         }

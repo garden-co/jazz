@@ -27,9 +27,9 @@ fn branch_sync_selector(byte: u8) -> BranchSelector {
 #[test]
 fn db_sync_surface_round_trips_subscription_to_client() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
     seed(&server, "todos", cells("from server", false, owner));
 
@@ -67,9 +67,9 @@ fn db_sync_surface_round_trips_subscription_to_client() {
 #[test]
 fn large_logical_snapshot_crosses_byte_peer_transport_and_settles() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0x71; 16]);
-    let client_author = AuthorId::from_bytes([0x72; 16]);
-    let server = open_core(0x73, AuthorId::SYSTEM, &schema);
+    let owner = AuthorSubject::for_test_bytes([0x71; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0x72; 16]);
+    let server = open_core(0x73, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0x74, client_author, &schema);
     let expected = 900;
 
@@ -114,8 +114,8 @@ fn large_logical_snapshot_crosses_byte_peer_transport_and_settles() {
 #[test]
 fn branch_view_subscription_projects_base_resumes_and_unsubscribes_exact_view() {
     let schema = branch_sync_schema();
-    let client_author = AuthorId::from_bytes([0x32; 16]);
-    let server = open_core(0x33, AuthorId::SYSTEM, &schema);
+    let client_author = AuthorSubject::for_test_bytes([0x32; 16]);
+    let server = open_core(0x33, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0x34, client_author, &schema);
     let base = branch_sync_selector(0x35);
     let sibling = branch_sync_selector(0x36);
@@ -228,8 +228,8 @@ fn branch_view_subscription_projects_base_resumes_and_unsubscribes_exact_view() 
 #[test]
 fn branch_view_subscriptions_disambiguate_same_row_and_tx_by_branch() {
     let schema = branch_sync_schema();
-    let client_author = AuthorId::from_bytes([0x41; 16]);
-    let server = open_core(0x42, AuthorId::SYSTEM, &schema);
+    let client_author = AuthorSubject::for_test_bytes([0x41; 16]);
+    let server = open_core(0x42, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0x43, client_author, &schema);
     let left = branch_sync_selector(0x44);
     let right = branch_sync_selector(0x45);

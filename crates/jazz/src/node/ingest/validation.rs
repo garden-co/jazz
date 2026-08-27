@@ -44,6 +44,40 @@ where
         .await
     }
 
+    pub(super) async fn stage_view_scoped_transaction_with_current_indexes(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        fate: Fate,
+        global_time: Option<GlobalTime>,
+        durability: DurabilityTier,
+        staged_global_times: &mut Vec<GlobalTime>,
+        staged_content_versions: &mut Vec<VersionRow>,
+    ) -> Result<(), Error> {
+        let staged_versions = self
+            .stage_transaction_and_versions_with_current_indexes(
+                batch,
+                tx,
+                versions,
+                fate.clone(),
+                global_time,
+                durability,
+                true,
+                true,
+                Some(staged_content_versions),
+            )
+            .await?;
+        self.finalize_staged_transaction_ingest(
+            batch,
+            fate,
+            global_time,
+            staged_global_times,
+            &staged_versions,
+        )
+        .await
+    }
+
     pub(super) async fn publish_pending_transaction_and_versions(
         &mut self,
         tx: Transaction,
@@ -123,6 +157,13 @@ where
         view_scoped_cardinality: bool,
         staged_content_versions: Option<&mut Vec<VersionRow>>,
     ) -> Result<Vec<VersionRow>, Error> {
+        let large_value_descriptors = version_indirect_descriptors(&versions);
+        for staged_id in self
+            .current_staged_ids_for_descriptors(&large_value_descriptors, false)
+            .await?
+        {
+            batch.accept_large_value(staged_id);
+        }
         self.merge_tx_time(tx.tx_id.time);
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
         let stored_tx = self.query_transaction(tx.tx_id).await?;
@@ -286,7 +327,13 @@ where
                     batch.insert_raw(history_table.as_ref(), storage_key, groove_record);
                 }
             } else {
-                batch.insert_raw_fresh(history_table.as_ref(), storage_key, groove_record);
+                // SAFETY: transaction metadata and immutable history rows persist atomically, so
+                // an unknown transaction id proves that this history key is absent from storage.
+                // The bulk-ingest path also deduplicates transaction ids before staging, proving
+                // there is no earlier operation for this key in the same batch.
+                unsafe {
+                    batch.insert_raw_fresh(history_table.as_ref(), storage_key, groove_record);
+                }
             }
             if update_current_indexes && !matches!(fate, Fate::Rejected(_)) && global_time.is_none()
             {
@@ -380,6 +427,17 @@ where
     /// from an authored value and reintroduce partial-row sync semantics.
     fn malformed_authored_version_reason(&self, versions: &[VersionRecord]) -> Option<String> {
         for version in versions {
+            for (field, physical_ms) in [
+                ("created_at_ms", version.created_at_ms()),
+                ("updated_at_ms", version.updated_at_ms()),
+            ] {
+                if crate::time::TxTime::from_physical_ms(physical_ms).is_err() {
+                    return Some(format!(
+                        "row version for table '{}' has {field} outside the packed HLC physical-millisecond range",
+                        version.table()
+                    ));
+                }
+            }
             let Some(schema) = self
                 .catalogue
                 .catalogue_schemas
@@ -461,6 +519,13 @@ where
         versions: &[VersionRecord],
     ) -> Result<(), Error> {
         for version in versions {
+            if crate::time::TxTime::from_physical_ms(version.created_at_ms()).is_err()
+                || crate::time::TxTime::from_physical_ms(version.updated_at_ms()).is_err()
+            {
+                return Err(Error::MalformedViewUpdate(
+                    "row version provenance exceeds packed HLC physical-millisecond range",
+                ));
+            }
             let schema = self
                 .catalogue
                 .catalogue_schemas

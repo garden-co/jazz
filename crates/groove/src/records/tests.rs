@@ -277,6 +277,58 @@ fn record_values_reject_non_canonical_child_bytes() {
 }
 
 #[test]
+fn structural_validation_matches_full_decode_for_corrupt_composite_records() {
+    let child = RecordDescriptor::new([
+        ("maybe_id", ValueType::Nullable(Box::new(ValueType::U8))),
+        ("active", ValueType::Bool),
+    ]);
+    let child_record = OwnedRecord::new(
+        child
+            .create(&[Value::Nullable(None), Value::Bool(true)])
+            .unwrap(),
+        child,
+    );
+    let descriptor = RecordDescriptor::new([
+        ("name", ValueType::String),
+        ("child", ValueType::Record(Box::new(child))),
+        ("aliases", ValueType::Array(Box::new(ValueType::String))),
+    ]);
+    let valid = descriptor
+        .create(&[
+            Value::String("kind of blue".into()),
+            Value::Record(child_record),
+            Value::Array(vec![
+                Value::String("blue in green".into()),
+                Value::String("all blues".into()),
+            ]),
+        ])
+        .unwrap();
+
+    let equivalent = |raw: &[u8]| {
+        assert_eq!(
+            descriptor.bind(raw).validate().is_ok(),
+            descriptor.bind(raw).to_values().is_ok(),
+            "structural validation and decoding disagreed for {raw:?}"
+        );
+    };
+
+    equivalent(&valid);
+    for len in 0..valid.len() {
+        equivalent(&valid[..len]);
+    }
+    let mut with_trailing_byte = valid.clone();
+    with_trailing_byte.push(0xff);
+    equivalent(&with_trailing_byte);
+    for index in 0..valid.len() {
+        for replacement in [0, 1, 0x7f, 0x80, 0xff] {
+            let mut mutated = valid.clone();
+            mutated[index] = replacement;
+            equivalent(&mutated);
+        }
+    }
+}
+
+#[test]
 fn pure_fixed_schema_bytes_are_unchanged() {
     let schema = RecordDescriptor::new([
         ("a", ValueType::U8),
@@ -768,8 +820,8 @@ fn encodes_nullable_variable_size_null_as_only_flag_byte() {
         .unwrap();
 
     let mut expected = Vec::new();
-    expected.extend(8_u32.to_le_bytes());
-    expected.extend([1]);
+    expected.extend(9_u32.to_le_bytes());
+    expected.extend([1, 2]);
     expected.extend(b"yes");
     expected.extend([0]);
     assert_eq!(record, expected);
@@ -1064,9 +1116,10 @@ fn encodes_record_offsets_relative_to_record_start() {
         .unwrap();
 
     let mut expected = vec![9];
-    expected.extend(8_u32.to_le_bytes());
+    expected.extend(9_u32.to_le_bytes());
+    expected.extend([2]);
     expected.extend(b"abc");
-    expected.extend([4, 5]);
+    expected.extend([2, 4, 5]);
 
     assert_eq!(record, expected);
 }
@@ -1133,8 +1186,10 @@ fn encodes_variable_array_offsets_relative_to_array_start() {
 
     let mut expected = Vec::new();
     expected.extend(2_u32.to_le_bytes());
-    expected.extend(10_u32.to_le_bytes());
+    expected.extend(11_u32.to_le_bytes());
+    expected.extend([2]);
     expected.extend(b"hi");
+    expected.extend([2]);
     expected.extend(b"j");
 
     assert_eq!(record, expected);
@@ -1735,8 +1790,30 @@ fn lookup_rejects_invalid_utf8_string() {
     let descriptor = descriptor([ValueType::String]);
 
     assert_eq!(
-        descriptor.get_idx(&[0xff], 0).unwrap_err(),
+        descriptor.get_idx(&[2, 1, 0xff], 0).unwrap_err(),
         Error::InvalidUtf8
+    );
+}
+
+#[test]
+fn indirect_string_uses_the_same_logical_value_type_with_an_explicit_physical_arm() {
+    let descriptor = descriptor([ValueType::String]);
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::String,
+        b"large logical text",
+    )
+    .unwrap();
+    let record = descriptor
+        .create(&[Value::Large(prepared.value_ref.clone())])
+        .unwrap();
+
+    assert_eq!(
+        descriptor.get_idx(&record, 0).unwrap(),
+        Value::Large(prepared.value_ref)
+    );
+    assert_eq!(
+        descriptor.bind(&record).get_str(0).unwrap_err(),
+        Error::LargeValue(crate::large_values::Error::RequiresEvaluation)
     );
 }
 

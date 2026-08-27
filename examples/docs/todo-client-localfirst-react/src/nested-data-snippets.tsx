@@ -24,10 +24,10 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
 // #region nested-permissions
 s.definePermissions(app, ({ policy, allowedTo, session }) => {
   // Projects: only the creator
-  policy.projects.allowRead.where({ $createdBy: session.user_id });
+  policy.projects.allowRead.where({ $createdBy: session.user });
   policy.projects.allowInsert.always();
-  policy.projects.allowUpdate.where({ $createdBy: session.user_id });
-  policy.projects.allowDelete.where({ $createdBy: session.user_id });
+  policy.projects.allowUpdate.where({ $createdBy: session.user });
+  policy.projects.allowDelete.where({ $createdBy: session.user });
 
   // Tasks: inherit from project
   policy.tasks.allowRead.where(allowedTo.read("projectId"));
@@ -38,8 +38,8 @@ s.definePermissions(app, ({ policy, allowedTo, session }) => {
   // Comments: inherit from task
   policy.comments.allowRead.where(allowedTo.read("taskId"));
   policy.comments.allowInsert.where(allowedTo.read("taskId"));
-  policy.comments.allowUpdate.where({ $createdBy: session.user_id });
-  policy.comments.allowDelete.where({ $createdBy: session.user_id });
+  policy.comments.allowUpdate.where({ $createdBy: session.user });
+  policy.comments.allowDelete.where({ $createdBy: session.user });
 });
 // #endregion nested-permissions
 

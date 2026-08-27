@@ -53,7 +53,7 @@ const documents = await db.all(app.documents.orderBy("title", "asc"), {
   base: "main",
 });
 
-const unsubscribe = db.subscribeAll(app.documents, ({ all }) => renderDocuments(all), {
+const unsubscribe = db.subscribe(app.documents, (documents) => renderDocuments(documents), {
   branch: "draft",
   base: "main",
 });
@@ -112,7 +112,7 @@ example, an app can allow writes only when:
 ```text
 document.branch_id -> branches.id
 branches.workspace_id -> workspace_memberships.workspace_id
-workspace_memberships.user_id == session.user_id
+workspace_memberships.user_id == session.user
 branches.status == "open"
 ```
 

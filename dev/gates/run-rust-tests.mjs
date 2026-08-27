@@ -11,7 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { sourceIdentity } from "./source-identity.mjs";
+import { checkedOutCommit, sameTrackedSource, sourceIdentity } from "./source-identity.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const now = () => new Date().toISOString();
@@ -131,7 +131,12 @@ const result = await new Promise((resolve) => {
 });
 clearTimeout(timer);
 const finishedAt = now();
-const source = sourceIdentity(root);
+const observedSource = { commit: checkedOutCommit(root), ...sourceIdentity(root) };
+const baselinePath = process.env.RUST_SHADOW_SOURCE_BASELINE;
+const baseline = baselinePath ? JSON.parse(fs.readFileSync(baselinePath, "utf8")) : null;
+if (baseline && !sameTrackedSource(baseline, observedSource))
+  throw new Error("Rust test changed the checked-out source after the shadow baseline");
+const source = baseline ?? observedSource;
 const data = {
   schemaVersion: 1,
   kind: "rust-test-receipt",
@@ -156,7 +161,7 @@ const data = {
   },
   command: [command, ...commandArgs],
   source: {
-    commit: run("git", ["rev-parse", "HEAD"]),
+    commit: checkedOutCommit(root),
     ...source,
   },
   environment: {

@@ -13,12 +13,13 @@ import { linkSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
+import { snapshotCorrectnessArtifacts } from "../artifacts/test-artifact-store.mjs";
 
 const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 
-function sharedGitDirectory(cwd = root) {
+function worktreeGitDirectory(cwd = root) {
   try {
-    const directory = execFileSync("git", ["rev-parse", "--git-common-dir"], {
+    const directory = execFileSync("git", ["rev-parse", "--git-dir"], {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
@@ -73,16 +74,16 @@ function ownerIsAlive(owner) {
 }
 
 /**
- * The common Git directory is shared by every linked worktree in a clone.
- * Put the lock there rather than in a checkout: linked worktrees share this
- * clone's default Cargo target and generated package outputs. Separate clones
- * do not share those resources and intentionally do not contend. A test hook
- * overrides the exact path without exposing a real checkout in receipts.
+ * Generated bindings and Cargo targets are per worktree. Keep the lock beside
+ * that worktree's Git metadata: independent lanes may build in parallel while
+ * children of one aggregate build still inherit one verified lease. Cargo and
+ * pnpm protect their genuinely shared caches themselves. A test/CI hook can
+ * still select one explicit parent lock for its children.
  */
 export function artifactLockPath(cwd = root) {
   return (
     process.env.JAZZ_TEST_ARTIFACT_LOCK_PATH ??
-    resolve(sharedGitDirectory(cwd), "jazz-test-artifacts.lock")
+    resolve(worktreeGitDirectory(cwd), "jazz-test-artifacts.lock")
   );
 }
 
@@ -108,7 +109,7 @@ function lockError(lockPath, owner) {
   );
 }
 
-/** Acquire an exclusive, clone-wide artifact build lock. */
+/** Acquire an exclusive, worktree-scoped artifact build lock. */
 export function acquireArtifactBuildLock(lockPath = artifactLockPath()) {
   const owner = {
     pid: process.pid,
@@ -146,9 +147,11 @@ export function acquireArtifactBuildLock(lockPath = artifactLockPath()) {
     removeQuietly(staging);
     throw lockError(lockPath, existing);
   }
-  console.log(`test-artifacts: acquired shared artifact lock (pid ${owner.pid})`);
+  console.log(`test-artifacts: acquired artifact lock (pid ${owner.pid})`);
   let released = false;
   return {
+    lockPath,
+    token: owner.token,
     release() {
       if (released) return;
       released = true;
@@ -160,9 +163,38 @@ export function acquireArtifactBuildLock(lockPath = artifactLockPath()) {
       } catch (error) {
         throw lockFilesystemError("release lock", error);
       }
-      console.log("test-artifacts: released shared artifact lock");
+      console.log("test-artifacts: released artifact lock");
     },
   };
+}
+
+/**
+ * Environment inherited by an artifact producer owned by this lock.
+ *
+ * `JAZZ_TEST_ARTIFACT_LOCK_PATH` is deliberately the selected-lock input, not
+ * merely a test convenience: the aggregate CI parent selects its runner-temp
+ * lock before it spawns Turbo.  Turbo children must receive that same input so
+ * `verifyArtifactBuildLease` can prove that a claimed lease belongs to the
+ * parent-selected lock, rather than treating a child-provided lock path as
+ * authority.
+ */
+export function artifactBuildLease(lock) {
+  return {
+    JAZZ_ARTIFACT_BUILD_LEASE: lock.token,
+    JAZZ_ARTIFACT_BUILD_LOCK_PATH: lock.lockPath,
+    JAZZ_TEST_ARTIFACT_LOCK_PATH: lock.lockPath,
+  };
+}
+
+/** Reject forged/nested leases instead of silently racing the aggregate builder. */
+export function verifyArtifactBuildLease({ token, lockPath }) {
+  const expectedPath = artifactLockPath(root);
+  if (!lockPath || resolve(lockPath) !== resolve(expectedPath))
+    throw new Error("test-artifacts: inherited artifact lease is for a different clone lock.");
+  const owner = readLockOwner(lockPath);
+  if (!owner || owner.token !== token || !ownerIsAlive(owner))
+    throw new Error("test-artifacts: inherited artifact lease is missing or no longer owned.");
+  return { token, lockPath };
 }
 
 export function unlockArtifactBuildLock(lockPath = artifactLockPath()) {
@@ -226,7 +258,7 @@ export async function withArtifactBuildLock(run, lockPath = artifactLockPath()) 
   process.once("SIGINT", onSigint);
   process.once("SIGTERM", onSigterm);
   try {
-    return await run(scope);
+    return await run(scope, artifactBuildLease(lock));
   } finally {
     process.removeListener("SIGINT", onSigint);
     process.removeListener("SIGTERM", onSigterm);
@@ -321,16 +353,36 @@ export function command(command, args, label = [command, ...args].join(" "), opt
   });
 }
 
-export async function buildTestArtifacts(run = command, scope = createBuildScope()) {
+export async function buildTestArtifacts(
+  run = command,
+  scope = createBuildScope(),
+  lease = undefined,
+  snapshot = () => {},
+) {
   let firstBuildError;
   const guardedRun = (command, args, label, env) =>
-    scope.track(run(command, args, label, { env, signal: scope.signal })).catch((error) => {
-      if (!firstBuildError) {
-        firstBuildError = error;
-        scope.abort(error);
-      }
-      throw error;
-    });
+    scope
+      .track(run(command, args, label, { env: { ...env, ...lease }, signal: scope.signal }))
+      .catch((error) => {
+        if (!firstBuildError) {
+          firstBuildError = error;
+          scope.abort(error);
+        }
+        throw error;
+      });
+
+  const preflightNapi = () =>
+    scope.track(
+      run(
+        "node",
+        [
+          "-e",
+          "const {nativeBinding,expectedNativeArtifactFingerprint:expected}=require('./crates/jazz-napi/native-binding.pointer.cjs'); const actual=nativeBinding.nativeArtifactFingerprint?.(); if(actual!==expected) { console.error(`Jazz NAPI artifact ABI mismatch: expected ${expected}, got ${String(actual)}`); process.exit(23); }",
+        ],
+        "preflight release NAPI",
+        { signal: scope.signal },
+      ),
+    );
 
   // Keep every Cargo invocation in the default target directory restored by
   // Swatinem/rust-cache. On the 4-vCPU CI runner, separate target directories
@@ -359,14 +411,35 @@ export async function buildTestArtifacts(run = command, scope = createBuildScope
     await scope.drain();
     throw firstBuildError ?? error;
   }
-  // The parallel CLI Cargo process can overlap the WASM build's first receipt.
-  // Seal the completed (or signed-cache-restored) artifact against the stable
-  // post-build checkout before any consumer uses it.
   await guardedRun(
     "node",
-    ["dev/artifacts/provenance.mjs", "write", "wasm", "fast"],
-    "seal fast WASM provenance",
+    ["dev/artifacts/stage-native-fingerprints.mjs", "--local"],
+    "derive local artifact expectations",
   );
+  try {
+    // Validate the mutable producer generation before it can enter the
+    // immutable correctness store. A bad generation must never poison the
+    // fingerprint-addressed destination that its repair needs to publish.
+    await preflightNapi();
+  } catch (error) {
+    console.warn(`test-artifacts: release NAPI failed preflight; repairing (${error.message})`);
+    await guardedRun(
+      "pnpm",
+      ["exec", "turbo", "run", "build", "--filter=jazz-napi", "--only", "--force"],
+      "repair release NAPI",
+    );
+    await guardedRun(
+      "node",
+      ["dev/artifacts/stage-native-fingerprints.mjs", "--local"],
+      "refresh repaired artifact expectations",
+    );
+    await preflightNapi();
+  }
+  // Seal the exact pair before jazz-tools bundles its broker worker. The
+  // mutable package publication paths are still useful to package builds, but
+  // correctness bundles must never follow a later replacement generation.
+  snapshot(root);
+  // The atomic WASM producer seals its matching manifest before publication.
   await guardedRun(
     "pnpm",
     ["exec", "turbo", "run", "build", "--filter=jazz-tools", "--only"],
@@ -387,25 +460,7 @@ export async function buildTestArtifacts(run = command, scope = createBuildScope
     "seal release NAPI provenance",
   );
 
-  try {
-    // A load failure is expected to enter the bounded repair path, so unlike a
-    // build failure it must not abort the parent scope before repair starts.
-    await scope.track(
-      run("node", ["-e", "require('./crates/jazz-napi')"], "load release NAPI", {
-        signal: scope.signal,
-      }),
-    );
-  } catch (error) {
-    // A damaged native artifact must not make every run pay a second build.
-    // Repair only after the first load proves it necessary, then prove repair.
-    console.warn(`test-artifacts: release NAPI did not load; repairing (${error.message})`);
-    await guardedRun(
-      "pnpm",
-      ["exec", "turbo", "run", "build", "--filter=jazz-napi", "--only", "--force"],
-      "repair release NAPI",
-    );
-    await guardedRun("node", ["-e", "require('./crates/jazz-napi')"], "load repaired release NAPI");
-  }
+  await guardedRun("node", ["-e", "require('./crates/jazz-napi')"], "load release NAPI");
   await guardedRun(
     "node",
     ["dev/artifacts/provenance.mjs", "verify", "napi", "release"],
@@ -425,7 +480,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.error("test-artifacts: expected no argument or `unlock`");
     process.exitCode = 1;
   } else
-    withArtifactBuildLock((scope) => buildTestArtifacts(command, scope)).catch((error) => {
+    withArtifactBuildLock((scope, lease) =>
+      buildTestArtifacts(command, scope, lease, snapshotCorrectnessArtifacts),
+    ).catch((error) => {
       console.error(`test-artifacts: ${error.message}`);
       process.exitCode = 1;
     });

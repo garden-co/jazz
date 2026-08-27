@@ -28,16 +28,37 @@ type NativeRowCodecCase = {
 };
 
 describe("native row codec", () => {
+  it("round-trips sealed internal physical value types without exposing them as columns", () => {
+    const descriptor = [
+      { name: "raw_text", valueType: { tag: 10, internal: { tag: 0 } } },
+      { name: "raw_bytes", valueType: { tag: 10, internal: { tag: 1 } } },
+      { name: "stored_bytes", valueType: { tag: 10, internal: { tag: 2, kind: 0 } } },
+      { name: "stored_text", valueType: { tag: 10, internal: { tag: 2, kind: 1 } } },
+      { name: "stored_json", valueType: { tag: 10, internal: { tag: 2, kind: 2 } } },
+    ];
+    const writer = new PostcardWriter();
+    writeDescriptor(writer, descriptor);
+
+    expect(readDescriptor(new PostcardReader(writer.finish()))).toEqual(descriptor);
+  });
+
+  it("rejects the old UUID-at-tag-10 descriptor instead of treating it compatibly", () => {
+    const writer = new PostcardWriter();
+    expect(() => writeDescriptor(writer, [{ name: "old_uuid", valueType: { tag: 10 } }])).toThrow(
+      "missing physical type for ValueType::Internal",
+    );
+  });
+
   it("accepts nested terminal descriptors with producer fields beyond the root output", () => {
     const columns: ColumnDescriptor[] = [
       { name: "title", column_type: { type: "Text" }, nullable: false },
     ];
     const descriptor = [
-      { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },
+      { name: "__jazz_terminal_row_key", valueType: { tag: 11 } },
       { name: "title", valueType: { tag: 8 } },
       {
         name: "members",
-        valueType: { tag: 13, inner: { tag: 15, record: [] } },
+        valueType: { tag: 14, inner: { tag: 16, record: [] } },
       },
     ];
 
@@ -49,19 +70,19 @@ describe("native row codec", () => {
       { name: "title", column_type: { type: "Text" }, nullable: false },
       { name: "body", column_type: { type: "Text" }, nullable: false },
     ];
-    const missingRootField = [{ name: "__jazz_terminal_row_key", valueType: { tag: 10 } }];
+    const missingRootField = [{ name: "__jazz_terminal_row_key", valueType: { tag: 11 } }];
     const wrongRootType = [
-      { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },
+      { name: "__jazz_terminal_row_key", valueType: { tag: 11 } },
       { name: "title", valueType: { tag: 4 } },
-      { name: "members", valueType: { tag: 13, inner: { tag: 15, record: [] } } },
+      { name: "members", valueType: { tag: 14, inner: { tag: 16, record: [] } } },
     ];
     const reorderedSameTypeFields = [
-      { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },
+      { name: "__jazz_terminal_row_key", valueType: { tag: 11 } },
       { name: "body", valueType: { tag: 8 } },
       { name: "title", valueType: { tag: 8 } },
     ];
     const wrongKeyName = [
-      { name: "not_the_terminal_key", valueType: { tag: 10 } },
+      { name: "not_the_terminal_key", valueType: { tag: 11 } },
       { name: "title", valueType: { tag: 8 } },
       { name: "body", valueType: { tag: 8 } },
     ];
@@ -86,15 +107,15 @@ describe("native row codec", () => {
       { name: "done", column_type: { type: "Boolean" }, nullable: false },
     ];
     const currentRow = [
-      { name: "row_uuid", valueType: { tag: 10 } },
-      { name: "user_title", valueType: { tag: 14, inner: { tag: 8 } } },
-      { name: "user_done", valueType: { tag: 14, inner: { tag: 7 } } },
-      { name: "$createdBy", valueType: { tag: 10 } },
+      { name: "row_uuid", valueType: { tag: 11 } },
+      { name: "user_title", valueType: { tag: 15, inner: { tag: 8 } } },
+      { name: "user_done", valueType: { tag: 15, inner: { tag: 7 } } },
+      { name: "$createdBy", valueType: { tag: 8 } },
     ];
     const nullableLogicalNames = [
-      { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },
-      { name: "title", valueType: { tag: 14, inner: { tag: 8 } } },
-      { name: "done", valueType: { tag: 14, inner: { tag: 7 } } },
+      { name: "__jazz_terminal_row_key", valueType: { tag: 11 } },
+      { name: "title", valueType: { tag: 15, inner: { tag: 8 } } },
+      { name: "done", valueType: { tag: 15, inner: { tag: 7 } } },
     ];
     const reorderedCarriers = [currentRow[0]!, currentRow[2]!, currentRow[1]!];
 
@@ -127,11 +148,11 @@ describe("native row codec", () => {
       },
     ];
     const descriptor = [
-      { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },
+      { name: "__jazz_terminal_row_key", valueType: { tag: 11 } },
       {
         name: "event",
         valueType: {
-          tag: 16,
+          tag: 17,
           enumSchema: {
             registryId: 37,
             name: "physical_event",
@@ -140,7 +161,7 @@ describe("native row codec", () => {
                 name: "message",
                 payload: [
                   { name: "text", valueType: { tag: 8 } },
-                  { name: "level", valueType: { tag: 14, inner: { tag: 4 } } },
+                  { name: "level", valueType: { tag: 15, inner: { tag: 4 } } },
                 ],
               },
             ],
@@ -220,7 +241,7 @@ describe("native row codec", () => {
     const cells = encodeCellsForRow({ columns }, values);
     expect(cells).toEqual(writer.finish());
     expect(bytesToHex(cells)).toMatchInlineSnapshot(
-      `"06010661637469766507010663686f6963650801066c6162656c730d0801066e65737465640901046e6f74650e0801067370617273650e04440001070000001b00000029000000430000007075626c6973686564020000000b0000006f6e6574776f0100000000000040008000000000000001050000006368696c6400"`,
+      `"06010661637469766507010663686f6963650801066c6162656c730e0801066e65737465640901046e6f74650f0801067370617273650f04480001070000001c0000002c00000047000000027075626c6973686564020000000c000000026f6e650274776f010000000000004000800000000000000106000000026368696c6400"`,
     );
   });
 
@@ -278,7 +299,7 @@ describe("native row codec", () => {
     const patch = encodeCellsForPatch({ columns: [column] }, { value: { type: "Null" } });
     expect(row).toEqual(expected);
     expect(patch).toEqual(expected);
-    expect(bytesToHex(row)).toMatchInlineSnapshot(`"01010576616c75650e0e08020100"`);
+    expect(bytesToHex(row)).toMatchInlineSnapshot(`"01010576616c75650f0f08020100"`);
   });
 
   it("round-trips scalar payload enum cases, nullable fields, and descriptor metadata", () => {
@@ -316,7 +337,7 @@ describe("native row codec", () => {
     const encoded = encodeNativeRowValues(columns, [payload]);
     expect(decodeNativeRowValues(columns, encoded)).toEqual([payload]);
     const storage = storageColumnValueType(columns[0]!);
-    expect(storage).toMatchObject({ tag: 14, inner: { tag: 16, enumSchema: { name: "event" } } });
+    expect(storage).toMatchObject({ tag: 15, inner: { tag: 17, enumSchema: { name: "event" } } });
     expect(storage.inner?.enumSchema?.cases?.[0]?.payload[0]).toMatchObject({
       name: "text",
       valueType: { tag: 8 },
@@ -331,7 +352,7 @@ describe("native row codec", () => {
     writeDescriptor(writer, [
       {
         name: "nested",
-        valueType: { tag: 15, record: [{ name: "label", valueType: { tag: 8 } }] },
+        valueType: { tag: 16, record: [{ name: "label", valueType: { tag: 8 } }] },
       },
       { name: "count", valueType: { tag: 4 } },
     ]);
@@ -341,14 +362,14 @@ describe("native row codec", () => {
     expect(readDescriptor(reader)).toEqual([
       {
         name: "nested",
-        valueType: { tag: 15, record: [{ name: "label", valueType: { tag: 8 } }] },
+        valueType: { tag: 16, record: [{ name: "label", valueType: { tag: 8 } }] },
       },
       { name: "count", valueType: { tag: 4 } },
     ]);
     expect(reader.u64()).toBe(42);
   });
 
-  it("round-trips a payload enum descriptor at ValueType tag 16", () => {
+  it("round-trips a payload enum descriptor at ValueType tag 17", () => {
     // Keep this fixture explicit: a tag-16 decoder which merely consumes the
     // enum header, or skips a case payload descriptor, leaves the trailing
     // value unread and is rejected below.
@@ -356,7 +377,7 @@ describe("native row codec", () => {
       {
         name: "event",
         valueType: {
-          tag: 16,
+          tag: 17,
           enumSchema: {
             registryId: 41,
             name: "event",
@@ -366,7 +387,7 @@ describe("native row codec", () => {
                 name: "message",
                 payload: [
                   { name: "body", valueType: { tag: 8 } },
-                  { name: "priority", valueType: { tag: 14, inner: { tag: 4 } } },
+                  { name: "priority", valueType: { tag: 15, inner: { tag: 4 } } },
                 ],
               },
             ],
@@ -395,18 +416,21 @@ describe("native row codec", () => {
     const descriptor = readDescriptor(new PostcardReader(descriptorBytes));
 
     expect(new Set(descriptor.map((field) => field.valueType.tag))).toEqual(
-      new Set(Array.from({ length: 16 }, (_, tag) => tag)),
+      new Set([
+        ...Array.from({ length: 10 }, (_, tag) => tag),
+        ...Array.from({ length: 6 }, (_, index) => index + 11),
+      ]),
     );
     expect(descriptor[9]?.valueType).toMatchObject({
-      tag: 11,
+      tag: 12,
       enumSchema: { name: "mode", variants: ["low", "high"] },
     });
-    expect(descriptor[10]?.valueType.members?.map((member) => member.tag)).toEqual([0, 5, 14, 4]);
+    expect(descriptor[10]?.valueType.members?.map((member) => member.tag)).toEqual([0, 5, 15, 4]);
     expect(descriptor[13]?.valueType).toMatchObject({
-      tag: 14,
-      inner: { tag: 13, inner: { tag: 14 } },
+      tag: 15,
+      inner: { tag: 14, inner: { tag: 15 } },
     });
-    expect(descriptor[15]?.valueType).toMatchObject({ tag: 13, inner: { tag: 15 } });
+    expect(descriptor[15]?.valueType).toMatchObject({ tag: 14, inner: { tag: 16 } });
 
     const descriptorWriter = new PostcardWriter();
     writeDescriptor(descriptorWriter, descriptor);
@@ -545,7 +569,7 @@ describe("native row codec", () => {
       },
     ];
     const childRecord = (id: string, name: string) =>
-      Uint8Array.from([...uuidBytes(id), ...new TextEncoder().encode(name)]);
+      Uint8Array.from([...uuidBytes(id), 2, ...new TextEncoder().encode(name)]);
     const first = childRecord(firstChildId, "first");
     const second = childRecord(secondChildId, "second");
     const childArray = Uint8Array.from([
@@ -561,8 +585,8 @@ describe("native row codec", () => {
       ...second,
     ]);
     const descriptor = [
-      { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },
-      { name: "children", valueType: { tag: 13, inner: { tag: 15, record: [] } } },
+      { name: "__jazz_terminal_row_key", valueType: { tag: 11 } },
+      { name: "children", valueType: { tag: 14, inner: { tag: 16, record: [] } } },
     ];
     const raw = createRecord(descriptor, [uuidBytes(rootId), childArray]);
 

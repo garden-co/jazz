@@ -1,0 +1,37 @@
+{
+  "name": "band-chat-nextjs-betterauth",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "node ../../../../packages/jazz-tools/dist/cli.js validate && next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test:permissions": "vitest run tests/permissions.test.ts",
+    "test:browser": "node ../../../../dev/artifacts/verify-correctness-test-artifacts.mjs && vitest run --config vitest.config.browser.ts",
+    "test:browser:focused": "node scripts/test-browser-focused.mjs",
+    "test": "pnpm test:permissions && pnpm test:browser"
+  },
+  "dependencies": {
+    "better-auth": "1.7.1",
+    "jazz-napi": "workspace:*",
+    "jazz-tools": "workspace:*",
+    "next": "catalog:default",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:default",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "catalog:default",
+    "@vitest/browser": "catalog:default",
+    "@vitest/browser-playwright": "catalog:default",
+    "typescript": "catalog:default",
+    "vite": "catalog:default",
+    "vite-plugin-top-level-await": "catalog:default",
+    "vite-plugin-wasm": "catalog:default",
+    "vitest": "catalog:default"
+  }
+}

@@ -30,8 +30,14 @@ where
     pub(super) coverage_refresh_generations: CoverageRefreshGenerations,
     pub(super) query_coverage_registrations: QueryCoverageRegistrations,
     pub(super) upstream_subscription_owners: UpstreamSubscriptionOwners,
+    pub(super) relay_upstream_subscription_owners: RelayUpstreamSubscriptionOwners,
+    pub(super) pending_relay_subscription_rejections: PendingRelaySubscriptionRejections,
     pub(super) connections: RefCell<Vec<Rc<LocalMutex<PeerConnection<S>>>>>,
     pub(super) scheduler: SharedTickScheduler,
+    pub(super) upload_retry_clock: SharedUploadRetryClock,
+    pub(super) detached_large_value_uploads:
+        Rc<RefCell<BTreeMap<UpstreamUploadDestination, peer_connection::LargeValueUploadQueues>>>,
+    pub(super) large_value_upload_retry_deadlines: Rc<RefCell<BTreeMap<TxId, u64>>>,
     pub(super) write_state_waiters: WriteStateWaiters,
     pub(super) permission_advice_waiters: PermissionAdviceWaiters,
     pub(super) edge_fate_routes: EdgeFateRoutes,
@@ -45,6 +51,9 @@ where
     pub(super) edge_cache_budget: Cell<Option<EdgeCacheBudget>>,
     pub(super) upstream_durability_floor: Cell<DurabilityTier>,
     pub(super) defer_local_persistence: Cell<bool>,
+    pub(super) chunk_resolver: PeerChunkResolver,
+    pub(super) local_chunk_reader: groove::chunks::LocalChunkReader,
+    pub(super) observed_chunk_completion_generation: Cell<u64>,
 }
 
 impl<S> Node<S>
@@ -52,11 +61,14 @@ where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     /// Wrap a node for serving subscriber links.
-    pub fn new(node: NodeState<S>) -> Self {
+    pub fn new(mut node: NodeState<S>) -> Self {
         // History completeness is a structural property of the opened node,
         // not evaluator state. Cache it so connection attachment never needs
         // to synchronously borrow storage-owning state during evaluation.
         let receives_commits_as_local = !node.is_history_complete();
+        let chunk_resolver = PeerChunkResolver::default();
+        let local_chunk_reader = node.local_chunk_reader_handle();
+        node.set_missing_chunk_resolver(Rc::new(chunk_resolver.clone()));
         let pending_mutation_errors = node
             .rejected_transactions()
             .into_iter()
@@ -69,7 +81,7 @@ where
             node: Rc::new(futures::lock::Mutex::new(node)),
             receives_commits_as_local,
             subscriptions: Rc::new(RefCell::new(Vec::new())),
-            outbox: Rc::new(RefCell::new(Vec::new())),
+            outbox: Rc::new(RefCell::new(UploadOutbox::default())),
             pending_local_publications: Rc::new(RefCell::new(VecDeque::new())),
             local_publication_settler: Rc::new(futures::lock::Mutex::new(())),
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
@@ -82,8 +94,13 @@ where
             coverage_refresh_generations: Rc::new(RefCell::new(BTreeMap::new())),
             query_coverage_registrations: Rc::new(RefCell::new(BTreeMap::new())),
             upstream_subscription_owners: Rc::new(RefCell::new(BTreeMap::new())),
+            relay_upstream_subscription_owners: Rc::new(RefCell::new(BTreeMap::new())),
+            pending_relay_subscription_rejections: Rc::new(RefCell::new(BTreeMap::new())),
             connections: RefCell::new(Vec::new()),
             scheduler: Rc::new(RefCell::new(None)),
+            upload_retry_clock: Rc::new(RefCell::new(Rc::new(MonotonicUploadRetryClock::new()))),
+            detached_large_value_uploads: Rc::new(RefCell::new(BTreeMap::new())),
+            large_value_upload_retry_deadlines: Rc::new(RefCell::new(BTreeMap::new())),
             write_state_waiters: Rc::new(RefCell::new(BTreeMap::new())),
             mutation_errors: Rc::new(RefCell::new(MutationErrorState {
                 callback: None,
@@ -100,6 +117,9 @@ where
             edge_cache_budget: Cell::new(None),
             upstream_durability_floor: Cell::new(DurabilityTier::Global),
             defer_local_persistence: Cell::new(false),
+            chunk_resolver,
+            local_chunk_reader,
+            observed_chunk_completion_generation: Cell::new(0),
         }
     }
 
@@ -128,6 +148,27 @@ where
         Rc::clone(&self.node)
     }
 
+    /// Configure Jazz-owned ingress and expiry policy for unpublished large
+    /// values. Groove persists timestamps and performs eviction, but does not
+    /// choose these product limits.
+    pub fn set_large_value_staging_policy(&self, policy: crate::node::LargeValueStagingPolicy) {
+        self.node
+            .borrow_mut()
+            .set_large_value_staging_policy(policy);
+    }
+
+    /// Run one host-driven staging-expiry maintenance pass.
+    ///
+    /// Browser, NAPI, and server hosts call this from their own timer cadence;
+    /// it is idempotent and does not make Groove own an executor or clock.
+    pub async fn evict_expired_staged_large_values(&self) -> Result<usize, Error> {
+        self.node
+            .borrow()
+            .evict_expired_staged_large_values()
+            .await
+            .map_err(Into::into)
+    }
+
     pub(super) fn set_non_durable_client(&self) {
         self.node.borrow_mut().set_non_durable_client();
         self.upstream_durability_floor.set(DurabilityTier::Local);
@@ -152,10 +193,9 @@ where
 
     pub(super) fn queue_pending_upload(&self, tx_id: TxId, unit: Option<SyncMessage>) {
         let mut outbox = self.outbox.borrow_mut();
-        if outbox.iter().any(|pending| pending.tx_id == tx_id) {
+        if !outbox.push(PendingUpload { tx_id, unit }) {
             return;
         }
-        outbox.push(PendingUpload { tx_id, unit });
         drop(outbox);
         self.mark_subscriber_connections_dirty();
         self.schedule_tick(TickUrgency::Deferred);
@@ -218,9 +258,23 @@ where
         Ok(())
     }
 
+    pub(super) fn restore_browser_relay_pending_uploads(
+        &self,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        let mut node = self.node.borrow_mut();
+        let pending = node.pending_transaction_ids_for_author(author);
+        let pending = crate::db::block_on(pending)?;
+        drop(node);
+        for tx_id in pending {
+            self.queue_pending_upload(tx_id, None);
+        }
+        Ok(())
+    }
+
     fn restore_local_subscriber(
         &self,
-        author: AuthorId,
+        author: AuthorSubject,
         downstream_fates: &PendingDownstreamFates,
     ) -> Result<(), Error> {
         let mut node = self.node.borrow_mut();
@@ -319,6 +373,11 @@ where
 
     pub(super) fn set_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {
         *self.scheduler.borrow_mut() = scheduler;
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_upload_retry_clock_for_test(&self, clock: Rc<dyn UploadRetryClock>) {
+        *self.upload_retry_clock.borrow_mut() = clock;
     }
 
     pub(super) fn set_edge_cache_budget(&self, budget: Option<EdgeCacheBudget>) {
@@ -461,6 +520,10 @@ where
             .clear();
         self.query_coverage_registrations.borrow_mut().clear();
         self.upstream_subscription_owners.borrow_mut().clear();
+        self.relay_upstream_subscription_owners.borrow_mut().clear();
+        self.pending_relay_subscription_rejections
+            .borrow_mut()
+            .clear();
     }
 
     pub(super) fn set_mutation_error_callback(&self, callback: Option<MutationErrorCallback>) {
@@ -675,6 +738,18 @@ where
         let confirmation_floor = node.committed_global_time();
         drop(node);
         let session_context = transport.connection_session_context();
+        let upstream_upload_destination =
+            session_context.map(|context| UpstreamUploadDestination {
+                remote_node: *context.remote.node.as_bytes(),
+                link_identity: context.link_identity,
+            });
+        let transferred_large_value_uploads = upstream_upload_destination
+            .and_then(|destination| {
+                self.detached_large_value_uploads
+                    .borrow_mut()
+                    .remove(&destination)
+            })
+            .unwrap_or_default();
         let connection_epoch = session_context
             .map(|context| context.local.epoch)
             .unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u64);
@@ -696,7 +771,7 @@ where
             })
             .map(|context| AuthorityContext {
                 authority: *context.remote.node.as_bytes(),
-                link: *context.link_identity.as_bytes(),
+                link: context.link_identity,
                 connection_id: connection_epoch,
                 connection_epoch: context.remote.epoch,
                 claims_revision: 0,
@@ -721,23 +796,19 @@ where
                 // this newly connected successor has not seen it.
                 let mut routes = self.edge_fate_routes.borrow_mut();
                 let routed_txs = routes.keys().copied().collect::<Vec<_>>();
-                for pending in routes.values_mut() {
-                    for route in pending.iter_mut() {
+                for obligation in routes.values_mut() {
+                    for route in obligation.routes.iter_mut() {
                         route.authority = Some(context);
                     }
                 }
                 drop(routes);
                 let mut outbox = self.outbox.borrow_mut();
                 for tx_id in routed_txs {
-                    if !outbox.iter().any(|pending| pending.tx_id == tx_id) {
-                        outbox.push(PendingUpload {
-                            tx_id,
-                            unit: crate::db::block_on(
-                                self.node.borrow_mut().commit_unit_for(tx_id),
-                            )
+                    outbox.push(PendingUpload {
+                        tx_id,
+                        unit: crate::db::block_on(self.node.borrow_mut().commit_unit_for(tx_id))
                             .ok(),
-                        });
-                    }
+                    });
                 }
             }
         }
@@ -807,18 +878,71 @@ where
                 }
             }
         }
+        // Relay-owned coverage is not represented by the public subscription
+        // list above: it is retained by the downstream connection that it
+        // serves. Replacing an upstream transport drops that transport's wire
+        // subscriptions, while the downstream browser is still connected and
+        // therefore will not send a fresh Subscribe. Replay every live relay
+        // owner onto the successor authority, using its stable usage-site key.
+        //
+        // The owner map is the lifecycle authority here. A rejected coverage
+        // group can briefly remain on its downstream link while its rejection
+        // waits to be delivered; replaying that orphan would resurrect a
+        // subscription that is already being retired.
+        let relay_subscriptions = {
+            let owners = self.relay_upstream_subscription_owners.borrow();
+            self.connections
+                .borrow()
+                .iter()
+                .flat_map(|connection| {
+                    let connection = connection.borrow();
+                    let ConnectionLink::Subscriber(subscriber) = &connection.link else {
+                        return Vec::new();
+                    };
+                    subscriber
+                        .coverage_groups
+                        .iter()
+                        .filter_map(|(coverage, group)| {
+                            let owner = owners.get(&group.upstream_subscription)?;
+                            (group.upstream_opts.propagate_upstream
+                                && owner.downstream_connection_epoch == connection.connection_epoch
+                                && owner.coverage == *coverage)
+                                .then(|| PendingUpstreamSubscription {
+                                    subscription: group.upstream_subscription,
+                                    shape: group.shape.clone(),
+                                    binding: group.binding.clone(),
+                                    opts: group.upstream_opts.clone(),
+                                    identity: subscriber.peer.link_identity(),
+                                })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        for subscription in relay_subscriptions {
+            if pending_subscriptions.insert(subscription.subscription) {
+                pending.push(PendingUpstreamCommand::Subscribe(subscription));
+            }
+        }
         let connection = Rc::new(LocalMutex::new(PeerConnection {
             transport,
             staged_inbound: VecDeque::new(),
             node: Rc::clone(&self.node),
             subscriptions: Rc::clone(&self.subscriptions),
             upstream_subscription_owners: Rc::clone(&self.upstream_subscription_owners),
+            relay_upstream_subscription_owners: Rc::clone(&self.relay_upstream_subscription_owners),
+            pending_relay_subscription_rejections: Rc::clone(
+                &self.pending_relay_subscription_rejections,
+            ),
             latest_coverage_subscriptions: Rc::clone(&self.latest_coverage_subscriptions),
             awaiting_initial_authority_coverage: Rc::clone(
                 &self.awaiting_initial_authority_coverage,
             ),
             active_authority_view_receipts: Rc::clone(&self.active_authority_view_receipts),
             scheduler: Rc::clone(&self.scheduler),
+            upload_retry_clock: Rc::clone(&self.upload_retry_clock),
+            upstream_upload_destination,
+            large_value_upload_retry_deadlines: Rc::clone(&self.large_value_upload_retry_deadlines),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
             edge_fate_routes: Rc::clone(&self.edge_fate_routes),
@@ -831,6 +955,9 @@ where
             observed_session_claim_revision: Cell::new(0),
             connection_epoch,
             startup_error: None,
+            released_outbox_tx_ids: Vec::new(),
+            pending_chunk_response: None,
+            pending_control_responses: VecDeque::new(),
             link: ConnectionLink::Upstream(UpstreamConnectionState {
                 local_receiver,
                 pending,
@@ -839,6 +966,10 @@ where
                 sent_session_claim_revisions: BTreeMap::new(),
                 outbox: Rc::clone(&self.outbox),
                 uploaded: BTreeSet::new(),
+                large_value_uploads: transferred_large_value_uploads,
+                awaiting_large_value_uploads: BTreeMap::new(),
+                failed_large_value_uploads: BTreeSet::new(),
+                pending_row_version_fetches: VecDeque::new(),
                 pending_row_version_repairs: VecDeque::new(),
                 scope_view_cuts: BTreeMap::new(),
                 scope_receipts: BTreeMap::new(),
@@ -846,6 +977,12 @@ where
                 scope_lease_manager: AuthorizationScopeLeaseManager::default(),
             }),
             last_resume_bytes: None,
+            auxiliary_pump: PeerIoPump::new(
+                self.chunk_resolver.clone(),
+                self.local_chunk_reader.clone(),
+                connection_epoch,
+                PeerIoPumpRole::Upstream,
+            ),
         }));
         self.connections.borrow_mut().push(Rc::clone(&connection));
         self.schedule_tick(TickUrgency::Immediate);
@@ -859,7 +996,7 @@ where
     pub fn accept_subscriber(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.accept_subscriber_with_trust(transport, identity, CommitUnitTrust::Session)
     }
@@ -868,7 +1005,7 @@ where
     pub fn accept_subscriber_with_claims(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.accept_subscriber_with_claims_and_trust(
@@ -879,11 +1016,25 @@ where
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn accept_test_subscriber_with_claims(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
+        let admitted = self
+            .node
+            .borrow_mut()
+            .set_test_provider_claims(identity, claims.clone());
+        self.accept_subscriber_with_claims(transport, identity, admitted)
+    }
+
     /// Accept a subscriber connection with an explicit commit-upload trust mode.
     pub fn accept_subscriber_with_trust(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         trust: CommitUnitTrust,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.accept_subscriber_with_resume_and_trust(
@@ -899,7 +1050,7 @@ where
     pub fn accept_subscriber_with_claims_and_trust(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
         trust: CommitUnitTrust,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
@@ -910,7 +1061,7 @@ where
     pub fn accept_edge_subscriber_with_claims(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.accept_subscriber_with_peer(
@@ -928,7 +1079,7 @@ where
     pub fn accept_edge_authority_subscriber_with_claims(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.accept_subscriber_with_peer(
@@ -946,7 +1097,7 @@ where
     pub fn accept_subscriber_with_resume(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         cursor: ResumeCursor,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.accept_subscriber_with_resume_and_trust(
@@ -961,7 +1112,7 @@ where
     fn accept_subscriber_with_resume_and_trust(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         trust: CommitUnitTrust,
         claims: BTreeMap<String, Value>,
         cursor: Option<ResumeCursor>,
@@ -971,7 +1122,7 @@ where
         } else {
             match trust {
                 CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAdmin => {
-                    PeerState::edge_client_with_permission_identity(identity, AuthorId::SYSTEM)
+                    PeerState::edge_client_with_permission_identity(identity, AuthorSubject::SYSTEM)
                 }
                 CommitUnitTrust::Session => PeerState::client_link(identity),
             }
@@ -982,7 +1133,7 @@ where
     fn accept_subscriber_with_peer(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         trust: CommitUnitTrust,
         claims: BTreeMap<String, Value>,
         cursor: Option<ResumeCursor>,
@@ -1028,12 +1179,19 @@ where
             node: Rc::clone(&self.node),
             subscriptions: Rc::clone(&self.subscriptions),
             upstream_subscription_owners: Rc::clone(&self.upstream_subscription_owners),
+            relay_upstream_subscription_owners: Rc::clone(&self.relay_upstream_subscription_owners),
+            pending_relay_subscription_rejections: Rc::clone(
+                &self.pending_relay_subscription_rejections,
+            ),
             latest_coverage_subscriptions: Rc::clone(&self.latest_coverage_subscriptions),
             awaiting_initial_authority_coverage: Rc::clone(
                 &self.awaiting_initial_authority_coverage,
             ),
             active_authority_view_receipts: Rc::clone(&self.active_authority_view_receipts),
             scheduler: Rc::clone(&self.scheduler),
+            upload_retry_clock: Rc::clone(&self.upload_retry_clock),
+            upstream_upload_destination: None,
+            large_value_upload_retry_deadlines: Rc::clone(&self.large_value_upload_retry_deadlines),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
             edge_fate_routes: Rc::clone(&self.edge_fate_routes),
@@ -1046,6 +1204,9 @@ where
             observed_session_claim_revision: Cell::new(session_claim_revision),
             connection_epoch,
             startup_error,
+            released_outbox_tx_ids: Vec::new(),
+            pending_chunk_response: None,
+            pending_control_responses: VecDeque::new(),
             link: ConnectionLink::Subscriber(SubscriberConnectionState {
                 peer,
                 ingest_context,
@@ -1066,6 +1227,12 @@ where
                 serve_dirty: true,
             }),
             last_resume_bytes: None,
+            auxiliary_pump: PeerIoPump::new(
+                self.chunk_resolver.clone(),
+                self.local_chunk_reader.clone(),
+                connection_epoch,
+                PeerIoPumpRole::Subscriber,
+            ),
         }));
         self.connections.borrow_mut().push(Rc::clone(&connection));
         self.schedule_tick(TickUrgency::Immediate);
@@ -1074,23 +1241,103 @@ where
 
     /// Detach a previously attached peer connection from this node.
     pub fn detach_connection(&self, connection: &Rc<LocalMutex<PeerConnection<S>>>) -> bool {
-        let connection_ref = connection.borrow();
-        let (authority, upstream_epoch) = match &connection_ref.link {
-            ConnectionLink::Upstream(UpstreamConnectionState {
-                expected_scope_authority,
-                ..
-            }) => (
-                *expected_scope_authority,
-                Some(connection_ref.connection_epoch),
-            ),
-            ConnectionLink::Subscriber(_) => (None, None),
-        };
+        if !self
+            .connections
+            .borrow()
+            .iter()
+            .any(|candidate| Rc::ptr_eq(candidate, connection))
+        {
+            return false;
+        }
+        let mut connection_ref = connection.borrow_mut();
+        let connection_epoch = connection_ref.connection_epoch;
+        let upstream_upload_destination = connection_ref.upstream_upload_destination;
+        let (authority, upstream_epoch, transferable_uploads, retired_relay_subscriptions) =
+            match &mut connection_ref.link {
+                ConnectionLink::Upstream(UpstreamConnectionState {
+                    expected_scope_authority,
+                    large_value_uploads,
+                    awaiting_large_value_uploads,
+                    ..
+                }) => (
+                    *expected_scope_authority,
+                    Some(connection_epoch),
+                    Some(peer_connection::take_reconnectable_large_value_uploads(
+                        large_value_uploads,
+                        awaiting_large_value_uploads,
+                    )),
+                    Vec::new(),
+                ),
+                ConnectionLink::Subscriber(SubscriberConnectionState {
+                    peer,
+                    served,
+                    coverage_groups,
+                    scope_purposes,
+                    scope_aggregates,
+                    authority_scope_hydrations,
+                    ..
+                }) => {
+                    let retired = retire_relay_upstream_subscriptions_for_connection(
+                        &self.relay_upstream_subscription_owners,
+                        connection_epoch,
+                    );
+                    // A detached subscriber cannot later send a normal
+                    // Unsubscribe. Retire its concrete served usage sites and the
+                    // one maintained receiver per coverage group now; groups on
+                    // every other downstream connection remain untouched.
+                    let groups = std::mem::take(coverage_groups);
+                    let mut node = self.node.borrow_mut();
+                    for (coverage, group) in groups {
+                        for subscription in group.subscribers {
+                            node.apply_unsubscribe(subscription);
+                            served.remove(&subscription);
+                            scope_purposes.remove(&subscription);
+                        }
+                        peer.forget_subscription_with_node(
+                            &mut node,
+                            SubscriptionKey {
+                                shape_id: coverage.shape_id,
+                                binding_id: coverage.binding_id,
+                                read_view: coverage.opts.read_view_key(),
+                            },
+                        );
+                    }
+                    scope_aggregates.clear();
+                    authority_scope_hydrations.clear();
+                    (None, None, None, retired)
+                }
+            };
+        // The auxiliary lane is independent of semantic ticks. Retire it for
+        // both upstream and subscriber links before releasing this connection
+        // so an in-flight local lookup cannot recreate relay state afterward.
+        connection_ref.auxiliary_pump.disconnect();
         drop(connection_ref);
+        // A rejection can be queued by the upstream turn immediately before
+        // this abrupt detach. Its downstream transport is gone, so retaining
+        // that queue entry would be an unbounded stale-epoch leak.
+        self.pending_relay_subscription_rejections
+            .borrow_mut()
+            .remove(&connection_epoch);
         let mut connections = self.connections.borrow_mut();
-        let before = connections.len();
         connections.retain(|candidate| !Rc::ptr_eq(candidate, connection));
-        let detached = connections.len() != before;
         drop(connections);
+        let detached = true;
+        if !retired_relay_subscriptions.is_empty() {
+            self.upstream_subscriptions.borrow_mut().extend(
+                retired_relay_subscriptions
+                    .into_iter()
+                    .map(|(subscription, _)| PendingUpstreamCommand::Unsubscribe(subscription)),
+            );
+            self.schedule_tick(TickUrgency::Immediate);
+        }
+        if let (Some(destination), Some(uploads)) =
+            (upstream_upload_destination, transferable_uploads)
+            && !uploads.is_empty()
+        {
+            let mut detached_uploads = self.detached_large_value_uploads.borrow_mut();
+            let destination_uploads = detached_uploads.entry(destination).or_default();
+            peer_connection::merge_reconnectable_large_value_uploads(destination_uploads, uploads);
+        }
         if detached
             && let Some(epoch) = upstream_epoch
             && self
@@ -1145,14 +1392,16 @@ where
                 *self.admitted_upstream_authority.borrow_mut() = handoff;
                 let mut routes = self.edge_fate_routes.borrow_mut();
                 if let Some(handoff) = handoff {
-                    routes.retain(|_, pending| {
-                        pending.retain(|route| route.queue.upgrade().is_some());
-                        for route in pending.iter_mut() {
+                    routes.retain(|_, obligation| {
+                        obligation
+                            .routes
+                            .retain(|route| route.queue.upgrade().is_some());
+                        for route in obligation.routes.iter_mut() {
                             if route.authority == Some(authority) {
                                 route.authority = Some(handoff);
                             }
                         }
-                        !pending.is_empty()
+                        !obligation.routes.is_empty()
                     });
                     let routed_txs = routes.keys().copied().collect::<Vec<_>>();
                     drop(routes);
@@ -1176,15 +1425,13 @@ where
                         for tx_id in &routed_txs {
                             uploaded.remove(tx_id);
                             let mut outbox = outbox.borrow_mut();
-                            if !outbox.iter().any(|pending| pending.tx_id == *tx_id) {
-                                outbox.push(PendingUpload {
-                                    tx_id: *tx_id,
-                                    unit: crate::db::block_on(
-                                        self.node.borrow_mut().commit_unit_for(*tx_id),
-                                    )
-                                    .ok(),
-                                });
-                            }
+                            outbox.push(PendingUpload {
+                                tx_id: *tx_id,
+                                unit: crate::db::block_on(
+                                    self.node.borrow_mut().commit_unit_for(*tx_id),
+                                )
+                                .ok(),
+                            });
                         }
                     }
                     self.schedule_tick(TickUrgency::Immediate);
@@ -1192,14 +1439,16 @@ where
                     // No successor yet: preserve bounded live downstream
                     // routes for a later admitted authority.  Clearing them
                     // after an Edge acceptance would strand the caller.
-                    routes.retain(|_, pending| {
-                        pending.retain(|route| route.queue.upgrade().is_some());
-                        for route in pending.iter_mut() {
+                    routes.retain(|_, obligation| {
+                        obligation
+                            .routes
+                            .retain(|route| route.queue.upgrade().is_some());
+                        for route in obligation.routes.iter_mut() {
                             if route.authority == Some(authority) {
                                 route.authority = None;
                             }
                         }
-                        !pending.is_empty()
+                        !obligation.routes.is_empty()
                     });
                     self.schedule_tick(TickUrgency::Immediate);
                 }
@@ -1213,7 +1462,21 @@ where
         self.drain_subscription_finalizations().await?;
         self.deliver_pending_mutation_errors();
         let mut stats = DbTickStats::default();
+        let chunk_completion_generation = self.chunk_resolver.completion_generation();
+        if self.chunk_resolver.has_pending_local_demand()
+            || chunk_completion_generation != self.observed_chunk_completion_generation.get()
+        {
+            stats.subscription_events += Box::pin(refresh_subscriptions_in(
+                &self.node,
+                &self.subscriptions,
+                &self.active_authority_view_receipts,
+            ))
+            .await?;
+            self.observed_chunk_completion_generation
+                .set(chunk_completion_generation);
+        }
         let mut remote_sync_applied = false;
+        let mut released_outbox_tx_ids = HashSet::new();
         // A later subscriber can mutate Core state after an earlier peer link
         // has already had its turn in this pass.  Remember that generation so
         // the post-receive serve pass below reaches that earlier link too;
@@ -1222,7 +1485,9 @@ where
         let subscriber_dirty_epoch_before = self.subscriber_dirty_epoch.get();
         let connections = self.connections.borrow().clone();
         for connection in &connections {
-            let next = connection.lock().await.tick().await?;
+            let mut connection = connection.lock().await;
+            let next = connection.tick().await?;
+            released_outbox_tx_ids.extend(connection.take_released_outbox_tx_ids());
             stats.subscription_events += next.subscription_events;
             stats.remote_sync_applied += next.remote_sync_applied;
             remote_sync_applied |= next.remote_sync_applied > 0;
@@ -1236,7 +1501,9 @@ where
                     connection.mark_subscriber_dirty() || subscriber_state_changed
                 };
                 if should_tick {
-                    let next = connection.lock().await.tick().await?;
+                    let mut connection = connection.lock().await;
+                    let next = connection.tick().await?;
+                    released_outbox_tx_ids.extend(connection.take_released_outbox_tx_ids());
                     stats.subscription_events += next.subscription_events;
                     stats.remote_sync_applied += next.remote_sync_applied;
                 }
@@ -1253,31 +1520,39 @@ where
                 .enforce_edge_cache_budget(&pins, budget)
                 .await?;
         }
-        self.prune_settled_outbox_uploads();
+        if !released_outbox_tx_ids.is_empty() {
+            self.release_outbox_uploads(released_outbox_tx_ids);
+        }
         Ok(stats)
     }
 
-    fn prune_settled_outbox_uploads(&self) {
+    fn release_outbox_uploads(&self, released_tx_ids: HashSet<TxId>) {
         let mut outbox = self.outbox.borrow_mut();
-        if outbox.is_empty() {
-            return;
+        let mut remaining = released_tx_ids.clone();
+        outbox.remove_released(&mut remaining);
+        drop(outbox);
+        for connection in self.connections.borrow().iter() {
+            connection
+                .borrow_mut()
+                .forget_released_outbox_tx_ids(&released_tx_ids);
         }
-        let mut node = self.node.borrow_mut();
-        outbox.retain(|pending| {
-            let state = crate::db::block_on(node.transaction_state(pending.tx_id));
-            let Some((fate, _, durability)) = state else {
-                return true;
-            };
-            matches!(fate, Fate::Pending | Fate::Accepted) && durability < DurabilityTier::Global
-        });
+        self.large_value_upload_retry_deadlines
+            .borrow_mut()
+            .retain(|tx_id, _| !released_tx_ids.contains(tx_id));
+        self.detached_large_value_uploads
+            .borrow_mut()
+            .retain(|_, uploads| {
+                uploads.retain(|tx_id, _| !released_tx_ids.contains(tx_id));
+                !uploads.is_empty()
+            });
     }
 }
 
 async fn optimistic_transaction_row_keys_for_query<S>(
     node: &SharedNodeState<S>,
-    cache: &mut BTreeMap<AuthorId, BTreeSet<(String, RowUuid)>>,
+    cache: &mut BTreeMap<AuthorSubject, BTreeSet<(String, RowUuid)>>,
     shape: &ValidatedQuery,
-    author: AuthorId,
+    author: AuthorSubject,
 ) -> Result<BTreeSet<(String, RowUuid)>, Error>
 where
     S: OrderedKvStorage,
@@ -1609,15 +1884,24 @@ where
                     let (update, suppressed) = drained?;
                     debug_assert!(suppressed);
                     if let Some(update) = update {
+                        let state_ref = state.borrow();
+                        let SubscriptionKind::Prepared {
+                            maintained_subscription,
+                            ..
+                        } = &state_ref.kind;
+                        let terminal_layout = maintained_subscription
+                            .as_ref()
+                            .and_then(LocalMaintainedViewSubscription::terminal_root_layout);
                         let mut snapshot_index = RelationSnapshotIndex::from_snapshot(&snapshot);
                         let _ = apply_maintained_update_to_snapshot(
                             &mut snapshot,
                             &mut snapshot_index,
                             update,
+                            shape.query().table.as_str(),
                             read_tier,
                             previous_settled,
-                            terminal_rows,
-                        );
+                            terminal_layout,
+                        )?;
                     }
                     consumed_authoritative_resets.insert(binding_view);
                 } else {
@@ -2008,15 +2292,20 @@ where
                         (fallback, false)
                     };
                 if let Some(update) = maintained_update {
+                    let terminal_layout = refresh
+                        .maintained
+                        .as_ref()
+                        .and_then(LocalMaintainedViewSubscription::terminal_root_layout);
                     let mut snapshot_index = RelationSnapshotIndex::from_snapshot(&snapshot);
                     let _ = apply_maintained_update_to_snapshot(
                         &mut snapshot,
                         &mut snapshot_index,
                         update,
+                        shape.query().table.as_str(),
                         snapshot_tier,
                         previous_settled,
-                        terminal_rows,
-                    );
+                        terminal_layout,
+                    )?;
                 }
                 let settled = subscription_is_settled(
                     &node.borrow(),
@@ -2037,10 +2326,6 @@ where
                 )
             } else {
                 if terminal_rows && !peer_terminal_operations.is_empty() {
-                    let terminal_layout = refresh
-                        .maintained
-                        .as_ref()
-                        .and_then(|maintained| maintained.terminal_root_layout().cloned());
                     if let Some(maintained) = refresh.maintained.as_mut() {
                         // The serving terminal is authoritative for
                         // structural publication. Advance the local
@@ -2061,22 +2346,29 @@ where
                         remote_propagate_upstream,
                         requires_authority_receipt,
                     );
-                    let state_ref = &mut refresh;
-                    let event = SubscriptionEvent::Delta {
-                        reset: false,
-                        publishable: true,
-                        added: Vec::new(),
-                        updated: Vec::new(),
-                        removed: Vec::new(),
-                        ordered_suffix_start: None,
-                        terminal_operations: peer_terminal_operations,
+                    let terminal_layout = refresh
+                        .maintained
+                        .as_ref()
+                        .and_then(LocalMaintainedViewSubscription::terminal_root_layout)
+                        .ok_or_else(|| {
+                            Error::new(
+                                ErrorCode::Protocol,
+                                "terminal operation arrived without a prepared root layout",
+                            )
+                        })?;
+                    let event = apply_terminal_operations_to_subscription_snapshot(
+                        &mut refresh.snapshot,
+                        &mut refresh.snapshot_index,
+                        peer_terminal_operations,
+                        None,
                         terminal_layout,
+                        shape.query().table.as_str(),
+                        snapshot_tier,
                         settled,
-                        tier: snapshot_tier,
-                    };
-                    state_ref.settled = settled;
+                    )?;
+                    refresh.settled = settled;
                     retained.push(Rc::downgrade(&state));
-                    if state_ref.sender.unbounded_send(event).is_ok() {
+                    if refresh.sender.unbounded_send(event).is_ok() {
                         changed += 1;
                     }
                     continue;
@@ -2119,8 +2411,63 @@ where
                         (None, false)
                     };
                 if let Some(update) = maintained_update {
-                    if terminal_rows {
-                        if !update.terminal_operations.is_empty() {
+                    match update {
+                        LocalMaintainedViewSubscriptionUpdate::Structured {
+                            terminal_operations,
+                        } => {
+                            if !terminal_operations.is_empty() {
+                                let settled = subscription_is_settled(
+                                    &node.borrow(),
+                                    active_authority_view_receipts,
+                                    &shape,
+                                    &binding,
+                                    settled_tier,
+                                    read_view,
+                                    remote_propagate_upstream,
+                                    requires_authority_receipt,
+                                );
+                                let terminal_layout = refresh
+                                    .maintained
+                                    .as_ref()
+                                    .and_then(LocalMaintainedViewSubscription::terminal_root_layout)
+                                    .ok_or_else(|| {
+                                        Error::new(
+                                            ErrorCode::Protocol,
+                                            "terminal operation arrived without a prepared root layout",
+                                        )
+                                    })?;
+                                let event = apply_terminal_operations_to_subscription_snapshot(
+                                    &mut refresh.snapshot,
+                                    &mut refresh.snapshot_index,
+                                    terminal_operations,
+                                    None,
+                                    terminal_layout,
+                                    shape.query().table.as_str(),
+                                    snapshot_tier,
+                                    settled,
+                                )?;
+                                refresh.settled = settled;
+                                retained.push(Rc::downgrade(&state));
+                                if refresh.sender.unbounded_send(event).is_ok() {
+                                    changed += 1;
+                                }
+                                continue;
+                            }
+                            let Some(maintained) = refresh.maintained.as_ref() else {
+                                return Err(Error::new(
+                                    ErrorCode::Protocol,
+                                    "structured subscription lost its Groove terminal",
+                                ));
+                            };
+                            let materialized = node
+                                .lock()
+                                .await
+                                .materialize_local_maintained_relation_snapshot_with_occurrences(
+                                    maintained,
+                                )
+                                .await?;
+                            let snapshot = materialized.snapshot;
+                            let current_root_occurrences = materialized.root_occurrence_ids;
                             let settled = subscription_is_settled(
                                 &node.borrow(),
                                 active_authority_view_receipts,
@@ -2132,18 +2479,25 @@ where
                                 requires_authority_receipt,
                             );
                             let state_ref = &mut refresh;
-                            let event = SubscriptionEvent::Delta {
-                                reset: false,
-                                publishable: true,
-                                added: Vec::new(),
-                                updated: Vec::new(),
-                                removed: Vec::new(),
-                                ordered_suffix_start: None,
-                                terminal_operations: update.terminal_operations,
-                                terminal_layout: update.terminal_layout,
+                            let previous_root_occurrences = snapshot_root_occurrences(
+                                &state_ref.snapshot,
+                                &state_ref.snapshot_index,
+                            )?;
+                            let event = subscription_terminal_delta_event(
+                                snapshot_tier,
                                 settled,
-                                tier: snapshot_tier,
-                            };
+                                &state_ref.snapshot,
+                                &previous_root_occurrences,
+                                &snapshot,
+                                &current_root_occurrences,
+                            )?;
+                            state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
+                            state_ref.snapshot_index =
+                                relation_snapshot_index_with_root_occurrences(
+                                    &state_ref.snapshot,
+                                    &current_root_occurrences,
+                                )?;
+                            state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
                             state_ref.settled = settled;
                             retained.push(Rc::downgrade(&state));
                             if state_ref.sender.unbounded_send(event).is_ok() {
@@ -2151,125 +2505,89 @@ where
                             }
                             continue;
                         }
-                        let Some(maintained) = refresh.maintained.as_ref() else {
-                            return Err(Error::new(
-                                ErrorCode::Protocol,
-                                "structured subscription lost its Groove terminal",
-                            ));
-                        };
-                        let materialized = node
-                            .lock()
-                            .await
-                            .materialize_local_maintained_relation_snapshot_with_occurrences(
-                                maintained,
-                            )
-                            .await?;
-                        let snapshot = materialized.snapshot;
-                        let current_root_occurrences = materialized.root_occurrence_ids;
-                        let settled = subscription_is_settled(
-                            &node.borrow(),
-                            active_authority_view_receipts,
-                            &shape,
-                            &binding,
-                            settled_tier,
-                            read_view,
-                            remote_propagate_upstream,
-                            requires_authority_receipt,
-                        );
-                        let state_ref = &mut refresh;
-                        let previous_root_occurrences = snapshot_root_occurrences(
-                            &state_ref.snapshot,
-                            &state_ref.snapshot_index,
-                        )?;
-                        let event = subscription_terminal_delta_event(
-                            snapshot_tier,
-                            settled,
-                            &state_ref.snapshot,
-                            &previous_root_occurrences,
-                            &snapshot,
-                            &current_root_occurrences,
-                        )?;
-                        state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
-                        state_ref.snapshot_index = relation_snapshot_index_with_root_occurrences(
-                            &state_ref.snapshot,
-                            &current_root_occurrences,
-                        )?;
-                        state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
-                        state_ref.settled = settled;
-                        retained.push(Rc::downgrade(&state));
-                        if state_ref.sender.unbounded_send(event).is_ok() {
-                            changed += 1;
-                        }
-                        continue;
-                    } else {
-                        let state_ref = &mut refresh;
-                        let previous_snapshot = state_ref.snapshot.clone();
-                        let previous_snapshot_index = state_ref.snapshot_index.clone();
-                        let authoritative_membership_changed =
-                            update.authoritative_membership_changed;
-                        let mut event = apply_maintained_update_to_snapshot(
-                            &mut state_ref.snapshot,
-                            &mut state_ref.snapshot_index,
-                            update,
-                            snapshot_tier,
-                            previous_settled,
-                            terminal_rows,
-                        );
-                        if authoritative_membership_changed {
-                            order_maintained_snapshot_roots(
-                                &node.borrow(),
-                                &shape.query(),
+                        LocalMaintainedViewSubscriptionUpdate::Flat {
+                            authoritative_membership_changed,
+                            added,
+                            removed,
+                            terminal_operations,
+                        } => {
+                            let state_ref = &mut refresh;
+                            let previous = authoritative_membership_changed.then(|| {
+                                (state_ref.snapshot.clone(), state_ref.snapshot_index.clone())
+                            });
+                            let mut event = apply_maintained_update_to_snapshot(
                                 &mut state_ref.snapshot,
                                 &mut state_ref.snapshot_index,
-                            )?;
-                            // Authority reconciliation carries row
-                            // additions/removals without positions.
-                            // Re-publish the first changed ordered
-                            // suffix so consumers apply TopBy order.
-                            event = subscription_terminal_delta_event(
+                                LocalMaintainedViewSubscriptionUpdate::Flat {
+                                    authoritative_membership_changed,
+                                    added,
+                                    removed,
+                                    terminal_operations,
+                                },
+                                shape.query().table.as_str(),
                                 snapshot_tier,
                                 previous_settled,
-                                &previous_snapshot,
-                                &snapshot_root_occurrences(
+                                None,
+                            )?;
+                            if authoritative_membership_changed {
+                                let (previous_snapshot, previous_snapshot_index) = previous.expect(
+                                    "authoritative membership changes retain prior snapshot",
+                                );
+                                order_maintained_snapshot_roots(
+                                    &node.borrow(),
+                                    &shape.query(),
+                                    &mut state_ref.snapshot,
+                                    &mut state_ref.snapshot_index,
+                                )?;
+                                // Authority reconciliation carries row
+                                // additions/removals without positions.
+                                // Re-publish the first changed ordered
+                                // suffix so consumers apply TopBy order.
+                                event = subscription_terminal_delta_event(
+                                    snapshot_tier,
+                                    previous_settled,
                                     &previous_snapshot,
-                                    &previous_snapshot_index,
-                                )?,
-                                &state_ref.snapshot,
-                                &snapshot_root_occurrences(
+                                    &snapshot_root_occurrences(
+                                        &previous_snapshot,
+                                        &previous_snapshot_index,
+                                    )?,
                                     &state_ref.snapshot,
-                                    &state_ref.snapshot_index,
-                                )?,
-                            )?;
+                                    &snapshot_root_occurrences(
+                                        &state_ref.snapshot,
+                                        &state_ref.snapshot_index,
+                                    )?,
+                                )?;
+                            }
+                            state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
+                            let settled = subscription_is_settled(
+                                &node.borrow(),
+                                active_authority_view_receipts,
+                                &shape,
+                                &binding,
+                                settled_tier,
+                                read_view,
+                                remote_propagate_upstream,
+                                requires_authority_receipt,
+                            ) && node
+                                .borrow()
+                                .relation_snapshot_has_materialized_required_cells(
+                                    shape.query(),
+                                    &state_ref.snapshot,
+                                )?;
+                            state_ref.settled = settled;
+                            retained.push(Rc::downgrade(&state));
+                            if let SubscriptionEvent::Delta {
+                                settled: event_settled,
+                                ..
+                            } = &mut event
+                            {
+                                *event_settled = settled;
+                            }
+                            if state_ref.sender.unbounded_send(event).is_ok() {
+                                changed += 1;
+                            }
+                            continue;
                         }
-                        state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
-                        let settled = subscription_is_settled(
-                            &node.borrow(),
-                            active_authority_view_receipts,
-                            &shape,
-                            &binding,
-                            settled_tier,
-                            read_view,
-                            remote_propagate_upstream,
-                            requires_authority_receipt,
-                        ) && node
-                            .borrow()
-                            .relation_snapshot_has_materialized_required_cells(
-                                shape.query(),
-                                &state_ref.snapshot,
-                            )?;
-                        state_ref.settled = settled;
-                        retained.push(Rc::downgrade(&state));
-                        if let SubscriptionEvent::Delta {
-                            settled: event_settled,
-                            ..
-                        } = &mut event
-                        {
-                            *event_settled = settled;
-                        }
-                        if state_ref.sender.unbounded_send(event).is_ok() {
-                            changed += 1;
-                        }
-                        continue;
                     }
                 }
                 let preserve_local_overlay = suppressed_authoritative_change;
@@ -2528,6 +2846,70 @@ pub(super) fn unregister_upstream_subscription_owner(
     }
 }
 
+/// Retire one relay-owned upstream usage site only when it still belongs to
+/// the expected downstream connection and coverage group. The exact match is
+/// what keeps a stale unsubscribe/rejection from removing a sibling relay
+/// connection that happens to request identical coverage.
+pub(super) fn retire_relay_upstream_subscription(
+    owners: &RelayUpstreamSubscriptionOwners,
+    subscription: SubscriptionKey,
+    downstream_connection_epoch: u64,
+    coverage: &CoverageKey,
+) -> Option<RelayUpstreamSubscriptionOwner> {
+    let mut owners = owners.borrow_mut();
+    let owner = owners.get(&subscription)?;
+    if owner.downstream_connection_epoch != downstream_connection_epoch
+        || owner.coverage != *coverage
+    {
+        return None;
+    }
+    owners.remove(&subscription)
+}
+
+/// Retire a relay owner after its authority has terminally rejected the wire
+/// subscription. Unlike an ordinary unsubscribe there is no downstream link
+/// assertion here: the opaque upstream handle itself is the unforgeable owner
+/// token, and the returned record tells us exactly where to route the result.
+pub(super) fn take_relay_upstream_subscription_owner(
+    owners: &RelayUpstreamSubscriptionOwners,
+    subscription: SubscriptionKey,
+) -> Option<RelayUpstreamSubscriptionOwner> {
+    owners.borrow_mut().remove(&subscription)
+}
+
+/// Take every propagated upstream owner for a disconnected downstream link.
+/// Taking the records before enqueuing wire retirement makes repeated detach
+/// calls and late rejections harmless no-ops.
+pub(super) fn retire_relay_upstream_subscriptions_for_connection(
+    owners: &RelayUpstreamSubscriptionOwners,
+    downstream_connection_epoch: u64,
+) -> Vec<(SubscriptionKey, RelayUpstreamSubscriptionOwner)> {
+    let mut owners = owners.borrow_mut();
+    let subscriptions = owners
+        .iter()
+        .filter_map(|(subscription, owner)| {
+            (owner.downstream_connection_epoch == downstream_connection_epoch)
+                .then_some(*subscription)
+        })
+        .collect::<Vec<_>>();
+    subscriptions
+        .into_iter()
+        .filter_map(|subscription| {
+            owners
+                .remove(&subscription)
+                .map(|owner| (subscription, owner))
+        })
+        .collect()
+}
+
+pub(super) fn register_shape_rejection_matches(
+    subscription: SubscriptionKey,
+    shape: &ValidatedQuery,
+    opts: &RegisterShapeOptions,
+) -> bool {
+    shape.shape_id() == subscription.shape_id && opts.read_view_key() == subscription.read_view
+}
+
 pub(super) fn route_upstream_subscription_rejection(
     subscriptions: &SubscriptionList,
     owners: &UpstreamSubscriptionOwners,
@@ -2556,13 +2938,12 @@ pub(super) fn route_upstream_subscription_rejection(
             continue;
         }
         let SubscriptionKind::Prepared { shape, binding, .. } = &state_ref.kind;
-        let read_view = RegisterShapeOptions {
+        let opts = RegisterShapeOptions {
             tier: state_ref.remote_read_tier.unwrap_or(state_ref.read_tier),
             read_view: state_ref.read_view.clone(),
             propagate_upstream: state_ref.remote_propagate_upstream,
-        }
-        .read_view_key();
-        if shape.shape_id() != subscription.shape_id || read_view != subscription.read_view {
+        };
+        if !register_shape_rejection_matches(subscription, shape, &opts) {
             continue;
         }
         if subscription.binding_id != BindingId(uuid::Uuid::nil())
@@ -2609,7 +2990,7 @@ pub struct ConnectionSessionContext {
     /// Authenticated remote authority identity and fresh epoch.
     pub remote: WireAuthorityEndpoint,
     /// Authenticated session identity terminated by this link.
-    pub link_identity: AuthorId,
+    pub link_identity: AuthorSubject,
     /// Features accepted for this connection.
     pub negotiated_features: WireFeatures,
 }

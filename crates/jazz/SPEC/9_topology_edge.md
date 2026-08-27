@@ -17,10 +17,10 @@ versions merely because it has the payload (`INV-TX-23`).
 
 Invariant digest:
 
-- `INV-EDGE-1`: A `PeerRole::Relay` link MUST use `AuthorId::SYSTEM` as its link identity and MUST NOT terminate a client identity.
+- `INV-EDGE-1`: A `PeerRole::Relay` link MUST use `AuthorSubject::SYSTEM` as its link identity and MUST NOT terminate a client identity.
 - `INV-EDGE-2`: A relay MUST store/forward `TxKind::Mergeable` and `TxKind::Exclusive` commit units as `Fate::Pending` with `DurabilityTier::Local` and MUST NOT assign an authority fate.
 - `INV-EDGE-3`: An edge-client link MUST terminate exactly one client author identity as `PeerRole::ClientLink { identity }`, and downstream reads on that link MUST use that identity for policy composition.
-- `INV-EDGE-4`: An edge MUST NOT assign a mergeable fate until the needed permission-scope subscription has delivered an initial settled result; before that, the transaction MUST remain pending and deferred.
+- `INV-EDGE-4`: An edge MUST NOT assign a mergeable fate until the needed permission-scope subscription has delivered an initial settled result; before that, the transaction MUST remain outside edge history in in-memory deferred-admission state. Once settled, an authorized transaction is ingested and edge-accepted exactly once; a denied transaction is rejected without ingestion.
 - `INV-EDGE-5`: Edge-local fate assignment MUST support only `TxKind::Mergeable`; an edge MUST NOT use the edge mergeable path to assign fate for `TxKind::Exclusive`.
 - `INV-EDGE-6`: `TxKind::Exclusive` acceptance MUST be decided by core, the serialization point; edge authority MUST NOT make exclusive acceptance final.
 - `INV-EDGE-7`: Once a transaction reaches `Fate::Accepted`, later stale `Fate::Pending` updates MUST NOT regress its fate.
@@ -33,7 +33,7 @@ Invariant digest:
 - `INV-EDGE-14`: An edge cache MUST NOT evict fate-pending units, permission-scope results currently backing edge acceptance, parked commit families, or edge-accepted versions not yet globally durable.
 - `INV-EDGE-15`: After eviction, an edge MUST recover required payloads through resubscription without assuming complete local history.
 - `INV-EDGE-16`: Duplicate merges of the same concurrent mergeable frontier MUST be legal (identical cells); when independent edge merges diverge, an upstream tier MUST reconcile them by folding over the de-duplicated raw head set (not by re-merging merged values), so `Counter` never double-counts a shared ancestor.
-- `INV-EDGE-17`: An edge permission-scope subscription MUST be keyed by `(policy_shape, writer_claim)` — the write policy's query shape bound to the writer's `claim("sub")` — and MUST NOT hydrate a whole-table scope. A public-write table (no write policy) opens no scope and settles immediately.
+- `INV-EDGE-17`: An edge permission-scope subscription MUST be keyed by `(policy_shape, writer_claim)` — the write policy's query shape bound to the writer's `claim("user")` — and MUST NOT hydrate a whole-table scope. A public-write table (no write policy) opens no scope and settles immediately.
 - `INV-EDGE-18`: An edge MUST share a settled permission-scope subscription among all dependent acceptance gates it can satisfy.
 - `INV-EDGE-19`: A dynamically catalogued serving authority MUST NOT accept an uploaded commit unit until an authority has published a permissions head selecting its write schema and table policies. If no head is published, it MUST reject the unit with `permissions_head_missing`, rather than silently accepting it.
 - `INV-LOWER-20`: RLS policy declarations MUST be valid Jazz query shapes; read policy MUST lower through the query engine as part of the policy-composed read graph, while write-time ac...
@@ -48,7 +48,7 @@ Trust is the axis:
 
 - **client** — untrusted; no fate authority; local preview only.
 - **relay** — semi-trusted passthrough/cache; never assigns fates or enforces
-  per-user permissions; forwards opaquely under `AuthorId::SYSTEM`.
+  per-user permissions; forwards opaquely under `AuthorSubject::SYSTEM`.
 - **edge** — operator-trusted; may finally decide _mergeable_ fates and enforces
   read/write policy for the identities it terminates.
 - **core** — operator-trusted; the exclusive-transaction authority and global
@@ -115,7 +115,7 @@ same client-worker link. A worker without an upstream can therefore satisfy
 ### 9.3 Relays
 
 Relays provide unopinionated transport and caching. A relay link uses
-`PeerRole::Relay` with identity `AuthorId::SYSTEM` (`INV-EDGE-1`) and forwards
+`PeerRole::Relay` with identity `AuthorSubject::SYSTEM` (`INV-EDGE-1`) and forwards
 both mergeable and exclusive commit units without deciding their outcome: stored
 units remain `Fate::Pending` / `DurabilityTier::Local`, and the relay assigns no
 fate (`INV-EDGE-2`).
@@ -129,7 +129,7 @@ the browser. Server-deployed relays are the exception.
 
 The edge-client boundary is where the system binds a link to a user identity and
 applies the last-hop policy view. An edge-client link terminates exactly one
-client `AuthorId` as `PeerRole::ClientLink { identity }`, and downstream reads on
+client `AuthorSubject` as `PeerRole::ClientLink { identity }`, and downstream reads on
 that link are policy-composed for that identity (`INV-EDGE-3`, ch. 7).
 
 Upstream commit-unit uploads on a normal session link are authorized under the
@@ -174,7 +174,7 @@ a later stale `Pending` update is ignored (`INV-EDGE-7`).
 keyed by `(policy_shape, writer_claim)` — the narrow slice of policy data that the
 write policy reads _for that writer_ — not a whole-table scope (`INV-EDGE-17`).
 Because a write policy is itself a jazz query shape (`INV-LOWER-20`), binding it
-to the writer's `claim("sub")` narrows hydration to exactly the rows the policy
+to the writer's `claim("user")` narrows hydration to exactly the rows the policy
 would read for that writer. An edge therefore holds only the policy data for the
 identities it terminates, rather than every tenant's data.
 

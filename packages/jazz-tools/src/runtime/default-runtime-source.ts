@@ -4,7 +4,9 @@ import {
   type ConnectRuntimeOptions,
   type WasmModule,
 } from "./client.js";
+import type { AppContext } from "./context.js";
 import { resolveDefaultPersistentDbName, type DbConfig } from "./db.js";
+import { getTrustedReservedSession, setTrustedReservedSession } from "./db-internal-session.js";
 import {
   RuntimeSource,
   type BrowserWorkerConnection,
@@ -16,20 +18,24 @@ import {
   type RuntimeTokenOptions,
 } from "./runtime-source.js";
 import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
+import type { NativeSelfSignedClientProof } from "./native-runtime/native-codec.js";
 import { SharedBrowserWorkerConnection } from "./native-runtime/browser-shared-worker-connection.js";
 import { AttachedBrowserWorkerConnection } from "./native-runtime/attached-browser-worker-connection.js";
 import { MessagePortBrowserFollowerConnection } from "./native-runtime/browser-follower-connection.js";
 import { installWasmTelemetry } from "./sync-telemetry.js";
-import { parseJwtPayload, resolveClientSessionSync } from "./client-session.js";
+import {
+  ANONYMOUS_JWT_ISSUER,
+  LOCAL_FIRST_JWT_ISSUER,
+  resolveClientInternalSessionSync,
+} from "./client-session.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { httpUrlToWs } from "./url.js";
-import { authorBytesForSubject, isUsableSubject } from "./author-id.js";
+import { authorBytesForSession, canonicalAuthorSubject } from "./author-id.js";
 import {
   createBrowserAuthSessionKey,
   createBrowserWorkerFingerprint,
 } from "./browser-worker-config.js";
 import { getRuntimeSchemaCacheKey } from "../drivers/schema-wire.js";
-import { bundledWasmUrl } from "jazz-wasm/wasm-url.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
@@ -60,16 +66,58 @@ function randomBytes(): Uint8Array {
   return deterministicBytes(`${Date.now()}:${Math.random()}`);
 }
 
-function subjectFromConfig(config: DbConfig): string | null {
-  if (config.cookieSession?.user_id && isUsableSubject(config.cookieSession.user_id)) {
-    return config.cookieSession.user_id;
-  }
-  const payload = parseJwtPayload(config.jwtToken ?? "");
-  return typeof payload?.sub === "string" && isUsableSubject(payload.sub) ? payload.sub : null;
+function sessionFromConfig(config: DbConfig) {
+  return resolveClientInternalSessionSync({
+    ...config,
+    trustedReservedSession: getTrustedReservedSession(config),
+  });
 }
 
-function persistentIdentitySeed(config: DbConfig, subject: string | null): string {
-  return `${config.appId}:${config.env ?? "dev"}:${subject ?? "anonymous"}`;
+function runtimeAuthorFromConfig(config: DbConfig) {
+  const session = sessionFromConfig(config);
+  if (session) return session;
+
+  // A sessionless default runtime is an explicitly trusted backend open. Its
+  // raw config still needs a syntactically valid, untrusted author because the
+  // native constructor validates that input before its separate backend ABI
+  // derives SYSTEM. This placeholder never becomes the runtime's author.
+  if (config.backendSecret || config.adminSecret) {
+    return { issuer: "https://jazz.invalid", user_id: "backend-open" };
+  }
+  throw new Error("Default runtime requires a verified session or backend credential");
+}
+
+function isBackendRuntime(config: DbConfig): boolean {
+  return !sessionFromConfig(config) && Boolean(config.backendSecret || config.adminSecret);
+}
+
+export function selfSignedClientProofFromConfig(
+  config: DbConfig,
+  session: ReturnType<typeof sessionFromConfig>,
+): NativeSelfSignedClientProof | undefined {
+  if (
+    !session ||
+    !config.jwtToken ||
+    (session.issuer !== LOCAL_FIRST_JWT_ISSUER && session.issuer !== ANONYMOUS_JWT_ISSUER)
+  ) {
+    return undefined;
+  }
+  return {
+    token: config.jwtToken,
+    appId: config.appId,
+    claimedAuthor: canonicalAuthorSubject(session.issuer, session.user_id),
+  };
+}
+
+function persistentIdentitySeed(
+  config: DbConfig,
+  session: ReturnType<typeof sessionFromConfig>,
+): string {
+  const author = canonicalAuthorSubject(
+    session?.issuer ?? ANONYMOUS_JWT_ISSUER,
+    session?.user_id ?? `${config.appId}:${config.env ?? "dev"}:unauthenticated`,
+  );
+  return `${config.appId}:${config.env ?? "dev"}:${author}`;
 }
 
 function initialSyncFlushEvery(config: DbConfig): number {
@@ -85,7 +133,12 @@ function browserWorkerRuntimeSources(config: DbConfig): DbConfig["runtimeSources
   if (sources?.wasmModule || sources?.wasmSource || sources?.wasmUrl || sources?.baseUrl) {
     return sources;
   }
-  return { ...sources, wasmUrl: bundledWasmUrl };
+  // The bundled SharedWorker contains wasm-bindgen glue and ships its matching
+  // binary beside that glue. Let wasm-bindgen resolve that worker-local pair.
+  // Passing the page bundle's `jazz-wasm` URL here can cross versions during a
+  // rebuild or cache transition, leaving a new binary to instantiate against
+  // old worker glue.
+  return sources;
 }
 
 export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
@@ -115,8 +168,10 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       onAuthFailure,
     };
 
-    const subject = subjectFromConfig(config);
-    const identitySeed = persistentIdentitySeed(config, subject);
+    const session = sessionFromConfig(config);
+    const selfSignedClientProof = selfSignedClientProofFromConfig(config, session);
+    const backendMode = isBackendRuntime(config);
+    const identitySeed = persistentIdentitySeed(config, session);
     // A persistent worker may replay a main-thread-authored transaction after
     // the page has reopened. Keep that logical client's node identity stable
     // for the persistence namespace so the fresh in-memory runtime still owns
@@ -124,9 +179,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     const node = isPersistentBrowserConfig(config)
       ? deterministicBytes(`${identitySeed}:${resolveDefaultPersistentDbName(config)}:main-node`)
       : randomBytes();
-    const author = subject
-      ? authorBytesForSubject(subject)
-      : deterministicBytes(`${identitySeed}:author`);
+    const author = authorBytesForSession(runtimeAuthorFromConfig(config));
     const flushEvery = initialSyncFlushEvery(config);
     const browserMode = isPersistentBrowserConfig(config);
     const mainThreadPeerRuntime = this.nativeSchemaView(
@@ -135,27 +188,27 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       author,
       flushEvery,
       !browserMode,
+      selfSignedClientProof,
+      backendMode,
     );
     if (browserMode) {
       mainThreadPeerRuntime.setNonDurableClient();
     }
 
-    return JazzClient.connectWithRuntime(
-      mainThreadPeerRuntime,
-      {
-        appId: config.appId,
-        schema,
-        driver: config.driver,
-        serverUrl: config.serverUrl,
-        env: config.env,
-        jwtToken: config.jwtToken,
-        cookieSession: config.cookieSession,
-        backendSecret: config.backendSecret,
-        adminSecret: config.adminSecret,
-        tier: "local",
-      },
-      runtimeOptions,
-    );
+    const context: AppContext = {
+      appId: config.appId,
+      schema,
+      driver: config.driver,
+      serverUrl: config.serverUrl,
+      env: config.env,
+      jwtToken: config.jwtToken,
+      cookieSession: config.cookieSession,
+      backendSecret: config.backendSecret,
+      adminSecret: config.adminSecret,
+      tier: "local",
+    };
+    setTrustedReservedSession(context, getTrustedReservedSession(config));
+    return JazzClient.connectWithRuntime(mainThreadPeerRuntime, context, runtimeOptions);
   }
 
   override createBrowserWorkerConnection({
@@ -172,17 +225,22 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     if (!(runtime instanceof NativeRuntimeAdapter)) {
       throw new Error("Browser worker connections require the native runtime adapter");
     }
-    const subject = subjectFromConfig(config);
-    const identitySeed = persistentIdentitySeed(config, subject);
+    const session = sessionFromConfig(config);
+    const selfSignedClientProof = selfSignedClientProofFromConfig(config, session);
+    const backendMode = isBackendRuntime(config);
+    if (backendMode) {
+      throw new Error(
+        "Persistent browser workers require a verified client session, not backend credentials",
+      );
+    }
+    const identitySeed = persistentIdentitySeed(config, session);
     const dbName = resolveDefaultPersistentDbName(config);
-    const author = subject
-      ? authorBytesForSubject(subject)
-      : deterministicBytes(`${identitySeed}:author`);
+    const author = authorBytesForSession(runtimeAuthorFromConfig(config));
     if (config.runtimeSources?.browserWorkerPort) {
       return new AttachedBrowserWorkerConnection(
         runtime,
         config.runtimeSources.browserWorkerPort,
-        resolveClientSessionSync(config)?.claims ?? {},
+        sessionFromConfig(config)?.claims ?? {},
         dbName,
         { onAuthFailure, onAuthRestored, onFailure, onStorageReset, onStorageInvalidated },
       );
@@ -195,12 +253,13 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         dbName,
         node: deterministicBytes(`${identitySeed}:${dbName}:node`),
         author,
+        selfSignedClientProof,
         initialSyncFlushEvery: initialSyncFlushEvery(config),
         appId: config.appId,
         authSessionKey: createBrowserAuthSessionKey(config),
         serverUrl: config.serverUrl ? httpUrlToWs(config.serverUrl, config.appId) : undefined,
         authJson: JSON.stringify(runtimeAuth(config)),
-        sessionClaims: resolveClientSessionSync(config)?.claims ?? {},
+        sessionClaims: sessionFromConfig(config)?.claims ?? {},
         logLevel: config.logLevel,
         telemetryCollectorUrl: config.telemetryCollectorUrl,
       },
@@ -221,7 +280,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     if (!(runtime instanceof NativeRuntimeAdapter)) {
       throw new Error("Browser follower connections require the native runtime adapter");
     }
-    const sessionClaims = resolveClientSessionSync(config)?.claims ?? {};
+    const sessionClaims = sessionFromConfig(config)?.claims ?? {};
     const connection = new MessagePortBrowserFollowerConnection(
       runtime,
       port,
@@ -243,6 +302,8 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     author: Uint8Array,
     flushEvery: number,
     historyComplete: boolean,
+    selfSignedClientProof?: NativeSelfSignedClientProof,
+    backendMode = false,
   ): NativeRuntimeAdapter {
     if (!this.ownerRuntime || this.ownerRuntime.isClosed()) {
       this.ownerRuntime = new NativeRuntimeAdapter(
@@ -252,7 +313,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         author,
         1,
         historyComplete,
-        { initialSyncFlushEvery: flushEvery },
+        { initialSyncFlushEvery: flushEvery, selfSignedClientProof, backendMode },
       );
       return this.ownerRuntime;
     }

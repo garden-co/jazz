@@ -4,6 +4,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { verifyManifest } from "./provenance.mjs";
+import { verifyWasmGlueAbi } from "./wasm-glue-abi.mjs";
+import { readCorrectnessArtifactSnapshot } from "./test-artifact-store.mjs";
 
 const root = resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
 
@@ -63,6 +65,17 @@ function parameterCount(parameters) {
 
 export function verifyCorrectnessTestArtifacts(rootDir = root) {
   const failures = [];
+  let snapshot;
+  try {
+    snapshot = readCorrectnessArtifactSnapshot(rootDir);
+    if (!snapshot) failures.push("missing worktree-private correctness artifact snapshot");
+  } catch (error) {
+    failures.push(error.message);
+  }
+  // The fallback keeps this verifier useful for its deliberately minimal unit
+  // fixtures. Real correctness invocation is rejected above without a sealed
+  // snapshot, but still reports every independently detectable ABI defect.
+  const wasmPackage = snapshot?.wasmPackage ?? resolve(rootDir, "crates/jazz-wasm/pkg");
   for (const [kind, profile] of [
     ["wasm", "fast"],
     ["napi", "release"],
@@ -80,10 +93,13 @@ export function verifyCorrectnessTestArtifacts(rootDir = root) {
       "WasmDb",
     );
     const generatedTypes = classBody(
-      text("crates/jazz-wasm/pkg/jazz_wasm.d.ts", rootDir),
+      readFileSync(resolve(wasmPackage, "jazz_wasm.d.ts"), "utf8"),
       "WasmDb",
     );
-    const generatedGlue = classBody(text("crates/jazz-wasm/pkg/jazz_wasm.js", rootDir), "WasmDb");
+    const generatedGlue = classBody(
+      readFileSync(resolve(wasmPackage, "jazz_wasm.js"), "utf8"),
+      "WasmDb",
+    );
     // These are the worker-boundary entry points whose arity is observable at
     // runtime and has previously drifted when bindgen glue was stale.
     for (const method of ["connectUpstream", "acceptSubscriber"]) {
@@ -94,6 +110,34 @@ export function verifyCorrectnessTestArtifacts(rootDir = root) {
         failures.push(
           `WASM ABI drift for WasmDb.${method}: consumer=${sourceArity}, d.ts=${typeArity}, glue=${glueArity}`,
         );
+    }
+    const expectedTransport = classBody(
+      text("packages/jazz-tools/src/types/jazz-wasm.d.ts", rootDir),
+      "WasmTransport",
+    );
+    const generatedTransportTypes = classBody(
+      readFileSync(resolve(wasmPackage, "jazz_wasm.d.ts"), "utf8"),
+      "WasmTransport",
+    );
+    const generatedTransportGlue = classBody(
+      readFileSync(resolve(wasmPackage, "jazz_wasm.js"), "utf8"),
+      "WasmTransport",
+    );
+    const transportMethod = "recvAuxiliaryWireFrames";
+    const sourceArity = arityFromDeclaration(expectedTransport, transportMethod);
+    const typeArity = arityFromDeclaration(generatedTransportTypes, transportMethod);
+    const glueArity = arityFromGlue(generatedTransportGlue, transportMethod);
+    if (sourceArity !== typeArity || sourceArity !== glueArity)
+      failures.push(
+        `WASM ABI drift for WasmTransport.${transportMethod}: consumer=${sourceArity}, d.ts=${typeArity}, glue=${glueArity}`,
+      );
+    const workerWasm = resolve(rootDir, "packages/jazz-tools/dist/worker/jazz_wasm_bg.wasm");
+    const workerGlue = resolve(rootDir, "packages/jazz-tools/dist/worker/jazz-broker-worker.js");
+    if (!existsSync(workerWasm) || !existsSync(workerGlue)) {
+      failures.push("browser worker artifacts are missing");
+    } else {
+      const problem = verifyWasmGlueAbi(readFileSync(workerWasm), readFileSync(workerGlue, "utf8"));
+      if (problem) failures.push(`broker worker ${problem}`);
     }
     const rust = text("crates/jazz/src/wire.rs", rootDir);
     const ts = text("packages/jazz-tools/src/runtime/native-runtime/websocket.ts", rootDir);

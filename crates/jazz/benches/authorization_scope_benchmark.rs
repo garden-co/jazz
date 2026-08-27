@@ -20,7 +20,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid};
+use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::query::Query;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TablePolicies, TableSchemaBuilder};
@@ -28,8 +28,13 @@ use jazz::tx::DurabilityTier;
 
 type DirectDb = Db<MemoryStorage>;
 
-const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
-const OTHER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
+fn author() -> AuthorSubject {
+    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"))
+}
+
+fn other_author() -> AuthorSubject {
+    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"))
+}
 
 fn authorization_schema(extra_columns: usize) -> JazzSchema {
     let mut table = TableSchemaBuilder::new("items")
@@ -59,7 +64,7 @@ fn open_db(seed: u64, extra_columns: usize) -> DirectDb {
             MemoryStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([seed as u8; 16]),
-                author: AUTHOR,
+                author: author(),
             },
         )
         .with_id_source(SeededRowIdSource::new(seed)),
@@ -69,12 +74,12 @@ fn open_db(seed: u64, extra_columns: usize) -> DirectDb {
 
 fn item_cells(index: usize, extra_columns: usize) -> BTreeMap<String, Value> {
     let owner = if index.is_multiple_of(2) {
-        AUTHOR
+        author()
     } else {
-        OTHER_AUTHOR
+        other_author()
     };
     let mut cells = BTreeMap::from([
-        ("owner_id".to_owned(), Value::Uuid(owner.0)),
+        ("owner_id".to_owned(), Value::Uuid(owner.test_uuid())),
         ("name".to_owned(), Value::String(format!("Item {index}"))),
         ("score".to_owned(), Value::U64(index as u64)),
     ]);
@@ -94,7 +99,11 @@ fn setup(row_count: usize, extra_columns: usize, seed: u64) -> DirectDb {
 
     for index in 0..row_count {
         let write = db
-            .insert("items", item_cells(index, extra_columns))
+            .insert(
+                "items",
+                item_cells(index, extra_columns),
+                Default::default(),
+            )
             .expect("insert benchmark item");
         block_on(write.wait(DurabilityTier::Local)).expect("seed row should be local");
     }

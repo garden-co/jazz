@@ -1,8 +1,10 @@
 import type { DurabilityTier } from "../client.js";
-import { resolveClientSessionSync } from "../client-session.js";
+import { resolveClientInternalSessionSync } from "../client-session.js";
 import type { Session } from "../context.js";
+import { getTrustedReservedSession, setTrustedReservedSession } from "../db-internal-session.js";
 import type { BrowserWorkerConnection } from "../runtime-source.js";
 import { reloadAfterStorageInvalidation } from "../browser-storage-invalidation.js";
+import { runCleanupSteps } from "../run-cleanup-steps.js";
 import {
   ConnectionManager,
   type ConnectionManagerClientInput,
@@ -21,6 +23,7 @@ export class BrowserConnectionManager extends ConnectionManager {
   private connectionError: Error | null = null;
   private disconnected = false;
   private readonly reconnectWaiters = new Set<() => void>();
+  private transportTransition: Promise<void> = Promise.resolve();
   private storageReset: Promise<void> | null = null;
   private unregisterInspectorControl: (() => void) | null = null;
 
@@ -31,8 +34,10 @@ export class BrowserConnectionManager extends ConnectionManager {
   async start(): Promise<void> {}
 
   protected override onClientCreated({ schema, client }: ConnectionManagerClientInput): void {
+    const workerConfig = { ...this.host.config };
+    setTrustedReservedSession(workerConfig, getTrustedReservedSession(this.host.config));
     const connection = this.host.runtimeSource.createBrowserWorkerConnection({
-      config: { ...this.host.config },
+      config: workerConfig,
       schema,
       client,
       onAuthFailure: (reason) => this.host.markUnauthenticated(reason),
@@ -54,18 +59,31 @@ export class BrowserConnectionManager extends ConnectionManager {
       throw error;
     });
     void this.connectionReady.catch(() => undefined);
+    if (this.disconnected) {
+      const ready = this.connectionReady;
+      void this.enqueueTransportTransition(async () => {
+        await ready;
+        await connection.disconnect();
+      }).catch(() => undefined);
+    }
   }
 
-  async ensureReady(tier?: DurabilityTier): Promise<void> {
+  async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
     if (this.host.isShuttingDown) return;
     await this.storageReset;
     if (this.connectionError) throw this.connectionError;
     await this.connectionReady;
     if (this.host.isShuttingDown) return;
     if (this.connectionError) throw this.connectionError;
-    if (this.disconnected && tier !== "local") {
-      await new Promise<void>((resolve) => this.reconnectWaiters.add(resolve));
-      if (this.host.isShuttingDown) return;
+    if (tier !== "local") {
+      for (;;) {
+        while (this.disconnected) {
+          await this.waitForReconnect(signal);
+          if (this.host.isShuttingDown || signal?.aborted) return;
+        }
+        await this.transportTransition;
+        if (!this.disconnected || this.host.isShuttingDown || signal?.aborted) break;
+      }
     }
     if (this.host.config.serverUrl && tier !== "local") {
       await this.connection?.waitForServerConnection();
@@ -75,30 +93,59 @@ export class BrowserConnectionManager extends ConnectionManager {
   shouldDeferSubscriptionStart(tier?: DurabilityTier): boolean {
     return tier === "edge" || tier === "global";
   }
+  isExplicitlyOffline(): boolean {
+    return this.disconnected;
+  }
+  async waitForReconnect(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return;
+    if (!this.disconnected) {
+      await this.transportTransition;
+      if (!this.disconnected) return;
+    }
+    await new Promise<void>((resolve) => {
+      const finish = () => {
+        this.reconnectWaiters.delete(finish);
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      };
+      const onAbort = () => finish();
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.reconnectWaiters.add(finish);
+    });
+  }
 
   async disconnect(): Promise<void> {
     if (!this.host.config.serverUrl) {
       throw new Error("Db.disconnect() requires a configured serverUrl.");
     }
-    await this.connectionReady;
-    await this.connection?.disconnect();
-    this.disconnected = true;
+    await this.enqueueTransportTransition(async () => {
+      await this.connectionReady;
+      await this.connection?.disconnect();
+      // Keep RemoteIfPossible strict until the worker confirms disconnect.
+      this.disconnected = true;
+    });
   }
 
   async reconnect(): Promise<void> {
     if (!this.host.config.serverUrl) {
       throw new Error("Db.reconnect() requires a configured serverUrl.");
     }
-    await this.connectionReady;
-    await this.connection?.reconnect(
-      JSON.stringify(runtimeAuth(this.host.config)),
-      runtimeSessionClaims(this.host.config),
-    );
-    this.disconnected = false;
-    this.resolveReconnectWaiters();
+    await this.enqueueTransportTransition(async () => {
+      await this.connectionReady;
+      await this.connection?.reconnect(
+        JSON.stringify(runtimeAuth(this.host.config)),
+        runtimeSessionClaims(this.host.config),
+      );
+      this.disconnected = false;
+    });
+    if (!this.disconnected) this.resolveReconnectWaiters();
   }
 
-  override updateAuth(auth: { jwtToken?: string; cookieSession?: Session }): void {
+  override updateAuth(auth: {
+    jwtToken?: string;
+    cookieSession?: Session;
+    trustedReservedSession?: Session;
+  }): void {
     super.updateAuth(auth);
     void this.connection?.updateAuth(
       JSON.stringify(runtimeAuth(this.host.config)),
@@ -144,22 +191,34 @@ export class BrowserConnectionManager extends ConnectionManager {
     this.connection = null;
     this.connectionReady = null;
     this.resolveReconnectWaiters();
-    this.unregisterInspectorControl?.();
+    const unregisterInspectorControl = this.unregisterInspectorControl;
     this.unregisterInspectorControl = null;
-    await connection?.flushLocal();
-    // The tab runtime is explicitly non-durable; once its worker peer has
-    // flushed, graceful evaluator teardown cannot add durability and may wait
-    // on suspended recursive/include work. Abandon that view and let the
-    // durable worker own orderly persistence shutdown.
-    this.detachClient()?.discard();
-    await super.shutdown();
-    await connection?.shutdown();
+
+    await runCleanupSteps([
+      () => unregisterInspectorControl?.(),
+      () => connection?.flushLocal(),
+      () => {
+        // The tab runtime is explicitly non-durable; once its worker peer has
+        // flushed, graceful evaluator teardown cannot add durability and may wait
+        // on suspended recursive/include work. Abandon that view and let the
+        // durable worker own orderly persistence shutdown.
+        this.detachClient()?.discard();
+      },
+      () => super.shutdown(),
+      () => connection?.shutdown(),
+    ]);
   }
 
   private resolveReconnectWaiters(): void {
     const waiters = [...this.reconnectWaiters];
     this.reconnectWaiters.clear();
     for (const resolve of waiters) resolve();
+  }
+
+  private enqueueTransportTransition(run: () => void | Promise<void>): Promise<void> {
+    const transition = this.transportTransition.then(run, run);
+    this.transportTransition = transition.catch(() => undefined);
+    return transition;
   }
 }
 
@@ -173,7 +232,12 @@ function runtimeAuth(config: DbForConnection["config"]): Record<string, unknown>
 }
 
 function runtimeSessionClaims(config: DbForConnection["config"]): Record<string, unknown> {
-  return resolveClientSessionSync(config)?.claims ?? {};
+  return (
+    resolveClientInternalSessionSync({
+      ...config,
+      trustedReservedSession: getTrustedReservedSession(config),
+    })?.claims ?? {}
+  );
 }
 
 function asError(error: unknown): Error {

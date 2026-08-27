@@ -7,7 +7,9 @@ use std::rc::Rc;
 use std::sync::Mutex;
 use std::task::{Context, Poll};
 
-use super::evaluation_session::{EvaluationInputs, StorageRequestKey, StorageRequests};
+use super::evaluation_session::{
+    EvaluationInputs, EvaluationRequestFailure, EvaluationRequestKey, EvaluationRequests,
+};
 use super::*;
 use crate::storage::OwnedStorage;
 
@@ -20,6 +22,7 @@ struct EvaluationSession<'a> {
     relevant_nodes: HashSet<NodeId>,
     roots: HashSet<NodeId>,
     outputs: HashMap<NodeId, RecordDeltas>,
+    pending_outputs: HashMap<NodeId, RecordDeltas>,
     operator_states: HashMap<OperatorStateKey, OperatorState>,
     arrangement_states: HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
     arrangement_keys_by_input: HashMap<NodeId, HashSet<ArrangementKey>>,
@@ -29,7 +32,7 @@ struct EvaluationSession<'a> {
     node_meta: HashMap<NodeId, NodeRuntimeMeta>,
     binding_frontiers: HashMap<String, u64>,
     storage: OwnedStorage<'a>,
-    storage_requests: StorageRequests<'a>,
+    requests: EvaluationRequests<'a>,
     evaluation_inputs: EvaluationInputs,
     work_queue: EvaluationWorkQueue,
 }
@@ -43,16 +46,35 @@ pub(super) struct IncrementalEvaluation<'a> {
     current_tick: u64,
     metrics: TickMetrics,
     storage: OwnedStorage<'a>,
-    storage_requests: StorageRequests<'a>,
+    requests: EvaluationRequests<'a>,
     evaluation_inputs: Option<EvaluationInputs>,
     work_queue: EvaluationWorkQueue,
     published_subscriptions: HashSet<SubscriptionId>,
     affected_nodes: HashSet<NodeId>,
     affected_subscriptions: HashSet<SubscriptionId>,
+    /// Relational output retained while logical terminal materialization waits
+    /// for immutable chunks. Re-evaluating after operator state advances can
+    /// correctly yield an empty delta, so publication owns this exact value.
+    pending_subscription_outputs: HashMap<NodeId, Arc<RecordDeltas>>,
     terminal_deltas: HashMap<NodeId, TerminalDeltas>,
     root_ordering_windows: HashMap<NodeId, RootOrderingWindows>,
     notification_publication: Option<PublicationId>,
     defer_notifications_until_durable: bool,
+    pending_resident_publication: Option<PendingResidentPublication>,
+}
+
+#[derive(Clone)]
+struct PendingResidentPublication {
+    publication: Rc<Cell<Option<PublicationId>>>,
+    notifications: Rc<RefCell<Vec<(SubscriptionId, QueuedMultisinkDeltas)>>>,
+    completed: Rc<Cell<bool>>,
+    defer_notifications_until_durable: bool,
+    chunk_provider: Option<crate::chunks::OwnedChunkProvider>,
+}
+
+pub(crate) struct ResidentTick {
+    pub(crate) metrics: TickMetrics,
+    publication: PendingResidentPublication,
 }
 
 struct EvaluationFailure {
@@ -140,7 +162,7 @@ impl std::fmt::Debug for PendingIncrementalEvaluation {
     }
 }
 
-/// Discovers storage leaves for all reachable siblings without recursively
+/// Discovers request-producing leaves for all reachable siblings without recursively
 /// evaluating through the first blocked branch. Hash-consed nodes enter the
 /// queue once, so discovery is linear in the reachable graph slice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,7 +177,7 @@ struct EvaluationWorkQueue {
     visited: HashSet<NodeId>,
     entries: HashMap<NodeId, EvaluationEntry>,
     dependents: HashMap<NodeId, Vec<NodeId>>,
-    storage_dependents: std::collections::BTreeMap<StorageRequestKey, Vec<NodeId>>,
+    request_dependents: std::collections::BTreeMap<EvaluationRequestKey, Vec<NodeId>>,
     runnable: VecDeque<NodeId>,
     roots: HashSet<NodeId>,
     completed_events: Vec<NodeId>,
@@ -170,7 +192,7 @@ impl EvaluationWorkQueue {
             visited: HashSet::default(),
             entries: HashMap::default(),
             dependents: HashMap::default(),
-            storage_dependents: std::collections::BTreeMap::new(),
+            request_dependents: std::collections::BTreeMap::new(),
             runnable: VecDeque::new(),
             roots: roots.into_iter().collect(),
             completed_events: Vec::new(),
@@ -196,15 +218,15 @@ impl EvaluationWorkQueue {
         mut self,
         graph: &IvmGraph,
         hydrate_sources: bool,
-        storage_dependents: std::collections::BTreeMap<StorageRequestKey, Vec<NodeId>>,
+        request_dependents: std::collections::BTreeMap<EvaluationRequestKey, Vec<NodeId>>,
     ) -> Result<(HashSet<NodeId>, Self), IvmRuntimeError> {
-        let mut storage_dependencies_by_node = HashMap::<NodeId, usize>::default();
-        for nodes in storage_dependents.values() {
+        let mut request_dependencies_by_node = HashMap::<NodeId, usize>::default();
+        for nodes in request_dependents.values() {
             for node in nodes {
-                *storage_dependencies_by_node.entry(*node).or_default() += 1;
+                *request_dependencies_by_node.entry(*node).or_default() += 1;
             }
         }
-        self.storage_dependents = storage_dependents;
+        self.request_dependents = request_dependents;
         while let Some(node_id) = self.pending.pop_front() {
             if !self.visited.insert(node_id) {
                 continue;
@@ -222,11 +244,12 @@ impl EvaluationWorkQueue {
                     OpType::IndexSource(source) => NodeState::index_source_request(source)?,
                     _ => None,
                 }
+                .map(EvaluationRequestKey::Storage)
             } else {
                 None
             };
             if let Some(request) = request {
-                self.storage_dependents
+                self.request_dependents
                     .entry(request)
                     .or_default()
                     .push(node_id);
@@ -236,7 +259,7 @@ impl EvaluationWorkQueue {
                     node_id,
                     EvaluationEntry::Waiting(
                         node.descriptor.inputs.len()
-                            + storage_dependencies_by_node
+                            + request_dependencies_by_node
                                 .get(&node_id)
                                 .copied()
                                 .unwrap_or_default(),
@@ -256,14 +279,14 @@ impl EvaluationWorkQueue {
         Ok((relevant_nodes, self))
     }
 
-    fn requests(&self) -> impl Iterator<Item = &StorageRequestKey> {
-        self.storage_dependents.keys()
+    fn requests(&self) -> impl Iterator<Item = &EvaluationRequestKey> {
+        self.request_dependents.keys()
     }
 
-    fn storage_ready(&mut self, requests: impl IntoIterator<Item = StorageRequestKey>) {
+    fn requests_ready(&mut self, requests: impl IntoIterator<Item = EvaluationRequestKey>) {
         let ready_nodes = requests
             .into_iter()
-            .flat_map(|request| self.storage_dependents.remove(&request).unwrap_or_default())
+            .flat_map(|request| self.request_dependents.remove(&request).unwrap_or_default())
             .collect::<Vec<_>>();
         for node in ready_nodes {
             let Some(EvaluationEntry::Waiting(remaining)) = self.entries.get_mut(&node) else {
@@ -278,7 +301,7 @@ impl EvaluationWorkQueue {
 
     fn storage_already_resident(&mut self, resident_nodes: &HashSet<NodeId>) {
         let mut ready_nodes = Vec::new();
-        self.storage_dependents.retain(|_, dependents| {
+        self.request_dependents.retain(|_, dependents| {
             dependents.retain(|node| {
                 if resident_nodes.contains(node) {
                     ready_nodes.push(*node);
@@ -300,16 +323,16 @@ impl EvaluationWorkQueue {
         }
     }
 
-    fn wait_for_storage(
+    fn wait_for_requests(
         &mut self,
         node: NodeId,
-        requests: impl IntoIterator<Item = StorageRequestKey>,
+        requests: impl IntoIterator<Item = EvaluationRequestKey>,
     ) {
         let requests = requests.into_iter().collect::<Vec<_>>();
         self.entries
             .insert(node, EvaluationEntry::Waiting(requests.len()));
         for request in requests {
-            let dependents = self.storage_dependents.entry(request).or_default();
+            let dependents = self.request_dependents.entry(request).or_default();
             if !dependents.contains(&node) {
                 dependents.push(node);
             }
@@ -340,6 +363,14 @@ impl EvaluationWorkQueue {
                 self.make_runnable(dependent);
             }
         }
+    }
+
+    /// Retain a runnable node at the front of the queue after its private step
+    /// deliberately yields. The step future itself is disposable; resumable
+    /// operators keep their bounded continuation in operator state.
+    fn requeue_yielded(&mut self, node: NodeId) {
+        self.entries.insert(node, EvaluationEntry::Runnable);
+        self.runnable.push_front(node);
     }
 
     fn is_root(&self, node: NodeId) -> bool {
@@ -374,19 +405,24 @@ impl EvaluationWorkQueue {
 
     fn failure_for_request(
         &self,
-        request: &StorageRequestKey,
-        error: IvmRuntimeError,
+        request: &EvaluationRequestKey,
+        failure: EvaluationRequestFailure,
     ) -> EvaluationFailure {
+        let kind = if failure.publication_metadata_durability {
+            EvaluationFailureKind::Fatal
+        } else {
+            EvaluationFailureKind::Scoped
+        };
         EvaluationFailure {
-            kind: EvaluationFailureKind::Scoped,
+            kind,
             affected_nodes: self.downstream_closure(
-                self.storage_dependents
+                self.request_dependents
                     .get(request)
                     .into_iter()
                     .flatten()
                     .copied(),
             ),
-            error: Arc::new(error),
+            error: Arc::new(failure.error),
         }
     }
 
@@ -400,7 +436,7 @@ impl EvaluationWorkQueue {
 
     fn abandon(&mut self, nodes: &HashSet<NodeId>) {
         self.runnable.retain(|node| !nodes.contains(node));
-        self.storage_dependents
+        self.request_dependents
             .retain(|_, dependents| !dependents.iter().all(|node| nodes.contains(node)));
         for node in nodes {
             if self.entries.contains_key(node) {
@@ -470,15 +506,15 @@ impl IncrementalEvaluation<'_> {
         runtime: &mut IvmRuntime,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), EvaluationFailure>> {
-        self.storage_requests.poll(cx);
-        let ready = match self.storage_requests.drain_ready() {
+        self.requests.poll(cx);
+        let ready = match self.requests.drain_ready() {
             Ok(ready) => ready,
             Err(error) => {
                 let (request, error) = *error;
                 return Poll::Ready(Err(self.work_queue.failure_for_request(&request, error)));
             }
         };
-        self.work_queue.storage_ready(ready.keys().cloned());
+        self.work_queue.requests_ready(ready.keys().cloned());
         if let Some(inputs) = &mut self.evaluation_inputs {
             inputs.install(ready);
         }
@@ -509,7 +545,7 @@ impl IncrementalEvaluation<'_> {
             root_ordering_windows: std::mem::take(&mut self.root_ordering_windows),
         };
 
-        let mut registered_storage = false;
+        let mut registered_requests = false;
         while let Some(node) = self.work_queue.runnable.pop_front() {
             let result = {
                 let mut future = evaluator.update_node(node);
@@ -529,28 +565,67 @@ impl IncrementalEvaluation<'_> {
                             .failure_for_node(node, IvmRuntimeError::EvaluationBlocked)));
                     }
                     for request in requests.iter().cloned() {
-                        registered_storage |=
-                            self.storage_requests
-                                .request(request, &self.storage, &runtime.schema);
+                        registered_requests |= self.requests.request(
+                            request,
+                            &self.storage,
+                            Some(
+                                self.pending_resident_publication
+                                    .as_ref()
+                                    .and_then(|pending| pending.chunk_provider.as_ref())
+                                    .unwrap_or(&runtime.chunk_provider),
+                            ),
+                            &runtime.schema,
+                        );
                     }
-                    self.work_queue.wait_for_storage(node, requests);
+                    self.work_queue.wait_for_requests(node, requests);
                 }
                 Poll::Ready(Err(error)) => {
                     return Poll::Ready(Err(self.work_queue.failure_for_node(node, error)));
                 }
                 Poll::Pending => {
-                    return Poll::Ready(Err(self
-                        .work_queue
-                        .failure_for_node(node, IvmRuntimeError::EvaluationBlocked)));
+                    self.work_queue.requeue_yielded(node);
+                    drop(evaluator);
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
                 }
             }
         }
-        if registered_storage && self.storage_requests.poll(cx) > 0 {
-            // Resident storage completed synchronously. Install its results
+        let mut immediately_ready = if registered_requests {
+            self.requests.poll(cx)
+        } else {
+            0
+        };
+        if registered_requests && immediately_ready == 0 {
+            // Test and memory providers may deliberately yield once on a cold
+            // resident lookup. Match terminal materialization by advancing
+            // that retained request future once more before detaching the tick.
+            immediately_ready = self.requests.poll(cx);
+        }
+        if immediately_ready > 0 {
+            // Resident requests completed synchronously. Install their results
             // and resume the queue within this same public poll so resident
             // writes retain their same-tick visibility contract.
             drop(evaluator);
             return self.poll(runtime, cx);
+        }
+
+        let mut terminal_consumers = HashMap::<NodeId, usize>::default();
+        for subscription_id in &self.affected_subscriptions {
+            let Some(subscription) = runtime.multisink_subscriptions.get(subscription_id) else {
+                continue;
+            };
+            if subscription.failed || self.published_subscriptions.contains(subscription_id) {
+                continue;
+            }
+            for output in subscription
+                .outputs
+                .values()
+                .filter(|output| self.affected_nodes.contains(&output.node))
+            {
+                if let Some(node) = evaluator.terminal_delta_node_for_output(output.node)? {
+                    *terminal_consumers.entry(node).or_default() += 1;
+                }
+            }
         }
 
         for subscription_id in &self.affected_subscriptions {
@@ -572,21 +647,81 @@ impl IncrementalEvaluation<'_> {
             {
                 continue;
             }
-            let mut sinks = BTreeMap::new();
-            let mut terminal_sinks = BTreeMap::new();
+            let mut prepared_outputs = Vec::new();
             for (sink, output) in &subscription.outputs {
                 if !self.affected_nodes.contains(&output.node) {
                     continue;
                 }
-                let records = {
-                    let mut future = evaluator.update_node(output.node);
-                    match Pin::new(&mut future).poll(cx) {
-                        Poll::Ready(result) => result?,
-                        Poll::Pending => {
+                let physical_records = if let Some(records) =
+                    self.pending_subscription_outputs.get(&output.node)
+                {
+                    Arc::clone(records)
+                } else {
+                    let records = {
+                        let mut future = evaluator.update_node(output.node);
+                        match Pin::new(&mut future).poll(cx) {
+                            Poll::Ready(result) => result?,
+                            Poll::Pending => {
+                                return Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked.into()));
+                            }
+                        }
+                    };
+                    self.pending_subscription_outputs
+                        .insert(output.node, Arc::clone(&records));
+                    records
+                };
+                let records = match evaluator.materialize_indirect_input(&physical_records) {
+                    Ok(records) => {
+                        self.pending_subscription_outputs
+                            .insert(output.node, Arc::clone(&records));
+                        records
+                    }
+                    Err(IvmRuntimeError::EvaluationBlocked) => {
+                        self.terminal_deltas = std::mem::take(&mut evaluator.terminal_deltas);
+                        self.root_ordering_windows =
+                            std::mem::take(&mut evaluator.root_ordering_windows);
+                        let requests = evaluator
+                            .evaluation_inputs
+                            .as_deref_mut()
+                            .map(EvaluationInputs::take_missing)
+                            .unwrap_or_default();
+                        if requests.is_empty() {
                             return Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked.into()));
                         }
+                        for request in requests {
+                            self.requests.request(
+                                request,
+                                &self.storage,
+                                Some(
+                                    self.pending_resident_publication
+                                        .as_ref()
+                                        .and_then(|pending| pending.chunk_provider.as_ref())
+                                        .unwrap_or(&runtime.chunk_provider),
+                                ),
+                                &runtime.schema,
+                            );
+                        }
+                        drop(evaluator);
+                        let mut ready = self.requests.poll(cx);
+                        if ready == 0 {
+                            // A provider may deliberately yield once on a cold
+                            // resident request. Advance that retained future a
+                            // second time before yielding the whole commit.
+                            ready = self.requests.poll(cx);
+                        }
+                        if ready > 0 {
+                            return self.poll(runtime, cx);
+                        }
+                        return Poll::Pending;
                     }
+                    Err(error) => return Poll::Ready(Err(error.into())),
                 };
+                prepared_outputs.push((sink, output, records));
+            }
+
+            let mut sinks = BTreeMap::new();
+            let mut terminal_sinks = BTreeMap::new();
+            for (sink, output, records) in prepared_outputs {
                 if !records.deltas.is_empty()
                     && !records.descriptor.registry_compatible_with(&output.output)
                 {
@@ -598,10 +733,12 @@ impl IncrementalEvaluation<'_> {
                 let records = records.as_ref().clone();
                 if terminal_owned {
                     let terminal = if structured {
-                        if let Some(terminal) =
-                            evaluator.take_terminal_deltas_for_output(output.node)?
-                        {
-                            Some(terminal)
+                        if let Some(node) = evaluator.terminal_delta_node_for_output(output.node)? {
+                            let remaining = terminal_consumers
+                                .get_mut(&node)
+                                .expect("terminal consumer counted before publication");
+                            *remaining -= 1;
+                            evaluator.terminal_deltas_for_consumer(node, *remaining == 0)
                         } else if !public_root && !records.is_empty() {
                             Some(terminal_deltas_from_record_deltas(&records)?)
                         } else if output.root_ordering_node.is_some() {
@@ -648,10 +785,22 @@ impl IncrementalEvaluation<'_> {
                     multisink_deltas_encoded_bytes(&records);
             }
             let mut queued = QueuedMultisinkDeltas::new(records);
-            queued.publication = self.notification_publication;
+            let notification_publication = self
+                .pending_resident_publication
+                .as_ref()
+                .and_then(|pending| pending.publication.get())
+                .or(self.notification_publication);
+            queued.publication = notification_publication;
             if !queued.deltas.is_empty() {
-                if self.defer_notifications_until_durable
-                    && self.notification_publication.is_some_and(|publication| {
+                if let Some(pending) = &self.pending_resident_publication
+                    && notification_publication.is_none()
+                {
+                    pending
+                        .notifications
+                        .borrow_mut()
+                        .push((*subscription_id, queued));
+                } else if self.defer_notifications_until_durable
+                    && notification_publication.is_some_and(|publication| {
                         !runtime
                             .durable_notification_publications
                             .contains(&publication)
@@ -659,7 +808,7 @@ impl IncrementalEvaluation<'_> {
                 {
                     runtime
                         .deferred_notifications
-                        .entry(self.notification_publication.expect("checked publication"))
+                        .entry(notification_publication.expect("checked publication"))
                         .or_default()
                         .push((*subscription_id, queued));
                 } else if subscription.sender.send(queued).is_err() {
@@ -671,7 +820,7 @@ impl IncrementalEvaluation<'_> {
         self.terminal_deltas = std::mem::take(&mut evaluator.terminal_deltas);
         self.root_ordering_windows = std::mem::take(&mut evaluator.root_ordering_windows);
 
-        if self.storage_requests.has_pending() || !self.work_queue.roots_complete() {
+        if self.requests.has_pending() || !self.work_queue.roots_complete() {
             return Poll::Pending;
         }
 
@@ -686,8 +835,16 @@ impl IncrementalEvaluation<'_> {
             runtime.affected_recursive_nodes_are_current(&self.affected_nodes, self.current_tick)
         );
         runtime.evict_eval_memo();
-        if self.defer_notifications_until_durable
-            && let Some(publication) = self.notification_publication
+        if let Some(pending) = &self.pending_resident_publication
+            && pending.publication.get().is_none()
+        {
+            pending.completed.set(true);
+        } else if self.defer_notifications_until_durable
+            && let Some(publication) = self
+                .pending_resident_publication
+                .as_ref()
+                .and_then(|pending| pending.publication.get())
+                .or(self.notification_publication)
             && !runtime
                 .durable_notification_publications
                 .remove(&publication)
@@ -806,14 +963,20 @@ impl<'a> EvaluationSession<'a> {
             })
             .collect::<HashSet<_>>();
         work_queue.storage_already_resident(&resident_source_nodes);
-        let mut storage_requests = StorageRequests::new();
+        let mut requests = EvaluationRequests::new();
         for request in work_queue.requests().cloned().collect::<Vec<_>>() {
-            storage_requests.request(request, &storage, &runtime.schema);
+            requests.request(
+                request,
+                &storage,
+                Some(&runtime.chunk_provider),
+                &runtime.schema,
+            );
         }
         Ok(Self {
             relevant_nodes,
             roots: roots.into_iter().collect(),
             outputs: HashMap::default(),
+            pending_outputs: HashMap::default(),
             operator_states,
             arrangement_states,
             arrangement_keys_by_input,
@@ -823,7 +986,7 @@ impl<'a> EvaluationSession<'a> {
             node_meta,
             binding_frontiers: runtime.binding_frontiers.clone(),
             storage,
-            storage_requests,
+            requests,
             evaluation_inputs: EvaluationInputs::default(),
             work_queue,
         })
@@ -850,12 +1013,12 @@ impl<'a> EvaluationSession<'a> {
         metrics: &mut TickMetrics,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), IvmRuntimeError>> {
-        self.storage_requests.poll(cx);
-        let ready = match self.storage_requests.drain_ready() {
+        self.requests.poll(cx);
+        let ready = match self.requests.drain_ready() {
             Ok(ready) => ready,
-            Err(error) => return Poll::Ready(Err(error.1)),
+            Err(error) => return Poll::Ready(Err(error.1.error)),
         };
-        self.work_queue.storage_ready(ready.keys().cloned());
+        self.work_queue.requests_ready(ready.keys().cloned());
         self.evaluation_inputs.install(ready);
 
         while let Some(node) = self.work_queue.runnable.pop_front() {
@@ -864,7 +1027,9 @@ impl<'a> EvaluationSession<'a> {
             } else {
                 EvalContext::root_snapshot()
             };
-            let result = {
+            let result = if let Some(records) = self.pending_outputs.remove(&node) {
+                Ok(records)
+            } else {
                 let mut evaluator = TickEvaluator {
                     schema: &runtime.schema,
                     graph: &runtime.graph,
@@ -892,15 +1057,90 @@ impl<'a> EvaluationSession<'a> {
                 let mut evaluation = evaluator.update_node(node);
                 match Pin::new(&mut evaluation).poll(cx) {
                     Poll::Ready(result) => result.map(|records| records.as_ref().clone()),
-                    Poll::Pending => return Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked)),
+                    Poll::Pending => {
+                        self.work_queue.requeue_yielded(node);
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
                 }
             };
             match result {
-                Ok(records) => {
+                Ok(mut records) => {
                     if self.work_queue.is_root(node) {
+                        let mut materialized = Vec::with_capacity(records.deltas.len());
+                        let mut blocked = false;
+                        for delta in &records.deltas {
+                            match crate::large_values::materialize_record_attempt(
+                                &records.descriptor,
+                                delta.raw(),
+                                &mut self.evaluation_inputs,
+                            ) {
+                                Ok(record) => materialized.push(RecordDelta {
+                                    record: record.into(),
+                                    weight: delta.weight,
+                                }),
+                                Err(IvmRuntimeError::EvaluationBlocked) => blocked = true,
+                                Err(error) => return Poll::Ready(Err(error)),
+                            }
+                        }
+                        if blocked {
+                            let requests = self.evaluation_inputs.take_missing();
+                            if requests.is_empty() {
+                                return Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked));
+                            }
+                            for request in requests.iter().cloned() {
+                                self.requests.request(
+                                    request,
+                                    &self.storage,
+                                    Some(&runtime.chunk_provider),
+                                    &runtime.schema,
+                                );
+                            }
+                            self.pending_outputs.insert(node, records);
+                            self.work_queue.wait_for_requests(node, requests);
+                            // Every newly retained future must be polled once
+                            // before returning Pending so it can install the
+                            // caller's waker.
+                            if self.requests.poll(cx) > 0 {
+                                return self.poll(
+                                    runtime,
+                                    binding_snapshots,
+                                    hydrate_arrangements,
+                                    metrics,
+                                    cx,
+                                );
+                            }
+                            continue;
+                        }
+                        records.deltas = materialized;
                         self.outputs.insert(node, records);
                     }
                     self.work_queue.complete(node);
+                }
+                Err(IvmRuntimeError::EvaluationBlocked) => {
+                    let requests = self.evaluation_inputs.take_missing();
+                    if requests.is_empty() {
+                        return Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked));
+                    }
+                    let mut registered = false;
+                    for request in requests.iter().cloned() {
+                        registered |= self.requests.request(
+                            request,
+                            &self.storage,
+                            Some(&runtime.chunk_provider),
+                            &runtime.schema,
+                        );
+                    }
+                    self.work_queue.wait_for_requests(node, requests);
+                    if registered && self.requests.poll(cx) > 0 {
+                        return self.poll(
+                            runtime,
+                            binding_snapshots,
+                            hydrate_arrangements,
+                            metrics,
+                            cx,
+                        );
+                    }
                 }
                 Err(error) => return Poll::Ready(Err(error)),
             }
@@ -908,7 +1148,7 @@ impl<'a> EvaluationSession<'a> {
 
         if self.outputs.len() == self.roots.len() {
             Poll::Ready(Ok(()))
-        } else if self.storage_requests.has_pending() {
+        } else if self.requests.has_pending() {
             Poll::Pending
         } else {
             Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked))
@@ -1050,6 +1290,18 @@ impl IvmRuntime {
         }
     }
 
+    fn fail_all_subscriptions(&mut self, error: Arc<IvmRuntimeError>) {
+        for subscription in self.multisink_subscriptions.values_mut() {
+            if subscription.failed {
+                continue;
+            }
+            subscription.failed = true;
+            subscription
+                .sender
+                .fail(SubscriptionError::new(Arc::clone(&error)));
+        }
+    }
+
     pub async fn tick<S>(
         &mut self,
         table_deltas: Vec<TableDelta>,
@@ -1095,9 +1347,22 @@ impl IvmRuntime {
         &mut self,
         table_deltas: Vec<TableDelta>,
         storage: OwnedStorage<'static>,
-        publication: PublicationId,
         defer_notifications_until_durable: bool,
-    ) -> Result<TickMetrics, IvmRuntimeError> {
+        publication_install: Option<(
+            Rc<dyn crate::chunks::ChunkInstallObserver>,
+            crate::chunks::PublicationInstallFailures,
+        )>,
+    ) -> Result<ResidentTick, IvmRuntimeError> {
+        let publication = PendingResidentPublication {
+            publication: Rc::new(Cell::new(None)),
+            notifications: Rc::new(RefCell::new(Vec::new())),
+            completed: Rc::new(Cell::new(false)),
+            defer_notifications_until_durable,
+            chunk_provider: publication_install.map(|(observer, failures)| {
+                self.chunk_provider
+                    .with_install_observer(observer, failures)
+            }),
+        };
         let temporal_blockers = {
             let pending = self.pending_incremental.0.borrow();
             pending
@@ -1111,8 +1376,9 @@ impl IvmRuntime {
                 table_deltas,
                 Vec::new(),
                 storage,
-                Some(publication),
+                None,
                 defer_notifications_until_durable,
+                Some(publication.clone()),
             )
             .await?;
         evaluation
@@ -1128,6 +1394,14 @@ impl IvmRuntime {
                         self.fail_evaluation_nodes(failure);
                         evaluation.abandon(&failure.affected_nodes);
                     }
+                    Poll::Pending if !evaluation.work_queue.runnable.is_empty() => {
+                        // A resumable operator deliberately yielded while it
+                        // remains runnable. Keep this applying future alive so
+                        // its wake drives the next bounded turn. By contrast,
+                        // an empty runnable queue is waiting on external
+                        // requests and follows the existing detached path.
+                        return Poll::Pending;
+                    }
                     _ => return Poll::Ready(progress),
                 }
             }
@@ -1135,8 +1409,8 @@ impl IvmRuntime {
         .await;
         let metrics = evaluation.metrics.clone();
         match progress {
-            Poll::Ready(Ok(())) => Ok(metrics),
-            Poll::Ready(Err(failure)) => Err(failure.into_error()),
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(failure)) => return Err(failure.into_error()),
             Poll::Pending => {
                 evaluation.work_queue.drain_completed_events();
                 let mut pending = self.pending_incremental.0.borrow_mut();
@@ -1153,9 +1427,39 @@ impl IvmRuntime {
                     .evaluations
                     .insert(evaluation_id, PendingEvaluation::Incremental(evaluation));
                 pending.order.push_back(evaluation_id);
-                Ok(metrics)
             }
+        };
+        Ok(ResidentTick {
+            metrics,
+            publication,
+        })
+    }
+
+    pub(crate) fn assign_resident_publication(
+        &mut self,
+        tick: ResidentTick,
+        publication: PublicationId,
+    ) -> TickMetrics {
+        assert_eq!(
+            tick.publication.publication.replace(Some(publication)),
+            None
+        );
+        let mut notifications = std::mem::take(&mut *tick.publication.notifications.borrow_mut());
+        for (_, queued) in &mut notifications {
+            queued.publication = Some(publication);
         }
+        if tick.publication.defer_notifications_until_durable {
+            self.deferred_notifications
+                .entry(publication)
+                .or_default()
+                .extend(notifications);
+            if tick.publication.completed.get() {
+                self.completed_deferred_publications.insert(publication);
+            }
+        } else {
+            self.send_deferred_notifications(notifications);
+        }
+        tick.metrics
     }
 
     pub(crate) fn settle_deferred_notifications(&mut self, publication: PublicationId) {
@@ -1289,6 +1593,12 @@ impl IvmRuntime {
                         self.unsubscribe(hydration.subscription_id);
                     }
                     if failure.kind == EvaluationFailureKind::Fatal {
+                        let IvmRuntimeError::Chunk(error) = failure.error.as_ref() else {
+                            unreachable!("trusted install failures originate from chunk requests")
+                        };
+                        self.fail_all_subscriptions(Arc::new(IvmRuntimeError::Chunk(
+                            error.clone(),
+                        )));
                         state.order = retained_order;
                         *slot.borrow_mut() = state;
                         return Poll::Ready(Err(failure.into_error()));
@@ -1425,6 +1735,7 @@ impl IvmRuntime {
             storage,
             notification_publication,
             false,
+            None,
         )
         .await
     }
@@ -1436,6 +1747,7 @@ impl IvmRuntime {
         storage: OwnedStorage<'a>,
         notification_publication: Option<PublicationId>,
         defer_notifications_until_durable: bool,
+        pending_resident_publication: Option<PendingResidentPublication>,
     ) -> Result<IncrementalEvaluation<'a>, IvmRuntimeError> {
         let pending_binding_retractions = self.pending_binding_retractions.len();
         if pending_binding_retractions != 0 {
@@ -1517,7 +1829,7 @@ impl IvmRuntime {
         active_roots.extend(retained_roots.iter().copied());
         active_roots.sort_unstable();
         active_roots.dedup();
-        let storage_requests = StorageRequests::new();
+        let requests = EvaluationRequests::new();
         let evaluation_inputs = Some(EvaluationInputs::default());
         let (_, work_queue) =
             EvaluationWorkQueue::new(active_roots).discover_incremental(&self.graph)?;
@@ -1530,16 +1842,18 @@ impl IvmRuntime {
             current_tick,
             metrics,
             storage,
-            storage_requests,
+            requests,
             evaluation_inputs,
             work_queue,
             published_subscriptions: HashSet::default(),
             affected_nodes,
             affected_subscriptions,
+            pending_subscription_outputs: HashMap::default(),
             terminal_deltas: HashMap::default(),
             root_ordering_windows: HashMap::default(),
             notification_publication,
             defer_notifications_until_durable,
+            pending_resident_publication,
         })
     }
 

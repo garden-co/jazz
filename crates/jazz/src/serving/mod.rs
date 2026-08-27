@@ -19,11 +19,12 @@ use std::time::SystemTime;
 
 use crate::db::{
     CommitUnitTrust, ConnectionSessionContext, Db, DbConfig, DbIdentity, Error as DbError,
-    PeerConnection, ResumeCursor, RowCells, SeededRowIdSource, Transport, WireTransportAdapter,
+    PeerConnection, ResumeCursor, RowCells, SeededRowIdSource, TickScheduler, Transport,
+    WireTransportAdapter,
 };
 use crate::groove::records::Value;
 use crate::groove::storage::{BoxedStorage, MemoryStorage, StorageFactory};
-use crate::ids::{AuthorId, MigrationLensId, RowUuid, SchemaVersionId};
+use crate::ids::{AuthorSubject, MigrationLensId, RowUuid, SchemaVersionId};
 use crate::node::EdgeCacheBudget;
 use crate::protocol::{
     CatalogueAck, CurrentWriteSchema, MigrationLens, SchemaLineagePublication, SchemaVersion,
@@ -51,7 +52,7 @@ pub type AbiBytes = Vec<u8>;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ServerSession {
     transport: usize,
-    identity: AuthorId,
+    identity: AuthorSubject,
 }
 
 impl ServerSession {
@@ -59,7 +60,7 @@ impl ServerSession {
         self.transport
     }
 
-    fn identity(self) -> AuthorId {
+    fn identity(self) -> AuthorSubject {
         self.identity
     }
 }
@@ -71,7 +72,7 @@ impl ServerSession {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ServerSessionResume {
     /// Subscriber author identity to serve the resumed connection under.
-    pub identity: AuthorId,
+    pub identity: AuthorSubject,
     /// One-shot in-process resume token returned by disconnect-for-resume.
     pub resume_token: u64,
 }
@@ -87,6 +88,8 @@ pub struct InMemoryServerShellConfig {
     pub row_id_seed: Option<u64>,
     /// Optional edge-cache byte budget. `None` disables automatic eviction.
     pub edge_cache_budget: Option<EdgeCacheBudget>,
+    /// Jazz-owned policy for unpublished large-value uploads and roots.
+    pub large_value_staging_policy: crate::node::LargeValueStagingPolicy,
     /// Server role used for client-link semantics.
     pub role: NodeRole,
     /// Whether startup should publish the constructor schema into the runtime
@@ -105,6 +108,7 @@ impl InMemoryServerShellConfig {
             identity,
             row_id_seed: None,
             edge_cache_budget: None,
+            large_value_staging_policy: crate::node::LargeValueStagingPolicy::default(),
             role: NodeRole::Core,
             bootstrap_runtime_schema: false,
             storage_factory: None,
@@ -120,6 +124,15 @@ impl InMemoryServerShellConfig {
     /// Configure automatic edge-cache eviction by byte budget.
     pub fn with_edge_cache_budget(mut self, budget: EdgeCacheBudget) -> Self {
         self.edge_cache_budget = Some(budget);
+        self
+    }
+
+    /// Configure incoming upload rate limits and staged-tree expiry.
+    pub fn with_large_value_staging_policy(
+        mut self,
+        policy: crate::node::LargeValueStagingPolicy,
+    ) -> Self {
+        self.large_value_staging_policy = policy;
         self
     }
 
@@ -152,6 +165,10 @@ impl fmt::Debug for InMemoryServerShellConfig {
             .field("identity", &self.identity)
             .field("row_id_seed", &self.row_id_seed)
             .field("edge_cache_budget", &self.edge_cache_budget)
+            .field(
+                "large_value_staging_policy",
+                &self.large_value_staging_policy,
+            )
             .field("role", &self.role)
             .field("bootstrap_runtime_schema", &self.bootstrap_runtime_schema)
             .field(
@@ -168,7 +185,8 @@ pub struct InMemoryServerShell {
     db: ShellDb,
     role: NodeRole,
     sessions: Vec<Option<ServerSessionState>>,
-    resume_cursors: BTreeMap<u64, (AuthorId, ResumeCursor)>,
+    upstream_connections: Vec<ShellPeerConnection>,
+    resume_cursors: BTreeMap<u64, (AuthorSubject, ResumeCursor)>,
     next_resume_token: u64,
     runtime_schema_state: RuntimeSchemaState,
     metrics: InMemoryServerShellMetrics,
@@ -240,7 +258,9 @@ enum ShellDb {
 struct ServerSessionState {
     connection: ShellPeerConnection,
     transport: SharedWireTransport,
-    identity: AuthorId,
+    auxiliary_pump: crate::db::PeerIoPump,
+    negotiated_features: crate::wire::WireFeatures,
+    identity: AuthorSubject,
     epoch: u64,
     resume_status: ServerResumeStatus,
 }
@@ -250,8 +270,14 @@ enum ShellPeerConnection {
     Durable(Rc<LocalMutex<PeerConnection<BoxedStorage>>>),
 }
 
+impl fmt::Debug for ShellPeerConnection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ShellPeerConnection(..)")
+    }
+}
+
 #[derive(Clone, Debug, Default)]
-struct SharedWireTransport {
+pub(super) struct SharedWireTransport {
     queues: Rc<RefCell<WireQueues>>,
 }
 
@@ -259,6 +285,13 @@ struct SharedWireTransport {
 struct WireQueues {
     inbound: VecDeque<Vec<u8>>,
     outbound: VecDeque<Vec<u8>>,
+}
+
+pub(super) struct ServerUpstreamIo {
+    pub(super) transport: SharedWireTransport,
+    pub(super) pump: crate::db::PeerIoPump,
+    pub(super) protocol_version: u16,
+    pub(super) features: crate::wire::WireFeatures,
 }
 
 impl WireTransport for SharedWireTransport {
@@ -293,6 +326,13 @@ impl fmt::Debug for ServerSessionState {
 }
 
 impl ShellDb {
+    fn set_tick_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {
+        match self {
+            Self::Memory(db) => db.set_tick_scheduler(scheduler),
+            Self::Durable(db) => db.set_tick_scheduler(scheduler),
+        }
+    }
+
     fn open_catalogue_uninitialized_edge(
         identity: DbIdentity,
         storage_config: StorageConfig,
@@ -402,6 +442,26 @@ impl ShellDb {
         }
     }
 
+    fn set_large_value_staging_policy(&self, policy: crate::node::LargeValueStagingPolicy) {
+        match self {
+            Self::Memory(db) => db.set_large_value_staging_policy(policy),
+            Self::Durable(db) => db.set_large_value_staging_policy(policy),
+        }
+    }
+
+    async fn evict_expired_staged_large_values(&self) -> ShellResult<usize> {
+        match self {
+            Self::Memory(db) => db
+                .evict_expired_staged_large_values()
+                .await
+                .map_err(Into::into),
+            Self::Durable(db) => db
+                .evict_expired_staged_large_values()
+                .await
+                .map_err(Into::into),
+        }
+    }
+
     fn current_write_schema(&self) -> ShellResult<CurrentWriteSchema> {
         match self {
             Self::Memory(db) => db.current_write_schema().map_err(Into::into),
@@ -496,7 +556,7 @@ impl ShellDb {
     fn accept_subscriber_with_claims(
         &self,
         transport: Box<dyn crate::db::Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
         cursor: Option<ResumeCursor>,
     ) -> ShellPeerConnection {
@@ -519,7 +579,7 @@ impl ShellDb {
     fn accept_subscriber_with_claims_and_trust(
         &self,
         transport: Box<dyn crate::db::Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
         trust: CommitUnitTrust,
     ) -> ShellPeerConnection {
@@ -536,7 +596,7 @@ impl ShellDb {
     fn accept_edge_authority_subscriber_with_claims(
         &self,
         transport: Box<dyn crate::db::Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> ShellPeerConnection {
         match self {
@@ -561,10 +621,10 @@ impl ShellDb {
         }
     }
 
-    fn tick_stats(&self) -> ShellResult<crate::db::DbTickStats> {
+    async fn tick_stats_async(&self) -> ShellResult<crate::db::DbTickStats> {
         match self {
-            Self::Memory(db) => crate::db::block_on(db.tick_stats()).map_err(Into::into),
-            Self::Durable(db) => crate::db::block_on(db.tick_stats()).map_err(Into::into),
+            Self::Memory(db) => db.tick_stats().await.map_err(Into::into),
+            Self::Durable(db) => db.tick_stats().await.map_err(Into::into),
         }
     }
 
@@ -572,7 +632,7 @@ impl ShellDb {
         &self,
         table: String,
         row_id: RowUuid,
-        author: AuthorId,
+        author: AuthorSubject,
         cells: RowCells,
     ) -> ShellResult<()> {
         match self {
@@ -589,6 +649,13 @@ impl ShellDb {
 }
 
 impl ShellPeerConnection {
+    fn io_pump(&self) -> crate::db::PeerIoPump {
+        match self {
+            Self::Memory(connection) => crate::db::block_on(connection.lock()).io_pump(),
+            Self::Durable(connection) => crate::db::block_on(connection.lock()).io_pump(),
+        }
+    }
+
     fn take_resume_cursor(&self) -> Option<ResumeCursor> {
         match self {
             Self::Memory(connection) => crate::db::block_on(connection.lock()).take_resume_cursor(),
@@ -618,6 +685,7 @@ impl InMemoryServerShell {
         storage_config: StorageConfig,
     ) -> ShellResult<Self> {
         let edge_cache_budget = config.edge_cache_budget;
+        let large_value_staging_policy = config.large_value_staging_policy;
         let role = config.role;
         let bootstrap_runtime_schema = config.bootstrap_runtime_schema;
         let bootstrap_schema = config.schema.clone();
@@ -661,11 +729,13 @@ impl InMemoryServerShell {
             }
         };
         db.set_edge_cache_budget(edge_cache_budget);
+        db.set_large_value_staging_policy(large_value_staging_policy);
 
         let mut shell = Self {
             db,
             role,
             sessions: Vec::new(),
+            upstream_connections: Vec::new(),
             resume_cursors: BTreeMap::new(),
             next_resume_token: 1,
             runtime_schema_state: RuntimeSchemaState::default(),
@@ -709,6 +779,7 @@ impl InMemoryServerShell {
             db,
             role: NodeRole::Edge,
             sessions: Vec::new(),
+            upstream_connections: Vec::new(),
             resume_cursors: BTreeMap::new(),
             next_resume_token: 1,
             runtime_schema_state: RuntimeSchemaState::default(),
@@ -744,6 +815,7 @@ impl InMemoryServerShell {
             db,
             role: NodeRole::Edge,
             sessions: Vec::new(),
+            upstream_connections: Vec::new(),
             resume_cursors: BTreeMap::new(),
             next_resume_token: 1,
             runtime_schema_state: RuntimeSchemaState::default(),
@@ -1010,14 +1082,17 @@ impl InMemoryServerShell {
     }
 
     /// Accept one subscriber byte session under the supplied author identity.
-    pub fn accept_subscriber_session(&mut self, identity: AuthorId) -> ShellResult<ServerSession> {
+    pub fn accept_subscriber_session(
+        &mut self,
+        identity: AuthorSubject,
+    ) -> ShellResult<ServerSession> {
         self.accept_subscriber_session_with_claims(identity, BTreeMap::new())
     }
 
     /// Accept one subscriber byte session under the supplied identity and claims.
     pub fn accept_subscriber_session_with_claims(
         &mut self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> ShellResult<ServerSession> {
         self.accept_subscriber_session_with_claims_and_trust(
@@ -1030,7 +1105,7 @@ impl InMemoryServerShell {
     /// Accept one subscriber byte session under the supplied identity, claims, and trust mode.
     pub fn accept_subscriber_session_with_claims_and_trust(
         &mut self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
         trust: CommitUnitTrust,
     ) -> ShellResult<ServerSession> {
@@ -1047,7 +1122,7 @@ impl InMemoryServerShell {
     /// endpoint context. Callers without receipt-capable negotiation pass None.
     pub fn accept_subscriber_session_with_claims_and_trust_and_context(
         &mut self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
         trust: CommitUnitTrust,
         negotiated_features: crate::wire::WireFeatures,
@@ -1082,9 +1157,12 @@ impl InMemoryServerShell {
             )
         };
         let session_id = self.sessions.len();
+        let auxiliary_pump = connection.io_pump();
         self.sessions.push(Some(ServerSessionState {
             connection,
             transport,
+            auxiliary_pump,
+            negotiated_features,
             identity,
             epoch: 1,
             resume_status: ServerResumeStatus::Fresh,
@@ -1098,9 +1176,35 @@ impl InMemoryServerShell {
 
     /// Attach this edge shell to an upstream core transport.
     pub fn connect_upstream(&mut self, transport: Box<dyn Transport>) -> ShellResult<()> {
-        let _connection = self.db.connect_upstream(transport);
+        let connection = self.db.connect_upstream(transport);
+        self.upstream_connections.push(connection);
         self.tick()?;
         Ok(())
+    }
+
+    pub(super) fn connect_upstream_wire_io(
+        &mut self,
+        protocol_version: u16,
+        features: crate::wire::WireFeatures,
+        session_context: Option<ConnectionSessionContext>,
+    ) -> ServerUpstreamIo {
+        let transport = SharedWireTransport::default();
+        let adapter = Box::new(WireTransportAdapter::new_with_session_context(
+            transport.clone(),
+            protocol_version,
+            features,
+            None,
+            session_context,
+        ));
+        let connection = self.db.connect_upstream(adapter);
+        let pump = connection.io_pump();
+        self.upstream_connections.push(connection);
+        ServerUpstreamIo {
+            transport,
+            pump,
+            protocol_version,
+            features,
+        }
     }
 
     /// Disconnect a subscriber session while preserving an in-process cursor.
@@ -1159,9 +1263,12 @@ impl InMemoryServerShell {
             Some(cursor),
         );
         let session_id = self.sessions.len();
+        let auxiliary_pump = connection.io_pump();
         self.sessions.push(Some(ServerSessionState {
             connection,
             transport,
+            auxiliary_pump,
+            negotiated_features: crate::wire::current_wire_features(),
             identity: resume.identity,
             epoch: resume.resume_token.saturating_add(1),
             resume_status: ServerResumeStatus::Resumed,
@@ -1249,19 +1356,58 @@ impl InMemoryServerShell {
         for frame in frames {
             self.metrics.frames_received += 1;
             self.metrics.bytes_received += frame.len() as u64;
-            self.session_state(session)?
-                .transport
-                .queues
-                .borrow_mut()
-                .inbound
-                .push_back(frame);
+            let state = self.session_state(session)?;
+            let canonical = crate::db::block_on(
+                state
+                    .auxiliary_pump
+                    .route_incoming_wire_frame(frame, state.negotiated_features),
+            )
+            .map_err(ShellError::Transport)?;
+            if let Some(frame) = canonical {
+                state.transport.queues.borrow_mut().inbound.push_back(frame);
+            }
+        }
+        Ok(())
+    }
+
+    /// Async owner-thread variant used by native runtimes. It yields while
+    /// Groove checks local chunk storage, allowing other local executor tasks
+    /// (notably the upstream chunk pump) to make progress.
+    pub async fn receive_frames_async(
+        &mut self,
+        session: ServerSession,
+        frames: impl IntoIterator<Item = AbiBytes>,
+    ) -> ShellResult<()> {
+        for frame in frames {
+            self.metrics.frames_received += 1;
+            self.metrics.bytes_received += frame.len() as u64;
+            let state = self.session_state(session)?;
+            let canonical = state
+                .auxiliary_pump
+                .route_incoming_wire_frame(frame, state.negotiated_features)
+                .await
+                .map_err(ShellError::Transport)?;
+            if let Some(frame) = canonical {
+                state.transport.queues.borrow_mut().inbound.push_back(frame);
+            }
         }
         Ok(())
     }
 
     /// Service the shell database's accepted subscriber connections once.
     pub fn tick(&mut self) -> ShellResult<()> {
-        let stats = self.db.tick_stats()?;
+        crate::db::block_on(self.tick_async())
+    }
+
+    pub(super) fn set_tick_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {
+        self.db.set_tick_scheduler(scheduler);
+    }
+
+    /// Poll database evaluation without blocking the owner thread's local
+    /// executor. Auxiliary peer I/O can therefore satisfy suspended Groove
+    /// chunk reads before this future resumes.
+    pub async fn tick_async(&mut self) -> ShellResult<()> {
+        let stats = self.db.tick_stats_async().await?;
         self.metrics.ticks += 1;
         let stats = ShellTickStats {
             inbound: 0,
@@ -1277,11 +1423,37 @@ impl InMemoryServerShell {
         Ok(())
     }
 
+    /// Replace the Jazz-owned staging policy used by this server shell.
+    pub fn set_large_value_staging_policy(&self, policy: crate::node::LargeValueStagingPolicy) {
+        self.db.set_large_value_staging_policy(policy);
+    }
+
+    /// Run one expiry pass from the host's maintenance timer.
+    pub async fn evict_expired_staged_large_values(&self) -> ShellResult<usize> {
+        self.db.evict_expired_staged_large_values().await
+    }
+
     /// Drain encoded wire frames ready to send to the host for a session.
     pub fn take_frames(&mut self, session: ServerSession) -> ShellResult<Vec<AbiBytes>> {
-        let mut queues = self.session_state(session)?.transport.queues.borrow_mut();
-        let frames = queues.outbound.drain(..).collect::<Vec<_>>();
-        drop(queues);
+        let state = self.session_state(session)?;
+        let mut frames = state
+            .transport
+            .queues
+            .borrow_mut()
+            .outbound
+            .drain(..)
+            .collect::<Vec<_>>();
+        while let Some(frame) = state
+            .auxiliary_pump
+            .take_outbound_wire_frame(
+                crate::wire::WIRE_PROTOCOL_VERSION,
+                state.negotiated_features,
+                None,
+            )
+            .map_err(ShellError::Transport)?
+        {
+            frames.push(frame);
+        }
         self.metrics.frames_sent += frames.len() as u64;
         self.metrics.bytes_sent += frames.iter().map(Vec::len).sum::<usize>() as u64;
         Ok(frames)
@@ -1314,8 +1486,12 @@ impl InMemoryServerShell {
         row_id: RowUuid,
         cells: RowCells,
     ) -> ShellResult<()> {
-        self.db
-            .seed_settled_mergeable_for_bootstrap(table.into(), row_id, AuthorId::SYSTEM, cells)
+        self.db.seed_settled_mergeable_for_bootstrap(
+            table.into(),
+            row_id,
+            AuthorSubject::SYSTEM,
+            cells,
+        )
     }
 
     fn is_draining(&self) -> bool {
@@ -1375,9 +1551,9 @@ pub enum ShellError {
     /// A process-local resume token was presented for the wrong identity.
     ResumeIdentityMismatch {
         /// Identity that owns the resume cursor.
-        expected: AuthorId,
+        expected: AuthorSubject,
         /// Identity supplied by the caller.
-        actual: AuthorId,
+        actual: AuthorSubject,
     },
     /// A new session was rejected because the shell is draining.
     SessionRejected {
@@ -1987,7 +2163,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let identity = DbIdentity {
             node: crate::ids::NodeUuid::from_bytes([0x5e; 16]),
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
         };
         let config = InMemoryServerShellConfig::new(structural.clone(), identity)
             .with_runtime_schema_bootstrap()

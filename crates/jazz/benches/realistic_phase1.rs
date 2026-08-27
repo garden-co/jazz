@@ -26,7 +26,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage};
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{Query, all_of, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{CmpOp, RelValueRef};
@@ -44,8 +44,13 @@ use tempfile::TempDir;
 type BenchDb = Db<MemoryStorage>;
 type RocksBenchDb = Db<RocksDbStorage>;
 
-const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
-const READER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
+fn author() -> AuthorSubject {
+    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"))
+}
+
+fn reader_author() -> AuthorSubject {
+    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"))
+}
 const R3_REOPEN_SEED: u64 = 31;
 
 #[derive(Debug, Clone, Copy)]
@@ -156,7 +161,7 @@ fn recursive_permissions_schema() -> JazzSchema {
         "team_edges",
         "member",
         "parent",
-        RelValueRef::SessionRef(vec!["user_id".to_owned()]),
+        RelValueRef::SessionRef(vec!["user".to_owned()]),
     );
 
     schema_fixture::compile(
@@ -196,20 +201,20 @@ fn claim_resume_schema() -> JazzSchema {
 }
 
 fn open_db(seed: u64) -> BenchDb {
-    open_db_with_author(seed, AUTHOR, false)
+    open_db_with_author(seed, author(), false)
 }
 
 fn open_core_db(seed: u64) -> BenchDb {
-    open_db_with_author(seed, AuthorId::SYSTEM, true)
+    open_db_with_author(seed, AuthorSubject::SYSTEM, true)
 }
 
-fn open_db_with_author(seed: u64, author: AuthorId, history_complete: bool) -> BenchDb {
+fn open_db_with_author(seed: u64, author: AuthorSubject, history_complete: bool) -> BenchDb {
     open_db_with_schema(seed, author, history_complete, schema())
 }
 
 fn open_db_with_schema(
     seed: u64,
-    author: AuthorId,
+    author: AuthorSubject,
     history_complete: bool,
     schema: JazzSchema,
 ) -> BenchDb {
@@ -225,7 +230,7 @@ fn open_db_with_schema(
 
 fn open_rocks_db_with_author(
     seed: u64,
-    author: AuthorId,
+    author: AuthorSubject,
     history_complete: bool,
     path: &Path,
 ) -> RocksBenchDb {
@@ -241,7 +246,7 @@ fn open_rocks_db_with_author(
 
 fn open_db_with_storage<S>(
     seed: u64,
-    author: AuthorId,
+    author: AuthorSubject,
     history_complete: bool,
     schema: JazzSchema,
     storage: impl FnOnce(&[&str]) -> S,
@@ -308,7 +313,7 @@ fn byte_duplex() -> (Box<dyn jazz::db::Transport>, Box<dyn jazz::db::Transport>)
 }
 
 fn byte_duplex_with_session(
-    identity: AuthorId,
+    identity: AuthorSubject,
     epoch: u64,
 ) -> (Box<dyn jazz::db::Transport>, Box<dyn jazz::db::Transport>) {
     let left = Rc::new(RefCell::new(VecDeque::new()));
@@ -518,8 +523,15 @@ where
         .map(|index| {
             let row = row_uuid(0x11, index);
             wait_local(
-                db.insert_with_id("users", row, user_cells(index))
-                    .expect("seed user"),
+                db.insert(
+                    "users",
+                    user_cells(index),
+                    jazz::db::InsertOptions {
+                        row_id: Some(row),
+                        ..Default::default()
+                    },
+                )
+                .expect("seed user"),
             );
             row
         })
@@ -529,8 +541,15 @@ where
         .map(|index| {
             let row = row_uuid(0x1f, index);
             wait_local(
-                db.insert_with_id("organizations", row, organization_cells(index))
-                    .expect("seed organization"),
+                db.insert(
+                    "organizations",
+                    organization_cells(index),
+                    jazz::db::InsertOptions {
+                        row_id: Some(row),
+                        ..Default::default()
+                    },
+                )
+                .expect("seed organization"),
             );
             row
         })
@@ -541,6 +560,7 @@ where
             db.insert(
                 "memberships",
                 membership_cells(index, &organizations, &users),
+                Default::default(),
             )
             .expect("seed membership"),
         );
@@ -550,10 +570,13 @@ where
         .map(|index| {
             let row = row_uuid(0x22, index);
             wait_local(
-                db.insert_with_id(
+                db.insert(
                     "projects",
-                    row,
                     project_cells(index, &organizations, &users),
+                    jazz::db::InsertOptions {
+                        row_id: Some(row),
+                        ..Default::default()
+                    },
                 )
                 .expect("seed project"),
             );
@@ -565,8 +588,15 @@ where
         .map(|index| {
             let row = row_uuid(0x33, index);
             wait_local(
-                db.insert_with_id("tasks", row, task_cells(index, &projects, &users))
-                    .expect("seed task"),
+                db.insert(
+                    "tasks",
+                    task_cells(index, &projects, &users),
+                    jazz::db::InsertOptions {
+                        row_id: Some(row),
+                        ..Default::default()
+                    },
+                )
+                .expect("seed task"),
             );
             row
         })
@@ -574,8 +604,12 @@ where
 
     for index in 0..profile.comments {
         wait_local(
-            db.insert("comments", comment_cells(index, &tasks, &users))
-                .expect("seed comment"),
+            db.insert(
+                "comments",
+                comment_cells(index, &tasks, &users),
+                Default::default(),
+            )
+            .expect("seed comment"),
         );
     }
 
@@ -583,7 +617,7 @@ where
         for watcher_offset in 0..profile.watchers_per_task {
             let user = users[(task_index + watcher_offset) % users.len()];
             wait_local(
-                db.insert("watchers", watcher_cells(*task, user))
+                db.insert("watchers", watcher_cells(*task, user), Default::default())
                     .expect("seed watcher"),
             );
         }
@@ -591,8 +625,12 @@ where
 
     for index in 0..profile.activity_events {
         wait_local(
-            db.insert("activity", activity_cells(index, &projects, &tasks, &users))
-                .expect("seed activity"),
+            db.insert(
+                "activity",
+                activity_cells(index, &projects, &tasks, &users),
+                Default::default(),
+            )
+            .expect("seed activity"),
         );
     }
 
@@ -611,8 +649,15 @@ where
         .map(|index| {
             let row = row_uuid(0x41, index);
             wait_local(
-                db.insert_with_id("users", row, user_cells(index))
-                    .expect("seed resume user"),
+                db.insert(
+                    "users",
+                    user_cells(index),
+                    jazz::db::InsertOptions {
+                        row_id: Some(row),
+                        ..Default::default()
+                    },
+                )
+                .expect("seed resume user"),
             );
             row
         })
@@ -622,8 +667,15 @@ where
         .map(|index| {
             let row = row_uuid(0x42, index);
             wait_local(
-                db.insert_with_id("organizations", row, organization_cells(index))
-                    .expect("seed resume organization"),
+                db.insert(
+                    "organizations",
+                    organization_cells(index),
+                    jazz::db::InsertOptions {
+                        row_id: Some(row),
+                        ..Default::default()
+                    },
+                )
+                .expect("seed resume organization"),
             );
             row
         })
@@ -633,10 +685,13 @@ where
         .map(|index| {
             let row = row_uuid(0x43, index);
             wait_local(
-                db.insert_with_id(
+                db.insert(
                     "projects",
-                    row,
                     project_cells(index, &organizations, &users),
+                    jazz::db::InsertOptions {
+                        row_id: Some(row),
+                        ..Default::default()
+                    },
                 )
                 .expect("seed resume project"),
             );
@@ -648,8 +703,15 @@ where
         .map(|index| {
             let row = row_uuid(0x44, index);
             wait_local(
-                db.insert_with_id("tasks", row, task_cells(index, &projects, &users))
-                    .expect("seed resume task"),
+                db.insert(
+                    "tasks",
+                    task_cells(index, &projects, &users),
+                    jazz::db::InsertOptions {
+                        row_id: Some(row),
+                        ..Default::default()
+                    },
+                )
+                .expect("seed resume task"),
             );
             row
         })
@@ -744,7 +806,7 @@ fn recursive_team_edge_cells(member: RowUuid, parent: RowUuid) -> BTreeMap<Strin
 fn open_recursive_permissions_db(seed: u64) -> BenchDb {
     open_db_with_schema(
         seed,
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         false,
         recursive_permissions_schema(),
     )
@@ -752,7 +814,7 @@ fn open_recursive_permissions_db(seed: u64) -> BenchDb {
 
 fn open_recursive_permissions_db_with_author(
     seed: u64,
-    author: AuthorId,
+    author: AuthorSubject,
     history_complete: bool,
 ) -> BenchDb {
     open_db_with_schema(
@@ -763,7 +825,7 @@ fn open_recursive_permissions_db_with_author(
     )
 }
 
-fn open_claim_resume_db(seed: u64, author: AuthorId, history_complete: bool) -> BenchDb {
+fn open_claim_resume_db(seed: u64, author: AuthorSubject, history_complete: bool) -> BenchDb {
     open_db_with_schema(seed, author, history_complete, claim_resume_schema())
 }
 
@@ -774,8 +836,15 @@ fn seed_recursive_permissions_fixture(db: &BenchDb) {
         (RECURSIVE_HIDDEN_TEAM, "hidden"),
     ] {
         wait_local(
-            db.insert_with_id("teams", team, recursive_team_cells(name))
-                .expect("seed recursive team"),
+            db.insert(
+                "teams",
+                recursive_team_cells(name),
+                jazz::db::InsertOptions {
+                    row_id: Some(team),
+                    ..Default::default()
+                },
+            )
+            .expect("seed recursive team"),
         );
     }
 
@@ -785,8 +854,15 @@ fn seed_recursive_permissions_fixture(db: &BenchDb) {
         (RECURSIVE_DOC_HIDDEN, "hidden", "hidden"),
     ] {
         wait_local(
-            db.insert_with_id("docs", doc, recursive_doc_cells(title, kind))
-                .expect("seed recursive doc"),
+            db.insert(
+                "docs",
+                recursive_doc_cells(title, kind),
+                jazz::db::InsertOptions {
+                    row_id: Some(doc),
+                    ..Default::default()
+                },
+            )
+            .expect("seed recursive doc"),
         );
     }
 
@@ -796,8 +872,12 @@ fn seed_recursive_permissions_fixture(db: &BenchDb) {
         (RECURSIVE_DOC_HIDDEN, RECURSIVE_HIDDEN_TEAM),
     ] {
         wait_local(
-            db.insert("doc_access", recursive_doc_access_cells(doc, team))
-                .expect("seed recursive doc access"),
+            db.insert(
+                "doc_access",
+                recursive_doc_access_cells(doc, team),
+                Default::default(),
+            )
+            .expect("seed recursive doc access"),
         );
     }
 
@@ -805,6 +885,7 @@ fn seed_recursive_permissions_fixture(db: &BenchDb) {
         db.insert(
             "team_edges",
             recursive_team_edge_cells(RECURSIVE_READER_TEAM, RECURSIVE_PARENT_TEAM),
+            Default::default(),
         )
         .expect("seed recursive team edge"),
     );
@@ -817,16 +898,26 @@ fn seed_permission_resume_fixture(db: &BenchDb) {
         (RECURSIVE_HIDDEN_TEAM, "hidden"),
     ] {
         wait_local(
-            db.insert_with_id("teams", team, recursive_team_cells(name))
-                .expect("seed resume permission team"),
+            db.insert(
+                "teams",
+                recursive_team_cells(name),
+                jazz::db::InsertOptions {
+                    row_id: Some(team),
+                    ..Default::default()
+                },
+            )
+            .expect("seed resume permission team"),
         );
     }
 
     wait_local(
-        db.insert_with_id(
+        db.insert(
             "team_edges",
-            RESUME_EDGE_READER_PARENT,
             recursive_team_edge_cells(RECURSIVE_READER_TEAM, RECURSIVE_PARENT_TEAM),
+            jazz::db::InsertOptions {
+                row_id: Some(RESUME_EDGE_READER_PARENT),
+                ..Default::default()
+            },
         )
         .expect("seed resume permission team edge"),
     );
@@ -838,8 +929,15 @@ fn seed_permission_resume_fixture(db: &BenchDb) {
         (RESUME_DOC_NEVER, "never", "never-visible"),
     ] {
         wait_local(
-            db.insert_with_id("docs", doc, recursive_doc_cells(title, kind))
-                .expect("seed resume permission doc"),
+            db.insert(
+                "docs",
+                recursive_doc_cells(title, kind),
+                jazz::db::InsertOptions {
+                    row_id: Some(doc),
+                    ..Default::default()
+                },
+            )
+            .expect("seed resume permission doc"),
         );
     }
 
@@ -857,8 +955,15 @@ fn seed_permission_resume_fixture(db: &BenchDb) {
         (RESUME_ACCESS_NEVER, RESUME_DOC_NEVER, RECURSIVE_HIDDEN_TEAM),
     ] {
         wait_local(
-            db.insert_with_id("doc_access", access, recursive_doc_access_cells(doc, team))
-                .expect("seed resume permission access"),
+            db.insert(
+                "doc_access",
+                recursive_doc_access_cells(doc, team),
+                jazz::db::InsertOptions {
+                    row_id: Some(access),
+                    ..Default::default()
+                },
+            )
+            .expect("seed resume permission access"),
         );
     }
 }
@@ -1041,6 +1146,7 @@ fn r1_crud(c: &mut Criterion) {
                         .insert(
                             "tasks",
                             task_cells(next_task, &fixture.projects, &fixture.users),
+                            Default::default(),
                         )
                         .expect("insert task");
                     let inserted_row = inserted.row_uuid();
@@ -1056,12 +1162,16 @@ fn r1_crud(c: &mut Criterion) {
                                 ("status".to_owned(), Value::String("review".to_owned())),
                                 ("updated_at".to_owned(), Value::U64(next_task as u64)),
                             ]),
+                            Default::default(),
                         )
                         .expect("update task"),
                     );
                     update_index += 1;
 
-                    wait_local(db.delete("tasks", inserted_row).expect("delete task"));
+                    wait_local(
+                        db.delete("tasks", inserted_row, Default::default())
+                            .expect("delete task"),
+                    );
                 });
             },
         );
@@ -1278,7 +1388,7 @@ fn evict_path_from_linux_page_cache(_path: &Path) {
 
 fn open_rocks_db_with_phases(
     seed: u64,
-    author: AuthorId,
+    author: AuthorSubject,
     path: &Path,
 ) -> (RocksBenchDb, Duration, Duration, Option<R3OpenBreakdown>) {
     let schema = schema();
@@ -1352,7 +1462,7 @@ fn measure_r3_phase_sample(
         evict_path_from_linux_page_cache(path);
     }
     let (db, storage_open, jazz_open, open_breakdown) =
-        open_rocks_db_with_phases(R3_REOPEN_SEED, AUTHOR, path);
+        open_rocks_db_with_phases(R3_REOPEN_SEED, author(), path);
 
     let prepare_started = Instant::now();
     let query = project_board_query(&db, project);
@@ -1391,7 +1501,7 @@ fn measure_r3_phase_sample(
 }
 
 fn establish_r3_close_mode(path: &Path, close_mode: R3CloseMode) {
-    let db = open_rocks_db_with_author(R3_REOPEN_SEED, AUTHOR, false, path);
+    let db = open_rocks_db_with_author(R3_REOPEN_SEED, author(), false, path);
     if matches!(close_mode, R3CloseMode::Clean) {
         block_on(db.close()).expect("establish clean-close marker before R3 phase samples");
     }
@@ -1544,7 +1654,7 @@ fn r3_rocksdb_cold_load(c: &mut Criterion) {
         let tempdir = TempDir::new().expect("create tempdir for RocksDB cold-load bench");
         let db_path = tempdir.path().join("realistic_phase1.rocksdb");
         let project = {
-            let db = open_rocks_db_with_author(30, AUTHOR, false, &db_path);
+            let db = open_rocks_db_with_author(30, author(), false, &db_path);
             let fixture = seed_fixture(&db, profile);
             fixture.projects[0]
         };
@@ -1561,7 +1671,7 @@ fn r3_rocksdb_cold_load(c: &mut Criterion) {
             &profile,
             |b, &_profile| {
                 b.iter(|| {
-                    let db = open_rocks_db_with_author(31, AUTHOR, false, &db_path);
+                    let db = open_rocks_db_with_author(31, author(), false, &db_path);
                     let query = project_board_query(&db, project);
                     let rows = db.read(&query).expect("read cold project board");
                     assert_eq!(
@@ -1637,6 +1747,7 @@ fn r4_hot_task_history(c: &mut Criterion) {
                                 ),
                                 ("updated_at".to_owned(), Value::U64(event_index as u64)),
                             ]),
+                            Default::default(),
                         )
                         .expect("hot task update"),
                     );
@@ -1644,6 +1755,7 @@ fn r4_hot_task_history(c: &mut Criterion) {
                         db.insert(
                             "comments",
                             comment_cells(event_index, &[hot_task], &fixture.users),
+                            Default::default(),
                         )
                         .expect("hot task comment"),
                     );
@@ -1656,6 +1768,7 @@ fn r4_hot_task_history(c: &mut Criterion) {
                                 &[hot_task],
                                 &fixture.users,
                             ),
+                            Default::default(),
                         )
                         .expect("hot task activity"),
                     );
@@ -1712,6 +1825,7 @@ fn r9_subscribed_write(c: &mut Criterion) {
                                 ("status".to_owned(), Value::String("doing".to_owned())),
                                 ("updated_at".to_owned(), Value::U64(task_index as u64)),
                             ]),
+                            Default::default(),
                         )
                         .expect("subscribed task update"),
                     );
@@ -1738,7 +1852,7 @@ fn r10_sync_fanout(c: &mut Criterion) {
             |b, &profile| {
                 let writer = open_db(10);
                 let server = open_core_db(11);
-                let reader = open_db_with_author(12, READER_AUTHOR, false);
+                let reader = open_db_with_author(12, reader_author(), false);
 
                 let fixture = seed_fixture(&writer, profile);
                 let project = fixture.projects[0];
@@ -1746,12 +1860,13 @@ fn r10_sync_fanout(c: &mut Criterion) {
 
                 let (writer_transport, server_writer_transport) = byte_duplex();
                 let _writer_upstream = block_on(writer.connect_upstream(writer_transport));
-                let _writer_subscriber = server.accept_subscriber(server_writer_transport, AUTHOR);
+                let _writer_subscriber =
+                    server.accept_subscriber(server_writer_transport, author());
 
                 let (reader_transport, server_reader_transport) = byte_duplex();
                 let _reader_upstream = block_on(reader.connect_upstream(reader_transport));
                 let _reader_subscriber =
-                    server.accept_subscriber(server_reader_transport, READER_AUTHOR);
+                    server.accept_subscriber(server_reader_transport, reader_author());
 
                 let query = project_board_query(&reader, project);
                 let mut subscription = block_on(reader.subscribe(&query, global_subscribe_opts()))
@@ -1791,6 +1906,7 @@ fn r10_sync_fanout(c: &mut Criterion) {
                                         Value::U64((profile.tasks + update_index) as u64),
                                     ),
                                 ]),
+                                Default::default(),
                             )
                             .expect("writer project-board update"),
                     );
@@ -1824,7 +1940,7 @@ fn r11_byte_wire_resume(c: &mut Criterion) {
                 b.iter(|| {
                     let writer = open_db(110);
                     let server = open_core_db(111);
-                    let client = open_db_with_author(112, READER_AUTHOR, false);
+                    let client = open_db_with_author(112, reader_author(), false);
                     let fixture = seed_resume_fixture(&writer, profile);
                     let subscribed_row = fixture.tasks[0];
                     let prepared = client
@@ -1832,19 +1948,19 @@ fn r11_byte_wire_resume(c: &mut Criterion) {
                         .expect("prepare resumed tasks query");
 
                     let (writer_transport, server_writer_transport) =
-                        byte_duplex_with_session(AUTHOR, 1);
+                        byte_duplex_with_session(author(), 1);
                     let writer_upstream = block_on(writer.connect_upstream(writer_transport));
                     let writer_subscriber =
-                        server.accept_subscriber(server_writer_transport, AUTHOR);
+                        server.accept_subscriber(server_writer_transport, author());
                     writer.tick().expect("ship resume seed rows");
                     server.tick().expect("ingest resume seed rows");
                     assert!(writer.detach_connection(&writer_upstream));
                     assert!(server.detach_connection(&writer_subscriber));
 
                     let (client_transport, server_transport) =
-                        byte_duplex_with_session(READER_AUTHOR, 2);
+                        byte_duplex_with_session(reader_author(), 2);
                     let upstream = block_on(client.connect_upstream(client_transport));
-                    let subscriber = server.accept_subscriber(server_transport, READER_AUTHOR);
+                    let subscriber = server.accept_subscriber(server_transport, reader_author());
 
                     let mut subscription =
                         block_on(client.subscribe(&prepared, global_subscribe_opts()))
@@ -1889,25 +2005,25 @@ fn r11_byte_wire_resume(c: &mut Criterion) {
                                         Value::String(changed_status.to_owned()),
                                     ),
                                     ("updated_at".to_owned(), Value::U64(9_001)),
-                                ]),
+                                ]), Default::default()
                             )
                             .expect("writer disconnected task update"),
                     );
                     let (writer_transport, server_writer_transport) =
-                        byte_duplex_with_session(AUTHOR, 3);
+                        byte_duplex_with_session(author(), 3);
                     let writer_upstream = block_on(writer.connect_upstream(writer_transport));
                     let writer_subscriber =
-                        server.accept_subscriber(server_writer_transport, AUTHOR);
+                        server.accept_subscriber(server_writer_transport, author());
                     writer.tick().expect("ship disconnected task update");
                     server.tick().expect("ingest disconnected task update");
                     assert!(writer.detach_connection(&writer_upstream));
                     assert!(server.detach_connection(&writer_subscriber));
 
                     let (client_transport, server_transport) =
-                        byte_duplex_with_session(READER_AUTHOR, 4);
+                        byte_duplex_with_session(reader_author(), 4);
                     let _resumed_upstream = block_on(client.connect_upstream(client_transport));
                     let resumed =
-                        server.accept_subscriber_with_resume(server_transport, READER_AUTHOR, cursor);
+                        server.accept_subscriber_with_resume(server_transport, reader_author(), cursor);
 
                     client.tick().expect("announce resumed tasks subscription");
                     server.tick().expect("serve task resume catch-up");
@@ -1955,12 +2071,12 @@ fn r12_recursive_permissions(c: &mut Criterion) {
         let read_opts = ReadOpts::default();
 
         b.iter(|| {
-            let rows = block_on(db.all_for_identity(&query, read_opts.clone(), READER_AUTHOR))
+            let rows = block_on(db.all_for_identity(&query, read_opts.clone(), reader_author()))
                 .expect("read recursive docs for reader");
             assert_recursive_docs_visible(&rows);
 
             let mut subscription =
-                block_on(db.subscribe_for_identity(&query, read_opts.clone(), READER_AUTHOR))
+                block_on(db.subscribe_for_identity(&query, read_opts.clone(), reader_author()))
                     .expect("subscribe recursive docs for reader");
             match block_on(subscription.next_event()) {
                 Some(SubscriptionEvent::Delta {
@@ -1989,26 +2105,27 @@ fn r12_recursive_permissions(c: &mut Criterion) {
 fn run_permission_filtered_resume(
     churn: PermissionResumeChurn,
 ) -> (Duration, usize, usize, usize, usize, usize) {
-    let writer = open_recursive_permissions_db_with_author(130, AuthorId::SYSTEM, false);
-    let server = open_recursive_permissions_db_with_author(131, AuthorId::SYSTEM, true);
-    let client = open_recursive_permissions_db_with_author(132, READER_AUTHOR, false);
+    let writer = open_recursive_permissions_db_with_author(130, AuthorSubject::SYSTEM, false);
+    let server = open_recursive_permissions_db_with_author(131, AuthorSubject::SYSTEM, true);
+    let client = open_recursive_permissions_db_with_author(132, reader_author(), false);
     seed_permission_resume_fixture(&writer);
     let prepared = client
         .prepare_query(&Query::from("docs"))
         .expect("prepare permission-filtered docs query");
 
     let (writer_transport, server_writer_transport) =
-        byte_duplex_with_session(AuthorId::SYSTEM, 13_001);
+        byte_duplex_with_session(AuthorSubject::SYSTEM, 13_001);
     let writer_upstream = block_on(writer.connect_upstream(writer_transport));
-    let writer_subscriber = server.accept_subscriber(server_writer_transport, AuthorId::SYSTEM);
+    let writer_subscriber =
+        server.accept_subscriber(server_writer_transport, AuthorSubject::SYSTEM);
     writer.tick().expect("ship permission seed rows");
     server.tick().expect("ingest permission seed rows");
     assert!(writer.detach_connection(&writer_upstream));
     assert!(server.detach_connection(&writer_subscriber));
 
-    let (client_transport, server_transport) = byte_duplex_with_session(READER_AUTHOR, 13_002);
+    let (client_transport, server_transport) = byte_duplex_with_session(reader_author(), 13_002);
     let upstream = block_on(client.connect_upstream(client_transport));
-    let subscriber = server.accept_subscriber(server_transport, READER_AUTHOR);
+    let subscriber = server.accept_subscriber(server_transport, reader_author());
     let mut subscription = block_on(client.subscribe(&prepared, global_subscribe_opts()))
         .expect("subscribe permission-filtered docs");
     assert_eq!(
@@ -2052,22 +2169,26 @@ fn run_permission_filtered_resume(
                     "doc_access",
                     RESUME_ACCESS_REVOKED,
                     recursive_doc_access_cells(RESUME_DOC_REVOKED, RECURSIVE_HIDDEN_TEAM),
+                    Default::default(),
                 )
                 .expect("hide disconnected doc access before revoke"),
         );
         wait_local(
             writer
-                .delete("doc_access", RESUME_ACCESS_REVOKED)
+                .delete("doc_access", RESUME_ACCESS_REVOKED, Default::default())
                 .expect("revoke disconnected doc access"),
         );
     }
     if churn.grants() {
         wait_local(
             writer
-                .insert_with_id(
+                .insert(
                     "doc_access",
-                    RESUME_ACCESS_GRANTED,
                     recursive_doc_access_cells(RESUME_DOC_GRANTED, RECURSIVE_PARENT_TEAM),
+                    jazz::db::InsertOptions {
+                        row_id: Some(RESUME_ACCESS_GRANTED),
+                        ..Default::default()
+                    },
                 )
                 .expect("grant disconnected doc access"),
         );
@@ -2075,9 +2196,10 @@ fn run_permission_filtered_resume(
 
     if churn.grants() || churn.revokes() {
         let (writer_transport, server_writer_transport) =
-            byte_duplex_with_session(AuthorId::SYSTEM, 13_003);
+            byte_duplex_with_session(AuthorSubject::SYSTEM, 13_003);
         let writer_upstream = block_on(writer.connect_upstream(writer_transport));
-        let writer_subscriber = server.accept_subscriber(server_writer_transport, AuthorId::SYSTEM);
+        let writer_subscriber =
+            server.accept_subscriber(server_writer_transport, AuthorSubject::SYSTEM);
         writer.tick().expect("ship disconnected permission changes");
         server
             .tick()
@@ -2094,7 +2216,7 @@ fn run_permission_filtered_resume(
 
     let server_query = recursive_docs_query(&server);
     let server_rows =
-        block_on(server.all_for_identity(&server_query, ReadOpts::default(), READER_AUTHOR))
+        block_on(server.all_for_identity(&server_query, ReadOpts::default(), reader_author()))
             .expect("read disconnected permission state on server");
     let mut expected_server_rows = vec![RESUME_DOC_DIRECT];
     if !churn.revokes() {
@@ -2105,9 +2227,9 @@ fn run_permission_filtered_resume(
     }
     assert_permission_resume_docs(&server_rows, &expected_server_rows);
 
-    let (client_transport, server_transport) = byte_duplex_with_session(READER_AUTHOR, 13_004);
+    let (client_transport, server_transport) = byte_duplex_with_session(reader_author(), 13_004);
     let _resumed_upstream = block_on(client.connect_upstream(client_transport));
-    let resumed = server.accept_subscriber_with_resume(server_transport, READER_AUTHOR, cursor);
+    let resumed = server.accept_subscriber_with_resume(server_transport, reader_author(), cursor);
 
     let resume_started = Instant::now();
     client
@@ -2166,19 +2288,22 @@ fn run_permission_filtered_resume(
 fn run_claim_filtered_resume(
     churn: ClaimResumeChurn,
 ) -> (Duration, usize, usize, usize, usize, usize) {
-    let writer = open_claim_resume_db(133, AuthorId::SYSTEM, false);
-    let server = open_claim_resume_db(134, AuthorId::SYSTEM, true);
-    let client = open_claim_resume_db(135, READER_AUTHOR, false);
+    let writer = open_claim_resume_db(133, AuthorSubject::SYSTEM, false);
+    let server = open_claim_resume_db(134, AuthorSubject::SYSTEM, true);
+    let client = open_claim_resume_db(135, reader_author(), false);
     for (row, title) in [
         (CLAIM_RESUME_DOC_A, "claim-a"),
         (CLAIM_RESUME_DOC_B, "claim-b"),
     ] {
         wait_local(
             writer
-                .insert_with_id(
+                .insert(
                     "claim_docs",
-                    row,
                     BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+                    jazz::db::InsertOptions {
+                        row_id: Some(row),
+                        ..Default::default()
+                    },
                 )
                 .expect("seed claim-resume doc"),
         );
@@ -2188,24 +2313,25 @@ fn run_claim_filtered_resume(
         .expect("prepare claim-filtered docs query");
 
     let (writer_transport, server_writer_transport) =
-        byte_duplex_with_session(AuthorId::SYSTEM, 13_101);
+        byte_duplex_with_session(AuthorSubject::SYSTEM, 13_101);
     let writer_upstream = block_on(writer.connect_upstream(writer_transport));
-    let writer_subscriber = server.accept_subscriber(server_writer_transport, AuthorId::SYSTEM);
+    let writer_subscriber =
+        server.accept_subscriber(server_writer_transport, AuthorSubject::SYSTEM);
     writer.tick().expect("ship claim-resume seed rows");
     server.tick().expect("ingest claim-resume seed rows");
     assert!(writer.detach_connection(&writer_upstream));
     assert!(server.detach_connection(&writer_subscriber));
 
     server.set_identity_claims(
-        READER_AUTHOR,
+        reader_author(),
         BTreeMap::from([(
             "access".to_owned(),
             Value::String(churn.initial_access().to_owned()),
         )]),
     );
-    let (client_transport, server_transport) = byte_duplex_with_session(READER_AUTHOR, 13_102);
+    let (client_transport, server_transport) = byte_duplex_with_session(reader_author(), 13_102);
     let upstream = block_on(client.connect_upstream(client_transport));
-    let subscriber = server.accept_subscriber(server_transport, READER_AUTHOR);
+    let subscriber = server.accept_subscriber(server_transport, reader_author());
     let mut subscription = block_on(client.subscribe(&prepared, global_subscribe_opts()))
         .expect("subscribe claim-filtered docs");
     assert_eq!(
@@ -2235,15 +2361,15 @@ fn run_claim_filtered_resume(
     assert!(server.detach_connection(&subscriber));
 
     server.set_identity_claims(
-        READER_AUTHOR,
+        reader_author(),
         BTreeMap::from([(
             "access".to_owned(),
             Value::String(churn.resumed_access().to_owned()),
         )]),
     );
-    let (client_transport, server_transport) = byte_duplex_with_session(READER_AUTHOR, 13_103);
+    let (client_transport, server_transport) = byte_duplex_with_session(reader_author(), 13_103);
     let _resumed_upstream = block_on(client.connect_upstream(client_transport));
-    let resumed = server.accept_subscriber_with_resume(server_transport, READER_AUTHOR, cursor);
+    let resumed = server.accept_subscriber_with_resume(server_transport, reader_author(), cursor);
 
     let resume_started = Instant::now();
     client.tick().expect("announce resumed claim subscription");

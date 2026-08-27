@@ -4,7 +4,7 @@ use jazz::block_on;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, RowCells, SeededRowIdSource};
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid};
+use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::node::CurrentRow;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -55,16 +55,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         storage,
         identity: DbIdentity {
             node: NodeUuid::from_bytes([0x11; 16]),
-            author: AuthorId::from_bytes([0xa1; 16]),
+            author: AuthorSubject::for_test_bytes([0xa1; 16]),
         },
         id_source: Some(Box::new(SeededRowIdSource::new(0x1111))),
     }))?;
 
-    let insert_milk = block_on(db.insert("todos", todo_cells("buy milk", false)))?;
+    let insert_milk =
+        block_on(db.insert("todos", todo_cells("buy milk", false), Default::default()))?;
     let buy_milk = insert_milk.row_uuid();
     block_on(insert_milk.wait(DurabilityTier::Local))?;
 
-    let insert_docs = block_on(db.insert("todos", todo_cells("write docs", false)))?;
+    let insert_docs =
+        block_on(db.insert("todos", todo_cells("write docs", false), Default::default()))?;
     let write_docs = insert_docs.row_uuid();
     block_on(insert_docs.wait(DurabilityTier::Local))?;
 
@@ -76,10 +78,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "todos",
         buy_milk,
         BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        Default::default(),
     ))?;
     block_on(update_milk.wait(DurabilityTier::Local))?;
 
-    let delete_docs = block_on(db.delete("todos", write_docs))?;
+    let delete_docs = block_on(db.delete("todos", write_docs, Default::default()))?;
     block_on(delete_docs.wait(DurabilityTier::Local))?;
 
     let rows = block_on(db.all(&query, ReadOpts::default()))?;

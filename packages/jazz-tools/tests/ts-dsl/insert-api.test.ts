@@ -10,6 +10,12 @@ describe("TS Insert API", () => {
     db = await createDb({
       appId: "test-app",
       driver: { type: "persistent", dbName: uniqueDbName("insert-row-shape") },
+      cookieSession: {
+        issuer: "https://issuer.example",
+        user_id: "todo-client-localfirst-insert",
+        claims: {},
+        authMode: "external",
+      },
     });
   });
 
@@ -82,7 +88,7 @@ describe("TS Insert API", () => {
   });
 
   it("can use caller-supplied updatedAt on insert", async () => {
-    const updatedAt = 1_704_067_200_123_000;
+    const updatedAt = 1_704_067_200_123;
     const { value: project } = db.insert(
       app.projects,
       { name: "Backfilled Project" },
@@ -96,12 +102,12 @@ describe("TS Insert API", () => {
     expect(projected).toEqual({
       id: project.id,
       name: "Backfilled Project",
-      $updatedAt: new Date(Math.trunc(updatedAt / 1_000)),
+      $updatedAt: new Date(updatedAt),
     });
   });
 
   it("can use caller-supplied updatedAt on transaction-scoped insert", async () => {
-    const updatedAt = 1_704_067_200_123_000;
+    const updatedAt = 1_704_067_200_123;
     const tx = db.beginTransaction();
     const project = tx.insert(app.projects, { name: "Backfilled Project" }, { updatedAt });
 
@@ -114,7 +120,7 @@ describe("TS Insert API", () => {
     expect(projected).toEqual({
       id: project.id,
       name: "Backfilled Project",
-      $updatedAt: new Date(Math.trunc(updatedAt / 1_000)),
+      $updatedAt: new Date(updatedAt),
     });
   });
 

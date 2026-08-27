@@ -1,6 +1,7 @@
 //! Record descriptors, projection, enum remapping, and operator shape validation.
 
 use super::*;
+use crate::records::collect_by_ordered_scalar;
 
 pub(super) fn extend_root_window_positions(
     descriptor: RecordDescriptor,
@@ -510,31 +511,13 @@ pub(super) fn validate_collect_by_key_types(
     input: &RecordDescriptor,
     indices: &[usize],
 ) -> Result<(), IvmRuntimeError> {
-    fn ordered_scalar(value_type: &ValueType) -> bool {
-        match value_type {
-            ValueType::Nullable(inner) => ordered_scalar(inner),
-            ValueType::U8
-            | ValueType::U16
-            | ValueType::U32
-            | ValueType::U64
-            | ValueType::I32
-            | ValueType::I64
-            | ValueType::F64
-            | ValueType::Bool
-            | ValueType::String
-            | ValueType::Bytes
-            | ValueType::Uuid
-            | ValueType::EnumTag(_) => true,
-            _ => false,
-        }
-    }
     for &index in indices {
         let value_type = &input
             .fields()
             .get(index)
             .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(index))?
             .value_type;
-        let scalar = ordered_scalar(value_type);
+        let scalar = collect_by_ordered_scalar(value_type);
         if value_type.contains_record() || !scalar {
             return Err(IvmRuntimeError::InvalidCollectBy(
                 "group, order, and tie fields must be scalar ordered values without records".into(),
@@ -545,88 +528,67 @@ pub(super) fn validate_collect_by_key_types(
 }
 
 pub(super) fn validate_collect_by_terminality(graph: &GraphBuilder) -> Result<(), IvmRuntimeError> {
-    fn contains_collect_by(graph: &GraphBuilder) -> bool {
-        match graph {
-            GraphBuilder::CollectBy { .. } => true,
-            GraphBuilder::Recursive { seed, step, .. } => {
-                contains_collect_by(seed) || contains_collect_by(step)
-            }
+    fn contains(
+        children: impl IntoIterator<Item = *const GraphBuilder>,
+        seen: &HashMap<usize, bool>,
+    ) -> bool {
+        children
+            .into_iter()
+            .any(|child| seen.get(&(child as usize)).copied().unwrap_or(false))
+    }
+
+    let mut contains_collect = HashMap::default();
+    for node in graph.postorder() {
+        let children_contain_collect = match node {
             GraphBuilder::Filter { input, .. }
             | GraphBuilder::Project { input, .. }
+            | GraphBuilder::StreamingChecksum { input, .. }
             | GraphBuilder::UnwrapNullable { input, .. }
             | GraphBuilder::Unnest { input, .. }
             | GraphBuilder::VariantProject { input, .. }
             | GraphBuilder::ArgMaxBy { input, .. }
             | GraphBuilder::ArgMinBy { input, .. }
             | GraphBuilder::TopBy { input, .. }
-            | GraphBuilder::Aggregate { input, .. } => contains_collect_by(input),
-            GraphBuilder::Union { inputs } => inputs.iter().any(contains_collect_by),
+            | GraphBuilder::CollectBy { input, .. }
+            | GraphBuilder::Aggregate { input, .. } => {
+                contains([input.as_ref() as *const GraphBuilder], &contains_collect)
+            }
+            GraphBuilder::Union { inputs } => contains(
+                inputs.iter().map(|input| input as *const GraphBuilder),
+                &contains_collect,
+            ),
             GraphBuilder::Join { left, right, .. }
             | GraphBuilder::SemiJoin { left, right, .. }
-            | GraphBuilder::AntiJoin { left, right, .. } => {
-                contains_collect_by(left) || contains_collect_by(right)
-            }
+            | GraphBuilder::AntiJoin { left, right, .. } => contains(
+                [
+                    left.as_ref() as *const GraphBuilder,
+                    right.as_ref() as *const GraphBuilder,
+                ],
+                &contains_collect,
+            ),
+            GraphBuilder::Recursive { seed, step, .. } => contains(
+                [
+                    seed.as_ref() as *const GraphBuilder,
+                    step.as_ref() as *const GraphBuilder,
+                ],
+                &contains_collect,
+            ),
             GraphBuilder::Table { .. }
             | GraphBuilder::InlineRecords { .. }
             | GraphBuilder::Index { .. }
             | GraphBuilder::FrontierSource { .. }
             | GraphBuilder::BindingSource { .. } => false,
-        }
-    }
+        };
 
-    match graph {
-        GraphBuilder::CollectBy { input, .. } => {
-            if contains_collect_by(input) {
-                return Err(IvmRuntimeError::CollectByMustBeTerminal);
-            }
-            validate_collect_by_terminality(input)
+        if children_contain_collect {
+            return Err(IvmRuntimeError::CollectByMustBeTerminal);
         }
-        GraphBuilder::Recursive { seed, step, .. } => {
-            if contains_collect_by(seed) || contains_collect_by(step) {
-                return Err(IvmRuntimeError::CollectByMustBeTerminal);
-            }
-            validate_collect_by_terminality(seed)?;
-            validate_collect_by_terminality(step)
-        }
-        GraphBuilder::Filter { input, .. } | GraphBuilder::Project { input, .. } => {
-            validate_collect_by_terminality(input)
-        }
-        GraphBuilder::UnwrapNullable { input, .. }
-        | GraphBuilder::Unnest { input, .. }
-        | GraphBuilder::VariantProject { input, .. }
-        | GraphBuilder::ArgMaxBy { input, .. }
-        | GraphBuilder::ArgMinBy { input, .. }
-        | GraphBuilder::TopBy { input, .. }
-        | GraphBuilder::Aggregate { input, .. } => {
-            if contains_collect_by(input) {
-                return Err(IvmRuntimeError::CollectByMustBeTerminal);
-            }
-            validate_collect_by_terminality(input)
-        }
-        GraphBuilder::Union { inputs } => {
-            if inputs.iter().any(contains_collect_by) {
-                return Err(IvmRuntimeError::CollectByMustBeTerminal);
-            }
-            for input in inputs {
-                validate_collect_by_terminality(input)?;
-            }
-            Ok(())
-        }
-        GraphBuilder::Join { left, right, .. }
-        | GraphBuilder::SemiJoin { left, right, .. }
-        | GraphBuilder::AntiJoin { left, right, .. } => {
-            if contains_collect_by(left) || contains_collect_by(right) {
-                return Err(IvmRuntimeError::CollectByMustBeTerminal);
-            }
-            validate_collect_by_terminality(left)?;
-            validate_collect_by_terminality(right)
-        }
-        GraphBuilder::Table { .. }
-        | GraphBuilder::InlineRecords { .. }
-        | GraphBuilder::Index { .. }
-        | GraphBuilder::FrontierSource { .. }
-        | GraphBuilder::BindingSource { .. } => Ok(()),
+        contains_collect.insert(
+            node as *const GraphBuilder as usize,
+            children_contain_collect || matches!(node, GraphBuilder::CollectBy { .. }),
+        );
     }
+    Ok(())
 }
 
 pub(super) fn project_field_expr(

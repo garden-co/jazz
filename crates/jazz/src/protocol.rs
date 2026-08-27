@@ -10,10 +10,11 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
+use groove::large_values::Locator;
 use groove::records::{OwnedRecord, Value};
 
 use crate::ids::{
-    AuthorId, MigrationLensId, NodeUuid, RowUuid, SchemaLineagePublicationId, SchemaVersionId,
+    AuthorSubject, MigrationLensId, NodeUuid, RowUuid, SchemaLineagePublicationId, SchemaVersionId,
 };
 use crate::query::{BindingId, Query, RelationQuery, ShapeId};
 use crate::schema::{JazzSchema, TableSchema};
@@ -25,10 +26,16 @@ use crate::tx::{DeletionEvent, DurabilityTier, Fate, Snapshot, Transaction, TxId
 /// Messages exchanged between Jazz nodes.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum SyncMessage {
+    /// Auxiliary, non-canonical requests for immutable Groove chunks that are
+    /// absent from the receiver's local chunk storage.
+    ChunkRequestBatch(ChunkRequestBatch),
+    /// Auxiliary responses to a chunk request batch. These carry storage
+    /// objects, never row facts or authorization grants.
+    ChunkResponseBatch(ChunkResponseBatch),
     /// Trusted backend assertion of process-local auth claims for a write subject.
     SessionClaims {
         /// Identity these claims describe.
-        identity: AuthorId,
+        identity: AuthorSubject,
         /// Claims used by policy evaluation for this identity.
         claims: BTreeMap<String, Value>,
     },
@@ -76,14 +83,14 @@ pub enum SyncMessage {
     /// Publish an immutable schema-version payload.
     PublishSchema {
         /// Authenticated catalogue admin.
-        author: AuthorId,
+        author: AuthorSubject,
         /// Schema payload.
         schema: Box<SchemaVersion>,
     },
     /// Atomically publish a non-genesis schema with its lineage-defining lens.
     PublishSchemaWithLens {
         /// Authenticated catalogue admin.
-        author: AuthorId,
+        author: AuthorSubject,
         /// Database-wide authoritative catalogue ordering position.
         catalogue_seq: u64,
         /// Complete schema-and-lineage publication bundle.
@@ -92,66 +99,21 @@ pub enum SyncMessage {
     /// Publish an immutable migration lens payload.
     PublishLens {
         /// Authenticated catalogue admin.
-        author: AuthorId,
+        author: AuthorSubject,
         /// Lens payload.
         lens: MigrationLens,
     },
     /// Set the current write-schema pointer.
     SetCurrentWriteSchema {
         /// Authenticated catalogue admin.
-        author: AuthorId,
+        author: AuthorSubject,
         /// Core-ordered pointer payload.
         pointer: CurrentWriteSchema,
     },
     /// Catalogue-lane acknowledgement.
     CatalogueAck(CatalogueAck),
     /// Downstream current-row view update.
-    ViewUpdate {
-        /// Query binding result set addressed by this update.
-        subscription: SubscriptionKey,
-        /// Core-assigned `GlobalTime` through which the canonical binding view
-        /// was evaluated. It is durable known-state evidence, reusable after
-        /// reconnecting to an edge serving the same authoritative database
-        /// lineage for payload dedup/repair; it is not evidence that an
-        /// upstream connection is currently live and cannot alone settle a
-        /// subscription.
-        settled_through: GlobalTime,
-        /// Whether receiver result_set should be reset first.
-        reset_result_set: bool,
-        /// General carrier stream for singleton bundles and packed runs.
-        ///
-        /// Receivers validate this stream and apply packed runs directly.
-        /// Legacy/test paths may still expand carriers into `version_bundles`.
-        version_carriers: Vec<VersionCarrier>,
-        /// Version bundles not previously shipped on the peer.
-        ///
-        /// Partial bundles may contain only the versions that contribute to this
-        /// update. Exclusive bundles are view-atomic: they contain all versions
-        /// required by this subscription view, not necessarily all transaction writes.
-        version_bundles: Vec<VersionBundle>,
-        /// Peer-scoped payload coverage that may be referenced instead of
-        /// resending bytes.
-        ///
-        /// The currently implemented tier is complete transaction payload
-        /// coverage only. It does not mean the peer knows every concrete row
-        /// version relevant to a partial transaction, nor that an exclusive
-        /// transaction is complete for this subscription view. Partial/view-
-        /// scoped payloads remain explicit bundles until the protocol grows
-        /// finer coverage refs.
-        peer_payload_inventory: PeerPayloadInventory,
-        /// Typed result membership additions for the subscription.
-        result_member_adds: Vec<ResultMemberEntry>,
-        /// Typed result membership removals for the subscription.
-        result_member_removes: Vec<ResultMemberEntry>,
-        /// Terminal-owned structural edits, addressed by stable result keys and
-        /// typed paths. These are applied after an authoritative reset or the
-        /// preceding update on this FIFO link.
-        terminal_operations: Vec<groove::ivm::TerminalOperation>,
-        /// Non-row program fact additions, such as relation edges.
-        program_fact_adds: Vec<ProgramFactEntry>,
-        /// Non-row program fact removals, such as relation edges.
-        program_fact_removes: Vec<ProgramFactEntry>,
-    },
+    ViewUpdate(ViewUpdatePayload),
     /// Repair-lane request for exact row-version payloads referenced by known-state dedup.
     FetchRowVersions {
         /// Exact version identities requested by the receiver.
@@ -223,7 +185,11 @@ pub enum SyncMessage {
         /// Total number of authority clauses in this hydration.
         clause_count: u16,
         /// Ordinary settlement-bearing `ViewUpdate` payload.
-        view: Box<SyncMessage>,
+        ///
+        /// This deliberately is not a `SyncMessage`: an authority scope view
+        /// has exactly one wrapper around a view update, never another scope
+        /// wrapper.
+        view: ViewUpdatePayload,
     },
     /// Aggregate proof for every clause sent in an authority scope view set.
     AuthorizationScopeAggregateReceipt {
@@ -247,6 +213,200 @@ pub enum SyncMessage {
         /// Final authority result for the zero-support action.
         advice: PermissionAdvice,
     },
+    /// Begin a root-first push upload with its complete immutable descriptor.
+    ChunkUploadStart(ChunkUploadStart),
+    /// Supply one bounded set of nodes requested by the receiver.
+    ChunkUploadNodes(ChunkUploadNodes),
+    /// Receiver acknowledgement for a pushed upload.
+    ChunkUploadResult(ChunkUploadResult),
+}
+
+/// Shared payload for ordinary and authorization-scope view updates.
+///
+/// [`SyncMessage::ViewUpdate`] carries it directly, while
+/// [`SyncMessage::AuthorizationScopeView`] adds scope metadata around the same
+/// payload. Keeping the payload separate from `SyncMessage` makes recursive
+/// authorization-scope wrappers impossible to construct and decode.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct ViewUpdatePayload {
+    /// Target subscription whose result set this update changes.
+    pub subscription: SubscriptionKey,
+    /// Authority cut through which this view has settled.
+    pub settled_through: GlobalTime,
+    /// Whether the receiver must replace its current result membership.
+    pub reset_result_set: bool,
+    /// Compact carriers for versions referenced by this update.
+    pub version_carriers: Vec<VersionCarrier>,
+    /// Explicit version bundles required by this update.
+    pub version_bundles: Vec<VersionBundle>,
+    /// Per-peer payload coverage and authorization progress.
+    pub peer_payload_inventory: PeerPayloadInventory,
+    /// Result members added by the update.
+    pub result_member_adds: Vec<ResultMemberEntry>,
+    /// Result members removed by the update.
+    pub result_member_removes: Vec<ResultMemberEntry>,
+    /// Terminal-owned structural result edits.
+    pub terminal_operations: Vec<groove::ivm::TerminalOperation>,
+    /// Program facts added by this update.
+    pub program_fact_adds: Vec<ProgramFactEntry>,
+    /// Program facts removed by this update.
+    pub program_fact_removes: Vec<ProgramFactEntry>,
+}
+
+impl ViewUpdatePayload {
+    /// Extracts the shared payload from an ordinary view-update message.
+    pub fn from_view_update(message: SyncMessage) -> Option<Self> {
+        match message {
+            SyncMessage::ViewUpdate(payload) => Some(payload),
+            _ => None,
+        }
+    }
+
+    /// Wraps this payload in an ordinary view-update message.
+    pub fn into_view_update(self) -> SyncMessage {
+        SyncMessage::ViewUpdate(self)
+    }
+}
+
+/// Bounded batch of exact immutable-chunk requests on one peer link.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ChunkRequestBatch {
+    /// Exact requests coalesced for one transport frame.
+    #[serde(deserialize_with = "deserialize_chunk_requests")]
+    pub requests: Vec<ChunkRequestEntry>,
+}
+
+fn deserialize_chunk_requests<'de, D>(deserializer: D) -> Result<Vec<ChunkRequestEntry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct ChunkRequestsVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for ChunkRequestsVisitor {
+        type Value = Vec<ChunkRequestEntry>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                formatter,
+                "at most {} chunk requests",
+                crate::protocol_limits::MAX_CHUNK_REQUEST_BATCH_ENTRIES
+            )
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let declared = sequence.size_hint();
+            if declared.is_some_and(|count| {
+                count > crate::protocol_limits::MAX_CHUNK_REQUEST_BATCH_ENTRIES
+            }) {
+                return Err(<A::Error as serde::de::Error>::custom(
+                    "chunk request batch exceeds cardinality limit",
+                ));
+            }
+            let mut requests = Vec::with_capacity(
+                declared
+                    .unwrap_or_default()
+                    .min(crate::protocol_limits::MAX_CHUNK_REQUEST_BATCH_ENTRIES),
+            );
+            while let Some(request) = sequence.next_element()? {
+                if requests.len() >= crate::protocol_limits::MAX_CHUNK_REQUEST_BATCH_ENTRIES {
+                    return Err(<A::Error as serde::de::Error>::custom(
+                        "chunk request batch exceeds cardinality limit",
+                    ));
+                }
+                requests.push(request);
+            }
+            Ok(requests)
+        }
+    }
+
+    deserializer.deserialize_seq(ChunkRequestsVisitor)
+}
+
+/// One hop-local request. `remaining_hops` is decremented before forwarding.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ChunkRequestEntry {
+    /// Identifier meaningful only on this peer hop.
+    pub request_id: u64,
+    /// Exact random 256-bit retrieval capability. Storage adapters derive
+    /// their private key layout from this value internally.
+    pub locator: Locator,
+    /// Hash Groove must verify before accepting returned bytes.
+    pub expected_hash: [u8; 32],
+    /// Maximum remaining forwarding edges.
+    pub remaining_hops: u8,
+}
+
+/// Bounded batch of replies addressed by the request id allocated on this hop.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ChunkResponseBatch {
+    /// Replies coalesced for one transport frame.
+    pub responses: Vec<ChunkResponseEntry>,
+}
+
+/// One hop-local immutable-chunk reply.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ChunkResponseEntry {
+    /// Request identifier allocated by the receiver of this response.
+    pub request_id: u64,
+    /// Storage result for the exact requested locator and hash.
+    pub result: ChunkResponse,
+}
+
+/// Result of one auxiliary immutable-chunk request.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum ChunkResponse {
+    /// Exact stored bytes; Groove still verifies the expected hash.
+    Found(Vec<u8>),
+    /// This route cannot supply the requested object.
+    Unavailable,
+    /// The route may become available after the suggested delay.
+    Retryable {
+        /// Minimum suggested retry delay.
+        retry_after_ms: u32,
+    },
+}
+
+/// Root-first upload announcement. The descriptor, already carried by the
+/// later transaction, is the protocol identity.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ChunkUploadStart {
+    /// Exact immutable value whose root the receiver checks first.
+    pub value_ref: groove::large_values::LargeValueRef,
+}
+
+/// A bounded collection of receiver-requested immutable Groove nodes.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ChunkUploadNodes {
+    /// Descriptor whose current missing frontier requested these nodes.
+    pub value_ref: groove::large_values::LargeValueRef,
+    /// Authenticated immutable nodes, bounded by the semantic frame limit.
+    pub chunks: Vec<groove::large_values::StagedChunk>,
+}
+
+/// Hop-local upload outcome. A rejected upload must be retried from its first
+/// batch; no referencing row may be sent before `Staged`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ChunkUploadResult {
+    /// Descriptor whose derived receiver state changed.
+    pub value_ref: groove::large_values::LargeValueRef,
+    /// Current receiver outcome.
+    pub status: ChunkUploadStatus,
+}
+
+/// Receiver outcome for one push-upload step.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum ChunkUploadStatus {
+    /// Authenticated nodes still absent from local Groove storage.
+    Need(Vec<groove::large_values::NodeRef>),
+    /// Groove derived graph closure and created a persisted retainer claim.
+    Staged,
+    /// Jazz rejected incoming bytes under its deployment policy.
+    RateLimited,
+    /// The descriptor or a supplied node was invalid.
+    Rejected,
 }
 
 /// Opaque identity for one permission-advice exchange.
@@ -312,7 +472,7 @@ pub struct AuthorizationSupportScopeKey {
     /// Compiled policy support shape, including the selected operation clause.
     pub support_shape_digest: [u8; 32],
     /// Authenticated subject, never caller-supplied on a serving link.
-    pub subject: AuthorId,
+    pub subject: AuthorSubject,
     /// Canonical digest of authenticated claims.
     pub claims_digest: [u8; 32],
     /// Compiled policy shape and selected policy epoch.
@@ -349,7 +509,7 @@ pub struct AuthorizationScopeReceipt {
     /// Authenticated authority identity that issued this receipt.
     pub authority: [u8; 16],
     /// Authenticated subscriber link to which this proof is restricted.
-    pub link: [u8; 16],
+    pub link: AuthorSubject,
     /// Authority-local connection/process epoch.
     pub authority_epoch: u64,
     /// Authenticated-claims revision paired with this proof.
@@ -404,40 +564,53 @@ impl SyncMessage {
             | Self::AuthorizationScopeDecision { .. } => {
                 crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
             }
+            Self::ChunkRequestBatch(_)
+            | Self::ChunkResponseBatch(_)
+            | Self::ChunkUploadStart(_)
+            | Self::ChunkUploadNodes(_)
+            | Self::ChunkUploadResult(_) => crate::wire::FEATURE_AUXILIARY_CHUNKS,
             _ => crate::wire::FEATURE_NONE,
         }
     }
 
     /// Validate any packed view-update carrier runs in this message.
     pub fn validate_version_carriers(&self) -> Result<(), VersionBundleRunError> {
+        self.carried_view_update().map_or(Ok(()), |view| {
+            validate_version_carrier_runs(&view.version_carriers)
+        })
+    }
+
+    fn carried_view_update(&self) -> Option<&ViewUpdatePayload> {
         match self {
-            Self::ViewUpdate {
-                version_carriers, ..
-            } => {
-                for carrier in version_carriers {
-                    if let VersionCarrier::Run(run) = carrier {
-                        run.validate()?;
-                    }
-                }
-                Ok(())
-            }
-            _ => Ok(()),
+            Self::ViewUpdate(view) | Self::AuthorizationScopeView { view, .. } => Some(view),
+            _ => None,
         }
     }
 
     /// Expand packed view-update carriers into `version_bundles` for legacy paths/tests.
     pub fn expand_version_carriers_for_receive(mut self) -> Result<Self, VersionBundleRunError> {
-        if let Self::ViewUpdate {
+        if let Self::ViewUpdate(ViewUpdatePayload {
             version_carriers,
             version_bundles,
             ..
-        } = &mut self
+        }) = &mut self
         {
             version_bundles.extend(expand_version_carriers(version_carriers)?);
             version_carriers.clear();
         }
         Ok(self)
     }
+}
+
+fn validate_version_carrier_runs(
+    version_carriers: &[VersionCarrier],
+) -> Result<(), VersionBundleRunError> {
+    for carrier in version_carriers {
+        if let VersionCarrier::Run(run) = carrier {
+            run.validate()?;
+        }
+    }
+    Ok(())
 }
 
 /// Exact row-version identity used by known-state repair requests.
@@ -556,10 +729,10 @@ impl VersionRecord {
         schema_version: SchemaVersionId,
         row_uuid: RowUuid,
         parents: Vec<TxId>,
-        created_by: AuthorId,
-        created_at: TxTime,
-        updated_by: AuthorId,
-        updated_at: TxTime,
+        created_by: AuthorSubject,
+        created_at_ms: u64,
+        updated_by: AuthorSubject,
+        updated_at_ms: u64,
         cells_by_position: &[Option<Value>],
         deletion: Option<DeletionEvent>,
     ) -> Result<Self, groove::records::Error> {
@@ -568,10 +741,10 @@ impl VersionRecord {
         let values = [
             Value::Uuid(row_uuid.0),
             Value::Array(parents.into_iter().map(tx_id_value).collect()),
-            Value::Uuid(created_by.0),
-            Value::U64(created_at.0),
-            Value::Uuid(updated_by.0),
-            Value::U64(updated_at.0),
+            Value::String(created_by.canonical().to_owned()),
+            Value::U64(created_at_ms),
+            Value::String(updated_by.canonical().to_owned()),
+            Value::U64(updated_at_ms),
             Value::Nullable(deletion.map(|deletion| {
                 Box::new(Value::EnumTag(match deletion {
                     DeletionEvent::Deleted => 0,
@@ -603,10 +776,10 @@ impl VersionRecord {
         schema_version: SchemaVersionId,
         row_uuid: RowUuid,
         parents: Vec<TxId>,
-        created_by: AuthorId,
-        created_at: TxTime,
-        updated_by: AuthorId,
-        updated_at: TxTime,
+        created_by: AuthorSubject,
+        created_at_ms: u64,
+        updated_by: AuthorSubject,
+        updated_at_ms: u64,
         cells: &BTreeMap<String, V>,
         deletion: Option<DeletionEvent>,
     ) -> Result<Self, groove::records::Error> {
@@ -621,9 +794,9 @@ impl VersionRecord {
             row_uuid,
             parents,
             created_by,
-            created_at,
+            created_at_ms,
             updated_by,
-            updated_at,
+            updated_at_ms,
             &positional,
             deletion,
         )
@@ -677,43 +850,41 @@ impl VersionRecord {
     }
 
     /// Original author for this logical row.
-    pub fn created_by(&self) -> AuthorId {
-        AuthorId(
+    pub fn created_by(&self) -> AuthorSubject {
+        AuthorSubject::from_canonical(
             self.record
                 .borrowed()
-                .get_uuid(WireRowRecord::FIELD_CREATED_BY_IDX)
+                .get_str(WireRowRecord::FIELD_CREATED_BY_IDX)
                 .expect("valid wire created_by"),
         )
+        .expect("canonical wire created_by")
     }
 
-    /// Original creation timestamp for this logical row.
-    pub fn created_at(&self) -> TxTime {
-        TxTime(
-            self.record
-                .borrowed()
-                .get_u64(WireRowRecord::FIELD_CREATED_AT_IDX)
-                .expect("valid wire created_at"),
-        )
+    /// Original creation timestamp for this logical row in Unix milliseconds.
+    pub fn created_at_ms(&self) -> u64 {
+        self.record
+            .borrowed()
+            .get_u64(WireRowRecord::FIELD_CREATED_AT_IDX)
+            .expect("valid wire created_at_ms")
     }
 
     /// Author of this row version.
-    pub fn updated_by(&self) -> AuthorId {
-        AuthorId(
+    pub fn updated_by(&self) -> AuthorSubject {
+        AuthorSubject::from_canonical(
             self.record
                 .borrowed()
-                .get_uuid(WireRowRecord::FIELD_UPDATED_BY_IDX)
+                .get_str(WireRowRecord::FIELD_UPDATED_BY_IDX)
                 .expect("valid wire updated_by"),
         )
+        .expect("canonical wire updated_by")
     }
 
-    /// Update timestamp for this row version.
-    pub fn updated_at(&self) -> TxTime {
-        TxTime(
-            self.record
-                .borrowed()
-                .get_u64(WireRowRecord::FIELD_UPDATED_AT_IDX)
-                .expect("valid wire updated_at"),
-        )
+    /// Update timestamp for this row version in Unix milliseconds.
+    pub fn updated_at_ms(&self) -> u64 {
+        self.record
+            .borrowed()
+            .get_u64(WireRowRecord::FIELD_UPDATED_AT_IDX)
+            .expect("valid wire updated_at_ms")
     }
 
     /// Cell value by application-schema column position.
@@ -740,6 +911,14 @@ impl VersionRecord {
             .nullable_value()
             .ok()
             .flatten()
+    }
+
+    pub(crate) fn application_cell_count(&self) -> usize {
+        self.record
+            .descriptor()
+            .fields()
+            .len()
+            .saturating_sub(WireRowRecord::USER_CELLS)
     }
 }
 
@@ -778,10 +957,10 @@ groove::define_record! {
     struct WireRowRecord {
         0 => row_uuid: RowUuid,
         1 => parents: ParentRefs,
-        2 => created_by: AuthorId,
-        3 => created_at: TxTime,
-        4 => updated_by: AuthorId,
-        5 => updated_at: TxTime,
+        2 => created_by: AuthorSubject,
+        3 => created_at: u64,
+        4 => updated_by: AuthorSubject,
+        5 => updated_at: u64,
         6 => _deletion: Option<Value>,
         .. user_cells,
     }
@@ -2841,6 +3020,15 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
                 "union-valued values are an internal Groove representation, not a Jazz protocol value"
             )
         }
+        Value::Large(value) => {
+            bytes.push(15);
+            let encoded = groove::large_values::encode_stored_scalar(
+                value.kind,
+                &groove::large_values::StoredScalar::Chunked(value.clone()),
+            )
+            .expect("admitted large descriptor has canonical encoding");
+            put_bytes(bytes, &encoded);
+        }
     }
 }
 
@@ -3176,10 +3364,10 @@ mod tests {
             schema_id(1),
             RowUuid::from_bytes([1; 16]),
             Vec::new(),
-            AuthorId::SYSTEM,
-            TxTime(1),
-            AuthorId::SYSTEM,
-            TxTime(1),
+            AuthorSubject::SYSTEM,
+            1,
+            AuthorSubject::SYSTEM,
+            1,
             &BTreeMap::from([("title".to_owned(), Value::String("x".to_owned()))]),
             None,
         )

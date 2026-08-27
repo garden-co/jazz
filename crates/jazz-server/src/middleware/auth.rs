@@ -898,24 +898,24 @@ pub fn resolve_verified_jwt_session(
     let issuer = verified
         .issuer
         .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty());
+        .filter(|v| jazz::tools::identity::principal_is_nonempty(v))
+        .ok_or_else(|| UnauthenticatedResponse::invalid("JWT iss claim is required"))?
+        .to_owned();
 
     let claims = match verified.claims {
         serde_json::Value::Object(mut map) => {
             map.insert("subject".to_string(), serde_json::json!(subject));
-            if let Some(iss) = issuer {
-                map.insert("issuer".to_string(), serde_json::json!(iss));
-            }
+            map.insert("issuer".to_string(), serde_json::json!(issuer.clone()));
             serde_json::Value::Object(map)
         }
         _ => serde_json::json!({
             "subject": subject,
-            "issuer": issuer,
+            "issuer": issuer.clone(),
         }),
     };
 
     Ok(Session {
+        issuer,
         user_id: subject,
         claims,
         auth_mode: jazz::tools::AuthMode::External,
@@ -1010,10 +1010,10 @@ pub async fn extract_session(
     if let Some(token) = token {
         // Self-signed JWT path (local-first or anonymous).
         //
-        // Anonymous is always accepted at the transport layer — apps gate
-        // anonymous reads/writes via the permissions DSL
-        // (`session.where({ authMode: "anonymous" })`) and Task 6's write-deny
-        // middleware. Local-first still requires the explicit config opt-in.
+        // Anonymous is accepted at the transport layer so public reads can
+        // flow. The core fate authority structurally rejects its writes before
+        // table-policy evaluation; apps still gate anonymous reads through the
+        // permissions DSL. Local-first requires the explicit config opt-in.
         if let Some(issuer) = is_jazz_self_signed_identity_proof(token) {
             if issuer == identity::LOCAL_FIRST_ISSUER && !config.allow_local_first_auth {
                 return Err(UnauthenticatedResponse::disabled(
@@ -1031,6 +1031,7 @@ pub async fn extract_session(
                 _ => jazz::tools::AuthMode::LocalFirst,
             };
             return Ok(Some(Session {
+                issuer: verified.issuer.to_owned(),
                 user_id: verified.user_id,
                 claims: serde_json::Value::Object(serde_json::Map::new()),
                 auth_mode,
@@ -1172,7 +1173,7 @@ mod tests {
             assert!(
                 resolve_verified_jwt_session(VerifiedJwt {
                     subject: subject.to_owned(),
-                    issuer: None,
+                    issuer: Some("https://issuer.jazz.test".to_owned()),
                     claims: serde_json::json!({}),
                     exp: None,
                 })
@@ -1183,7 +1184,7 @@ mod tests {
         let subject = " WorkOS_User_01J8Y3K4M5N6P7Q8R9S0T1U2V3 ";
         let session = resolve_verified_jwt_session(VerifiedJwt {
             subject: subject.to_owned(),
-            issuer: None,
+            issuer: Some("https://issuer.jazz.test".to_owned()),
             claims: serde_json::json!({}),
             exp: None,
         })
@@ -1197,7 +1198,7 @@ mod tests {
         let jwks = make_hs256_jwks(TEST_JWKS_KID, TEST_JWKS_SECRET);
         let claims = JwtClaims {
             sub: "user-123".to_string(),
-            iss: None,
+            iss: Some("https://issuer.jazz.test".to_owned()),
             claims: serde_json::json!({"role": "admin"}),
             exp: None,
             iat: None,
@@ -1243,7 +1244,8 @@ mod tests {
 
     #[test]
     fn test_decode_session_header() {
-        let session = Session::new("user-456").with_claims(serde_json::json!({"teams": ["eng"]}));
+        let session = Session::new("urn:jazz:test", "user-456")
+            .with_claims(serde_json::json!({"teams": ["eng"]}));
         let json = serde_json::to_string(&session).unwrap();
         let b64 = base64::engine::general_purpose::STANDARD.encode(&json);
 
@@ -1263,7 +1265,7 @@ mod tests {
         let config = make_test_config();
         let mut headers = HeaderMap::new();
 
-        let session = Session::new("impersonated-user");
+        let session = Session::new("urn:jazz:test", "impersonated-user");
         let session_json = serde_json::to_string(&session).unwrap();
         let session_b64 = base64::engine::general_purpose::STANDARD.encode(&session_json);
 
@@ -1285,7 +1287,7 @@ mod tests {
         let config = make_test_config();
         let mut headers = HeaderMap::new();
 
-        let session = Session::new("user");
+        let session = Session::new("urn:jazz:test", "user");
         let session_json = serde_json::to_string(&session).unwrap();
         let session_b64 = base64::engine::general_purpose::STANDARD.encode(&session_json);
 
@@ -1305,7 +1307,7 @@ mod tests {
 
         let claims = JwtClaims {
             sub: "jwt-user".to_string(),
-            iss: None,
+            iss: Some("https://issuer.jazz.test".to_owned()),
             claims: serde_json::json!({}),
             exp: None,
             iat: None,
@@ -1377,13 +1379,43 @@ mod tests {
         assert_eq!(session.claims["issuer"], "https://issuer.example");
     }
 
+    #[test]
+    fn resolve_verified_jwt_session_rejects_blank_issuer_and_preserves_exact_bytes() {
+        for issuer in [
+            None,
+            Some("".to_owned()),
+            Some(" \t\n\x0b\x0c\r ".to_owned()),
+        ] {
+            assert!(
+                resolve_verified_jwt_session(VerifiedJwt {
+                    subject: "user".to_owned(),
+                    issuer,
+                    claims: serde_json::json!({}),
+                    exp: None,
+                })
+                .is_err(),
+                "missing or ASCII-whitespace-only issuer must be rejected"
+            );
+        }
+
+        let session = resolve_verified_jwt_session(VerifiedJwt {
+            subject: "user".to_owned(),
+            issuer: Some(" https://issuer.example ".to_owned()),
+            claims: serde_json::json!({}),
+            exp: None,
+        })
+        .expect("non-empty issuer is retained exactly");
+        assert_eq!(session.issuer, " https://issuer.example ");
+        assert_eq!(session.claims["issuer"], " https://issuer.example ");
+    }
+
     #[tokio::test]
     async fn test_extract_session_backend_takes_priority() {
         let config = make_test_config();
         let mut headers = HeaderMap::new();
 
         // Add both backend and JWT auth - backend should win
-        let session = Session::new("backend-user");
+        let session = Session::new("https://issuer.jazz.test", "backend-user");
         let session_json = serde_json::to_string(&session).unwrap();
         let session_b64 = base64::engine::general_purpose::STANDARD.encode(&session_json);
 

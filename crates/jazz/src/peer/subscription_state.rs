@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use groove::ivm::MultisinkSubscription;
 
-use super::super::ids::AuthorId;
+use super::super::ids::AuthorSubject;
 use super::super::node::PreparedQueryPlanHandle;
 use super::super::node::maintained_subscription_view::{
     MaintainedSubscriptionView, MaintainedTerminalSchemas,
@@ -95,14 +95,14 @@ pub enum PeerRole {
     /// Link serving one terminated client identity.
     ClientLink {
         /// Client author identity terminated by this link.
-        identity: AuthorId,
+        identity: AuthorSubject,
     },
 }
 
 impl PeerRole {
-    pub(super) fn identity(self) -> AuthorId {
+    pub(super) fn identity(self) -> AuthorSubject {
         match self {
-            Self::Relay => AuthorId::SYSTEM,
+            Self::Relay => AuthorSubject::SYSTEM,
             Self::ClientLink { identity } => identity,
         }
     }
@@ -218,7 +218,7 @@ pub(super) struct DeferredEdgeFate {
     pub(super) tx: Transaction,
     pub(super) versions: Vec<VersionRecord>,
     pub(super) now_ms: u64,
-    pub(super) permission_identity: AuthorId,
+    pub(super) permission_identity: AuthorSubject,
     pub(super) scope_subscriptions: Vec<SubscriptionKey>,
 }
 

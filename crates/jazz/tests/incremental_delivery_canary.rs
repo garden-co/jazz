@@ -14,7 +14,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{ArraySubquery, Query};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -135,7 +135,7 @@ fn open_db_with_schema(scale: usize, schema: JazzSchema) -> Db<TestStorage> {
             TestStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([scale as u8; 16]),
-                author: AuthorId::from_bytes([0xa1; 16]),
+                author: AuthorSubject::for_test_bytes([0xa1; 16]),
             },
         )
         .with_id_source(SeededRowIdSource::new(scale as u64 + 1)),
@@ -152,7 +152,7 @@ fn open_history_complete_db_with_schema(scale: usize, schema: JazzSchema) -> Db<
             TestStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([(scale as u8).wrapping_add(0x40); 16]),
-                author: AuthorId::SYSTEM,
+                author: AuthorSubject::SYSTEM,
             },
         )
         .with_id_source(SeededRowIdSource::new(scale as u64 + 10_000)),
@@ -174,7 +174,7 @@ fn open_rocks_db_with_schema(
             storage,
             DbIdentity {
                 node: NodeUuid::from_bytes([scale as u8; 16]),
-                author: AuthorId::from_bytes([0xa1; 16]),
+                author: AuthorSubject::for_test_bytes([0xa1; 16]),
             },
         )
         .with_id_source(SeededRowIdSource::new(scale as u64 + 1)),
@@ -198,9 +198,8 @@ fn relation_query() -> Query {
 
 fn seed_relation_fixture(db: &Db<TestStorage>, child_rows: usize) -> RowUuid {
     let parent = row(1);
-    block_on(db.insert_with_id(
+    block_on(db.insert(
         "parents",
-        parent,
         BTreeMap::from([
             (
                 "label".to_owned(),
@@ -208,20 +207,41 @@ fn seed_relation_fixture(db: &Db<TestStorage>, child_rows: usize) -> RowUuid {
             ),
             ("ordinal".to_owned(), Value::I32(0)),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(parent),
+            ..Default::default()
+        },
     ))
     .expect("insert parent");
 
-    for index in 0..child_rows {
-        block_on(db.insert_with_id(
-            "children",
-            row(1_000 + index as u64),
-            BTreeMap::from([
-                ("parent_id".to_owned(), Value::Uuid(parent.0)),
-                ("label".to_owned(), Value::String(format!("child-{index}"))),
-                ("ordinal".to_owned(), Value::I32(index as i32)),
-            ]),
-        ))
-        .unwrap_or_else(|err| panic!("insert child {index}: {err}"));
+    // The canary measures a change against a large *current relation*, not
+    // admission work for 20,000 independent historical transactions. Seed in
+    // bounded ordinary mergeable transactions so fixture construction does not
+    // consume the CI watchdog before the maintained-view path is exercised.
+    let mut next = 0usize;
+    while next < child_rows {
+        let start = next;
+        let end = (start + 500).min(child_rows);
+        block_on(db.transaction(async |tx| {
+            for index in start..end {
+                tx.insert(
+                    "children",
+                    BTreeMap::from([
+                        ("parent_id".to_owned(), Value::Uuid(parent.0)),
+                        ("label".to_owned(), Value::String(format!("child-{index}"))),
+                        ("ordinal".to_owned(), Value::I32(index as i32)),
+                    ]),
+                    jazz::db::InsertOptions {
+                        row_id: Some(row(1_000 + index as u64)),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            }
+            Ok(())
+        }))
+        .unwrap_or_else(|err| panic!("insert children {start}..{end}: {err}"));
+        next = end;
     }
 
     parent
@@ -232,7 +252,7 @@ fn seed_reset_batch_fixture(db: &Db<TestStorage>, rows: usize) {
         db.seed_settled_mergeable_for_bootstrap(
             "items",
             row(30_000_000 + index as u64),
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             BTreeMap::from([
                 ("label".to_owned(), Value::String(format!("item-{index}"))),
                 ("ordinal".to_owned(), Value::I32(index as i32)),
@@ -319,9 +339,8 @@ fn measure_single_child_insert(scale: usize) -> AllocSnapshot {
     );
 
     reset_alloc_counter();
-    block_on(db.insert_with_id(
+    block_on(db.insert(
         "children",
-        row(10_000_000 + scale as u64),
         BTreeMap::from([
             ("parent_id".to_owned(), Value::Uuid(parent.0)),
             (
@@ -330,6 +349,10 @@ fn measure_single_child_insert(scale: usize) -> AllocSnapshot {
             ),
             ("ordinal".to_owned(), Value::I32((scale + 1) as i32)),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(row(10_000_000 + scale as u64)),
+            ..Default::default()
+        },
     ))
     .expect("insert measured child");
     expect_parent_snapshot(
@@ -342,8 +365,12 @@ fn measure_single_child_insert(scale: usize) -> AllocSnapshot {
 
 #[test]
 fn maintained_relation_include_single_row_changes_are_scale_independent() {
-    let small = measure_single_child_insert(1_000);
-    let large = measure_single_child_insert(20_000);
+    // Preserve the 20x scale gap that exposes accumulated-state work while
+    // keeping initial hydration below the suite watchdog. The only measured
+    // operation is the one-row update below, so a larger fixture merely made
+    // the canary's unmeasured setup compete with unrelated CI work.
+    let small = measure_single_child_insert(250);
+    let large = measure_single_child_insert(5_000);
 
     // This canary is intentionally about mechanism, not observable correctness.
     // A 20x larger accumulated include relation receiving the same one-row
@@ -366,7 +393,7 @@ fn measure_post_reset_single_insert(existing_rows: usize) -> AllocSnapshot {
 
     let (client_transport, server_transport) = duplex();
     let _upstream = jazz::db::block_on(client.connect_upstream(client_transport));
-    let _subscriber = server.accept_subscriber(server_transport, AuthorId::SYSTEM);
+    let _subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
 
     let prepared = client
         .prepare_query(&Query::from("items"))
@@ -384,7 +411,7 @@ fn measure_post_reset_single_insert(existing_rows: usize) -> AllocSnapshot {
         .seed_settled_mergeable_for_bootstrap(
             "items",
             row(90_000_000 + existing_rows as u64),
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             BTreeMap::from([
                 (
                     "label".to_owned(),
@@ -439,13 +466,16 @@ fn write_cells(parent: RowUuid, index: usize) -> BTreeMap<String, Value> {
 
 fn seed_rocks_write_fixture(db: &Db<RocksDbStorage>, child_rows: usize) -> RowUuid {
     let parent = row(50_000_000);
-    block_on(db.insert_with_id(
+    block_on(db.insert(
         "parents",
-        parent,
         BTreeMap::from([
             ("label".to_owned(), Value::String("write-parent".to_owned())),
             ("ordinal".to_owned(), Value::I32(0)),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(parent),
+            ..Default::default()
+        },
     ))
     .expect("insert write parent");
 
@@ -455,10 +485,13 @@ fn seed_rocks_write_fixture(db: &Db<RocksDbStorage>, child_rows: usize) -> RowUu
         let end = (start + 200).min(child_rows);
         block_on(db.transaction(async |tx| {
             for index in start..end {
-                tx.insert_with_id(
+                tx.insert(
                     "children",
-                    row(60_000_000 + index as u64),
                     write_cells(parent, index),
+                    jazz::db::InsertOptions {
+                        row_id: Some(row(60_000_000 + index as u64)),
+                        ..Default::default()
+                    },
                 )
                 .await?;
             }
@@ -480,8 +513,13 @@ fn measure_rocks_write_transaction(existing_rows: usize) -> TxMeasurement {
     block_on(db.transaction(async |tx| {
         for offset in 0..200 {
             let index = start_index + offset;
-            tx.update("children", row(index as u64), write_cells(parent, index))
-                .await?;
+            tx.update(
+                "children",
+                row(index as u64),
+                write_cells(parent, index),
+                Default::default(),
+            )
+            .await?;
         }
         Ok(())
     }))

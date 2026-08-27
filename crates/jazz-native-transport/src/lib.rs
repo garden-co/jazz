@@ -4,14 +4,14 @@ use std::time::Duration;
 
 use futures::{SinkExt as _, StreamExt as _};
 use jazz::db::{ConnectionSessionContext, WireTransportAdapter};
-use jazz::ids::{AuthorId, NodeUuid};
+use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::protocol_limits::{MAX_WIRE_BATCH_FRAMES, MAX_WIRE_FRAME_BYTES, validate_wire_frame_len};
 use jazz::wire::{
     FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError, WIRE_PROTOCOL_VERSION, WireAuthorityEndpoint,
     WireError, WireFrame, WireHello, WirePeerRole, WireTransport, current_wire_features,
     decode_frame, encode_frame, negotiate_wire,
 };
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::{Notify, Semaphore, mpsc};
 use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::Message;
@@ -38,6 +38,7 @@ const POSTCARD_BATCH_LENGTH_RESERVE: usize = 5;
 /// streamed through as its consumer drains rather than rejected mid-message.
 const WS_CLIENT_INBOUND_FRAME_SLOTS: usize = 64;
 const WS_CLIENT_MAX_QUEUED_BYTES: usize = 8 << 20;
+const WS_CLIENT_MAX_OUTBOUND_QUEUED_BYTES: usize = 8 << 20;
 static NEXT_CLIENT_CONNECTION_EPOCH: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
@@ -85,7 +86,7 @@ pub struct WebSocketTransport {
     inbound: Arc<Mutex<mpsc::Receiver<InboundFrame>>>,
     inbound_error: Arc<Mutex<Option<String>>>,
     inbound_notify: Arc<Notify>,
-    outbound: mpsc::UnboundedSender<Vec<u8>>,
+    outbound: BoundedOutbound,
     task: tokio::task::JoinHandle<()>,
     protocol_version: u16,
     features: u64,
@@ -158,6 +159,112 @@ struct InboundFrame {
     _budget: tokio::sync::OwnedSemaphorePermit,
 }
 
+struct QueuedOutboundFrame {
+    bytes: Vec<u8>,
+    charge: usize,
+    queued_bytes: Arc<AtomicUsize>,
+}
+
+impl Drop for QueuedOutboundFrame {
+    fn drop(&mut self) {
+        self.queued_bytes.fetch_sub(self.charge, Ordering::AcqRel);
+    }
+}
+
+struct BoundedOutbound {
+    sender: mpsc::UnboundedSender<QueuedOutboundFrame>,
+    queued_bytes: Arc<AtomicUsize>,
+    backpressured: Arc<AtomicBool>,
+}
+
+impl BoundedOutbound {
+    fn channel() -> (
+        Self,
+        mpsc::UnboundedReceiver<QueuedOutboundFrame>,
+        Arc<AtomicBool>,
+    ) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let queued_bytes = Arc::new(AtomicUsize::new(0));
+        let backpressured = Arc::new(AtomicBool::new(false));
+        (
+            Self {
+                sender,
+                queued_bytes,
+                backpressured: Arc::clone(&backpressured),
+            },
+            receiver,
+            backpressured,
+        )
+    }
+
+    fn send(&self, bytes: Vec<u8>) -> Result<(), TransportError> {
+        self.send_after_backpressure_arm(bytes, || {})
+    }
+
+    fn send_after_backpressure_arm(
+        &self,
+        bytes: Vec<u8>,
+        after_backpressure_arm: impl FnOnce(),
+    ) -> Result<(), TransportError> {
+        let charge = bytes.len().max(1);
+        let reserve = || {
+            self.queued_bytes
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    current
+                        .checked_add(charge)
+                        .filter(|next| *next <= WS_CLIENT_MAX_OUTBOUND_QUEUED_BYTES)
+                })
+        };
+        if reserve().is_err() {
+            // Arm before checking capacity again. If the pump drains between
+            // the failed reservation and this store, the second reservation
+            // succeeds; if it drains afterwards, it observes this flag and
+            // wakes the producer. Neither ordering loses the wake.
+            self.backpressured.store(true, Ordering::Release);
+            after_backpressure_arm();
+            if reserve().is_err() {
+                return Err(TransportError::Backpressure);
+            }
+        }
+        let frame = QueuedOutboundFrame {
+            bytes,
+            charge,
+            queued_bytes: Arc::clone(&self.queued_bytes),
+        };
+        self.sender.send(frame).map_err(|error| {
+            drop(error.0);
+            TransportError::Failed("websocket pump is closed".to_owned())
+        })
+    }
+}
+
+impl fmt::Debug for BoundedOutbound {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BoundedOutbound")
+            .field("queued_bytes", &self.queued_bytes.load(Ordering::Acquire))
+            .field("max_bytes", &WS_CLIENT_MAX_OUTBOUND_QUEUED_BYTES)
+            .finish_non_exhaustive()
+    }
+}
+
+struct OutboundBatch<'a>(&'a [QueuedOutboundFrame]);
+
+impl serde::Serialize for OutboundBatch<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeSeq as _;
+
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for frame in self.0 {
+            sequence.serialize_element(&frame.bytes)?;
+        }
+        sequence.end()
+    }
+}
+
 impl fmt::Debug for WebSocketTransport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WebSocketTransport")
@@ -172,7 +279,7 @@ impl WebSocketTransport {
     pub async fn connect(
         base_url: impl AsRef<str>,
         app_id: AppId,
-        peer_identity: AuthorId,
+        peer_identity: AuthorSubject,
         auth: AuthConfig,
     ) -> Result<Self, WebSocketClientError> {
         Self::connect_with_wake(base_url, app_id, peer_identity, auth, Arc::new(|| {})).await
@@ -181,7 +288,7 @@ impl WebSocketTransport {
     pub async fn connect_with_wake(
         base_url: impl AsRef<str>,
         app_id: AppId,
-        peer_identity: AuthorId,
+        peer_identity: AuthorSubject,
         auth: AuthConfig,
         wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Self, WebSocketClientError> {
@@ -195,7 +302,7 @@ impl WebSocketTransport {
     pub async fn connect_catalogue_bootstrap(
         base_url: impl AsRef<str>,
         app_id: AppId,
-        peer_identity: AuthorId,
+        peer_identity: AuthorSubject,
         auth: AuthConfig,
     ) -> Result<jazz::protocol::CatalogueSnapshot, WebSocketClientError> {
         validate_catalogue_bootstrap_upstream_url(base_url.as_ref(), app_id)
@@ -256,7 +363,7 @@ impl WebSocketTransport {
     async fn connect_with_wake_and_bootstrap(
         base_url: impl AsRef<str>,
         app_id: AppId,
-        peer_identity: AuthorId,
+        peer_identity: AuthorSubject,
         auth: AuthConfig,
         wake: Arc<dyn Fn() + Send + Sync>,
         bootstrap_catalogue: bool,
@@ -275,7 +382,10 @@ impl WebSocketTransport {
             // The server authenticates the session subject separately. This
             // endpoint only binds a fresh wire link and is never trusted as a
             // semantic identity.
-            node: NodeUuid::from_bytes(*peer_identity.as_bytes()),
+            node: NodeUuid(uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_URL,
+                peer_identity.canonical().as_bytes(),
+            )),
             epoch: NEXT_CLIENT_CONNECTION_EPOCH.fetch_add(1, Ordering::Relaxed),
         };
         let hello = WireFrame::Hello(
@@ -330,7 +440,7 @@ impl WebSocketTransport {
         let inbound_error = Arc::new(Mutex::new(None));
         let inbound_notify = Arc::new(Notify::new());
         let inbound_budget = Arc::new(Semaphore::new(WS_CLIENT_MAX_QUEUED_BYTES));
-        let (outbound, outbound_rx) = mpsc::unbounded_channel();
+        let (outbound, outbound_rx, outbound_backpressured) = BoundedOutbound::channel();
         let task = tokio::spawn(run_ws_pump(
             ws,
             inbound_tx,
@@ -338,6 +448,7 @@ impl WebSocketTransport {
             Arc::clone(&inbound_error),
             Arc::clone(&inbound_notify),
             outbound_rx,
+            outbound_backpressured,
             Arc::clone(&wake),
             bootstrap_catalogue,
         ));
@@ -368,16 +479,10 @@ impl Drop for WebSocketTransport {
 
 impl WireTransport for WebSocketTransport {
     fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
-        self.outbound
-            .send(frame)
-            .map_err(|_| TransportError::Failed("websocket pump is closed".to_owned()))?;
-        // The shell is already actively servicing this connection when it
-        // emits an outbound frame. Waking it again turns `tick_take` into a
-        // feedback loop: the drained frame schedules another empty shell tick,
-        // whose outbound drain can schedule the next. Only the pump's inbound
-        // branch wakes the synchronous owner because only new peer work needs
-        // another tick.
-        Ok(())
+        // A failed reservation is retried after the pump releases a sent batch
+        // and wakes the synchronous owner. Ordinary sends do not wake it, which
+        // avoids turning outbound draining into an empty-tick feedback loop.
+        self.outbound.send(frame)
     }
 
     fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
@@ -400,12 +505,12 @@ fn is_false(value: &bool) -> bool {
 }
 
 fn encode_prelude(
-    peer_identity: AuthorId,
+    peer_identity: AuthorSubject,
     auth: AuthConfig,
     bootstrap_catalogue: bool,
 ) -> Result<Vec<u8>, WebSocketClientError> {
     serde_json::to_vec(&WebSocketClientPrelude {
-        peer_identity: hex::encode(peer_identity.as_bytes()),
+        peer_identity: peer_identity.canonical().to_owned(),
         auth,
         bootstrap_catalogue,
     })
@@ -512,6 +617,20 @@ async fn receive_server_hello(
     Ok(hello)
 }
 
+fn finish_outbound_pump(
+    outbound: mpsc::UnboundedReceiver<QueuedOutboundFrame>,
+    backpressured: &AtomicBool,
+    wake: &(dyn Fn() + Send + Sync),
+) {
+    // A backpressured producer retries when woken. Make the terminal channel
+    // state visible first, so that retry fails rather than re-entering the
+    // still-full queue with no pump left to wake it again.
+    drop(outbound);
+    if backpressured.swap(false, Ordering::AcqRel) {
+        wake();
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_ws_pump(
     mut ws: tokio_tungstenite::WebSocketStream<
@@ -521,11 +640,13 @@ async fn run_ws_pump(
     inbound_budget: Arc<Semaphore>,
     inbound_error: Arc<Mutex<Option<String>>>,
     inbound_notify: Arc<Notify>,
-    mut outbound: mpsc::UnboundedReceiver<Vec<u8>>,
+    mut outbound: mpsc::UnboundedReceiver<QueuedOutboundFrame>,
+    outbound_backpressured: Arc<AtomicBool>,
     wake: Arc<dyn Fn() + Send + Sync>,
     bootstrap_catalogue: bool,
 ) {
-    loop {
+    async {
+      loop {
         tokio::select! {
             maybe_frame = outbound.recv() => {
                 let Some(first_frame) = maybe_frame else {
@@ -534,30 +655,37 @@ async fn run_ws_pump(
                 };
                 let mut batch = vec![first_frame];
                 let mut batch_bytes = POSTCARD_BATCH_LENGTH_RESERVE
-                    + batch[0].len()
+                    + batch[0].bytes.len()
                     + POSTCARD_FRAME_LENGTH_RESERVE;
                 while let Ok(frame) = outbound.try_recv() {
-                    let frame_bytes = frame.len() + POSTCARD_FRAME_LENGTH_RESERVE;
+                    let frame_bytes = frame.bytes.len() + POSTCARD_FRAME_LENGTH_RESERVE;
                     if batch.len() >= MAX_WIRE_BATCH_FRAMES
                         || batch_bytes.saturating_add(frame_bytes) > WS_CLIENT_OUTBOUND_BATCH_BYTES
                     {
-                        let Ok(bytes) = postcard::to_allocvec(&batch) else {
+                        let Ok(bytes) = postcard::to_allocvec(&OutboundBatch(&batch)) else {
                             return;
                         };
                         if ws.send(Message::Binary(bytes.into())).await.is_err() {
                             return;
                         }
-                        batch = Vec::new();
+                        batch.clear();
+                        if outbound_backpressured.swap(false, Ordering::AcqRel) {
+                            wake();
+                        }
                         batch_bytes = POSTCARD_BATCH_LENGTH_RESERVE;
                     }
                     batch_bytes = batch_bytes.saturating_add(frame_bytes);
                     batch.push(frame);
                 }
-                let Ok(bytes) = postcard::to_allocvec(&batch) else {
+                let Ok(bytes) = postcard::to_allocvec(&OutboundBatch(&batch)) else {
                     return;
                 };
                 if ws.send(Message::Binary(bytes.into())).await.is_err() {
                     return;
+                }
+                drop(batch);
+                if outbound_backpressured.swap(false, Ordering::AcqRel) {
+                    wake();
                 }
             }
             message = ws.next() => {
@@ -606,7 +734,10 @@ async fn run_ws_pump(
                 }
             }
         }
+      }
     }
+    .await;
+    finish_outbound_pump(outbound, &outbound_backpressured, wake.as_ref());
 }
 
 fn decode_inbound_batch(bytes: &[u8], bootstrap_catalogue: bool) -> Result<Vec<Vec<u8>>, String> {
@@ -653,7 +784,7 @@ mod tests {
             .collect::<String>();
         sender
             .send(jazz::protocol::SyncMessage::SessionClaims {
-                identity: AuthorId::SYSTEM,
+                identity: AuthorSubject::SYSTEM,
                 claims: BTreeMap::from([(
                     "catalogue_fixture".to_owned(),
                     jazz::groove::records::Value::String(body),
@@ -752,7 +883,7 @@ mod tests {
 
     #[test]
     fn snapshot_bootstrap_prelude_explicitly_marks_the_snapshot_only_exchange() {
-        let bytes = encode_prelude(AuthorId::SYSTEM, AuthConfig::default(), true)
+        let bytes = encode_prelude(AuthorSubject::SYSTEM, AuthConfig::default(), true)
             .expect("encode snapshot bootstrap prelude");
         let prelude: serde_json::Value =
             serde_json::from_slice(&bytes).expect("decode snapshot bootstrap prelude");
@@ -776,5 +907,112 @@ mod tests {
                 .to_string()
                 .contains("plaintext ws:// bootstrap")
         );
+    }
+
+    #[tokio::test]
+    async fn outbound_queue_returns_backpressure_at_a_finite_byte_budget() {
+        let (_inbound_sender, inbound) = mpsc::channel(1);
+        let (outbound, mut outbound_receiver, outbound_backpressured) = BoundedOutbound::channel();
+        let task = tokio::spawn(std::future::pending());
+        let mut transport = WebSocketTransport {
+            inbound: Arc::new(Mutex::new(inbound)),
+            inbound_error: Arc::new(Mutex::new(None)),
+            inbound_notify: Arc::new(Notify::new()),
+            outbound,
+            task,
+            protocol_version: WIRE_PROTOCOL_VERSION,
+            features: FEATURE_SYNC_MESSAGE_PAYLOAD,
+            session_context: None,
+        };
+        let frame = vec![0; MAX_WIRE_FRAME_BYTES];
+        for _ in 0..(WS_CLIENT_MAX_OUTBOUND_QUEUED_BYTES / MAX_WIRE_FRAME_BYTES) {
+            transport
+                .send_frame(frame.clone())
+                .expect("frames within the queue budget are accepted");
+        }
+
+        assert!(matches!(
+            transport.send_frame(frame.clone()),
+            Err(TransportError::Backpressure)
+        ));
+        assert!(outbound_backpressured.load(Ordering::Acquire));
+
+        drop(
+            outbound_receiver
+                .recv()
+                .await
+                .expect("queued frame retains its byte reservation"),
+        );
+        transport
+            .send_frame(frame)
+            .expect("releasing a queued frame restores capacity");
+    }
+
+    #[test]
+    fn terminal_outbound_failure_wakes_backpressured_producer_to_observe_closed_pump() {
+        let (outbound, receiver, backpressured) = BoundedOutbound::channel();
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let retry_saw_closed_pump = Arc::new(AtomicBool::new(false));
+        let wake: Arc<dyn Fn() + Send + Sync> = {
+            let wake_count = Arc::clone(&wake_count);
+            let retry_saw_closed_pump = Arc::clone(&retry_saw_closed_pump);
+            let retry_outbound = BoundedOutbound {
+                sender: outbound.sender.clone(),
+                queued_bytes: Arc::clone(&outbound.queued_bytes),
+                backpressured: Arc::clone(&outbound.backpressured),
+            };
+            Arc::new(move || {
+                wake_count.fetch_add(1, Ordering::AcqRel);
+                retry_saw_closed_pump.store(
+                    matches!(
+                        retry_outbound.send(vec![1]),
+                        Err(TransportError::Failed(message)) if message == "websocket pump is closed"
+                    ),
+                    Ordering::Release,
+                );
+            })
+        };
+
+        let frame = vec![0; MAX_WIRE_FRAME_BYTES];
+        for _ in 0..(WS_CLIENT_MAX_OUTBOUND_QUEUED_BYTES / MAX_WIRE_FRAME_BYTES) {
+            outbound.send(frame.clone()).expect("fill outbound budget");
+        }
+        assert!(matches!(
+            outbound.send(frame),
+            Err(TransportError::Backpressure)
+        ));
+
+        // A failed websocket send ends the pump. The finish path drops the
+        // receiver before waking the producer that saw Backpressure.
+        finish_outbound_pump(receiver, &backpressured, wake.as_ref());
+
+        assert_eq!(wake_count.load(Ordering::Acquire), 1);
+        assert!(retry_saw_closed_pump.load(Ordering::Acquire));
+        assert!(matches!(
+            outbound.send(vec![1]),
+            Err(TransportError::Failed(message)) if message == "websocket pump is closed"
+        ));
+    }
+
+    #[test]
+    fn draining_between_backpressure_reservation_and_arm_is_rechecked() {
+        let (outbound, mut receiver, _backpressured) = BoundedOutbound::channel();
+        let frame = vec![0; MAX_WIRE_FRAME_BYTES];
+        for _ in 0..(WS_CLIENT_MAX_OUTBOUND_QUEUED_BYTES / MAX_WIRE_FRAME_BYTES) {
+            outbound.send(frame.clone()).expect("fill outbound budget");
+        }
+
+        // Deterministically model the pump releasing one frame in the former
+        // reservation-failure -> arm race window. The recheck accepts it
+        // instead of returning an unwakeable Backpressure result.
+        outbound
+            .send_after_backpressure_arm(frame, || {
+                drop(
+                    receiver
+                        .try_recv()
+                        .expect("pump drains a queued frame after producer arms"),
+                );
+            })
+            .expect("recheck observes capacity released after arming");
     }
 }

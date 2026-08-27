@@ -1,6 +1,6 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { schema as s } from "../../src/index.js";
-import type { QueryBuilder, TableProxy } from "../../src/runtime/db.js";
+import type { Db, QueryBuilder, TableProxy } from "../../src/runtime/db.js";
 import type { Query, Table } from "../../src/typed-app.js";
 
 interface ProjectRecord {
@@ -80,6 +80,17 @@ const graphSchema = {
 type GraphAppSchema = s.Schema<typeof graphSchema>;
 const graphApp: s.App<GraphAppSchema> = s.defineApp(graphSchema);
 
+const largeValueUpdateSchema = {
+  documents: s.table({
+    title: s.string(),
+    payload: s.bytes(),
+    metadata: s.json(),
+    done: s.boolean(),
+  }),
+};
+type LargeValueUpdateAppSchema = s.Schema<typeof largeValueUpdateSchema>;
+const largeValueUpdateApp: s.App<LargeValueUpdateAppSchema> = s.defineApp(largeValueUpdateSchema);
+
 const largeSchema = {
   accounts: s.table({
     name: s.string(),
@@ -120,6 +131,36 @@ describe("typed app prototype", () => {
       orderBy: [],
       hops: [],
     });
+  });
+
+  it("serializes partial large-value select descriptors", () => {
+    const query = app.todos.select({
+      attachment: { from: 1_000_000, to: 2_000_000 },
+      title: { fromUtf8: 4, toUtf8: 67 },
+    });
+
+    expect(JSON.parse(query._build())).toMatchObject({
+      table: "todos",
+      select: {
+        attachment: { from: 1_000_000, to: 2_000_000 },
+        title: { fromUtf8: 4, toUtf8: 67 },
+      },
+    });
+    expectTypeOf(query).toMatchTypeOf<
+      QueryBuilder<{ id: string; attachment: Uint8Array; title: string }>
+    >();
+
+    if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
+      // The object form is a schema-derived partial projection, rather than a
+      // generic descriptor bag. In particular, JSON pointers cannot leak onto
+      // an arbitrary scalar just because its JS representation is primitive.
+      // @ts-expect-error BOOLEAN columns do not support partial projections.
+      app.todos.select({ done: { at: "/" } });
+      // @ts-expect-error bytes use byte ranges, not text UTF-8 coordinates.
+      app.todos.select({ attachment: { fromUtf8: 0, toUtf8: 1 } });
+      // @ts-expect-error TEXT cannot use the JSON-pointer projection form.
+      app.todos.select({ title: { at: "/" } });
+    }
   });
 
   it("serializes nested include builders as query objects", () => {
@@ -274,11 +315,30 @@ describe("typed app prototype", () => {
 
     type TodoRow = s.RowOf<typeof app.todos>;
     type TodoInsert = s.InsertOf<typeof app.todos>;
+    type TodoStreamingInsert = s.StreamingInsertOf<typeof app.todos>;
+    type TodoStreamingUpdate = s.StreamingUpdateOf<typeof app.todos>;
     type TodoWhere = s.WhereOf<typeof app.todos>;
     type TodoWithProject = s.RowOf<typeof todoWithProjectQuery>;
     type ProjectWithTitles = s.RowOf<typeof projectWithTitlesQuery>;
     const todoRow = {} as TodoRow;
     const todoInsert = {} as TodoInsert;
+    const streamedTitle = {
+      title: new ReadableStream<string>(),
+      done: false,
+      tags: [],
+      attachment: new Uint8Array(),
+      project: "project-id",
+    } satisfies TodoStreamingInsert;
+    const streamedAttachment = {
+      title: "todo",
+      done: false,
+      tags: [],
+      attachment: new ReadableStream<Uint8Array>(),
+      project: "project-id",
+    } satisfies TodoStreamingInsert;
+    const streamedTitleUpdate = {
+      title: new ReadableStream<string>(),
+    } satisfies TodoStreamingUpdate;
     const todoWithProject = {} as TodoWithProject;
     const projectWithTitles = {} as ProjectWithTitles;
 
@@ -296,22 +356,45 @@ describe("typed app prototype", () => {
     expectTypeOf(todoInsert.attachment).toEqualTypeOf<Uint8Array>();
     expectTypeOf(todoInsert.project).toEqualTypeOf<string>();
     expectTypeOf(todoInsert.owner).toEqualTypeOf<string | null | undefined>();
+    expectTypeOf(streamedTitle.title).toEqualTypeOf<ReadableStream<string>>();
+    expectTypeOf(streamedAttachment.attachment).toEqualTypeOf<ReadableStream<Uint8Array>>();
+    expectTypeOf(streamedTitleUpdate.title).toEqualTypeOf<ReadableStream<string>>();
 
     expectTypeOf<TodoWhere["project"]>().branded.toEqualTypeOf<
-      string | { eq?: string; ne?: string; in?: string[] } | undefined
+      string | { eq?: string; ne?: string; in?: string[]; notIn?: string[] } | undefined
     >();
     expectTypeOf<TodoWhere["owner"]>().branded.toEqualTypeOf<
       | string
       | null
-      | { eq?: string | null; ne?: string | null; in?: string[]; isNull?: boolean }
+      | {
+          eq?: string | null;
+          ne?: string | null;
+          in?: string[];
+          notIn?: string[];
+          isNull?: boolean;
+        }
       | undefined
     >();
     expectTypeOf<TodoWhere["tags"]>().branded.toEqualTypeOf<
-      string[] | { eq?: string[]; ne?: string[]; contains?: string; in?: string[][] } | undefined
+      | string[]
+      | { eq?: string[]; ne?: string[]; contains?: string; in?: string[][]; notIn?: string[][] }
+      | undefined
     >();
     expectTypeOf<TodoWhere["attachment"]>().branded.toEqualTypeOf<
-      Uint8Array | { eq?: Uint8Array; ne?: Uint8Array; in?: (Uint8Array | number[])[] } | undefined
+      | Uint8Array
+      | {
+          eq?: Uint8Array;
+          ne?: Uint8Array;
+          in?: (Uint8Array | number[])[];
+          notIn?: (Uint8Array | number[])[];
+        }
+      | undefined
     >();
+
+    // Membership is deliberately non-nullable. Express null handling with
+    // isNull/isNotNull rather than SQL-style null membership semantics.
+    // @ts-expect-error null is not a valid membership value
+    app.todos.where({ owner: { notIn: [null] } });
 
     const projectRecord: ProjectRecord | null = todoWithProject.project;
     expectTypeOf(todoWithProject.owner).toEqualTypeOf<string | null>();
@@ -324,6 +407,9 @@ describe("typed app prototype", () => {
 
     void projectRecord;
     void todoTitleRecords;
+    void streamedTitle;
+    void streamedAttachment;
+    void streamedTitleUpdate;
     void queryContract;
     void typedQueryContract;
     void tableProxyContract;
@@ -332,6 +418,15 @@ describe("typed app prototype", () => {
     if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
       // @ts-expect-error invalid root key
       void app.unknown;
+      const invalidStreamedReference: TodoStreamingInsert = {
+        title: "todo",
+        done: false,
+        tags: [],
+        attachment: new Uint8Array(),
+        // @ts-expect-error UUID references are not streamable despite being strings in TypeScript.
+        project: new ReadableStream<string>(),
+      };
+      void invalidStreamedReference;
 
       // @ts-expect-error invalid where column
       app.todos.where({ missing: true });
@@ -402,6 +497,76 @@ describe("typed app prototype", () => {
     }
   });
 
+  it("infers update payloads with column-specific large-value descriptors", () => {
+    type DocumentUpdate = s.LargeValueUpdateOf<typeof largeValueUpdateApp.documents>;
+    const update = {
+      title: {
+        within: { from: 0, to: 4 },
+        splices: [{ at: 1, delete: 2, insert: "ee" }],
+      },
+      payload: {
+        within: { from: 0, to: 3 },
+        splices: [{ at: 1, delete: 1, insert: new Uint8Array([9]) }],
+      },
+      metadata: {
+        edits: [{ op: "set", at: "/selected/answer", value: 43 }],
+      },
+    } satisfies DocumentUpdate;
+
+    const utf8TextUpdate = {
+      title: {
+        within: { fromUtf8: 0, toUtf8: 4 },
+        splices: [{ atUtf8: 0, deleteUtf8: 4, insert: "text" }],
+      },
+    } satisfies DocumentUpdate;
+
+    void update;
+    void utf8TextUpdate;
+
+    if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
+      // Whole-column updates continue to use the ordinary Db.update API; the
+      // narrow LargeValueUpdateOf surface intentionally accepts only diffs.
+      const db = null as unknown as Pick<Db, "update" | "upsert">;
+      db.update(largeValueUpdateApp.documents, "00000000-0000-0000-0000-000000000001", {
+        done: true,
+      });
+      db.upsert(largeValueUpdateApp.documents, "00000000-0000-0000-0000-000000000001", {
+        // @ts-expect-error partial descriptors belong exclusively to applyDiffs
+        title: { within: { from: 0, to: 1 }, splices: [{ at: 0, delete: 0, insert: "x" }] },
+      });
+
+      const byteUpdateWithText = {
+        payload: {
+          within: { from: 0, to: 1 },
+          splices: [
+            {
+              at: 0,
+              delete: 0,
+              // @ts-expect-error byte splice inserts must be Uint8Array
+              insert: "x",
+            },
+          ],
+        },
+      } satisfies DocumentUpdate;
+      void byteUpdateWithText;
+
+      const textUpdateWithBytes = {
+        title: {
+          within: { fromUtf8: 0, toUtf8: 1 },
+          splices: [
+            {
+              atUtf8: 0,
+              deleteUtf8: 0,
+              // @ts-expect-error text splice inserts must be strings
+              insert: new Uint8Array([1]),
+            },
+          ],
+        },
+      } satisfies DocumentUpdate;
+      void textUpdateWithBytes;
+    }
+  });
+
   it("infers in filters for boolean, bytes, and array columns", () => {
     expectTypeOf<s.WhereOf<typeof app.todos>["done"]>().branded.toEqualTypeOf<
       | boolean
@@ -409,6 +574,7 @@ describe("typed app prototype", () => {
           eq?: boolean;
           ne?: boolean;
           in?: boolean[];
+          notIn?: boolean[];
         }
       | undefined
     >();
@@ -419,6 +585,7 @@ describe("typed app prototype", () => {
           ne?: string[];
           contains?: string;
           in?: string[][];
+          notIn?: string[][];
         }
       | undefined
     >();
@@ -428,6 +595,7 @@ describe("typed app prototype", () => {
           eq?: Uint8Array;
           ne?: Uint8Array;
           in?: (Uint8Array | number[])[];
+          notIn?: (Uint8Array | number[])[];
         }
       | undefined
     >();
@@ -453,6 +621,7 @@ describe("typed app prototype", () => {
           lt?: number;
           lte?: number;
           in?: number[];
+          notIn?: number[];
         }
       | undefined
     >();

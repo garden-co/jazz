@@ -5,11 +5,13 @@ mod schema_fixture;
 mod support;
 
 use jazz::block_on;
+use jazz::groove::ivm::TickMetrics;
 use jazz::groove::records::Value;
 use jazz::ids::{NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::peer::PeerState;
 use jazz::protocol::SyncMessage;
+use jazz::protocol::expand_version_carriers;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::{DurabilityTier, Fate};
@@ -44,33 +46,224 @@ pub(crate) fn correctness_smoke() {
     bench.seed_pending(1);
     let _ = bench.current_rows_update_elapsed(DurabilityTier::Global);
     let _ = bench.current_rows_update_elapsed(DurabilityTier::Local);
+    current_state_history_depth_contract();
+}
+
+/// An ordinary current-state subscriber must receive and materialize only the
+/// current winner, regardless of how many superseded versions of that one row
+/// the authority retains.  This is deliberately an internal receipt because
+/// storage read buckets and query-engine counters have no public application
+/// API, while the update itself is a real core-to-peer protocol message.
+/// It intentionally excludes explicit historical/as-of (`current_rows_at`),
+/// branch-base, and direct version-fetch operations: those name history and
+/// therefore do not have this current-state complexity contract.
+///
+/// ```text
+/// writer ──1/10/1000 successive updates──► core history + current index
+/// client peer ──subscribe current table──► one winner payload, bounded reads
+/// ```
+fn current_state_history_depth_contract() {
+    let mut baseline = None;
+    for depth in [1, 10, 1_000, 1_025] {
+        let mut bench = ColdSubscriptionBench::new();
+        let winner = bench.seed_history(depth);
+        // Drop all node/query/runtime state and reopen the same RocksDB data
+        // before measuring. This makes the receipt a cold-state contract, not
+        // an accidental hit in the seeding runtime's caches.
+        bench.reopen_core();
+
+        // Local reads must be served entirely by the compact current sources.
+        reset_phase_counters(&mut [bench.core_mut()]);
+        let local_rows = block_on(bench.core_mut().current_rows(TABLE, DurabilityTier::Local))
+            .expect("local current read");
+        let local_metrics = bench.core().storage_read_metrics();
+        let local_query_metrics = bench.core().query_engine_read_metrics().clone();
+        let local_tick_metrics = normalized_tick_metrics(bench.core().last_tick_metrics());
+        assert_eq!(local_rows.len(), 1, "depth {depth} local visible rows");
+        assert_eq!(
+            local_metrics.history_rows.reads, 0,
+            "depth {depth}: local current read must not decode history rows"
+        );
+        assert_eq!(
+            local_metrics.history_rows.ranges, 0,
+            "depth {depth}: local current read must not range-scan history rows"
+        );
+        assert_eq!(
+            local_metrics.history_indexes.reads, 0,
+            "depth {depth}: local current read must not probe history indexes"
+        );
+        assert_eq!(
+            local_metrics.history_indexes.ranges, 0,
+            "depth {depth}: local current read must not range-scan history indexes"
+        );
+
+        // A fresh peer needs the one immutable winner for wire fidelity, but
+        // no superseded payload. The bounded history read is the exact winner
+        // lookup behind the current-index witness, not a history scan.
+        reset_phase_counters(&mut [bench.core_mut()]);
+        let mut peer = PeerState::new();
+        let update = block_on(peer.current_rows_update(bench.core_mut(), TABLE))
+            .expect("serve current rows to fresh peer");
+        let metrics = bench.core().storage_read_metrics();
+        let query_metrics = bench.core().query_engine_read_metrics().clone();
+        let tick_metrics = normalized_tick_metrics(bench.core().last_tick_metrics());
+        let SyncMessage::ViewUpdate(payload) = &update else {
+            panic!("current-row subscription must produce a view update");
+        };
+        let mut bundles = payload.version_bundles.clone();
+        bundles.extend(
+            expand_version_carriers(&payload.version_carriers)
+                .expect("current-row version carriers must expand"),
+        );
+        assert_eq!(bundles.len(), 1, "depth {depth}: one current winner bundle");
+        assert_eq!(
+            bundles[0].tx.tx_id, winner,
+            "depth {depth}: delivery must materialize the last current version"
+        );
+        // Stale-winner plant: selecting the initial/superseded version instead
+        // of the argmax current witness changes this identity and fails here.
+        assert_eq!(
+            bundles[0].versions.len(),
+            1,
+            "depth {depth}: no superseded row versions may cross the wire"
+        );
+        // The ViewUpdate envelope carries the advancing accepted-global cursor,
+        // so its total bytes legitimately differ after 1 versus 1k commits.
+        // The transported immutable winner body is the history-independent
+        // payload: all measured winners have an equally-sized value and one
+        // parent, and this encoding must therefore be exactly identical.
+        let winner_wire_bytes = postcard::to_allocvec(&bundles[0].versions[0])
+            .expect("encode delivered winner body")
+            .len();
+        assert_eq!(
+            payload.result_member_adds.len(),
+            1,
+            "depth {depth}: IVM materializes one logical current row"
+        );
+        assert!(
+            metrics.history_rows.reads <= 2
+                && metrics.history_rows.ranges <= 2
+                && metrics.history_indexes.reads <= 2
+                && metrics.history_indexes.ranges <= 2,
+            "depth {depth}: serving the winner may do bounded exact history lookup, not a scan: {metrics:?}"
+        );
+
+        if let Some((
+            ref baseline_local_metrics,
+            ref baseline_local_query_metrics,
+            ref baseline_local_tick_metrics,
+            ref baseline_metrics,
+            ref baseline_query_metrics,
+            ref baseline_tick_metrics,
+            baseline_bytes,
+        )) = baseline
+        {
+            assert_eq!(
+                &local_metrics, baseline_local_metrics,
+                "depth {depth}: local current read storage work regressed with history depth"
+            );
+            assert_eq!(
+                &local_query_metrics, baseline_local_query_metrics,
+                "depth {depth}: local current query lowering work regressed with history depth"
+            );
+            assert_eq!(
+                &local_tick_metrics, baseline_local_tick_metrics,
+                "depth {depth}: local current IVM tick work regressed with history depth"
+            );
+            assert_eq!(
+                &metrics, baseline_metrics,
+                "depth {depth}: peer current delivery storage work regressed with history depth"
+            );
+            assert_eq!(
+                &query_metrics, baseline_query_metrics,
+                "depth {depth}: peer current query lowering work regressed with history depth"
+            );
+            assert_eq!(
+                &tick_metrics, baseline_tick_metrics,
+                "depth {depth}: peer current IVM tick work regressed with history depth"
+            );
+            assert_eq!(
+                winner_wire_bytes, baseline_bytes,
+                "depth {depth}: identical-size current winner body grew with retained history"
+            );
+        } else {
+            baseline = Some((
+                local_metrics,
+                local_query_metrics,
+                local_tick_metrics,
+                metrics,
+                query_metrics,
+                tick_metrics,
+                winner_wire_bytes,
+            ));
+        }
+    }
+}
+
+/// Tick sequence numbers and internal memo node ids are runtime-instance
+/// identities, not work. Every remaining TickMetrics/RuntimeStats counter is
+/// compared exactly across depths.
+fn normalized_tick_metrics(metrics: Option<&TickMetrics>) -> Option<TickMetrics> {
+    metrics.cloned().map(|mut metrics| {
+        metrics.tick = 0;
+        metrics.hydration_memo_computed_nodes.clear();
+        metrics
+    })
 }
 
 struct ColdSubscriptionBench {
     writer: NodeState<RocksDbStorage>,
-    core: NodeState<RocksDbStorage>,
-    _dirs: Vec<tempfile::TempDir>,
+    core: Option<NodeState<RocksDbStorage>>,
+    schema: JazzSchema,
+    _writer_dir: tempfile::TempDir,
+    core_dir: tempfile::TempDir,
 }
 
 impl ColdSubscriptionBench {
     fn new() -> Self {
         let schema = schema();
-        let mut dirs = Vec::new();
-        let (dir, writer) = open_node(node(1), schema.clone());
-        dirs.push(dir);
-        let (dir, core) = open_node(node(2), schema);
-        dirs.push(dir);
+        let (writer_dir, writer) = open_node(node(1), schema.clone());
+        let (core_dir, core) = open_node(node(2), schema.clone());
         Self {
             writer,
-            core,
-            _dirs: dirs,
+            core: Some(core),
+            schema,
+            _writer_dir: writer_dir,
+            core_dir,
         }
     }
 
-    fn seed_history(&mut self, depth: usize) {
+    fn core(&self) -> &NodeState<RocksDbStorage> {
+        self.core.as_ref().expect("core must be open")
+    }
+
+    fn core_mut(&mut self) -> &mut NodeState<RocksDbStorage> {
+        self.core.as_mut().expect("core must be open")
+    }
+
+    fn reopen_core(&mut self) {
+        drop(self.core.take());
+        let cfs = self.schema.column_families();
+        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = RocksDbStorage::open_with_durability(
+            self.core_dir.path(),
+            &refs,
+            Durability::WalNoSync,
+        )
+        .expect("reopen core rocksdb");
+        self.core = Some(
+            block_on(NodeState::new(node(2), self.schema.clone(), storage))
+                .expect("reopen core node"),
+        );
+    }
+
+    fn seed_history(&mut self, depth: usize) -> jazz::tx::TxId {
         let row_uuid = row();
         let mut parent = None;
-        for idx in 0..depth {
+        // Every measured winner has one parent: `depth` counts ordinary
+        // last-seen-style updates after the initial create, rather than making
+        // depth one a structurally different parentless version.
+        for idx in 0..=depth {
             let mut commit =
                 MergeableCommit::new(TABLE, row_uuid, 1_000 + idx as u64).cells(cells(idx));
             if let Some(parent_tx_id) = parent {
@@ -81,7 +274,7 @@ impl ColdSubscriptionBench {
             let tx_id = publication.tx_id();
             block_on(self.writer.persist_and_settle_transaction(publication))
                 .expect("persist mergeable commit");
-            let fate = core_ingest(&mut self.core, &unit, u64::MAX - SKEW_TOLERANCE_MS);
+            let fate = core_ingest(self.core_mut(), &unit, u64::MAX - SKEW_TOLERANCE_MS);
             assert!(matches!(
                 fate,
                 SyncMessage::FateUpdate {
@@ -92,41 +285,42 @@ impl ColdSubscriptionBench {
             parent = Some(tx_id);
         }
 
-        let rows =
-            block_on(self.core.current_rows(TABLE, DurabilityTier::Global)).expect("current rows");
+        let rows = block_on(self.core_mut().current_rows(TABLE, DurabilityTier::Global))
+            .expect("current rows");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].row_uuid(), row_uuid);
+        parent.expect("depth is non-zero")
     }
 
     fn seed_pending(&mut self, ahead: usize) {
         for idx in 0..ahead {
             let publication = block_on(
-                self.core.commit_mergeable(
+                self.core_mut().commit_mergeable(
                     MergeableCommit::new(TABLE, pending_row(idx), 10_000_000 + idx as u64)
                         .cells(cells(idx)),
                 ),
             )
             .expect("pending commit");
-            block_on(self.core.persist_and_settle_transaction(publication))
+            block_on(self.core_mut().persist_and_settle_transaction(publication))
                 .expect("persist pending commit");
         }
 
-        let rows =
-            block_on(self.core.current_rows(TABLE, DurabilityTier::Local)).expect("current rows");
+        let rows = block_on(self.core_mut().current_rows(TABLE, DurabilityTier::Local))
+            .expect("current rows");
         assert_eq!(rows.len(), ahead + 1);
     }
 
     fn current_rows_update_elapsed(&mut self, tier: DurabilityTier) -> std::time::Duration {
-        reset_phase_counters(&mut [&mut self.core]);
+        reset_phase_counters(&mut [self.core_mut()]);
         let mut peer = PeerState::new();
         let start = Instant::now();
         match tier {
             DurabilityTier::Global => {
-                let _ = block_on(peer.current_rows_update(&mut self.core, TABLE))
+                let _ = block_on(peer.current_rows_update(self.core_mut(), TABLE))
                     .expect("cold global current rows update");
             }
             DurabilityTier::Local => {
-                let _ = block_on(self.core.current_rows(TABLE, DurabilityTier::Local))
+                let _ = block_on(self.core_mut().current_rows(TABLE, DurabilityTier::Local))
                     .expect("cold local current rows");
             }
             DurabilityTier::None | DurabilityTier::Edge => {
@@ -154,7 +348,7 @@ impl ColdSubscriptionBench {
         fields.insert("depth".to_owned(), serde_json::json!(depth));
         fields.insert("pending_ahead".to_owned(), serde_json::json!(ahead));
         insert_durability_tier(&mut fields, tier);
-        insert_node_metrics(&mut fields, "core", &self.core);
+        insert_node_metrics(&mut fields, "core", self.core());
         emit_json_line("cold_subscription", fields);
     }
 }
@@ -206,7 +400,7 @@ fn open_node(
 }
 
 fn cells(idx: usize) -> BTreeMap<String, Value> {
-    BTreeMap::from([("title".to_owned(), Value::String(format!("title-{idx}")))])
+    BTreeMap::from([("title".to_owned(), Value::String(format!("title-{idx:08}")))])
 }
 
 fn node(byte: u8) -> NodeUuid {

@@ -74,6 +74,7 @@ export function makeClient() {
   > = [];
   const executeSubscriptionCalls: Array<[number, Function]> = [];
   const unsubscribeCalls: number[] = [];
+  const largeValueCalls: Array<[string, ...unknown[]]> = [];
   let nextHandle = 0;
 
   const runtime: Runtime = {
@@ -90,6 +91,26 @@ export function makeClient() {
     }),
     update: () => committed("transaction-id"),
     delete: () => committed("transaction-id"),
+    readValueRange: async (...args) => {
+      largeValueCalls.push(["range", ...args]);
+      return new Uint8Array([1, 2, 3]);
+    },
+    readTextUtf16Range: async (...args) => {
+      largeValueCalls.push(["text", ...args]);
+      return "🙂";
+    },
+    readJsonPointer: async (...args) => {
+      largeValueCalls.push(["json", ...args]);
+      return { selected: true };
+    },
+    appendValue: async (...args) => {
+      largeValueCalls.push(["append", ...args]);
+      return committed("append-transaction");
+    },
+    spliceValue: async (...args) => {
+      largeValueCalls.push(["splice", ...args]);
+      return committed("splice-transaction");
+    },
     query: async (
       queryJson: string,
       sessionJson?: string | null,
@@ -146,6 +167,7 @@ export function makeClient() {
     createSubscriptionCalls,
     executeSubscriptionCalls,
     unsubscribeCalls,
+    largeValueCalls,
   };
 }
 

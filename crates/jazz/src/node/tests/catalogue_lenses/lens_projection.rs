@@ -37,7 +37,7 @@ fn shared_physical_reads_project_natural_lenses_after_schema_agnostic_winner() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved_payload.id,
@@ -120,7 +120,7 @@ fn shared_physical_reads_project_natural_lenses_after_schema_agnostic_winner() {
             &include_deleted_binding,
             DurabilityTier::Local,
             None,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
@@ -219,7 +219,7 @@ fn agreeing_cross_lens_keeps_the_authoritative_physical_mapping() {
     let published_lens_count = core.catalogue.catalogue_lenses.len();
 
     core.apply_trusted_catalogue_message_settled(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         lens: shortest.clone(),
     })
     .unwrap();
@@ -267,7 +267,7 @@ fn old_schema_commit_units_stay_in_authored_variant_after_pointer_flip() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved_payload.id,
@@ -341,6 +341,9 @@ fn rls_policy_under_lenses_evaluates_translated_data_against_pinned_policy() {
     let (_core_dir, mut core) = open_node_with_schema(node(0x47), pinned.clone());
     let author = user(0xa1);
     let other = user(0xb2);
+    install_test_uuid_sub_claim(&mut writer, author);
+    install_test_uuid_sub_claim(&mut core, author);
+    install_test_uuid_sub_claim(&mut core, other);
     publish_schema_lineage(
         &mut core,
         evolved_payload.clone(),
@@ -357,7 +360,7 @@ fn rls_policy_under_lenses_evaluates_translated_data_against_pinned_policy() {
                     },
                     LensOp::AddColumn {
                         column: "extra_owner".to_owned(),
-                        default: Value::Uuid(other.0),
+                        default: Value::Uuid(other.test_uuid()),
                     },
                     LensOp::RenameColumn {
                         from: "owner".to_owned(),
@@ -371,7 +374,7 @@ fn rls_policy_under_lenses_evaluates_translated_data_against_pinned_policy() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved_payload.id,
@@ -386,8 +389,8 @@ fn rls_policy_under_lenses_evaluates_translated_data_against_pinned_policy() {
                 .made_by(author)
                 .cells(BTreeMap::from([
                     ("name".to_owned(), v("allowed")),
-                    ("extra_owner".to_owned(), Value::Uuid(other.0)),
-                    ("owner_id".to_owned(), Value::Uuid(author.0)),
+                    ("extra_owner".to_owned(), Value::Uuid(other.test_uuid())),
+                    ("owner_id".to_owned(), Value::Uuid(author.test_uuid())),
                 ])),
         )
         .unwrap();
@@ -422,8 +425,8 @@ fn rls_policy_under_lenses_evaluates_translated_data_against_pinned_policy() {
                 .made_by(author)
                 .cells(BTreeMap::from([
                     ("name".to_owned(), v("denied")),
-                    ("extra_owner".to_owned(), Value::Uuid(author.0)),
-                    ("owner_id".to_owned(), Value::Uuid(other.0)),
+                    ("extra_owner".to_owned(), Value::Uuid(author.test_uuid())),
+                    ("owner_id".to_owned(), Value::Uuid(other.test_uuid())),
                 ])),
         )
         .unwrap();
@@ -580,7 +583,7 @@ fn local_writes_store_versions_under_current_write_schema_storage() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved_payload.id,
@@ -652,7 +655,7 @@ fn exclusive_writes_store_versions_under_current_write_schema_storage() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved_payload.id,
@@ -673,7 +676,7 @@ fn exclusive_writes_store_versions_under_current_write_schema_storage() {
         None,
     )
     .unwrap();
-    let (exclusive_tx, _unit) = core.commit_exclusive_settled(tx, AuthorId::SYSTEM, 11).unwrap();
+    let (exclusive_tx, _unit) = core.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 11).unwrap();
 
     let base_history_table = physical_history_table_name(
         core.catalogue.physical_mappings[&base.version_id()].tables["todos"].table_id,
@@ -727,7 +730,7 @@ fn physical_schema_variants_survive_pointer_changes_and_reopen() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved_payload.id,
@@ -742,7 +745,7 @@ fn physical_schema_variants_survive_pointer_changes_and_reopen() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 2,
             schema: base.version_id(),

@@ -17,7 +17,7 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
         )]))
         .unwrap();
     let pre_lens_plan = core
-        .prepared_query_plan(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
+        .prepared_query_plan(&shape, &binding, DurabilityTier::Local, AuthorSubject::SYSTEM)
         .unwrap();
     publish_schema_lineage(
         &mut core,
@@ -45,7 +45,7 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved_payload.id,
@@ -136,7 +136,7 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
     .unwrap();
     join_core
         .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
                 schema: join_evolved.id,
@@ -216,7 +216,7 @@ fn schema_projected_reads_ignore_settled_result_set_materialization_cache() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved_payload.id,
@@ -328,7 +328,7 @@ fn schema_projected_current_reachable_filters_translate_old_names() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved_payload.id,
@@ -433,7 +433,7 @@ fn include_deleted_schema_projected_root_filters_translate_old_names() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved.id,
@@ -466,7 +466,7 @@ fn include_deleted_schema_projected_root_filters_translate_old_names() {
             &binding,
             DurabilityTier::Local,
             None,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
@@ -537,7 +537,7 @@ fn include_deleted_schema_projected_join_filters_translate_old_names() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved.id,
@@ -576,7 +576,7 @@ fn include_deleted_schema_projected_join_filters_translate_old_names() {
             &binding,
             DurabilityTier::Local,
             None,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
@@ -646,7 +646,7 @@ fn include_deleted_schema_projected_reachable_filters_translate_old_names() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved.id,
@@ -719,7 +719,7 @@ fn include_deleted_schema_projected_reachable_filters_translate_old_names() {
             &binding,
             DurabilityTier::Local,
             None,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
@@ -761,7 +761,7 @@ fn historical_schema_projected_reads_use_projected_snapshot_source() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved_payload.id,
@@ -880,7 +880,7 @@ fn global_changes_span_table_renames_for_history_and_conflict_detection() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: renamed.id,
@@ -920,7 +920,7 @@ fn global_changes_span_table_renames_for_history_and_conflict_detection() {
     }));
 
     assert!(matches!(
-        core.commit_exclusive_settled(exclusive, AuthorId::SYSTEM, 12),
+        core.commit_exclusive_settled(exclusive, AuthorSubject::SYSTEM, 12),
         Err(Error::TransactionConflict)
     ));
 
@@ -1035,7 +1035,7 @@ fn historical_schema_projected_reachable_filters_translate_old_names() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved_payload.id,

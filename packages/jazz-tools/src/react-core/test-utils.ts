@@ -1,5 +1,5 @@
 import type { AuthState } from "../runtime/auth-state.js";
-import type { AuthMode, Session } from "../runtime/context.js";
+import type { AuthMode, PublicSession } from "../runtime/context.js";
 import { attachSubscriptionStore } from "../subscription-store-internal.js";
 
 export function makeFakeClient(params: {
@@ -7,8 +7,8 @@ export function makeFakeClient(params: {
   userId: string;
   claims: Record<string, unknown>;
 }) {
-  const session: Session = {
-    user_id: params.userId,
+  const session: PublicSession = {
+    user: params.userId,
     claims: params.claims,
     authMode: params.authMode,
   };

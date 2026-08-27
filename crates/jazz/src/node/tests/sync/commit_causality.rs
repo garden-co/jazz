@@ -211,7 +211,7 @@ fn client_side_rejection_cascades_to_local_mergeable_descendant() {
         .tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
         .unwrap();
     let (exclusive, exclusive_unit) = client
-        .commit_exclusive_settled(tx_id, AuthorId::SYSTEM, SKEW_TOLERANCE_MS + 1)
+        .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, SKEW_TOLERANCE_MS + 1)
         .unwrap();
     let (dependent, dependent_unit) = client
         .commit_mergeable_unit_settled(
@@ -273,6 +273,54 @@ fn client_side_rejection_cascades_to_local_mergeable_descendant() {
         Fate::Rejected(RejectionReason::Cascade { root: exclusive })
     );
 }
+
+// Stack safety is an implementation-level property. This NodeState integration
+// test arranges a deep speculative local chain, then asserts terminal states
+// and retracted local rows through its fate entry point.
+#[test]
+fn client_rejects_deep_local_causal_chain_without_recursing() {
+    const DEPTH: usize = 1_024;
+
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let mut parent = None;
+    let mut tx_ids = Vec::with_capacity(DEPTH);
+
+    for time in 1..=DEPTH {
+        // Spread versions across rows so test-only history consistency checks
+        // do not turn this stack-safety regression into a quadratic soak.
+        let mut commit = MergeableCommit::new("todos", row((time % 251) as u8), time as u64)
+            .cells(title_cells(&format!("depth-{time}")));
+        if let Some(parent) = parent {
+            commit = commit.parents(vec![parent]);
+        }
+        let (tx_id, _) = client.commit_mergeable_unit_settled(commit).unwrap();
+        parent = Some(tx_id);
+        tx_ids.push(tx_id);
+    }
+
+    let root = tx_ids[0];
+    client
+        .apply_fate_update(
+            root,
+            Fate::Rejected(RejectionReason::ClientClockTooFarAhead),
+            None,
+            None,
+        )
+        .unwrap();
+
+    for tx_id in tx_ids {
+        assert_eq!(
+            client.transaction_state_settled(tx_id).unwrap().0,
+            if tx_id == root {
+                Fate::Rejected(RejectionReason::ClientClockTooFarAhead)
+            } else {
+                Fate::Rejected(RejectionReason::Cascade { root })
+            }
+        );
+    }
+    assert!(client.current_rows("todos", DurabilityTier::Local).unwrap().is_empty());
+}
+
 #[test]
 fn authority_unparks_child_after_unknown_parent_accepts() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));
@@ -283,7 +331,7 @@ fn authority_unparks_child_after_unknown_parent_accepts() {
     client
         .tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
         .unwrap();
-    let (exclusive, exclusive_unit) = client.commit_exclusive_settled(tx_id, AuthorId::SYSTEM, 1).unwrap();
+    let (exclusive, exclusive_unit) = client.commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 1).unwrap();
     let (child, child_unit) = client
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row, 2)
@@ -429,6 +477,136 @@ fn malformed_commit_unit_rejects_write_count_mismatch() {
         }
     );
     assert!(core.row_history("todos", row(1)).unwrap().is_empty());
+}
+
+/// A core accepts the final representable public provenance millisecond but
+/// rejects an over-range content or deletion carrier before any row state is
+/// staged (while retaining the ordinary durable rejection receipt).
+///
+/// writer ──wire provenance──► core
+///   max                      accepts
+///   max + 1                  rejects ──► no partial row/tx state
+#[test]
+fn wire_provenance_hlc_boundary_is_admitted_or_rejected_before_commit_staging() {
+    use crate::time::HLC_MAX_PHYSICAL_MS;
+
+    let schema = schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
+
+    for (row_uuid, deletion) in [(row(0x81), None), (row(0x82), Some(DeletionEvent::Deleted))] {
+        let source = if let Some(deletion) = deletion {
+            MergeableCommit::new("todos", row_uuid, 10).deletion(deletion)
+        } else {
+            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("boundary"))
+        };
+        let (_tx_id, unit) = writer.commit_mergeable_unit_settled(source).unwrap();
+        let SyncMessage::CommitUnit { tx, versions } = unit else {
+            panic!("expected commit unit");
+        };
+        let original = versions.into_iter().next().unwrap();
+        let boundary = VersionRecord::encode(
+            &schema.tables[0],
+            original.schema_version(),
+            original.row_uuid(),
+            original.parents(),
+            original.created_by(),
+            HLC_MAX_PHYSICAL_MS,
+            original.updated_by(),
+            HLC_MAX_PHYSICAL_MS,
+            &[original.cell_at(0)],
+            original.deletion(),
+        )
+        .unwrap()
+        .with_authored_columns(original.authored_columns().cloned());
+        let accepted = core
+            .ingest_commit_unit_settled(
+                tx.clone(),
+                vec![boundary],
+                u64::MAX - SKEW_TOLERANCE_MS,
+            )
+            .unwrap();
+        assert!(matches!(
+            accepted.as_slice(),
+            [SyncMessage::FateUpdate { fate: Fate::Accepted, .. }]
+        ));
+
+        let (_bad_tx_id, bad_unit) = writer
+            .commit_mergeable_unit_settled(if let Some(deletion) = deletion {
+                MergeableCommit::new("todos", row_uuid, 11).deletion(deletion)
+            } else {
+                MergeableCommit::new("todos", row_uuid, 11).cells(title_cells("too far"))
+            })
+            .unwrap();
+        let SyncMessage::CommitUnit {
+            tx: bad_tx,
+            versions: bad_versions,
+        } = bad_unit
+        else {
+            panic!("expected commit unit");
+        };
+        let original = bad_versions.into_iter().next().unwrap();
+        let too_far = VersionRecord::encode(
+            &schema.tables[0],
+            original.schema_version(),
+            original.row_uuid(),
+            original.parents(),
+            original.created_by(),
+            HLC_MAX_PHYSICAL_MS + 1,
+            original.updated_by(),
+            HLC_MAX_PHYSICAL_MS + 1,
+            &[original.cell_at(0)],
+            original.deletion(),
+        )
+        .unwrap()
+        .with_authored_columns(original.authored_columns().cloned());
+        let rejected = core
+            .ingest_commit_unit_settled(
+                bad_tx.clone(),
+                vec![too_far],
+                u64::MAX - SKEW_TOLERANCE_MS,
+            )
+            .unwrap();
+        assert!(matches!(
+            rejected.as_slice(),
+            [SyncMessage::FateUpdate {
+                tx_id,
+                fate: Fate::Rejected(RejectionReason::MalformedCommit(reason)),
+                global_time: None,
+                durability: None,
+            }] if *tx_id == bad_tx.tx_id && reason.contains("created_at_ms outside the packed HLC")
+        ));
+        assert!(matches!(
+            core.transaction_record(bad_tx.tx_id).resolve(),
+            Some(TransactionRecord {
+                fate: Fate::Rejected(RejectionReason::MalformedCommit(_)),
+                ..
+            })
+        ));
+        // The rejection receipt is durable, but the malformed carrier never
+        // reaches history/current-row storage.
+        assert_eq!(core.row_history("todos", row_uuid).unwrap().len(), 1);
+    }
+}
+
+/// Locally authored mergeable writes validate their public provenance before
+/// allocating/staging a transaction, rather than reaching `TxTime::from`'s
+/// assertion through an internal convenience path.
+#[test]
+fn local_mergeable_provenance_over_hlc_boundary_is_a_typed_error() {
+    use crate::time::HLC_MAX_PHYSICAL_MS;
+
+    let (_dir, mut node) = open_node_with_uuid(node(0x71));
+    assert!(matches!(
+        node.commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x71), HLC_MAX_PHYSICAL_MS + 1)
+                .cells(title_cells("too far")),
+        ),
+        Err(Error::InvalidMergeableCommit(
+            "commit now_ms exceeds packed HLC physical-millisecond range"
+        ))
+    ));
+    assert!(node.row_history("todos", row(0x71)).unwrap().is_empty());
 }
 
 #[test]

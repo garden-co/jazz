@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use jazz::groove::records::Value;
 use jazz::groove::storage::{OrderedKvStorage, ReopenableStorage};
-use jazz::ids::{AuthorId, RowUuid};
+use jazz::ids::{AuthorSubject, RowUuid};
 use jazz::node::{Error as NodeError, MergeableCommit, NodeState, PublicationOutcome};
 use jazz::peer::PeerState;
 use jazz::protocol::{SyncMessage, VersionRecord};
@@ -69,7 +69,12 @@ impl FixtureBuilder {
             if entity.authors {
                 fixture.authors_by_set.insert(
                     entity.name.clone(),
-                    rows.iter().map(|row| AuthorId(row.0)).collect::<Vec<_>>(),
+                    rows.iter()
+                        .map(|row| {
+                            AuthorSubject::authenticated("urn:jazz:sim", &row.0.to_string())
+                                .expect("simulation issuer is external")
+                        })
+                        .collect::<Vec<_>>(),
                 );
             }
             fixture.rows_by_set.insert(entity.name.clone(), rows);
@@ -143,7 +148,7 @@ pub struct Fixture {
     /// Row ids by declared set name.
     pub rows_by_set: BTreeMap<String, Vec<RowUuid>>,
     /// Optional author ids by declared set name.
-    pub authors_by_set: BTreeMap<String, Vec<AuthorId>>,
+    pub authors_by_set: BTreeMap<String, Vec<AuthorSubject>>,
 }
 
 impl Fixture {
@@ -368,7 +373,7 @@ pub struct WriteStep {
     /// Target row.
     pub row_uuid: RowUuid,
     /// Acting author.
-    pub author: AuthorId,
+    pub author: AuthorSubject,
 }
 
 /// Rate-driven ongoing edit stream.
@@ -385,7 +390,7 @@ pub struct FixtureCommitApply<'a> {
     /// Core node name in the topology.
     pub core_name: &'a str,
     /// Transaction author.
-    pub made_by: AuthorId,
+    pub made_by: AuthorSubject,
     /// Abstract wall clock at the writer.
     pub now_ms: u64,
 }
@@ -446,7 +451,7 @@ where
 pub fn commit_exclusive_settled<S>(
     node: &mut NodeState<S>,
     open_tx: OpenTransactionId,
-    made_by: AuthorId,
+    made_by: AuthorSubject,
     now_ms: u64,
 ) -> Result<(TxId, SyncMessage), NodeError>
 where
@@ -518,7 +523,10 @@ where
 {
     let update = jazz::db::block_on(peer.current_rows_update(from, options.table))
         .map_err(|err| format!("view update failed: {err}"))?;
-    if !matches!(update, SyncMessage::ViewUpdate { .. }) {
+    if !matches!(
+        update,
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload { .. })
+    ) {
         return Err("expected view update".to_owned());
     }
     ctx.send(options.from_name, options.to_name, update);
@@ -538,7 +546,7 @@ impl WriteStream {
         edits_per_sec: u64,
         steps: usize,
         rows: &[RowUuid],
-        authors: &[AuthorId],
+        authors: &[AuthorSubject],
         row_zipf_s: f64,
         author_zipf_s: f64,
     ) -> Self {
@@ -624,7 +632,13 @@ mod tests {
         let rows = (0..8)
             .map(|idx| deterministic_row_uuid(1, "rows", idx))
             .collect::<Vec<_>>();
-        let authors = rows.iter().map(|row| AuthorId(row.0)).collect::<Vec<_>>();
+        let authors = rows
+            .iter()
+            .map(|row| {
+                AuthorSubject::authenticated("urn:jazz:sim", &row.0.to_string())
+                    .expect("simulation issuer is external")
+            })
+            .collect::<Vec<_>>();
         let a = WriteStream::new(7, 10, 16, &rows, &authors, 1.1, 1.1);
         let b = WriteStream::new(7, 10, 16, &rows, &authors, 1.1, 1.1);
         assert_eq!(a.steps(), b.steps());

@@ -1,12 +1,20 @@
+use std::any::Any;
 use std::collections::BTreeMap;
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::collections::VecDeque;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc as std_mpsc;
+use std::sync::{Arc, Condvar, Mutex};
+use std::task::Poll;
 use std::thread;
 
-use crate::db::{CommitUnitTrust, ConnectionSessionContext, DbIdentity, Transport};
+use crate::db::{
+    CommitUnitTrust, ConnectionSessionContext, DbIdentity, TickScheduler, TickUrgency, Transport,
+};
 use crate::groove::records::Value;
 use crate::groove::storage::StorageFactory;
-use crate::ids::{AuthorId, NodeUuid, SchemaVersionId};
+use crate::ids::{AuthorSubject, NodeUuid, SchemaVersionId};
 use crate::node::EdgeCacheBudget;
 use crate::protocol::{MigrationLens, SyncMessage};
 use crate::schema::JazzSchema;
@@ -14,7 +22,11 @@ use crate::serving::{
     AbiBytes, InMemoryServerShell, InMemoryServerShellConfig, NodeRole, ServerSession,
     StorageConfig,
 };
-use crate::wire::{WireFrame, decode_frame, decode_sync_message};
+use crate::wire::{WireFrame, WireTransport, decode_frame, decode_sync_message};
+use futures::StreamExt;
+use futures::channel::mpsc;
+use futures::future::LocalBoxFuture;
+use futures::task::LocalSpawnExt;
 use tokio::sync::{mpsc as tokio_mpsc, oneshot, watch};
 
 /// Sendable handle for the thread that owns the in-memory server shell.
@@ -58,9 +70,19 @@ impl ServerRuntimeFrameStream {
 }
 
 struct ServerShellInner {
-    jobs: Mutex<Option<mpsc::Sender<ServerShellCommand>>>,
+    jobs: Mutex<Option<mpsc::UnboundedSender<ServerShellCommand>>>,
     join: Mutex<Option<thread::JoinHandle<()>>>,
+    shutdown: Mutex<ShutdownState>,
+    shutdown_changed: Condvar,
     activity_tx: watch::Sender<u64>,
+    io_wakers: Arc<Mutex<Vec<mpsc::UnboundedSender<()>>>>,
+}
+
+#[derive(Clone)]
+enum ShutdownState {
+    Running,
+    InProgress,
+    Finished(Result<(), String>),
 }
 
 impl Drop for ServerShellInner {
@@ -77,10 +99,291 @@ impl Drop for ServerShellInner {
 }
 
 type ServerShellJob = Box<dyn FnOnce(&mut InMemoryServerShell) + Send + 'static>;
+type AsyncServerShellJob =
+    Box<dyn for<'a> FnOnce(&'a mut InMemoryServerShell) -> LocalBoxFuture<'a, ()> + Send + 'static>;
 
 enum ServerShellCommand {
     Run(ServerShellJob),
-    Shutdown(mpsc::Sender<()>),
+    RunAsync(AsyncServerShellJob),
+    AttachUpstreamWire {
+        transport: Box<dyn WireTransport + Send>,
+        protocol_version: u16,
+        features: crate::wire::WireFeatures,
+        session_context: Option<ConnectionSessionContext>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    Shutdown(std_mpsc::Sender<()>),
+}
+
+/// Bridges database-local progress requests back into the shell owner queue.
+///
+/// The database is intentionally thread-affine, so this scheduler is only
+/// installed and invoked on the owner thread. The command queue preserves that
+/// affinity while ensuring an Immediate request becomes a following shell turn
+/// instead of waiting for unrelated socket activity.
+#[derive(Clone)]
+struct ServerShellTickScheduler {
+    jobs: mpsc::UnboundedSender<ServerShellCommand>,
+    activity_tx: watch::Sender<u64>,
+    io_wakers: Arc<Mutex<Vec<mpsc::UnboundedSender<()>>>>,
+    state: Arc<ServerShellTickState>,
+}
+
+#[derive(Default)]
+struct ServerShellTickState {
+    queued: AtomicBool,
+    delayed: AtomicBool,
+}
+
+impl ServerShellTickScheduler {
+    fn enqueue_tick(
+        jobs: &mpsc::UnboundedSender<ServerShellCommand>,
+        activity_tx: &watch::Sender<u64>,
+        io_wakers: &Arc<Mutex<Vec<mpsc::UnboundedSender<()>>>>,
+        state: &Arc<ServerShellTickState>,
+    ) {
+        if state.queued.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        let activity_tx = activity_tx.clone();
+        let io_wakers = Arc::clone(io_wakers);
+        let tick_state = Arc::clone(state);
+        if jobs
+            .unbounded_send(ServerShellCommand::RunAsync(Box::new(move |shell| {
+                Box::pin(async move {
+                    // Mark this turn consumed before ticking. Work discovered by
+                    // the tick itself queues one follow-up turn instead of being
+                    // lost behind the currently running command.
+                    tick_state.queued.store(false, Ordering::Release);
+                    if shell.tick_async().await.is_ok() {
+                        notify_shell_activity(&activity_tx);
+                        if let Ok(mut wakers) = io_wakers.lock() {
+                            wakers.retain(|wake| wake.unbounded_send(()).is_ok());
+                        }
+                    }
+                })
+            })))
+            .is_err()
+        {
+            state.queued.store(false, Ordering::Release);
+        }
+    }
+}
+
+impl TickScheduler for ServerShellTickScheduler {
+    fn schedule_tick(&self, _urgency: TickUrgency) {
+        Self::enqueue_tick(&self.jobs, &self.activity_tx, &self.io_wakers, &self.state);
+    }
+
+    fn schedule_tick_after(&self, delay_ms: u64) {
+        // The shell owner must not sleep: it owns the thread-affine database
+        // and needs to keep accepting transport work while an upload waits for
+        // its admission window. Coalesce same-window retry wakes, then return
+        // to the owner queue from a tiny timer thread.
+        if self.state.delayed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let jobs = self.jobs.clone();
+        let activity_tx = self.activity_tx.clone();
+        let io_wakers = Arc::clone(&self.io_wakers);
+        let state = Arc::clone(&self.state);
+        thread::spawn(move || {
+            thread::sleep(std::time::Duration::from_millis(delay_ms));
+            state.delayed.store(false, Ordering::Release);
+            Self::enqueue_tick(&jobs, &activity_tx, &io_wakers, &state);
+        });
+    }
+}
+
+fn run_server_shell_owner(
+    mut shell: InMemoryServerShell,
+    mut receiver: mpsc::UnboundedReceiver<ServerShellCommand>,
+    jobs: mpsc::UnboundedSender<ServerShellCommand>,
+    activity_tx: watch::Sender<u64>,
+    io_wakers: Arc<Mutex<Vec<mpsc::UnboundedSender<()>>>>,
+) {
+    let scheduler = ServerShellTickScheduler {
+        jobs,
+        activity_tx,
+        io_wakers: Arc::clone(&io_wakers),
+        state: Arc::new(ServerShellTickState::default()),
+    };
+    shell.set_tick_scheduler(Some(Rc::new(scheduler.clone())));
+    let mut executor = futures::executor::LocalPool::new();
+    let spawner = executor.spawner();
+    executor.run_until(async move {
+        let mut pending = VecDeque::new();
+        loop {
+            let command = match pending.pop_front() {
+                Some(command) => command,
+                None => match receiver.next().await {
+                    Some(command) => command,
+                    None => return,
+                },
+            };
+            match command {
+                ServerShellCommand::Run(job) => job(&mut shell),
+                ServerShellCommand::RunAsync(job) => {
+                    let mut operation = job(&mut shell);
+                    loop {
+                        match futures::future::select(operation.as_mut(), receiver.next()).await {
+                            futures::future::Either::Left(((), _)) => break,
+                            futures::future::Either::Right((
+                                Some(ServerShellCommand::Shutdown(stopped)),
+                                _,
+                            )) => {
+                                // Dropping the suspended operation releases all
+                                // evaluator leases before storage destruction.
+                                drop(operation);
+                                drop(shell);
+                                let _ = stopped.send(());
+                                return;
+                            }
+                            futures::future::Either::Right((Some(command), _)) => {
+                                pending.push_back(command);
+                            }
+                            futures::future::Either::Right((None, _)) => return,
+                        }
+                    }
+                }
+                ServerShellCommand::AttachUpstreamWire {
+                    transport,
+                    protocol_version,
+                    features,
+                    session_context,
+                    reply,
+                } => {
+                    let io =
+                        shell.connect_upstream_wire_io(protocol_version, features, session_context);
+                    let (wake_tx, wake_rx) = mpsc::unbounded();
+                    if let Ok(mut wakers) = io_wakers.lock() {
+                        wakers.push(wake_tx);
+                    }
+                    let spawn_result = spawner.spawn_local(drive_upstream_wire(
+                        transport,
+                        io,
+                        wake_rx,
+                        scheduler.clone(),
+                    ));
+                    let _ = reply.send(spawn_result.map_err(|error| {
+                        format!("failed to spawn local upstream wire pump: {error}")
+                    }));
+                }
+                ServerShellCommand::Shutdown(stopped) => {
+                    // Native storage is destroyed on its owner thread before
+                    // shutdown is acknowledged.
+                    drop(shell);
+                    let _ = stopped.send(());
+                    return;
+                }
+            }
+
+            // A shell tick can discover and enqueue another immediate tick.
+            // The owner also hosts upstream wire pumps in this LocalPool, so
+            // consuming a run of already-ready commands without yielding can
+            // indefinitely delay an edge's inbound/outbound wire progress.
+            // Cooperate once per command: queued shell work remains ordered,
+            // while a ready wire pump gets an opportunity to transfer the
+            // corresponding core update.
+            yield_to_local_tasks().await;
+        }
+    });
+}
+
+/// Yield exactly once through the current local executor without introducing a
+/// host timer or moving the thread-affine shell to another thread.
+async fn yield_to_local_tasks() {
+    let mut yielded = false;
+    futures::future::poll_fn(move |context| {
+        if yielded {
+            Poll::Ready(())
+        } else {
+            yielded = true;
+            context.waker().wake_by_ref();
+            Poll::Pending
+        }
+    })
+    .await;
+}
+
+async fn drive_upstream_wire(
+    mut wire: Box<dyn WireTransport + Send>,
+    io: super::ServerUpstreamIo,
+    mut wake_rx: mpsc::UnboundedReceiver<()>,
+    scheduler: ServerShellTickScheduler,
+) {
+    loop {
+        let mut staged_semantic_input = false;
+        while let Some(frame) = wire.try_recv_frame() {
+            match io.pump.route_incoming_wire_frame(frame, io.features).await {
+                Ok(Some(canonical)) => {
+                    io.transport
+                        .queues
+                        .borrow_mut()
+                        .inbound
+                        .push_back(canonical);
+                    staged_semantic_input = true;
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    io.pump.disconnect();
+                    return;
+                }
+            }
+        }
+        // The socket callback can notify the host before this local pump gets
+        // a turn to stage its frame. Schedule only after canonical input is
+        // actually visible to the shell, otherwise a downstream activity tick
+        // may observe an empty queue and leave the edge dormant indefinitely.
+        if staged_semantic_input {
+            scheduler.schedule_tick(TickUrgency::Immediate);
+        }
+        loop {
+            let frame = io.transport.queues.borrow_mut().outbound.pop_front();
+            let Some(frame) = frame else { break };
+            if wire.send_frame(frame).is_err() {
+                io.pump.disconnect();
+                return;
+            }
+        }
+        loop {
+            let frame =
+                match io
+                    .pump
+                    .take_outbound_wire_frame(io.protocol_version, io.features, None)
+                {
+                    Ok(frame) => frame,
+                    Err(_) => {
+                        io.pump.disconnect();
+                        return;
+                    }
+                };
+            let Some(frame) = frame else { break };
+            if wire.send_frame(frame).is_err() {
+                io.pump.disconnect();
+                return;
+            }
+        }
+
+        let external_wake = wake_rx.next();
+        let auxiliary_wake = io.pump.outbound_ready();
+        futures::pin_mut!(external_wake, auxiliary_wake);
+        match futures::future::select(external_wake, auxiliary_wake).await {
+            futures::future::Either::Left((Some(()), _)) => {}
+            futures::future::Either::Right(((), _)) => {
+                // Disconnect wakes `outbound_ready` to let the owner tear
+                // down cleanly; it is not another unit of socket work.
+                if io.pump.is_disconnected() {
+                    return;
+                }
+            }
+            futures::future::Either::Left((None, _)) => {
+                io.pump.disconnect();
+                return;
+            }
+        }
+    }
 }
 
 impl ServerRuntimeHandle {
@@ -91,16 +394,20 @@ impl ServerRuntimeHandle {
         storage_factory: Option<Arc<dyn StorageFactory>>,
         edge_cache_budget: Option<EdgeCacheBudget>,
     ) -> Result<Option<Self>, String> {
-        let (jobs, receiver) = mpsc::channel::<ServerShellCommand>();
-        let (started_tx, started_rx) = mpsc::channel();
+        let (jobs, receiver) = mpsc::unbounded::<ServerShellCommand>();
+        let (started_tx, started_rx) = std_mpsc::channel();
         let (activity_tx, _) = watch::channel(0_u64);
+        let io_wakers = Arc::new(Mutex::new(Vec::new()));
+        let owner_io_wakers = Arc::clone(&io_wakers);
+        let owner_jobs = jobs.clone();
+        let owner_activity_tx = activity_tx.clone();
         let join = thread::Builder::new()
             .name("jazz-server-shell".to_owned())
             .spawn(move || {
                 let shell = match InMemoryServerShell::try_start_dynamic_edge_from_storage(
                     DbIdentity {
                         node: NodeUuid::from_bytes([0x5e; 16]),
-                        author: AuthorId::SYSTEM,
+                        author: AuthorSubject::SYSTEM,
                     },
                     storage_config,
                     storage_factory,
@@ -119,17 +426,13 @@ impl ServerRuntimeHandle {
                         return;
                     }
                 };
-                let mut shell = shell;
-                while let Ok(command) = receiver.recv() {
-                    match command {
-                        ServerShellCommand::Run(job) => job(&mut shell),
-                        ServerShellCommand::Shutdown(stopped) => {
-                            drop(shell);
-                            let _ = stopped.send(());
-                            return;
-                        }
-                    }
-                }
+                run_server_shell_owner(
+                    shell,
+                    receiver,
+                    owner_jobs,
+                    owner_activity_tx,
+                    owner_io_wakers,
+                );
             })
             .map_err(|error| format!("failed to spawn server shell thread: {error}"))?;
         let started = started_rx
@@ -139,7 +442,10 @@ impl ServerRuntimeHandle {
             inner: Arc::new(ServerShellInner {
                 jobs: Mutex::new(Some(jobs)),
                 join: Mutex::new(Some(join)),
+                shutdown: Mutex::new(ShutdownState::Running),
+                shutdown_changed: Condvar::new(),
                 activity_tx,
+                io_wakers,
             }),
         }))
     }
@@ -153,9 +459,13 @@ impl ServerRuntimeHandle {
         edge_cache_budget: Option<EdgeCacheBudget>,
         snapshot: crate::protocol::CatalogueSnapshot,
     ) -> Result<Self, String> {
-        let (jobs, receiver) = mpsc::channel::<ServerShellCommand>();
-        let (started_tx, started_rx) = mpsc::channel();
+        let (jobs, receiver) = mpsc::unbounded::<ServerShellCommand>();
+        let (started_tx, started_rx) = std_mpsc::channel();
         let (activity_tx, _) = watch::channel(0_u64);
+        let io_wakers = Arc::new(Mutex::new(Vec::new()));
+        let owner_io_wakers = Arc::clone(&io_wakers);
+        let owner_jobs = jobs.clone();
+        let owner_activity_tx = activity_tx.clone();
 
         let join = thread::Builder::new()
             .name("jazz-server-shell".to_owned())
@@ -163,7 +473,7 @@ impl ServerRuntimeHandle {
                 let shell = match InMemoryServerShell::start_dynamic_edge_with_catalogue_snapshot(
                     DbIdentity {
                         node: NodeUuid::from_bytes([0x5e; 16]),
-                        author: AuthorId::SYSTEM,
+                        author: AuthorSubject::SYSTEM,
                     },
                     storage_config,
                     storage_factory,
@@ -179,17 +489,13 @@ impl ServerRuntimeHandle {
                         return;
                     }
                 };
-                let mut shell = shell;
-                while let Ok(command) = receiver.recv() {
-                    match command {
-                        ServerShellCommand::Run(job) => job(&mut shell),
-                        ServerShellCommand::Shutdown(stopped) => {
-                            drop(shell);
-                            let _ = stopped.send(());
-                            return;
-                        }
-                    }
-                }
+                run_server_shell_owner(
+                    shell,
+                    receiver,
+                    owner_jobs,
+                    owner_activity_tx,
+                    owner_io_wakers,
+                );
             })
             .map_err(|error| format!("failed to spawn server shell thread: {error}"))?;
 
@@ -200,7 +506,10 @@ impl ServerRuntimeHandle {
             inner: Arc::new(ServerShellInner {
                 jobs: Mutex::new(Some(jobs)),
                 join: Mutex::new(Some(join)),
+                shutdown: Mutex::new(ShutdownState::Running),
+                shutdown_changed: Condvar::new(),
                 activity_tx,
+                io_wakers,
             }),
         })
     }
@@ -312,9 +621,13 @@ impl ServerRuntimeHandle {
         edge_cache_budget: Option<EdgeCacheBudget>,
         permissions_ready: bool,
     ) -> Result<Self, String> {
-        let (jobs, receiver) = mpsc::channel::<ServerShellCommand>();
-        let (started_tx, started_rx) = mpsc::channel();
+        let (jobs, receiver) = mpsc::unbounded::<ServerShellCommand>();
+        let (started_tx, started_rx) = std_mpsc::channel();
         let (activity_tx, _) = watch::channel(0_u64);
+        let io_wakers = Arc::new(Mutex::new(Vec::new()));
+        let owner_io_wakers = Arc::clone(&io_wakers);
+        let owner_jobs = jobs.clone();
+        let owner_activity_tx = activity_tx.clone();
 
         let join = thread::Builder::new()
             .name("jazz-server-shell".to_owned())
@@ -323,7 +636,7 @@ impl ServerRuntimeHandle {
                     schema,
                     DbIdentity {
                         node: NodeUuid::from_bytes([0x5e; 16]),
-                        author: AuthorId::SYSTEM,
+                        author: AuthorSubject::SYSTEM,
                     },
                 )
                 .with_row_id_seed(0x5e)
@@ -353,19 +666,13 @@ impl ServerRuntimeHandle {
                     }
                 };
 
-                let mut shell = shell;
-                while let Ok(command) = receiver.recv() {
-                    match command {
-                        ServerShellCommand::Run(job) => job(&mut shell),
-                        ServerShellCommand::Shutdown(stopped) => {
-                            // The shell owns the native storage, so complete
-                            // its destruction before acknowledging shutdown.
-                            drop(shell);
-                            let _ = stopped.send(());
-                            return;
-                        }
-                    }
-                }
+                run_server_shell_owner(
+                    shell,
+                    receiver,
+                    owner_jobs,
+                    owner_activity_tx,
+                    owner_io_wakers,
+                );
             })
             .map_err(|error| format!("failed to spawn server shell thread: {error}"))?;
 
@@ -376,7 +683,10 @@ impl ServerRuntimeHandle {
             inner: Arc::new(ServerShellInner {
                 jobs: Mutex::new(Some(jobs)),
                 join: Mutex::new(Some(join)),
+                shutdown: Mutex::new(ShutdownState::Running),
+                shutdown_changed: Condvar::new(),
                 activity_tx,
+                io_wakers,
             }),
         })
     }
@@ -391,7 +701,7 @@ impl ServerRuntimeHandle {
     /// Admit an authenticated session into the semantic runtime.
     pub async fn open_with_session_context(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
         trust: CommitUnitTrust,
         negotiated_features: crate::wire::WireFeatures,
@@ -470,31 +780,26 @@ impl ServerRuntimeHandle {
     ) -> Result<ServerRuntimeFrameStream, String> {
         let activity_tx = self.inner.activity_tx.clone();
         let (outbound_tx, outbound_rx) = tokio_mpsc::unbounded_channel();
-        self.send(ServerShellCommand::Run(Box::new(move |shell| {
-            for frame in frames {
-                let phase = inbound_frame_phase(&frame);
-                let result = shell
-                    .receive_frames(session, [frame])
-                    .map_err(|error| format!("server receive {phase}: {error}"))
-                    .and_then(|()| {
-                        shell
-                            .tick()
-                            .map_err(|error| format!("server tick after {phase}: {error}"))
-                    })
-                    .and_then(|()| {
-                        shell
-                            .take_frames(session)
-                            .map_err(|error| format!("server drain after {phase}: {error}"))
-                    });
-                let keep_streaming = result.is_ok();
-                if outbound_tx.send(result).is_err() {
-                    return;
+        self.send(ServerShellCommand::RunAsync(Box::new(move |shell| {
+            Box::pin(async move {
+                for frame in frames {
+                    let phase = inbound_frame_phase(&frame);
+                    let result = match shell.receive_frames_async(session, [frame]).await {
+                        Err(error) => Err(format!("server receive {phase}: {error}")),
+                        Ok(()) => match shell.tick_async().await {
+                            Err(error) => Err(format!("server tick after {phase}: {error}")),
+                            Ok(()) => shell
+                                .take_frames(session)
+                                .map_err(|error| format!("server drain after {phase}: {error}")),
+                        },
+                    };
+                    let keep_streaming = result.is_ok();
+                    if outbound_tx.send(result).is_err() || !keep_streaming {
+                        return;
+                    }
+                    notify_shell_activity(&activity_tx);
                 }
-                if !keep_streaming {
-                    return;
-                }
-                notify_shell_activity(&activity_tx);
-            }
+            })
         })))?;
         Ok(ServerRuntimeFrameStream {
             receiver: outbound_rx,
@@ -504,23 +809,27 @@ impl ServerRuntimeHandle {
     /// Tick the runtime once and return pending frames for one session.
     pub async fn tick_take(&self, session: ServerSession) -> Result<Vec<AbiBytes>, String> {
         let activity_tx = self.inner.activity_tx.clone();
-        self.run(move |shell| {
-            let result = shell
-                .tick()
-                .and_then(|()| shell.take_frames(session))
-                .map_err(|error| error.to_string());
-            // Progress-based re-arm: a tick that yielded frames may have more
-            // behind it (large resets span many ticks), so schedule another.
-            // Empty ticks do NOT re-arm — that unconditional re-arm was the
-            // consolidation-spin feeder. One notification must never buy an
-            // unbounded loop, and delivery must never stall mid-reset; frames
-            // produced is exactly the signal that separates the two.
-            if let Ok(frames) = &result
-                && !frames.is_empty()
-            {
-                notify_shell_activity(&activity_tx);
-            }
-            result
+        self.run_async(move |shell| {
+            Box::pin(async move {
+                let result = match shell.tick_async().await {
+                    Ok(()) => shell
+                        .take_frames(session)
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(error.to_string()),
+                };
+                // Progress-based re-arm: a tick that yielded frames may have more
+                // behind it (large resets span many ticks), so schedule another.
+                // Empty ticks do NOT re-arm — that unconditional re-arm was the
+                // consolidation-spin feeder. One notification must never buy an
+                // unbounded loop, and delivery must never stall mid-reset; frames
+                // produced is exactly the signal that separates the two.
+                if let Ok(frames) = &result
+                    && !frames.is_empty()
+                {
+                    notify_shell_activity(&activity_tx);
+                }
+                result
+            })
         })
         .await
     }
@@ -543,9 +852,38 @@ impl ServerRuntimeHandle {
         .await
     }
 
+    /// Attach a negotiated native wire transport and drive its semantic and
+    /// auxiliary channels on the shell's local executor.
+    pub async fn connect_upstream_wire(
+        &self,
+        transport: Box<dyn WireTransport + Send>,
+        protocol_version: u16,
+        features: crate::wire::WireFeatures,
+        session_context: Option<ConnectionSessionContext>,
+    ) -> Result<(), String> {
+        let (reply, response) = oneshot::channel();
+        self.send(ServerShellCommand::AttachUpstreamWire {
+            transport,
+            protocol_version,
+            features,
+            session_context,
+            reply,
+        })?;
+        let result = response
+            .await
+            .map_err(|_| "server shell dropped upstream wire attachment".to_owned())?;
+        if result.is_ok() {
+            self.notify_activity();
+        }
+        result
+    }
+
     /// Wake shell tasks after an adapter stages inbound work.
     pub fn notify_activity(&self) {
         notify_shell_activity(&self.inner.activity_tx);
+        if let Ok(mut wakers) = self.inner.io_wakers.lock() {
+            wakers.retain(|wake| wake.unbounded_send(()).is_ok());
+        }
     }
 
     /// Close a semantic session without exposing runtime storage or peer state.
@@ -572,7 +910,7 @@ impl ServerRuntimeHandle {
             .map_err(|_| "server shell jobs mutex poisoned".to_owned())?
             .as_ref()
             .ok_or_else(|| "server shell is shut down".to_owned())?
-            .send(command)
+            .unbounded_send(command)
             .map_err(|_| "server shell thread is not running".to_owned())
     }
 
@@ -591,9 +929,90 @@ impl ServerRuntimeHandle {
             .await
             .map_err(|_| "server shell thread dropped response".to_owned())?
     }
+
+    async fn run_async<T>(
+        &self,
+        run_on_shell: impl for<'a> FnOnce(
+            &'a mut InMemoryServerShell,
+        ) -> LocalBoxFuture<'a, Result<T, String>>
+        + Send
+        + 'static,
+    ) -> Result<T, String>
+    where
+        T: Send + 'static,
+    {
+        let (reply, response) = oneshot::channel();
+        self.send(ServerShellCommand::RunAsync(Box::new(move |shell| {
+            Box::pin(async move {
+                let result = run_on_shell(shell).await;
+                let _ = reply.send(result);
+            })
+        })))?;
+        response
+            .await
+            .map_err(|_| "server shell thread dropped async response".to_owned())?
+    }
 }
 
 fn shutdown_blocking(inner: &ServerShellInner) -> Result<(), String> {
+    shutdown_blocking_with(inner, perform_shutdown_blocking, || {})
+}
+
+fn shutdown_blocking_with(
+    inner: &ServerShellInner,
+    perform: impl FnOnce(&ServerShellInner) -> Result<(), String>,
+    on_waiting: impl FnOnce(),
+) -> Result<(), String> {
+    let mut on_waiting = Some(on_waiting);
+    {
+        let mut state = inner
+            .shutdown
+            .lock()
+            .map_err(|_| "server shell shutdown mutex poisoned".to_owned())?;
+        loop {
+            match &*state {
+                ShutdownState::Running => {
+                    *state = ShutdownState::InProgress;
+                    break;
+                }
+                ShutdownState::InProgress => {
+                    if let Some(on_waiting) = on_waiting.take() {
+                        on_waiting();
+                    }
+                    state = inner
+                        .shutdown_changed
+                        .wait(state)
+                        .map_err(|_| "server shell shutdown mutex poisoned".to_owned())?;
+                }
+                ShutdownState::Finished(result) => return result.clone(),
+            }
+        }
+    }
+
+    let result = catch_unwind(AssertUnwindSafe(|| perform(inner))).unwrap_or_else(|payload| {
+        Err(format!(
+            "server shell shutdown panicked: {}",
+            panic_payload_message(payload.as_ref())
+        ))
+    });
+    let mut state = inner
+        .shutdown
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *state = ShutdownState::Finished(result.clone());
+    inner.shutdown_changed.notify_all();
+    result
+}
+
+fn panic_payload_message(payload: &(dyn Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown panic payload")
+}
+
+fn perform_shutdown_blocking(inner: &ServerShellInner) -> Result<(), String> {
     let sender = inner
         .jobs
         .lock()
@@ -603,9 +1022,9 @@ fn shutdown_blocking(inner: &ServerShellInner) -> Result<(), String> {
         return Ok(());
     };
 
-    let (stopped_tx, stopped_rx) = mpsc::channel();
+    let (stopped_tx, stopped_rx) = std_mpsc::channel();
     sender
-        .send(ServerShellCommand::Shutdown(stopped_tx))
+        .unbounded_send(ServerShellCommand::Shutdown(stopped_tx))
         .map_err(|_| "server shell thread is not running".to_owned())?;
     drop(sender);
     stopped_rx
@@ -647,6 +1066,11 @@ fn sync_message_name(message: &SyncMessage) -> &'static str {
     // message itself here: claims and row payloads must not escape through a
     // transport diagnostic.
     match message {
+        SyncMessage::ChunkRequestBatch(_) => "ChunkRequestBatch",
+        SyncMessage::ChunkResponseBatch(_) => "ChunkResponseBatch",
+        SyncMessage::ChunkUploadStart(_) => "ChunkUploadStart",
+        SyncMessage::ChunkUploadNodes(_) => "ChunkUploadNodes",
+        SyncMessage::ChunkUploadResult(_) => "ChunkUploadResult",
         SyncMessage::SessionClaims { .. } => "SessionClaims",
         SyncMessage::CommitUnit { .. } => "CommitUnit",
         SyncMessage::FateUpdate { .. } => "FateUpdate",
@@ -659,7 +1083,7 @@ fn sync_message_name(message: &SyncMessage) -> &'static str {
         SyncMessage::PublishLens { .. } => "PublishLens",
         SyncMessage::SetCurrentWriteSchema { .. } => "SetCurrentWriteSchema",
         SyncMessage::CatalogueAck(_) => "CatalogueAck",
-        SyncMessage::ViewUpdate { .. } => "ViewUpdate",
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) => "ViewUpdate",
         SyncMessage::FetchRowVersions { .. } => "FetchRowVersions",
         SyncMessage::RowVersionPayloads { .. } => "RowVersionPayloads",
         SyncMessage::CatalogueSnapshot(_) => "CatalogueSnapshot",
@@ -688,7 +1112,34 @@ mod tests {
     use super::*;
     use crate::protocol::{ReadViewKey, Subscribe, SubscriptionKey};
     use crate::query::{BindingId, ShapeId};
+    use crate::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
     use crate::wire::{WireEnvelope, encode_frame, encode_sync_message};
+    use futures::FutureExt;
+    use std::collections::VecDeque;
+    use std::time::Duration;
+
+    /// A host-facing wire queue whose canonical input can be withheld until
+    /// after the shell has consumed an earlier, empty activity tick.
+    #[derive(Default)]
+    struct QueuedWireTransport {
+        inbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    }
+
+    impl QueuedWireTransport {
+        fn push_inbound(&self, frame: Vec<u8>) {
+            self.inbound.lock().unwrap().push_back(frame);
+        }
+    }
+
+    impl WireTransport for QueuedWireTransport {
+        fn send_frame(&mut self, _frame: Vec<u8>) -> Result<(), crate::wire::TransportError> {
+            Ok(())
+        }
+
+        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+            self.inbound.lock().unwrap().pop_front()
+        }
+    }
 
     fn encode_message(message: SyncMessage) -> Vec<u8> {
         let payload = encode_sync_message(&message).unwrap();
@@ -698,7 +1149,7 @@ mod tests {
     #[test]
     fn inbound_frame_phase_labels_semantic_transport_work() {
         let encoded = encode_message(SyncMessage::SessionClaims {
-            identity: AuthorId::from_bytes([7; 16]),
+            identity: AuthorSubject::for_test_bytes([7; 16]),
             claims: BTreeMap::new(),
         });
 
@@ -716,5 +1167,259 @@ mod tests {
         }));
         assert_eq!(inbound_frame_phase(&subscribe), "Subscribe");
         assert_eq!(inbound_frame_phase(&[0xff]), "malformed wire frame");
+    }
+
+    #[test]
+    fn delayed_tick_keeps_the_native_shell_owner_live_and_does_not_replace_deferred_work() {
+        let (jobs, mut receiver) = mpsc::unbounded();
+        let (activity_tx, _) = watch::channel(0_u64);
+        let io_wakers = Arc::new(Mutex::new(Vec::new()));
+        let state = Arc::new(ServerShellTickState::default());
+        let scheduler = ServerShellTickScheduler {
+            jobs,
+            activity_tx,
+            io_wakers,
+            state: Arc::clone(&state),
+        };
+
+        scheduler.schedule_tick_after(20);
+        assert!(
+            receiver.next().now_or_never().is_none(),
+            "an admission deadline must not enqueue an early shell tick"
+        );
+
+        // Ordinary deferred work remains immediately serviceable while the
+        // separate timer waits. This is the native owner-liveness guarantee:
+        // the owner queue never sleeps for an upload admission window.
+        scheduler.schedule_tick(TickUrgency::Deferred);
+        assert!(matches!(
+            receiver.next().now_or_never().flatten(),
+            Some(ServerShellCommand::RunAsync(_))
+        ));
+        state.queued.store(false, Ordering::Release);
+
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(matches!(
+            receiver.next().now_or_never().flatten(),
+            Some(ServerShellCommand::RunAsync(_))
+        ));
+    }
+
+    #[test]
+    fn native_wire_input_rearms_after_an_earlier_empty_activity_tick() {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let mut shell = InMemoryServerShell::start(InMemoryServerShellConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x73; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        ))
+        .unwrap();
+        let (jobs, mut pending_ticks) = mpsc::unbounded();
+        let (activity_tx, _) = watch::channel(0_u64);
+        let scheduler = ServerShellTickScheduler {
+            jobs,
+            activity_tx,
+            io_wakers: Arc::new(Mutex::new(Vec::new())),
+            state: Arc::new(ServerShellTickState::default()),
+        };
+        shell.set_tick_scheduler(Some(Rc::new(scheduler.clone())));
+
+        let io = shell.connect_upstream_wire_io(
+            crate::wire::WIRE_PROTOCOL_VERSION,
+            crate::wire::FEATURE_NONE,
+            None,
+        );
+
+        // Connecting the upstream may have queued setup work. Service all of
+        // it first: the only outstanding turn below is the host activity tick
+        // whose queue we deliberately make empty.
+        while let Some(ServerShellCommand::RunAsync(setup_tick)) =
+            pending_ticks.next().now_or_never().flatten()
+        {
+            futures::executor::block_on(setup_tick(&mut shell));
+        }
+
+        // A host activity notification can run before the local wire pump has
+        // translated bytes into canonical input. Consume that tick while the
+        // upstream queue is still empty.
+        scheduler.schedule_tick(TickUrgency::Immediate);
+        let Some(ServerShellCommand::RunAsync(empty_tick)) =
+            pending_ticks.next().now_or_never().flatten()
+        else {
+            panic!("the pre-stage activity wake queues one shell tick");
+        };
+        futures::executor::block_on(empty_tick(&mut shell));
+
+        let wire = QueuedWireTransport::default();
+        wire.push_inbound(encode_message(SyncMessage::SessionClaims {
+            identity: AuthorSubject::for_test_bytes([0x74; 16]),
+            claims: BTreeMap::new(),
+        }));
+        let (_wake_tx, wake_rx) = mpsc::unbounded();
+        let mut executor = futures::executor::LocalPool::new();
+        executor
+            .spawner()
+            .spawn_local(drive_upstream_wire(Box::new(wire), io, wake_rx, scheduler))
+            .unwrap();
+        executor.run_until_stalled();
+
+        assert!(
+            matches!(
+                pending_ticks.next().now_or_never().flatten(),
+                Some(ServerShellCommand::RunAsync(_))
+            ),
+            "canonical input staged after an empty activity tick must queue a post-stage shell tick"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_a_suspended_local_shell_operation() {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let runtime =
+            ServerRuntimeHandle::start_with_storage(schema, StorageConfig::InMemory, None).unwrap();
+        let suspended_runtime = runtime.clone();
+        let suspended = tokio::spawn(async move {
+            suspended_runtime
+                .run_async(|_| Box::pin(futures::future::pending::<Result<(), String>>()))
+                .await
+        });
+        tokio::task::yield_now().await;
+
+        tokio::time::timeout(Duration::from_secs(1), runtime.shutdown())
+            .await
+            .expect("shutdown must not wait for suspended Groove work")
+            .unwrap();
+        assert!(suspended.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn concurrent_shutdown_callers_wait_for_the_owner_thread() {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let runtime =
+            ServerRuntimeHandle::start_with_storage(schema, StorageConfig::InMemory, None).unwrap();
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let blocked_runtime = runtime.clone();
+        let blocked_entered = Arc::clone(&entered);
+        let blocked_release = Arc::clone(&release);
+        let blocked = tokio::spawn(async move {
+            blocked_runtime
+                .run(move |_| {
+                    blocked_entered.wait();
+                    blocked_release.wait();
+                    Ok(())
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        entered.wait();
+
+        let first_runtime = runtime.clone();
+        let first = tokio::spawn(async move { first_runtime.shutdown().await });
+        loop {
+            let jobs_retired = runtime.inner.jobs.lock().is_ok_and(|jobs| jobs.is_none());
+            if jobs_retired {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let second_runtime = runtime.clone();
+        let (second_waiting_tx, second_waiting_rx) = oneshot::channel();
+        let second = tokio::task::spawn_blocking(move || {
+            shutdown_blocking_with(
+                &second_runtime.inner,
+                perform_shutdown_blocking,
+                move || {
+                    let _ = second_waiting_tx.send(());
+                },
+            )
+        });
+        let second_reached_wait = tokio::time::timeout(Duration::from_secs(1), second_waiting_rx)
+            .await
+            .is_ok_and(|result| result.is_ok());
+        let second_returned_early = second.is_finished();
+
+        release.wait();
+        blocked.await.unwrap().unwrap();
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        assert!(
+            second_reached_wait,
+            "the concurrent shutdown caller must reach the wait path"
+        );
+        assert!(
+            !second_returned_early,
+            "a concurrent shutdown must not return before the owner thread exits"
+        );
+    }
+
+    // This state-machine test is intentionally internal: a panic in the
+    // shutdown implementation cannot be injected through the public API.
+    #[tokio::test]
+    async fn shutdown_panic_is_published_to_waiters_and_late_callers() {
+        let (activity_tx, _) = watch::channel(0_u64);
+        let inner = Arc::new(ServerShellInner {
+            jobs: Mutex::new(None),
+            join: Mutex::new(None),
+            shutdown: Mutex::new(ShutdownState::Running),
+            shutdown_changed: Condvar::new(),
+            activity_tx,
+            io_wakers: Arc::new(Mutex::new(Vec::new())),
+        });
+        let (perform_entered_tx, perform_entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        let owner_inner = Arc::clone(&inner);
+        let owner = tokio::task::spawn_blocking(move || {
+            shutdown_blocking_with(
+                &owner_inner,
+                move |_| {
+                    let _ = perform_entered_tx.send(());
+                    release_rx.recv().unwrap();
+                    panic!("planted shutdown panic")
+                },
+                || {},
+            )
+        });
+        perform_entered_rx.await.unwrap();
+
+        let (waiter_entered_tx, waiter_entered_rx) = oneshot::channel();
+        let waiter_inner = Arc::clone(&inner);
+        let waiter = tokio::task::spawn_blocking(move || {
+            shutdown_blocking_with(&waiter_inner, perform_shutdown_blocking, move || {
+                let _ = waiter_entered_tx.send(());
+            })
+        });
+        tokio::time::timeout(Duration::from_secs(1), waiter_entered_rx)
+            .await
+            .expect("the waiter must enter shutdown")
+            .expect("the waiter must reach the wait path");
+
+        release_tx.send(()).unwrap();
+        let owner_result = owner.await.unwrap();
+        let waiter_result = waiter.await.unwrap();
+        assert_eq!(owner_result, waiter_result);
+        assert_eq!(
+            owner_result.unwrap_err(),
+            "server shell shutdown panicked: planted shutdown panic"
+        );
+        assert_eq!(shutdown_blocking(&inner), waiter_result);
     }
 }

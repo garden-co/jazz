@@ -279,7 +279,7 @@ impl Database {
                 actual: key.len(),
             });
         }
-        let descriptor = table_schema.record_schema();
+        let descriptor = self.table_storage_descriptor(table)?;
         let mut encoded_key = Vec::new();
         for (value, column) in key.iter().zip(&primary_key.columns) {
             ensure_primary_key_value_type(table_schema, column, value)?;
@@ -297,7 +297,7 @@ impl Database {
             return store
                 .get_raw(&encoded_key)
                 .await?
-                .map(|value| decode_stored_key_value(table_schema, encoded_key, value))
+                .map(|value| self.decode_stored_key_value(table_schema, encoded_key, value))
                 .transpose();
         }
 
@@ -309,7 +309,7 @@ impl Database {
         store
             .get_raw(&encoded_key)
             .await?
-            .map(|value| decode_stored_key_value(table_schema, encoded_key, value))
+            .map(|value| self.decode_stored_key_value(table_schema, encoded_key, value))
             .transpose()
     }
 
@@ -334,7 +334,7 @@ impl Database {
                 actual: key.len(),
             });
         }
-        let descriptor = table_schema.record_schema();
+        let descriptor = self.table_storage_descriptor(table)?;
         let mut encoded_key = Vec::new();
         for (value, column) in key.iter().zip(&primary_key.columns) {
             ensure_primary_key_value_type(table_schema, column, value)?;
@@ -345,7 +345,7 @@ impl Database {
         store
             .get_raw(&encoded_key)
             .await?
-            .map(|value| decode_stored_key_value(table_schema, encoded_key, value))
+            .map(|value| self.decode_stored_key_value(table_schema, encoded_key, value))
             .transpose()
     }
 
@@ -370,7 +370,7 @@ impl Database {
                 actual: prefix.len(),
             });
         }
-        let descriptor = table_schema.record_schema();
+        let descriptor = self.table_storage_descriptor(table)?;
         let mut key_prefix = Vec::new();
         for (value, column) in prefix.iter().zip(&primary_key.columns) {
             ensure_primary_key_value_type(table_schema, column, value)?;
@@ -382,7 +382,7 @@ impl Database {
             .prefix(&key_prefix)
             .await?
             .into_iter()
-            .map(|(key, value)| decode_stored_key_value(table_schema, key, value))
+            .map(|(key, value)| self.decode_stored_key_value(table_schema, key, value))
             .collect()
     }
 
@@ -407,7 +407,7 @@ impl Database {
                 actual: prefix.len(),
             });
         }
-        let descriptor = table_schema.record_schema();
+        let descriptor = self.table_storage_descriptor(table)?;
         let mut key_prefix = Vec::new();
         for (value, column) in prefix.iter().zip(&primary_key.columns) {
             ensure_primary_key_value_type(table_schema, column, value)?;
@@ -418,7 +418,7 @@ impl Database {
         store
             .last_with_prefix(&key_prefix)
             .await?
-            .map(|(key, value)| decode_stored_key_value(table_schema, key, value))
+            .map(|(key, value)| self.decode_stored_key_value(table_schema, key, value))
             .transpose()
     }
 
@@ -451,7 +451,7 @@ impl Database {
                 actual: end.len(),
             });
         }
-        let descriptor = table_schema.record_schema();
+        let descriptor = self.table_storage_descriptor(table)?;
         let mut start_key = Vec::new();
         for (value, column) in start.iter().zip(&primary_key.columns) {
             ensure_primary_key_value_type(table_schema, column, value)?;
@@ -470,7 +470,7 @@ impl Database {
             .range(&start_key, &end_key)
             .await?
             .into_iter()
-            .map(|(key, value)| decode_stored_key_value(table_schema, key, value))
+            .map(|(key, value)| self.decode_stored_key_value(table_schema, key, value))
             .collect()
     }
 
@@ -539,7 +539,7 @@ impl Database {
                 actual: upper.len(),
             });
         }
-        let descriptor = table_schema.record_schema();
+        let descriptor = self.table_storage_descriptor(table)?;
         let mut key_prefix = Vec::new();
         for (value, column) in prefix.iter().zip(&primary_key.columns) {
             ensure_primary_key_value_type(table_schema, column, value)?;
@@ -560,7 +560,7 @@ impl Database {
         store
             .last_with_prefix_before_or_at(&key_prefix, &upper_key)
             .await?
-            .map(|(key, value)| decode_stored_key_value(table_schema, key, value))
+            .map(|(key, value)| self.decode_stored_key_value(table_schema, key, value))
             .transpose()
     }
 
@@ -735,7 +735,7 @@ impl Database {
         T: OrderedKvStorage,
     {
         let table_schema = self.table(table)?;
-        let storage_descriptor = table_schema.record_schema();
+        let storage_descriptor = self.table_storage_descriptor(table)?;
         let key_descriptor = table_schema
             .primary_key
             .as_ref()
@@ -753,7 +753,7 @@ impl Database {
                 &index_record.get("value")?,
             )?;
             if let Some(record) = store.get_raw(&primary_key).await? {
-                records.push(decode_stored_key_value(table_schema, primary_key, record)?);
+                records.push(self.decode_stored_key_value(table_schema, primary_key, record)?);
             } else if table_schema.primary_key.is_some() {
                 return Err(Error::InvalidPersistedIndex(index_name.to_owned()));
             }

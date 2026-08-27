@@ -50,7 +50,7 @@ pub use object::{BranchName, ObjectId, ResultKey};
 #[cfg(feature = "runtime")]
 pub use sync::ClientId;
 #[cfg(feature = "runtime")]
-pub use sync::DurabilityTier;
+pub use sync::{DurabilityTier, ReadTier};
 
 /// Configuration for connecting to Jazz.
 #[cfg(feature = "runtime")]
@@ -116,6 +116,9 @@ pub enum ClientStorage {
 #[cfg(feature = "runtime")]
 #[derive(Error, Debug)]
 pub enum JazzError {
+    #[error("Identity error: {0}")]
+    Identity(#[from] crate::ids::AuthorSubjectError),
+
     #[error("Connection error: {0}")]
     Connection(String),
 

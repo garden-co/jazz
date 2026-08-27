@@ -45,8 +45,9 @@ fn merge_receiver_version_bundle_ref(
     bundles: &mut BTreeMap<TxId, VersionBundle>,
     bundle: VersionBundleRef<'_>,
 ) -> Result<(), Error> {
+    let incoming = canonical_receiver_bundle(bundle)?;
     let Some(existing) = bundles.get_mut(&bundle.tx.tx_id) else {
-        bundles.insert(bundle.tx.tx_id, bundle.to_owned_bundle());
+        bundles.insert(bundle.tx.tx_id, incoming);
         return Ok(());
     };
     let mut existing_tx_identity = existing.tx.clone();
@@ -54,15 +55,11 @@ fn merge_receiver_version_bundle_ref(
     let mut incoming_tx_identity = bundle.tx.clone();
     incoming_tx_identity.n_total_writes = 0;
     if existing_tx_identity != incoming_tx_identity
-        || existing.fate != *bundle.fate
-        || existing.global_time != bundle.global_time
-        || existing.durability != bundle.durability
+        || existing.fate != incoming.fate
+        || existing.global_time != incoming.global_time
+        || existing.durability != incoming.durability
     {
         return Err(Error::ConflictingCommitUnit(bundle.tx.tx_id));
-    }
-    if bundle.scope == crate::protocol::VersionBundleScope::CompleteTransaction {
-        existing.tx = bundle.tx.clone();
-        existing.scope = bundle.scope;
     }
     let mut seen = existing
         .versions
@@ -70,7 +67,7 @@ fn merge_receiver_version_bundle_ref(
         .cloned()
         .map(|version| (version_bundle_record_key(&version), version))
         .collect::<BTreeMap<_, VersionRecord>>();
-    for version in bundle.versions {
+    for version in &incoming.versions {
         let key = version_bundle_record_key(version);
         match seen.get(&key) {
             Some(existing) if existing == version => {}
@@ -80,13 +77,70 @@ fn merge_receiver_version_bundle_ref(
             }
         }
     }
-    existing.versions = seen.into_values().collect();
-    if existing.scope == crate::protocol::VersionBundleScope::ViewScoped {
-        existing.tx.n_total_writes = existing
-            .versions
-            .len()
-            .try_into()
-            .map_err(|_| Error::InvalidStoredValue("view payload is too large"))?;
+    use crate::protocol::VersionBundleScope::{CompleteTransaction, ViewScoped};
+    match (existing.scope, incoming.scope) {
+        (CompleteTransaction, CompleteTransaction) => {
+            if existing.tx.n_total_writes != incoming.tx.n_total_writes
+                || existing.versions != incoming.versions
+            {
+                return Err(Error::ConflictingCommitUnit(bundle.tx.tx_id));
+            }
+        }
+        (CompleteTransaction, ViewScoped) => {
+            validate_version_subset(&incoming.versions, &existing.versions, bundle.tx.tx_id)?;
+        }
+        (ViewScoped, CompleteTransaction) => {
+            validate_version_subset(&existing.versions, &incoming.versions, bundle.tx.tx_id)?;
+            *existing = incoming;
+        }
+        (ViewScoped, ViewScoped) => {
+            existing.versions = seen.into_values().collect();
+            existing.tx.n_total_writes = existing
+                .versions
+                .len()
+                .try_into()
+                .map_err(|_| Error::InvalidStoredValue("view payload is too large"))?;
+        }
+    }
+    Ok(())
+}
+
+fn canonical_receiver_bundle(bundle: VersionBundleRef<'_>) -> Result<VersionBundle, Error> {
+    let mut versions = BTreeMap::new();
+    for version in bundle.versions {
+        let key = version_bundle_record_key(version);
+        match versions.get(&key) {
+            Some(existing) if existing != version => {
+                return Err(Error::ConflictingCommitUnit(bundle.tx.tx_id));
+            }
+            Some(_) => {}
+            None => {
+                versions.insert(key, version.clone());
+            }
+        }
+    }
+    let versions = versions.into_values().collect::<Vec<_>>();
+    if usize::try_from(bundle.tx.n_total_writes).ok() != Some(versions.len()) {
+        return Err(Error::ConflictingCommitUnit(bundle.tx.tx_id));
+    }
+    let mut owned = bundle.to_owned_bundle();
+    owned.versions = versions;
+    Ok(owned)
+}
+
+fn validate_version_subset(
+    subset: &[VersionRecord],
+    complete: &[VersionRecord],
+    tx_id: TxId,
+) -> Result<(), Error> {
+    let complete = complete
+        .iter()
+        .map(|version| (version_bundle_record_key(version), version))
+        .collect::<BTreeMap<_, _>>();
+    for version in subset {
+        if complete.get(&version_bundle_record_key(version)) != Some(&version) {
+            return Err(Error::ConflictingCommitUnit(tx_id));
+        }
     }
     Ok(())
 }
@@ -185,7 +239,7 @@ pub(crate) struct MaintainedViewBundleInputs<'a> {
     pub(crate) result_member_removes: Vec<ResultMemberEntry>,
     pub(crate) program_fact_adds: Vec<ProgramFactEntry>,
     pub(crate) program_fact_removes: Vec<ProgramFactEntry>,
-    pub(crate) identity: AuthorId,
+    pub(crate) identity: AuthorSubject,
     pub(crate) tier: DurabilityTier,
     /// Maintained fact and collector state. The current carrier consumes its
     /// membership/witness facts; the retained recursive app rows are available
@@ -194,10 +248,102 @@ pub(crate) struct MaintainedViewBundleInputs<'a> {
     pub(crate) allow_storage_witness_fallback: bool,
 }
 
+struct ViewBundlePreflight {
+    bundles: BTreeMap<TxId, VersionBundle>,
+    persisted_tx_ids: BTreeSet<TxId>,
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    async fn preflight_view_bundle_conflicts(
+        &mut self,
+        bundles: &[VersionBundleRef<'_>],
+    ) -> Result<ViewBundlePreflight, Error> {
+        let mut merged = BTreeMap::<TxId, VersionBundle>::new();
+        for bundle in bundles {
+            merge_receiver_version_bundle_ref(&mut merged, *bundle)?;
+        }
+        let mut persisted_tx_ids = BTreeSet::new();
+        for (tx_id, bundle) in &mut merged {
+            let Some(stored) = self.query_transaction(*tx_id).await? else {
+                continue;
+            };
+            persisted_tx_ids.insert(*tx_id);
+            let mut stored_identity = stored.tx.clone();
+            stored_identity.n_total_writes = 0;
+            let mut incoming_identity = bundle.tx.clone();
+            incoming_identity.n_total_writes = 0;
+            if stored_identity != incoming_identity {
+                return Err(Error::ConflictingCommitUnit(*tx_id));
+            }
+            let stored_versions = self.query_versions_for_tx(*tx_id).await?;
+            let mut stored_by_key = BTreeMap::new();
+            for stored_version in &stored_versions {
+                let version = self.version_record_from_row(stored_version)?;
+                stored_by_key.insert(version_bundle_record_key(&version), version);
+            }
+            let incoming_by_key = bundle
+                .versions
+                .iter()
+                .cloned()
+                .map(|version| (version_bundle_record_key(&version), version))
+                .collect::<BTreeMap<_, _>>();
+            for (key, incoming) in &incoming_by_key {
+                if let Some(existing) = stored_by_key.get(key)
+                    && existing != incoming
+                {
+                    return Err(Error::ConflictingCommitUnit(*tx_id));
+                }
+            }
+            use crate::protocol::VersionBundleScope::{CompleteTransaction, ViewScoped};
+            match (stored.view_scoped_cardinality, bundle.scope) {
+                (false, CompleteTransaction) => {
+                    if stored.tx.n_total_writes != bundle.tx.n_total_writes
+                        || stored_by_key.len() != incoming_by_key.len()
+                        || stored_by_key.keys().ne(incoming_by_key.keys())
+                    {
+                        return Err(Error::ConflictingCommitUnit(*tx_id));
+                    }
+                }
+                (false, ViewScoped) => {
+                    if incoming_by_key
+                        .keys()
+                        .any(|key| !stored_by_key.contains_key(key))
+                    {
+                        return Err(Error::ConflictingCommitUnit(*tx_id));
+                    }
+                }
+                (true, CompleteTransaction) => {
+                    if stored_by_key
+                        .keys()
+                        .any(|key| !incoming_by_key.contains_key(key))
+                    {
+                        return Err(Error::ConflictingCommitUnit(*tx_id));
+                    }
+                }
+                (true, ViewScoped) => {
+                    for (key, version) in stored_by_key {
+                        if !incoming_by_key.contains_key(&key) {
+                            bundle.versions.push(version);
+                        }
+                    }
+                    bundle.versions.sort();
+                    bundle.tx.n_total_writes = bundle
+                        .versions
+                        .len()
+                        .try_into()
+                        .map_err(|_| Error::InvalidStoredValue("view payload is too large"))?;
+                }
+            }
+        }
+        Ok(ViewBundlePreflight {
+            bundles: merged,
+            persisted_tx_ids,
+        })
+    }
+
     /// Subscribe to the raw history storage table.
     pub async fn subscribe_history(&mut self, table: &str) -> Result<Subscription, Error> {
         self.table(table)?;
@@ -222,7 +368,7 @@ where
             [],
             [],
             [],
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
         )
         .await
     }
@@ -236,7 +382,7 @@ where
         peer_complete_tx_payloads: impl IntoIterator<Item = TxId>,
         previous_result_set: impl IntoIterator<Item = TxId>,
         previous_member_result_set: impl IntoIterator<Item = ResultMemberEntry>,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<SyncMessage, Error> {
         let (shape, binding) = self.whole_table_shape_binding(table)?;
         self.view_update_for_query_binding_with_peer_payload_inventory(
@@ -262,7 +408,7 @@ where
         peer_complete_tx_payloads: impl IntoIterator<Item = TxId>,
         previous_result_set: impl IntoIterator<Item = TxId>,
         previous_member_result_set: impl IntoIterator<Item = ResultMemberEntry>,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<SyncMessage, Error> {
         self.seeded_maintained_view_update_for_query_binding_with_peer_payload_inventory(
             shape,
@@ -288,7 +434,7 @@ where
         peer_complete_tx_payloads: impl IntoIterator<Item = TxId>,
         previous_result_set: impl IntoIterator<Item = TxId>,
         previous_member_result_set: impl IntoIterator<Item = ResultMemberEntry>,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<SyncMessage, Error> {
         self.seeded_maintained_view_update_for_query_binding_with_peer_payload_inventory_at_tier(
             shape,
@@ -312,7 +458,7 @@ where
         peer_complete_tx_payloads: impl IntoIterator<Item = TxId>,
         previous_result_set: impl IntoIterator<Item = TxId>,
         previous_member_result_set: impl IntoIterator<Item = ResultMemberEntry>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         tier: DurabilityTier,
     ) -> Result<SyncMessage, Error> {
         let peer_complete_tx_payloads = peer_complete_tx_payloads
@@ -769,23 +915,25 @@ where
         }
         let version_carriers = build_version_carriers_from_singletons(version_bundles)
             .map_err(|_| Error::InvalidStoredValue("failed to build version-bundle run"))?;
-        Ok(SyncMessage::ViewUpdate {
-            subscription,
-            settled_through: self.clock.committed_global_time,
-            reset_result_set: false,
-            version_carriers,
-            version_bundles: Vec::new(),
-            peer_payload_inventory: PeerPayloadInventory {
-                complete_tx_payloads: peer_payload_inventory_refs,
-                authorization_progress: None,
-                opening_pending: false,
+        Ok(SyncMessage::ViewUpdate(
+            crate::protocol::ViewUpdatePayload {
+                subscription,
+                settled_through: self.clock.committed_global_time,
+                reset_result_set: false,
+                version_carriers,
+                version_bundles: Vec::new(),
+                peer_payload_inventory: PeerPayloadInventory {
+                    complete_tx_payloads: peer_payload_inventory_refs,
+                    authorization_progress: None,
+                    opening_pending: false,
+                },
+                result_member_adds: result_member_adds.into_iter().collect(),
+                result_member_removes: result_member_removes.into_iter().collect(),
+                terminal_operations: Vec::new(),
+                program_fact_adds,
+                program_fact_removes,
             },
-            result_member_adds: result_member_adds.into_iter().collect(),
-            result_member_removes: result_member_removes.into_iter().collect(),
-            terminal_operations: Vec::new(),
-            program_fact_adds,
-            program_fact_removes,
-        })
+        ))
     }
 
     /// Apply a downstream current-row view update.
@@ -810,9 +958,7 @@ where
         // preceding valid bundle can advance clocks, allocate aliases, or
         // stage history before a later malformed bundle rejects the frame.
         self.validate_view_update_payloads(&updates)?;
-        if updates.iter().any(|update| update.reset_result_set) {
-            self.begin_initial_sync_flush_cadence().await?;
-        }
+        let mut all_bundle_refs = Vec::new();
         let mut bulk_candidates = Vec::new();
         let mut initial_hydration_binding_views =
             self.query.initial_hydration_binding_views.clone();
@@ -828,6 +974,7 @@ where
                 &update.version_bundles,
                 &update.version_carriers,
             )?;
+            all_bundle_refs.extend(version_bundle_refs.iter().copied());
             let in_initial_hydration = initial_hydration_binding_views.contains(&binding_view_key);
             if update.reset_result_set
                 && update.peer_complete_tx_payload_refs.is_empty()
@@ -842,19 +989,38 @@ where
                 initial_hydration_binding_views.remove(&binding_view_key);
             }
         }
-        let bulk_loaded_tx_ids = self
-            .ingest_reset_view_bundle_refs_in_bulk(&bulk_candidates)
+        let preflight = self
+            .preflight_view_bundle_conflicts(&all_bundle_refs)
             .await?;
-        let mut receiver_candidates = BTreeMap::<TxId, VersionBundle>::new();
-        for update in &updates {
-            for bundle in
-                version_bundle_refs_for_carriers(&update.version_bundles, &update.version_carriers)?
-            {
-                if bulk_loaded_tx_ids.contains(&bundle.tx.tx_id) {
-                    continue;
-                }
-                merge_receiver_version_bundle_ref(&mut receiver_candidates, bundle)?;
-            }
+        let bulk_candidate_tx_ids = bulk_candidates
+            .iter()
+            .map(|bundle| bundle.tx.tx_id)
+            .collect::<BTreeSet<_>>();
+        let bulk_candidate_bundles = preflight
+            .bundles
+            .iter()
+            .filter(|(tx_id, bundle)| {
+                bulk_candidate_tx_ids.contains(tx_id)
+                    && bundle.scope == crate::protocol::VersionBundleScope::CompleteTransaction
+            })
+            .map(|(_, bundle)| bundle.clone())
+            .collect::<Vec<_>>();
+        let bulk_candidate_refs = bulk_candidate_bundles
+            .iter()
+            .map(VersionBundle::as_ref)
+            .collect::<Vec<_>>();
+        let bulk_loaded_tx_ids = self
+            .ingest_reset_view_bundle_refs_in_bulk(
+                &bulk_candidate_refs,
+                Some(&preflight.persisted_tx_ids),
+            )
+            .await?;
+        let mut receiver_candidates = preflight.bundles;
+        if updates.iter().any(|update| update.reset_result_set) {
+            self.begin_initial_sync_flush_cadence().await?;
+        }
+        for tx_id in &bulk_loaded_tx_ids {
+            receiver_candidates.remove(tx_id);
         }
         let mut receiver_batch = self.database.open_batch();
         let mut receiver_batch_tx_ids = BTreeSet::new();
@@ -979,6 +1145,46 @@ where
             }
             Err(error) => return Err(error),
         };
+        let preflight = if preloaded_tx_ids.is_none() {
+            Some(
+                self.preflight_view_bundle_conflicts(&version_bundle_refs)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let bulk_loaded_tx_ids = if let Some(preloaded) = preloaded_tx_ids {
+            preloaded.clone()
+        } else if reset_result_set
+            && peer_complete_tx_payload_refs.is_empty()
+            && result_member_removes.is_empty()
+        {
+            // A reset with bundles is a snapshot for this subscription even
+            // when other subscriptions already advanced the node watermark.
+            // Empty reset stamps stay orthogonal below: with no bundles there
+            // is no payload to bulk ingest and the stamp must not clear shared
+            // state that is already more settled.
+            let preflight = preflight.as_ref().expect("direct update was preflighted");
+            let complete_bundles = preflight
+                .bundles
+                .values()
+                .filter(|bundle| {
+                    bundle.scope == crate::protocol::VersionBundleScope::CompleteTransaction
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let complete_refs = complete_bundles
+                .iter()
+                .map(VersionBundle::as_ref)
+                .collect::<Vec<_>>();
+            self.ingest_reset_view_bundle_refs_in_bulk(
+                &complete_refs,
+                Some(&preflight.persisted_tx_ids),
+            )
+            .await?
+        } else {
+            BTreeSet::new()
+        };
         if reset_result_set {
             self.query
                 .pending_terminal_operations_by_binding_view
@@ -1003,34 +1209,18 @@ where
                 .deferred_publication_binding_views
                 .remove(&binding_view_key);
         }
-        let bulk_loaded_tx_ids = if let Some(preloaded) = preloaded_tx_ids {
-            preloaded.clone()
-        } else if reset_result_set
-            && peer_complete_tx_payload_refs.is_empty()
-            && result_member_removes.is_empty()
-        {
-            // A reset with bundles is a snapshot for this subscription even
-            // when other subscriptions already advanced the node watermark.
-            // Empty reset stamps stay orthogonal below: with no bundles there
-            // is no payload to bulk ingest and the stamp must not clear shared
-            // state that is already more settled.
-            self.ingest_reset_view_bundle_refs_in_bulk(&version_bundle_refs)
-                .await?
-        } else {
-            BTreeSet::new()
-        };
         let row_result_adds = result_member_adds
             .iter()
             .filter_map(ResultMemberEntry::as_row)
             .collect::<Vec<_>>();
         let version_bundles_is_empty = version_bundle_refs.is_empty();
-        if bulk_loaded_tx_ids.len() != version_bundle_refs.len() {
-            for bundle in &version_bundle_refs {
+        if let Some(preflight) = &preflight {
+            for bundle in preflight.bundles.values() {
                 if bulk_loaded_tx_ids.contains(&bundle.tx.tx_id) {
                     continue;
                 }
                 self.sync_metrics.receiver_per_bundle_ingests += 1;
-                self.ingest_view_bundle_ref(*bundle).await?;
+                self.ingest_view_bundle(bundle.clone()).await?;
             }
         }
         let mut available_peer_complete_tx_payload_refs = Vec::new();
@@ -1323,7 +1513,15 @@ where
         }
         if bundle.scope == crate::protocol::VersionBundleScope::ViewScoped {
             let tx_id = bundle.tx.tx_id;
-            let mut known_keys = if self.query_transaction(tx_id).await?.is_some() {
+            let stored_tx = self.query_transaction(tx_id).await?;
+            // A bulk reset installs its authorized fragment as locally current
+            // so a relay can serve it onward. Further authorized siblings from
+            // that same view-scoped transaction must extend that projection;
+            // fragments first learned outside such a reset remain history-only.
+            let extend_current_view = stored_tx
+                .as_ref()
+                .is_some_and(|stored| stored.view_scoped_cardinality);
+            let mut known_keys = if stored_tx.is_some() {
                 self.query_versions_for_tx(tx_id)
                     .await?
                     .iter()
@@ -1338,15 +1536,25 @@ where
                 .len()
                 .try_into()
                 .map_err(|_| Error::InvalidStoredValue("view payload is too large"))?;
-            return self
-                .ingest_transaction_fragment_without_current_indexes(
+            return if extend_current_view {
+                self.ingest_view_scoped_transaction_with_current_indexes(
                     redacted_tx,
                     bundle.versions,
                     bundle.fate,
                     bundle.global_time,
                     bundle.durability,
                 )
-                .await;
+                .await
+            } else {
+                self.ingest_transaction_fragment_without_current_indexes(
+                    redacted_tx,
+                    bundle.versions,
+                    bundle.fate,
+                    bundle.global_time,
+                    bundle.durability,
+                )
+                .await
+            };
         }
         let complete_len = usize::try_from(bundle.tx.n_total_writes).map_err(|_| {
             Error::InvalidStoredValue("exclusive transaction write count does not fit usize")
@@ -1415,10 +1623,6 @@ where
         .await
     }
 
-    async fn ingest_view_bundle_ref(&mut self, bundle: VersionBundleRef<'_>) -> Result<(), Error> {
-        self.ingest_view_bundle(bundle.to_owned_bundle()).await
-    }
-
     async fn stage_view_bundle(
         &mut self,
         batch: &mut DatabaseBatch,
@@ -1437,7 +1641,26 @@ where
             ));
         }
         if bundle.scope == crate::protocol::VersionBundleScope::ViewScoped {
-            return Ok(false);
+            // A view-scoped exclusive fragment may extend a projection already
+            // installed by an earlier reset. Its redacted cardinality is
+            // deliberately not a whole-transaction completeness claim, so do
+            // not take the complete-exclusive fast path below merely because
+            // the transaction itself is already known.
+            if !staged_tx_ids.insert(bundle.tx.tx_id) {
+                return Ok(true);
+            }
+            self.stage_view_scoped_transaction_with_current_indexes(
+                batch,
+                bundle.tx.clone(),
+                bundle.versions.clone(),
+                bundle.fate.clone(),
+                bundle.global_time,
+                bundle.durability,
+                staged_global_times,
+                staged_content_versions,
+            )
+            .await?;
+            return Ok(true);
         }
         if bundle.tx.kind == TxKind::Exclusive {
             let complete_len = usize::try_from(bundle.tx.n_total_writes).map_err(|_| {

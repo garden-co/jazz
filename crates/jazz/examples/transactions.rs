@@ -7,7 +7,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::protocol::SyncMessage;
 use jazz::query::Query;
@@ -51,7 +51,7 @@ fn open_db() -> Result<Db<MemoryStorage>, Box<dyn std::error::Error>> {
         storage,
         identity: DbIdentity {
             node: NodeUuid::from_bytes([0x11; 16]),
-            author: AuthorId::from_bytes([0xa1; 16]),
+            author: AuthorSubject::for_test_bytes([0xa1; 16]),
         },
         id_source: Some(Box::new(SeededRowIdSource::new(0x1111))),
     }))?)
@@ -60,7 +60,7 @@ fn open_db() -> Result<Db<MemoryStorage>, Box<dyn std::error::Error>> {
 struct CoreDb {
     server: Node<MemoryStorage>,
     schema: JazzSchema,
-    author: AuthorId,
+    author: AuthorSubject,
     next_now_ms: Cell<u64>,
 }
 
@@ -81,7 +81,7 @@ fn open_core() -> Result<CoreDb, Box<dyn std::error::Error>> {
     Ok(CoreDb {
         server: Node::new(node),
         schema,
-        author: AuthorId::from_bytes([0xa1; 16]),
+        author: AuthorSubject::for_test_bytes([0xa1; 16]),
         next_now_ms: Cell::new(1),
     })
 }
@@ -223,8 +223,16 @@ fn write_rejected(reason: RejectionReason) -> RejectionReason {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = open_db()?;
     let mergeable = block_on(db.mergeable_tx())?;
-    let first = block_on(mergeable.insert("todos", todo_cells("write examples", false)))?;
-    let second = block_on(mergeable.insert("todos", todo_cells("run examples", true)))?;
+    let first = block_on(mergeable.insert(
+        "todos",
+        todo_cells("write examples", false),
+        Default::default(),
+    ))?;
+    let second = block_on(mergeable.insert(
+        "todos",
+        todo_cells("run examples", true),
+        Default::default(),
+    ))?;
     let mergeable_tx = block_on(mergeable.commit())?;
 
     let todos = db.prepare_query(&db.table("todos"))?;

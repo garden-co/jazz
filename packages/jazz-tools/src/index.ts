@@ -2,9 +2,7 @@
 
 import {
   col,
-  getCollectedMigration,
   getCollectedSchema,
-  migrate,
   resetCollectedState,
   table,
   allowExternalProvenanceName,
@@ -21,6 +19,10 @@ import {
 import type {
   App as TypedApp,
   InsertOf as TypedInsertOf,
+  LargeValueUpdateOf as TypedLargeValueUpdateOf,
+  StreamingInsertOf as TypedStreamingInsertOf,
+  StreamingUpdateOf as TypedStreamingUpdateOf,
+  StreamingUpsertOf as TypedStreamingUpsertOf,
   RowOf as TypedRowOf,
   Schema as TypedSchema,
   SchemaDefinition as TypedSchemaDefinition,
@@ -34,9 +36,7 @@ import type {
 export {
   table,
   col,
-  migrate,
   getCollectedSchema,
-  getCollectedMigration,
   resetCollectedState,
   allowExternalProvenanceName,
 } from "./dsl.js";
@@ -58,7 +58,6 @@ export type {
   LensOp,
   SqlType,
   LensOpType,
-  MigrationOp,
   AddOp,
   DropOp,
   RenameOp,
@@ -129,6 +128,8 @@ export type {
   DefinedTable,
   TableRow,
   TableInit,
+  TableStreamingInit,
+  TableStreamingUpdate,
   TableWhereInput,
   TableSelectableColumn,
   TableOrderableColumn,
@@ -150,6 +151,10 @@ export type {
   TypedApp,
   RowOf,
   InsertOf,
+  LargeValueUpdateOf,
+  StreamingInsertOf,
+  StreamingUpdateOf,
+  StreamingUpsertOf,
   TableMetaOf,
   WhereOf,
 } from "./typed-app.js";
@@ -209,6 +214,12 @@ export namespace schema {
    * Input type for new rows inserted into a table (no `id`, respects optionals and defaults)
    */
   export type InsertOf<TTable> = TypedInsertOf<TTable>;
+  /** Input type for updating a row, including typed partial large-value descriptors. */
+  export type LargeValueUpdateOf<TTable> = TypedLargeValueUpdateOf<TTable>;
+  /** Input type for inserting a row with one streamed Text, JSON, or Bytea column. */
+  export type StreamingInsertOf<TTable> = TypedStreamingInsertOf<TTable>;
+  export type StreamingUpdateOf<TTable> = TypedStreamingUpdateOf<TTable>;
+  export type StreamingUpsertOf<TTable> = TypedStreamingUpsertOf<TTable>;
   /**
    * Metadata for a given table.
    */

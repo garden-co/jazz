@@ -1,70 +1,110 @@
-import { describe, expect, test } from "vitest";
-import { authorBytesForSubject, isUsableSubject } from "./author-id.js";
+import { describe, expect, it } from "vitest";
+import {
+  authorBytesForSession,
+  canonicalAuthorSubject,
+  decodeCanonicalAuthorSubjectBytes,
+  isPortableAuthorComponent,
+  isUsableSubject,
+  parseCanonicalAuthorSubject,
+} from "./author-id.js";
 
-describe("authorBytesForSubject", () => {
-  test("preserves UUID subjects", () => {
-    expect(Array.from(authorBytesForSubject("123e4567-e89b-12d3-a456-426614174000"))).toEqual([
-      0x12, 0x3e, 0x45, 0x67, 0xe8, 0x9b, 0x12, 0xd3, 0xa4, 0x56, 0x42, 0x66, 0x14, 0x17, 0x40,
-      0x00,
-    ]);
+const encoder = new TextEncoder();
+
+function storedScalar(value: string): Uint8Array {
+  return Uint8Array.from([2, ...encoder.encode(value)]);
+}
+
+describe("canonical author subjects", () => {
+  it("uses canonical JSON of the exact issuer and subject", () => {
+    const canonical = canonicalAuthorSubject("https://issuer.example", "opaque:subject");
+    expect(canonical).toBe('["https://issuer.example","opaque:subject"]');
+    expect(
+      new TextDecoder().decode(
+        authorBytesForSession({
+          issuer: "https://issuer.example",
+          user_id: "opaque:subject",
+        }),
+      ),
+    ).toBe(canonical);
   });
 
-  test("maps non-UUID subjects to UUIDv5 in the URL namespace", () => {
-    expect(Array.from(authorBytesForSubject("better-auth-user"))).toEqual([
-      0x07, 0x96, 0x0c, 0x5e, 0x28, 0xbb, 0x5e, 0xd4, 0xb4, 0x3a, 0x06, 0xf5, 0x9a, 0x65, 0xe1,
-      0x1c,
-    ]);
-  });
-
-  test("accepts only explicit UUID spellings and maps every other subject exactly", () => {
-    const canonical = "123e4567-e89b-12d3-a456-426614174000";
-    const direct = Array.from(authorBytesForSubject(canonical));
-    for (const subject of [
-      canonical,
-      "123E4567-E89B-12D3-A456-426614174000",
-      "123e4567e89b12d3a456426614174000",
-      "123E4567E89B12D3A456426614174000",
-    ]) {
-      expect(Array.from(authorBytesForSubject(subject))).toEqual(direct);
-    }
-
-    // Keep these literal vectors identical to crates/jazz/src/tools/identity.rs.
-    for (const [subject, expected] of [
-      ["123e4567e89b12d3-a456426614174000", "bf38a3ac-d534-5b16-8d93-14ddea925c47"],
-      ["workos_user_01J8Y3K4M5N6P7Q8R9S0T1U2V3", "001ee09d-5506-554f-9581-46bf449082bd"],
-      ["\u0085", "8fec6819-1507-5190-a4e6-d61b73fa4091"],
-      ["\ufeff", "aef4b8ca-08ab-51a8-adab-bd8c111efbe7"],
-    ]) {
-      expect(formatUuid(authorBytesForSubject(subject))).toBe(expected);
-      expect(Array.from(authorBytesForSubject(subject))).not.toEqual(direct);
-    }
-    for (const subject of [
-      "123e4567-e89b-12d3-a4564-26614174000", // moved hyphen
-      "123e4567-e89b-12d3-a456426614174000", // missing hyphen
-      "123e4567--e89b-12d3-a456-426614174000", // arbitrary extra hyphen
-      " 123e4567-e89b-12d3-a456-426614174000 ",
-      "urn:uuid:123e4567-e89b-12d3-a456-426614174000",
-      "{123e4567-e89b-12d3-a456-426614174000}",
-      "WORKOS_USER_01J8Y3K4M5N6P7Q8R9S0T1U2V3",
-    ]) {
-      expect(Array.from(authorBytesForSubject(subject))).not.toEqual(direct);
-    }
-    expect(Array.from(authorBytesForSubject("workos_user_01J8Y3K4M5N6P7Q8R9S0T1U2V3"))).not.toEqual(
-      Array.from(authorBytesForSubject("WORKOS_USER_01J8Y3K4M5N6P7Q8R9S0T1U2V3")),
+  it("distinguishes the same subject issued by different authorities", () => {
+    expect(canonicalAuthorSubject("issuer-a", "user")).not.toBe(
+      canonicalAuthorSubject("issuer-b", "user"),
     );
   });
 
-  test("uses ASCII-only blank-subject validation", () => {
-    for (const subject of ["", " \t\n\v\f\r "]) {
-      expect(isUsableSubject(subject)).toBe(false);
+  it("preserves opaque spelling and rejects only ASCII-blank components", () => {
+    expect(isUsableSubject(" opaque ")).toBe(true);
+    expect(isUsableSubject("\u0085")).toBe(true);
+    expect(isUsableSubject("\uFEFF")).toBe(true);
+    expect(canonicalAuthorSubject("issuer", " User ")).toBe('["issuer"," User "]');
+    expect(canonicalAuthorSubject(" issuer ", "\u0085")).toBe(
+      JSON.stringify([" issuer ", "\u0085"]),
+    );
+    for (const blank of ["", " ", "\t\n\r"])
+      expect(() => canonicalAuthorSubject("issuer", blank)).toThrow(/nonempty/);
+  });
+
+  it("rejects unpaired UTF-16 surrogates while preserving valid code points", () => {
+    expect(isPortableAuthorComponent("\ud83d\ude80")).toBe(true);
+    expect(isPortableAuthorComponent("rocket-\ud83d\ude80")).toBe(true);
+    expect(isPortableAuthorComponent("\ud800")).toBe(false);
+    expect(isPortableAuthorComponent("\udc00")).toBe(false);
+    expect(() => canonicalAuthorSubject("issuer", "\ud800")).toThrow(/portable/);
+    expect(() => canonicalAuthorSubject("issuer", "\udc00")).toThrow(/portable/);
+
+    const canonical = canonicalAuthorSubject("issuer", "🚀");
+    expect(canonical).toBe('["issuer","🚀"]');
+    expect(parseCanonicalAuthorSubject(canonical)?.user_id).toBe("🚀");
+  });
+
+  it("strictly parses only exact canonical two-string JSON", () => {
+    const canonical = '["https://issuer.example","opaque:subject"]';
+    expect(parseCanonicalAuthorSubject(canonical)).toEqual({
+      issuer: "https://issuer.example",
+      user_id: "opaque:subject",
+      canonical,
+    });
+
+    for (const value of [
+      `[ "https://issuer.example", "opaque:subject" ]`,
+      '["https://issuer.example","opaque:subject","extra"]',
+      '{"issuer":"https://issuer.example","user_id":"opaque:subject"}',
+      '["https://issuer.example"," "]',
+      '[" ","opaque:subject"]',
+      String.raw`["https://issuer.example","\ud800"]`,
+      String.raw`["https://issuer.example","\udc00"]`,
+      String.raw`["https://issuer.example","\ud83d\ude80"]`,
+      "not-json",
+    ]) {
+      expect(parseCanonicalAuthorSubject(value)).toBeNull();
     }
-    for (const subject of ["\u0085", "\ufeff", " subject "]) {
-      expect(isUsableSubject(subject)).toBe(true);
+  });
+
+  it("decodes only the current singly wrapped stored canonical author bytes", () => {
+    const canonical = '["urn:jazz:test","author"]';
+    expect(decodeCanonicalAuthorSubjectBytes(storedScalar(canonical))).toBe(canonical);
+    expect(() =>
+      decodeCanonicalAuthorSubjectBytes(Uint8Array.from([0, ...encoder.encode(canonical)])),
+    ).toThrow(/canonical author subject/);
+    expect(() => decodeCanonicalAuthorSubjectBytes(encoder.encode(canonical))).toThrow(
+      /canonical author subject/,
+    );
+  });
+
+  it("rejects malformed provenance bytes instead of accepting arbitrary text", () => {
+    const canonical = '["urn:jazz:test","author"]';
+    for (const bytes of [
+      encoder.encode("not-json"),
+      Uint8Array.from([2, ...storedScalar(canonical)]),
+      encoder.encode(`[ "urn:jazz:test", "author" ]`),
+      encoder.encode('["urn:jazz:test"," "]'),
+      encoder.encode(String.raw`["urn:jazz:test","\ud800"]`),
+      encoder.encode(String.raw`["urn:jazz:test","\ud83d\ude80"]`),
+      Uint8Array.from([0x5b, 0xff, 0x5d]),
+    ]) {
+      expect(() => decodeCanonicalAuthorSubjectBytes(bytes)).toThrow(/canonical author subject/);
     }
   });
 });
-
-function formatUuid(bytes: Uint8Array): string {
-  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}

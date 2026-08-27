@@ -1,10 +1,10 @@
 impl PeerState {
     /// Ingest a client mergeable commit unit at an edge boundary.
     ///
-    /// The edge first stores the unit as pending relay history, then gates fate
-    /// assignment on the first settled permission-scope subscription for the
-    /// affected tables and writer. If a scope was not settled before this call,
-    /// the unit remains pending and can be completed by
+    /// The edge gates admission on the first settled permission-scope
+    /// subscription for the affected tables and writer. If a scope was not
+    /// settled before this call, the unit remains outside edge history and can
+    /// be admitted exactly once by
     /// [`Self::drain_deferred_edge_fates`] after the registered scope settles.
     pub async fn ingest_edge_mergeable_commit_unit<S>(
         &mut self,
@@ -32,8 +32,21 @@ impl PeerState {
         )
         .await?
         {
-            node.ingest_relay_commit_unit(tx.clone(), versions.clone()).await?;
-            if !self.deferred_edge_fates.contains_key(&tx.tx_id) {
+            if let Some(existing) = self.deferred_edge_fates.get(&tx.tx_id) {
+                // The durable ingest path rejects two different commit units
+                // for one transaction id.  Deferred admission sits before that
+                // path, so retain the same conflict boundary here rather than
+                // silently treating a conflicting upload as a retransmit.
+                // Version order is transport-insignificant and is normalized
+                // by NodeState on eventual admission.
+                let mut existing_versions = existing.versions.clone();
+                existing_versions.sort();
+                let mut incoming_versions = versions;
+                incoming_versions.sort();
+                if existing.tx != tx || existing_versions != incoming_versions {
+                    return Err(Error::ConflictingCommitUnit(tx.tx_id));
+                }
+            } else {
                 for subscription in &scope_subscriptions {
                     self.retain_edge_scope_subscription(*subscription);
                 }
@@ -119,14 +132,14 @@ impl PeerState {
     }
 
     fn record_outgoing_view_update_metadata(&mut self, update: &SyncMessage) {
-        let SyncMessage::ViewUpdate {
+        let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             version_carriers,
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
             ..
-        } = update
+        }) = update
         else {
             return;
         };
@@ -154,7 +167,7 @@ impl PeerState {
     pub(crate) async fn prove_terminal_commit_authorization<S>(
         &mut self,
         node: &mut NodeState<S>,
-        writer: AuthorId,
+        writer: AuthorSubject,
         versions: &[VersionRecord],
         candidate_tx_id: TxId,
     ) -> Result<(), Error>
@@ -195,28 +208,19 @@ impl PeerState {
                         self.authorization_progress_for_subscription(subscription),
                     )
                 } else {
-                    let previous_role = self.role;
-                    let previous_permission_identity = self.permission_identity;
-                    self.role = PeerRole::ClientLink { identity: writer };
-                    // The support proof must evaluate claims as the commit's
-                    // permission subject. Trusted backend links normally use
-                    // `SYSTEM` for their served reads, so changing only the
-                    // transient client role would still bind policy claims as
-                    // `SYSTEM` here.
-                    self.permission_identity = Some(writer);
                     let update = self
-                        .rehydrate_authorization_support_query(
-                        node,
-                        &shape,
-                        &binding,
-                        scope.options.clone(),
-                    )
-                    .await;
-                    self.role = previous_role;
-                    self.permission_identity = previous_permission_identity;
-                    let SyncMessage::ViewUpdate {
+                        .rehydrate_authorization_support_query_for_identity(
+                            node,
+                            writer,
+                            subscription,
+                            &shape,
+                            &binding,
+                            scope.options.clone(),
+                        )
+                        .await;
+                    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                         settled_through, ..
-                    } = update?
+                    }) = update?
                     else {
                         return Err(Error::UnsupportedSyncMessage(
                             "terminal authority support hydration did not return a view",
@@ -251,7 +255,7 @@ impl PeerState {
     async fn unsettled_authority_scope_subscriptions<S>(
         &mut self,
         node: &mut NodeState<S>,
-        writer: AuthorId,
+        writer: AuthorSubject,
         versions: &[VersionRecord],
         candidate_tx_id: Option<TxId>,
         retained_scope_is_unsettled: bool,
@@ -310,24 +314,20 @@ impl PeerState {
                     );
                     continue;
                 }
-                let previous_role = self.role;
-                let previous_permission_identity = self.permission_identity;
-                self.role = PeerRole::ClientLink { identity: writer };
-                self.permission_identity = Some(writer);
                 let rehydrate = self
-                    .rehydrate_authorization_support_query(
+                    .rehydrate_authorization_support_query_for_identity(
                         node,
+                        writer,
+                        subscription,
                         &shape,
                         &binding,
                         scope.options.clone(),
                     )
                     .await;
-                self.role = previous_role;
-                self.permission_identity = previous_permission_identity;
                 let update = rehydrate?;
-                let SyncMessage::ViewUpdate {
+                let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     settled_through, ..
-                } = update
+                }) = update
                 else {
                     return Err(Error::UnsupportedSyncMessage(
                         "authority support hydration did not return a view",
@@ -442,7 +442,7 @@ impl PeerState {
     }
 
     fn apply_outgoing_view_update_result_set(&mut self, update: &SyncMessage) {
-        let SyncMessage::ViewUpdate {
+        let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             reset_result_set,
             result_member_adds,
@@ -450,7 +450,7 @@ impl PeerState {
             program_fact_adds,
             program_fact_removes,
             ..
-        } = update
+        }) = update
         else {
             return;
         };

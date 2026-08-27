@@ -1,10 +1,13 @@
 //! Admission and semantic size limits for Jazz protocol payloads.
 //!
-//! These limits protect allocation at the wire boundary and keep oversized
-//! semantic requests recoverable. Server shells may eventually surface these as
-//! configuration, but the core owns the default contract.
+//! These limits protect allocation at the wire boundary. Oversized operations
+//! with an already-derived correlation key can be rejected in-band; an
+//! oversized shape registration is rejected before key derivation and is
+//! therefore fatal to the offending peer link. The core owns this contract.
 
-use crate::protocol::{KnownStateDeclaration, RowVersionRef, ShapeAst, VersionRecord};
+use crate::protocol::{
+    KnownStateDeclaration, RegisterShapeOptions, RowVersionRef, ShapeAst, VersionRecord,
+};
 
 /// Maximum encoded `WireFrame` bytes accepted before postcard decode.
 ///
@@ -31,14 +34,25 @@ pub const MAX_LOGICAL_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_INFLIGHT_LOGICAL_MESSAGE_BYTES: usize = MAX_LOGICAL_MESSAGE_BYTES;
 /// Per-peer fairness bound for concurrently incomplete logical messages.
 pub const MAX_INFLIGHT_LOGICAL_MESSAGES: usize = 4;
+/// Maximum inactivity after the last novel fragment before reassembly expires.
+pub const MAX_FRAGMENT_REASSEMBLY_IDLE_MS: u64 = 30_000;
+/// Maximum total lifetime of an incomplete fragmented message, even with progress.
+pub const MAX_FRAGMENT_REASSEMBLY_AGE_MS: u64 = 5 * 60 * 1_000;
 
-/// Maximum postcard-encoded query shape registration payload.
+/// Maximum postcard-encoded query shape AST payload.
 ///
-/// Source: existing wire fixtures use tiny shapes; 64 KiB leaves headroom for
-/// generated policy/query shapes without letting `ShapeAst` become an allocation
+/// This remains the public AST-only contract for callers that validate shapes
+/// before constructing registration options.
+pub const MAX_SHAPE_AST_BYTES: usize = 64 * 1024;
+
+/// Maximum postcard-encoded retained shape registration payload.
+///
+/// Source: existing wire fixtures use tiny registrations; 64 KiB leaves
+/// headroom for generated policy/query shapes and ordinary read views without
+/// letting either `ShapeAst` or `RegisterShapeOptions` become an allocation
 /// vector. Server shells may make this configurable later for unusually large
 /// generated schemas.
-pub const MAX_SHAPE_AST_BYTES: usize = 64 * 1024;
+pub const MAX_SHAPE_REGISTRATION_BYTES: usize = MAX_SHAPE_AST_BYTES;
 
 /// Maximum number of row-version records in one commit unit.
 ///
@@ -59,6 +73,13 @@ pub const MAX_FETCH_ROW_VERSIONS: usize = 1024;
 /// would silently overclaim.
 pub const MAX_KNOWN_STATE_EXACT_REFS: usize = MAX_FETCH_ROW_VERSIONS;
 
+/// Maximum immutable-chunk requests admitted from one auxiliary message.
+///
+/// Four maximum-size encoded nodes plus response envelopes remain below the
+/// ordinary wire-frame ceiling. Local producers currently send one request per
+/// frame; this headroom permits small peer-side coalescing without amplification.
+pub const MAX_CHUNK_REQUEST_BATCH_ENTRIES: usize = 4;
+
 /// Validate raw frame bytes before postcard can allocate from declared lengths.
 pub fn validate_wire_frame_len(len: usize) -> Result<(), String> {
     validate_len("wire frame", len, MAX_WIRE_FRAME_BYTES)
@@ -69,11 +90,22 @@ pub fn validate_logical_message_len(len: usize) -> Result<(), String> {
     validate_len("logical message payload", len, MAX_LOGICAL_MESSAGE_BYTES)
 }
 
-/// Validate a shape registration after sync-message decode but before storing it.
+/// Validate the shape AST independently of its registration options.
 pub fn validate_shape_ast_size(ast: &ShapeAst) -> Result<(), String> {
-    let bytes = postcard::to_allocvec(ast)
+    let size = postcard::experimental::serialized_size(ast)
         .map_err(|err| format!("failed to measure shape AST payload: {err}"))?;
-    validate_len("shape AST", bytes.len(), MAX_SHAPE_AST_BYTES)
+    validate_len("shape AST", size, MAX_SHAPE_AST_BYTES)
+}
+
+/// Validate a complete shape registration after sync-message decode but before
+/// deriving its read-view key or storing either component.
+pub fn validate_shape_registration_size(
+    ast: &ShapeAst,
+    opts: &RegisterShapeOptions,
+) -> Result<(), String> {
+    let size = postcard::experimental::serialized_size(&(ast, opts))
+        .map_err(|err| format!("failed to measure shape registration payload: {err}"))?;
+    validate_len("shape registration", size, MAX_SHAPE_REGISTRATION_BYTES)
 }
 
 /// Validate row-version repair request size after sync-message decode.

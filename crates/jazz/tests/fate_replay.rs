@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use futures::executor::block_on;
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::peer::PeerState;
 use jazz::protocol::SyncMessage;
@@ -73,7 +73,7 @@ fn task_cells(title: &str, count: i32) -> BTreeMap<String, Value> {
 
 async fn commit(
     client: &mut NodeState<RocksDbStorage>,
-    author: AuthorId,
+    author: AuthorSubject,
     row_uuid: RowUuid,
     made_at: u64,
     title: &str,
@@ -165,7 +165,7 @@ async fn task_rows(
 fn redelivered_identical_commit_unit_returns_known_fate_without_reprocessing() {
     block_on(async {
         let schema = schema();
-        let alice = AuthorId::from_bytes([0xa1; 16]);
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
         let (_client_dir, mut client) = open_node(node(1), schema.clone()).await;
         let (_core_dir, mut core) = open_node(node(9), schema).await;
 
@@ -222,7 +222,7 @@ fn redelivered_identical_commit_unit_returns_known_fate_without_reprocessing() {
 fn redelivered_fate_update_is_idempotent_downstream() {
     block_on(async {
         let schema = schema();
-        let alice = AuthorId::from_bytes([0xa1; 16]);
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
         let (_client_dir, mut client) = open_node(node(1), schema.clone()).await;
         let (_worker_dir, mut worker) = open_node(node(2), schema.clone()).await;
         let (_core_dir, mut core) = open_node(node(9), schema).await;
@@ -301,7 +301,7 @@ fn redelivered_fate_update_is_idempotent_downstream() {
 fn fate_replay_repairs_partially_applied_state() {
     block_on(async {
         let schema = schema();
-        let alice = AuthorId::from_bytes([0xa1; 16]);
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
         let (_client_dir, mut client) = open_node(node(1), schema.clone()).await;
         let (worker_dir, mut worker) = open_node(node(2), schema.clone()).await;
         let (_core_dir, mut core) = open_node(node(9), schema.clone()).await;

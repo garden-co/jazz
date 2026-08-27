@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn db_subscription_stream_surfaces_upstream_rejection_after_open() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
     let db = open_db(0x51, owner, &schema);
     let (client_transport, mut server_transport) = duplex();
     let upstream = crate::db::block_on(db.connect_upstream(client_transport));
@@ -48,7 +48,7 @@ fn db_subscription_stream_surfaces_upstream_rejection_after_open() {
 #[test]
 fn upstream_transport_rejects_forged_system_catalogue_publication() {
     let base = schema();
-    let client_author = AuthorId::from_bytes([0x51; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0x51; 16]);
     let client = open_db(0x51, client_author, &base);
     let (client_transport, mut upstream_transport) = duplex();
     let upstream = crate::db::block_on(client.connect_upstream(client_transport));
@@ -75,7 +75,7 @@ fn upstream_transport_rejects_forged_system_catalogue_publication() {
     );
     upstream_transport
         .send(SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(SchemaLineagePublication::new(
                 target.clone(),
@@ -95,8 +95,8 @@ fn upstream_transport_rejects_forged_system_catalogue_publication() {
 #[test]
 fn subscriber_connection_surfaces_server_table_not_found_without_silence() {
     let server_schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let server = open_core(0x53, AuthorId::SYSTEM, &server_schema);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let server = open_core(0x53, AuthorSubject::SYSTEM, &server_schema);
     let (mut client_transport, server_transport) = duplex();
     let subscriber = server.accept_subscriber(server_transport, owner);
     let shape_id = ShapeId(uuid::Uuid::from_bytes([0x52; 16]));
@@ -143,9 +143,9 @@ fn subscriber_connection_surfaces_server_table_not_found_without_silence() {
 #[test]
 fn subscriber_connection_serves_default_ordered_window_alongside_unbounded_shape() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     seed(&server, "todos", cells("first", false, owner));
     seed(&server, "todos", cells("second", false, owner));
 
@@ -212,7 +212,9 @@ fn subscriber_connection_serves_default_ordered_window_alongside_unbounded_shape
     let subscriptions = drive_subscriber_until_payloads(&subscriber, client_transport.as_mut(), 2)
         .into_iter()
         .map(|message| match message {
-            SyncMessage::ViewUpdate { subscription, .. } => subscription,
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+                subscription, ..
+            }) => subscription,
             other => panic!("expected ViewUpdate, got {other:?}"),
         })
         .collect::<BTreeSet<_>>();
@@ -226,9 +228,9 @@ fn subscriber_connection_serves_default_ordered_window_alongside_unbounded_shape
 #[test]
 fn subscriber_connection_rejects_local_tier_register_shape() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     seed(&server, "todos", cells("after malformed", false, owner));
 
     // Internal sync-loop coverage: public propagated subscriptions normalize
@@ -295,8 +297,8 @@ fn subscriber_connection_rejects_local_tier_register_shape() {
 #[test]
 fn subscriber_connection_rejects_subscribe_without_link_shape_options() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
 
     // Internal sync-loop coverage: pre-register the shape in the served node but
     // not on this link. The subscriber must still RegisterShape on its own
@@ -343,9 +345,9 @@ fn subscriber_connection_rejects_subscribe_without_link_shape_options() {
 #[test]
 fn subscriber_connection_drops_oversized_known_state_and_keeps_serving() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     seed(&server, "todos", cells("after malformed", false, owner));
 
     let (mut client_transport, server_transport) = duplex();
@@ -411,9 +413,9 @@ fn subscriber_connection_drops_oversized_known_state_and_keeps_serving() {
 #[test]
 fn subscriber_connection_drops_oversized_fetch_row_versions_and_keeps_serving() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     seed(&server, "todos", cells("after malformed", false, owner));
 
     let (mut client_transport, server_transport) = duplex();
@@ -466,9 +468,9 @@ fn subscriber_connection_drops_oversized_fetch_row_versions_and_keeps_serving() 
 #[test]
 fn subscriber_connection_drops_mismatched_shape_id_and_keeps_serving() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     seed(&server, "todos", cells("after malformed", false, owner));
 
     let (mut client_transport, server_transport) = duplex();
@@ -527,10 +529,10 @@ fn subscriber_connection_drops_mismatched_shape_id_and_keeps_serving() {
 #[test]
 fn local_live_subscription_requests_global_upstream_coverage() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
 
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
     seed(&server, "todos", cells("first", false, owner));
 
@@ -563,8 +565,8 @@ fn local_live_subscription_requests_global_upstream_coverage() {
 #[test]
 fn edge_live_subscription_requests_global_upstream_coverage() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
     let (client_transport, server_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
@@ -597,8 +599,8 @@ fn edge_live_subscription_requests_global_upstream_coverage() {
 #[test]
 fn subscriber_connection_rejects_non_global_register_shape_options() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
 
     // Internal sync-loop coverage: public APIs normalize local subscriptions to
     // global upstream coverage. Malformed/direct peers must not install an
@@ -637,8 +639,8 @@ fn subscriber_connection_rejects_non_global_register_shape_options() {
 #[test]
 fn subscriber_connection_accepts_array_subquery_register_shape_for_serving_subscription() {
     let schema = relation_schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
 
     // Internal sync-loop coverage: array-subquery subscriptions are served as
     // flat relation-edge facts, so direct wire registration should be accepted.
@@ -667,8 +669,8 @@ fn subscriber_connection_accepts_array_subquery_register_shape_for_serving_subsc
 #[test]
 fn subscriber_connection_accepts_relation_register_shape_for_serving_subscription() {
     let schema = relation_schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     server
         .insert_with_id(
             "users",
@@ -761,11 +763,11 @@ fn subscriber_connection_accepts_relation_register_shape_for_serving_subscriptio
         }))
         .unwrap();
 
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription: served,
         result_member_adds,
         ..
-    } = drive_subscriber_until_payload(&subscriber, client_transport.as_mut())
+    }) = drive_subscriber_until_payload(&subscriber, client_transport.as_mut())
     else {
         panic!("expected relation facade subscription view update");
     };

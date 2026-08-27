@@ -78,7 +78,10 @@ impl DatabaseSchema {
     ///     ),
     /// );
     ///
-    /// assert_eq!(schema.column_families(), vec!["album_art"]);
+    /// assert_eq!(
+    ///     schema.column_families(),
+    ///     vec!["album_art", groove::db::LARGE_VALUE_METADATA_CF],
+    /// );
     /// ```
     pub fn with_direct_record_store(mut self, store: DirectRecordStoreSchema) -> Self {
         self.direct_record_stores.push(store);
@@ -107,6 +110,7 @@ impl DatabaseSchema {
                     .map(|store| store.name.as_str()),
             )
             .chain(index_family)
+            .chain(std::iter::once(crate::db::LARGE_VALUE_METADATA_CF))
             .collect()
     }
 }
@@ -740,7 +744,10 @@ mod tests {
             RecordDescriptor::new([("id", ValueType::String)]),
             RecordDescriptor::new([("bytes", ValueType::Bytes)]),
         ));
-        assert_eq!(without_index.column_families(), ["albums", "streams"]);
+        assert_eq!(
+            without_index.column_families(),
+            ["albums", "streams", crate::db::LARGE_VALUE_METADATA_CF]
+        );
 
         let with_index = DatabaseSchema::new([
             TableSchema::new(
@@ -760,7 +767,13 @@ mod tests {
         ));
         assert_eq!(
             with_index.column_families(),
-            ["albums", "artists", "streams", "indices"]
+            [
+                "albums",
+                "artists",
+                "streams",
+                "indices",
+                crate::db::LARGE_VALUE_METADATA_CF,
+            ]
         );
     }
 

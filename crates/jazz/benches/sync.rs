@@ -9,7 +9,7 @@ use support::BenchFutureExt as _;
 
 use hdrhistogram::Histogram;
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::peer::PeerState;
 use jazz::protocol::SyncMessage;
@@ -67,9 +67,9 @@ struct SyncBench {
     core_to_edge: PeerState,
     edge_to_worker: PeerState,
     worker_to_ui: PeerState,
-    ui_author: AuthorId,
-    ui_owner: AuthorId,
-    other_owner: AuthorId,
+    ui_author: AuthorSubject,
+    ui_owner: AuthorSubject,
+    other_owner: AuthorSubject,
     rng: Rng,
     parents: BTreeMap<RowUuid, TxId>,
     metrics: Metrics,
@@ -79,15 +79,18 @@ impl SyncBench {
     fn new(config: Config) -> Self {
         let schema = schema();
         let mut dirs = Vec::new();
-        let (dir, ui) = open_node(node(1), schema.clone());
+        let (dir, mut ui) = open_node(node(1), schema.clone());
         dirs.push(dir);
-        let (dir, worker) = open_node(node(2), schema.clone());
+        let (dir, mut worker) = open_node(node(2), schema.clone());
         dirs.push(dir);
-        let (dir, edge) = open_node(node(3), schema.clone());
+        let (dir, mut edge) = open_node(node(3), schema.clone());
         dirs.push(dir);
-        let (dir, core) = open_node(node(4), schema);
+        let (dir, mut core) = open_node(node(4), schema);
         dirs.push(dir);
-        let ui_author = AuthorId::from_bytes([7; 16]);
+        let ui_author = AuthorSubject::for_test_bytes([7; 16]);
+        for node in [&mut ui, &mut worker, &mut edge, &mut core] {
+            node.admit_test_session_claims(ui_author, BTreeMap::new());
+        }
         Self {
             config,
             ui,
@@ -100,7 +103,7 @@ impl SyncBench {
             worker_to_ui: PeerState::client_link(ui_author),
             ui_author,
             ui_owner: ui_author,
-            other_owner: AuthorId::from_bytes([8; 16]),
+            other_owner: AuthorSubject::for_test_bytes([8; 16]),
             rng: Rng::new(config.seed),
             parents: BTreeMap::new(),
             metrics: Metrics::default(),
@@ -268,7 +271,9 @@ impl SyncBench {
     fn next_exclusive(&mut self, step: usize) -> (TxId, SyncMessage, u64) {
         let row_uuid = row(120 + (step % 12) as u8);
         let tx_id = OpenTransactionId::new();
-        self.ui.open_exclusive(tx_id).expect("open exclusive");
+        self.ui
+            .open_exclusive_for_test(tx_id, self.ui_author)
+            .expect("open exclusive");
         let _ = self.ui.tx_read(tx_id, TABLE, row_uuid).expect("read");
         self.ui
             .tx_write(
@@ -312,11 +317,9 @@ impl SyncBench {
             .expect("ui subscription");
         let schema = schema();
         let table = &schema.tables[0];
-        assert!(
-            ui_rows
-                .iter()
-                .all(|row| row.cell(table, "owner") == Some(Value::Uuid(self.ui_owner.0)))
-        );
+        assert!(ui_rows.iter().all(|row| {
+            row.cell(table, "owner") == Some(Value::String(self.ui_owner.canonical().to_owned()))
+        }));
         assert!(!ui_expected_rows.contains_key(&row(250)));
         assert_eq!(
             self.worker.sync_metrics().parked_orphans,
@@ -479,8 +482,8 @@ fn current_rows(
                 .columns
                 .iter()
                 .filter_map(|column| {
-                    row.cell(table, &column.name)
-                        .map(|value| (column.name.clone(), value))
+                    row.cell(table, column.name())
+                        .map(|value| (column.name().to_owned(), value))
                 })
                 .collect();
             (row.row_uuid(), cells)
@@ -490,10 +493,12 @@ fn current_rows(
 
 fn rows_owned_by(
     rows: &BTreeMap<RowUuid, BTreeMap<String, Value>>,
-    owner: AuthorId,
+    owner: AuthorSubject,
 ) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     rows.iter()
-        .filter(|(_row_uuid, cells)| cells.get("owner") == Some(&Value::Uuid(owner.0)))
+        .filter(|(_row_uuid, cells)| {
+            cells.get("owner") == Some(&Value::String(owner.canonical().to_owned()))
+        })
         .map(|(row_uuid, cells)| (*row_uuid, cells.clone()))
         .collect()
 }
@@ -513,7 +518,7 @@ fn schema() -> JazzSchema {
         SchemaBuilder::new().table(
             TableSchemaBuilder::new(TABLE)
                 .column("title", ColumnType::Text)
-                .column("owner", ColumnType::Uuid)
+                .column("owner", ColumnType::Text)
                 .policies(policies),
         ),
     )
@@ -533,10 +538,13 @@ fn open_node(
     (temp_dir, node)
 }
 
-fn cells(title: impl Into<String>, owner: AuthorId) -> BTreeMap<String, Value> {
+fn cells(title: impl Into<String>, owner: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.into())),
-        ("owner".to_owned(), Value::Uuid(owner.0)),
+        (
+            "owner".to_owned(),
+            Value::String(owner.canonical().to_owned()),
+        ),
     ])
 }
 

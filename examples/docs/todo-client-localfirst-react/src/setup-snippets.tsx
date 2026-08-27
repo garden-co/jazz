@@ -26,6 +26,7 @@ export function AppWithRuntimeSources() {
         serverUrl: "https://my-jazz-server.example.com",
         runtimeSources: {
           baseUrl: "/assets/jazz/",
+          wasmVersion: "2026-08-25", // Change this for every deployed asset build.
         },
       }}
       fallback={<p>Loading...</p>}

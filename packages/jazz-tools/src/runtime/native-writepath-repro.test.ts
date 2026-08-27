@@ -26,6 +26,33 @@ function rowId(index: number): string {
 }
 
 describe("native write path", () => {
+  it("admits private asBackend authority for high-level mutations and queries", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "jazz-backend-authority-"));
+    const context = createJazzContext({
+      appId: `backend-authority-${Date.now()}`,
+      app: importApp,
+      permissions: {},
+      driver: { type: "persistent", dataPath: dir },
+      adminSecret: "backend-authority-admin",
+      tier: "local",
+    });
+
+    try {
+      const db = context.asBackend();
+      const write = db.insert(importApp.parents, { label: "private backend", ordinal: 7 });
+      await write.wait({ tier: "local" });
+
+      await expect(db.one(importApp.parents.where({ id: write.value.id }))).resolves.toMatchObject({
+        id: write.value.id,
+        label: "private backend",
+        ordinal: 7,
+      });
+    } finally {
+      await context.shutdown();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps fixed-size transaction cost flat as the store grows", async () => {
     const dir = mkdtempSync(join(tmpdir(), "jazz-writepath-repro-"));
     const context = createJazzContext({

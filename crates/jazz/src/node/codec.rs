@@ -19,9 +19,9 @@ groove::define_record! {
         3 => tx_node_id: NodeAlias,
         4 => schema_version: SchemaVersionAlias,
         5 => parents: ParentRefs,
-        6 => created_by: AuthorId,
+        6 => created_by: AuthorSubject,
         7 => created_at: TxTime,
-        8 => updated_by: AuthorId,
+        8 => updated_by: AuthorSubject,
         9 => updated_at: TxTime,
         .. user_cells,
     }
@@ -35,9 +35,9 @@ groove::define_record! {
         3 => tx_node_id: NodeAlias,
         4 => schema_version: SchemaVersionAlias,
         5 => parents: ParentRefs,
-        6 => created_by: AuthorId,
+        6 => created_by: AuthorSubject,
         7 => created_at: TxTime,
-        8 => updated_by: AuthorId,
+        8 => updated_by: AuthorSubject,
         9 => updated_at: TxTime,
         10 => _deletion: DeletionEvent,
     }
@@ -55,9 +55,9 @@ groove::define_record! {
         4 => tx_node_id: NodeAlias,
         5 => schema_version: SchemaVersionAlias,
         6 => parents: ParentRefs,
-        7 => created_by: AuthorId,
+        7 => created_by: AuthorSubject,
         8 => created_at: TxTime,
-        9 => updated_by: AuthorId,
+        9 => updated_by: AuthorSubject,
         10 => updated_at: TxTime,
         11 => _deletion: DeletionEvent,
     }
@@ -71,10 +71,10 @@ groove::define_record! {
         3 => tx_node_id: NodeAlias,
         4 => schema_version: SchemaVersionAlias,
         5 => parents: ParentRefs,
-        6 => created_by: AuthorId,
-        7 => created_at: TxTime,
-        8 => updated_by: AuthorId,
-        9 => updated_at: TxTime,
+        6 => created_by: AuthorSubject,
+        7 => created_at: u64,
+        8 => updated_by: AuthorSubject,
+        9 => updated_at: u64,
         10 => global_time: Option<GlobalTime>,
         .. user_cells,
     }
@@ -88,10 +88,10 @@ groove::define_record! {
         3 => tx_node_id: NodeAlias,
         4 => schema_version: SchemaVersionAlias,
         5 => parents: ParentRefs,
-        6 => created_by: AuthorId,
-        7 => created_at: TxTime,
-        8 => updated_by: AuthorId,
-        9 => updated_at: TxTime,
+        6 => created_by: AuthorSubject,
+        7 => created_at: u64,
+        8 => updated_by: AuthorSubject,
+        9 => updated_at: u64,
         10 => global_time: Option<GlobalTime>,
         11 => _deletion: DeletionEvent,
     }
@@ -165,16 +165,17 @@ groove::impl_record_field_enum!(RejectionReasonTag {
     RejectionReasonTag::MalformedCommit = 5,
 });
 
-impl records::RecordField for AuthorId {
+impl records::RecordField for AuthorSubject {
     fn read(record: &records::BorrowedRecord<'_>, idx: usize) -> Result<Self, records::Error> {
-        record.get_uuid(idx).map(Self)
+        AuthorSubject::from_canonical(record.get_str(idx)?)
+            .map_err(|_| records::Error::NonCanonicalRecord)
     }
 
     fn to_value(&self) -> Value {
-        Value::Uuid(self.0)
+        Value::String(self.canonical().to_owned())
     }
 
-    const COLUMN_KIND: records::FieldKind = records::FieldKind::Uuid;
+    const COLUMN_KIND: records::FieldKind = records::FieldKind::String;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -210,10 +211,10 @@ groove::define_record! {
     pub(super) struct WireRowRecord {
         0 => row_uuid: RowUuid,
         1 => parents: ParentRefs,
-        2 => created_by: AuthorId,
-        3 => created_at: TxTime,
-        4 => updated_by: AuthorId,
-        5 => updated_at: TxTime,
+        2 => created_by: AuthorSubject,
+        3 => created_at: u64,
+        4 => updated_by: AuthorSubject,
+        5 => updated_at: u64,
         6 => _deletion: Option<Value>,
         .. user_cells,
     }
@@ -225,14 +226,14 @@ groove::define_record! {
         1 => node_id: NodeAlias,
         2 => kind: TxKind,
         3 => n_total_writes: u32,
-        4 => made_by: AuthorId,
+        4 => made_by: AuthorSubject,
         5 => base_snapshot: Option<Value>,
         6 => row_read_set: Option<Value>,
         7 => absent_read_set: Option<Value>,
         8 => predicate_read_set: Option<Value>,
         9 => user_metadata: Option<String>,
         10 => contribution_merge: Option<Vec<u8>>,
-        11 => permission_subject: Option<AuthorId>,
+        11 => permission_subject: Option<AuthorSubject>,
         // Retained physical slot, now used internally to mark redacted
         // view-scoped transaction cardinality without changing row alignment.
         12 => merge_strategy: Option<String>,
@@ -280,7 +281,7 @@ groove::define_record! {
         0 => time: TxTime,
         1 => node_id: NodeAlias,
         2 => kind: TxKind,
-        3 => made_by: AuthorId,
+        3 => made_by: AuthorSubject,
         4 => rejection_reason: RejectionReasonTag,
         5 => cascade_root: Option<Value>,
         6 => reason_detail: Option<String>,
@@ -315,6 +316,11 @@ impl VersionRecord {
         table: &TableSchema,
         schema_version: SchemaVersionId,
     ) -> Result<Self, Error> {
+        TxTime::from_physical_ms(commit.now_ms).map_err(|_| {
+            Error::InvalidMergeableCommit(
+                "commit now_ms exceeds packed HLC physical-millisecond range",
+            )
+        })?;
         let positional = positional_cells_from_map(table, &commit.cells)?;
         VersionRecord::encode(
             table,
@@ -322,9 +328,9 @@ impl VersionRecord {
             commit.row_uuid,
             commit.parents.clone(),
             commit.made_by,
-            TxTime(commit.now_ms),
+            commit.now_ms,
             commit.made_by,
-            TxTime(commit.now_ms),
+            commit.now_ms,
             &positional,
             commit.deletion,
         )
@@ -352,9 +358,9 @@ impl VersionRecord {
             stored.row_uuid(),
             stored.parents(),
             stored.created_by(),
-            stored.created_at(),
+            stored.created_at().physical_ms(),
             stored.updated_by(),
-            stored.updated_at(),
+            stored.updated_at().physical_ms(),
             &cells,
             stored.deletion(),
         )
@@ -509,9 +515,9 @@ pub(super) struct VersionRowParts {
     pub(super) schema_version_alias: SchemaVersionAlias,
     pub(super) tx_time: TxTime,
     pub(super) parents: Vec<TxId>,
-    pub(super) created_by: AuthorId,
+    pub(super) created_by: AuthorSubject,
     pub(super) created_at: TxTime,
-    pub(super) updated_by: AuthorId,
+    pub(super) updated_by: AuthorSubject,
     pub(super) updated_at: TxTime,
     pub(super) cells: BTreeMap<String, Value>,
     pub(super) authored_columns: Option<BTreeSet<String>>,
@@ -523,22 +529,31 @@ impl VersionRow {
         table: &TableSchema,
         parts: VersionRowParts,
         _storage_schema_version: Option<SchemaVersionId>,
+        history_descriptor: Option<records::RecordDescriptor>,
     ) -> Result<Self, Error> {
-        let (storage_table, values) = if parts.deletion.is_some() {
-            (
-                table.register_storage_table(),
-                register_values_from_parts(&parts)?,
-            )
+        let is_deletion = parts.deletion.is_some();
+        let values = if is_deletion {
+            register_values_from_parts(&parts)?
         } else {
-            (
-                table.history_storage_table(),
-                history_values_from_parts(table, &parts)?,
-            )
+            history_values_from_parts(table, &parts)?
+        };
+        let record = if is_deletion {
+            owned_record_from_storage_values(&table.register_storage_table(), values)?
+        } else {
+            match history_descriptor {
+                Some(descriptor) => {
+                    owned_record_from_storage_values_with_descriptor(descriptor, values)?
+                }
+                None => owned_record_from_storage_values(
+                    &table.authored_history_storage_table(),
+                    values,
+                )?,
+            }
         };
         Ok(Self {
             table: groove::Intern::new(parts.table),
             branch_key: parts.branch_key,
-            record: owned_record_from_storage_values(&storage_table, values)?,
+            record,
         })
     }
 
@@ -559,11 +574,11 @@ impl VersionRow {
                     schema_version_alias,
                     tx_time,
                     deletion,
-                ),
+                )?,
             )
         } else {
             (
-                table.history_storage_table(),
+                table.authored_history_storage_table(),
                 history_values_from_wire(
                     table,
                     version,
@@ -635,18 +650,19 @@ impl VersionRow {
             .expect("valid parent tx ids")
     }
 
-    pub(super) fn created_by(&self) -> AuthorId {
+    pub(super) fn created_by(&self) -> AuthorSubject {
         let idx = if self.is_register_record() {
             RegisterRowRecord::FIELD_CREATED_BY_IDX
         } else {
             HistoryRowRecord::FIELD_CREATED_BY_IDX
         };
-        AuthorId(
+        AuthorSubject::from_canonical(
             self.record
                 .borrowed()
-                .get_uuid(idx)
+                .get_str(idx)
                 .expect("valid created_by"),
         )
+        .expect("canonical created_by")
     }
 
     pub(super) fn created_at(&self) -> TxTime {
@@ -663,18 +679,19 @@ impl VersionRow {
         )
     }
 
-    pub(super) fn updated_by(&self) -> AuthorId {
+    pub(super) fn updated_by(&self) -> AuthorSubject {
         let idx = if self.is_register_record() {
             RegisterRowRecord::FIELD_UPDATED_BY_IDX
         } else {
             HistoryRowRecord::FIELD_UPDATED_BY_IDX
         };
-        AuthorId(
+        AuthorSubject::from_canonical(
             self.record
                 .borrowed()
-                .get_uuid(idx)
+                .get_str(idx)
                 .expect("valid updated_by"),
         )
+        .expect("canonical updated_by")
     }
 
     pub(super) fn updated_at(&self) -> TxTime {
@@ -958,7 +975,7 @@ pub(super) fn version_tx_id_from_aliases(
         .map(|node| TxId::new(version.tx_time(), node))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum VersionLayer {
     Content,
     Deletion,
@@ -1016,7 +1033,7 @@ pub(super) fn transaction_values_with_cardinality_scope(
             TxKind::Exclusive => "exclusive".to_owned(),
         }),
         Value::U32(tx.n_total_writes),
-        Value::Uuid(tx.made_by.0),
+        Value::String(tx.made_by.canonical().to_owned()),
         Value::Nullable(None),
         Value::Nullable(None),
         Value::Nullable(None),
@@ -1031,7 +1048,10 @@ pub(super) fn transaction_values_with_cardinality_scope(
                 postcard::to_allocvec(provenance).expect("contribution provenance is serializable"),
             ))
         })),
-        Value::Nullable(tx.permission_subject.map(|id| Box::new(Value::Uuid(id.0)))),
+        Value::Nullable(
+            tx.permission_subject
+                .map(|id| Box::new(Value::String(id.canonical().to_owned()))),
+        ),
         Value::Nullable(
             view_scoped_cardinality
                 .then(|| Box::new(Value::String("view-scoped-cardinality".to_owned()))),
@@ -1061,7 +1081,7 @@ pub(super) fn rejected_transaction_values(
             TxKind::Mergeable => "mergeable".to_owned(),
             TxKind::Exclusive => "exclusive".to_owned(),
         }),
-        Value::Uuid(tx.made_by.0),
+        Value::String(tx.made_by.canonical().to_owned()),
         Value::String(rejection_reason_tag_for_reason(&reason)),
         Value::Nullable(
             rejection_reason_cascade_root_for_reason(&reason)
@@ -1278,9 +1298,9 @@ pub(super) fn history_values_from_parts(
                 .map(|parent| tx_id_value(*parent))
                 .collect(),
         ),
-        Value::Uuid(version.created_by.0),
+        Value::String(version.created_by.canonical().to_owned()),
         Value::U64(version.created_at.0),
-        Value::Uuid(version.updated_by.0),
+        Value::String(version.updated_by.canonical().to_owned()),
         Value::U64(version.updated_at.0),
     ];
     for column in &table.columns {
@@ -1322,10 +1342,20 @@ fn history_values_from_wire(
             .map(|parent| tx_id_value(*parent))
             .collect(),
     ));
-    values.push(Value::Uuid(version.created_by().0));
-    values.push(Value::U64(version.created_at().0));
-    values.push(Value::Uuid(version.updated_by().0));
-    values.push(Value::U64(version.updated_at().0));
+    values.push(Value::String(version.created_by().canonical().to_owned()));
+    // Wire provenance carries public Unix milliseconds. Reconstruct the
+    // internal HLC with logical counter zero at this ingestion boundary.
+    values.push(Value::U64(
+        TxTime::from_physical_ms(version.created_at_ms())
+            .map_err(|_| Error::InvalidStoredValue("wire created_at_ms exceeds packed HLC range"))?
+            .0,
+    ));
+    values.push(Value::String(version.updated_by().canonical().to_owned()));
+    values.push(Value::U64(
+        TxTime::from_physical_ms(version.updated_at_ms())
+            .map_err(|_| Error::InvalidStoredValue("wire updated_at_ms exceeds packed HLC range"))?
+            .0,
+    ));
     for (idx, column) in table.columns.iter().enumerate() {
         let value = version.optional_cell_at(idx);
         if let Some(value) = value.as_ref() {
@@ -1359,9 +1389,9 @@ pub(super) fn register_values_from_parts(version: &VersionRowParts) -> Result<Ve
                 .map(|parent| tx_id_value(*parent))
                 .collect(),
         ),
-        Value::Uuid(version.created_by.0),
+        Value::String(version.created_by.canonical().to_owned()),
         Value::U64(version.created_at.0),
-        Value::Uuid(version.updated_by.0),
+        Value::String(version.updated_by.canonical().to_owned()),
         Value::U64(version.updated_at.0),
         deletion_event_value(deletion),
     ])
@@ -1373,8 +1403,8 @@ fn register_values_from_wire(
     schema_version_alias: SchemaVersionAlias,
     tx_time: TxTime,
     deletion: DeletionEvent,
-) -> Vec<Value> {
-    vec![
+) -> Result<Vec<Value>, Error> {
+    Ok(vec![
         Value::Bytes(version.branch_key().canonical_bytes()),
         Value::Uuid(version.row_uuid().0),
         Value::U64(tx_time.0),
@@ -1387,12 +1417,24 @@ fn register_values_from_wire(
                 .map(|parent| tx_id_value(*parent))
                 .collect(),
         ),
-        Value::Uuid(version.created_by().0),
-        Value::U64(version.created_at().0),
-        Value::Uuid(version.updated_by().0),
-        Value::U64(version.updated_at().0),
+        Value::String(version.created_by().canonical().to_owned()),
+        Value::U64(
+            TxTime::from_physical_ms(version.created_at_ms())
+                .map_err(|_| {
+                    Error::InvalidStoredValue("wire created_at_ms exceeds packed HLC range")
+                })?
+                .0,
+        ),
+        Value::String(version.updated_by().canonical().to_owned()),
+        Value::U64(
+            TxTime::from_physical_ms(version.updated_at_ms())
+                .map_err(|_| {
+                    Error::InvalidStoredValue("wire updated_at_ms exceeds packed HLC range")
+                })?
+                .0,
+        ),
         deletion_event_value(deletion),
-    ]
+    ])
 }
 
 pub(super) fn deletion_event_value(deletion: DeletionEvent) -> Value {
@@ -1435,9 +1477,9 @@ fn stored_version_prefix_values(version: &VersionRow) -> Vec<Value> {
                 .map(|parent| tx_id_value(*parent))
                 .collect(),
         ),
-        Value::Uuid(version.created_by().0),
+        Value::String(version.created_by().canonical().to_owned()),
         Value::U64(version.created_at().0),
-        Value::Uuid(version.updated_by().0),
+        Value::String(version.updated_by().canonical().to_owned()),
         Value::U64(version.updated_at().0),
     ]
 }
@@ -1448,6 +1490,12 @@ pub(super) fn global_current_values(
     global_time: Option<GlobalTime>,
 ) -> Result<Vec<Value>, Error> {
     let mut values = stored_version_prefix_values(version);
+    // Current rows are the public read carrier. HLC ordering remains on the
+    // version/transaction fields; provenance exposes Unix milliseconds.
+    values[GlobalCurrentRowRecord::FIELD_CREATED_AT_IDX] =
+        Value::U64(version.created_at().physical_ms());
+    values[GlobalCurrentRowRecord::FIELD_UPDATED_AT_IDX] =
+        Value::U64(version.updated_at().physical_ms());
     values.push(Value::Nullable(
         global_time.map(|seq| Box::new(Value::U64(seq.0))),
     ));
@@ -1471,6 +1519,10 @@ pub(super) fn register_global_current_values(
     global_time: Option<GlobalTime>,
 ) -> Vec<Value> {
     let mut values = stored_version_prefix_values(version);
+    values[RegisterGlobalCurrentRowRecord::FIELD_CREATED_AT_IDX] =
+        Value::U64(version.created_at().physical_ms());
+    values[RegisterGlobalCurrentRowRecord::FIELD_UPDATED_AT_IDX] =
+        Value::U64(version.updated_at().physical_ms());
     values.push(Value::Nullable(
         global_time.map(|seq| Box::new(Value::U64(seq.0))),
     ));
@@ -1756,10 +1808,10 @@ pub(super) fn current_row_from_materialized_cells_with_layer_provenance(
             cells.get(&column.name).cloned().map(Box::new),
         ));
     }
-    values.push(Value::Uuid(created.created_by().0));
-    values.push(Value::U64(created.created_at().0));
-    values.push(Value::Uuid(updated.updated_by().0));
-    values.push(Value::U64(updated.updated_at().0));
+    values.push(Value::String(created.created_by().canonical().to_owned()));
+    values.push(Value::U64(created.created_at().physical_ms()));
+    values.push(Value::String(updated.updated_by().canonical().to_owned()));
+    values.push(Value::U64(updated.updated_at().physical_ms()));
     values.push(Value::U64(updated.tx_time().0));
     values.push(Value::U64(updated.tx_node_alias().0));
     let raw = descriptor.create(&values)?;
@@ -1784,10 +1836,10 @@ pub(super) fn current_row_from_cells_with_explicit_provenance(
             cells.get(&column.name).cloned().map(Box::new),
         ));
     }
-    values.push(Value::Uuid(provenance.created_by.0));
-    values.push(Value::U64(provenance.created_at.0));
-    values.push(Value::Uuid(provenance.updated_by.0));
-    values.push(Value::U64(provenance.updated_at.0));
+    values.push(Value::String(provenance.created_by.canonical().to_owned()));
+    values.push(Value::U64(provenance.created_at));
+    values.push(Value::String(provenance.updated_by.canonical().to_owned()));
+    values.push(Value::U64(provenance.updated_at));
     let (tx_time, tx_node_alias) = projected_tx.unwrap_or((TxTime(0), NodeAlias(0)));
     values.push(Value::U64(tx_time.0));
     values.push(Value::U64(tx_node_alias.0));
@@ -1818,10 +1870,14 @@ fn current_row_prefix_and_cells_from_version(
 }
 
 fn append_current_row_provenance(values: &mut Vec<Value>, provenance: &VersionRow) {
-    values.push(Value::Uuid(provenance.created_by().0));
-    values.push(Value::U64(provenance.created_at().0));
-    values.push(Value::Uuid(provenance.updated_by().0));
-    values.push(Value::U64(provenance.updated_at().0));
+    values.push(Value::String(
+        provenance.created_by().canonical().to_owned(),
+    ));
+    values.push(Value::U64(provenance.created_at().physical_ms()));
+    values.push(Value::String(
+        provenance.updated_by().canonical().to_owned(),
+    ));
+    values.push(Value::U64(provenance.updated_at().physical_ms()));
     values.push(Value::U64(provenance.tx_time().0));
     values.push(Value::U64(provenance.tx_node_alias().0));
 }
@@ -1885,9 +1941,9 @@ fn build_current_row_descriptor(table: &TableSchema) -> records::RecordDescripto
                 )
             }))
             .chain([
-                ("$createdBy".to_owned(), records::ValueType::Uuid),
+                ("$createdBy".to_owned(), records::ValueType::String),
                 ("$createdAt".to_owned(), records::ValueType::U64),
-                ("$updatedBy".to_owned(), records::ValueType::Uuid),
+                ("$updatedBy".to_owned(), records::ValueType::String),
                 ("$updatedAt".to_owned(), records::ValueType::U64),
                 ("tx_time".to_owned(), records::ValueType::U64),
                 ("tx_node_id".to_owned(), records::ValueType::U64),

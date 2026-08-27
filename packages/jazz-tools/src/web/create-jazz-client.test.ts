@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { canonicalAuthorSubject } from "../runtime/author-id.js";
 import type { Session } from "../runtime/context.js";
 import type { DbConfig } from "../runtime/db.js";
 
@@ -50,6 +51,7 @@ const mocks = vi.hoisted(() => {
 vi.mock("../runtime/db.js", () => ({
   Db: class {},
   createDb: mocks.createDb,
+  getDbSubscriptionSource: (db: unknown) => db,
   resolveDefaultPersistentDbName: (config: DbConfig) => {
     const driver = config.driver;
     if (driver?.type === "persistent" && driver.dbName?.trim()) {
@@ -66,6 +68,7 @@ vi.mock("../subscriptions-orchestrator.js", () => ({
 
 import { createJazzClient, type JazzClientConfig } from "./create-jazz-client.js";
 import { getSubscriptionStore } from "../subscription-store-internal.js";
+import { setDbInternalSession } from "../runtime/db-internal-session.js";
 
 const originalWindow = (globalThis as { window?: unknown }).window;
 
@@ -74,16 +77,24 @@ function createMockDb(
   session: Session | null = null,
   config: DbConfig = { appId },
 ) {
-  return {
+  const db = {
     getAuthState: vi.fn(() => ({
       status: session ? "authenticated" : "unauthenticated",
-      session,
+      session: session
+        ? {
+            user: JSON.stringify([session.issuer, session.user_id]),
+            claims: { ...session.claims, iss: session.issuer, sub: session.user_id },
+            authMode: session.authMode,
+          }
+        : null,
     })),
     onAuthChanged: vi.fn(() => () => {}),
     deleteClientStorage: vi.fn(async () => undefined),
     shutdown: vi.fn(async () => undefined),
     getConfig: vi.fn(() => config),
   };
+  setDbInternalSession(db, session);
+  return db;
 }
 
 describe("framework-agnostic/createAgnosticJazzClient", () => {
@@ -107,6 +118,7 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
     const session: Session = {
       user_id: "local:alice",
       claims: {},
+      issuer: "urn:jazz:local-first",
       authMode: "local-first",
     };
     const db = createMockDb("test-app", session);
@@ -125,7 +137,11 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
     expect(manager.init).toHaveBeenCalledTimes(1);
 
     expect(client.db).toBe(db);
-    expect(client.session).toEqual(session);
+    expect(client.session).toEqual({
+      user: canonicalAuthorSubject(session.issuer, session.user_id),
+      claims: { iss: session.issuer, sub: session.user_id },
+      authMode: session.authMode,
+    });
     expect("manager" in client).toBe(false);
     expect(getSubscriptionStore(client)).toBe(manager);
 
@@ -135,6 +151,22 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
     expect(manager.shutdown.mock.invocationCallOrder[0]!).toBeLessThan(
       db.shutdown.mock.invocationCallOrder[0]!,
     );
+  });
+
+  it("continues database teardown after orchestrator shutdown fails", async () => {
+    const managerError = new Error("orchestrator shutdown failed");
+    const dbError = new Error("database shutdown failed");
+    const db = createMockDb("shutdown-failure");
+    db.shutdown.mockRejectedValueOnce(dbError);
+    mocks.createDb.mockResolvedValue(db);
+
+    const client = await createJazzClient({ appId: "shutdown-failure" });
+    const manager = mocks.orchestratorInstances[0]!;
+    manager.shutdown.mockRejectedValueOnce(managerError);
+
+    await expect(client.shutdown()).resolves.toBeUndefined();
+    expect(manager.shutdown).toHaveBeenCalledOnce();
+    expect(db.shutdown).toHaveBeenCalledOnce();
   });
 
   it("AGC-02: rejects when db creation fails", async () => {

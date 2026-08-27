@@ -19,10 +19,10 @@ async fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exi
     let projects_policies = permissions(|p| {
         p.allow_insert()
             .where_(pe::exists(pe::table("admins").where_(pe::all_of([
-                pe::eq("user_id", pe::session("user_id")),
+                pe::eq("user_id", pe::session(vec!["claims", "sub"])),
                 pe::exists(pe::table("team_memberships").where_(pe::rel::all_of([
                     pe::rel::eq_outer("team_id", "team_id"),
-                    pe::rel::eq_session("user_id", "user_id"),
+                    pe::rel::eq_session("user_id", vec!["claims", "sub"]),
                 ]))),
             ]))));
     });
@@ -67,7 +67,7 @@ async fn local_insert_with_exists_policy_propagates_enforcing_mode_to_nested_exi
         .expect("seed membership row");
 
     let err = client
-        .for_session(Session::new(super::ALICE_ID))
+        .for_session(Session::new("urn:jazz:test", super::ALICE_ID))
         .insert("projects", crate::row_input!("name" => "alice project"))
         .expect_err(
             "enforcing mode should deny nested EXISTS_REL checks when the probed table lacks an explicit SELECT policy",
@@ -91,7 +91,7 @@ async fn local_insert_with_exists_rel_policy_denies_non_admin() {
 async fn local_insert_with_exists_rel_policy_denies_non_admin_inner() {
     let projects_policies = permissions(|p| {
         p.allow_insert().where_(pe::exists(
-            pe::table("admins").where_(pe::rel::eq_session("user_id", "user_id")),
+            pe::table("admins").where_(pe::rel::eq_session("user_id", vec!["claims", "sub"])),
         ));
     });
     let schema = SchemaBuilder::new()
@@ -121,13 +121,13 @@ async fn local_insert_with_exists_rel_policy_denies_non_admin_inner() {
         .expect("seed admin row");
 
     let bob_err = client
-        .for_session(Session::new(super::BOB_ID))
+        .for_session(Session::new("urn:jazz:test", super::BOB_ID))
         .insert("projects", crate::row_input!("name" => "bob project"))
         .expect_err("non-admin insert should be denied");
     assert_client_policy_denied(bob_err, "projects", Operation::Insert);
 
     client
-        .for_session(Session::new(super::ALICE_ID))
+        .for_session(Session::new("urn:jazz:test", super::ALICE_ID))
         .insert("projects", crate::row_input!("name" => "alice project"))
         .expect("admin insert should be allowed");
 
@@ -150,7 +150,7 @@ async fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned
 async fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned_table_inner() {
     let projects_policies = permissions(|p| {
         p.allow_insert().where_(pe::exists(
-            pe::table("admins").where_(pe::rel::eq_session("user_id", "user_id")),
+            pe::table("admins").where_(pe::rel::eq_session("user_id", vec!["claims", "sub"])),
         ));
     });
     let schema = SchemaBuilder::new()
@@ -176,7 +176,7 @@ async fn local_insert_with_exists_rel_policy_requires_explicit_select_on_scanned
         .expect("seed admin row");
 
     let err = client
-        .for_session(Session::new(super::ALICE_ID))
+        .for_session(Session::new("urn:jazz:test", super::ALICE_ID))
         .insert("projects", crate::row_input!("name" => "alice project"))
         .expect_err(
             "enforcing mode should deny EXISTS_REL scans when the scanned table lacks an explicit SELECT policy",
@@ -201,7 +201,7 @@ async fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows_i
     let projects_policies = permissions(|p| {
         p.allow_insert()
             .where_(pe::exists(pe::table("admins").where_(pe::rel::all_of([
-                pe::rel::eq_session("user_id", "user_id"),
+                pe::rel::eq_session("user_id", vec!["claims", "sub"]),
                 pe::rel::eq_literal("revoked_at", Value::Null),
             ]))));
     });
@@ -242,12 +242,12 @@ async fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows_i
         .expect("seed revoked admin row");
 
     client
-        .for_session(Session::new(super::ALICE_ID))
+        .for_session(Session::new("urn:jazz:test", super::ALICE_ID))
         .insert("projects", crate::row_input!("name" => "alice project"))
         .expect("active admin row should satisfy revoked_at = NULL predicate");
 
     let carol_err = client
-        .for_session(Session::new(super::CAROL_ID))
+        .for_session(Session::new("urn:jazz:test", super::CAROL_ID))
         .insert("projects", crate::row_input!("name" => "carol project"))
         .expect_err("revoked admin row should fail revoked_at = NULL predicate");
     assert_client_policy_denied(carol_err, "projects", Operation::Insert);
@@ -269,7 +269,7 @@ async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin()
 async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin_inner() {
     let protected_policies = permissions(|p| {
         p.allow_delete().where_(pe::exists(
-            pe::table("admins").where_(pe::rel::eq_session("user_id", "user_id")),
+            pe::table("admins").where_(pe::rel::eq_session("user_id", vec!["claims", "sub"])),
         ));
     });
     let schema = SchemaBuilder::new()
@@ -303,17 +303,17 @@ async fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin_i
         .0;
 
     let bob_err = client
-        .for_session(Session::new(super::BOB_ID))
+        .for_session(Session::new("urn:jazz:test", super::BOB_ID))
         .delete(protected)
         .expect_err("non-admin delete should be denied");
     assert_client_policy_denied(bob_err, "protected", Operation::Delete);
 
     client
-        .for_session(Session::new(super::ALICE_ID))
+        .for_session(Session::new("urn:jazz:test", super::ALICE_ID))
         .delete(protected)
         .expect("admin delete should be allowed");
     let second_delete = client
-        .for_session(Session::new(super::ALICE_ID))
+        .for_session(Session::new("urn:jazz:test", super::ALICE_ID))
         .delete(protected)
         .expect_err("deleted row should not be deleted again");
     assert!(format!("{second_delete:?}").contains("row already deleted"));

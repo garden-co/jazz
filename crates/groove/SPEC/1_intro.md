@@ -44,6 +44,8 @@ marked in-flight operational material; open questions hold unresolved decisions.
 | 5   | Prepared shapes & bindings-as-data                   | the work-sharing core                                                 |
 | 6   | Recursion & fixpoint                                 | a fixpoint inside every commit                                        |
 | 7   | Correctness, determinism & scope                     | the oracle property, deliberate limits                                |
+| 8   | Async storage & interruptible evaluation             | owned requests, suspension, publication and failure                   |
+| 9   | Large values                                         | lazy indirect scalars and chunk-dependent IVM evaluation              |
 | A   | _guidance:_ implementation map                       | where to read the code                                                |
 | B   | _guidance:_ benchmarks, performance & meta-learnings | the suite, its predictions, levers, findings                          |
 | —   | _registry:_ `INVARIANTS.md`                          | out-of-band: every `INV-` id → test + impl                            |

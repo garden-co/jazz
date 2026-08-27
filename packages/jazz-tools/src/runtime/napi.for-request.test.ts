@@ -1,9 +1,10 @@
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { schema as s } from "jazz-tools";
+import { canonicalAuthorSubject } from "./author-id.js";
 import { deploy } from "../dev/catalogue.js";
 import { startLocalJazzServer } from "../testing/index.js";
 
@@ -20,19 +21,31 @@ const todoApp = s.defineApp({
 });
 
 const todoAppPermissions = s.definePermissions(todoApp, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner_id: session.user_id });
-  policy.todos.allowInsert.where({ owner_id: session.user_id });
-  policy.todos.allowUpdate.where({ owner_id: session.user_id });
-  policy.todos.allowDelete.where({ owner_id: session.user_id });
+  policy.todos.allowRead.where({ owner_id: session.user });
+  policy.todos.allowInsert.where({ owner_id: session.user });
+  policy.todos.allowUpdate.where({ owner_id: session.user });
+  policy.todos.allowDelete.where({ owner_id: session.user });
 });
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-type LocalFirstIdentity = {
+type ExternalIdentity = {
   token: string;
   userId: string;
+  user: string;
+};
+
+const EXTERNAL_ISSUER = "https://napi-request.test";
+const EXTERNAL_JWT_KID = "napi-request-test";
+const EXTERNAL_JWT_SECRET = "napi-request-test-secret";
+
+const externalJwtPublicKey = {
+  kty: "oct" as const,
+  kid: EXTERNAL_JWT_KID,
+  alg: "HS256",
+  k: Buffer.from(EXTERNAL_JWT_SECRET, "utf8").toString("base64url"),
 };
 
 // ---------------------------------------------------------------------------
@@ -40,21 +53,34 @@ type LocalFirstIdentity = {
 // ---------------------------------------------------------------------------
 
 /**
- * Mints a local-first bearer token for a named test actor and resolves the
- * canonical user ID derived from it. The seed is derived deterministically
- * from `actorName` so repeated calls with the same name and appId return the
- * same identity.
+ * Mints a signed external bearer token for a named test actor. These serving
+ * tests exercise public request admission; reserved Jazz issuers are covered
+ * separately by the local-first rejection test below.
  */
+function createExternalIdentity(actorName: string): ExternalIdentity {
+  const header = Buffer.from(
+    JSON.stringify({ alg: "HS256", typ: "JWT", kid: EXTERNAL_JWT_KID }),
+    "utf8",
+  ).toString("base64url");
+  const payload = Buffer.from(
+    JSON.stringify({ iss: EXTERNAL_ISSUER, sub: actorName }),
+    "utf8",
+  ).toString("base64url");
+  const signature = createHmac("sha256", EXTERNAL_JWT_SECRET)
+    .update(`${header}.${payload}`, "utf8")
+    .digest("base64url");
+  const token = `${header}.${payload}.${signature}`;
+  const userId = actorName;
+  return { token, userId, user: canonicalAuthorSubject(EXTERNAL_ISSUER, userId) };
+}
+
 async function createLocalFirstIdentity(
   actorName: string,
   appId: string,
-): Promise<LocalFirstIdentity> {
-  const { mintLocalFirstToken, verifyLocalFirstIdentityProof } = await import("jazz-napi");
-  // Derive a deterministic 32-byte seed: pad / truncate the name to 32 bytes.
+): Promise<{ token: string }> {
+  const { mintLocalFirstToken } = await import("jazz-napi");
   const seed = Buffer.from(actorName.padEnd(32, "-").slice(0, 32)).toString("base64url");
-  const token = mintLocalFirstToken(seed, appId, 60);
-  const userId = verifyLocalFirstIdentityProof(token, appId).id;
-  return { token, userId };
+  return { token: mintLocalFirstToken(seed, appId, 60) };
 }
 
 async function removeTempDir(path: string): Promise<void> {
@@ -105,6 +131,7 @@ async function createTestContext(
     driver: { type: "persistent", dataPath },
     serverUrl: server.url,
     backendSecret,
+    jwtPublicKey: externalJwtPublicKey,
     env: "test",
     tier: "local",
   });
@@ -136,10 +163,8 @@ async function createConcurrentTestEnv() {
     await server.stop();
   });
 
-  const [alice, bob] = await Promise.all([
-    createLocalFirstIdentity("alice", appId),
-    createLocalFirstIdentity("bob", appId),
-  ]);
+  const alice = createExternalIdentity("alice");
+  const bob = createExternalIdentity("bob");
 
   const [aliceDb, bobDb] = await Promise.all([
     context.forRequest({ headers: { authorization: `Bearer ${alice.token}` } }),
@@ -180,7 +205,7 @@ describe("forRequest auth and policy", () => {
       await server.stop();
     });
 
-    const alice = await createLocalFirstIdentity("alice", appId);
+    const alice = createExternalIdentity("alice");
     const aliceDb = await context.forRequest({
       headers: { authorization: `Bearer ${alice.token}` },
     });
@@ -191,7 +216,7 @@ describe("forRequest auth and policy", () => {
         title: "alice-todo",
         done: false,
         description: scopeTag,
-        owner_id: alice.userId,
+        owner_id: alice.user,
       })
       .wait({ tier: "edge" });
 
@@ -202,7 +227,7 @@ describe("forRequest auth and policy", () => {
           tier: "edge",
         });
         expect(rows).toEqual([
-          expect.objectContaining({ id: row.id, title: "alice-todo", owner_id: alice.userId }),
+          expect.objectContaining({ id: row.id, title: "alice-todo", owner_id: alice.user }),
         ]);
       },
       { timeout: 10_000 },
@@ -321,6 +346,7 @@ describe("forRequest auth and policy", () => {
       serverUrl: server.url,
       backendSecret,
       adminSecret,
+      jwtPublicKey: externalJwtPublicKey,
       env: "test",
     });
 
@@ -331,12 +357,9 @@ describe("forRequest auth and policy", () => {
       await server.stop();
     });
 
-    // Derive user IDs so backend writes use the same owner_id values that local-first sessions expect.
-    const [alice, bob, carol] = await Promise.all([
-      createLocalFirstIdentity("alice", appId),
-      createLocalFirstIdentity("bob", appId),
-      createLocalFirstIdentity("carol", appId),
-    ]);
+    const alice = createExternalIdentity("alice");
+    const bob = createExternalIdentity("bob");
+    const carol = createExternalIdentity("carol");
 
     const writerBackend = writerContext.asBackend();
     const readerBackend = readerContext.asBackend();
@@ -348,7 +371,7 @@ describe("forRequest auth and policy", () => {
           title: "alice-item",
           done: false,
           description: scopeTag,
-          owner_id: alice.userId,
+          owner_id: alice.user,
         })
         .wait({ tier: "edge" }),
       writerBackend
@@ -356,7 +379,7 @@ describe("forRequest auth and policy", () => {
           title: "bob-item",
           done: false,
           description: scopeTag,
-          owner_id: bob.userId,
+          owner_id: bob.user,
         })
         .wait({ tier: "edge" }),
       writerBackend
@@ -364,7 +387,7 @@ describe("forRequest auth and policy", () => {
           title: "carol-item",
           done: false,
           description: scopeTag,
-          owner_id: carol.userId,
+          owner_id: carol.user,
         })
         .wait({ tier: "edge" }),
     ]);
@@ -372,6 +395,7 @@ describe("forRequest auth and policy", () => {
     const aliceSessionDb = readerContext.forSession({
       user_id: alice.userId,
       claims: {},
+      issuer: EXTERNAL_ISSUER,
       authMode: "external",
     });
     const aliceRequestDb = await readerContext.forRequest({
@@ -380,6 +404,7 @@ describe("forRequest auth and policy", () => {
     const bobSessionDb = readerContext.forSession({
       user_id: bob.userId,
       claims: {},
+      issuer: EXTERNAL_ISSUER,
       authMode: "external",
     });
 
@@ -440,7 +465,7 @@ describe("forRequest concurrent session isolation", () => {
           title: "alice-todo",
           done: false,
           description: scopeTag,
-          owner_id: alice.userId,
+          owner_id: alice.user,
         })
         .wait({ tier: "edge" }),
       bobDb
@@ -448,7 +473,7 @@ describe("forRequest concurrent session isolation", () => {
           title: "bob-todo",
           done: false,
           description: scopeTag,
-          owner_id: bob.userId,
+          owner_id: bob.user,
         })
         .wait({ tier: "edge" }),
     ]);
@@ -482,7 +507,7 @@ describe("forRequest concurrent session isolation", () => {
           title: "alice-as-bob",
           done: false,
           description: scopeTag,
-          owner_id: bob.userId,
+          owner_id: bob.user,
         })
         .wait({ tier: "edge" }),
     ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
@@ -492,7 +517,7 @@ describe("forRequest concurrent session isolation", () => {
           title: "bob-as-alice",
           done: false,
           description: scopeTag,
-          owner_id: alice.userId,
+          owner_id: alice.user,
         })
         .wait({ tier: "edge" }),
     ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
@@ -535,7 +560,7 @@ describe("forRequest concurrent session isolation", () => {
           title: "alice-todo",
           done: false,
           description: scopeTag,
-          owner_id: alice.userId,
+          owner_id: alice.user,
         })
         .wait({ tier: "edge" }),
       bobDb
@@ -543,7 +568,7 @@ describe("forRequest concurrent session isolation", () => {
           title: "bob-todo",
           done: false,
           description: scopeTag,
-          owner_id: bob.userId,
+          owner_id: bob.user,
         })
         .wait({ tier: "edge" }),
     ]);
@@ -568,10 +593,10 @@ describe("forRequest concurrent session isolation", () => {
 
     // Cross-user update must be rejected.
     expect(() => aliceDb.update(todoApp.todos, bobRow.id, { title: "alice-as-bob" })).toThrow(
-      'Update failed: WriteError("read policy denied partial UPDATE on table todos: the operation requires read permission on the target row")',
+      'Update failed: WriteError("read policy denied UPDATE on table todos: the operation requires read permission on the target row")',
     );
     expect(() => bobDb.update(todoApp.todos, aliceRow.id, { title: "bob-as-alice" })).toThrow(
-      'Update failed: WriteError("read policy denied partial UPDATE on table todos: the operation requires read permission on the target row")',
+      'Update failed: WriteError("read policy denied UPDATE on table todos: the operation requires read permission on the target row")',
     );
   }, 30_000);
 
@@ -598,7 +623,7 @@ describe("forRequest concurrent session isolation", () => {
           title: "alice-todo",
           done: false,
           description: scopeTag,
-          owner_id: alice.userId,
+          owner_id: alice.user,
         })
         .wait({ tier: "edge" }),
       bobDb
@@ -606,7 +631,7 @@ describe("forRequest concurrent session isolation", () => {
           title: "bob-todo",
           done: false,
           description: scopeTag,
-          owner_id: bob.userId,
+          owner_id: bob.user,
         })
         .wait({ tier: "edge" }),
     ]);
@@ -670,7 +695,7 @@ describe("forRequest concurrent session isolation", () => {
         title: "alice-todo",
         done: false,
         description: scopeTag,
-        owner_id: alice.userId,
+        owner_id: alice.user,
       })
       .wait({ tier: "edge" });
 
@@ -692,7 +717,7 @@ describe("forRequest concurrent session isolation", () => {
         title: "bob-todo",
         done: false,
         description: scopeTag,
-        owner_id: bob.userId,
+        owner_id: bob.user,
       })
       .wait({ tier: "edge" });
 
@@ -723,9 +748,9 @@ describe("forRequest concurrent session isolation", () => {
    *   carol ──forRequest──► carolDb ──► all() ──► []
    */
   it("forRequest user with no rows gets empty results, not another user's rows", async () => {
-    const { context, alice, aliceDb, scopeTag, appId } = await createConcurrentTestEnv();
+    const { context, alice, aliceDb, scopeTag } = await createConcurrentTestEnv();
 
-    const carol = await createLocalFirstIdentity("carol", appId);
+    const carol = createExternalIdentity("carol");
     const carolDb = await context.forRequest({
       headers: { authorization: `Bearer ${carol.token}` },
     });
@@ -735,7 +760,7 @@ describe("forRequest concurrent session isolation", () => {
         title: "alice-todo",
         done: false,
         description: scopeTag,
-        owner_id: alice.userId,
+        owner_id: alice.user,
       })
       .wait({ tier: "edge" });
 

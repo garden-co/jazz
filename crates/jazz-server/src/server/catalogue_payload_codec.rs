@@ -203,6 +203,7 @@ fn decode_current_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> 
         schema.insert(name, table_schema);
     }
 
+    ensure_consumed(data, offset)?;
     Ok(schema)
 }
 
@@ -678,6 +679,7 @@ fn decode_current_lens_transform(
         draft_ops.push(read_u32(data, &mut offset)? as usize);
     }
 
+    ensure_consumed(data, offset)?;
     Ok(LensTransform { ops, draft_ops })
 }
 
@@ -798,6 +800,7 @@ pub fn decode_permissions(
         permissions.insert(table_name, policies);
     }
 
+    ensure_consumed(data, offset)?;
     Ok(permissions)
 }
 
@@ -877,6 +880,7 @@ fn decode_current_permissions_bundle(
     let payload_len = read_u32(data, &mut offset)? as usize;
     let payload = read_bytes(data, &mut offset, payload_len)?;
     let permissions = decode_permissions(payload)?;
+    ensure_consumed(data, offset)?;
     Ok((schema_hash, version, parent_bundle_object_id, permissions))
 }
 
@@ -952,6 +956,7 @@ fn decode_current_permissions_head(
                 message: format!("invalid permissions bundle object id: {err}"),
             }
         })?;
+    ensure_consumed(data, offset)?;
     Ok((
         schema_hash,
         version,
@@ -1643,6 +1648,18 @@ fn read_bytes<'a>(
     Ok(bytes)
 }
 
+fn ensure_consumed(data: &[u8], offset: usize) -> Result<(), CatalogueEncodingError> {
+    if offset == data.len() {
+        return Ok(());
+    }
+    Err(CatalogueEncodingError::DecodeError {
+        message: format!(
+            "trailing data after decoded payload: {} bytes remain",
+            data.len() - offset
+        ),
+    })
+}
+
 fn write_string(buf: &mut Vec<u8>, s: &str) {
     let bytes = s.as_bytes();
     write_u32(buf, bytes.len() as u32);
@@ -1992,18 +2009,19 @@ mod tests {
 
     #[test]
     fn schema_roundtrip_strips_policies_but_preserves_hash() {
-        let schema = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("todos")
-                    .column("id", ColumnType::Uuid)
-                    .column("owner_id", ColumnType::Uuid)
-                    .column("title", ColumnType::Text)
-                    .policies(TablePolicies::new().with_select(PolicyExpr::eq_session(
-                        "owner_id",
-                        vec!["user_id".to_string()],
-                    ))),
-            )
-            .build();
+        let schema =
+            SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("todos")
+                        .column("id", ColumnType::Uuid)
+                        .column("owner_id", ColumnType::Uuid)
+                        .column("title", ColumnType::Text)
+                        .policies(TablePolicies::new().with_select(PolicyExpr::eq_session(
+                            "owner_id",
+                            vec!["user".to_owned()],
+                        ))),
+                )
+                .build();
 
         let original_hash = jazz::tools::public_schema::SchemaHash::compute(&schema);
         let encoded = encode_schema(&schema);
@@ -2051,7 +2069,7 @@ mod tests {
                 column: "status".to_string(),
                 values: vec![
                     PolicyValue::Literal(Value::Text("active".to_string())),
-                    PolicyValue::SessionRef(vec!["user_id".to_string()]),
+                    PolicyValue::SessionRef(vec!["user".to_owned()]),
                 ],
             },
             PolicyExpr::SessionCmp {
@@ -2074,7 +2092,7 @@ mod tests {
                 path: vec!["claims".to_string(), "deleted_at".to_string()],
             },
             PolicyExpr::SessionIsNotNull {
-                path: vec!["userId".to_string()],
+                path: vec!["user".to_owned()],
             },
         ]);
         let permissions = HashMap::from([(

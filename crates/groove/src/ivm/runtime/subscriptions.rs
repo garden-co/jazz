@@ -1,5 +1,6 @@
 //! Prepared shapes, routed bindings, and subscription delivery state.
 
+use super::evaluation_session::EvaluationInputs;
 use super::*;
 use crate::storage::OwnedStorage;
 use std::rc::Rc;
@@ -413,6 +414,90 @@ impl MultisinkSubscription {
 }
 
 impl PredicateExpr {
+    pub(super) fn supports_indirect_literal_attempt(&self) -> bool {
+        matches!(
+            self,
+            Self::Eq { .. }
+                | Self::Neq { .. }
+                | Self::Gt { .. }
+                | Self::GtEq { .. }
+                | Self::Lt { .. }
+                | Self::LtEq { .. }
+        )
+    }
+
+    pub(super) fn matches_indirect_literal_attempt(
+        &self,
+        record: BorrowedRecord<'_>,
+        inputs: &mut EvaluationInputs,
+    ) -> Result<Option<bool>, IvmRuntimeError> {
+        let (field, literal, predicate): (&str, &LiteralValue, fn(std::cmp::Ordering) -> bool) =
+            match self {
+                Self::Eq { field, value } => (field, value, std::cmp::Ordering::is_eq),
+                Self::Neq { field, value } => (field, value, |ordering| !ordering.is_eq()),
+                Self::Gt { field, value } => (field, value, std::cmp::Ordering::is_gt),
+                Self::GtEq { field, value } => (field, value, std::cmp::Ordering::is_ge),
+                Self::Lt { field, value } => (field, value, std::cmp::Ordering::is_lt),
+                Self::LtEq { field, value } => (field, value, std::cmp::Ordering::is_le),
+                _ => return Ok(None),
+            };
+        let actual = record.get(field)?;
+        let actual = match actual {
+            Value::Nullable(Some(value)) => *value,
+            value => value,
+        };
+        let Value::Large(large) = actual else {
+            return Ok(None);
+        };
+        let literal = match literal.to_value() {
+            Value::Nullable(Some(value)) => *value,
+            value => value,
+        };
+        let inline = match (&large.kind, literal) {
+            (crate::large_values::LargeValueKind::Bytes, Value::Bytes(bytes)) => bytes,
+            (
+                crate::large_values::LargeValueKind::String
+                | crate::large_values::LargeValueKind::Json,
+                Value::String(text),
+            ) => text.into_bytes(),
+            _ => return Ok(Some(false)),
+        };
+        crate::large_values::compare_inline_attempt(&large, &inline, inputs)
+            .map(predicate)
+            .map(Some)
+    }
+
+    pub(super) fn referenced_fields(&self, output: &mut BTreeSet<String>) {
+        match self {
+            Self::Eq { field, .. }
+            | Self::Neq { field, .. }
+            | Self::Contains { field, .. }
+            | Self::Gt { field, .. }
+            | Self::GtEq { field, .. }
+            | Self::Lt { field, .. }
+            | Self::LtEq { field, .. }
+            | Self::IsNull { field }
+            | Self::IsNotNull { field }
+            | Self::EnumMatch { field, .. } => {
+                output.insert(field.clone());
+            }
+            Self::EqField { field, value_field }
+            | Self::NeqField { field, value_field }
+            | Self::ContainsField {
+                field,
+                needle_field: value_field,
+            } => {
+                output.insert(field.clone());
+                output.insert(value_field.clone());
+            }
+            Self::And(predicates) | Self::Or(predicates) => {
+                for predicate in predicates {
+                    predicate.referenced_fields(output);
+                }
+            }
+        }
+    }
+
     pub(super) fn matches(
         &self,
         record: BorrowedRecord<'_>,
@@ -816,6 +901,7 @@ pub(super) fn count_builder_nodes(graph: &GraphBuilder) -> usize {
         }
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::Project { input, .. }
+        | GraphBuilder::StreamingChecksum { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::Unnest { input, .. }
         | GraphBuilder::VariantProject { input, .. }
@@ -841,6 +927,7 @@ pub(super) fn builder_contains_binding_source(graph: &GraphBuilder) -> bool {
         }
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::Project { input, .. }
+        | GraphBuilder::StreamingChecksum { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::Unnest { input, .. }
         | GraphBuilder::VariantProject { input, .. }
@@ -911,6 +998,7 @@ fn collect_builder_field_names(
         }
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::Project { input, .. }
+        | GraphBuilder::StreamingChecksum { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::Unnest { input, .. }
         | GraphBuilder::VariantProject { input, .. }
@@ -1361,7 +1449,8 @@ fn lift_literal_filter(
         | GraphBuilder::InlineRecords { .. }
         | GraphBuilder::Index { .. }
         | GraphBuilder::FrontierSource { .. }
-        | GraphBuilder::BindingSource { .. } => Ok(None),
+        | GraphBuilder::BindingSource { .. }
+        | GraphBuilder::StreamingChecksum { .. } => Ok(None),
     }
 }
 
@@ -1546,6 +1635,20 @@ fn graph_outputs_binding(graph: &GraphBuilder, binding_field: &str) -> bool {
         GraphBuilder::Project { fields, .. } => fields
             .iter()
             .any(|field| field.output_name == binding_field),
+        GraphBuilder::StreamingChecksum {
+            input,
+            field,
+            output_field,
+            ..
+        } => {
+            if output_field == binding_field {
+                true
+            } else if matches!(field, FieldRef::Name(name) if name == binding_field) {
+                false
+            } else {
+                graph_outputs_binding(input, binding_field)
+            }
+        }
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::Unnest { input, .. }
@@ -1714,6 +1817,7 @@ fn propagate_binding_through_frontier(
         | GraphBuilder::CollectBy { .. }
         | GraphBuilder::Aggregate { .. }
         | GraphBuilder::Union { .. }
+        | GraphBuilder::StreamingChecksum { .. }
         | GraphBuilder::VariantProject { .. } => None,
     }
 }
@@ -2625,9 +2729,22 @@ impl IvmRuntime {
         if let Some(output) = output_memo.get(&memo_key) {
             return Ok(*output);
         }
-        let output = self.infer_builder_output_uncached(graph, output_memo)?;
-        output_memo.insert(memo_key, output);
-        Ok(output)
+        // A legal policy graph can be deeply nested (for example a recursive
+        // inheritance policy after its public result and routing projections
+        // have been attached). Infer every child before its parent explicitly
+        // so descriptor inference does not consume the server owner's stack.
+        for builder in graph.postorder() {
+            let key = builder as *const GraphBuilder as usize;
+            if output_memo.contains_key(&key) {
+                continue;
+            }
+            let output = self.infer_builder_output_uncached(builder, output_memo)?;
+            output_memo.insert(key, output);
+        }
+        output_memo
+            .get(&memo_key)
+            .copied()
+            .ok_or(IvmRuntimeError::UnsupportedOperator)
     }
 
     fn infer_builder_output_uncached(
@@ -2740,6 +2857,42 @@ impl IvmRuntime {
             GraphBuilder::Project { input, fields } => {
                 let input = self.infer_builder_output_cached(input, output_memo)?;
                 project_descriptor(&input, fields)
+            }
+            GraphBuilder::StreamingChecksum {
+                input,
+                field,
+                output_field,
+                window_bytes,
+                max_bytes_per_turn,
+            } => {
+                if *window_bytes == 0 || *max_bytes_per_turn == 0 {
+                    return Err(IvmRuntimeError::InvalidStreamingChecksumBudget);
+                }
+                let input = self.infer_builder_output_cached(input, output_memo)?;
+                let field_idx = resolve_field_ref(&input, field)?;
+                match input.fields()[field_idx].value_type {
+                    ValueType::String | ValueType::Bytes => {}
+                    _ => return Err(IvmRuntimeError::StreamingChecksumTypeMismatch),
+                }
+                Ok(RecordDescriptor::new(
+                    input
+                        .fields()
+                        .iter()
+                        .enumerate()
+                        .map(|(index, descriptor_field)| {
+                            let name = if index == field_idx {
+                                output_field.clone()
+                            } else {
+                                descriptor_field.name.clone().unwrap_or_default()
+                            };
+                            let value_type = if index == field_idx {
+                                ValueType::Bytes
+                            } else {
+                                descriptor_field.value_type.clone()
+                            };
+                            (name, value_type)
+                        }),
+                ))
             }
             GraphBuilder::Union { inputs } => {
                 let mut output: Option<RecordDescriptor> = None;

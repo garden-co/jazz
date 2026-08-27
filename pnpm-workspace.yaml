@@ -4,6 +4,7 @@ packages:
   - crates/jazz-rn
   - starters/*
   - examples/*
+  - examples/*/apps/*
   - examples/docs/*
   - "!examples/docs/todo-client-localfirst-expo"
   - dev/stress-tests/*

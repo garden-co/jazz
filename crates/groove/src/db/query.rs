@@ -15,7 +15,9 @@ impl Database {
         if let Err(error) = self.ensure_not_poisoned() {
             return std::task::Poll::Ready(Err(error));
         }
-        match self.ivm_runtime.poll_pending_incremental(cx) {
+        let progress = self.ivm_runtime.poll_pending_incremental(cx);
+        self.refresh_resident_writes();
+        match progress {
             std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(Ok(())),
             std::task::Poll::Ready(Err(error)) => {
                 self.poisoned = true;

@@ -136,6 +136,7 @@ where
             .into_iter()
             .max_by_key(|made_at| made_at.sort_key(self.node_uuid))
             .map(TxTime::tick_after)
+            .transpose()?
             .ok_or(Error::InvalidStoredValue("merge requires heads"))?;
         self.merge_tx_time(made_at);
         let merge_tx_id = TxId::new(made_at, self.node_uuid);
@@ -161,7 +162,7 @@ where
             tx_id: merge_tx,
             kind: TxKind::Mergeable,
             n_total_writes: 1,
-            made_by: AuthorId::SYSTEM,
+            made_by: AuthorSubject::SYSTEM,
             permission_subject: None,
             base_snapshot: None,
             row_read_set: None,
@@ -414,28 +415,39 @@ where
         &mut self,
         batch: &mut DatabaseBatch,
         version: &VersionRow,
+        known_first_local_version: bool,
     ) -> Result<(), Error> {
         if version.layer() != VersionLayer::Content {
             return Ok(());
         }
         let table_id = self.physical_table_id_for_version(version)?;
         let new_tx = self.version_tx_id(version)?;
-        let mut heads = match self.read_merge_heads(
-            table_id,
-            version.branch_key(),
-            version.row_uuid(),
-        ).await? {
-            Some(existing) => existing,
-            // A redacted exclusive view fragment intentionally persists
-            // history without current indexes. If a later visible mergeable
-            // version reaches this replica, bootstrap the derived head index
-            // from every locally known eligible version before advancing it.
-            None => self.recompute_merge_heads_from_persisted_history(
-                table_id,
-                version.table(),
-                version.branch_key(),
-                version.row_uuid(),
-            ).await?,
+        // Authored commits may skip the derived-index bootstrap only when the
+        // caller's physical-history lookup proved that this branch-local row
+        // has no persisted content version and this is its first occurrence
+        // in the still-uncommitted database batch.
+        let mut heads = if known_first_local_version {
+            BTreeSet::new()
+        } else {
+            match self
+                .read_merge_heads(table_id, version.branch_key(), version.row_uuid())
+                .await?
+            {
+                Some(existing) => existing,
+                // A redacted exclusive view fragment intentionally persists
+                // history without current indexes. If a later visible mergeable
+                // version reaches this replica, bootstrap the derived head index
+                // from every locally known eligible version before advancing it.
+                None => {
+                    self.recompute_merge_heads_from_persisted_history(
+                        table_id,
+                        version.table(),
+                        version.branch_key(),
+                        version.row_uuid(),
+                    )
+                    .await?
+                }
+            }
         };
         for parent in version.parents() {
             heads.remove(&parent);
@@ -745,6 +757,10 @@ where
         start: TxId,
         target: TxId,
     ) -> Result<bool, Error> {
+        #[cfg(any(test, feature = "testing"))]
+        {
+            self.merge_head_reachability_walks += 1;
+        }
         let mut stack = vec![start];
         let mut seen = BTreeSet::new();
         while let Some(tx_id) = stack.pop() {
@@ -777,6 +793,10 @@ where
         start: TxId,
         target: TxId,
     ) -> Result<bool, Error> {
+        #[cfg(any(test, feature = "testing"))]
+        {
+            self.merge_head_reachability_walks += 1;
+        }
         let mut stack = vec![start];
         let mut seen = BTreeSet::new();
         while let Some(tx_id) = stack.pop() {
@@ -1242,45 +1262,29 @@ where
             .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
         match version.layer() {
             VersionLayer::Content => {
-                let table = self.table_in_schema(version.table(), schema_version)?;
-                let binding = physical_current_binding(
-                    &self.catalogue.catalogue_schemas,
-                    &self.catalogue.physical_mappings,
+                let plan = self.prepared_physical_write_plan(
                     schema_version,
                     version.table(),
-                    PhysicalCurrentClass::Global,
+                    PhysicalWriteTarget::GlobalCurrent,
                 )?;
-                let logical = owned_record_from_storage_values(
-                    &table.global_current_storage_tables()[0],
-                    self.public_current_values(&table, version, Some(global_time))?,
-                )
-                .expect("valid global current row");
-                let mapping = self
-                    .catalogue
-                    .physical_mappings
-                    .get(&schema_version)
-                    .and_then(|mapping| mapping.tables.get(version.table()))
-                    .cloned()
-                    .ok_or(Error::InvalidStoredValue(
-                        "physical global-current table mapping missing",
-                    ))?;
-                let physical_table = self.database.table_schema(&binding.storage_table)?.clone();
-                let descriptor = physical_write_descriptor(
-                    &table.global_current_storage_tables()[0].record_schema(),
-                    &physical_current_field_names(&table, &mapping)?,
-                    &physical_table,
+                let mut values = self.public_current_values(
+                    &plan.source_table,
+                    version,
+                    Some(global_time),
                 )?;
-                let mut values = logical.to_values()?;
                 self.remap_authored_enum_cells_for_physical(
                     &mut values,
-                    &table,
-                    &mapping,
-                    &physical_table,
+                    &plan.source_table,
+                    &plan.source_mapping,
+                    &plan.physical_table,
                     GlobalCurrentRowRecord::USER_CELLS,
                 )?;
-                let physical = OwnedRecord::new(descriptor.create(&values)?, descriptor);
+                let physical = OwnedRecord::new(
+                    plan.physical_descriptor.create(&values)?,
+                    plan.physical_descriptor,
+                );
                 batch.update_raw(
-                    binding.storage_table,
+                    plan.storage_table.clone(),
                     global_current_primary_key(version.branch_key(), version.row_uuid()),
                     groove::records::VariantRecord::new(
                         u32::try_from(version.schema_version_alias().0)
@@ -1330,60 +1334,41 @@ where
         // its pending-current projection must be idempotent too. Otherwise a
         // self-referential schema can visit the same version twice and try to
         // insert its exact current primary key again.
-        if self.ahead_current_keys.contains(&(
-            version.table().to_owned(),
-            version.branch_key().clone(),
-            version.layer(),
-            version.row_uuid(),
-            version.tx_time(),
-            version.tx_node_alias(),
-        )) {
-            return Ok(());
-        }
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
+        let physical_table_id =
+            self.physical_table_id_for_schema(schema_version, version.table())?;
+        let encoded_primary_key = history_primary_key(version).into_bytes();
+        if self.ahead_current_keys.contains(&(
+            physical_table_id,
+            version.layer(),
+            encoded_primary_key.clone(),
+        )) {
+            return Ok(());
+        }
         match version.layer() {
             VersionLayer::Content => {
-                let table = self.table_in_schema(version.table(), schema_version)?;
-                let binding = physical_current_binding(
-                    &self.catalogue.catalogue_schemas,
-                    &self.catalogue.physical_mappings,
+                let plan = self.prepared_physical_write_plan(
                     schema_version,
                     version.table(),
-                    PhysicalCurrentClass::Ahead,
+                    PhysicalWriteTarget::AheadCurrent,
                 )?;
-                let logical = owned_record_from_storage_values(
-                    &table.ahead_current_storage_tables()[0],
-                    self.public_current_values(&table, version, None)?,
-                )
-                .expect("valid ahead current row");
-                let mapping = self
-                    .catalogue
-                    .physical_mappings
-                    .get(&schema_version)
-                    .and_then(|mapping| mapping.tables.get(version.table()))
-                    .cloned()
-                    .ok_or(Error::InvalidStoredValue(
-                        "physical ahead-current table mapping missing",
-                    ))?;
-                let physical_table = self.database.table_schema(&binding.storage_table)?.clone();
-                let descriptor = physical_write_descriptor(
-                    &table.ahead_current_storage_tables()[0].record_schema(),
-                    &physical_current_field_names(&table, &mapping)?,
-                    &physical_table,
-                )?;
-                let mut values = logical.to_values()?;
+                let mut values =
+                    self.public_current_values(&plan.source_table, version, None)?;
                 self.remap_authored_enum_cells_for_physical(
                     &mut values,
-                    &table,
-                    &mapping,
-                    &physical_table,
+                    &plan.source_table,
+                    &plan.source_mapping,
+                    &plan.physical_table,
                     GlobalCurrentRowRecord::USER_CELLS,
                 )?;
-                let physical = OwnedRecord::new(descriptor.create(&values)?, descriptor);
+                let physical = OwnedRecord::new(
+                    plan.physical_descriptor.create(&values)?,
+                    plan.physical_descriptor,
+                );
                 batch.insert_raw(
-                    binding.storage_table,
+                    plan.storage_table.clone(),
                     history_primary_key(version),
                     groove::records::VariantRecord::new(
                         u32::try_from(version.schema_version_alias().0)
@@ -1412,12 +1397,9 @@ where
             ),
         }
         self.insert_ahead_current_key(
-            version.table().to_owned(),
-            version.branch_key().clone(),
+            physical_table_id,
             version.layer(),
-            version.row_uuid(),
-            version.tx_time(),
-            version.tx_node_alias(),
+            encoded_primary_key,
         );
         Ok(())
     }
@@ -1448,12 +1430,9 @@ where
         )?;
         batch.delete(table, history_primary_key(version));
         self.remove_ahead_current_key(
-            version.table(),
-            version.branch_key(),
+            self.physical_table_id_for_schema(schema_version, version.table())?,
             version.layer(),
-            version.row_uuid(),
-            version.tx_time(),
-            version.tx_node_alias(),
+            history_primary_key(version).into_bytes(),
         );
         Ok(())
     }

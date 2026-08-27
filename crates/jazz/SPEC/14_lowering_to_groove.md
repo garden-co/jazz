@@ -61,6 +61,12 @@ those concerns. A node opens its `groove::db::Database` from a lowered `groove`
 schema and never bypasses it for queryable record storage, current-row
 maintenance, or query/sync evaluation (`INV-LOWER-1`).
 
+Large values preserve this ownership rule in the other direction: Groove owns
+their indirect scalar format and every logical operation over it, while Jazz
+supplies only the authorized opaque-locator chunk capability specified by
+chapter 19. Jazz MUST NOT materialize descriptors after Groove has already
+evaluated filters, policies, ordering, grouping, joins, indices, or aggregates.
+
 ### 14.2 Schema → groove
 
 A jazz schema lowers its fixed system tables and direct record stores through
@@ -290,6 +296,16 @@ effective head/base view. Plain child-insert `inherits(parent_col)` selects the 
 `update_using` clause; explicit `InheritsOperation::{Insert, Update, Delete}`
 selects the matching parent write clause. There is no direct predicate
 interpreter fallback (`INV-LOWER-20`).
+
+Old-row and candidate inline sources MUST carry the same authoritative
+`RowProvenance` metadata as stored current rows. `UPDATE USING` and
+`DELETE USING` evaluate the retained old-row creator and updater metadata;
+`UPDATE WITH CHECK` preserves the retained creator and uses the incoming
+version's updater; inserts use the incoming version's full provenance. If
+required metadata cannot be represented, source resolution fails closed rather
+than rebinding provenance from the authenticated identity. This evidence
+remains hidden source metadata and does not change application row fields or
+read visibility.
 
 Identity and execution are separate concerns: aggregation and non-maintained
 `order_by` are part of a shape's _semantic identity_ (canonicalized into the

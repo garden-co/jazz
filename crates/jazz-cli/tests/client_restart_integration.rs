@@ -39,6 +39,7 @@ async fn connect_native(context: AppContext) -> jazz::tools::Result<JazzClient> 
 #[derive(Debug, Serialize, Deserialize)]
 struct JwtClaims {
     sub: String,
+    iss: String,
     claims: JsonValue,
     exp: u64,
 }
@@ -228,6 +229,7 @@ fn take_pipe_text<T: Read>(pipe: &mut Option<T>) -> String {
 fn make_jwt(sub: &str) -> String {
     let claims = JwtClaims {
         sub: sub.to_string(),
+        iss: "https://issuer.jazz.test".to_owned(),
         claims: json!({"role": "user"}),
         exp: SystemTime::now()
             .duration_since(UNIX_EPOCH)

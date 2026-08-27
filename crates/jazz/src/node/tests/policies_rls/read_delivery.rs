@@ -98,6 +98,20 @@ fn message_read_policy_allows_public_chat_or_membership_join() {
             ),
     );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    core.set_test_provider_claims(
+        member,
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::String(member.test_uuid().to_string()),
+        )]),
+    );
+    core.set_test_provider_claims(
+        other,
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::String(other.test_uuid().to_string()),
+        )]),
+    );
 
     accept_global(
         &mut core,
@@ -131,7 +145,7 @@ fn message_read_policy_allows_public_chat_or_membership_join() {
         &mut core,
         MergeableCommit::new("chat_members", membership, 14).cells(BTreeMap::from([
             ("chat_id".to_owned(), Value::Uuid(private_chat.0)),
-            ("user_id".to_owned(), Value::String(member.0.to_string())),
+            ("user_id".to_owned(), Value::String(member.test_uuid().to_string())),
         ])),
     );
 
@@ -184,6 +198,78 @@ fn message_read_policy_allows_public_chat_or_membership_join() {
             .map(|row| row.row_uuid())
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([public_message])
+    );
+}
+
+#[test]
+fn read_policy_compares_indirect_text_by_its_logical_value() {
+    let reader = user(0xa1);
+    let allowed = "policy-visible/".repeat(6_000);
+    let denied = format!("{}x", &allowed[..allowed.len() - 1]);
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("documents")
+            .column("classification", PublicColumnType::Text)
+            .policies(
+                public_all_policies().with_select(public_literal_eq(
+                    "classification",
+                    PublicValue::Text(allowed.clone()),
+                )),
+            ),
+    ));
+    let (_core_dir, mut core) = open_node_with_schema(node(0x6c), schema);
+    let visible = row(0x6c);
+    let hidden = row(0x6d);
+    accept_global(
+        &mut core,
+        MergeableCommit::new("documents", visible, 10).cells(BTreeMap::from([(
+            "classification".to_owned(),
+            Value::String(allowed.clone()),
+        )])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("documents", hidden, 11).cells(BTreeMap::from([(
+            "classification".to_owned(),
+            Value::String(denied),
+        )])),
+    );
+
+    let table = core.table("documents").unwrap().clone();
+    let physical = core.query_table_versions("documents").unwrap();
+    assert!(matches!(physical[0].cell(&table, "classification"), Ok(Some(Value::Large(_)))));
+    assert_eq!(
+        core.current_rows("documents", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.row_uuid() == visible)
+            .and_then(|candidate| candidate.cell(&table, "classification")),
+        Some(Value::String(allowed.clone()))
+    );
+    let direct = Query::from("documents")
+        .filter(eq(col("classification"), lit(allowed.clone())))
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let direct_binding = direct.bind(BTreeMap::new()).unwrap();
+    assert_eq!(
+        core.query_rows_for_link(
+            &direct,
+            &direct_binding,
+            DurabilityTier::Local,
+            AuthorSubject::SYSTEM,
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+
+    assert!(
+        core.dry_run_read_current_allows("documents", visible, reader)
+            .unwrap()
+    );
+    assert!(
+        !core
+            .dry_run_read_current_allows("documents", hidden, reader)
+            .unwrap()
     );
 }
 
@@ -258,14 +344,14 @@ fn camel_case_message_read_policy_incrementally_adds_member_message() {
         &mut core,
         MergeableCommit::new("chats", chat, 10).cells(BTreeMap::from([
             ("isPublic".to_owned(), Value::Bool(true)),
-            ("createdBy".to_owned(), Value::String(alice.0.to_string())),
+            ("createdBy".to_owned(), Value::String(alice.test_uuid().to_string())),
         ])),
     );
     accept_global(
         &mut core,
         MergeableCommit::new("chatMembers", alice_membership, 11).cells(BTreeMap::from([
             ("chatId".to_owned(), Value::Uuid(chat.0)),
-            ("userId".to_owned(), Value::String(alice.0.to_string())),
+            ("userId".to_owned(), Value::String(alice.test_uuid().to_string())),
         ])),
     );
     accept_global(
@@ -280,14 +366,14 @@ fn camel_case_message_read_policy_incrementally_adds_member_message() {
     accept_global(
         &mut core,
         MergeableCommit::new("profiles", alice_profile, 15).cells(BTreeMap::from([
-            ("userId".to_owned(), Value::String(alice.0.to_string())),
+            ("userId".to_owned(), Value::String(alice.test_uuid().to_string())),
             ("name".to_owned(), Value::String("Alice".to_owned())),
         ])),
     );
     accept_global(
         &mut core,
         MergeableCommit::new("profiles", bob_profile, 16).cells(BTreeMap::from([
-            ("userId".to_owned(), Value::String(bob.0.to_string())),
+            ("userId".to_owned(), Value::String(bob.test_uuid().to_string())),
             ("name".to_owned(), Value::String("Bob".to_owned())),
         ])),
     );
@@ -308,7 +394,7 @@ fn camel_case_message_read_policy_incrementally_adds_member_message() {
         &mut core,
         MergeableCommit::new("chatMembers", bob_membership, 13).cells(BTreeMap::from([
             ("chatId".to_owned(), Value::Uuid(chat.0)),
-            ("userId".to_owned(), Value::String(bob.0.to_string())),
+            ("userId".to_owned(), Value::String(bob.test_uuid().to_string())),
         ])),
     );
     let bob_message_tx = accept_global(
@@ -326,10 +412,10 @@ fn camel_case_message_read_policy_incrementally_adds_member_message() {
     assert_view_update_only_ships_rows(&update, BTreeSet::from([bob_message, bob_profile]));
     assert!(matches!(
         update,
-            SyncMessage::ViewUpdate {
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 result_member_adds: ref adds,
                 ..
-        } if adds.iter().any(|entry| entry == &("messages".to_owned().into(), bob_message, bob_message_tx))
+        }) if adds.iter().any(|entry| entry == &("messages".to_owned().into(), bob_message, bob_message_tx))
     ));
     let _ = bob_membership_tx;
 }
@@ -396,6 +482,15 @@ fn edge_read_policy_joins_use_edge_visible_dependency_rows() {
             ),
     );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    for identity in [member, other, bob] {
+        core.set_test_provider_claims(
+            identity,
+            BTreeMap::from([(
+                "user_id".to_owned(),
+                Value::String(identity.test_uuid().to_string()),
+            )]),
+        );
+    }
     for commit in [
         MergeableCommit::new("chats", public_chat, 10).cells(BTreeMap::from([
             ("title".to_owned(), Value::String("public".to_owned())),
@@ -415,11 +510,11 @@ fn edge_read_policy_joins_use_edge_visible_dependency_rows() {
         ])),
         MergeableCommit::new("chat_members", membership, 14).cells(BTreeMap::from([
             ("chat_id".to_owned(), Value::Uuid(private_chat.0)),
-            ("user_id".to_owned(), Value::String(member.0.to_string())),
+            ("user_id".to_owned(), Value::String(member.test_uuid().to_string())),
         ])),
         MergeableCommit::new("chat_members", bob_membership, 15).cells(BTreeMap::from([
             ("chat_id".to_owned(), Value::Uuid(private_chat.0)),
-            ("user_id".to_owned(), Value::String(bob.0.to_string())),
+            ("user_id".to_owned(), Value::String(bob.test_uuid().to_string())),
         ])),
         MergeableCommit::new("messages", bob_private_message, 16).cells(BTreeMap::from([
             ("chat_id".to_owned(), Value::Uuid(private_chat.0)),
@@ -525,14 +620,23 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
     let bob_membership = row(0x1b);
     let schema = private_message_membership_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    for identity in [alice, bob] {
+        core.set_test_provider_claims(
+            identity,
+            BTreeMap::from([(
+                "user_id".to_owned(),
+                Value::String(identity.test_uuid().to_string()),
+            )]),
+        );
+    }
     for commit in [
         MergeableCommit::new("chats", chat, 10).cells(BTreeMap::from([
             ("isPublic".to_owned(), Value::Bool(false)),
-            ("createdBy".to_owned(), Value::String(alice.0.to_string())),
+            ("createdBy".to_owned(), Value::String(alice.test_uuid().to_string())),
         ])),
         MergeableCommit::new("chatMembers", alice_membership, 11).cells(BTreeMap::from([
             ("chatId".to_owned(), Value::Uuid(chat.0)),
-            ("userId".to_owned(), Value::String(alice.0.to_string())),
+            ("userId".to_owned(), Value::String(alice.test_uuid().to_string())),
         ])),
     ] {
         let tx_id = core.commit_mergeable_many_settled(vec![commit]).unwrap();
@@ -578,7 +682,7 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
         .commit_mergeable_many_settled(vec![
             MergeableCommit::new("chatMembers", bob_membership, 13).cells(BTreeMap::from([
                 ("chatId".to_owned(), Value::Uuid(chat.0)),
-                ("userId".to_owned(), Value::String(bob.0.to_string())),
+                ("userId".to_owned(), Value::String(bob.test_uuid().to_string())),
             ])),
         ])
         .unwrap();
@@ -604,10 +708,10 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
         .unwrap();
     assert!(matches!(
         update,
-            SyncMessage::ViewUpdate {
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 result_member_adds: ref adds,
                 ..
-        } if adds.iter().any(|entry| entry == &("messages".to_owned().into(), seed_message, seed_tx))
+        }) if adds.iter().any(|entry| entry == &("messages".to_owned().into(), seed_message, seed_tx))
     ));
 }
 
@@ -622,14 +726,23 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
     let bob_membership = row(0x1b);
     let schema = private_message_membership_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    for identity in [alice, bob] {
+        core.set_test_provider_claims(
+            identity,
+            BTreeMap::from([(
+                "user_id".to_owned(),
+                Value::String(identity.test_uuid().to_string()),
+            )]),
+        );
+    }
     for commit in [
         MergeableCommit::new("chats", chat, 10).cells(BTreeMap::from([
             ("isPublic".to_owned(), Value::Bool(false)),
-            ("createdBy".to_owned(), Value::String(alice.0.to_string())),
+            ("createdBy".to_owned(), Value::String(alice.test_uuid().to_string())),
         ])),
         MergeableCommit::new("chatMembers", alice_membership, 11).cells(BTreeMap::from([
             ("chatId".to_owned(), Value::Uuid(chat.0)),
-            ("userId".to_owned(), Value::String(alice.0.to_string())),
+            ("userId".to_owned(), Value::String(alice.test_uuid().to_string())),
         ])),
     ] {
         let tx_id = core.commit_mergeable_many_settled(vec![commit]).unwrap();
@@ -666,18 +779,18 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
         .unwrap();
     assert!(matches!(
         initial,
-            SyncMessage::ViewUpdate {
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 result_member_adds: ref adds,
                 reset_result_set: true,
                 ..
-        } if adds.iter().any(|entry| entry == &("messages".to_owned().into(), seed_message, seed_tx))
+        }) if adds.iter().any(|entry| entry == &("messages".to_owned().into(), seed_message, seed_tx))
     ));
 
     let bob_membership_tx = core
         .commit_mergeable_many_settled(vec![
             MergeableCommit::new("chatMembers", bob_membership, 13).cells(BTreeMap::from([
                 ("chatId".to_owned(), Value::Uuid(chat.0)),
-                ("userId".to_owned(), Value::String(bob.0.to_string())),
+                ("userId".to_owned(), Value::String(bob.test_uuid().to_string())),
             ])),
         ])
         .unwrap();
@@ -703,11 +816,11 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
     let rehydrated = alice_peer
         .rehydrate_query_with_opts(&mut core, &shape, &binding, opts)
         .unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         reset_result_set,
         ..
-    } = rehydrated
+    }) = rehydrated
     else {
         panic!("expected rehydrate view update");
     };
@@ -749,12 +862,12 @@ fn edge_public_or_owner_claim_policy_rehydrates_empty_result_set() {
         MergeableCommit::new("chats", private_chat, 10).cells(BTreeMap::from([
             ("title".to_owned(), Value::String("private".to_owned())),
             ("visibility".to_owned(), Value::String("private".to_owned())),
-            ("owner_id".to_owned(), Value::String(alice.0.to_string())),
+            ("owner_id".to_owned(), Value::String(alice.test_uuid().to_string())),
         ])),
         MergeableCommit::new("chats", public_chat, 11).cells(BTreeMap::from([
             ("title".to_owned(), Value::String("public".to_owned())),
             ("visibility".to_owned(), Value::String("public".to_owned())),
-            ("owner_id".to_owned(), Value::String(alice.0.to_string())),
+            ("owner_id".to_owned(), Value::String(alice.test_uuid().to_string())),
         ])),
     ] {
         let tx_id = core.commit_mergeable_many_settled(vec![commit]).unwrap();
@@ -814,6 +927,8 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
             ),
     );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    install_test_uuid_sub_claim(&mut core, invited);
+    install_test_uuid_sub_claim(&mut core, spy);
     let shape = Query::from("shapes")
         .validate(&core.catalogue.schema)
         .unwrap();
@@ -862,17 +977,17 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
         .unwrap();
     assert!(matches!(
         invited_initial,
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             result_member_adds: ref adds,
             ..
-        } if adds.is_empty()
+        }) if adds.is_empty()
     ));
     assert!(matches!(
         spy_initial,
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             result_member_adds: ref adds,
             ..
-        } if adds.is_empty()
+        }) if adds.is_empty()
     ));
     assert_eq!(
         core.query
@@ -888,7 +1003,7 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
         .commit_mergeable_settled(MergeableCommit::new("canvasInvites", invite_row, 12).cells(
             BTreeMap::from([
                 ("canvas".to_owned(), Value::Uuid(canvas_row.0)),
-                ("userID".to_owned(), Value::Uuid(invited.0)),
+                ("userID".to_owned(), Value::Uuid(invited.test_uuid())),
             ]),
         ))
         .unwrap();
@@ -903,11 +1018,11 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     let grant_update = invited_link
         .query_update(&mut core, &shape, &binding)
         .unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = grant_update
+    }) = grant_update
     else {
         panic!("expected grant update");
     };
@@ -924,11 +1039,11 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     let spy_update = spy_link.query_update(&mut core, &shape, &binding).unwrap();
     assert!(matches!(
         spy_update,
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             result_member_adds: ref adds,
             result_member_removes: ref removes,
             ..
-        } if adds.is_empty() && removes.is_empty()
+        }) if adds.is_empty() && removes.is_empty()
     ));
     assert_eq!(spy_link.metrics.result_adds_out, 0);
     assert_eq!(spy_link.metrics.version_bundles_out, 0);
@@ -948,11 +1063,11 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     let revoke_update = invited_link
         .query_update(&mut core, &shape, &binding)
         .unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = revoke_update
+    }) = revoke_update
     else {
         panic!("expected revoke update");
     };
@@ -1003,7 +1118,7 @@ fn relay_and_edge_peer_identities_drive_policy_composed_reads() {
     commit_core_owner_fixture(&mut core, row(1), owner, "owned", 10);
 
     let mut relay = PeerState::relay();
-    assert_eq!(relay.identity(), AuthorId::SYSTEM);
+    assert_eq!(relay.identity(), AuthorSubject::SYSTEM);
     assert_view_update_only_references_rows(
         &relay.current_rows_update(&mut core, "todos").unwrap(),
         BTreeSet::from([row(1)]),
@@ -1057,8 +1172,12 @@ fn edge_query_rehydrate_applies_session_user_id_read_policy() {
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let alice_id = user(0xa1);
     let bob_id = user(0xb2);
-    let alice_user_id = alice_id.0.to_string();
-    let bob_user_id = bob_id.0.to_string();
+    let alice_user_id = alice_id.test_uuid().to_string();
+    let bob_user_id = bob_id.test_uuid().to_string();
+    core.set_test_provider_claims(
+        bob_id,
+        BTreeMap::from([("user_id".to_owned(), v(bob_user_id.clone()))]),
+    );
     let alice_private_chat_tx = commit_mergeable_global(
         &mut alice,
         &mut core,
@@ -1099,7 +1218,7 @@ fn edge_query_rehydrate_applies_session_user_id_read_policy() {
                 ("chat_id".to_owned(), Value::Uuid(row(0x10).0)),
                 ("body".to_owned(), v("alice private message")),
                 ("author_id".to_owned(), v(alice_user_id)),
-                ("owner_id".to_owned(), v(alice_id.0.to_string())),
+                ("owner_id".to_owned(), v(alice_id.test_uuid().to_string())),
             ])),
     );
     core.apply_fate_update(
@@ -1354,7 +1473,7 @@ fn nullable_join_code_claim_branch_allows_edge_chat_read() {
         .unwrap();
     core.apply_fate_update(tx, Fate::Accepted, None, Some(DurabilityTier::Edge))
         .unwrap();
-    core.set_session_claims(
+    core.set_test_provider_claims(
         reader,
         BTreeMap::from([("join_code".to_owned(), v(join_code))]),
     );
@@ -1416,7 +1535,7 @@ fn edge_query_rehydrate_resets_empty_result_for_denied_private_chat() {
                 .cells(BTreeMap::from([
                     ("title".to_owned(), v("private")),
                     ("visibility".to_owned(), v("private")),
-                    ("owner_id".to_owned(), v(alice.0.to_string())),
+                    ("owner_id".to_owned(), v(alice.test_uuid().to_string())),
                 ])),
         )
         .unwrap();
@@ -1441,12 +1560,12 @@ fn edge_query_rehydrate_resets_empty_result_for_denied_private_chat() {
         )
         .unwrap();
 
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         result_member_adds,
         version_bundles,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -1468,6 +1587,8 @@ fn deletion_read_policy_requires_visible_global_content_winner() {
     let (_dir, mut core) = open_node_with_schema(node(9), schema);
     let owner = user(0xa1);
     let other = user(0xb2);
+    install_test_uuid_sub_claim(&mut core, owner);
+    install_test_uuid_sub_claim(&mut core, other);
     let row_uuid = row(0x81);
     let content = core
         .commit_mergeable_settled(

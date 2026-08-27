@@ -18,7 +18,7 @@ use super::query_engine::{
     VersionedRowRefSchema, logical_user_column,
 };
 use crate::db::{TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField};
-use crate::ids::{AuthorId, NodeAlias, NodeUuid, RowUuid};
+use crate::ids::{AuthorSubject, NodeAlias, NodeUuid, RowUuid};
 use crate::protocol::{
     BranchKey, ProgramFactEntry, RealRowMemberEntry, RelationEdgeEntry, ResultMemberEntry,
     ResultMemberPayloadEntry, ResultRowLayer, RowVersionRefEntry, SyntheticReplacementToken,
@@ -48,7 +48,7 @@ struct VersionDecodePlan {
     authored_columns_idx: usize,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct MaintainedSubscriptionView {
     result_weights: BTreeMap<ResultMemberEntry, i64>,
     result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
@@ -57,8 +57,26 @@ pub(crate) struct MaintainedSubscriptionView {
     /// touching the rendered trees for other roots.
     structured_app_rows: BTreeMap<RowUuid, BTreeMap<Vec<u8>, i64>>,
     structured_app_row_descriptor: Option<RecordDescriptor>,
+    /// Whether this maintained subscription retains the recursive app-row
+    /// collector. Flat unordered subscriptions release it after their reset;
+    /// subsequent terminal deltas must not rebuild the duplicate state.
+    retains_structured_app_rows: bool,
     versions: WeightedVersionIndex,
     replacements: ReplacementIndex,
+}
+
+impl Default for MaintainedSubscriptionView {
+    fn default() -> Self {
+        Self {
+            result_weights: BTreeMap::new(),
+            result_payloads: BTreeMap::new(),
+            structured_app_rows: BTreeMap::new(),
+            structured_app_row_descriptor: None,
+            retains_structured_app_rows: true,
+            versions: WeightedVersionIndex::default(),
+            replacements: ReplacementIndex::default(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -135,9 +153,6 @@ pub(crate) struct ResultTransitions {
     pub(crate) result_payload_removes: Vec<ResultMemberEntry>,
     pub(crate) program_fact_adds: Vec<ProgramFactEntry>,
     pub(crate) program_fact_removes: Vec<ProgramFactEntry>,
-    /// Root occurrences whose retained collector record changed in this tick.
-    /// The future structured carrier can render exactly these parents.
-    pub(crate) structured_app_row_changes: BTreeSet<RowUuid>,
     /// Generic Groove terminal patches. These bypass relation/result assembly
     /// and are forwarded unchanged to the subscription boundary.
     pub(crate) terminal_operations: Vec<TerminalOperation>,
@@ -303,9 +318,6 @@ impl MaintainedSubscriptionView {
             transitions
                 .result_payload_removes
                 .extend(delta_transitions.result_payload_removes);
-            transitions
-                .structured_app_row_changes
-                .extend(delta_transitions.structured_app_row_changes);
             transitions.observed_result_delta_batches +=
                 delta_transitions.observed_result_delta_batches;
             transitions.requires_authoritative_membership_reconcile |=
@@ -394,8 +406,9 @@ impl MaintainedSubscriptionView {
                     }
                 }
                 NetEvent::StructuredAppRow(root, record) => {
-                    self.apply_structured_app_row_delta(root, record, weight);
-                    transitions.structured_app_row_changes.insert(root);
+                    if self.retains_structured_app_rows {
+                        self.apply_structured_app_row_delta(root, record, weight);
+                    }
                 }
             }
         }
@@ -551,6 +564,16 @@ impl MaintainedSubscriptionView {
             .keys()
             .filter_map(|root| self.structured_app_row(*root).map(|record| (*root, record)))
             .collect()
+    }
+
+    /// Release the app-row collector after a flat subscription's reset has
+    /// been materialized. Only structured array output reads this state after
+    /// opening; flat subscriptions publish subsequent rows from membership
+    /// and version witnesses.
+    pub(crate) fn discard_structured_app_rows(&mut self) {
+        self.structured_app_rows.clear();
+        self.structured_app_row_descriptor = None;
+        self.retains_structured_app_rows = false;
     }
 
     fn apply_structured_app_row_delta(&mut self, root: RowUuid, record: OwnedRecord, weight: i64) {
@@ -1513,10 +1536,25 @@ fn decode_typed_version_witness(
         )?),
         tx_time,
         parents: tx_ids_from_value(record.get_idx(plan.parents_idx)?)?,
-        created_by: AuthorId(record.get_uuid(plan.created_by_idx)?),
-        created_at: TxTime(record_u64_idx(record, plan.created_at_idx)?),
-        updated_by: AuthorId(record.get_uuid(plan.updated_by_idx)?),
-        updated_at: TxTime(record_u64_idx(record, plan.updated_at_idx)?),
+        created_by: AuthorSubject::from_canonical(record.get_str(plan.created_by_idx)?)
+            .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
+        // Current-row provenance is public Unix milliseconds. Witness state
+        // needs the corresponding history form only to identify/materialize
+        // the authored version, whose provenance HLC always has counter zero.
+        created_at: TxTime::from_physical_ms(record_u64_idx(record, plan.created_at_idx)?)
+            .map_err(|_| {
+                super::Error::InvalidStoredValue(
+                    "maintained witness created_at_ms exceeds packed HLC range",
+                )
+            })?,
+        updated_by: AuthorSubject::from_canonical(record.get_str(plan.updated_by_idx)?)
+            .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
+        updated_at: TxTime::from_physical_ms(record_u64_idx(record, plan.updated_at_idx)?)
+            .map_err(|_| {
+                super::Error::InvalidStoredValue(
+                    "maintained witness updated_at_ms exceeds packed HLC range",
+                )
+            })?,
         cells,
         authored_columns,
         deletion,
@@ -2432,14 +2470,15 @@ mod tests {
                 schema_version_alias: SchemaVersionAlias(0),
                 tx_time: TxTime(time),
                 parents: Vec::new(),
-                created_by: AuthorId::SYSTEM,
+                created_by: AuthorSubject::SYSTEM,
                 created_at: TxTime(time),
-                updated_by: AuthorId::SYSTEM,
+                updated_by: AuthorSubject::SYSTEM,
                 updated_at: TxTime(time),
                 cells: BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
                 authored_columns: Some(BTreeSet::from(["title".to_owned()])),
                 deletion: None,
             },
+            None,
             None,
         )
         .unwrap()
@@ -2456,14 +2495,15 @@ mod tests {
                 schema_version_alias: SchemaVersionAlias(0),
                 tx_time: TxTime(time),
                 parents: Vec::new(),
-                created_by: AuthorId::SYSTEM,
+                created_by: AuthorSubject::SYSTEM,
                 created_at: TxTime(time),
-                updated_by: AuthorId::SYSTEM,
+                updated_by: AuthorSubject::SYSTEM,
                 updated_at: TxTime(time),
                 cells: BTreeMap::new(),
                 authored_columns: None,
                 deletion: Some(DeletionEvent::Deleted),
             },
+            None,
             None,
         )
         .unwrap()
@@ -2503,6 +2543,40 @@ mod tests {
         assert!(second.adds.is_empty());
         assert_eq!(second.removes, vec![member]);
         assert!(maintained.result_weights.is_empty());
+    }
+
+    #[test]
+    fn discarded_structured_app_row_collector_does_not_retain_later_deltas() {
+        let descriptor =
+            RecordDescriptor::new([("row_uuid", ValueType::Uuid), ("title", ValueType::String)]);
+        let record = OwnedRecord::new(
+            descriptor
+                .create(&[
+                    Value::Uuid(row(1).0),
+                    Value::String("later terminal row".to_owned()),
+                ])
+                .unwrap(),
+            descriptor,
+        );
+        let mut maintained = MaintainedSubscriptionView::default();
+
+        maintained.discard_structured_app_rows();
+        maintained
+            .apply_decoded_deltas(
+                [(
+                    DecodedMaintainedEvent::StructuredAppRow {
+                        root: row(1),
+                        record,
+                    },
+                    1,
+                )],
+                &aliases(),
+            )
+            .unwrap();
+
+        assert!(maintained.structured_app_rows().is_empty());
+        assert_eq!(maintained.footprint().structured_app_rows, 0);
+        assert_eq!(maintained.footprint().structured_app_rows_bytes, 0);
     }
 
     #[test]

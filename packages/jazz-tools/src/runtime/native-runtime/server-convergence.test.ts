@@ -3,14 +3,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocket } from "undici";
-import type { WasmSchema } from "../../drivers/types.js";
+import type { RuntimeSubscriptionDelta, WasmSchema } from "../../drivers/types.js";
 import { fetchSchemaHashes, fetchStoredWasmSchema, publishStoredSchema } from "../schema-fetch.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../../testing/index.js";
 import { JazzClient } from "../client.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "../testing/wasm-runtime-test-utils.js";
 import { encodeSchema } from "./native-runtime-adapter.js";
-import { decodeNativeDelta, isNativeRowDelta } from "../subscription-manager.js";
-import type { SubscriptionWireDelta } from "../../drivers/types.js";
 
 const maybeIt = hasJazzWasmBuild() ? it : it.skip;
 const previousWebSocket = globalThis.WebSocket;
@@ -24,13 +22,31 @@ const schema = {
   },
 } satisfies WasmSchema;
 
-function normalizeTestDelta(delta: SubscriptionWireDelta, testSchema: WasmSchema) {
-  if (isNativeRowDelta(delta)) {
-    const columns = testSchema.todos?.columns ?? testSchema.arrays?.columns;
-    if (!columns) throw new Error("test schema has no decodable subscription table");
-    return decodeNativeDelta(delta, columns);
-  }
-  return delta;
+function normalizeTestDelta(delta: RuntimeSubscriptionDelta, _testSchema: WasmSchema) {
+  return [
+    ...delta.updated.map((change) => ({
+      kind: 2 as const,
+      id: resultId(change.sourceId, change.occurrenceKey),
+      index: change.index,
+      row: change.row,
+    })),
+    ...delta.added.map((change) => ({
+      kind: 0 as const,
+      id: resultId(change.sourceId, change.occurrenceKey),
+      index: change.index,
+      row: change.row,
+    })),
+    ...delta.removed.map((change) => ({
+      kind: 1 as const,
+      id: resultId(change.sourceId, change.occurrenceKey),
+      index: change.index,
+    })),
+  ];
+}
+
+function resultId(sourceId: string, occurrenceKey: Uint8Array): string {
+  if (occurrenceKey.length === 17 && occurrenceKey[0] === 1) return sourceId;
+  return `result:${Array.from(occurrenceKey, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
 const writableTodoSchema = {

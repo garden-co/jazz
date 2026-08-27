@@ -32,15 +32,26 @@ use napi::sys;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 use serde::Deserialize;
-use serde_json::Value as JsonValue;
+/// Any JSON-compatible value crossing the native JavaScript boundary.
+///
+/// Keep this alias exported through napi-rs rather than relying on its Rust
+/// import name: exported methods use `JsonValue` throughout their generated
+/// declarations, so the package must define that name for TypeScript
+/// consumers.
+#[napi]
+pub type JsonValue = serde_json::Value;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Mutex;
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use futures::future::LocalBoxFuture;
 use futures::lock::Mutex as LocalMutex;
 use jazz::db::{
     ConnectionSessionContext as CoreConnectionSessionContext, Db as CoreDb,
@@ -50,9 +61,12 @@ use jazz::db::{
     PeerConnection as CorePeerConnection, PreparedQuery as PreparedQueryInner,
     Propagation as CorePropagation, QueryAttachment as CoreQueryAttachment,
     ReadOpts as CoreReadOpts, RowCells as CoreRowCells, SeededRowIdSource as CoreSeededRowIdSource,
-    SubscriptionEvent as CoreSubscriptionEvent, SubscriptionStream,
-    TickScheduler as CoreTickScheduler, TickUrgency as CoreTickUrgency,
+    StreamingValueUpload as CoreStreamingValueUpload, SubscriptionEvent as CoreSubscriptionEvent,
+    SubscriptionStream, TickScheduler as CoreTickScheduler, TickUrgency as CoreTickUrgency,
     WireTransportAdapter as CoreWireTransportAdapter, WriteHandle, block_on as core_block_on,
+};
+use jazz::db::{
+    LargeValueUpdate as CoreLargeValueUpdate, StreamingMutationKind as CoreStreamingMutationKind,
 };
 use jazz::groove::records::{
     BorrowedRecord as CoreBorrowedRecord, RecordDescriptor, Value as CoreValue,
@@ -61,7 +75,9 @@ use jazz::groove::storage::{
     MemoryStorage as CoreMemoryStorage, OrderedKvStorage as CoreOrderedKvStorage,
     ReopenableStorage as CoreReopenableStorage,
 };
-use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
+use jazz::ids::{
+    AuthorSubject as CoreAuthorSubject, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid,
+};
 use jazz::protocol::{
     BranchSelector as CoreBranchSelector, BranchViewBase as CoreBranchViewBase,
     ReadViewSpec as CoreReadViewSpec,
@@ -85,18 +101,76 @@ use jazz_server::{
 };
 use jazz_storage_rocksdb::RocksDbStorage as CoreRocksDbStorage;
 
+/// Exact build/ABI fingerprint for the generated native artifact.
+#[napi]
+pub fn native_artifact_fingerprint() -> String {
+    option_env!("JAZZ_NATIVE_ARTIFACT_FINGERPRINT")
+        .unwrap_or("missing-build-fingerprint")
+        .to_owned()
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct CoreOpenDbConfig {
     identity: CoreOpenDbIdentity,
     row_id_seed: Option<u64>,
     history_complete: bool,
     initial_sync_flush_every: Option<u32>,
+    backend_credential: Option<String>,
+}
+
+/// This is a binding-internal wire capability, not a generic author parser.
+/// The claimed author is accepted only after the signed proof derives the
+/// exact same canonical local-first or anonymous subject.
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+struct CoreSelfSignedClientProof {
+    token: String,
+    app_id: String,
+    claimed_author: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
 struct CoreOpenDbIdentity {
     node: CoreNodeUuid,
-    author: CoreAuthorId,
+    #[serde(deserialize_with = "CoreAuthorSubject::deserialize_untrusted")]
+    author: CoreAuthorSubject,
+}
+
+#[napi(object)]
+pub struct InsertOptions {
+    pub row_id: Option<Uint8Array>,
+    pub author: Option<Uint8Array>,
+    pub branch: Option<JsonValue>,
+    pub updated_at_ms: Option<f64>,
+}
+
+#[napi(object)]
+pub struct UpdateOptions {
+    pub author: Option<Uint8Array>,
+    pub head: Option<JsonValue>,
+    pub base: Option<JsonValue>,
+    pub updated_at_ms: Option<f64>,
+}
+
+#[napi(object)]
+pub struct UpsertOptions {
+    pub author: Option<Uint8Array>,
+    pub branch: Option<JsonValue>,
+    pub updated_at_ms: Option<f64>,
+}
+
+#[napi(object)]
+pub struct DeleteOptions {
+    pub author: Option<Uint8Array>,
+    pub head: Option<JsonValue>,
+    pub base: Option<JsonValue>,
+    pub updated_at_ms: Option<f64>,
+}
+
+#[napi(object)]
+pub struct RestoreOptions {
+    pub author: Option<Uint8Array>,
+    pub branch: Option<JsonValue>,
+    pub updated_at_ms: Option<f64>,
 }
 
 impl From<CoreOpenDbIdentity> for CoreDbIdentity {
@@ -167,6 +241,13 @@ impl CoreTickScheduler for NapiTickScheduler {
             ThreadsafeFunctionCallMode::NonBlocking,
         );
     }
+
+    fn schedule_tick_after(&self, delay_ms: u64) {
+        let _ = self.callback.call(
+            Ok(format!("after:{delay_ms}")),
+            ThreadsafeFunctionCallMode::NonBlocking,
+        );
+    }
 }
 
 impl CoreWireTransport for NapiWireTransport {
@@ -193,22 +274,247 @@ pub struct QueryAttachment {
 #[napi(js_name = "Write")]
 pub struct Write {
     payload: Vec<u8>,
+    row_id: CoreRowUuid,
     batch_id: TransactionId,
     inner: Option<NapiWrite>,
+}
+
+/// A JavaScript-thread-owned binding read which suspended on asynchronous
+/// large-value storage. NAPI promises execute on a Send worker pool, whereas
+/// a Jazz runtime is deliberately `Rc`/thread-affine. The adapter drives this
+/// object after its peer transport makes progress instead of blocking Node.
+#[napi]
+pub struct PendingNativeRead {
+    future: Rc<RefCell<Option<LocalBoxFuture<'static, napi::Result<Uint8Array>>>>>,
+}
+
+/// Thread-affine large-value mutation setup which is waiting for local or
+/// routed chunks. The completed value is the ordinary write receipt.
+#[napi]
+pub struct PendingNativeWrite {
+    future: Rc<RefCell<Option<LocalBoxFuture<'static, napi::Result<Write>>>>>,
+}
+
+impl PendingNativeWrite {
+    fn new(future: LocalBoxFuture<'static, napi::Result<Write>>) -> Self {
+        Self {
+            future: Rc::new(RefCell::new(Some(future))),
+        }
+    }
+    fn poll_once(&self) -> napi::Result<Option<Write>> {
+        let Some(mut future) = self.future.borrow_mut().take() else {
+            return Err(napi::Error::from_reason(
+                "native pending write is already complete",
+            ));
+        };
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        match Pin::new(&mut future).poll(&mut context) {
+            Poll::Ready(result) => result.map(Some),
+            Poll::Pending => {
+                *self.future.borrow_mut() = Some(future);
+                Ok(None)
+            }
+        }
+    }
+}
+
+struct PendingSubscriptionBatchCompletion {
+    events: Vec<SubscriptionEvent>,
+}
+
+/// A retryable chunk miss is not a subscription failure: retain the exact raw
+/// batch so the next host turn can re-run hydration after the peer pump has
+/// supplied the requested content.
+enum PendingSubscriptionBatchOutcome {
+    Complete(PendingSubscriptionBatchCompletion),
+    Retryable {
+        events: Vec<CoreSubscriptionEvent>,
+        retry_after_ms: u32,
+    },
+}
+
+enum PendingSubscriptionBatchState {
+    Future(LocalBoxFuture<'static, napi::Result<PendingSubscriptionBatchOutcome>>),
+    /// The raw events have been returned to the subscription queue. Keep this
+    /// marker visible to JavaScript for one turn so it can honor the retry
+    /// delay rather than tight-polling an immediately retryable resolver.
+    Retryable {
+        retry_after_ms: u32,
+    },
+}
+
+enum PendingSubscriptionBatchPoll {
+    Pending,
+    Complete(PendingSubscriptionBatchCompletion),
+    /// `Some` is the first observation of the retryable future completion and
+    /// owns events which must be restored to the front of the queue. `None`
+    /// is the following host turn, which clears the marker and retries them.
+    Retryable {
+        events: Option<Vec<CoreSubscriptionEvent>>,
+    },
+}
+
+/// Opaque marker returned while the next bounded native subscription batch is
+/// waiting for chunk I/O. Call `readAll` again after transport progress.
+#[napi]
+pub struct PendingNativeSubscriptionBatch {
+    state: Rc<RefCell<Option<PendingSubscriptionBatchState>>>,
+}
+
+impl Clone for PendingNativeSubscriptionBatch {
+    fn clone(&self) -> Self {
+        Self {
+            state: Rc::clone(&self.state),
+        }
+    }
+}
+
+impl PendingNativeSubscriptionBatch {
+    fn new(future: LocalBoxFuture<'static, napi::Result<PendingSubscriptionBatchOutcome>>) -> Self {
+        Self {
+            state: Rc::new(RefCell::new(Some(PendingSubscriptionBatchState::Future(
+                future,
+            )))),
+        }
+    }
+
+    fn poll_once(&self) -> napi::Result<PendingSubscriptionBatchPoll> {
+        let Some(state) = self.state.borrow_mut().take() else {
+            return Err(napi::Error::from_reason(
+                "native pending subscription batch is already complete",
+            ));
+        };
+        let PendingSubscriptionBatchState::Future(mut future) = state else {
+            let PendingSubscriptionBatchState::Retryable { retry_after_ms } = state else {
+                unreachable!("subscription batch state is exhaustive");
+            };
+            *self.state.borrow_mut() =
+                Some(PendingSubscriptionBatchState::Retryable { retry_after_ms });
+            return Ok(PendingSubscriptionBatchPoll::Retryable { events: None });
+        };
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        match Pin::new(&mut future).poll(&mut context) {
+            Poll::Ready(result) => result.map(|outcome| match outcome {
+                PendingSubscriptionBatchOutcome::Complete(completion) => {
+                    PendingSubscriptionBatchPoll::Complete(completion)
+                }
+                PendingSubscriptionBatchOutcome::Retryable {
+                    events,
+                    retry_after_ms,
+                } => {
+                    *self.state.borrow_mut() =
+                        Some(PendingSubscriptionBatchState::Retryable { retry_after_ms });
+                    PendingSubscriptionBatchPoll::Retryable {
+                        events: Some(events),
+                    }
+                }
+            }),
+            Poll::Pending => {
+                *self.state.borrow_mut() = Some(PendingSubscriptionBatchState::Future(future));
+                Ok(PendingSubscriptionBatchPoll::Pending)
+            }
+        }
+    }
+
+    fn retry_after_ms(&self) -> Option<u32> {
+        match self.state.borrow().as_ref() {
+            Some(PendingSubscriptionBatchState::Retryable { retry_after_ms }) => {
+                Some(*retry_after_ms)
+            }
+            _ => None,
+        }
+    }
+}
+
+impl PendingNativeRead {
+    fn new(future: LocalBoxFuture<'static, napi::Result<Uint8Array>>) -> Self {
+        Self {
+            future: Rc::new(RefCell::new(Some(future))),
+        }
+    }
+
+    fn poll_once(&self) -> napi::Result<Option<Uint8Array>> {
+        let Some(mut future) = self.future.borrow_mut().take() else {
+            return Err(napi::Error::from_reason(
+                "native pending read is already complete",
+            ));
+        };
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        match Pin::new(&mut future).poll(&mut context) {
+            Poll::Ready(result) => result.map(Some),
+            Poll::Pending => {
+                *self.future.borrow_mut() = Some(future);
+                Ok(None)
+            }
+        }
+    }
+}
+
+#[napi]
+impl PendingNativeSubscriptionBatch {
+    /// The host should wait this bounded delay before asking the subscription
+    /// to retry a retained chunk-hydration batch.
+    #[napi(js_name = "retryAfterMs")]
+    pub fn retry_after_ms_for_js(&self) -> Option<u32> {
+        self.retry_after_ms()
+    }
+}
+
+#[napi]
+impl PendingNativeWrite {
+    #[napi]
+    pub fn poll(&self) -> napi::Result<Option<Write>> {
+        self.poll_once()
+    }
+}
+
+#[napi]
+impl PendingNativeRead {
+    #[napi]
+    pub fn poll(&self) -> napi::Result<Option<Uint8Array>> {
+        self.poll_once()
+    }
+}
+
+fn native_read_or_pending(
+    future: LocalBoxFuture<'static, napi::Result<Uint8Array>>,
+) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
+    let pending = PendingNativeRead::new(future);
+    match pending.poll_once()? {
+        Some(bytes) => Ok(Either::A(bytes)),
+        None => Ok(Either::B(pending)),
+    }
+}
+
+fn native_write_or_pending(
+    future: LocalBoxFuture<'static, napi::Result<Write>>,
+) -> napi::Result<Either<Write, PendingNativeWrite>> {
+    let pending = PendingNativeWrite::new(future);
+    match pending.poll_once()? {
+        Some(write) => Ok(Either::A(write)),
+        None => Ok(Either::B(pending)),
+    }
+}
+
+fn napi_error(error: impl std::fmt::Display) -> napi::Error {
+    napi::Error::from_reason(error.to_string())
 }
 
 #[napi(js_name = "Transport")]
 pub struct Transport {
     inner: NapiTransportInner,
     queues: WireQueues,
+    auxiliary_pump: jazz::db::PeerIoPump,
+    protocol_version: u16,
+    features: u64,
 }
 
 #[napi(js_name = "Subscription")]
 pub struct Subscription {
     inner: Option<NapiSubscription>,
-    /// Layout definitions are installed atomically with the first event that
-    /// references them.  Later terminal operations only carry this stable id.
-    published_terminal_layouts: HashSet<String>,
 }
 
 #[napi(object)]
@@ -217,12 +523,8 @@ pub struct SubscriptionDeltaEvent {
     pub event_type: String,
     pub reset: bool,
     pub delta: Uint8Array,
-    #[napi(js_name = "orderedSuffixStart")]
-    pub ordered_suffix_start: Option<u32>,
     #[napi(js_name = "terminalOperations")]
     pub terminal_operations: Vec<SubscriptionTerminalOperation>,
-    #[napi(js_name = "terminalLayouts")]
-    pub terminal_layouts: Vec<SubscriptionTerminalLayout>,
     pub settled: bool,
     #[napi(ts_type = "'None' | 'Local' | 'Edge' | 'Global'")]
     pub tier: String,
@@ -269,38 +571,10 @@ pub struct SubscriptionServerFailureReason {
 
 #[napi(object)]
 pub struct SubscriptionTerminalOperation {
-    #[napi(js_name = "rootLayoutId")]
-    pub root_layout_id: String,
     #[napi(js_name = "root_key")]
     pub root_key: Vec<u32>,
     pub path: Vec<SubscriptionTerminalPathSegment>,
     pub edit: SubscriptionTerminalEdit,
-}
-
-/// Immutable producer-owned root record contract.  The descriptor and public
-/// slots are published once per NAPI subscription, before an operation may
-/// reference `id`; TypeScript never has to infer a CurrentRow/layout family.
-#[napi(object)]
-pub struct SubscriptionTerminalLayout {
-    pub id: String,
-    #[napi(js_name = "rootDescriptor")]
-    pub root_descriptor: Vec<u32>,
-    #[napi(js_name = "rootKeySlot")]
-    pub root_key_slot: f64,
-    #[napi(js_name = "rootKeyFieldName")]
-    pub root_key_field_name: String,
-    #[napi(js_name = "publicFields")]
-    pub public_fields: Vec<SubscriptionTerminalPublicField>,
-    pub carrier: String,
-}
-
-#[napi(object)]
-pub struct SubscriptionTerminalPublicField {
-    pub name: String,
-    #[napi(js_name = "descriptorFieldName")]
-    pub descriptor_field_name: String,
-    pub slot: f64,
-    pub carrier: String,
 }
 
 #[napi(object)]
@@ -398,9 +672,43 @@ enum NapiTransportInner {
     Closed,
 }
 
+impl NapiTransportInner {
+    fn auxiliary_pump(&self) -> jazz::db::PeerIoPump {
+        match self {
+            Self::Memory { connection, .. } => core_block_on(async {
+                connection
+                    .as_ref()
+                    .expect("new transport has a connection")
+                    .lock()
+                    .await
+                    .io_pump()
+            }),
+            Self::Persistent { connection, .. } => core_block_on(async {
+                connection
+                    .as_ref()
+                    .expect("new transport has a connection")
+                    .lock()
+                    .await
+                    .io_pump()
+            }),
+            Self::Closed => panic!("closed transport has no auxiliary pump"),
+        }
+    }
+}
+
 enum NapiSubscription {
-    Memory(SubscriptionStream),
-    Persistent(SubscriptionStream),
+    Memory {
+        db: Rc<CoreDb<CoreMemoryStorage>>,
+        stream: SubscriptionStream,
+        pending_events: VecDeque<CoreSubscriptionEvent>,
+        pending_batch: Option<PendingNativeSubscriptionBatch>,
+    },
+    Persistent {
+        db: Rc<CoreDb<CoreRocksDbStorage>>,
+        stream: SubscriptionStream,
+        pending_events: VecDeque<CoreSubscriptionEvent>,
+        pending_batch: Option<PendingNativeSubscriptionBatch>,
+    },
 }
 
 #[napi(js_name = "Tx")]
@@ -409,6 +717,9 @@ pub struct Tx {
     kind: NapiTxKind,
     open_tx: Option<CoreOpenBatchId>,
     owns_lifetime: bool,
+    /// A backend-attributed batch is deliberately root-only until branch
+    /// attribution has a separately designed representation.
+    attributed: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -449,15 +760,6 @@ macro_rules! with_napi_exclusive_tx {
         }
         .map_err(|error: jazz::db::Error| napi::Error::from_reason(error.to_string()))
     }};
-}
-
-macro_rules! core_block_on_optional {
-    ($option:expr, |$value:ident| $some:expr, $none:expr) => {
-        match $option {
-            Some($value) => core_block_on($some),
-            None => core_block_on($none),
-        }
-    };
 }
 
 impl Write {
@@ -505,6 +807,11 @@ impl Write {
         Uint8Array::new(self.payload.clone())
     }
 
+    #[napi(getter, js_name = "rowId")]
+    pub fn row_id(&self) -> Uint8Array {
+        Uint8Array::new(self.row_id.to_bytes())
+    }
+
     #[napi(js_name = "writeState")]
     pub fn write_state(&self) -> napi::Result<serde_json::Value> {
         let Some(write) = &self.inner else {
@@ -531,6 +838,37 @@ impl Write {
 
 #[napi]
 impl Transport {
+    #[napi(js_name = "routeAuxiliaryWireFrame")]
+    pub fn route_auxiliary_wire_frame(
+        &self,
+        frame: Uint8Array,
+    ) -> napi::Result<Option<Uint8Array>> {
+        core_block_on(
+            self.auxiliary_pump
+                .route_incoming_wire_frame(frame.to_vec(), self.features),
+        )
+        .map(|frame| frame.map(Uint8Array::new))
+        .map_err(napi::Error::from_reason)
+    }
+
+    #[napi(js_name = "recvAuxiliaryWireFrames")]
+    pub fn recv_auxiliary_wire_frames(&self) -> napi::Result<Vec<Uint8Array>> {
+        let mut frames = Vec::new();
+        while let Some(frame) = self
+            .auxiliary_pump
+            .take_outbound_wire_frame(self.protocol_version, self.features, None)
+            .map_err(napi::Error::from_reason)?
+        {
+            frames.push(Uint8Array::new(frame));
+        }
+        Ok(frames)
+    }
+
+    #[napi(js_name = "auxiliaryOutboundReady")]
+    pub fn auxiliary_outbound_ready(&self) -> bool {
+        self.auxiliary_pump.outbound_is_ready()
+    }
+
     #[napi(js_name = "sendWireFrame")]
     pub fn send_wire_frame(&self, frame: Uint8Array) {
         self.queues.inbound.borrow_mut().push_back(frame.to_vec());
@@ -565,6 +903,7 @@ impl Transport {
 
     #[napi]
     pub fn close(&mut self) -> bool {
+        self.auxiliary_pump.disconnect();
         match std::mem::replace(&mut self.inner, NapiTransportInner::Closed) {
             NapiTransportInner::Memory { db, connection } => {
                 let Some(connection) = connection else {
@@ -586,30 +925,49 @@ impl Transport {
 #[napi]
 impl Subscription {
     #[napi(js_name = "readAll")]
-    pub fn read_all(&mut self) -> napi::Result<Vec<SubscriptionEvent>> {
+    pub fn read_all(
+        &mut self,
+    ) -> napi::Result<Either<Vec<SubscriptionEvent>, PendingNativeSubscriptionBatch>> {
         let subscription = self
             .inner
             .as_mut()
             .ok_or_else(|| napi::Error::from_reason("subscription is closed"))?;
-        let mut events = Vec::new();
-        loop {
-            let event = match subscription {
-                NapiSubscription::Memory(stream) => stream.try_next_event(),
-                NapiSubscription::Persistent(stream) => stream.try_next_event(),
-            };
-            let Some(event) = event else {
-                break;
-            };
-            events.push(core_subscription_event_to_napi(
-                &event,
-                &mut self.published_terminal_layouts,
-            )?);
+        let result = match subscription {
+            NapiSubscription::Memory {
+                db,
+                stream,
+                pending_events,
+                pending_batch,
+            } => read_or_start_subscription_batch(db, stream, pending_events, pending_batch),
+            NapiSubscription::Persistent {
+                db,
+                stream,
+                pending_events,
+                pending_batch,
+            } => read_or_start_subscription_batch(db, stream, pending_events, pending_batch),
+        };
+        match result {
+            Ok(Some(events)) => Ok(Either::A(events)),
+            Ok(None) => match subscription {
+                NapiSubscription::Memory { pending_batch, .. }
+                | NapiSubscription::Persistent { pending_batch, .. } => Ok(Either::B(
+                    pending_batch
+                        .as_ref()
+                        .expect("suspended batch is retained")
+                        .clone(),
+                )),
+            },
+            Err(error) => {
+                self.inner.take();
+                Err(error)
+            }
         }
-        Ok(events)
     }
 
     #[napi]
-    pub fn drain(&mut self) -> napi::Result<Vec<SubscriptionEvent>> {
+    pub fn drain(
+        &mut self,
+    ) -> napi::Result<Either<Vec<SubscriptionEvent>, PendingNativeSubscriptionBatch>> {
         self.read_all()
     }
 
@@ -619,203 +977,238 @@ impl Subscription {
     }
 }
 
-#[napi]
-impl Tx {
-    #[napi(js_name = "insertWithIdEncoded")]
-    pub fn insert_with_id_encoded(
-        &mut self,
-        table: String,
-        row_id: Uint8Array,
-        cells: Uint8Array,
-        updated_at_ms: Option<f64>,
-    ) -> napi::Result<()> {
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let cells = decode_core_cells(&cells)?;
-        let now_ms = updated_at_ms.map(|value| value as u64);
-        match self.kind {
-            NapiTxKind::Mergeable => match now_ms {
-                Some(now_ms) => with_napi_mergeable_tx!(self, |tx| tx
-                    .insert_with_id_at_ms(&table, row_id, cells, now_ms)),
-                None => {
-                    with_napi_mergeable_tx!(self, |tx| tx.insert_with_id(&table, row_id, cells))
-                }
-            },
-            NapiTxKind::Exclusive => {
-                with_napi_exclusive_tx!(self, |tx| tx.insert_with_id(&table, row_id, cells))
+const MAX_RETAINED_SUBSCRIPTION_BATCH_EVENTS: usize = 256;
+
+fn requeue_retryable_subscription_batch(
+    pending_events: &mut VecDeque<CoreSubscriptionEvent>,
+    events: Vec<CoreSubscriptionEvent>,
+) {
+    for event in events.into_iter().rev() {
+        pending_events.push_front(event);
+    }
+}
+
+fn read_or_start_subscription_batch<S>(
+    db: &Rc<CoreDb<S>>,
+    stream: &mut SubscriptionStream,
+    pending_events: &mut VecDeque<CoreSubscriptionEvent>,
+    pending_batch: &mut Option<PendingNativeSubscriptionBatch>,
+) -> napi::Result<Option<Vec<SubscriptionEvent>>>
+where
+    S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
+{
+    if let Some(batch) = pending_batch.as_ref() {
+        match batch.poll_once()? {
+            PendingSubscriptionBatchPoll::Complete(completion) => {
+                *pending_batch = None;
+                return Ok(Some(completion.events));
+            }
+            PendingSubscriptionBatchPoll::Pending => return Ok(None),
+            PendingSubscriptionBatchPoll::Retryable {
+                events: Some(events),
+                ..
+            } => {
+                requeue_retryable_subscription_batch(pending_events, events);
+                return Ok(None);
+            }
+            PendingSubscriptionBatchPoll::Retryable { events: None, .. } => {
+                *pending_batch = None;
             }
         }
     }
+    let mut raw_events = Vec::with_capacity(MAX_RETAINED_SUBSCRIPTION_BATCH_EVENTS);
+    while raw_events.len() < MAX_RETAINED_SUBSCRIPTION_BATCH_EVENTS {
+        let Some(event) = pending_events
+            .pop_front()
+            .or_else(|| stream.try_next_event())
+        else {
+            break;
+        };
+        raw_events.push(event);
+    }
+    if raw_events.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    let db = Rc::clone(db);
+    let batch = PendingNativeSubscriptionBatch::new(Box::pin(async move {
+        let mut raw_events = raw_events;
+        for event in &mut raw_events {
+            match db
+                .hydrate_subscription_event_for_binding_outcome(event)
+                .await
+            {
+                Ok(()) => {}
+                Err(jazz::db::BindingHydrationError::RetryableChunkUnavailable {
+                    retry_after_ms,
+                }) => {
+                    // Preserve the whole batch below rather than making a
+                    // retryable absence terminal at the NAPI boundary.
+                    return Ok(PendingSubscriptionBatchOutcome::Retryable {
+                        events: raw_events,
+                        retry_after_ms,
+                    });
+                }
+                Err(jazz::db::BindingHydrationError::Error(error)) => {
+                    return Err(napi_error(error));
+                }
+            }
+        }
+        let events = raw_events
+            .iter()
+            .map(core_subscription_event_to_napi)
+            .collect::<napi::Result<Vec<_>>>()?;
+        Ok(PendingSubscriptionBatchOutcome::Complete(
+            PendingSubscriptionBatchCompletion { events },
+        ))
+    }));
+    match batch.poll_once()? {
+        PendingSubscriptionBatchPoll::Complete(completion) => Ok(Some(completion.events)),
+        PendingSubscriptionBatchPoll::Pending
+        | PendingSubscriptionBatchPoll::Retryable { events: None } => {
+            *pending_batch = Some(batch);
+            Ok(None)
+        }
+        PendingSubscriptionBatchPoll::Retryable {
+            events: Some(events),
+        } => {
+            requeue_retryable_subscription_batch(pending_events, events);
+            *pending_batch = Some(batch);
+            Ok(None)
+        }
+    }
+}
 
-    #[napi(js_name = "insertWithIdEncodedInBranch")]
-    pub fn insert_with_id_encoded_in_branch(
+#[napi]
+impl Tx {
+    #[napi(js_name = "insertEncoded")]
+    pub fn insert_encoded_with_options(
         &mut self,
         table: String,
-        row_id: Uint8Array,
         cells: Uint8Array,
-        branch: JsonValue,
-    ) -> napi::Result<()> {
-        if !matches!(self.kind, NapiTxKind::Mergeable) {
-            return Err(napi::Error::from_reason(
-                "branch writes require a mergeable transaction",
-            ));
-        }
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        options: Option<InsertOptions>,
+    ) -> napi::Result<Uint8Array> {
+        self.reject_attributed_branch(
+            options
+                .as_ref()
+                .and_then(|options| options.branch.as_ref())
+                .is_some(),
+        )?;
         let cells = decode_core_cells(&cells)?;
-        let branch = core_branch_selector_from_json(branch)?;
-        with_napi_mergeable_tx!(self, |tx| tx
-            .insert_with_id_in_branch(&table, branch, row_id, cells))
+        let options = core_insert_options(options)?;
+        let row_id = match self.kind {
+            NapiTxKind::Mergeable => {
+                with_napi_mergeable_tx!(self, |tx| tx.insert(&table, cells, options))
+            }
+            NapiTxKind::Exclusive => {
+                with_napi_exclusive_tx!(self, |tx| tx.insert(&table, cells, options))
+            }
+        }?;
+        Ok(Uint8Array::new(row_id.to_bytes()))
     }
 
     #[napi(js_name = "updateEncoded")]
-    pub fn update_encoded(
+    pub fn update_encoded_with_options(
         &mut self,
         table: String,
         row_id: Uint8Array,
         patch: Uint8Array,
-        updated_at_ms: Option<f64>,
+        options: Option<UpdateOptions>,
     ) -> napi::Result<()> {
+        self.reject_attributed_branch(
+            options
+                .as_ref()
+                .is_some_and(|options| options.head.is_some() || options.base.is_some()),
+        )?;
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let patch = decode_core_cells(&patch)?;
-        let now_ms = updated_at_ms.map(|value| value as u64);
+        let options = core_update_options(options)?;
         match self.kind {
-            NapiTxKind::Mergeable => match now_ms {
-                Some(now_ms) => with_napi_mergeable_tx!(self, |tx| tx
-                    .update_at_ms(&table, row_id, patch, now_ms)),
-                None => with_napi_mergeable_tx!(self, |tx| tx.update(&table, row_id, patch)),
-            },
+            NapiTxKind::Mergeable => {
+                with_napi_mergeable_tx!(self, |tx| tx.update(&table, row_id, patch, options))
+            }
             NapiTxKind::Exclusive => {
-                with_napi_exclusive_tx!(self, |tx| tx.update(&table, row_id, patch))
+                with_napi_exclusive_tx!(self, |tx| tx.update(&table, row_id, patch, options))
             }
         }
-    }
-
-    #[napi(js_name = "updateEncodedInBranchView")]
-    pub fn update_encoded_in_branch_view(
-        &mut self,
-        table: String,
-        row_id: Uint8Array,
-        patch: Uint8Array,
-        head: JsonValue,
-        base: Option<JsonValue>,
-    ) -> napi::Result<()> {
-        if !matches!(self.kind, NapiTxKind::Mergeable) {
-            return Err(napi::Error::from_reason(
-                "branch writes require a mergeable transaction",
-            ));
-        }
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let patch = decode_core_cells(&patch)?;
-        let head = core_branch_selector_from_json(head)?;
-        let base = core_branch_base_from_json(base)?;
-        with_napi_mergeable_tx!(self, |tx| tx
-            .update_in_branch_view(&table, head, base, row_id, patch))
+        .map(|_| ())
     }
 
     #[napi(js_name = "upsertEncoded")]
-    pub fn upsert_encoded(
+    pub fn upsert_encoded_with_options(
         &mut self,
         table: String,
         row_id: Uint8Array,
         cells: Uint8Array,
-        updated_at_ms: Option<f64>,
+        options: Option<UpsertOptions>,
     ) -> napi::Result<()> {
+        self.reject_attributed_branch(
+            options
+                .as_ref()
+                .and_then(|options| options.branch.as_ref())
+                .is_some(),
+        )?;
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
-        let now_ms = updated_at_ms.map(|value| value as u64);
+        let options = core_upsert_options(options)?;
         match self.kind {
-            NapiTxKind::Mergeable => match now_ms {
-                Some(now_ms) => with_napi_mergeable_tx!(self, |tx| tx
-                    .update_at_ms(&table, row_id, cells, now_ms)),
-                None => with_napi_mergeable_tx!(self, |tx| tx.update(&table, row_id, cells)),
-            },
+            NapiTxKind::Mergeable => {
+                with_napi_mergeable_tx!(self, |tx| tx.upsert(&table, row_id, cells, options))
+            }
             NapiTxKind::Exclusive => {
-                with_napi_exclusive_tx!(self, |tx| tx.update(&table, row_id, cells))
+                with_napi_exclusive_tx!(self, |tx| tx.upsert(&table, row_id, cells, options))
             }
         }
     }
 
-    #[napi(js_name = "delete")]
-    pub fn delete_encoded(
+    #[napi(js_name = "deleteEncoded")]
+    pub fn delete_encoded_with_options(
         &mut self,
         table: String,
         row_id: Uint8Array,
-        updated_at_ms: Option<f64>,
+        options: Option<DeleteOptions>,
     ) -> napi::Result<()> {
+        self.reject_attributed_branch(
+            options
+                .as_ref()
+                .is_some_and(|options| options.head.is_some() || options.base.is_some()),
+        )?;
         let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let options = core_delete_options(options)?;
         match self.kind {
-            NapiTxKind::Mergeable => match updated_at_ms.map(|value| value as u64) {
-                Some(now_ms) => {
-                    with_napi_mergeable_tx!(self, |tx| tx.delete_at_ms(&table, row_id, now_ms))
-                }
-                None => with_napi_mergeable_tx!(self, |tx| tx.delete(&table, row_id)),
-            },
+            NapiTxKind::Mergeable => {
+                with_napi_mergeable_tx!(self, |tx| tx.delete(&table, row_id, options))
+            }
             NapiTxKind::Exclusive => {
-                with_napi_exclusive_tx!(self, |tx| tx.delete(&table, row_id))
+                with_napi_exclusive_tx!(self, |tx| tx.delete(&table, row_id, options))
             }
         }
-    }
-
-    #[napi(js_name = "deleteInBranchView")]
-    pub fn delete_in_branch_view(
-        &mut self,
-        table: String,
-        row_id: Uint8Array,
-        head: JsonValue,
-        base: Option<JsonValue>,
-    ) -> napi::Result<()> {
-        if !matches!(self.kind, NapiTxKind::Mergeable) {
-            return Err(napi::Error::from_reason(
-                "branch writes require a mergeable transaction",
-            ));
-        }
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let head = core_branch_selector_from_json(head)?;
-        let base = core_branch_base_from_json(base)?;
-        with_napi_mergeable_tx!(self, |tx| tx
-            .delete_in_branch_view(&table, head, base, row_id))
     }
 
     #[napi(js_name = "restoreEncoded")]
-    pub fn restore_encoded(
+    pub fn restore_encoded_with_options(
         &mut self,
         table: String,
         row_id: Uint8Array,
-        cells: Uint8Array,
-        updated_at_ms: Option<f64>,
+        cells: Option<Uint8Array>,
+        options: Option<RestoreOptions>,
     ) -> napi::Result<()> {
+        self.reject_attributed_branch(
+            options
+                .as_ref()
+                .and_then(|options| options.branch.as_ref())
+                .is_some(),
+        )?;
         let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let cells = decode_core_cells(&cells)?;
-        let now_ms = updated_at_ms.map(|value| value as u64);
+        let cells = cells.map(|cells| decode_core_cells(&cells)).transpose()?;
+        let options = core_restore_options(options)?;
         match self.kind {
-            NapiTxKind::Mergeable => match now_ms {
-                Some(now_ms) => with_napi_mergeable_tx!(self, |tx| tx
-                    .restore_at_ms(&table, row_id, cells, now_ms)),
-                None => with_napi_mergeable_tx!(self, |tx| tx.restore(&table, row_id, cells)),
-            },
+            NapiTxKind::Mergeable => {
+                with_napi_mergeable_tx!(self, |tx| tx.restore(&table, row_id, cells, options))
+            }
             NapiTxKind::Exclusive => {
-                with_napi_exclusive_tx!(self, |tx| tx.restore(&table, row_id, cells))
+                with_napi_exclusive_tx!(self, |tx| tx.restore(&table, row_id, cells, options))
             }
         }
-    }
-
-    #[napi(js_name = "restoreEncodedInBranch")]
-    pub fn restore_encoded_in_branch(
-        &mut self,
-        table: String,
-        row_id: Uint8Array,
-        cells: Uint8Array,
-        branch: JsonValue,
-    ) -> napi::Result<()> {
-        if !matches!(self.kind, NapiTxKind::Mergeable) {
-            return Err(napi::Error::from_reason(
-                "branch writes require a mergeable transaction",
-            ));
-        }
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let cells = decode_core_cells(&cells)?;
-        let branch = core_branch_selector_from_json(branch)?;
-        with_napi_mergeable_tx!(self, |tx| tx
-            .restore_in_branch(&table, branch, row_id, cells))
     }
 
     #[napi]
@@ -849,6 +1242,15 @@ impl Tx {
 }
 
 impl Tx {
+    fn reject_attributed_branch(&self, requests_branch: bool) -> napi::Result<()> {
+        if self.attributed && requests_branch {
+            return Err(napi::Error::from_reason(
+                "backend-attributed transactions do not support branch writes",
+            ));
+        }
+        Ok(())
+    }
+
     fn open_tx(&self) -> napi::Result<CoreOpenBatchId> {
         self.open_tx
             .ok_or_else(|| napi::Error::from_reason("transaction is already closed"))
@@ -879,20 +1281,684 @@ impl Drop for Tx {
 pub struct NapiDb {
     inner: NapiDbInner,
     owns_runtime: bool,
+    // Only explicit backend opens mint this in-process capability. It is
+    // independent of the SYSTEM author value.
+    trusted_backend: bool,
+    /// Owner-wide marker carried into short-lived attached Tx handles so they
+    /// can reject branch operations before staging any mutation.
+    attributed_mergeable_batches: Rc<RefCell<HashSet<CoreOpenBatchId>>>,
+}
+
+/// Native bounded-memory sink used by the TypeScript async streaming-mutation
+/// adapter. Each push incrementally prepares and stages bounded Groove nodes,
+/// using the same ingress policy and resumable construction as WASM.
+#[napi(js_name = "StreamingMutation")]
+pub struct StreamingMutation {
+    db: NapiDbInner,
+    table: String,
+    row_id: CoreRowUuid,
+    cells: Option<CoreRowCells>,
+    column: String,
+    mutation: CoreStreamingMutationKind,
+    identity: Option<CoreAuthorSubject>,
+    attribution: Option<CoreAuthorSubject>,
+    updated_at_ms: Option<u64>,
+    head: Option<CoreBranchSelector>,
+    base: Option<CoreBranchViewBase>,
+    upload: Option<CoreStreamingValueUpload>,
+}
+
+#[napi]
+impl StreamingMutation {
+    #[napi]
+    pub fn push(&mut self, chunk: Uint8Array) -> napi::Result<()> {
+        let upload = self
+            .upload
+            .as_mut()
+            .ok_or_else(|| napi::Error::from_reason("streaming insert is closed"))?;
+        let db = self.db.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let result = match db {
+            NapiDbInnerStorage::Memory(db) => {
+                core_block_on(db.push_streaming_value_upload(upload, chunk.as_ref()))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                core_block_on(db.push_streaming_value_upload(upload, chunk.as_ref()))
+            }
+        };
+        result.map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    #[napi]
+    pub fn finish(&mut self) -> napi::Result<Write> {
+        let upload = self
+            .upload
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("streaming insert is closed"))?;
+        let cells = self
+            .cells
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("streaming insert is closed"))?;
+        let db = self.db.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                core_block_on(db.finish_streaming_value_upload(
+                    upload,
+                    self.mutation,
+                    &self.table,
+                    self.row_id,
+                    cells,
+                    &self.column,
+                    self.identity,
+                    self.updated_at_ms,
+                    self.head.clone(),
+                    self.base.clone(),
+                    self.attribution,
+                ))
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                core_block_on(db.finish_streaming_value_upload(
+                    upload,
+                    self.mutation,
+                    &self.table,
+                    self.row_id,
+                    cells,
+                    &self.column,
+                    self.identity,
+                    self.updated_at_ms,
+                    self.head.clone(),
+                    self.base.clone(),
+                    self.attribution,
+                ))
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi]
+    pub fn abort(&mut self) -> napi::Result<bool> {
+        self.cells.take();
+        let Some(upload) = self.upload.take() else {
+            return Ok(false);
+        };
+        let db = self.db.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => {
+                core_block_on(db.abort_streaming_value_upload(upload))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                core_block_on(db.abort_streaming_value_upload(upload))
+            }
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        Ok(true)
+    }
 }
 
 #[napi]
 impl NapiDb {
+    fn require_trusted_backend(&self) -> napi::Result<()> {
+        self.trusted_backend.then_some(()).ok_or_else(|| {
+            napi::Error::from_reason("backend attribution requires an explicit backend runtime")
+        })
+    }
+    #[napi(js_name = "insertEncoded")]
+    pub fn insert_encoded_with_options(
+        &self,
+        table: String,
+        cells: Uint8Array,
+        options: Option<InsertOptions>,
+    ) -> napi::Result<Write> {
+        let cells = decode_core_cells(&cells)?;
+        let options = core_insert_options(options)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                core_block_on(db.insert(&table, cells, options))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                core_block_on(db.insert(&table, cells, options))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi(js_name = "updateEncoded")]
+    pub fn update_encoded_with_options(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        patch: Uint8Array,
+        options: Option<UpdateOptions>,
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let patch = decode_core_cells(&patch)?;
+        let options = core_update_options(options)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                core_block_on(db.update(&table, row_id, patch, options))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                core_block_on(db.update(&table, row_id, patch, options))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
+    /// Binding-only entrypoint for typed partial-value updates. The public
+    /// TypeScript API validates column-kind-specific descriptors before they
+    /// reach this encoded boundary.
+    #[napi(js_name = "updateLargeValuesEncoded")]
+    pub fn update_large_values_encoded(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        patch: Uint8Array,
+        mutations: JsonValue,
+        updated_at_ms: Option<f64>,
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let patch = decode_core_cells(&patch)?;
+        let mutations: Vec<CoreLargeValueUpdate> =
+            serde_json::from_value(mutations).map_err(|error| {
+                napi::Error::from_reason(format!(
+                    "invalid partial-value update descriptor: {error}"
+                ))
+            })?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        // This binding-only ABI must retain the ordinary write-option
+        // timestamp contract. A direct `as u64` would turn NaN, fractions,
+        // negatives, and unsafe JavaScript numbers into unrelated HLC input.
+        let updated_at_ms = updated_at_ms
+            .map(|value| checked_u64(value, "updatedAtMs"))
+            .transpose()?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                match updated_at_ms {
+                    Some(now_ms) => core_block_on(db.update_with_large_value_mutations_at_ms(
+                        &table, row_id, patch, mutations, now_ms,
+                    )),
+                    None => core_block_on(
+                        db.update_with_large_value_mutations(&table, row_id, patch, mutations),
+                    ),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                match updated_at_ms {
+                    Some(now_ms) => core_block_on(db.update_with_large_value_mutations_at_ms(
+                        &table, row_id, patch, mutations, now_ms,
+                    )),
+                    None => core_block_on(
+                        db.update_with_large_value_mutations(&table, row_id, patch, mutations),
+                    ),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi(js_name = "upsertEncoded")]
+    pub fn upsert_encoded_with_options(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+        options: Option<UpsertOptions>,
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
+        let options = core_upsert_options(options)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                core_block_on(db.upsert(&table, row_id, cells, options))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                core_block_on(db.upsert(&table, row_id, cells, options))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi(js_name = "deleteEncoded")]
+    pub fn delete_encoded_with_options(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        options: Option<DeleteOptions>,
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let options = core_delete_options(options)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                core_block_on(db.delete(&table, row_id, options))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                core_block_on(db.delete(&table, row_id, options))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi(js_name = "restoreEncoded")]
+    pub fn restore_encoded_with_options(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Option<Uint8Array>,
+        options: Option<RestoreOptions>,
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let cells = cells.map(|cells| decode_core_cells(&cells)).transpose()?;
+        let options = core_restore_options(options)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                core_block_on(db.restore(&table, row_id, cells, options))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                core_block_on(db.restore(&table, row_id, cells, options))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
+    /// Backend-only root mutation entrypoints. They deliberately do not take
+    /// branch selectors: attributed branch writes fail closed until #1881's
+    /// split transaction/branch representation is designed.
+    #[napi(js_name = "insertWithIdEncodedAttributed")]
+    pub fn insert_with_id_encoded_attributed(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+        author: Uint8Array,
+    ) -> napi::Result<Write> {
+        self.require_trusted_backend()?;
+        let row = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
+        let author = core_author_id_from_bytes(&author)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                core_block_on(db.insert_with_id_attributed(author, &table, row, cells))
+                    .map_err(|e| napi::Error::from_reason(e.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                core_block_on(db.insert_with_id_attributed(author, &table, row, cells))
+                    .map_err(|e| napi::Error::from_reason(e.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi(js_name = "updateEncodedAttributed")]
+    pub fn update_encoded_attributed(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        patch: Uint8Array,
+        author: Uint8Array,
+    ) -> napi::Result<Write> {
+        self.require_trusted_backend()?;
+        let row = core_row_uuid_from_bytes(&row_id)?;
+        let patch = decode_core_cells(&patch)?;
+        let author = core_author_id_from_bytes(&author)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                core_block_on(db.update_attributed(author, &table, row, patch))
+                    .map_err(|e| napi::Error::from_reason(e.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                core_block_on(db.update_attributed(author, &table, row, patch))
+                    .map_err(|e| napi::Error::from_reason(e.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi(js_name = "upsertEncodedAttributed")]
+    pub fn upsert_encoded_attributed(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+        author: Uint8Array,
+    ) -> napi::Result<Write> {
+        self.require_trusted_backend()?;
+        let row = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
+        let author = core_author_id_from_bytes(&author)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                core_block_on(db.upsert_attributed(author, &table, row, cells))
+                    .map_err(|e| napi::Error::from_reason(e.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                core_block_on(db.upsert_attributed(author, &table, row, cells))
+                    .map_err(|e| napi::Error::from_reason(e.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi(js_name = "deleteAttributed")]
+    pub fn delete_attributed(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        author: Uint8Array,
+    ) -> napi::Result<Write> {
+        self.require_trusted_backend()?;
+        let row = core_row_uuid_from_bytes(&row_id)?;
+        let author = core_author_id_from_bytes(&author)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                core_block_on(db.delete_attributed(author, &table, row))
+                    .map_err(|e| napi::Error::from_reason(e.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                core_block_on(db.delete_attributed(author, &table, row))
+                    .map_err(|e| napi::Error::from_reason(e.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi(js_name = "restoreEncodedAttributed")]
+    pub fn restore_encoded_attributed(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+        author: Uint8Array,
+    ) -> napi::Result<Write> {
+        self.require_trusted_backend()?;
+        let row = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
+        let author = core_author_id_from_bytes(&author)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                core_block_on(db.restore_attributed(author, &table, row, cells))
+                    .map_err(|e| napi::Error::from_reason(e.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                core_block_on(db.restore_attributed(author, &table, row, cells))
+                    .map_err(|e| napi::Error::from_reason(e.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi(js_name = "beginStreamingMutationEncoded")]
+    #[allow(clippy::too_many_arguments)] // Flat arguments are the generated NAPI ABI.
+    pub fn begin_streaming_mutation_encoded(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+        column: String,
+        mutation: Option<String>,
+        author: Option<Uint8Array>,
+        updated_at_ms: Option<f64>,
+        head: Option<JsonValue>,
+        base: Option<JsonValue>,
+    ) -> napi::Result<StreamingMutation> {
+        if self.inner.borrow().is_none() {
+            return Err(napi::Error::from_reason("database is closed"));
+        }
+        let mutation = match mutation.as_deref().unwrap_or("insert") {
+            "insert" => CoreStreamingMutationKind::Insert,
+            "update" => CoreStreamingMutationKind::Update,
+            "upsert" => CoreStreamingMutationKind::Upsert,
+            _ => {
+                return Err(napi::Error::from_reason(
+                    "streaming mutation must be insert, update, or upsert",
+                ));
+            }
+        };
+        let identity = author
+            .as_ref()
+            .map(|author| core_author_id_from_bytes(author))
+            .transpose()?;
+        let head = head.map(core_branch_selector_from_json).transpose()?;
+        let base = core_branch_base_from_json(base)?;
+        if base.is_some() && head.is_none() {
+            return Err(napi::Error::from_reason(
+                "a streaming mutation branch base requires a branch head",
+            ));
+        }
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
+        let upload = {
+            let db = self.inner.borrow();
+            let db = db
+                .as_ref()
+                .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+            match db {
+                NapiDbInnerStorage::Memory(db) => {
+                    db.begin_streaming_value_upload(&table, &cells, &column)
+                }
+                NapiDbInnerStorage::Persistent(db) => {
+                    db.begin_streaming_value_upload(&table, &cells, &column)
+                }
+            }
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?
+        };
+        Ok(StreamingMutation {
+            db: Rc::clone(&self.inner),
+            table,
+            row_id,
+            cells: Some(cells),
+            column,
+            mutation,
+            identity,
+            attribution: None,
+            updated_at_ms: updated_at_ms
+                .map(|value| checked_u64(value, "updatedAtMs"))
+                .transpose()?,
+            head,
+            base,
+            upload: Some(upload),
+        })
+    }
+
+    /// Trusted-backend streaming counterpart: SYSTEM remains the admission
+    /// identity and `attribution` is retained only for final row provenance.
+    /// Branch streaming is intentionally unsupported until its split state is
+    /// designed, so it fails closed rather than silently losing attribution.
+    #[napi(js_name = "beginStreamingMutationAttributedEncoded")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_streaming_mutation_attributed_encoded(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+        column: String,
+        mutation: Option<String>,
+        author: Option<Uint8Array>,
+        attribution: Uint8Array,
+        updated_at_ms: Option<f64>,
+        head: Option<JsonValue>,
+        base: Option<JsonValue>,
+    ) -> napi::Result<StreamingMutation> {
+        self.require_trusted_backend()?;
+        if author.is_some() {
+            return Err(napi::Error::from_reason(
+                "backend-attributed streaming mutations cannot override backend admission identity",
+            ));
+        }
+        if head.is_some() || base.is_some() {
+            return Err(napi::Error::from_reason(
+                "backend-attributed streaming mutations do not support branch writes",
+            ));
+        }
+        let attribution = core_author_id_from_bytes(&attribution)?;
+        let mut upload = self.begin_streaming_mutation_encoded(
+            table,
+            row_id,
+            cells,
+            column,
+            mutation,
+            None,
+            updated_at_ms,
+            None,
+            None,
+        )?;
+        upload.attribution = Some(attribution);
+        Ok(upload)
+    }
+
     #[napi(factory, js_name = "openMemory")]
     pub fn open_memory(schema: Uint8Array, config: Uint8Array) -> napi::Result<Self> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;
+        let identity = core_open_identity(&config, None)?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let db = open_core_db(schema, CoreMemoryStorage::new(&refs), config)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        let db = open_core_db(
+            schema,
+            CoreMemoryStorage::new(&refs),
+            config,
+            identity,
+            false,
+        )?;
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::new(db))))),
             owns_runtime: true,
+            trusted_backend: false,
+            attributed_mergeable_batches: Rc::default(),
+        })
+    }
+
+    /// Open a deliberate backend runtime. Unlike the public raw-open entrypoint,
+    /// this explicit ABI derives the canonical system author.
+    #[napi(factory, js_name = "openMemoryAsBackend")]
+    pub fn open_memory_as_backend(schema: Uint8Array, config: Uint8Array) -> napi::Result<Self> {
+        let (schema, config) = decode_core_open_args(&schema, &config)?;
+        let identity = core_open_backend_identity(&config)?;
+        let refs = schema.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let db = open_core_db(
+            schema,
+            CoreMemoryStorage::new(&refs),
+            config,
+            identity,
+            true,
+        )?;
+        Ok(Self {
+            inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::new(db))))),
+            owns_runtime: true,
+            trusted_backend: true,
+            attributed_mergeable_batches: Rc::default(),
+        })
+    }
+
+    /// Open with a verified Jazz self-signed client identity. This is a
+    /// separate ABI entrypoint deliberately: a new client cannot accidentally
+    /// hand proof bytes to an old constructor, and an old client cannot enter
+    /// the proof-bearing path.
+    #[napi(factory, js_name = "openMemoryWithSelfSignedProof")]
+    pub fn open_memory_with_self_signed_proof(
+        schema: Uint8Array,
+        config: Uint8Array,
+        token: String,
+        app_id: String,
+        claimed_author: String,
+    ) -> napi::Result<Self> {
+        let (schema, config) = decode_core_open_args(&schema, &config)?;
+        let proof = CoreSelfSignedClientProof {
+            token,
+            app_id,
+            claimed_author,
+        };
+        let identity = core_open_identity(&config, Some(&proof))?;
+        let refs = schema.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let db = open_core_db(
+            schema,
+            CoreMemoryStorage::new(&refs),
+            config,
+            identity,
+            false,
+        )?;
+        Ok(Self {
+            inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::new(db))))),
+            owns_runtime: true,
+            trusted_backend: false,
+            attributed_mergeable_batches: Rc::default(),
         })
     }
 
@@ -903,17 +1969,75 @@ impl NapiDb {
         config: Uint8Array,
     ) -> napi::Result<Self> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;
+        let identity = core_open_identity(&config, None)?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = CoreRocksDbStorage::open(data_path, &refs)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        let db = open_core_db(schema, storage, config)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        let db = open_core_db(schema, storage, config, identity, false)?;
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Persistent(Rc::new(
                 db,
             ))))),
             owns_runtime: true,
+            trusted_backend: false,
+            attributed_mergeable_batches: Rc::default(),
+        })
+    }
+
+    /// Open a deliberate persistent backend runtime. This is intentionally a
+    /// distinct ABI from the public raw-open entrypoint.
+    #[napi(factory, js_name = "openPersistentAsBackend")]
+    pub fn open_persistent_as_backend(
+        data_path: String,
+        schema: Uint8Array,
+        config: Uint8Array,
+    ) -> napi::Result<Self> {
+        let (schema, config) = decode_core_open_args(&schema, &config)?;
+        let identity = core_open_backend_identity(&config)?;
+        let refs = schema.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = CoreRocksDbStorage::open(data_path, &refs)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        let db = open_core_db(schema, storage, config, identity, true)?;
+        Ok(Self {
+            inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Persistent(Rc::new(
+                db,
+            ))))),
+            owns_runtime: true,
+            trusted_backend: true,
+            attributed_mergeable_batches: Rc::default(),
+        })
+    }
+
+    #[napi(factory, js_name = "openPersistentWithSelfSignedProof")]
+    pub fn open_persistent_with_self_signed_proof(
+        data_path: String,
+        schema: Uint8Array,
+        config: Uint8Array,
+        token: String,
+        app_id: String,
+        claimed_author: String,
+    ) -> napi::Result<Self> {
+        let (schema, config) = decode_core_open_args(&schema, &config)?;
+        let proof = CoreSelfSignedClientProof {
+            token,
+            app_id,
+            claimed_author,
+        };
+        let identity = core_open_identity(&config, Some(&proof))?;
+        let refs = schema.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = CoreRocksDbStorage::open(data_path, &refs)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        let db = open_core_db(schema, storage, config, identity, false)?;
+        Ok(Self {
+            inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Persistent(Rc::new(
+                db,
+            ))))),
+            owns_runtime: true,
+            trusted_backend: false,
+            attributed_mergeable_batches: Rc::default(),
         })
     }
 
@@ -938,6 +2062,8 @@ impl NapiDb {
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(view))),
             owns_runtime: false,
+            trusted_backend: self.trusted_backend,
+            attributed_mergeable_batches: Rc::clone(&self.attributed_mergeable_batches),
         })
     }
 
@@ -960,6 +2086,10 @@ impl NapiDb {
             kind: NapiTxKind::Mergeable,
             open_tx: Some(open_batch_id),
             owns_lifetime: false,
+            attributed: self
+                .attributed_mergeable_batches
+                .borrow()
+                .contains(&open_batch_id),
         })
     }
 
@@ -981,6 +2111,7 @@ impl NapiDb {
             kind: NapiTxKind::Exclusive,
             open_tx: Some(open_batch_id),
             owns_lifetime: false,
+            attributed: false,
         })
     }
 
@@ -992,6 +2123,16 @@ impl NapiDb {
         kind: String,
         author: Option<Uint8Array>,
     ) -> napi::Result<()> {
+        self.begin_transaction_inner(open_batch_id, kind, author, None)
+    }
+
+    fn begin_transaction_inner(
+        &self,
+        open_batch_id: String,
+        kind: String,
+        author: Option<Uint8Array>,
+        attribution: Option<Uint8Array>,
+    ) -> napi::Result<()> {
         let open_batch_id = open_batch_id
             .parse::<CoreOpenBatchId>()
             .map_err(napi::Error::from_reason)?;
@@ -999,6 +2140,23 @@ impl NapiDb {
             .as_deref()
             .map(core_author_id_from_bytes)
             .transpose()?;
+        let attribution = attribution
+            .as_deref()
+            .map(core_author_id_from_bytes)
+            .transpose()?;
+        if attribution.is_some() {
+            self.require_trusted_backend()?;
+            if kind != "mergeable" {
+                return Err(napi::Error::from_reason(
+                    "backend-attributed transactions currently require mergeable kind",
+                ));
+            }
+            if author.is_some() {
+                return Err(napi::Error::from_reason(
+                    "backend-attributed transactions cannot override backend admission identity",
+                ));
+            }
+        }
         if kind != "mergeable" && kind != "exclusive" {
             return Err(napi::Error::from_reason(unknown_transaction_kind_message(
                 &kind,
@@ -1012,12 +2170,18 @@ impl NapiDb {
             ($db:expr) => {
                 core_block_on(async {
                     if kind == "mergeable" {
-                        match author {
-                            Some(author) => {
-                                $db.begin_mergeable_for_identity(open_batch_id, author)
+                        match attribution {
+                            Some(attribution) => {
+                                $db.begin_mergeable_attributed(open_batch_id, attribution)
                                     .await
                             }
-                            None => $db.begin_mergeable(open_batch_id).await,
+                            None => match author {
+                                Some(author) => {
+                                    $db.begin_mergeable_for_identity(open_batch_id, author)
+                                        .await
+                                }
+                                None => $db.begin_mergeable(open_batch_id).await,
+                            },
                         }
                     } else {
                         match author {
@@ -1031,11 +2195,34 @@ impl NapiDb {
                 })
             };
         }
-        match db {
+        let result = match db {
             NapiDbInnerStorage::Memory(db) => begin!(db),
             NapiDbInnerStorage::Persistent(db) => begin!(db),
+        };
+        result.map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        if attribution.is_some() {
+            self.attributed_mergeable_batches
+                .borrow_mut()
+                .insert(open_batch_id);
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))
+        Ok(())
+    }
+
+    /// Begin the only supported attributed transaction shape. Keeping this a
+    /// distinct native ABI makes an older binding fail closed rather than
+    /// silently treating provenance as ordinary SYSTEM authorship.
+    #[napi(js_name = "beginTransactionAttributed")]
+    pub fn begin_transaction_attributed(
+        &self,
+        open_batch_id: String,
+        attribution: Uint8Array,
+    ) -> napi::Result<()> {
+        self.begin_transaction_inner(
+            open_batch_id,
+            "mergeable".to_owned(),
+            None,
+            Some(attribution),
+        )
     }
 
     /// Commit an owner-wide transaction by id and optional kind.
@@ -1052,7 +2239,7 @@ impl NapiDb {
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match (db, kind.as_deref().unwrap_or("mergeable")) {
+        let result = match (db, kind.as_deref().unwrap_or("mergeable")) {
             (NapiDbInnerStorage::Memory(db), "mergeable") => {
                 core_commit_tx_memory(db, open_batch_id)
             }
@@ -1068,7 +2255,13 @@ impl NapiDb {
             (_, kind) => Err(napi::Error::from_reason(unknown_transaction_kind_message(
                 kind,
             ))),
+        };
+        if result.is_ok() {
+            self.attributed_mergeable_batches
+                .borrow_mut()
+                .remove(&open_batch_id);
         }
+        result
     }
 
     /// Roll back an owner-wide open transaction by id.
@@ -1081,11 +2274,17 @@ impl NapiDb {
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
+        let result = match db {
             NapiDbInnerStorage::Memory(db) => db.abandon_transaction_handle(open_batch_id),
             NapiDbInnerStorage::Persistent(db) => db.abandon_transaction_handle(open_batch_id),
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))
+        .map_err(|error| napi::Error::from_reason(error.to_string()));
+        if result.is_ok() {
+            self.attributed_mergeable_batches
+                .borrow_mut()
+                .remove(&open_batch_id);
+        }
+        result
     }
 
     #[napi(js_name = "setTickScheduler")]
@@ -1151,20 +2350,40 @@ impl NapiDb {
             ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
-    ) -> napi::Result<Uint8Array> {
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
         let opts = core_read_opts_from_json(opts)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let rows = match db {
-            NapiDbInnerStorage::Memory(db) => core_block_on(db.all(&query.inner, opts)),
-            NapiDbInnerStorage::Persistent(db) => core_block_on(db.all(&query.inner, opts)),
+        match db {
+            NapiDbInnerStorage::Memory(db) => {
+                let db = Rc::clone(db);
+                let query = query.inner.clone();
+                native_read_or_pending(Box::pin(async move {
+                    let mut rows = db.all(&query, opts).await.map_err(napi_error)?;
+                    db.hydrate_rows_for_binding(&mut rows)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                let db = Rc::clone(db);
+                let query = query.inner.clone();
+                native_read_or_pending(Box::pin(async move {
+                    let mut rows = db.all(&query, opts).await.map_err(napi_error)?;
+                    db.hydrate_rows_for_binding(&mut rows)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
+            }
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        encode_core_rows(&rows)
-            .map(Uint8Array::new)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     /// Read through an open transaction using the identity bound at begin.
@@ -1177,7 +2396,7 @@ impl NapiDb {
             ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
-    ) -> napi::Result<Uint8Array> {
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1189,28 +2408,76 @@ impl NapiDb {
         }
         let opts = core_read_opts_from_json(opts)?;
         let open_tx = tx.open_tx()?;
-        let rows = match (db, tx.kind) {
-            (NapiDbInnerStorage::Memory(db), NapiTxKind::Mergeable) => core_block_on(
-                db.mergeable_tx_ref(open_tx)
-                    .all_prepared_with_opts(&query.inner, opts),
-            ),
-            (NapiDbInnerStorage::Persistent(db), NapiTxKind::Mergeable) => core_block_on(
-                db.mergeable_tx_ref(open_tx)
-                    .all_prepared_with_opts(&query.inner, opts),
-            ),
-            (NapiDbInnerStorage::Memory(db), NapiTxKind::Exclusive) => core_block_on(
-                db.exclusive_tx_ref(open_tx)
-                    .all_prepared_with_opts(&query.inner, opts),
-            ),
-            (NapiDbInnerStorage::Persistent(db), NapiTxKind::Exclusive) => core_block_on(
-                db.exclusive_tx_ref(open_tx)
-                    .all_prepared_with_opts(&query.inner, opts),
-            ),
+        match (db, tx.kind) {
+            (NapiDbInnerStorage::Memory(db), NapiTxKind::Mergeable) => {
+                let db = Rc::clone(db);
+                let query = query.inner.clone();
+                native_read_or_pending(Box::pin(async move {
+                    let mut rows = db
+                        .mergeable_tx_ref(open_tx)
+                        .all_prepared_with_opts(&query, opts)
+                        .await
+                        .map_err(napi_error)?;
+                    db.hydrate_rows_for_binding(&mut rows)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
+            }
+            (NapiDbInnerStorage::Persistent(db), NapiTxKind::Mergeable) => {
+                let db = Rc::clone(db);
+                let query = query.inner.clone();
+                native_read_or_pending(Box::pin(async move {
+                    let mut rows = db
+                        .mergeable_tx_ref(open_tx)
+                        .all_prepared_with_opts(&query, opts)
+                        .await
+                        .map_err(napi_error)?;
+                    db.hydrate_rows_for_binding(&mut rows)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
+            }
+            (NapiDbInnerStorage::Memory(db), NapiTxKind::Exclusive) => {
+                let db = Rc::clone(db);
+                let query = query.inner.clone();
+                native_read_or_pending(Box::pin(async move {
+                    let mut rows = db
+                        .exclusive_tx_ref(open_tx)
+                        .all_prepared_with_opts(&query, opts)
+                        .await
+                        .map_err(napi_error)?;
+                    db.hydrate_rows_for_binding(&mut rows)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
+            }
+            (NapiDbInnerStorage::Persistent(db), NapiTxKind::Exclusive) => {
+                let db = Rc::clone(db);
+                let query = query.inner.clone();
+                native_read_or_pending(Box::pin(async move {
+                    let mut rows = db
+                        .exclusive_tx_ref(open_tx)
+                        .all_prepared_with_opts(&query, opts)
+                        .await
+                        .map_err(napi_error)?;
+                    db.hydrate_rows_for_binding(&mut rows)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
+            }
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        encode_core_rows(&rows)
-            .map(Uint8Array::new)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     #[napi(js_name = "setIdentityClaims")]
@@ -1243,25 +2510,47 @@ impl NapiDb {
             ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
-    ) -> napi::Result<Uint8Array> {
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
         let author = core_author_id_from_bytes(&author)?;
         let opts = core_read_opts_from_json(opts)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let rows = match db {
+        match db {
             NapiDbInnerStorage::Memory(db) => {
-                core_block_on(db.all_for_identity(&query.inner, opts, author))
+                let db = Rc::clone(db);
+                let query = query.inner.clone();
+                native_read_or_pending(Box::pin(async move {
+                    let mut rows = db
+                        .all_for_identity(&query, opts, author)
+                        .await
+                        .map_err(napi_error)?;
+                    db.hydrate_rows_for_binding(&mut rows)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
             }
             NapiDbInnerStorage::Persistent(db) => {
-                core_block_on(db.all_for_identity(&query.inner, opts, author))
+                let db = Rc::clone(db);
+                let query = query.inner.clone();
+                native_read_or_pending(Box::pin(async move {
+                    let mut rows = db
+                        .all_for_identity(&query, opts, author)
+                        .await
+                        .map_err(napi_error)?;
+                    db.hydrate_rows_for_binding(&mut rows)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
             }
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        encode_core_rows(&rows)
-            .map(Uint8Array::new)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     #[napi(js_name = "allRelationSnapshot")]
@@ -1272,24 +2561,46 @@ impl NapiDb {
             ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
-    ) -> napi::Result<Uint8Array> {
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
         let opts = core_read_opts_from_json(opts)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let snapshot = match db {
+        match db {
             NapiDbInnerStorage::Memory(db) => {
-                core_block_on(db.all_relation_snapshot(&query.inner, opts))
+                let db = Rc::clone(db);
+                let query = query.inner.clone();
+                native_read_or_pending(Box::pin(async move {
+                    let mut snapshot = db
+                        .all_relation_snapshot(&query, opts)
+                        .await
+                        .map_err(napi_error)?;
+                    db.hydrate_relation_snapshot_for_binding(&mut snapshot)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_relation_snapshot(&snapshot)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
             }
             NapiDbInnerStorage::Persistent(db) => {
-                core_block_on(db.all_relation_snapshot(&query.inner, opts))
+                let db = Rc::clone(db);
+                let query = query.inner.clone();
+                native_read_or_pending(Box::pin(async move {
+                    let mut snapshot = db
+                        .all_relation_snapshot(&query, opts)
+                        .await
+                        .map_err(napi_error)?;
+                    db.hydrate_relation_snapshot_for_binding(&mut snapshot)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_relation_snapshot(&snapshot)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
             }
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        encode_core_relation_snapshot(&snapshot)
-            .map(Uint8Array::new)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     #[napi(js_name = "allRelationSnapshotForIdentity")]
@@ -1301,25 +2612,47 @@ impl NapiDb {
             ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
-    ) -> napi::Result<Uint8Array> {
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
         let author = core_author_id_from_bytes(&author)?;
         let opts = core_read_opts_from_json(opts)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let snapshot = match db {
+        match db {
             NapiDbInnerStorage::Memory(db) => {
-                core_block_on(db.all_relation_snapshot_for_identity(&query.inner, opts, author))
+                let db = Rc::clone(db);
+                let query = query.inner.clone();
+                native_read_or_pending(Box::pin(async move {
+                    let mut snapshot = db
+                        .all_relation_snapshot_for_identity(&query, opts, author)
+                        .await
+                        .map_err(napi_error)?;
+                    db.hydrate_relation_snapshot_for_binding(&mut snapshot)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_relation_snapshot(&snapshot)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
             }
             NapiDbInnerStorage::Persistent(db) => {
-                core_block_on(db.all_relation_snapshot_for_identity(&query.inner, opts, author))
+                let db = Rc::clone(db);
+                let query = query.inner.clone();
+                native_read_or_pending(Box::pin(async move {
+                    let mut snapshot = db
+                        .all_relation_snapshot_for_identity(&query, opts, author)
+                        .await
+                        .map_err(napi_error)?;
+                    db.hydrate_relation_snapshot_for_binding(&mut snapshot)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_relation_snapshot(&snapshot)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
             }
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        encode_core_relation_snapshot(&snapshot)
-            .map(Uint8Array::new)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     #[napi(js_name = "allRelationQuery")]
@@ -1330,23 +2663,45 @@ impl NapiDb {
             ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
-    ) -> napi::Result<Uint8Array> {
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
         let query = core_relation_query_from_json(&query_json)?;
         let opts = core_read_opts_from_json(opts)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let snapshot = match db {
-            NapiDbInnerStorage::Memory(db) => core_block_on(db.all_relation_query(&query, opts)),
+        match db {
+            NapiDbInnerStorage::Memory(db) => {
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    let mut snapshot = db
+                        .all_relation_query(&query, opts)
+                        .await
+                        .map_err(napi_error)?;
+                    db.hydrate_relation_snapshot_for_binding(&mut snapshot)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_rows(&snapshot.rows)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
+            }
             NapiDbInnerStorage::Persistent(db) => {
-                core_block_on(db.all_relation_query(&query, opts))
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    let mut snapshot = db
+                        .all_relation_query(&query, opts)
+                        .await
+                        .map_err(napi_error)?;
+                    db.hydrate_relation_snapshot_for_binding(&mut snapshot)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_rows(&snapshot.rows)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
             }
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        encode_core_rows(&snapshot.rows)
-            .map(Uint8Array::new)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     #[napi(js_name = "allRelationQueryForIdentity")]
@@ -1358,7 +2713,7 @@ impl NapiDb {
             ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
-    ) -> napi::Result<Uint8Array> {
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
         let query = core_relation_query_from_json(&query_json)?;
         let author = core_author_id_from_bytes(&author)?;
         let opts = core_read_opts_from_json(opts)?;
@@ -1366,18 +2721,38 @@ impl NapiDb {
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let snapshot = match db {
+        match db {
             NapiDbInnerStorage::Memory(db) => {
-                core_block_on(db.all_relation_query_for_identity(&query, opts, author))
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    let mut snapshot = db
+                        .all_relation_query_for_identity(&query, opts, author)
+                        .await
+                        .map_err(napi_error)?;
+                    db.hydrate_relation_snapshot_for_binding(&mut snapshot)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_rows(&snapshot.rows)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
             }
             NapiDbInnerStorage::Persistent(db) => {
-                core_block_on(db.all_relation_query_for_identity(&query, opts, author))
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    let mut snapshot = db
+                        .all_relation_query_for_identity(&query, opts, author)
+                        .await
+                        .map_err(napi_error)?;
+                    db.hydrate_relation_snapshot_for_binding(&mut snapshot)
+                        .await
+                        .map_err(napi_error)?;
+                    encode_core_rows(&snapshot.rows)
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
             }
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        encode_core_rows(&snapshot.rows)
-            .map(Uint8Array::new)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     #[napi(js_name = "localCurrentRow")]
@@ -1484,19 +2859,20 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let inner = match db {
-            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory(
-                core_block_on(db.subscribe(&query.inner, opts))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent(
-                core_block_on(db.subscribe(&query.inner, opts))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
+            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory {
+                db: Rc::clone(db),
+                stream: core_block_on(db.subscribe(&query.inner, opts)).map_err(napi_error)?,
+                pending_events: VecDeque::new(),
+                pending_batch: None,
+            },
+            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent {
+                db: Rc::clone(db),
+                stream: core_block_on(db.subscribe(&query.inner, opts)).map_err(napi_error)?,
+                pending_events: VecDeque::new(),
+                pending_batch: None,
+            },
         };
-        Ok(Subscription {
-            inner: Some(inner),
-            published_terminal_layouts: HashSet::new(),
-        })
+        Ok(Subscription { inner: Some(inner) })
     }
 
     #[napi(js_name = "subscribeForIdentity")]
@@ -1516,19 +2892,22 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let inner = match db {
-            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory(
-                core_block_on(db.subscribe_for_identity(&query.inner, opts, author))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent(
-                core_block_on(db.subscribe_for_identity(&query.inner, opts, author))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
+            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory {
+                db: Rc::clone(db),
+                stream: core_block_on(db.subscribe_for_identity(&query.inner, opts, author))
+                    .map_err(napi_error)?,
+                pending_events: VecDeque::new(),
+                pending_batch: None,
+            },
+            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent {
+                db: Rc::clone(db),
+                stream: core_block_on(db.subscribe_for_identity(&query.inner, opts, author))
+                    .map_err(napi_error)?,
+                pending_events: VecDeque::new(),
+                pending_batch: None,
+            },
         };
-        Ok(Subscription {
-            inner: Some(inner),
-            published_terminal_layouts: HashSet::new(),
-        })
+        Ok(Subscription { inner: Some(inner) })
     }
 
     #[napi(js_name = "subscribeRelationQuery")]
@@ -1547,19 +2926,22 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let inner = match db {
-            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory(
-                core_block_on(db.subscribe_relation_query(&query, opts))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent(
-                core_block_on(db.subscribe_relation_query(&query, opts))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
+            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory {
+                db: Rc::clone(db),
+                stream: core_block_on(db.subscribe_relation_query(&query, opts))
+                    .map_err(napi_error)?,
+                pending_events: VecDeque::new(),
+                pending_batch: None,
+            },
+            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent {
+                db: Rc::clone(db),
+                stream: core_block_on(db.subscribe_relation_query(&query, opts))
+                    .map_err(napi_error)?,
+                pending_events: VecDeque::new(),
+                pending_batch: None,
+            },
         };
-        Ok(Subscription {
-            inner: Some(inner),
-            published_terminal_layouts: HashSet::new(),
-        })
+        Ok(Subscription { inner: Some(inner) })
     }
 
     #[napi(js_name = "subscribeRelationQueryForIdentity")]
@@ -1580,744 +2962,26 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let inner = match db {
-            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory(
-                core_block_on(db.subscribe_relation_query_for_identity(&query, opts, author))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent(
-                core_block_on(db.subscribe_relation_query_for_identity(&query, opts, author))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
+            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory {
+                db: Rc::clone(db),
+                stream: core_block_on(
+                    db.subscribe_relation_query_for_identity(&query, opts, author),
+                )
+                .map_err(napi_error)?,
+                pending_events: VecDeque::new(),
+                pending_batch: None,
+            },
+            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent {
+                db: Rc::clone(db),
+                stream: core_block_on(
+                    db.subscribe_relation_query_for_identity(&query, opts, author),
+                )
+                .map_err(napi_error)?,
+                pending_events: VecDeque::new(),
+                pending_batch: None,
+            },
         };
-        Ok(Subscription {
-            inner: Some(inner),
-            published_terminal_layouts: HashSet::new(),
-        })
-    }
-
-    #[napi(js_name = "insertWithIdEncoded")]
-    pub fn insert_with_id_encoded(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        cells: Uint8Array,
-        updated_at_ms: Option<f64>,
-    ) -> napi::Result<Write> {
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let cells = decode_core_cells(&cells)?;
-        let updated_at_ms = updated_at_ms.map(|value| value as u64);
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on_optional!(
-                    updated_at_ms,
-                    |now_ms| db.insert_with_id_at_ms(&table, row_id, cells, now_ms),
-                    db.insert_with_id(&table, row_id, cells)
-                )
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on_optional!(
-                    updated_at_ms,
-                    |now_ms| db.insert_with_id_at_ms(&table, row_id, cells, now_ms),
-                    db.insert_with_id(&table, row_id, cells)
-                )
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-        }
-    }
-
-    #[napi(js_name = "insertWithIdEncodedInBranch")]
-    pub fn insert_with_id_encoded_in_branch(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        cells: Uint8Array,
-        branch: JsonValue,
-    ) -> napi::Result<Write> {
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let cells = decode_core_cells(&cells)?;
-        let branch = core_branch_selector_from_json(branch)?;
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on(db.insert_with_id_in_branch(&table, branch, row_id, cells))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on(db.insert_with_id_in_branch(&table, branch, row_id, cells))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-        }
-    }
-
-    #[napi(js_name = "insertWithIdEncodedInBranchForIdentity")]
-    pub fn insert_with_id_encoded_in_branch_for_identity(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        cells: Uint8Array,
-        branch: JsonValue,
-        author: Uint8Array,
-    ) -> napi::Result<Write> {
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let cells = decode_core_cells(&cells)?;
-        let branch = core_branch_selector_from_json(branch)?;
-        let author = core_author_id_from_bytes(&author)?;
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on(
-                    db.insert_with_id_in_branch_for_identity(author, &table, branch, row_id, cells),
-                )
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on(
-                    db.insert_with_id_in_branch_for_identity(author, &table, branch, row_id, cells),
-                )
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-        }
-    }
-
-    #[napi(js_name = "insertWithIdEncodedForIdentity")]
-    pub fn insert_with_id_encoded_for_identity(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        cells: Uint8Array,
-        author: Uint8Array,
-        updated_at_ms: Option<f64>,
-    ) -> napi::Result<Write> {
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let cells = decode_core_cells(&cells)?;
-        let author = core_author_id_from_bytes(&author)?;
-        let updated_at_ms = updated_at_ms.map(|value| value as u64);
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on_optional!(
-                    updated_at_ms,
-                    |now_ms| db
-                        .insert_with_id_for_identity_at_ms(author, &table, row_id, cells, now_ms),
-                    db.insert_with_id_for_identity(author, &table, row_id, cells)
-                )
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on_optional!(
-                    updated_at_ms,
-                    |now_ms| db
-                        .insert_with_id_for_identity_at_ms(author, &table, row_id, cells, now_ms),
-                    db.insert_with_id_for_identity(author, &table, row_id, cells)
-                )
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-        }
-    }
-
-    #[napi(js_name = "updateEncoded")]
-    pub fn update_encoded(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        patch: Uint8Array,
-        updated_at_ms: Option<f64>,
-    ) -> napi::Result<Write> {
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let patch = decode_core_cells(&patch)?;
-        let updated_at_ms = updated_at_ms.map(|value| value as u64);
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on_optional!(
-                    updated_at_ms,
-                    |now_ms| db.update_at_ms(&table, row_id, patch, now_ms),
-                    db.update(&table, row_id, patch)
-                )
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on_optional!(
-                    updated_at_ms,
-                    |now_ms| db.update_at_ms(&table, row_id, patch, now_ms),
-                    db.update(&table, row_id, patch)
-                )
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-        }
-    }
-
-    #[napi(js_name = "updateEncodedInBranch")]
-    pub fn update_encoded_in_branch(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        patch: Uint8Array,
-        branch: JsonValue,
-    ) -> napi::Result<Write> {
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let patch = decode_core_cells(&patch)?;
-        let branch = core_branch_selector_from_json(branch)?;
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on(db.update_in_branch(&table, branch, row_id, patch))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on(db.update_in_branch(&table, branch, row_id, patch))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-        }
-    }
-
-    #[napi(js_name = "updateEncodedInBranchView")]
-    pub fn update_encoded_in_branch_view(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        patch: Uint8Array,
-        head: JsonValue,
-        base: Option<JsonValue>,
-    ) -> napi::Result<Write> {
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let patch = decode_core_cells(&patch)?;
-        let head = core_branch_selector_from_json(head)?;
-        let base = core_branch_base_from_json(base)?;
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on(db.update_in_branch_view(&table, head, base, row_id, patch))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on(db.update_in_branch_view(&table, head, base, row_id, patch))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-        }
-    }
-
-    #[napi(js_name = "updateEncodedInBranchViewForIdentity")]
-    pub fn update_encoded_in_branch_view_for_identity(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        patch: Uint8Array,
-        head: JsonValue,
-        base: Option<JsonValue>,
-        author: Uint8Array,
-    ) -> napi::Result<Write> {
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let patch = decode_core_cells(&patch)?;
-        let head = core_branch_selector_from_json(head)?;
-        let base = core_branch_base_from_json(base)?;
-        let author = core_author_id_from_bytes(&author)?;
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => {
-                core_write_memory(
-                    Rc::clone(db),
-                    core_block_on(db.update_in_branch_view_for_identity(
-                        author, &table, head, base, row_id, patch,
-                    ))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                )
-            }
-            NapiDbInnerStorage::Persistent(db) => {
-                core_write_persistent(
-                    Rc::clone(db),
-                    core_block_on(db.update_in_branch_view_for_identity(
-                        author, &table, head, base, row_id, patch,
-                    ))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                )
-            }
-        }
-    }
-
-    #[napi(js_name = "updateEncodedForIdentity")]
-    pub fn update_encoded_for_identity(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        patch: Uint8Array,
-        author: Uint8Array,
-        updated_at_ms: Option<f64>,
-    ) -> napi::Result<Write> {
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let patch = decode_core_cells(&patch)?;
-        let author = core_author_id_from_bytes(&author)?;
-        let updated_at_ms = updated_at_ms.map(|value| value as u64);
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on_optional!(
-                    updated_at_ms,
-                    |now_ms| db.update_for_identity_at_ms(author, &table, row_id, patch, now_ms),
-                    db.update_for_identity(author, &table, row_id, patch)
-                )
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on_optional!(
-                    updated_at_ms,
-                    |now_ms| db.update_for_identity_at_ms(author, &table, row_id, patch, now_ms),
-                    db.update_for_identity(author, &table, row_id, patch)
-                )
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-        }
-    }
-
-    #[napi(js_name = "upsertEncoded")]
-    pub fn upsert_encoded(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        cells: Uint8Array,
-        updated_at_ms: Option<f64>,
-    ) -> napi::Result<Write> {
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let cells = decode_core_cells(&cells)?;
-        let updated_at_ms = updated_at_ms.map(|value| value as u64);
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on_optional!(
-                    updated_at_ms,
-                    |now_ms| db.upsert_at_ms(&table, row_id, cells, now_ms),
-                    db.upsert(&table, row_id, cells)
-                )
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on_optional!(
-                    updated_at_ms,
-                    |now_ms| db.upsert_at_ms(&table, row_id, cells, now_ms),
-                    db.upsert(&table, row_id, cells)
-                )
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-        }
-    }
-
-    #[napi(js_name = "upsertEncodedForIdentity")]
-    pub fn upsert_encoded_for_identity(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        cells: Uint8Array,
-        author: Uint8Array,
-        updated_at_ms: Option<f64>,
-    ) -> napi::Result<Write> {
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let cells = decode_core_cells(&cells)?;
-        let author = core_author_id_from_bytes(&author)?;
-        let updated_at_ms = updated_at_ms.map(|value| value as u64);
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on_optional!(
-                    updated_at_ms,
-                    |now_ms| db.upsert_for_identity_at_ms(author, &table, row_id, cells, now_ms),
-                    db.upsert_for_identity(author, &table, row_id, cells)
-                )
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on_optional!(
-                    updated_at_ms,
-                    |now_ms| db.upsert_for_identity_at_ms(author, &table, row_id, cells, now_ms),
-                    db.upsert_for_identity(author, &table, row_id, cells)
-                )
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-        }
-    }
-
-    #[napi(js_name = "delete")]
-    pub fn delete_encoded(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        updated_at_ms: Option<f64>,
-    ) -> napi::Result<Write> {
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let updated_at_ms = updated_at_ms.map(|value| value as u64);
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on_optional!(
-                    updated_at_ms,
-                    |now_ms| db.delete_at_ms(&table, row_id, now_ms),
-                    db.delete(&table, row_id)
-                )
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on_optional!(
-                    updated_at_ms,
-                    |now_ms| db.delete_at_ms(&table, row_id, now_ms),
-                    db.delete(&table, row_id)
-                )
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-        }
-    }
-
-    #[napi(js_name = "deleteInBranch")]
-    pub fn delete_in_branch(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        branch: JsonValue,
-    ) -> napi::Result<Write> {
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let branch = core_branch_selector_from_json(branch)?;
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on(db.delete_in_branch(&table, branch, row_id))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on(db.delete_in_branch(&table, branch, row_id))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-        }
-    }
-
-    #[napi(js_name = "deleteInBranchView")]
-    pub fn delete_in_branch_view(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        head: JsonValue,
-        base: Option<JsonValue>,
-    ) -> napi::Result<Write> {
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let head = core_branch_selector_from_json(head)?;
-        let base = core_branch_base_from_json(base)?;
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on(db.delete_in_branch_view(&table, head, base, row_id))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on(db.delete_in_branch_view(&table, head, base, row_id))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-        }
-    }
-
-    #[napi(js_name = "deleteInBranchViewForIdentity")]
-    pub fn delete_in_branch_view_for_identity(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        head: JsonValue,
-        base: Option<JsonValue>,
-        author: Uint8Array,
-    ) -> napi::Result<Write> {
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let head = core_branch_selector_from_json(head)?;
-        let base = core_branch_base_from_json(base)?;
-        let author = core_author_id_from_bytes(&author)?;
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on(
-                    db.delete_in_branch_view_for_identity(author, &table, head, base, row_id),
-                )
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on(
-                    db.delete_in_branch_view_for_identity(author, &table, head, base, row_id),
-                )
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-        }
-    }
-
-    #[napi(js_name = "deleteForIdentity")]
-    pub fn delete_for_identity(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        author: Uint8Array,
-        updated_at_ms: Option<f64>,
-    ) -> napi::Result<Write> {
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let author = core_author_id_from_bytes(&author)?;
-        let updated_at_ms = updated_at_ms.map(|value| value as u64);
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on_optional!(
-                    updated_at_ms,
-                    |now_ms| db.delete_for_identity_at_ms(author, &table, row_id, now_ms),
-                    db.delete_for_identity(author, &table, row_id)
-                )
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on_optional!(
-                    updated_at_ms,
-                    |now_ms| db.delete_for_identity_at_ms(author, &table, row_id, now_ms),
-                    db.delete_for_identity(author, &table, row_id)
-                )
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-        }
-    }
-
-    #[napi(js_name = "restoreEncoded")]
-    pub fn restore_encoded(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        cells: Uint8Array,
-        updated_at_ms: Option<f64>,
-    ) -> napi::Result<Write> {
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let cells = decode_core_cells(&cells)?;
-        let updated_at_ms = updated_at_ms.map(|value| value as u64);
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on_optional!(
-                    updated_at_ms,
-                    |now_ms| db.restore_at_ms(&table, row_id, cells, now_ms),
-                    db.restore(&table, row_id, cells)
-                )
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on_optional!(
-                    updated_at_ms,
-                    |now_ms| db.restore_at_ms(&table, row_id, cells, now_ms),
-                    db.restore(&table, row_id, cells)
-                )
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-        }
-    }
-
-    #[napi(js_name = "restoreInBranch")]
-    pub fn restore_in_branch(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        branch: JsonValue,
-    ) -> napi::Result<Write> {
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let branch = core_branch_selector_from_json(branch)?;
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on(db.restore_in_branch(&table, branch, row_id))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on(db.restore_in_branch(&table, branch, row_id))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-        }
-    }
-
-    #[napi(js_name = "restoreEncodedInBranch")]
-    pub fn restore_encoded_in_branch(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        cells: Uint8Array,
-        branch: JsonValue,
-    ) -> napi::Result<Write> {
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let cells = decode_core_cells(&cells)?;
-        let branch = core_branch_selector_from_json(branch)?;
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on(db.restore_with_cells_in_branch(&table, branch, row_id, cells))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on(db.restore_with_cells_in_branch(&table, branch, row_id, cells))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-        }
-    }
-
-    #[napi(js_name = "restoreEncodedInBranchForIdentity")]
-    pub fn restore_encoded_in_branch_for_identity(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        cells: Uint8Array,
-        branch: JsonValue,
-        author: Uint8Array,
-    ) -> napi::Result<Write> {
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let cells = decode_core_cells(&cells)?;
-        let branch = core_branch_selector_from_json(branch)?;
-        let author = core_author_id_from_bytes(&author)?;
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on(db.restore_with_cells_in_branch_as_identity(
-                    author, &table, branch, row_id, cells,
-                ))
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on(db.restore_with_cells_in_branch_as_identity(
-                    author, &table, branch, row_id, cells,
-                ))
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-        }
-    }
-
-    #[napi(js_name = "restoreEncodedForIdentity")]
-    pub fn restore_encoded_for_identity(
-        &self,
-        table: String,
-        row_id: Uint8Array,
-        cells: Uint8Array,
-        author: Uint8Array,
-        updated_at_ms: Option<f64>,
-    ) -> napi::Result<Write> {
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let cells = decode_core_cells(&cells)?;
-        let author = core_author_id_from_bytes(&author)?;
-        let updated_at_ms = updated_at_ms.map(|value| value as u64);
-        let db = self.inner.borrow();
-        let db = db
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on_optional!(
-                    updated_at_ms,
-                    |now_ms| db.restore_for_identity_at_ms(author, &table, row_id, cells, now_ms),
-                    db.restore_for_identity(author, &table, row_id, cells)
-                )
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on_optional!(
-                    updated_at_ms,
-                    |now_ms| db.restore_for_identity_at_ms(author, &table, row_id, cells, now_ms),
-                    db.restore_for_identity(author, &table, row_id, cells)
-                )
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-        }
+        Ok(Subscription { inner: Some(inner) })
     }
 
     #[napi]
@@ -2326,11 +2990,290 @@ impl NapiDb {
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => core_block_on(db.tick()),
-            NapiDbInnerStorage::Persistent(db) => core_block_on(db.tick()),
+        let completed = match db {
+            NapiDbInnerStorage::Memory(db) => core_poll_once(db.tick()),
+            NapiDbInnerStorage::Persistent(db) => core_poll_once(db.tick()),
+        };
+        completed
+            .unwrap_or(Ok(()))
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    /// Configure Jazz-owned upload ingress and unpublished-tree expiry limits.
+    #[napi(js_name = "setLargeValueStagingPolicy")]
+    pub fn set_large_value_staging_policy(
+        &self,
+        incoming_bytes_per_window: f64,
+        window_ms: f64,
+        max_age_ms: Option<f64>,
+    ) -> napi::Result<()> {
+        let incoming_bytes_per_window =
+            checked_u64(incoming_bytes_per_window, "incomingBytesPerWindow")?;
+        let window_ms = checked_u64(window_ms, "windowMs")?;
+        if window_ms < 1 {
+            return Err(napi::Error::from_reason("windowMs must be at least 1"));
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))
+        let max_age_ms = max_age_ms
+            .map(|value| checked_u64(value, "maxAgeMs"))
+            .transpose()?
+            .unwrap_or(jazz::node::LargeValueStagingPolicy::default().max_age_ms);
+        let policy = jazz::node::LargeValueStagingPolicy {
+            incoming_bytes_per_window,
+            window_ms,
+            max_age_ms,
+        };
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => db.set_large_value_staging_policy(policy),
+            NapiDbInnerStorage::Persistent(db) => db.set_large_value_staging_policy(policy),
+        }
+        Ok(())
+    }
+
+    /// Run one idempotent expiry pass; native hosts normally call this on a timer.
+    #[napi(js_name = "evictExpiredStagedLargeValues")]
+    pub fn evict_expired_staged_large_values(&self) -> napi::Result<u32> {
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let evicted = match db {
+            NapiDbInnerStorage::Memory(db) => core_block_on(db.evict_expired_staged_large_values()),
+            NapiDbInnerStorage::Persistent(db) => {
+                core_block_on(db.evict_expired_staged_large_values())
+            }
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        Ok(evicted.try_into().unwrap_or(u32::MAX))
+    }
+
+    #[napi(js_name = "readValueRange")]
+    pub fn read_value_range(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        column: String,
+        start: f64,
+        end: f64,
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let range = checked_u64_range(start, end)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => {
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    db.read_value_range(&table, row_id, &column, range)
+                        .await
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    db.read_value_range(&table, row_id, &column, range)
+                        .await
+                        .map(Uint8Array::new)
+                        .map_err(napi_error)
+                }))
+            }
+        }
+    }
+
+    #[napi(js_name = "readTextUtf16Range")]
+    pub fn read_text_utf16_range(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        column: String,
+        start: f64,
+        end: f64,
+    ) -> napi::Result<Either<String, PendingNativeRead>> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let range = checked_u64_range(start, end)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let bytes = match db {
+            NapiDbInnerStorage::Memory(db) => {
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    db.read_text_utf16_range(&table, row_id, &column, range)
+                        .await
+                        .map(|value| Uint8Array::new(value.into_bytes()))
+                        .map_err(napi_error)
+                }))?
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    db.read_text_utf16_range(&table, row_id, &column, range)
+                        .await
+                        .map(|value| Uint8Array::new(value.into_bytes()))
+                        .map_err(napi_error)
+                }))?
+            }
+        };
+        Ok(match bytes {
+            Either::A(bytes) => {
+                Either::A(String::from_utf8(bytes.to_vec()).expect("Rust String is valid UTF-8"))
+            }
+            Either::B(pending) => Either::B(pending),
+        })
+    }
+
+    #[napi(js_name = "readJsonPointer")]
+    pub fn read_json_pointer(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        column: String,
+        pointer: String,
+    ) -> napi::Result<Either<Option<String>, PendingNativeRead>> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let bytes = match db {
+            NapiDbInnerStorage::Memory(db) => {
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    let value = db
+                        .read_json_pointer(&table, row_id, &column, &pointer)
+                        .await
+                        .map_err(napi_error)?;
+                    let text = value
+                        .map(|value| serde_json::to_string(&value))
+                        .transpose()
+                        .map_err(napi_error)?
+                        .unwrap_or_default();
+                    Ok(Uint8Array::new(text.into_bytes()))
+                }))?
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    let value = db
+                        .read_json_pointer(&table, row_id, &column, &pointer)
+                        .await
+                        .map_err(napi_error)?;
+                    let text = value
+                        .map(|value| serde_json::to_string(&value))
+                        .transpose()
+                        .map_err(napi_error)?
+                        .unwrap_or_default();
+                    Ok(Uint8Array::new(text.into_bytes()))
+                }))?
+            }
+        };
+        Ok(match bytes {
+            Either::A(bytes) => {
+                let text = String::from_utf8(bytes.to_vec()).expect("JSON is UTF-8");
+                Either::A((!text.is_empty()).then_some(text))
+            }
+            Either::B(pending) => Either::B(pending),
+        })
+    }
+
+    #[napi(js_name = "appendValue")]
+    pub fn append_value(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        column: String,
+        bytes: Uint8Array,
+    ) -> napi::Result<Either<Write, PendingNativeWrite>> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => {
+                let db = Rc::clone(db);
+                native_write_or_pending(Box::pin(async move {
+                    let write = db
+                        .append_value(&table, row_id, &column, bytes.to_vec())
+                        .await
+                        .map_err(napi_error)?;
+                    core_write_memory(db, write)
+                }))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                let db = Rc::clone(db);
+                native_write_or_pending(Box::pin(async move {
+                    let write = db
+                        .append_value(&table, row_id, &column, bytes.to_vec())
+                        .await
+                        .map_err(napi_error)?;
+                    core_write_persistent(db, write)
+                }))
+            }
+        }
+    }
+
+    #[napi(js_name = "spliceValue")]
+    pub fn splice_value(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        column: String,
+        offset: f64,
+        delete_length: f64,
+        insert: Uint8Array,
+    ) -> napi::Result<Either<Write, PendingNativeWrite>> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let offset = checked_u64(offset, "offset")?;
+        let delete_length = checked_u64(delete_length, "deleteLength")?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => {
+                let db = Rc::clone(db);
+                native_write_or_pending(Box::pin(async move {
+                    let write = db
+                        .splice_value(
+                            &table,
+                            row_id,
+                            &column,
+                            offset,
+                            delete_length,
+                            insert.to_vec(),
+                        )
+                        .await
+                        .map_err(napi_error)?;
+                    core_write_memory(db, write)
+                }))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                let db = Rc::clone(db);
+                native_write_or_pending(Box::pin(async move {
+                    let write = db
+                        .splice_value(
+                            &table,
+                            row_id,
+                            &column,
+                            offset,
+                            delete_length,
+                            insert.to_vec(),
+                        )
+                        .await
+                        .map_err(napi_error)?;
+                    core_write_persistent(db, write)
+                }))
+            }
+        }
     }
 
     #[napi(js_name = "setNonDurableClient")]
@@ -2376,7 +3319,16 @@ impl NapiDb {
                 connection: Some(jazz::db::block_on(db.connect_upstream(transport))),
             },
         };
-        Ok(Transport { inner, queues })
+        let auxiliary_pump = inner.auxiliary_pump();
+        Ok(Transport {
+            inner,
+            queues,
+            auxiliary_pump,
+            protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
+            features: jazz::wire::current_wire_features()
+                & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+                    | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
+        })
     }
 
     #[napi(js_name = "connectUpstreamWithSession")]
@@ -2413,7 +3365,7 @@ impl NapiDb {
                 node: CoreNodeUuid::from_bytes(remote_node),
                 epoch: remote_epoch,
             },
-            link_identity: CoreAuthorId::from_bytes(local_node),
+            link_identity: CoreAuthorSubject::for_test_bytes(local_node),
             negotiated_features: features as u64,
         };
         let transport = Box::new(CoreWireTransportAdapter::new_with_session_context(
@@ -2435,7 +3387,14 @@ impl NapiDb {
                 connection: Some(jazz::db::block_on(db.connect_upstream(transport))),
             },
         };
-        Ok(Transport { inner, queues })
+        let auxiliary_pump = inner.auxiliary_pump();
+        Ok(Transport {
+            inner,
+            queues,
+            auxiliary_pump,
+            protocol_version,
+            features: features as u64,
+        })
     }
 
     #[napi(js_name = "mergeableTx")]
@@ -2457,6 +3416,7 @@ impl NapiDb {
                     open_batch_id
                 }),
                 owns_lifetime: true,
+                attributed: false,
             }),
             NapiDbInnerStorage::Persistent(db) => Ok(Tx {
                 db: NapiDbInnerStorage::Persistent(Rc::clone(db)),
@@ -2467,6 +3427,7 @@ impl NapiDb {
                     open_batch_id
                 }),
                 owns_lifetime: true,
+                attributed: false,
             }),
         }
     }
@@ -2495,6 +3456,7 @@ impl NapiDb {
                     open_batch_id
                 }),
                 owns_lifetime: true,
+                attributed: false,
             }),
             NapiDbInnerStorage::Persistent(db) => Ok(Tx {
                 db: NapiDbInnerStorage::Persistent(Rc::clone(db)),
@@ -2505,6 +3467,7 @@ impl NapiDb {
                     open_batch_id
                 }),
                 owns_lifetime: true,
+                attributed: false,
             }),
         }
     }
@@ -2570,24 +3533,80 @@ fn open_core_db<S>(
     schema: JazzSchema,
     storage: S,
     config: CoreOpenDbConfig,
-) -> std::result::Result<CoreDb<S>, jazz::db::Error>
+    identity: CoreDbIdentity,
+    backend_attribution: bool,
+) -> napi::Result<CoreDb<S>>
 where
     S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
 {
-    let mut db_config = CoreDbConfig::new(schema, storage, config.identity.into());
+    let mut db_config = CoreDbConfig::new(schema, storage, identity);
     if let Some(seed) = config.row_id_seed {
         db_config = db_config.with_id_source(CoreSeededRowIdSource::new(seed));
     }
     let initial_sync_flush_every = config.initial_sync_flush_every;
     if config.history_complete {
-        let db = core_block_on(CoreDb::open_history_complete(db_config))?;
-        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
+        let db = if backend_attribution {
+            // SAFETY: only explicit NAPI backend-open constructors pass true.
+            core_block_on(unsafe {
+                CoreDb::open_history_complete_with_backend_attribution(db_config)
+            })
+        } else {
+            core_block_on(CoreDb::open_history_complete(db_config))
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
         Ok(db)
     } else {
-        let db = core_block_on(CoreDb::open(db_config))?;
-        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
+        let db = if backend_attribution {
+            // SAFETY: only explicit NAPI backend-open constructors pass true.
+            core_block_on(unsafe { CoreDb::open_with_backend_attribution(db_config) })
+        } else {
+            core_block_on(CoreDb::open(db_config))
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
         Ok(db)
     }
+}
+
+fn core_open_identity(
+    config: &CoreOpenDbConfig,
+    self_signed_client_proof: Option<&CoreSelfSignedClientProof>,
+) -> napi::Result<CoreDbIdentity> {
+    if let Some(proof) = self_signed_client_proof {
+        let author = identity::verify_client_runtime_author(
+            &proof.token,
+            &proof.app_id,
+            &proof.claimed_author,
+        )
+        .map_err(napi::Error::from_reason)?;
+        return Ok(CoreDbIdentity {
+            node: config.identity.node,
+            author,
+        });
+    }
+    if config.backend_credential.is_some() {
+        return Err(napi::Error::from_reason(
+            "ordinary NapiDb open configuration cannot carry a backend credential; use a verified identity entrypoint",
+        ));
+    }
+    Ok(CoreDbIdentity {
+        node: config.identity.node,
+        author: config.identity.author,
+    })
+}
+
+fn core_open_backend_identity(config: &CoreOpenDbConfig) -> napi::Result<CoreDbIdentity> {
+    // Validate every caller-controlled raw field through the ordinary
+    // fail-closed ingress before this separate, intentional backend ABI picks
+    // the privileged system author.
+    core_open_identity(config, None)?;
+    Ok(CoreDbIdentity {
+        node: config.identity.node,
+        author: CoreAuthorSubject::SYSTEM,
+    })
 }
 
 fn configure_initial_sync_flush_cadence<S>(
@@ -2632,11 +3651,33 @@ fn core_row_uuid_from_bytes(bytes: &[u8]) -> napi::Result<CoreRowUuid> {
     Ok(CoreRowUuid::from_bytes(bytes))
 }
 
-fn core_author_id_from_bytes(bytes: &[u8]) -> napi::Result<CoreAuthorId> {
-    let bytes: [u8; 16] = bytes
-        .try_into()
-        .map_err(|_| napi::Error::from_reason("author id must be 16 bytes"))?;
-    Ok(CoreAuthorId::from_bytes(bytes))
+fn checked_u64(value: f64, name: &str) -> napi::Result<u64> {
+    if !value.is_finite()
+        || value < 0.0
+        || value.fract() != 0.0
+        || value > jazz::tools::policy_claims::MAX_SAFE_JS_INTEGER as f64
+    {
+        return Err(napi::Error::from_reason(format!(
+            "{name} must be a nonnegative safe integer"
+        )));
+    }
+    Ok(value as u64)
+}
+
+fn checked_u64_range(start: f64, end: f64) -> napi::Result<std::ops::Range<u64>> {
+    let start = checked_u64(start, "start")?;
+    let end = checked_u64(end, "end")?;
+    if start > end {
+        return Err(napi::Error::from_reason("start must not exceed end"));
+    }
+    Ok(start..end)
+}
+
+fn core_author_id_from_bytes(bytes: &[u8]) -> napi::Result<CoreAuthorSubject> {
+    let canonical = std::str::from_utf8(bytes)
+        .map_err(|_| napi::Error::from_reason("author subject must be canonical UTF-8 JSON"))?;
+    CoreAuthorSubject::from_untrusted_canonical(canonical)
+        .map_err(|error| napi::Error::from_reason(error.to_string()))
 }
 
 fn core_write_memory(
@@ -2651,6 +3692,7 @@ fn core_write_memory(
     Ok(Write {
         payload: postcard::to_allocvec(&result)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+        row_id: result.row_id,
         batch_id: TransactionId::from_committed_tx(tx_id),
         inner: Some(NapiWrite::Memory { db, tx_id }),
     })
@@ -2668,20 +3710,26 @@ fn core_write_persistent(
     Ok(Write {
         payload: postcard::to_allocvec(&result)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+        row_id: result.row_id,
         batch_id: TransactionId::from_committed_tx(tx_id),
         inner: Some(NapiWrite::Persistent { db, tx_id }),
     })
 }
 
 fn core_claims_from_json(
-    author: CoreAuthorId,
+    author: CoreAuthorSubject,
     claims: Option<JsonValue>,
 ) -> napi::Result<BTreeMap<String, CoreValue>> {
     let mut claims = match claims {
         None | Some(JsonValue::Null) => BTreeMap::new(),
         Some(JsonValue::Object(map)) => map
             .into_iter()
-            .map(|(key, value)| Ok((key, core_claim_value_from_json(value)?)))
+            .map(|(key, value)| {
+                Ok((
+                    jazz::query::provider_claim_key(&key),
+                    core_claim_value_from_json(value)?,
+                ))
+            })
             .collect::<napi::Result<BTreeMap<_, _>>>()?,
         Some(_) => {
             return Err(napi::Error::from_reason(
@@ -2689,17 +3737,44 @@ fn core_claims_from_json(
             ));
         }
     };
-    let subject = author.0.to_string();
-    claims
-        .entry("subject".to_owned())
-        .or_insert_with(|| CoreValue::String(subject.clone()));
-    claims
-        .entry("sub".to_owned())
-        .or_insert_with(|| CoreValue::String(subject.clone()));
-    claims
-        .entry("user_id".to_owned())
-        .or_insert_with(|| CoreValue::String(subject));
+    // This public NAPI ingress receives either an external canonical subject
+    // or one already verified by a distinct first-party proof ABI. Raw provider
+    // claims are always namespaced, including provider `user` and `authMode`;
+    // the two top-level policy fields are derived here and cannot be spoofed.
+    claims.insert(
+        "user".to_owned(),
+        CoreValue::String(author.canonical().to_owned()),
+    );
+    claims.insert(
+        "authMode".to_owned(),
+        CoreValue::String(auth_mode_for_author(&author).to_owned()),
+    );
+    let (issuer, subject): (String, String) = serde_json::from_str(author.canonical())
+        .expect("author subjects always have canonical issuer/subject JSON");
+    claims.insert(
+        jazz::query::provider_claim_key("iss"),
+        CoreValue::String(issuer),
+    );
+    claims.insert(
+        jazz::query::provider_claim_key("sub"),
+        CoreValue::String(subject),
+    );
     Ok(claims)
+}
+
+/// The public NAPI claim ingress deliberately does not trust an application
+/// supplied `authMode`. It is a property of the already-admitted identity:
+/// verified Jazz-owned issuers carry their matching mode and every other
+/// public subject is external.
+fn auth_mode_for_author(author: &CoreAuthorSubject) -> &'static str {
+    let issuer = serde_json::from_str::<(String, String)>(author.canonical())
+        .ok()
+        .map(|(issuer, _)| issuer);
+    match issuer.as_deref() {
+        Some(CoreAuthorSubject::LOCAL_FIRST_ISSUER) => "local-first",
+        Some(CoreAuthorSubject::ANONYMOUS_ISSUER) => "anonymous",
+        _ => "external",
+    }
 }
 
 fn core_claim_value_from_json(value: JsonValue) -> napi::Result<CoreValue> {
@@ -2734,6 +3809,7 @@ fn core_tx_write(tx_id: TxId, inner: Option<NapiWrite>) -> napi::Result<Write> {
     Ok(Write {
         payload: postcard::to_allocvec(&result)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+        row_id: result.row_id,
         batch_id: TransactionId::from_committed_tx(tx_id),
         inner,
     })
@@ -2748,9 +3824,22 @@ where
     let Some(connection) = connection else {
         return Ok(0);
     };
-    let stats = core_block_on(async { connection.lock().await.tick().await })
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    let mut connection = core_block_on(connection.lock());
+    let Some(stats) = core_poll_once(connection.tick()) else {
+        return Ok(0);
+    };
+    let stats = stats.map_err(|error| napi::Error::from_reason(error.to_string()))?;
     Ok(stats.subscription_events as u32)
+}
+
+fn core_poll_once<F: Future>(future: F) -> Option<F::Output> {
+    let mut future = Box::pin(future);
+    let waker = futures::task::noop_waker();
+    let mut context = Context::from_waker(&waker);
+    match future.as_mut().poll(&mut context) {
+        Poll::Ready(output) => Some(output),
+        Poll::Pending => None,
+    }
 }
 
 fn core_write_state_to_json(state: &jazz::db::WriteState) -> serde_json::Value {
@@ -2896,7 +3985,7 @@ fn core_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<CoreReadOp
         return Ok(opts);
     }
     if let Some(tier) = optional_json_string_prop(&value, "tier")? {
-        opts.tier = core_durability_tier_from_str(&tier)?;
+        opts.tier = core_read_tier_from_str(&tier)?;
     }
     if let Some(local_updates) = optional_json_string_prop(&value, "local_updates")? {
         opts.local_updates = match local_updates.as_str() {
@@ -2952,6 +4041,115 @@ fn core_branch_base_from_json(
         .transpose()
 }
 
+fn core_write_identity(author: Option<Uint8Array>) -> napi::Result<jazz::db::WriteIdentity> {
+    author
+        .map(|author| core_author_id_from_bytes(&author).map(jazz::db::WriteIdentity::Session))
+        .transpose()
+        .map(|identity| identity.unwrap_or_default())
+}
+
+fn core_insert_options(options: Option<InsertOptions>) -> napi::Result<jazz::db::InsertOptions> {
+    let Some(options) = options else {
+        return Ok(Default::default());
+    };
+    Ok(jazz::db::InsertOptions {
+        row_id: options
+            .row_id
+            .map(|row_id| core_row_uuid_from_bytes(&row_id))
+            .transpose()?,
+        identity: core_write_identity(options.author)?,
+        target: options
+            .branch
+            .map(core_branch_selector_from_json)
+            .transpose()?
+            .map(jazz::db::ExactWriteTarget::Branch)
+            .unwrap_or_default(),
+        updated_at_ms: options
+            .updated_at_ms
+            .map(|value| checked_u64(value, "updatedAtMs"))
+            .transpose()?,
+    })
+}
+
+fn core_update_options(options: Option<UpdateOptions>) -> napi::Result<jazz::db::UpdateOptions> {
+    let Some(options) = options else {
+        return Ok(Default::default());
+    };
+    let target = match options.head {
+        Some(head) => jazz::db::WriteTarget::BranchView {
+            head: core_branch_selector_from_json(head)?,
+            base: core_branch_base_from_json(options.base)?,
+        },
+        None if options.base.is_none() => Default::default(),
+        None => {
+            return Err(napi::Error::from_reason(
+                "branch view base requires a head selector",
+            ));
+        }
+    };
+    Ok(jazz::db::UpdateOptions {
+        identity: core_write_identity(options.author)?,
+        target,
+        updated_at_ms: options
+            .updated_at_ms
+            .map(|value| checked_u64(value, "updatedAtMs"))
+            .transpose()?,
+    })
+}
+
+fn core_upsert_options(options: Option<UpsertOptions>) -> napi::Result<jazz::db::UpsertOptions> {
+    let Some(options) = options else {
+        return Ok(Default::default());
+    };
+    Ok(jazz::db::UpsertOptions {
+        identity: core_write_identity(options.author)?,
+        target: options
+            .branch
+            .map(core_branch_selector_from_json)
+            .transpose()?
+            .map(jazz::db::ExactWriteTarget::Branch)
+            .unwrap_or_default(),
+        updated_at_ms: options
+            .updated_at_ms
+            .map(|value| checked_u64(value, "updatedAtMs"))
+            .transpose()?,
+    })
+}
+
+fn core_delete_options(options: Option<DeleteOptions>) -> napi::Result<jazz::db::DeleteOptions> {
+    let options = options.map(|options| UpdateOptions {
+        author: options.author,
+        head: options.head,
+        base: options.base,
+        updated_at_ms: options.updated_at_ms,
+    });
+    let options = core_update_options(options)?;
+    Ok(jazz::db::DeleteOptions {
+        identity: options.identity,
+        target: options.target,
+        updated_at_ms: options.updated_at_ms,
+    })
+}
+
+fn core_restore_options(options: Option<RestoreOptions>) -> napi::Result<jazz::db::RestoreOptions> {
+    let Some(options) = options else {
+        return Ok(Default::default());
+    };
+    Ok(jazz::db::RestoreOptions {
+        identity: core_write_identity(options.author)?,
+        target: options
+            .branch
+            .map(core_branch_selector_from_json)
+            .transpose()?
+            .map(jazz::db::ExactWriteTarget::Branch)
+            .unwrap_or_default(),
+        updated_at_ms: options
+            .updated_at_ms
+            .map(|value| checked_u64(value, "updatedAtMs"))
+            .transpose()?,
+    })
+}
+
 fn core_durability_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier> {
     match tier {
         "None" | "none" => Ok(CoreDurabilityTier::None),
@@ -2961,6 +4159,21 @@ fn core_durability_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier>
         other => Err(napi::Error::from_reason(format!(
             "unknown durability tier {other}"
         ))),
+    }
+}
+
+/// Read-only binding lowering. Write waits keep the durability-tier parser so
+/// `remote` names cannot accidentally become a write settlement tier.
+fn core_read_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier> {
+    match tier {
+        "local-first" | "LocalFirst" => Ok(CoreDurabilityTier::Local),
+        // NAPI has no explicit-offline state of its own. The TypeScript
+        // connection manager resolves RemoteIfPossible before the ABI call;
+        // direct NAPI callers therefore retain strict remote behavior.
+        "remote" | "Remote" | "remote-if-possible" | "RemoteIfPossible" => {
+            Ok(CoreDurabilityTier::Edge)
+        }
+        _ => core_durability_tier_from_str(tier),
     }
 }
 
@@ -3004,7 +4217,6 @@ fn encode_core_subscription_delta<'a>(
 
 fn core_subscription_event_to_napi(
     event: &CoreSubscriptionEvent,
-    published_terminal_layouts: &mut HashSet<String>,
 ) -> napi::Result<SubscriptionEvent> {
     match event {
         CoreSubscriptionEvent::Delta {
@@ -3012,65 +4224,22 @@ fn core_subscription_event_to_napi(
             added,
             updated,
             removed,
-            ordered_suffix_start,
             terminal_operations,
-            terminal_layout,
             settled,
             tier,
             ..
         } => {
-            let added = terminal_operations.is_empty().then_some(added.as_slice());
-            let updated = terminal_operations.is_empty().then_some(updated.as_slice());
-            let empty_removed = Vec::new();
-            let delta = encode_core_subscription_delta(
-                added.unwrap_or_default(),
-                updated.unwrap_or_default(),
-                if terminal_operations.is_empty() {
-                    removed
-                } else {
-                    &empty_removed
-                },
-            )
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-            let (terminal_layouts, terminal_operations) = if terminal_operations.is_empty() {
-                (Vec::new(), Vec::new())
-            } else {
-                let terminal_layout = terminal_layout.as_ref().ok_or_else(|| {
-                    napi::Error::from_reason(
-                        "terminal operation arrived without a prepared root layout".to_owned(),
-                    )
-                })?;
-                if terminal_operations
-                    .iter()
-                    .any(|operation| operation.root_descriptor != terminal_layout.root_descriptor)
-                {
-                    return Err(napi::Error::from_reason(
-                        "terminal operation descriptor disagrees with its prepared root layout"
-                            .to_owned(),
-                    ));
-                }
-                let terminal_layouts = published_terminal_layouts
-                    .insert(terminal_layout.id.clone())
-                    .then(|| core_terminal_layout_to_napi(terminal_layout))
-                    .transpose()?
-                    .into_iter()
-                    .collect();
-                let terminal_operations = terminal_operations
-                    .iter()
-                    .map(|operation| {
-                        core_terminal_operation_to_napi(operation, terminal_layout.id.clone())
-                    })
-                    .collect::<std::result::Result<_, _>>()?;
-                (terminal_layouts, terminal_operations)
-            };
+            let delta = encode_core_subscription_delta(added, updated, removed)
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+            let terminal_operations = terminal_operations
+                .iter()
+                .map(core_terminal_operation_to_napi)
+                .collect::<std::result::Result<_, _>>()?;
             Ok(Either3::A(SubscriptionDeltaEvent {
                 event_type: "delta".to_string(),
                 reset: *reset,
                 delta: Uint8Array::new(delta),
-                ordered_suffix_start: ordered_suffix_start
-                    .map(|start| u32::try_from(start).unwrap_or(u32::MAX)),
                 terminal_operations,
-                terminal_layouts,
                 settled: *settled,
                 tier: format!("{tier:?}"),
             }))
@@ -3135,9 +4304,7 @@ mod test_fixture_export {
             SubscriptionEvent::Closed,
         ]
         .iter()
-        .scan(std::collections::HashSet::new(), |layouts, event| {
-            Some(super::core_subscription_event_to_napi(event, layouts))
-        })
+        .map(super::core_subscription_event_to_napi)
         .collect()
     }
 }
@@ -3148,8 +4315,12 @@ mod test_fixture_export {
 /// representation for the existing TypeScript terminal consumer.
 fn core_terminal_operation_to_napi(
     operation: &jazz::groove::ivm::TerminalOperation,
-    root_layout_id: String,
 ) -> napi::Result<SubscriptionTerminalOperation> {
+    if operation.path.is_empty() {
+        return Err(napi::Error::from_reason(
+            "native producer emitted a root terminal operation".to_owned(),
+        ));
+    }
     use jazz::groove::ivm::{TerminalEdit, TerminalPathSegment};
 
     let path = operation
@@ -3194,40 +4365,9 @@ fn core_terminal_operation_to_napi(
     };
 
     Ok(SubscriptionTerminalOperation {
-        root_layout_id,
         root_key: terminal_bytes_to_numbers(&operation.root_key),
         path,
         edit,
-    })
-}
-
-fn core_terminal_layout_to_napi(
-    layout: &jazz::db::TerminalRootLayout,
-) -> napi::Result<SubscriptionTerminalLayout> {
-    let root_descriptor = postcard::to_allocvec(&layout.root_descriptor)
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-    Ok(SubscriptionTerminalLayout {
-        id: layout.id.clone(),
-        root_descriptor: terminal_bytes_to_numbers(&root_descriptor),
-        root_key_slot: layout.root_key_slot as f64,
-        root_key_field_name: layout.root_key_field_name.clone(),
-        public_fields: layout
-            .public_fields
-            .iter()
-            .map(|field| SubscriptionTerminalPublicField {
-                name: field.name.clone(),
-                descriptor_field_name: field.descriptor_field_name.clone(),
-                slot: field.slot as f64,
-                carrier: match field.carrier {
-                    jazz::db::TerminalRootCarrier::CurrentRow => "CurrentRow".to_owned(),
-                    jazz::db::TerminalRootCarrier::Logical => "Logical".to_owned(),
-                },
-            })
-            .collect(),
-        carrier: match layout.carrier {
-            jazz::db::TerminalRootCarrier::CurrentRow => "CurrentRow".to_owned(),
-            jazz::db::TerminalRootCarrier::Logical => "Logical".to_owned(),
-        },
     })
 }
 
@@ -3337,7 +4477,10 @@ impl TestJwtIssuer {
             claims,
             TestJwtOptions {
                 expires_in: Duration::from_secs(expires_in_seconds),
-                issuer: options.issuer,
+                // Keep the server test helper's ordinary external-session
+                // default. `None` is reserved for tests that explicitly
+                // exercise an issuer-less bearer, not the NAPI omission case.
+                issuer: options.issuer.or_else(|| Some("urn:jazz:test".to_owned())),
             },
         ))
     }
@@ -3599,15 +4742,118 @@ pub fn verify_local_first_identity_proof_napi(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, HashSet};
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use std::collections::{BTreeMap, VecDeque};
     use std::rc::Rc;
 
+    use futures::channel::oneshot;
+
     use crate::{
-        NapiDb, NapiDbInnerStorage, NapiTxKind, PreparedQuery, Tx, authority_epoch_from_bigint,
-        core_block_on, core_claim_value_from_json, core_read_opts_from_json,
-        core_subscription_event_to_napi, encode_core_subscription_delta, terminal_bytes_to_numbers,
-        unknown_transaction_kind_message,
+        CoreOpenDbConfig, CoreSelfSignedClientProof, InsertOptions, NapiDb, NapiDbInnerStorage,
+        NapiTxKind, PendingNativeRead, PendingNativeSubscriptionBatch,
+        PendingSubscriptionBatchOutcome, PendingSubscriptionBatchPoll, PreparedQuery,
+        RestoreOptions, Tx, UpdateOptions, UpsertOptions, authority_epoch_from_bigint,
+        core_author_id_from_bytes, core_block_on, core_claim_value_from_json, core_insert_options,
+        core_open_backend_identity, core_open_identity, core_read_opts_from_json,
+        core_read_tier_from_str, core_restore_options, core_subscription_event_to_napi,
+        core_update_options, core_upsert_options, encode_core_subscription_delta,
+        requeue_retryable_subscription_batch, unknown_transaction_kind_message,
     };
+
+    #[test]
+    fn pending_native_read_retains_a_suspended_future_until_the_next_js_turn() {
+        let (sender, receiver) = oneshot::channel::<Uint8Array>();
+        let pending = PendingNativeRead::new(Box::pin(async move {
+            receiver
+                .await
+                .map_err(|_| napi::Error::from_reason("planned sender drop"))
+        }));
+
+        assert!(
+            pending.poll_once().unwrap().is_none(),
+            "planted suspension is retained"
+        );
+        assert!(
+            sender.send(Uint8Array::new(vec![7, 11])).is_ok(),
+            "complete the retained future"
+        );
+        assert_eq!(pending.poll_once().unwrap().unwrap().to_vec(), vec![7, 11]);
+        assert!(
+            pending.poll_once().is_err(),
+            "completed reads cannot be replayed or double-encoded"
+        );
+    }
+
+    // Internal because this asserts the NAPI object's one-turn retry marker;
+    // public transport topology tests separately prove that routed chunks are
+    // eventually delivered. The marker is what prevents the binding from
+    // dropping an otherwise retryable subscription batch between those turns.
+    #[test]
+    fn pending_subscription_batch_retains_retryable_marker_for_the_next_js_turn() {
+        let batch = PendingNativeSubscriptionBatch::new(Box::pin(async {
+            Ok(PendingSubscriptionBatchOutcome::Retryable {
+                events: Vec::new(),
+                retry_after_ms: 37,
+            })
+        }));
+
+        assert!(matches!(
+            batch.poll_once().unwrap(),
+            PendingSubscriptionBatchPoll::Retryable {
+                events: Some(events),
+            } if events.is_empty()
+        ));
+        assert_eq!(batch.retry_after_ms(), Some(37));
+        assert!(matches!(
+            batch.poll_once().unwrap(),
+            PendingSubscriptionBatchPoll::Retryable { events: None }
+        ));
+    }
+
+    #[test]
+    fn retryable_subscription_batch_returns_raw_events_to_the_front_in_fifo_order() {
+        let mut queued = VecDeque::from([CoreSubscriptionEvent::Rejected {
+            reason: SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission,
+        }]);
+        requeue_retryable_subscription_batch(
+            &mut queued,
+            vec![CoreSubscriptionEvent::Closed, CoreSubscriptionEvent::Closed],
+        );
+
+        assert!(matches!(
+            queued.pop_front(),
+            Some(CoreSubscriptionEvent::Closed)
+        ));
+        assert!(matches!(
+            queued.pop_front(),
+            Some(CoreSubscriptionEvent::Closed)
+        ));
+        assert!(matches!(
+            queued.pop_front(),
+            Some(CoreSubscriptionEvent::Rejected {
+                reason: SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission,
+            })
+        ));
+        assert!(queued.is_empty());
+    }
+
+    /// Binding read choices lower without widening the write durability parser.
+    #[test]
+    fn read_tier_names_lower_to_existing_core_tiers() {
+        assert_eq!(
+            core_read_tier_from_str("local-first").expect("local-first read tier"),
+            jazz::tx::DurabilityTier::Local
+        );
+        assert_eq!(
+            core_read_tier_from_str("remote-if-possible").expect("strict remote read tier"),
+            jazz::tx::DurabilityTier::Edge
+        );
+        assert!(
+            super::core_durability_tier_from_str("remote").is_err(),
+            "write waits must not accept read-only tier names"
+        );
+    }
 
     #[test]
     fn transaction_binding_diagnostics_use_transaction_vocabulary() {
@@ -3619,14 +4865,15 @@ mod tests {
     use jazz::db::{
         Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
         MergeableTxOps, Propagation as CorePropagation, SubscriptionEvent as CoreSubscriptionEvent,
-        TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField,
     };
     use jazz::groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
     use jazz::groove::records::Value as CoreValue;
     use jazz::groove::records::{RecordDescriptor, ValueType};
     use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
-    use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
-    use jazz::protocol::ReadViewSpec as CoreReadViewSpec;
+    use jazz::ids::{
+        AuthorSubject as CoreAuthorSubject, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid,
+    };
+    use jazz::protocol::{ReadViewSpec as CoreReadViewSpec, SubscribeRejectReason};
     use jazz::tools::OpenTransactionId as CoreOpenBatchId;
     use jazz::tools::{
         ColumnType, PolicyExpr, Schema, SchemaBuilder, TableName, TablePolicies, TableSchema, Value,
@@ -3636,6 +4883,533 @@ mod tests {
     use napi::bindgen_prelude::{BigInt, Either, Either3, Either4};
     use serde_json::json;
     use std::cell::RefCell;
+
+    #[test]
+    fn identity_claim_ingress_namespaces_provider_values_and_derives_reserved_fields() {
+        let author = CoreAuthorSubject::authenticated("https://issuer.example", "alice").unwrap();
+        let claims = crate::core_claims_from_json(
+            author.clone(),
+            Some(json!({
+                "user": "forged-user",
+                "iss": "forged-issuer",
+                "sub": "provider-subject",
+                "custom": "provider-value",
+                "authMode": "local-first",
+            })),
+        )
+        .expect("NAPI claims are scalar provider data");
+
+        assert_eq!(
+            claims.get("user"),
+            Some(&CoreValue::String(author.canonical().to_owned())),
+            "session.user must come from the supplied canonical author"
+        );
+        assert_eq!(
+            claims.get("authMode"),
+            Some(&CoreValue::String("external".to_owned())),
+            "the public NAPI ingress derives external auth mode"
+        );
+        for (name, value) in [
+            ("user", "forged-user"),
+            ("custom", "provider-value"),
+            ("authMode", "local-first"),
+        ] {
+            assert_eq!(
+                claims.get(&jazz::query::provider_claim_key(name)),
+                Some(&CoreValue::String(value.to_owned())),
+                "raw provider {name} stays below session.claims"
+            );
+        }
+        assert_eq!(
+            claims.get(&jazz::query::provider_claim_key("iss")),
+            Some(&CoreValue::String("https://issuer.example".to_owned())),
+            "session.claims.iss must agree with the admitted author rather than a supplied claim"
+        );
+        assert_eq!(
+            claims.get(&jazz::query::provider_claim_key("sub")),
+            Some(&CoreValue::String("alice".to_owned())),
+            "session.claims.sub must agree with the admitted author rather than a supplied claim"
+        );
+    }
+
+    #[test]
+    fn identity_claim_ingress_derives_first_party_auth_mode_from_verified_author() {
+        let author = CoreAuthorSubject::from_canonical(r#"["urn:jazz:local-first","alice"]"#)
+            .expect("canonical first-party author");
+        let claims =
+            crate::core_claims_from_json(author.clone(), Some(json!({ "authMode": "external" })))
+                .expect("NAPI claims are scalar provider data");
+
+        assert_eq!(
+            claims.get("user"),
+            Some(&CoreValue::String(author.canonical().to_owned()))
+        );
+        assert_eq!(
+            claims.get("authMode"),
+            Some(&CoreValue::String("local-first".to_owned())),
+            "a provider claim must not override the mode verified by the native open ABI"
+        );
+        assert_eq!(
+            claims.get(&jazz::query::provider_claim_key("authMode")),
+            Some(&CoreValue::String("external".to_owned()))
+        );
+    }
+
+    #[test]
+    fn public_author_ingress_requires_a_verified_self_signed_open_proof() {
+        // This exercises the binding's raw postcard configuration boundary
+        // directly. A normal DB operation cannot construct an invalid native
+        // open envelope, so this internal receipt is required to prove that
+        // reserved identity selection stays closed at that ingress.
+        let external = br#"["https://issuer.example","alice"]"#;
+        assert_eq!(
+            core_author_id_from_bytes(external).unwrap().canonical(),
+            std::str::from_utf8(external).unwrap()
+        );
+        for issuer in [
+            CoreAuthorSubject::SYSTEM_ISSUER,
+            CoreAuthorSubject::LOCAL_FIRST_ISSUER,
+            CoreAuthorSubject::STATIC_BEARER_ISSUER,
+            CoreAuthorSubject::ANONYMOUS_ISSUER,
+        ] {
+            let canonical = serde_json::to_vec(&(issuer, "caller")).unwrap();
+            assert!(
+                core_author_id_from_bytes(&canonical).is_err(),
+                "issuer {issuer}"
+            );
+        }
+
+        #[derive(serde::Serialize)]
+        struct EncodedIdentity {
+            node: CoreNodeUuid,
+            author: CoreAuthorSubject,
+        }
+        #[derive(serde::Serialize)]
+        struct EncodedConfig {
+            identity: EncodedIdentity,
+            row_id_seed: Option<u64>,
+            history_complete: bool,
+            initial_sync_flush_every: Option<u32>,
+            backend_credential: Option<String>,
+        }
+        let encode_config = |author, backend_credential| {
+            postcard::to_allocvec(&EncodedConfig {
+                identity: EncodedIdentity {
+                    node: CoreNodeUuid::from_bytes([7; 16]),
+                    author,
+                },
+                row_id_seed: None,
+                history_complete: false,
+                initial_sync_flush_every: None,
+                backend_credential,
+            })
+            .unwrap()
+        };
+        for issuer in [
+            CoreAuthorSubject::SYSTEM_ISSUER,
+            CoreAuthorSubject::LOCAL_FIRST_ISSUER,
+            CoreAuthorSubject::STATIC_BEARER_ISSUER,
+            CoreAuthorSubject::ANONYMOUS_ISSUER,
+        ] {
+            let author = if issuer == CoreAuthorSubject::SYSTEM_ISSUER {
+                CoreAuthorSubject::SYSTEM
+            } else {
+                CoreAuthorSubject::from_canonical(
+                    &serde_json::to_string(&(issuer, "caller")).unwrap(),
+                )
+                .unwrap()
+            };
+            let bytes = encode_config(author, None);
+            assert!(
+                postcard::from_bytes::<CoreOpenDbConfig>(&bytes).is_err(),
+                "raw open author must reject {issuer} without a proof"
+            );
+        }
+
+        let external_author =
+            CoreAuthorSubject::authenticated("https://issuer.example", "alice").unwrap();
+        let bytes = encode_config(external_author, None);
+        let external_config = postcard::from_bytes::<CoreOpenDbConfig>(&bytes).unwrap();
+        assert_eq!(
+            core_open_identity(&external_config, None).unwrap().author,
+            external_author,
+            "an old TS caller uses only this ordinary raw-open path"
+        );
+        assert_ne!(
+            core_open_identity(&external_config, None).unwrap().author,
+            CoreAuthorSubject::SYSTEM,
+            "the ordinary raw-open path cannot become SYSTEM"
+        );
+        assert_eq!(
+            core_open_backend_identity(&external_config).unwrap().author,
+            CoreAuthorSubject::SYSTEM,
+            "only the separate backend-open path may intentionally derive SYSTEM"
+        );
+        NapiDb::open_memory_as_backend(
+            Uint8Array::from(br#"{"tables":{}}"#.to_vec()),
+            Uint8Array::from(encode_config(external_author, None)),
+        )
+        .expect(
+            "an explicit local backend open derives SYSTEM without requiring upstream verification",
+        );
+
+        for credential in ["arbitrary-backend-secret", "malformed.backend.credential"] {
+            let bytes = encode_config(external_author, Some(credential.to_owned()));
+            let config = postcard::from_bytes::<CoreOpenDbConfig>(&bytes).unwrap();
+            assert!(
+                core_open_identity(&config, None).is_err(),
+                "ordinary raw config must reject {credential:?}, never promote it to SYSTEM"
+            );
+            assert!(
+                core_open_backend_identity(&config).is_err(),
+                "the explicit backend ABI must still reject legacy raw credential input"
+            );
+        }
+
+        let memory_credential =
+            encode_config(external_author, Some("arbitrary-backend-secret".to_owned()));
+        assert!(
+            NapiDb::open_memory(
+                Uint8Array::from(b"{}".to_vec()),
+                Uint8Array::from(memory_credential),
+            )
+            .is_err(),
+            "openMemory must reject an unverified backend credential before opening the DB"
+        );
+
+        let persistent_path = std::env::temp_dir().join(format!(
+            "jazz-unverified-backend-open-{}",
+            std::process::id()
+        ));
+        assert!(
+            !persistent_path.exists(),
+            "test path must be fresh: {}",
+            persistent_path.display()
+        );
+        let persistent_credential = encode_config(
+            external_author,
+            Some("malformed.backend.credential".to_owned()),
+        );
+        let result = NapiDb::open_persistent(
+            persistent_path.to_string_lossy().into_owned(),
+            Uint8Array::from(b"{}".to_vec()),
+            Uint8Array::from(persistent_credential),
+        );
+        let created_storage = persistent_path.exists();
+        if created_storage {
+            std::fs::remove_dir_all(&persistent_path).unwrap();
+        }
+        assert!(
+            result.is_err(),
+            "openPersistent must reject an unverified backend credential"
+        );
+        assert!(
+            !created_storage,
+            "openPersistent must reject an unverified backend credential before creating storage"
+        );
+
+        for issuer in [
+            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            jazz::tools::identity::ANONYMOUS_ISSUER,
+        ] {
+            let token = jazz::tools::identity::mint_jazz_self_signed_token(
+                &[issuer.len() as u8; 32],
+                issuer,
+                "proof-app",
+                60,
+            )
+            .unwrap();
+            let verified =
+                jazz::tools::identity::verify_jazz_self_signed_proof(&token, "proof-app").unwrap();
+            let claimed_author = serde_json::to_string(&(issuer, verified.user_id)).unwrap();
+            let bytes = encode_config(external_author, None);
+            let config = postcard::from_bytes::<CoreOpenDbConfig>(&bytes).unwrap();
+            let proof = CoreSelfSignedClientProof {
+                token,
+                app_id: "proof-app".to_owned(),
+                claimed_author: claimed_author.clone(),
+            };
+            assert_eq!(
+                core_open_identity(&config, Some(&proof))
+                    .unwrap()
+                    .author
+                    .canonical(),
+                claimed_author,
+                "the separate proof constructor derives {issuer}, never backend/SYSTEM identity"
+            );
+            let bytes = encode_config(external_author, Some("misdecode-me".to_owned()));
+            let config = postcard::from_bytes::<CoreOpenDbConfig>(&bytes).unwrap();
+            assert_eq!(
+                core_open_identity(&config, Some(&proof))
+                    .unwrap()
+                    .author
+                    .canonical(),
+                claimed_author,
+                "a proof-bearing constructor never treats a config field as backend authority"
+            );
+        }
+
+        let token = jazz::tools::identity::mint_jazz_self_signed_token(
+            &[9; 32],
+            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            "proof-app",
+            60,
+        )
+        .unwrap();
+        let verified =
+            jazz::tools::identity::verify_jazz_self_signed_proof(&token, "proof-app").unwrap();
+        let claimed_author =
+            serde_json::to_string(&(jazz::tools::identity::LOCAL_FIRST_ISSUER, verified.user_id))
+                .unwrap();
+        let bytes = encode_config(external_author, None);
+        let config = postcard::from_bytes::<CoreOpenDbConfig>(&bytes).unwrap();
+        let (signing_input, signature_b64) = token.rsplit_once('.').unwrap();
+        let mut signature = URL_SAFE_NO_PAD.decode(signature_b64).unwrap();
+        assert_eq!(signature.len(), 64);
+        signature[0] ^= 1;
+        let proof = CoreSelfSignedClientProof {
+            token: format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(signature)),
+            app_id: "proof-app".to_owned(),
+            claimed_author: claimed_author.clone(),
+        };
+        assert!(
+            core_open_identity(&config, Some(&proof)).is_err(),
+            "same-length, valid-base64 signature tampering must fail"
+        );
+        let persistent_path = std::env::temp_dir().join(format!(
+            "jazz-invalid-self-signed-open-{}",
+            std::process::id()
+        ));
+        assert!(
+            !persistent_path.exists(),
+            "test path must be fresh: {}",
+            persistent_path.display()
+        );
+        let result = NapiDb::open_persistent_with_self_signed_proof(
+            persistent_path.to_string_lossy().into_owned(),
+            Uint8Array::from(b"{}".to_vec()),
+            Uint8Array::from(encode_config(external_author, None)),
+            proof.token.clone(),
+            proof.app_id.clone(),
+            proof.claimed_author.clone(),
+        );
+        let created_storage = persistent_path.exists();
+        if created_storage {
+            std::fs::remove_dir_all(&persistent_path).unwrap();
+        }
+        assert!(
+            result.is_err(),
+            "invalid proof must reject the persistent open"
+        );
+        assert!(
+            !created_storage,
+            "invalid proof must be rejected before RocksDB creates its data directory"
+        );
+
+        let bytes = encode_config(external_author, None);
+        let config = postcard::from_bytes::<CoreOpenDbConfig>(&bytes).unwrap();
+        let proof = CoreSelfSignedClientProof {
+            token: token.clone(),
+            app_id: "wrong-app".to_owned(),
+            claimed_author: claimed_author.clone(),
+        };
+        assert!(
+            core_open_identity(&config, Some(&proof)).is_err(),
+            "wrong audience must fail"
+        );
+
+        let bytes = encode_config(external_author, None);
+        let config = postcard::from_bytes::<CoreOpenDbConfig>(&bytes).unwrap();
+        let proof = CoreSelfSignedClientProof {
+            token,
+            app_id: "proof-app".to_owned(),
+            claimed_author: r#"["urn:jazz:local-first","another-subject"]"#.to_owned(),
+        };
+        assert!(
+            core_open_identity(&config, Some(&proof)).is_err(),
+            "claimed author must match the signed issuer and subject"
+        );
+
+        let expired = jazz::tools::identity::mint_jazz_self_signed_token_at(
+            &[10; 32],
+            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            "proof-app",
+            1,
+            0,
+        )
+        .unwrap();
+        let bytes = encode_config(external_author, None);
+        let config = postcard::from_bytes::<CoreOpenDbConfig>(&bytes).unwrap();
+        let proof = CoreSelfSignedClientProof {
+            token: expired,
+            app_id: "proof-app".to_owned(),
+            claimed_author,
+        };
+        assert!(
+            core_open_identity(&config, Some(&proof)).is_err(),
+            "expired proof must fail"
+        );
+    }
+
+    /// The native binding mints backend attribution only from its distinct
+    /// backend-open constructor. A backend can credit Alice while retaining
+    /// SYSTEM admission; raw opens, transaction identity overrides, and branch
+    /// streaming combinations must all fail before a write is staged.
+    ///
+    /// ```text
+    /// openMemoryAsBackend ──attribution=alice──► accepted NAPI write
+    /// openMemory / raw session ──attribution=alice──► rejected at binding edge
+    /// ```
+    #[test]
+    fn native_backend_attribution_capability_is_explicit_and_non_mixable() {
+        #[derive(serde::Serialize)]
+        struct EncodedIdentity {
+            node: CoreNodeUuid,
+            author: CoreAuthorSubject,
+        }
+        #[derive(serde::Serialize)]
+        struct EncodedConfig {
+            identity: EncodedIdentity,
+            row_id_seed: Option<u64>,
+            history_complete: bool,
+            initial_sync_flush_every: Option<u32>,
+            backend_credential: Option<String>,
+        }
+
+        let source = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("items")
+                    .column("label", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::True)
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                            .with_delete(PolicyExpr::True),
+                    ),
+            )
+            .build();
+        let schema = serde_json::to_vec(&source).unwrap();
+        let config = postcard::to_allocvec(&EncodedConfig {
+            identity: EncodedIdentity {
+                node: CoreNodeUuid::from_bytes([0xb3; 16]),
+                author: CoreAuthorSubject::for_test_bytes([0xb3; 16]),
+            },
+            row_id_seed: Some(0xb3),
+            history_complete: false,
+            initial_sync_flush_every: None,
+            backend_credential: None,
+        })
+        .unwrap();
+        let alice = CoreAuthorSubject::for_test_bytes([0xa1; 16]);
+        let alice_bytes = alice.canonical().as_bytes().to_vec();
+        let descriptor = RecordDescriptor::new([("label", ValueType::String)]);
+        let raw = descriptor
+            .create(&[CoreValue::String("credited to alice".to_owned())])
+            .unwrap();
+        let cells = postcard::to_allocvec(&(descriptor, raw)).unwrap();
+
+        let backend = NapiDb::open_memory_as_backend(
+            Uint8Array::from(schema.clone()),
+            Uint8Array::from(config.clone()),
+        )
+        .unwrap();
+        let write = backend
+            .insert_with_id_encoded_attributed(
+                "items".to_owned(),
+                Uint8Array::from(vec![0xb4; 16]),
+                Uint8Array::from(cells.clone()),
+                Uint8Array::from(alice_bytes.clone()),
+            )
+            .expect("the explicit backend constructor mints attribution capability");
+        assert_eq!(write.row_id, CoreRowUuid::from_bytes([0xb4; 16]));
+
+        let ordinary =
+            NapiDb::open_memory(Uint8Array::from(schema), Uint8Array::from(config)).unwrap();
+        let err = match ordinary.insert_with_id_encoded_attributed(
+            "items".to_owned(),
+            Uint8Array::from(vec![0xb4; 16]),
+            Uint8Array::from(cells),
+            Uint8Array::from(alice_bytes.clone()),
+        ) {
+            Ok(_) => panic!("a raw NAPI open must never gain attribution authority"),
+            Err(err) => err,
+        };
+        assert!(err.reason.contains("explicit backend runtime"));
+
+        let attributed_batch = CoreOpenBatchId::new().to_string();
+        backend
+            .begin_transaction_attributed(
+                attributed_batch.clone(),
+                Uint8Array::from(alice.canonical().as_bytes().to_vec()),
+            )
+            .expect("an attributed mergeable batch is the supported transaction shape");
+        let mut tx = backend
+            .attach_mergeable_tx(attributed_batch.clone())
+            .unwrap();
+        let err = match tx.insert_encoded_with_options(
+            "items".to_owned(),
+            Uint8Array::from(Vec::new()),
+            Some(InsertOptions {
+                row_id: None,
+                author: None,
+                branch: Some(json!({ "branch": "draft" })),
+                updated_at_ms: None,
+            }),
+        ) {
+            Ok(_) => {
+                panic!("an attributed batch must reject a branch before decoding or staging cells")
+            }
+            Err(err) => err,
+        };
+        assert!(err.reason.contains("do not support branch writes"));
+        backend.rollback_transaction(attributed_batch).unwrap();
+
+        let err = ordinary
+            .begin_transaction_attributed(
+                CoreOpenBatchId::new().to_string(),
+                Uint8Array::from(alice_bytes.clone()),
+            )
+            .expect_err("ordinary transactions cannot claim backend attribution");
+        assert!(err.reason.contains("explicit backend runtime"));
+
+        let err = match backend.begin_streaming_mutation_attributed_encoded(
+            "items".to_owned(),
+            Uint8Array::from(vec![0xb5; 16]),
+            Uint8Array::from(Vec::new()),
+            "label".to_owned(),
+            None,
+            Some(Uint8Array::from(alice_bytes)),
+            Uint8Array::from(alice.canonical().as_bytes().to_vec()),
+            None,
+            None,
+            None,
+        ) {
+            Ok(_) => panic!("streaming attribution cannot override SYSTEM admission"),
+            Err(err) => err,
+        };
+        assert!(
+            err.reason
+                .contains("cannot override backend admission identity")
+        );
+
+        let err = match backend.begin_streaming_mutation_attributed_encoded(
+            "items".to_owned(),
+            Uint8Array::from(vec![0xb6; 16]),
+            Uint8Array::from(Vec::new()),
+            "label".to_owned(),
+            None,
+            None,
+            Uint8Array::from(alice.canonical().as_bytes().to_vec()),
+            None,
+            Some(json!({})),
+            None,
+        ) {
+            Ok(_) => panic!("attributed streaming branch writes must fail closed"),
+            Err(err) => err,
+        };
+        assert!(err.reason.contains("do not support branch writes"));
+    }
 
     #[test]
     fn javascript_numeric_claims_preserve_safe_integers_and_fail_closed_when_lossy() {
@@ -3667,6 +5441,58 @@ mod tests {
         assert_eq!(
             core_claim_value_from_json(json!(-9_007_199_254_740_992_i64)).unwrap(),
             CoreValue::F64(-9_007_199_254_740_992.0)
+        );
+    }
+
+    #[test]
+    fn javascript_u64_boundaries_reject_lossy_or_invalid_numbers() {
+        assert_eq!(super::checked_u64(42.0, "value").unwrap(), 42);
+        for value in [
+            -1.0,
+            f64::NAN,
+            f64::INFINITY,
+            1.5,
+            (jazz::tools::policy_claims::MAX_SAFE_JS_INTEGER + 1) as f64,
+        ] {
+            assert!(super::checked_u64(value, "value").is_err(), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn write_option_timestamps_reject_lossy_javascript_numbers() {
+        assert!(
+            core_insert_options(Some(InsertOptions {
+                row_id: None,
+                author: None,
+                branch: None,
+                updated_at_ms: Some(1.5),
+            }))
+            .is_err()
+        );
+        assert!(
+            core_update_options(Some(UpdateOptions {
+                author: None,
+                head: None,
+                base: None,
+                updated_at_ms: Some(f64::NAN),
+            }))
+            .is_err()
+        );
+        assert!(
+            core_upsert_options(Some(UpsertOptions {
+                author: None,
+                branch: None,
+                updated_at_ms: Some(-1.0),
+            }))
+            .is_err()
+        );
+        assert!(
+            core_restore_options(Some(RestoreOptions {
+                author: None,
+                branch: None,
+                updated_at_ms: Some((jazz::tools::policy_claims::MAX_SAFE_JS_INTEGER + 1) as f64),
+            }))
+            .is_err()
         );
     }
 
@@ -3846,21 +5672,16 @@ mod tests {
 
     #[test]
     fn subscription_payload_exposes_only_terminal_rows() {
-        let payload = core_subscription_event_to_napi(
-            &CoreSubscriptionEvent::Delta {
-                reset: false,
-                publishable: true,
-                added: Vec::new(),
-                updated: Vec::new(),
-                removed: Vec::new(),
-                terminal_operations: Vec::new(),
-                terminal_layout: None,
-                ordered_suffix_start: None,
-                settled: true,
-                tier: DurabilityTier::Local,
-            },
-            &mut HashSet::new(),
-        )
+        let payload = core_subscription_event_to_napi(&CoreSubscriptionEvent::Delta {
+            reset: false,
+            publishable: true,
+            added: Vec::new(),
+            updated: Vec::new(),
+            removed: Vec::new(),
+            terminal_operations: Vec::new(),
+            settled: true,
+            tier: DurabilityTier::Local,
+        })
         .expect("encode terminal delta");
 
         let Either3::A(payload) = payload else {
@@ -3872,7 +5693,7 @@ mod tests {
     }
 
     #[test]
-    fn subscription_payload_preserves_typed_terminal_operations_and_descriptor() {
+    fn subscription_payload_preserves_descendant_terminal_operations() {
         let descriptor = RecordDescriptor::new([
             ("row_uuid", ValueType::Uuid),
             (
@@ -3880,7 +5701,7 @@ mod tests {
                 ValueType::Nullable(Box::new(ValueType::String)),
             ),
         ]);
-        let expected_descriptor = postcard::to_allocvec(&descriptor).unwrap();
+        let child_path = vec![TerminalPathSegment::Collection("children".to_owned())];
         let operations = vec![
             TerminalOperation {
                 root_descriptor: descriptor,
@@ -3898,7 +5719,7 @@ mod tests {
             TerminalOperation {
                 root_descriptor: descriptor,
                 root_key: vec![4],
-                path: Vec::new(),
+                path: child_path.clone(),
                 edit: TerminalEdit::Update {
                     key: vec![5],
                     value: vec![6],
@@ -3907,47 +5728,29 @@ mod tests {
             TerminalOperation {
                 root_descriptor: descriptor,
                 root_key: vec![7],
-                path: Vec::new(),
+                path: child_path.clone(),
                 edit: TerminalEdit::Remove { key: vec![8] },
             },
             TerminalOperation {
                 root_descriptor: descriptor,
                 root_key: vec![9],
-                path: Vec::new(),
+                path: child_path,
                 edit: TerminalEdit::Move {
                     key: vec![10],
                     index: 11,
                 },
             },
         ];
-        let terminal_layout = TerminalRootLayout {
-            id: "test-terminal-layout".to_owned(),
-            root_descriptor: descriptor,
-            root_key_slot: 0,
-            root_key_field_name: "row_uuid".to_owned(),
-            public_fields: vec![TerminalRootPublicField {
-                name: "title".to_owned(),
-                descriptor_field_name: "user_title".to_owned(),
-                slot: 1,
-                carrier: TerminalRootCarrier::CurrentRow,
-            }],
-            carrier: TerminalRootCarrier::CurrentRow,
-        };
-        let payload = core_subscription_event_to_napi(
-            &CoreSubscriptionEvent::Delta {
-                reset: false,
-                publishable: true,
-                added: Vec::new(),
-                updated: Vec::new(),
-                removed: Vec::new(),
-                terminal_operations: operations,
-                terminal_layout: Some(terminal_layout),
-                ordered_suffix_start: None,
-                settled: false,
-                tier: DurabilityTier::Edge,
-            },
-            &mut HashSet::new(),
-        )
+        let payload = core_subscription_event_to_napi(&CoreSubscriptionEvent::Delta {
+            reset: false,
+            publishable: true,
+            added: Vec::new(),
+            updated: Vec::new(),
+            removed: Vec::new(),
+            terminal_operations: operations,
+            settled: false,
+            tier: DurabilityTier::Edge,
+        })
         .expect("encode terminal operations");
 
         let Either3::A(payload) = payload else {
@@ -3956,11 +5759,6 @@ mod tests {
         assert_eq!(payload.tier, "Edge");
         assert_eq!(payload.terminal_operations.len(), 4);
         let insert = &payload.terminal_operations[0];
-        assert_eq!(insert.root_layout_id, "test-terminal-layout");
-        assert_eq!(
-            payload.terminal_layouts[0].root_descriptor,
-            terminal_bytes_to_numbers(&expected_descriptor)
-        );
         assert_eq!(insert.root_key, vec![0, 255]);
         assert!(matches!(
             insert.path.as_slice(),
@@ -3992,14 +5790,11 @@ mod tests {
     fn subscription_payload_preserves_rejection_and_closed_variants() {
         use jazz::protocol::{SubscribeRejectReason, SubscribeServerFailureCode};
 
-        let unsupported = core_subscription_event_to_napi(
-            &CoreSubscriptionEvent::Rejected {
-                reason: SubscribeRejectReason::UnsupportedShapeCapability {
-                    detail: "unsupported maintained shape".to_owned(),
-                },
+        let unsupported = core_subscription_event_to_napi(&CoreSubscriptionEvent::Rejected {
+            reason: SubscribeRejectReason::UnsupportedShapeCapability {
+                detail: "unsupported maintained shape".to_owned(),
             },
-            &mut HashSet::new(),
-        )
+        })
         .expect("encode unsupported rejection");
         assert!(matches!(
             unsupported,
@@ -4014,12 +5809,9 @@ mod tests {
                 && detail == "unsupported maintained shape"
         ));
 
-        let pending = core_subscription_event_to_napi(
-            &CoreSubscriptionEvent::Rejected {
-                reason: SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission,
-            },
-            &mut HashSet::new(),
-        )
+        let pending = core_subscription_event_to_napi(&CoreSubscriptionEvent::Rejected {
+            reason: SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission,
+        })
         .expect("encode pending rejection");
         assert!(matches!(
             pending,
@@ -4032,14 +5824,11 @@ mod tests {
                 && reason_type == "ShapeRegistrationPendingCatalogueAdmission"
         ));
 
-        let server_failure = core_subscription_event_to_napi(
-            &CoreSubscriptionEvent::Rejected {
-                reason: SubscribeRejectReason::ServerFailure {
-                    code: SubscribeServerFailureCode::QueryValidation,
-                },
+        let server_failure = core_subscription_event_to_napi(&CoreSubscriptionEvent::Rejected {
+            reason: SubscribeRejectReason::ServerFailure {
+                code: SubscribeServerFailureCode::QueryValidation,
             },
-            &mut HashSet::new(),
-        )
+        })
         .expect("encode server rejection");
         assert!(matches!(
             server_failure,
@@ -4054,9 +5843,8 @@ mod tests {
                 && code == "QueryValidation"
         ));
 
-        let closed =
-            core_subscription_event_to_napi(&CoreSubscriptionEvent::Closed, &mut HashSet::new())
-                .expect("encode closed event");
+        let closed = core_subscription_event_to_napi(&CoreSubscriptionEvent::Closed)
+            .expect("encode closed event");
         assert!(matches!(
             closed,
             Either3::C(crate::SubscriptionClosedEvent { event_type }) if event_type == "closed"
@@ -4102,7 +5890,7 @@ mod tests {
                 CoreMemoryStorage::new(&refs),
                 CoreDbIdentity {
                     node: CoreNodeUuid::from_bytes([0x44; 16]),
-                    author: CoreAuthorId::from_bytes([0xa4; 16]),
+                    author: CoreAuthorSubject::for_test_bytes([0xa4; 16]),
                 },
             )))
             .unwrap(),
@@ -4115,11 +5903,15 @@ mod tests {
             kind: NapiTxKind::Mergeable,
             open_tx: Some(batch),
             owns_lifetime: false,
+            attributed: false,
         });
-        core_block_on(view.mergeable_tx_ref(batch).insert_with_id(
+        core_block_on(view.mergeable_tx_ref(batch).insert(
             "items",
-            CoreRowUuid::from_bytes([1; 16]),
             BTreeMap::from([("label".to_owned(), CoreValue::String("kept".to_owned()))]),
+            jazz::db::InsertOptions {
+                row_id: Some(CoreRowUuid::from_bytes([1; 16])),
+                ..Default::default()
+            },
         ))
         .unwrap();
         core_block_on(owner.commit_mergeable_handle(batch)).unwrap();
@@ -4131,14 +5923,18 @@ mod tests {
             kind: NapiTxKind::Exclusive,
             open_tx: Some(exclusive),
             owns_lifetime: false,
+            attributed: false,
         });
-        core_block_on(view.exclusive_tx_ref(exclusive).insert_with_id(
+        core_block_on(view.exclusive_tx_ref(exclusive).insert(
             "items",
-            CoreRowUuid::from_bytes([2; 16]),
             BTreeMap::from([(
                 "label".to_owned(),
                 CoreValue::String("exclusive-kept".to_owned()),
             )]),
+            jazz::db::InsertOptions {
+                row_id: Some(CoreRowUuid::from_bytes([2; 16])),
+                ..Default::default()
+            },
         ))
         .unwrap();
         core_block_on(owner.commit_exclusive_handle(exclusive)).unwrap();
@@ -4150,14 +5946,16 @@ mod tests {
                 &owner,
             ))))),
             owns_runtime: false,
+            trusted_backend: false,
+            attributed_mergeable_batches: Rc::default(),
         };
-        let alice = CoreAuthorId::from_bytes([0xa6; 16]);
+        let alice = CoreAuthorSubject::for_test_bytes([0xa6; 16]);
         let bound = CoreOpenBatchId::new();
         binding
             .begin_transaction(
                 bound.to_string(),
                 "exclusive".to_owned(),
-                Some(Uint8Array::new(alice.0.as_bytes().to_vec())),
+                Some(Uint8Array::new(alice.canonical().as_bytes().to_vec())),
             )
             .unwrap();
         let tx = binding.attach_exclusive_tx(bound.to_string()).unwrap();
@@ -4173,6 +5971,8 @@ mod tests {
                 &view,
             ))))),
             owns_runtime: false,
+            trusted_backend: false,
+            attributed_mergeable_batches: Rc::default(),
         };
         let view_query = PreparedQuery {
             inner: view.prepare_query(&view.table("items")).unwrap(),
@@ -4190,7 +5990,7 @@ mod tests {
                 CoreMemoryStorage::new(&refs),
                 CoreDbIdentity {
                     node: CoreNodeUuid::from_bytes([0x46; 16]),
-                    author: CoreAuthorId::from_bytes([0xa6; 16]),
+                    author: CoreAuthorSubject::for_test_bytes([0xa6; 16]),
                 },
             )))
             .unwrap(),
@@ -4200,21 +6000,26 @@ mod tests {
                 &other_owner,
             ))))),
             owns_runtime: false,
+            trusted_backend: false,
+            attributed_mergeable_batches: Rc::default(),
         };
         other_binding
             .begin_transaction(
                 bound.to_string(),
                 "exclusive".to_owned(),
-                Some(Uint8Array::new(alice.0.as_bytes().to_vec())),
+                Some(Uint8Array::new(alice.canonical().as_bytes().to_vec())),
             )
             .unwrap();
-        core_block_on(other_owner.exclusive_tx_ref(bound).insert_with_id(
+        core_block_on(other_owner.exclusive_tx_ref(bound).insert(
             "items",
-            CoreRowUuid::from_bytes([3; 16]),
             BTreeMap::from([(
                 "label".to_owned(),
                 CoreValue::String("receiver-secret".to_owned()),
             )]),
+            jazz::db::InsertOptions {
+                row_id: Some(CoreRowUuid::from_bytes([3; 16])),
+                ..Default::default()
+            },
         ))
         .unwrap();
         let other_query = PreparedQuery {

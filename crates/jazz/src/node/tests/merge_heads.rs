@@ -4,6 +4,31 @@
 // the merge fast path relies on.
 
 #[test]
+fn merge_heads_match_history_for_first_and_subsequent_authored_versions() {
+    let schema = two_column_schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(0xa0), schema);
+    let row = row(0xa0);
+
+    let first = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row, 10)
+                .cells(BTreeMap::from([("title".to_owned(), "first".to_owned())])),
+        )
+        .unwrap();
+    core.assert_merge_heads_match_history_for_test("todos", row)
+        .unwrap();
+
+    core.commit_mergeable_settled(
+        MergeableCommit::new("todos", row, 11)
+            .parents(vec![first])
+            .cells(BTreeMap::from([("body".to_owned(), "second".to_owned())])),
+    )
+    .unwrap();
+    core.assert_merge_heads_match_history_for_test("todos", row)
+        .unwrap();
+}
+
+#[test]
 fn merge_heads_match_history_for_ordinary_concurrent_units() {
     let schema = two_column_schema();
     let (_writer_a_dir, mut writer_a) = open_node_with_schema(node(0xa1), schema.clone());
@@ -137,6 +162,45 @@ fn merge_heads_match_history_for_relay_pending_then_edge_fate() {
 }
 
 #[test]
+fn accepting_pending_history_does_not_rewalk_the_merge_chain() {
+    // A relay installs pending versions into current/merge-head state. Their
+    // later accepted fates do not alter head membership, even when transport
+    // delivers the fates newest-first. Rewalking the chain here made a 500
+    // revision subscription starve unrelated query tests.
+    let schema = two_column_schema();
+    let (_edge_dir, mut edge) = open_node_with_schema(node(0xfb), schema);
+    let row = row(0xfb);
+    let mut versions = Vec::new();
+    let mut parent = None;
+
+    for _ in 0..32 {
+        let mut commit = MergeableCommit::new("todos", row, 10)
+            .cells(BTreeMap::from([("title".to_owned(), "revision".to_owned())]));
+        if let Some(parent) = parent {
+            commit = commit.parents(vec![parent]);
+        }
+        let published = edge.commit_mergeable(commit).unwrap();
+        let tx_id = settle_published(&mut edge, published).unwrap();
+        parent = Some(tx_id);
+        versions.push(tx_id);
+    }
+
+    edge.reset_merge_head_reachability_walks_for_test();
+    for tx_id in versions.into_iter().rev() {
+        edge.apply_fate_update(tx_id, Fate::Accepted, None, Some(DurabilityTier::Edge))
+            .unwrap();
+    }
+
+    assert_eq!(
+        edge.merge_head_reachability_walks_for_test(),
+        0,
+        "accepting a pending chain must not replay historical reachability"
+    );
+    edge.assert_merge_heads_match_history_for_test("todos", row)
+        .unwrap();
+}
+
+#[test]
 fn merge_heads_match_history_after_parked_unit_resolves() {
     let schema = two_column_schema();
     let (_parent_dir, mut parent_writer) = open_node_with_schema(node(0xb1), schema.clone());
@@ -237,7 +301,7 @@ fn merge_heads_share_physical_identity_across_table_rename_and_restart() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: renamed.id,

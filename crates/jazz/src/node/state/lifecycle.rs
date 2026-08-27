@@ -69,12 +69,9 @@ where
         // too: an empty catalogue does not make an existing Jazz store safe to
         // repurpose as an uninitialized edge.
         let meta_schema = bootstrap_schema.lower_to_groove();
-        let meta_database = Database::new_with_storage_layout(
-            meta_schema,
-            storage,
-            StorageLayout::jazz_class_v1(),
-        )
-        .await?;
+        let meta_database =
+            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v1())
+                .await?;
         let mut genesis = None;
         let mut schemas = BTreeMap::new();
         let mut bootstrap_ready = None;
@@ -312,22 +309,31 @@ where
             catalogue,
             catalogue_bootstrap_state,
             database,
+            chunk_resolver,
             history_complete,
             ..
         } = self;
         let storage = database.into_inner().into_storage();
-        let reopened = match catalogue_bootstrap_state {
+        let mut reopened = match catalogue_bootstrap_state {
             CatalogueBootstrapState::Uninitialized => {
                 NodeState::<BoxedStorage>::new_catalogue_uninitialized(node_uuid, storage).await?
             }
-            CatalogueBootstrapState::Ready => NodeState::<BoxedStorage>::new_with_history_complete(
-                node_uuid,
-                catalogue.schema,
-                storage,
-                history_complete,
-            )
-            .await?,
+            CatalogueBootstrapState::Ready => {
+                NodeState::<BoxedStorage>::new_with_history_complete(
+                    node_uuid,
+                    catalogue.schema,
+                    storage,
+                    history_complete,
+                )
+                .await?
+            }
         };
+        reopened
+            .database
+            .set_missing_chunk_resolver(chunk_resolver.clone());
+        reopened.local_chunk_reader = reopened.database.local_chunk_reader();
+        reopened.chunk_resolver = chunk_resolver;
+        reopened.content_runtime_provider = reopened.database.owned_chunk_provider();
         Ok(reopened)
     }
 
@@ -474,8 +480,8 @@ where
                 );
             }
             let applied = database.apply_batch(batch).await?;
-let persisted = applied.persist().await;
-database.finish_persistence(persisted)?;
+            let persisted = applied.persist().await;
+            database.finish_persistence(persisted)?;
             schemas.insert(
                 staged.publication.schema.id,
                 staged.publication.schema.clone(),
@@ -501,6 +507,11 @@ database.finish_persistence(persisted)?;
             .unwrap_or_else(|| schema.clone());
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| Instant::now());
+        let chunk_resolver: Rc<dyn groove::chunks::MissingChunkResolver> =
+            Rc::new(groove::chunks::UnavailableChunkResolver);
+        database.set_missing_chunk_resolver(chunk_resolver.clone());
+        let content_runtime_provider = database.owned_chunk_provider();
+        let local_chunk_reader = database.local_chunk_reader();
         let mut node = Self {
             node_uuid,
             self_node_alias: None,
@@ -521,6 +532,7 @@ database.finish_persistence(persisted)?;
                 next_physical_column_id,
                 lens_path_cache: BTreeMap::new(),
                 compiled_lens_cache: BTreeMap::new(),
+                physical_write_plan_cache: BTreeMap::new(),
                 current_write_schema,
             },
             catalogue_bootstrap_state,
@@ -565,17 +577,22 @@ database.finish_persistence(persisted)?;
             },
             rejections: RejectionTracking::default(),
             database: DatabaseSlot::new(database),
+            local_chunk_reader,
+            chunk_resolver,
+            large_value_staging_policy: LargeValueStagingPolicy::default(),
+            large_value_ingress: RefCell::new(LargeValueIngressState::default()),
+            content_runtime_provider,
             storage_type: std::marker::PhantomData,
             groove_runtime_token: next_groove_runtime_token(),
             history_complete,
             authored_commit_durability: DurabilityTier::Local,
             pending_persistence: BTreeSet::new(),
             node_aliases: BTreeMap::new(),
-            ahead_current_keys: BTreeSet::new(),
-            ahead_current_rows: BTreeSet::new(),
-            ahead_current_latest: BTreeMap::new(),
+            ahead_current_keys: FxHashSet::default(),
             sync_metrics: SyncMetrics::default(),
             query_engine_read_metrics: QueryEngineReadMetrics::default(),
+            #[cfg(any(test, feature = "testing"))]
+            merge_head_reachability_walks: 0,
             session_claims: BTreeMap::new(),
             session_claim_revisions: BTreeMap::new(),
             permissions_ready: true,
@@ -624,7 +641,8 @@ database.finish_persistence(persisted)?;
         let started = receipt.as_ref().map(|_| Instant::now());
         #[cfg(feature = "testing")]
         if let Some(receipt) = receipt.as_deref_mut() {
-            node.rebuild_ahead_current_keys_with_receipt(receipt).await?;
+            node.rebuild_ahead_current_keys_with_receipt(receipt)
+                .await?;
         } else {
             node.rebuild_ahead_current_keys().await?;
         }
@@ -689,7 +707,7 @@ database.finish_persistence(persisted)?;
     /// Attach process-local auth claims to an accepted subscriber identity.
     pub(crate) fn set_session_claims(
         &mut self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) {
         if self.session_claims.get(&identity) == Some(&claims) {
@@ -704,8 +722,51 @@ database.finish_persistence(persisted)?;
         self.query.policy_authorization_graph_cache.clear();
     }
 
+    /// Admit application/provider claims for a synthetic test topology.
+    ///
+    /// Production admission already stores provider claims in the internal,
+    /// collision-proof namespace. Test fixtures use this named boundary so
+    /// their readable raw claim names cannot accidentally exercise the
+    /// forbidden legacy flat-claim lookup path.
+    #[cfg(test)]
+    pub(crate) fn set_test_provider_claims(
+        &mut self,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) -> BTreeMap<String, Value> {
+        let admitted: BTreeMap<String, Value> = claims
+            .into_iter()
+            .map(|(name, value)| {
+                let storage_name = if name == "user"
+                    || name == "authMode"
+                    || name.starts_with(crate::query::PROVIDER_CLAIM_PREFIX)
+                {
+                    name
+                } else {
+                    crate::query::provider_claim_key(&name)
+                };
+                (storage_name, value)
+            })
+            .collect();
+        self.set_session_claims(identity, admitted.clone());
+        admitted
+    }
+
+    /// Install claims through the same local-admission path used by a trusted
+    /// subscriber connection. This exists only for synthetic topology tests
+    /// that exercise `NodeState`/`PeerState` directly and therefore have no
+    /// serving transport on which to perform normal session admission.
+    #[cfg(feature = "testing")]
+    pub fn admit_test_session_claims(
+        &mut self,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) {
+        self.set_session_claims(identity, claims);
+    }
+
     /// Return the revision of process-local claims for `identity`.
-    pub(crate) fn session_claim_revision(&self, identity: AuthorId) -> u64 {
+    pub(crate) fn session_claim_revision(&self, identity: AuthorSubject) -> u64 {
         self.session_claim_revisions
             .get(&identity)
             .copied()
@@ -718,7 +779,7 @@ database.finish_persistence(persisted)?;
     /// reached that particular connection.
     pub(crate) fn session_claims_with_revisions(
         &self,
-    ) -> Vec<(AuthorId, BTreeMap<String, Value>, u64)> {
+    ) -> Vec<(AuthorSubject, BTreeMap<String, Value>, u64)> {
         self.session_claims
             .iter()
             .map(|(identity, claims)| {
@@ -741,6 +802,583 @@ database.finish_persistence(persisted)?;
         self.permissions_ready
     }
 
+    /// Replace the policy-blind immutable content backend used by Groove.
+    /// The backend instance and verified cache survive catalogue rebuilds.
+    pub fn set_chunk_storage(&mut self, storage: Rc<dyn groove::chunks::ChunkStorage>) {
+        self.database.set_chunk_storage(storage);
+        self.database
+            .set_missing_chunk_resolver(self.chunk_resolver.clone());
+        let runtime_provider = self.database.owned_chunk_provider();
+        self.local_chunk_reader
+            .refresh_from(&self.database.local_chunk_reader());
+        self.content_runtime_provider = runtime_provider;
+    }
+
+    /// Install Jazz's sync-plane fallback for chunks absent from Groove's
+    /// local storage. The resolver carries no authorization state; ordinary
+    /// row/view delivery is what discloses locators to callers.
+    pub fn set_missing_chunk_resolver(
+        &mut self,
+        resolver: Rc<dyn groove::chunks::MissingChunkResolver>,
+    ) {
+        self.database.set_missing_chunk_resolver(resolver.clone());
+        let runtime_provider = self.database.owned_chunk_provider();
+        self.chunk_resolver = resolver;
+        self.content_runtime_provider = runtime_provider;
+    }
+
+    /// Consult Groove's local immutable storage without invoking the peer
+    /// fallback. Peer forwarding uses this to avoid recursive request loops.
+    pub async fn local_chunk(
+        &self,
+        locator: groove::large_values::Locator,
+        expected_hash: groove::large_values::ContentHash,
+    ) -> Result<bytes::Bytes, groove::chunks::ChunkStorageError> {
+        self.local_chunk_reader.get(locator, expected_hash).await
+    }
+
+    pub(crate) fn local_chunk_reader_handle(&self) -> groove::chunks::LocalChunkReader {
+        self.local_chunk_reader.clone()
+    }
+
+    /// Replace Jazz's policy for unpublished Groove staging receipts.
+    pub fn set_large_value_staging_policy(&mut self, policy: LargeValueStagingPolicy) {
+        self.large_value_staging_policy = policy;
+    }
+
+    pub(super) async fn enforce_large_value_staging_policy(
+        &self,
+        newest: &groove::large_values::StagedLargeValue,
+    ) -> Result<(), Error> {
+        if !self.admit_large_value_ingress(newest.accounting.encoded_bytes) {
+            self.database.evict_staged_large_value(newest.id).await?;
+            return Err(Error::LargeValueIngressRateLimited);
+        }
+        Ok(())
+    }
+
+    pub(super) fn admit_large_value_ingress(&self, encoded_bytes: u64) -> bool {
+        let now_ms: u64 = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let mut ingress = self.large_value_ingress.borrow_mut();
+        if ingress.window_started_ms == 0
+            || now_ms.saturating_sub(ingress.window_started_ms)
+                >= self.large_value_staging_policy.window_ms.max(1)
+        {
+            ingress.window_started_ms = now_ms;
+            ingress.admitted_bytes = 0;
+        }
+        let next = ingress.admitted_bytes.saturating_add(encoded_bytes);
+        if next > self.large_value_staging_policy.incoming_bytes_per_window {
+            return false;
+        }
+        ingress.admitted_bytes = next;
+        true
+    }
+
+    pub(super) async fn ensure_large_value_stages_current(
+        &self,
+        ids: &BTreeSet<groove::large_values::StagedLargeValueId>,
+    ) -> Result<(), Error> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let staged = self
+            .database
+            .staged_large_values()
+            .await?
+            .into_iter()
+            .map(|staged| (staged.id, staged))
+            .collect::<BTreeMap<_, _>>();
+        for id in ids {
+            if !staged.contains_key(id) {
+                return Err(Error::LargeValueStageExpired);
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn current_staged_ids_for_descriptors(
+        &self,
+        descriptors: &[groove::large_values::LargeValueRef],
+        require_every_descriptor: bool,
+    ) -> Result<Vec<groove::large_values::StagedLargeValueId>, Error> {
+        if descriptors.is_empty() {
+            return Ok(Vec::new());
+        }
+        let staged = self.database.staged_large_values().await?;
+        let mut ids = Vec::new();
+        for descriptor in descriptors {
+            let receipt = staged
+                .iter()
+                .find(|receipt| &receipt.value_ref == descriptor);
+            if let Some(receipt) = receipt {
+                ids.push(receipt.id);
+            } else if require_every_descriptor {
+                return Err(Error::LargeValueStageExpired);
+            }
+        }
+        Ok(ids)
+    }
+
+    pub(crate) async fn require_staged_large_values_for_versions(
+        &self,
+        versions: &[VersionRecord],
+    ) -> Result<(), Error> {
+        let descriptors = version_indirect_descriptors(versions);
+        self.current_staged_ids_for_descriptors(&descriptors, true)
+            .await
+            .map(|_| ())
+    }
+
+    /// Evict unpublished Groove staging roots older than the configured Jazz
+    /// policy. TTL is maintenance and resource-management policy only; normal
+    /// operations continue any journal or receipt that remains present.
+    pub async fn evict_expired_staged_large_values(&self) -> Result<usize, Error> {
+        let max_age_ms = self.large_value_staging_policy.max_age_ms;
+        let now_ms: u64 = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let mut evicted = 0;
+        for staged in self.database.staged_large_values().await? {
+            if now_ms.saturating_sub(staged.created_at_ms) > max_age_ms
+                && self.database.evict_staged_large_value(staged.id).await?
+            {
+                evicted += 1;
+            }
+        }
+        for upload in self.database.pending_large_value_uploads().await? {
+            if now_ms.saturating_sub(upload.created_at_ms) > max_age_ms
+                && self
+                    .database
+                    .evict_pending_large_value_upload(upload.id)
+                    .await?
+            {
+                evicted += 1;
+            }
+        }
+        Ok(evicted)
+    }
+
+    /// Evict an opaque Groove staging root selected by Jazz policy. All
+    /// persisted mechanics remain in Groove and repeated eviction is harmless.
+    pub async fn evict_staged_large_value(
+        &self,
+        id: groove::large_values::StagedLargeValueId,
+    ) -> Result<bool, Error> {
+        Ok(self.database.evict_staged_large_value(id).await?)
+    }
+
+    pub(crate) async fn stage_large_value_chunk_batch(
+        &self,
+        upload_id: groove::large_values::StagedLargeValueId,
+        kind: groove::large_values::LargeValueKind,
+        chunks: Vec<groove::large_values::StagedChunk>,
+    ) -> Result<(), Error> {
+        let encoded_bytes = chunks.iter().try_fold(0_u64, |total, chunk| {
+            total.checked_add(u64::try_from(chunk.encoded.len()).map_err(|_| {
+                Error::InvalidStoredValue("large-value chunk size exceeds u64")
+            })?)
+            .ok_or(Error::InvalidStoredValue(
+                "large-value chunk batch accounting overflow",
+            ))
+        })?;
+        if !self.admit_large_value_ingress(encoded_bytes) {
+            self.database.evict_staged_large_value(upload_id).await?;
+            return Err(Error::LargeValueIngressRateLimited);
+        }
+        let staged = self
+            .database
+            .stage_large_value_chunk_batch_if_current(
+                upload_id,
+                kind,
+                chunks,
+            )
+            .await?;
+        if !staged {
+            return Err(Error::LargeValueStageExpired);
+        }
+        Ok(())
+    }
+
+    /// Establish the one pending journal that later local stream operations
+    /// must continue. Only this initialization path may create it.
+    pub(crate) async fn begin_streaming_large_value_upload(
+        &self,
+        upload_id: groove::large_values::StagedLargeValueId,
+        kind: groove::large_values::LargeValueKind,
+    ) -> Result<(), Error> {
+        self.database
+            .stage_large_value_chunk_batch(upload_id, kind, Vec::new())
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn evict_pending_large_value_upload(
+        &self,
+        upload_id: groove::large_values::StagedLargeValueId,
+    ) -> Result<(), Error> {
+        self.database
+            .evict_pending_large_value_upload(upload_id)
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn finalize_large_value_upload(
+        &self,
+        upload_id: groove::large_values::StagedLargeValueId,
+        value_ref: groove::large_values::LargeValueRef,
+    ) -> Result<groove::large_values::StagedLargeValue, Error> {
+        // Presence is the semantic boundary: maintenance may evict an old
+        // journal, but wall-clock age alone cannot reject an active upload.
+        let Some(staged) = self
+            .database
+            .finalize_large_value_upload_if_current(
+                upload_id,
+                value_ref,
+            )
+            .await?
+        else {
+            return Err(Error::LargeValueStageExpired);
+        };
+        Ok(staged)
+    }
+
+    /// Test helper exercising the same internally allocated admission path as
+    /// production writes.
+    #[cfg(test)]
+    pub(crate) async fn attach_large_cell_for_test(
+        &self,
+        mut commit: MergeableCommit,
+        column: impl Into<String>,
+        kind: groove::large_values::LargeValueKind,
+        bytes: &[u8],
+    ) -> Result<(MergeableCommit, groove::large_values::LargeValueRef), Error> {
+        let staged = self
+            .database
+            .prepare_and_stage_large_value(kind, bytes)
+            .await?;
+        self.enforce_large_value_staging_policy(&staged).await?;
+        let column = column.into();
+        commit
+            .cells
+            .insert(column.clone(), Value::Large(staged.value_ref.clone()));
+        commit.prepared_large_columns.insert(column);
+        commit.staged_large_values.push(staged.id);
+        Ok((commit, staged.value_ref))
+    }
+
+    /// Consolidate through Groove-owned storage. Jazz receives only the
+    /// publishable descriptor used by its high-level row-write API.
+    pub async fn consolidate_and_stage_large_value(
+        &self,
+        value: groove::large_values::LargeValueRef,
+    ) -> Result<groove::large_values::StagedLargeValue, Error> {
+        let staged = self
+            .database
+            .consolidate_and_stage_large_value(value)
+            .await?;
+        self.enforce_large_value_staging_policy(&staged).await?;
+        Ok(staged)
+    }
+
+    /// Prepare and stage a logical append through Groove's bounded tail and
+    /// localized consolidation path.
+    pub async fn append_and_stage_large_value(
+        &self,
+        value: groove::large_values::LargeValueRef,
+        bytes: Vec<u8>,
+    ) -> Result<groove::large_values::StagedLargeValue, Error> {
+        let staged = self
+            .database
+            .append_and_stage_large_value(value, bytes)
+            .await?;
+        self.enforce_large_value_staging_policy(&staged).await?;
+        Ok(staged)
+    }
+
+    /// Prepare and stage a logical byte-coordinate splice through Groove.
+    pub async fn edit_and_stage_large_value(
+        &self,
+        value: groove::large_values::LargeValueRef,
+        offset: u64,
+        delete_length: u64,
+        insert_bytes: Vec<u8>,
+    ) -> Result<groove::large_values::StagedLargeValue, Error> {
+        let staged = self
+            .database
+            .edit_and_stage_large_value(value, offset, delete_length, insert_bytes)
+            .await?;
+        self.enforce_large_value_staging_policy(&staged).await?;
+        Ok(staged)
+    }
+
+    pub(crate) async fn read_large_value_range(
+        &self,
+        value: &groove::large_values::LargeValueRef,
+        range: std::ops::Range<u64>,
+    ) -> Result<Vec<u8>, Error> {
+        Ok(self.database.read_large_value_range(value, range).await?)
+    }
+
+    pub(crate) async fn read_large_text_utf16_range(
+        &self,
+        value: &groove::large_values::LargeValueRef,
+        range: std::ops::Range<u64>,
+    ) -> Result<String, Error> {
+        Ok(self
+            .database
+            .read_large_text_utf16_range(value, range)
+            .await?)
+    }
+
+    /// Keep UTF-16-to-byte lowering inside Groove. Jazz supplies only a
+    /// page-relative coordinate from the binding descriptor.
+    pub(crate) async fn large_text_utf16_offset_to_byte(
+        &self,
+        value: &groove::large_values::LargeValueRef,
+        offset: u64,
+    ) -> Result<u64, Error> {
+        Ok(self
+            .database
+            .large_text_utf16_offset_to_byte(value, offset)
+            .await?)
+    }
+
+    pub(crate) async fn read_large_json_pointer(
+        &self,
+        value: &groove::large_values::LargeValueRef,
+        pointer: &str,
+    ) -> Result<Option<serde_json::Value>, Error> {
+        Ok(self
+            .database
+            .read_large_json_pointer(value, pointer)
+            .await?)
+    }
+
+    /// Materialize physical indirect scalar arms before returning cells across
+    /// a public transaction read boundary.
+    pub(crate) async fn hydrate_large_value_cells(
+        &self,
+        cells: &mut BTreeMap<String, Value>,
+    ) -> Result<(), Error> {
+        // Transaction cells are application scalars today; their schema is
+        // not carried through this internal helper. Binding records, which may
+        // contain collected nested records, use the descriptor-directed walker
+        // below instead.
+        for value in cells.values_mut() {
+            let target = match value {
+                Value::Nullable(Some(inner)) => inner.as_mut(),
+                value => value,
+            };
+            let Value::Large(value_ref) = target else {
+                continue;
+            };
+            *target = self.materialize_large_value(value_ref).await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn hydrate_current_rows(&self, rows: &mut [CurrentRow]) -> Result<(), Error> {
+        for row in rows {
+            let descriptor = row.record.descriptor().clone();
+            let mut values = row.record.to_values()?;
+            self.hydrate_record_values(&mut values, &descriptor).await?;
+            row.record =
+                std::sync::Arc::new(OwnedRecord::new(descriptor.create(&values)?, descriptor));
+        }
+        Ok(())
+    }
+
+    /// Materialize physical indirect scalars in one encoded record before a
+    /// language binding exposes that record outside Jazz.
+    pub(crate) async fn hydrate_encoded_record(
+        &self,
+        descriptor: &groove::records::RecordDescriptor,
+        raw: &mut Vec<u8>,
+    ) -> Result<(), Error> {
+        let mut values = descriptor.bind(raw).to_values()?;
+        self.hydrate_record_values(&mut values, descriptor).await?;
+        *raw = descriptor.create(&values)?;
+        Ok(())
+    }
+
+    /// Hydrate every physical indirect scalar in a descriptor-owned record.
+    ///
+    /// Values are decoded into a temporary tree and re-encoded only after the
+    /// full walk succeeds. In particular, a retryable missing chunk leaves the
+    /// retained subscription event byte-identical for the next attempt.
+    async fn hydrate_record_values(
+        &self,
+        values: &mut [Value],
+        descriptor: &records::RecordDescriptor,
+    ) -> Result<(), Error> {
+        if values.len() != descriptor.fields().len() {
+            return Err(Error::InvalidStoredValue(
+                "binding record has a descriptor/value arity mismatch",
+            ));
+        }
+        for (value, field) in values.iter_mut().zip(descriptor.fields()) {
+            self.hydrate_value_for_binding(value, &field.value_type).await?;
+        }
+        Ok(())
+    }
+
+    fn hydrate_value_for_binding<'a>(
+        &'a self,
+        value: &'a mut Value,
+        value_type: &'a records::ValueType,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + 'a>> {
+        use records::ValueType;
+
+        Box::pin(async move {
+            match value_type {
+                ValueType::String => match value {
+                    Value::String(_) => Ok(()),
+                    Value::Large(value_ref)
+                        if matches!(
+                            value_ref.kind,
+                            groove::large_values::LargeValueKind::String
+                                | groove::large_values::LargeValueKind::Json
+                        ) => {
+                        *value = self.materialize_large_value(value_ref).await?;
+                        Ok(())
+                    }
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding string value does not match its descriptor",
+                    )),
+                },
+                ValueType::Bytes => match value {
+                    Value::Bytes(_) => Ok(()),
+                    Value::Large(value_ref)
+                        if value_ref.kind == groove::large_values::LargeValueKind::Bytes =>
+                    {
+                        *value = self.materialize_large_value(value_ref).await?;
+                        Ok(())
+                    }
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding bytes value does not match its descriptor",
+                    )),
+                },
+                ValueType::Nullable(inner) => match value {
+                    Value::Nullable(None) => Ok(()),
+                    Value::Nullable(Some(value)) => {
+                        self.hydrate_value_for_binding(value, inner).await
+                    }
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding nullable value does not match its descriptor",
+                    )),
+                },
+                ValueType::Array(element_type) => match value {
+                    Value::Array(values) => {
+                        for value in values {
+                            self.hydrate_value_for_binding(value, element_type).await?;
+                        }
+                        Ok(())
+                    }
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding array value does not match its descriptor",
+                    )),
+                },
+                ValueType::Tuple(member_types) => match value {
+                    Value::Tuple(values) if values.len() == member_types.len() => {
+                        for (value, member_type) in values.iter_mut().zip(member_types) {
+                            self.hydrate_value_for_binding(value, member_type).await?;
+                        }
+                        Ok(())
+                    }
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding tuple value does not match its descriptor",
+                    )),
+                },
+                ValueType::Record(descriptor) => match value {
+                    Value::Record(record) if record.descriptor() == descriptor.as_ref() => {
+                        let mut values = record.to_values()?;
+                        self.hydrate_record_values(&mut values, descriptor).await?;
+                        *record = OwnedRecord::new(descriptor.create(&values)?, **descriptor);
+                        Ok(())
+                    }
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding nested record does not match its descriptor",
+                    )),
+                },
+                ValueType::Enum(schema) => match value {
+                    Value::Enum(enum_value) => {
+                        let tag = enum_value.tag();
+                        let case = schema.case(tag)?;
+                        if enum_value.record().descriptor() != &case.payload {
+                            return Err(Error::InvalidStoredValue(
+                                "binding enum payload does not match its descriptor",
+                            ));
+                        }
+                        let mut values = enum_value.record().to_values()?;
+                        self.hydrate_record_values(&mut values, &case.payload).await?;
+                        *enum_value = records::EnumValue::new(
+                            tag,
+                            OwnedRecord::new(
+                                case.payload.create(&values)?,
+                                case.payload,
+                            ),
+                        );
+                        Ok(())
+                    }
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding enum value does not match its descriptor",
+                    )),
+                },
+                ValueType::U8 if matches!(value, Value::U8(_)) => Ok(()),
+                ValueType::U16 if matches!(value, Value::U16(_)) => Ok(()),
+                ValueType::U32 if matches!(value, Value::U32(_)) => Ok(()),
+                ValueType::U64 if matches!(value, Value::U64(_)) => Ok(()),
+                ValueType::I32 if matches!(value, Value::I32(_)) => Ok(()),
+                ValueType::I64 if matches!(value, Value::I64(_)) => Ok(()),
+                ValueType::Bool if matches!(value, Value::Bool(_)) => Ok(()),
+                ValueType::Uuid if matches!(value, Value::Uuid(_)) => Ok(()),
+                ValueType::F64 => match value {
+                    Value::F64(value) if !value.is_nan() => Ok(()),
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding float value does not match its descriptor",
+                    )),
+                },
+                ValueType::EnumTag(schema) => match value {
+                    Value::EnumTag(value) => schema.variant(*value).map(|_| ()).map_err(Into::into),
+                    Value::String(value) => schema.discriminant(value).map(|_| ()).map_err(Into::into),
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding enum tag value does not match its descriptor",
+                    )),
+                },
+                _ => Err(Error::InvalidStoredValue(
+                    "binding value does not match its descriptor",
+                )),
+            }
+        })
+    }
+
+    async fn materialize_large_value(
+        &self,
+        value_ref: &groove::large_values::LargeValueRef,
+    ) -> Result<Value, Error> {
+        let bytes = self
+            .database
+            .read_large_value_range(value_ref, 0..value_ref.byte_length)
+            .await?;
+        match value_ref.kind {
+            groove::large_values::LargeValueKind::Bytes => Ok(Value::Bytes(bytes)),
+            groove::large_values::LargeValueKind::String
+            | groove::large_values::LargeValueKind::Json => Ok(Value::String(
+                String::from_utf8(bytes)
+                    .map_err(|_| Error::InvalidStoredValue("large text is not valid UTF-8"))?,
+            )),
+        }
+    }
+
     async fn rebuild_database_slot(&mut self) -> Result<(), Error> {
         // Reopening the database refreshes Groove's physical table catalogue.
         // Parking is in-memory delivery state, not derivable from storage, so a
@@ -748,7 +1386,7 @@ database.finish_persistence(persisted)?;
         let parking = self.parking.clone();
         let old_database = self.database.take();
         let storage = old_database.into_storage();
-        let database = Self::open_full_database(
+        let mut database = Self::open_full_database(
             &self.catalogue.schema,
             &self.catalogue.catalogue_schemas,
             &self.catalogue.schema_version_aliases,
@@ -756,6 +1394,14 @@ database.finish_persistence(persisted)?;
             storage,
         )
         .await?;
+        database.set_missing_chunk_resolver(self.chunk_resolver.clone());
+        self.content_runtime_provider = database.owned_chunk_provider();
+        // Existing peer I/O pumps retain clones of this local-only lookup
+        // service. Retarget all of them before dropping the rebuilt facade's
+        // temporary reader, rather than leaving a live browser/socket link on
+        // OrderedChunkStorage's deliberately weak old storage handle.
+        self.local_chunk_reader
+            .refresh_from(&database.local_chunk_reader());
         self.database.replace(database);
         self.register_physical_history_variant_projections().await?;
         self.register_physical_current_variant_projections().await?;
@@ -873,12 +1519,9 @@ database.finish_persistence(persisted)?;
     {
         let current_schema_version_id = schema.version_id();
         let meta_schema = schema.lower_catalogue_meta_to_groove();
-        let mut meta_database = Database::new_with_storage_layout(
-            meta_schema,
-            storage,
-            StorageLayout::jazz_class_v1(),
-        )
-        .await?;
+        let mut meta_database =
+            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v1())
+                .await?;
         let mut catalogue_schemas = BTreeMap::new();
         let mut catalogue_lenses = BTreeMap::new();
         let mut staged_lineages_by_id = BTreeMap::new();
@@ -1195,8 +1838,8 @@ database.finish_persistence(persisted)?;
                     &mapping,
                 )?;
                 let applied = meta_database.apply_batch(batch).await?;
-let persisted = applied.persist().await;
-meta_database.finish_persistence(persisted)?;
+                let persisted = applied.persist().await;
+                meta_database.finish_persistence(persisted)?;
             }
             schema_version_aliases.insert(current_schema_version_id, alias);
             physical_mappings.insert(current_schema_version_id, mapping);
@@ -1267,5 +1910,4 @@ meta_database.finish_persistence(persisted)?;
         })?;
         Ok(())
     }
-
 }

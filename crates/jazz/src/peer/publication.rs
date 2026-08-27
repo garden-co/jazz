@@ -101,7 +101,7 @@ impl PeerState {
     }
 
     /// Construct a peer link that terminates one client author identity.
-    pub fn client_link(identity: AuthorId) -> Self {
+    pub fn client_link(identity: AuthorSubject) -> Self {
         Self {
             role: PeerRole::ClientLink { identity },
             ..Self::default()
@@ -109,7 +109,7 @@ impl PeerState {
     }
 
     /// Construct an edge-boundary peer that terminates one client author identity.
-    pub fn edge_client(identity: AuthorId) -> Self {
+    pub fn edge_client(identity: AuthorSubject) -> Self {
         Self::client_link(identity)
     }
 
@@ -118,8 +118,8 @@ impl PeerState {
     /// Trusted backend websocket links still speak as their concrete peer identity
     /// for session/resume validation, but served reads must bypass row policies.
     pub fn edge_client_with_permission_identity(
-        identity: AuthorId,
-        permission_identity: AuthorId,
+        identity: AuthorSubject,
+        permission_identity: AuthorSubject,
     ) -> Self {
         Self {
             role: PeerRole::ClientLink { identity },
@@ -134,12 +134,12 @@ impl PeerState {
     }
 
     /// Return the wire/session identity for this peer link.
-    pub fn link_identity(&self) -> AuthorId {
+    pub fn link_identity(&self) -> AuthorSubject {
         self.role.identity()
     }
 
     /// Return the identity used to evaluate reads on this peer link.
-    pub fn identity(&self) -> AuthorId {
+    pub fn identity(&self) -> AuthorSubject {
         self.permission_identity
             .unwrap_or_else(|| self.role.identity())
     }
@@ -411,7 +411,7 @@ impl PeerState {
         self.clear_stale_groove_runtime_handles(node, subscription);
         self.ensure_query_subscription_registered(node, subscription, shape, binding)?;
         let Some(state) = self.publication_states.get(&subscription) else {
-            return Ok(Some(SyncMessage::ViewUpdate {
+            return Ok(Some(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription,
                 settled_through: binding_settlement_time(node, subscription, shape, binding),
                 reset_result_set: false,
@@ -423,7 +423,7 @@ impl PeerState {
                 terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
-            }));
+            })));
         };
         if state.maintained_subscription_view.is_some() {
             return self.query_update_maintained_subscription_view(
@@ -510,7 +510,6 @@ impl PeerState {
             result_payload_removes: _,
             program_fact_adds,
             program_fact_removes,
-            structured_app_row_changes: _,
             allow_storage_witness_fallback,
             observed_result_delta_batches,
             requires_authoritative_membership_reconcile,
@@ -572,7 +571,7 @@ impl PeerState {
             &program_fact_adds,
             &program_fact_removes,
         ) {
-            return Ok(Some(SyncMessage::ViewUpdate {
+            return Ok(Some(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription,
                 settled_through: binding_settlement_time(node, subscription, shape, binding),
                 reset_result_set: false,
@@ -584,7 +583,7 @@ impl PeerState {
                 terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
-            }));
+            })));
         }
         let previous_result_tx_ids = previous_member_result_set
             .iter()
@@ -641,10 +640,10 @@ impl PeerState {
             )
         };
         let mut update = update.await?;
-        if let SyncMessage::ViewUpdate {
+        if let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             terminal_operations: outgoing,
             ..
-        } = &mut update
+        }) = &mut update
         {
             *outgoing = terminal_operations;
         }
@@ -652,11 +651,11 @@ impl PeerState {
         let bundle_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
         if trace_rehydrate {
             let bundle_count = match &update {
-                SyncMessage::ViewUpdate {
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     version_carriers,
                     version_bundles,
                     ..
-                } => view_update_singleton_bundles(version_carriers, version_bundles).len(),
+                }) => view_update_singleton_bundles(version_carriers, version_bundles).len(),
                 _ => 0,
             };
             let drain_reads = drain_reads.expect("trace reads captured");
@@ -837,7 +836,6 @@ impl PeerState {
             result_payload_removes: Vec::new(),
             program_fact_adds,
             program_fact_removes,
-            structured_app_row_changes: BTreeSet::new(),
             allow_storage_witness_fallback,
             observed_result_delta_batches,
             requires_authoritative_membership_reconcile,
@@ -890,13 +888,13 @@ impl PeerState {
                 )
                 .await,
         };
-        let (receiver, maintained, terminal_schemas, transitions, tables, initial_received) =
+        let (receiver, mut maintained, terminal_schemas, transitions, tables, initial_received) =
             match opened {
             Ok(opened) => opened,
             Err(Error::AuthorizationSupportMissingClaim(_))
                 if purpose == RehydratePurpose::AuthorizationSupport =>
             {
-                let update = SyncMessage::ViewUpdate {
+                let update = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
                     settled_through: binding_settlement_time(node, subscription, shape, binding),
                     reset_result_set,
@@ -908,7 +906,7 @@ impl PeerState {
                     terminal_operations: Vec::new(),
                     program_fact_adds: Vec::new(),
                     program_fact_removes: Vec::new(),
-                };
+                });
                 self.record_outgoing_view_update(&update);
                 self.publication_states
                     .entry(subscription)
@@ -918,6 +916,11 @@ impl PeerState {
             }
             Err(error) => return Err(error),
             };
+        let retains_structured_terminal = !shape.query().array_subqueries.is_empty()
+            || !shape.query().order_by.is_empty();
+        if !retains_structured_terminal {
+            maintained.discard_structured_app_rows();
+        }
         if !initial_received {
             let maintained_subscription = MaintainedSubscriptionViewSubscription {
                 subscription: receiver,
@@ -1091,11 +1094,11 @@ impl PeerState {
         }
         if trace_rehydrate {
             let bundle_count = match &update {
-                SyncMessage::ViewUpdate {
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     version_carriers,
                     version_bundles,
                     ..
-                } => view_update_singleton_bundles(version_carriers, version_bundles).len(),
+                }) => view_update_singleton_bundles(version_carriers, version_bundles).len(),
                 _ => 0,
             };
             let open_reads = open_reads.expect("trace reads captured");
@@ -1304,9 +1307,15 @@ impl PeerState {
         .await
     }
 
-    pub(crate) async fn rehydrate_authorization_support_query<S>(
+    /// Hydrate an authority-owned authorization proof using its admitted
+    /// permission subject. A trusted backend link normally serves ordinary
+    /// reads as SYSTEM, but that bypass must not leak into a proof of a
+    /// particular session's policy clauses.
+    pub(crate) async fn rehydrate_authorization_support_query_for_identity<S>(
         &mut self,
         node: &mut NodeState<S>,
+        identity: AuthorSubject,
+        subscription: SubscriptionKey,
         shape: &ValidatedQuery,
         binding: &Binding,
         opts: RegisterShapeOptions,
@@ -1314,23 +1323,28 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        let subscription = SubscriptionKey {
-            shape_id: shape.shape_id(),
-            binding_id: binding.binding_id(),
-            read_view: opts.read_view_key(),
-        };
-        self.rehydrate_query_for_subscription_with_purpose(
-            node,
-            subscription,
-            shape,
-            binding,
-            opts,
-            RehydratePurpose::AuthorizationSupport,
-        )
-        .await?
-        .ok_or(Error::InvalidStoredValue(
-            "authorization hydration suspended outside an owner-loop subscription",
-        ))
+        let previous_role = self.role;
+        let previous_permission_identity = self.permission_identity;
+        self.role = PeerRole::ClientLink { identity };
+        self.permission_identity = Some(identity);
+        let update = self
+            .rehydrate_query_for_subscription_with_purpose(
+                node,
+                subscription,
+                shape,
+                binding,
+                opts,
+                RehydratePurpose::AuthorizationSupport,
+            )
+            .await
+            .and_then(|update| {
+                update.ok_or(Error::InvalidStoredValue(
+                    "authorization hydration suspended outside an owner-loop subscription",
+                ))
+            });
+        self.role = previous_role;
+        self.permission_identity = previous_permission_identity;
+        update
     }
 
     /// Build a usage-site update from an already-maintained canonical subscription.
@@ -1369,7 +1383,6 @@ impl PeerState {
             result_payload_removes: _,
             program_fact_adds: source_program_fact_adds,
             program_fact_removes: source_program_fact_removes,
-            structured_app_row_changes: _,
             allow_storage_witness_fallback: source_allow_storage_witness_fallback,
             observed_result_delta_batches: _,
             requires_authoritative_membership_reconcile: _,
@@ -1403,7 +1416,7 @@ impl PeerState {
             || !source_program_fact_adds.is_empty()
             || !source_program_fact_removes.is_empty()
         {
-            self.apply_outgoing_view_update_result_set(&SyncMessage::ViewUpdate {
+            self.apply_outgoing_view_update_result_set(&SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription: maintained_subscription,
                 settled_through: canonical_subscription_settlement_time(
                     node,
@@ -1418,7 +1431,7 @@ impl PeerState {
                 terminal_operations: source_terminal_operations,
                 program_fact_adds: source_program_fact_adds,
                 program_fact_removes: source_program_fact_removes,
-            });
+            }));
         }
         let canonical_state = self
             .publication_states

@@ -1,8 +1,9 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use jazz::ids::{AuthorSubject, AuthorSubjectError};
 use jazz::serving::auth_admission::{
     AdmissionSource, AuthAdmissionConfig, AuthAdmissionError, AuthHandshake, JwtVerifierConfig,
-    LOCAL_FIRST_JWT_ISSUER, admit_local_first_jwt, admit_static_bearer,
+    LOCAL_FIRST_JWT_ISSUER, admit_bearer_jwt, admit_local_first_jwt, admit_static_bearer,
     admit_static_bearer_with_claims,
 };
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
@@ -154,6 +155,25 @@ fn local_first_jwt_wrong_issuer_rejects() {
 }
 
 #[test]
+fn external_jwt_rejects_every_jazz_reserved_issuer_with_typed_error() {
+    let config = local_first_config(false);
+    for issuer in [
+        AuthorSubject::SYSTEM_ISSUER,
+        AuthorSubject::LOCAL_FIRST_ISSUER,
+        AuthorSubject::STATIC_BEARER_ISSUER,
+        AuthorSubject::ANONYMOUS_ISSUER,
+    ] {
+        let token = local_first_token("alice", expires_in(60), Some(issuer), None, None);
+        assert_eq!(
+            admit_bearer_jwt(&config, Some(&token), AdmissionSource::AuthorizationHeader),
+            Err(AuthAdmissionError::InvalidAuthorSubject(
+                AuthorSubjectError::ReservedIssuer(issuer.to_owned())
+            ))
+        );
+    }
+}
+
+#[test]
 fn local_first_jwt_same_subject_maps_same_author() {
     let config = local_first_config(true);
     let first = local_first_token(
@@ -229,8 +249,8 @@ fn subject_admission_rejects_blank_but_preserves_opaque_spelling() {
     let admitted = admit_local_first_jwt(&config, Some(&token)).unwrap();
     assert_eq!(admitted.subject, exact);
     assert_eq!(
-        admitted.author,
-        jazz::serving::auth_admission::author_id_from_subject(exact)
+        admitted.author.canonical(),
+        serde_json::to_string(&(LOCAL_FIRST_JWT_ISSUER, exact)).unwrap()
     );
 
     let static_admitted = admit_static_bearer(
@@ -241,7 +261,12 @@ fn subject_admission_rejects_blank_but_preserves_opaque_spelling() {
     )
     .unwrap();
     assert_eq!(static_admitted.subject, exact);
-    assert_eq!(static_admitted.author, admitted.author);
+    assert_ne!(static_admitted.author, admitted.author);
+    assert_eq!(
+        static_admitted.author.canonical(),
+        serde_json::to_string(&(jazz::serving::auth_admission::STATIC_BEARER_ISSUER, exact))
+            .unwrap()
+    );
 }
 
 #[test]
@@ -273,8 +298,9 @@ fn static_bearer_claim_admission_rejects_ascii_blank_and_preserves_exact_subject
     .unwrap();
     assert_eq!(admitted.subject, exact);
     assert_eq!(
-        admitted.author,
-        jazz::serving::auth_admission::author_id_from_subject(exact)
+        admitted.author.canonical(),
+        serde_json::to_string(&(jazz::serving::auth_admission::STATIC_BEARER_ISSUER, exact))
+            .unwrap()
     );
 }
 

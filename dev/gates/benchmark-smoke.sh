@@ -9,19 +9,41 @@ usage() {
 Usage:
   dev/gates/benchmark-smoke.sh <jazz|jazz-sim> <bench>
   dev/gates/benchmark-smoke.sh --ci
+  dev/gates/benchmark-smoke.sh --compile-ci
 
 The local form performs one debug-profile `cargo check` only. It never runs
 `cargo bench`, never writes a timing ledger, and does not request release
-RocksDB artifacts. `--ci` checks all maintained benchmark APIs and executes
-the deterministic jazz-sim scenario assertions.
+RocksDB artifacts. `--ci` executes deterministic correctness assertions on
+ordinary PR CI. `--compile-ci` checks all maintained benchmark APIs on the
+realistic benchmark workflow, where compile/performance coverage already lives.
 EOF
 }
 
+run_phase() {
+  local phase="$1"
+  shift
+  local started_seconds=$SECONDS
+  local status=0
+  if "$@"; then
+    status=0
+  else
+    status=$?
+  fi
+  printf 'benchmark-smoke phase=%s duration_seconds=%s status=%s\n' \
+    "$phase" "$((SECONDS - started_seconds))" "$status"
+  return "$status"
+}
+
 if [[ "${1:-}" == "--ci" && $# == 1 ]]; then
-  cargo check -p jazz --benches --features testing
-  cargo check -p jazz-sim --benches
-  cargo test -p jazz --features testing --test legacy_benchmark_smoke
-  cargo test -p jazz-sim --test scenario_smoke
+  run_phase legacy-benchmark-correctness \
+    cargo test -p jazz --features testing --test legacy_benchmark_smoke
+  run_phase jazz-sim-scenario-correctness cargo test -p jazz-sim --test scenario_smoke
+  exit 0
+fi
+
+if [[ "${1:-}" == "--compile-ci" && $# == 1 ]]; then
+  run_phase jazz-benchmark-api cargo check -p jazz --benches --features testing
+  run_phase jazz-sim-benchmark-api cargo check -p jazz-sim --benches
   exit 0
 fi
 

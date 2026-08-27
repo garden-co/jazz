@@ -1,0 +1,27 @@
+import { schema as s } from "jazz-tools";
+import { schema as betterAuthSchema } from "./schema-better-auth/schema";
+
+const schema = {
+  ...betterAuthSchema,
+  profiles: s.table({ author: s.string(), displayName: s.string() }),
+  rooms: s.table({ name: s.string() }),
+  roomMembers: s.table({ roomId: s.ref("rooms"), memberAuthor: s.string() }),
+  messages: s.table({
+    roomId: s.ref("rooms"),
+    senderId: s.ref("profiles"),
+    text: s.string(),
+    attachment: s.bytes().optional(),
+    attachmentName: s.string().optional(),
+  }),
+  reactions: s.table({
+    roomId: s.ref("rooms"),
+    messageId: s.ref("messages"),
+    author: s.string(),
+    emoji: s.string(),
+  }),
+};
+
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);
+export type Room = s.RowOf<typeof app.rooms>;
+export type Reaction = s.RowOf<typeof app.reactions>;

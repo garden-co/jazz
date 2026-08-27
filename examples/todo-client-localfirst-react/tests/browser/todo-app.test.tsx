@@ -47,7 +47,11 @@ function hasTodoTitle(el: HTMLDivElement, title: string): boolean {
 // ---------------------------------------------------------------------------
 
 describe("React Todo App E2E", () => {
-  const mounts: Array<{ root: Root; container: HTMLDivElement }> = [];
+  const mounts: Array<{
+    root: Root;
+    container: HTMLDivElement;
+    storageNamespace: string | undefined;
+  }> = [];
 
   /** Mount the real App. Returns the container element. */
   async function mountApp(
@@ -62,18 +66,17 @@ describe("React Todo App E2E", () => {
     const el = document.createElement("div");
     document.body.appendChild(el);
     const r = createRoot(el);
-    mounts.push({ root: r, container: el });
+    const resolvedConfig = {
+      appId: config.appId ?? "test-app",
+      driver: { type: "persistent" as const, dbName: crypto.randomUUID() },
+      ...config,
+    };
+    const storageNamespace =
+      resolvedConfig.driver?.type === "persistent" ? resolvedConfig.driver.dbName : undefined;
+    mounts.push({ root: r, container: el, storageNamespace });
 
     await act(async () => {
-      r.render(
-        <App
-          config={{
-            appId: config.appId ?? "test-app",
-            driver: { type: "persistent", dbName: crypto.randomUUID() },
-            ...config,
-          }}
-        />,
-      );
+      r.render(<App config={resolvedConfig} />);
     });
 
     // Wait for JazzProvider to initialize and TodoList to render
@@ -90,26 +93,27 @@ describe("React Todo App E2E", () => {
   async function unmountApp(el: HTMLDivElement): Promise<void> {
     const idx = mounts.findIndex((m) => m.container === el);
     if (idx === -1) return;
-    const { root } = mounts[idx];
+    const { root, storageNamespace } = mounts[idx];
     await act(async () => root.unmount());
     el.remove();
     mounts.splice(idx, 1);
-    // Give IndexedDB handles time to release
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 200));
-    });
+
+    if (storageNamespace) {
+      const storage = window.__jazz;
+      if (!storage) throw new Error("Jazz browser storage controls are unavailable");
+      await storage.shutdown(storageNamespace);
+      await waitFor(
+        () => !storage.listLiveStorageNamespaces().includes(storageNamespace),
+        5000,
+        "Unmounted Jazz storage should finish releasing",
+      );
+    }
   }
 
   afterEach(async () => {
-    for (const { root, container } of mounts) {
-      try {
-        await act(async () => root.unmount());
-      } catch {
-        /* best effort */
-      }
-      container.remove();
+    while (mounts.length > 0) {
+      await unmountApp(mounts[0].container);
     }
-    mounts.length = 0;
   });
 
   // -------------------------------------------------------------------------

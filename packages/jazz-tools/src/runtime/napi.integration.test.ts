@@ -7,6 +7,7 @@ import { WebSocket as UndiciWebSocket } from "undici";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
 import { type BatchId, type Row } from "./client.js";
+import type { Session } from "./context.js";
 import type { Db, QueryBuilder, TableProxy } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
 import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
@@ -71,6 +72,10 @@ type PolicyTodo = {
   parentId?: string;
   projectId?: string;
   owner_id: string;
+};
+
+type PolicyTodoWithProvenance = PolicyTodo & {
+  $createdBy: string;
 };
 
 type PolicyTodoInit = {
@@ -238,6 +243,27 @@ function makePolicyTodoByIdQuery(schema: WasmSchema, id: string): QueryBuilder<P
         includes: {},
         orderBy: [],
         offset: 0,
+      });
+    },
+  };
+}
+
+function makePolicyTodoProvenanceByIdQuery(
+  schema: WasmSchema,
+  id: string,
+): QueryBuilder<PolicyTodoWithProvenance> {
+  return {
+    _table: "todos",
+    _schema: schema,
+    _rowType: undefined as unknown as PolicyTodoWithProvenance,
+    _build() {
+      return JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "id", op: "eq", value: id }],
+        includes: {},
+        orderBy: [],
+        offset: 0,
+        select: ["*", "$createdBy"],
       });
     },
   };
@@ -503,7 +529,7 @@ describe("NAPI integration", () => {
     });
     let context: {
       asBackend(): Db;
-      forSession(session: { user_id: string; claims: Record<string, unknown> }): Db;
+      forSession(session: Session): Db;
       forRequest(request: Request): Promise<Db>;
       shutdown(): Promise<void>;
     } | null = null;
@@ -536,9 +562,26 @@ describe("NAPI integration", () => {
 
       const backendDb = context.asBackend();
       const aliceDb = context.forSession({
+        issuer: "https://issuer.example",
         user_id: "alice",
         claims: { role: "editor", team: "alpha" },
+        authMode: "external",
       });
+      const aliceAuthor = JSON.stringify(["https://issuer.example", "alice"]);
+      const systemAuthor = JSON.stringify(["urn:jazz:system", "system"]);
+
+      const backendCreatedTodo = await withTimeout(
+        backendDb
+          .insert(policyTodosTable, {
+            title: "backend-system-provenance",
+            done: false,
+            description: "created via asBackend",
+            owner_id: "backend-owner",
+          })
+          .wait({ tier: "edge" }),
+        10_000,
+        "backend insert timed out",
+      );
 
       const createdTodo = await withTimeout(
         aliceDb
@@ -546,11 +589,38 @@ describe("NAPI integration", () => {
             title: "session-created-item",
             done: false,
             description: "created via forSession",
-            owner_id: "alice",
+            owner_id: aliceAuthor,
           })
           .wait({ tier: "edge" }),
         10_000,
         "session insert timed out",
+      );
+
+      await vi.waitFor(
+        async () => {
+          const backendRow = await withTimeout(
+            backendDb.one(
+              makePolicyTodoProvenanceByIdQuery(todoServerSchema, backendCreatedTodo.id),
+              { tier: "edge" },
+            ),
+            10_000,
+            "backend provenance read timed out",
+          );
+          expect(backendRow).toMatchObject({
+            id: backendCreatedTodo.id,
+            $createdBy: systemAuthor,
+          });
+          const sessionRow = await withTimeout(
+            backendDb.one(makePolicyTodoProvenanceByIdQuery(todoServerSchema, createdTodo.id), {
+              tier: "edge",
+            }),
+            10_000,
+            "session provenance read timed out",
+          );
+          expect(sessionRow).toMatchObject({ id: createdTodo.id, $createdBy: aliceAuthor });
+          expect(sessionRow?.$createdBy).not.toBe(systemAuthor);
+        },
+        { timeout: 20_000 },
       );
 
       await vi.waitFor(
@@ -567,7 +637,7 @@ describe("NAPI integration", () => {
             id: createdTodo.id,
             title: "session-created-item",
             done: false,
-            owner_id: "alice",
+            owner_id: aliceAuthor,
           });
         },
         { timeout: 20_000 },
@@ -579,7 +649,7 @@ describe("NAPI integration", () => {
             title: "session-policy-denied",
             done: false,
             description: "",
-            owner_id: "bob",
+            owner_id: JSON.stringify(["https://issuer.example", "bob"]),
           })
           .wait({ tier: "edge" }),
       ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
@@ -870,7 +940,7 @@ describe("NAPI integration", () => {
     });
     let context: {
       asBackend(): Db;
-      forSession(session: { user_id: string; claims: Record<string, unknown> }): Db;
+      forSession(session: Session): Db;
       forRequest(request: Request): Promise<Db>;
       shutdown(): Promise<void>;
     } | null = null;
@@ -1304,7 +1374,7 @@ describe("NAPI integration", () => {
 
           export default s.definePermissions(app, ({ policy, allowedTo, session }) => {
             const directlyReachableTeams = policy.team_entry
-              .where({ team_id: session.user_id })
+              .where({ team_id: session.user })
               .hopTo("target");
             const memberReachableTeams = directlyReachableTeams.gather({
               step: ({ current }) =>
@@ -1376,7 +1446,7 @@ describe("NAPI integration", () => {
     });
     let context: {
       asBackend(): Db;
-      forSession(session: { user_id: string; claims: Record<string, unknown> }): Db;
+      forSession(session: Session): Db;
       shutdown(): Promise<void>;
     } | null = null;
 
@@ -1407,16 +1477,19 @@ describe("NAPI integration", () => {
       await settleAsyncSyncWork();
 
       const aliceDb = context.forSession({
+        issuer: "https://issuer.example",
         user_id: "alice",
         claims: { role: "editor", team: "alpha" },
+        authMode: "external",
       });
+      const aliceAuthor = JSON.stringify(["https://issuer.example", "alice"]);
 
       const createdTodo = await aliceDb
         .insert(policyTodosTable, {
           title: "nullable-description-repro",
           done: false,
           description: "server-original",
-          owner_id: "alice",
+          owner_id: aliceAuthor,
         })
         .wait({ tier: "edge" });
 

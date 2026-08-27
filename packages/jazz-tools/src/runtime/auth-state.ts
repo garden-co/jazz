@@ -1,4 +1,4 @@
-import type { AuthMode, Session } from "./context.js";
+import type { AuthMode, PublicSession, Session } from "./context.js";
 import { resolveClientSessionStateSync, type ClientSessionInput } from "./client-session.js";
 
 export type AuthFailureReason = "expired" | "missing" | "invalid" | "disabled";
@@ -13,7 +13,7 @@ export function mapAuthReason(reason: string): AuthFailureReason {
 
 export interface AuthState {
   authMode: AuthMode;
-  session: Session | null;
+  session: PublicSession | null;
   error?: AuthFailureReason;
 }
 
@@ -30,7 +30,9 @@ function authStateEquals(a: AuthState, b: AuthState): boolean {
   const bs = b.session;
   if (as === bs) return true;
   if (!as || !bs) return false;
-  if (as.user_id !== bs.user_id || as.authMode !== bs.authMode) return false;
+  if (as.user !== bs.user || as.authMode !== bs.authMode) {
+    return false;
+  }
   return JSON.stringify(as.claims) === JSON.stringify(bs.claims);
 }
 
@@ -90,7 +92,7 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
       return state;
     },
 
-    applyJwtToken(jwtToken?: string): AuthState {
+    applyJwtToken(jwtToken?: string, trustedReservedSession?: Session): AuthState {
       if (options?.lockAuthenticatedState) {
         return state;
       }
@@ -99,11 +101,12 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
         appId: input.appId,
         jwtToken,
         cookieSession: input.cookieSession,
+        trustedReservedSession,
       });
 
-      const currentUserId = state.session?.user_id ?? null;
-      const nextUserId = resolved.session?.user_id ?? null;
-      if (currentUserId !== nextUserId) {
+      const currentAuthor = state.session?.user ?? null;
+      const nextAuthor = resolved.session?.user ?? null;
+      if (JSON.stringify(currentAuthor) !== JSON.stringify(nextAuthor)) {
         throw new Error(
           "Changing auth principal on a live client is not supported. Recreate the Db.",
         );
@@ -130,9 +133,9 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
         cookieSession,
       });
 
-      const currentUserId = state.session?.user_id ?? null;
-      const nextUserId = resolved.session?.user_id ?? null;
-      if (currentUserId !== nextUserId) {
+      const currentAuthor = state.session?.user ?? null;
+      const nextAuthor = resolved.session?.user ?? null;
+      if (JSON.stringify(currentAuthor) !== JSON.stringify(nextAuthor)) {
         throw new Error(
           "Changing auth principal on a live client is not supported. Recreate the Db.",
         );

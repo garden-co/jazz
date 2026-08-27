@@ -20,7 +20,7 @@ fn catalogue_schema_publish_replicates_and_is_idempotent() {
         }],
     );
     let publish = SyncMessage::PublishSchemaWithLens {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         catalogue_seq: 1,
         publication: Box::new(SchemaLineagePublication::new(
             payload.clone(),
@@ -104,7 +104,7 @@ fn catalogue_lens_publish_validates_admin_id_and_known_endpoints() {
         Vec::new(),
     );
     let unknown_result = core.apply_trusted_catalogue_message_settled(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         lens: unknown,
     });
     assert!(matches!(
@@ -114,7 +114,7 @@ fn catalogue_lens_publish_validates_admin_id_and_known_endpoints() {
 
     let ack = core
         .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(publication),
         })
@@ -257,9 +257,9 @@ fn catalogue_arrival_rejects_incomplete_row_claiming_evolved_schema() {
                 version.row_uuid(),
                 version.parents(),
                 version.created_by(),
-                version.created_at(),
+                version.created_at_ms(),
                 version.updated_by(),
-                version.updated_at(),
+                version.updated_at_ms(),
                 &version_record_cells(&version, &base.tables[0]),
                 version.deletion(),
             )
@@ -337,9 +337,9 @@ fn catalogue_arrival_drops_incomplete_relay_row_without_failing_publication() {
                 version.row_uuid(),
                 version.parents(),
                 version.created_by(),
-                version.created_at(),
+                version.created_at_ms(),
                 version.updated_by(),
-                version.updated_at(),
+                version.updated_at_ms(),
                 &version_record_cells(&version, &base.tables[0]),
                 version.deletion(),
             )
@@ -385,9 +385,9 @@ fn zero_column_version_claiming_schema(
         version.row_uuid(),
         version.parents(),
         version.created_by(),
-        version.created_at(),
+        version.created_at_ms(),
         version.updated_by(),
-        version.updated_at(),
+        version.updated_at_ms(),
         &BTreeMap::<String, Value>::new(),
         version.deletion(),
     )
@@ -412,7 +412,7 @@ fn batched_view_update_rejects_incomplete_authored_row_before_storage() {
     assert_eq!(bundles.len(), 1);
     let version = bundles[0].versions[0].clone();
     bundles[0].versions = vec![zero_column_version_claiming_schema(&base, &version)];
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
         reset_result_set,
@@ -423,7 +423,7 @@ fn batched_view_update_rejects_incomplete_authored_row_before_storage() {
         program_fact_adds,
         program_fact_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -473,7 +473,7 @@ fn view_update_rejects_incomplete_authored_row_before_storage() {
     let mut bundles = version_bundles_for_update(&update);
     let version = bundles[0].versions[0].clone();
     bundles[0].versions = vec![zero_column_version_claiming_schema(&base, &version)];
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
         reset_result_set,
@@ -484,14 +484,14 @@ fn view_update_rejects_incomplete_authored_row_before_storage() {
         program_fact_adds,
         program_fact_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
 
     let (_reader_dir, mut reader) = open_node_with_schema(node(0x6f), base);
     assert!(matches!(
-        reader.apply_sync_message_settled(SyncMessage::ViewUpdate {
+        reader.apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through,
             reset_result_set,
@@ -503,7 +503,7 @@ fn view_update_rejects_incomplete_authored_row_before_storage() {
             terminal_operations,
             program_fact_adds,
             program_fact_removes,
-        }),
+        })),
         Err(Error::MalformedViewUpdate(
             "row version does not carry the complete descriptor of its authored schema"
         ))
@@ -562,7 +562,7 @@ fn reset_view_update_rejection_does_not_leave_initial_sync_flush_active() {
     let mut bundles = version_bundles_for_update(&update);
     let version = bundles[0].versions[0].clone();
     bundles[0].versions = vec![zero_column_version_claiming_schema(&base, &version)];
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
         peer_payload_inventory,
@@ -572,7 +572,7 @@ fn reset_view_update_rejection_does_not_leave_initial_sync_flush_active() {
         program_fact_adds,
         program_fact_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -631,7 +631,7 @@ fn batched_view_update_rejection_is_atomic_across_valid_and_malformed_bundles() 
     let malformed = bundles[1].versions[0].clone();
     bundles[1].versions = vec![zero_column_version_claiming_schema(&base, &malformed)];
     let valid_tx_id = bundles[0].tx.tx_id;
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
         peer_payload_inventory,
@@ -641,7 +641,7 @@ fn batched_view_update_rejection_is_atomic_across_valid_and_malformed_bundles() 
         program_fact_adds,
         program_fact_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };

@@ -7,7 +7,7 @@ use std::time::Duration;
 use jazz::db::block_on;
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::protocol::{
     CurrentWriteSchema, LensOp, MigrationLens, SchemaLineagePublication, SchemaVersion,
@@ -22,8 +22,8 @@ use jazz::tx::{DurabilityTier, Fate, RejectionReason};
 use jazz_server::JazzServer;
 use support::{publish_allow_all_permissions, push_catalogue_in_memory, wait_for_edge_query_ready};
 
-fn author(byte: u8) -> AuthorId {
-    AuthorId::from_bytes([byte; 16])
+fn author(byte: u8) -> AuthorSubject {
+    AuthorSubject::for_test_bytes([byte; 16])
 }
 
 fn node(byte: u8) -> NodeUuid {
@@ -40,7 +40,7 @@ fn v1_schema() -> JazzSchema {
             TableSchemaBuilder::new("users")
                 .column("id", ColumnType::Uuid)
                 .column("email", ColumnType::Text)
-                .column("owner", ColumnType::Uuid)
+                .column("owner", ColumnType::Text)
                 .policies(owner_write_policies(PolicyExpr::True)),
         ),
     )
@@ -53,7 +53,7 @@ fn v2_schema() -> JazzSchema {
             TableSchemaBuilder::new("people")
                 .column("id", ColumnType::Uuid)
                 .column("email", ColumnType::Text)
-                .column("owner", ColumnType::Uuid)
+                .column("owner", ColumnType::Text)
                 .policies(
                     TablePolicies::new()
                         .with_select(PolicyExpr::True)
@@ -70,7 +70,11 @@ fn compile_public_schema(builder: SchemaBuilder) -> JazzSchema {
 }
 
 fn owner_policy() -> PolicyExpr {
-    PolicyExpr::eq_session("owner", vec!["claims".to_owned(), "sub".to_owned()])
+    PolicyExpr::eq_session("owner", vec!["user".to_owned()])
+}
+
+fn install_claims(node: &mut NodeState<MemoryStorage>, author: AuthorSubject) {
+    node.admit_test_session_claims(author, BTreeMap::new());
 }
 
 fn owner_write_policies(select: PolicyExpr) -> TablePolicies {
@@ -104,11 +108,14 @@ fn rename_lens(v1: &SchemaVersion, v2: &SchemaVersion) -> MigrationLens {
     )
 }
 
-fn cells(id: RowUuid, email: &str, owner: AuthorId) -> BTreeMap<String, Value> {
+fn cells(id: RowUuid, email: &str, owner: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("id".to_string(), Value::Uuid(id.0)),
         ("email".to_string(), Value::String(email.to_string())),
-        ("owner".to_string(), Value::Uuid(owner.0)),
+        (
+            "owner".to_string(),
+            Value::String(owner.canonical().to_owned()),
+        ),
     ])
 }
 
@@ -167,6 +174,8 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
 
     let mut authority = open_node(node(0x90), v1.schema.clone());
     let mut writer_v1 = open_node(node(0x10), v1.schema.clone());
+    install_claims(&mut authority, alice);
+    install_claims(&mut writer_v1, alice);
     let user_row = row(0x77);
 
     let (insert_tx, insert_unit) = block_on(async {
@@ -213,7 +222,7 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
     block_on(async {
         let outcome = authority
             .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
-                author: AuthorId::SYSTEM,
+                author: AuthorSubject::SYSTEM,
                 catalogue_seq,
                 publication: Box::new(SchemaLineagePublication::new(
                     v2.clone(),
@@ -229,7 +238,7 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
     block_on(async {
         let outcome = authority
             .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
-                author: AuthorId::SYSTEM,
+                author: AuthorSubject::SYSTEM,
                 pointer: CurrentWriteSchema {
                     revision: 1,
                     schema: v2.id,
@@ -242,6 +251,8 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
 
     let mallory = author(0xa2);
     let mut non_owner_writer_v2 = open_node(node(0x11), v2.schema.clone());
+    install_claims(&mut authority, mallory);
+    install_claims(&mut non_owner_writer_v2, mallory);
     let (_rejected_tx, rejected_unit) = block_on(async {
         let (published, unit) = non_owner_writer_v2
             .commit_mergeable_unit(
@@ -284,6 +295,7 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
     }));
 
     let mut writer_v2 = open_node(node(0x10), v2.schema.clone());
+    install_claims(&mut writer_v2, alice);
     let (_update_tx, update_unit) = block_on(async {
         let (published, unit) = writer_v2
             .commit_mergeable_unit(

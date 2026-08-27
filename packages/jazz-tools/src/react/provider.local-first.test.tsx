@@ -3,7 +3,7 @@ import { indexedDB as fakeIndexedDb } from "fake-indexeddb";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuthState } from "../runtime/auth-state.js";
 import { BrowserAuthSecretStore } from "../runtime/auth-secret-store.js";
-import type { Session } from "../runtime/context.js";
+import type { PublicSession, Session } from "../runtime/context.js";
 
 const mock = vi.hoisted(() => ({
   createJazzClient: vi.fn(),
@@ -20,6 +20,12 @@ const SECRET = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const SESSION: Session = {
   user_id: "local-user",
   claims: {},
+  issuer: "urn:jazz:local-first",
+  authMode: "local-first",
+};
+const PUBLIC_SESSION: PublicSession = {
+  user: '["urn:jazz:local-first","local-user"]',
+  claims: { iss: SESSION.issuer, sub: SESSION.user_id },
   authMode: "local-first",
 };
 
@@ -65,14 +71,14 @@ function makeLockManager() {
 }
 
 function makeClient() {
-  const state: AuthState = { authMode: "local-first", session: SESSION };
+  const state: AuthState = { authMode: "local-first", session: PUBLIC_SESSION };
   return {
     db: {
       getAuthState: () => state,
       onAuthChanged: () => () => {},
       updateAuthToken: () => {},
     },
-    session: SESSION,
+    session: PUBLIC_SESSION,
     shutdown: async () => {},
   };
 }
@@ -92,11 +98,12 @@ function IdentityProbe({
   return (
     <output
       data-testid={`identity-${appId ?? "default"}`}
-      data-db-user={db.getAuthState().session?.user_id}
+      data-session-user={session?.user ?? ""}
+      data-db-user={db.getAuthState().session?.user}
       data-scoped-secret={scopedSecret ?? ""}
       data-secret={secret ?? ""}
     >
-      {secret}:{scopedSecret}:{session?.user_id}
+      {secret}:{scopedSecret}:{session?.user}
       {replacementSecret ? (
         <button onClick={() => void login(replacementSecret)} type="button">
           Replace identity
@@ -152,7 +159,8 @@ describe("JazzProvider local-first auth", () => {
       const identity = view.getByTestId("identity-react-local-first");
       expect(identity.dataset.secret).toBe(SECRET);
       expect(identity.dataset.scopedSecret).toBe(SECRET);
-      expect(identity.dataset.dbUser).toBe(SESSION.user_id);
+      expect(identity.dataset.dbUser).toBe(PUBLIC_SESSION.user);
+      expect(identity.dataset.sessionUser).toBe('["urn:jazz:local-first","local-user"]');
     });
 
     expect(mock.createJazzClient).toHaveBeenCalledWith(expect.objectContaining({ secret: SECRET }));

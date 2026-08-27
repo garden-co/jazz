@@ -194,6 +194,12 @@ pub enum QueryError {
         /// Column name.
         column: String,
     },
+    /// Portable author identities deliberately have no public ordering.
+    #[error("ordering by author provenance column {column} is unsupported")]
+    UnsupportedAuthorOrdering {
+        /// Author provenance column named as an ordering key.
+        column: String,
+    },
 }
 
 fn validate_query(query: &Query, schema: &RuntimeSchema) -> Result<ValidatedQuery, QueryError> {
@@ -302,6 +308,7 @@ fn validate_query_canonical_parts(
             validate_select_column(&root, column)?;
         }
     }
+    reject_author_ordering(&query.order_by)?;
     if let Some(aggregate) = &query.aggregate {
         validate_aggregate(&root, aggregate)?;
         validate_aggregate_order_by(&query.table, aggregate, &query.order_by)?;
@@ -313,6 +320,18 @@ fn validate_query_canonical_parts(
     let normalized = normalize_query(&resolved_query);
     let canonical = canonical_query_bytes_for_schema(&normalized, schema)?;
     Ok((normalized, params, canonical))
+}
+
+fn reject_author_ordering(order_by: &[OrderBy]) -> Result<(), QueryError> {
+    if let Some(order) = order_by
+        .iter()
+        .find(|order| matches!(order.column.as_str(), "$createdBy" | "$updatedBy"))
+    {
+        return Err(QueryError::UnsupportedAuthorOrdering {
+            column: order.column.clone(),
+        });
+    }
+    Ok(())
 }
 
 fn flat_join_source_tables(
@@ -826,7 +845,7 @@ fn executable_magic_column_type(column: &str) -> Result<Option<&'static ColumnTy
         });
     }
     match column {
-        "$createdBy" | "$updatedBy" => Ok(Some(&ColumnType::Uuid)),
+        "$createdBy" | "$updatedBy" => Ok(Some(&ColumnType::String)),
         "$createdAt" | "$updatedAt" => Ok(Some(&ColumnType::U64)),
         _ => Ok(None),
     }
@@ -892,6 +911,7 @@ fn validate_array_subquery(
             validate_select_column(&child, column)?;
         }
     }
+    reject_author_ordering(&subquery.order_by)?;
     for order in &subquery.order_by {
         planner_column_type(&child, &order.column)?;
     }
@@ -1378,7 +1398,7 @@ fn operand_type(
 
 fn claim_type(name: &str) -> Result<Option<ColumnType>, QueryError> {
     match name {
-        "sub" => Ok(Some(ColumnType::Uuid)),
+        "user" => Ok(Some(ColumnType::String)),
         "team" => Ok(Some(ColumnType::Uuid)),
         "isAdmin" => Ok(Some(ColumnType::Bool)),
         _ => Ok(None),

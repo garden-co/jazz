@@ -26,7 +26,7 @@ describe("native row descriptor cache keys", () => {
 
   it("includes payload enum registry identity when cases match", () => {
     const firstRegistry = {
-      tag: 16,
+      tag: 17,
       enumSchema: {
         registryId: 3,
         name: "event",
@@ -34,7 +34,7 @@ describe("native row descriptor cache keys", () => {
       },
     };
     const secondRegistry = {
-      tag: 16,
+      tag: 17,
       enumSchema: {
         registryId: 4,
         name: "event",
@@ -47,33 +47,33 @@ describe("native row descriptor cache keys", () => {
 
   it("includes recursive descriptor and enum schema data", () => {
     const nestedText = {
-      tag: 15,
+      tag: 16,
       record: [{ name: "body", valueType: { tag: 8 } }],
     };
     const nestedInteger = {
-      tag: 15,
+      tag: 16,
       record: [{ name: "body", valueType: { tag: 4 } }],
     };
-    const tupleWithText = { tag: 12, members: [{ tag: 7 }, { tag: 8 }] };
-    const tupleWithInteger = { tag: 12, members: [{ tag: 7 }, { tag: 4 }] };
-    const textArray = { tag: 13, inner: { tag: 8 } };
-    const integerArray = { tag: 13, inner: { tag: 4 } };
-    const nullableText = { tag: 14, inner: { tag: 8 } };
-    const nullableInteger = { tag: 14, inner: { tag: 4 } };
+    const tupleWithText = { tag: 13, members: [{ tag: 7 }, { tag: 8 }] };
+    const tupleWithInteger = { tag: 13, members: [{ tag: 7 }, { tag: 4 }] };
+    const textArray = { tag: 14, inner: { tag: 8 } };
+    const integerArray = { tag: 14, inner: { tag: 4 } };
+    const nullableText = { tag: 15, inner: { tag: 8 } };
+    const nullableInteger = { tag: 15, inner: { tag: 4 } };
     const scalarEnum = {
-      tag: 11,
+      tag: 12,
       enumSchema: { registryId: 7, name: "status", variants: ["draft", "published"] },
     };
     const otherScalarEnumRegistry = {
-      tag: 11,
+      tag: 12,
       enumSchema: { registryId: 8, name: "status", variants: ["draft", "published"] },
     };
     const otherScalarEnumVariants = {
-      tag: 11,
+      tag: 12,
       enumSchema: { registryId: 7, name: "status", variants: ["draft", "archived"] },
     };
     const payloadEnum = {
-      tag: 16,
+      tag: 17,
       enumSchema: {
         registryId: 3,
         name: "event",
@@ -81,7 +81,7 @@ describe("native row descriptor cache keys", () => {
       },
     };
     const changedPayloadEnum = {
-      tag: 16,
+      tag: 17,
       enumSchema: {
         registryId: 3,
         name: "event",
@@ -89,7 +89,7 @@ describe("native row descriptor cache keys", () => {
       },
     };
     const changedPayloadEnumCase = {
-      tag: 16,
+      tag: 17,
       enumSchema: {
         registryId: 3,
         name: "event",
@@ -134,19 +134,19 @@ describe("native row descriptor cache keys", () => {
       },
     } satisfies WasmSchema;
     const firstChildDescriptor = [
-      { name: "row_uuid", valueType: { tag: 10 } },
+      { name: "row_uuid", valueType: { tag: 11 } },
       { name: "title", valueType: { tag: 8 } },
     ];
     const secondChildDescriptor = [
-      { name: "row_uuid", valueType: { tag: 10 } },
+      { name: "row_uuid", valueType: { tag: 11 } },
       { name: "title", valueType: { tag: 8 } },
       { name: "ignored_fixed_field", valueType: { tag: 4 } },
     ];
     const firstDescriptor = [
-      { name: "child", valueType: { tag: 15, record: firstChildDescriptor } },
+      { name: "child", valueType: { tag: 16, record: firstChildDescriptor } },
     ];
     const secondDescriptor = [
-      { name: "child", valueType: { tag: 15, record: secondChildDescriptor } },
+      { name: "child", valueType: { tag: 16, record: secondChildDescriptor } },
     ];
     const childId = "00000000-0000-0000-0000-0000000000c1";
     const firstBatch = {
@@ -159,7 +159,7 @@ describe("native row descriptor cache keys", () => {
           raw: createRecord(firstDescriptor, [
             createRecord(firstChildDescriptor, [
               uuidBytes(childId),
-              new TextEncoder().encode("first"),
+              Uint8Array.from([2, ...new TextEncoder().encode("first")]),
             ]),
           ]),
         },
@@ -175,7 +175,7 @@ describe("native row descriptor cache keys", () => {
           raw: createRecord(secondDescriptor, [
             createRecord(secondChildDescriptor, [
               uuidBytes(childId),
-              new TextEncoder().encode("second"),
+              Uint8Array.from([2, ...new TextEncoder().encode("second")]),
               i32Bytes(42),
             ]),
           ]),
@@ -222,12 +222,15 @@ describe("nested row physical carriers", () => {
     { name: "title", column_type: { type: "Text" }, nullable: false },
   ];
   const descriptor = [
-    { name: "row_uuid", valueType: { tag: 10 } as const },
+    { name: "row_uuid", valueType: { tag: 11 } as const },
     { name: "title", valueType: { tag: 8 } as const },
   ];
 
   it("decodes a full snapshot record without stripping its row_uuid field", () => {
-    const bytes = createRecord(descriptor, [uuidBytes(id), new TextEncoder().encode("snapshot")]);
+    const bytes = createRecord(descriptor, [
+      uuidBytes(id),
+      Uint8Array.from([2, ...new TextEncoder().encode("snapshot")]),
+    ]);
 
     const row = decodeNestedRowBytes(columns, bytes, descriptor, "full-record");
 
@@ -238,7 +241,9 @@ describe("nested row physical carriers", () => {
   it("decodes an explicitly keyed terminal payload with the same descriptor", () => {
     const bytes = concatBytes([
       uuidBytes(id),
-      createRecord(descriptor.slice(1), [new TextEncoder().encode("terminal")]),
+      createRecord(descriptor.slice(1), [
+        Uint8Array.from([2, ...new TextEncoder().encode("terminal")]),
+      ]),
     ]);
 
     const row = decodeNestedRowBytes(columns, bytes, descriptor, "keyed-terminal");
@@ -256,20 +261,20 @@ describe("nested row physical carriers", () => {
       { name: "tags", column_type: { type: "Array", element: { type: "Text" } }, nullable: false },
     ];
     const todoDescriptor = [
-      { name: "row_uuid", valueType: { tag: 10 } as const },
+      { name: "row_uuid", valueType: { tag: 11 } as const },
       { name: "title", valueType: { tag: 8 } as const },
       { name: "done", valueType: { tag: 7 } as const },
-      { name: "priority", valueType: { tag: 14, inner: { tag: 4 } } as const },
-      { name: "owner_id", valueType: { tag: 14, inner: { tag: 10 } } as const },
-      { name: "tags", valueType: { tag: 13, inner: { tag: 8 } } as const },
+      { name: "priority", valueType: { tag: 15, inner: { tag: 4 } } as const },
+      { name: "owner_id", valueType: { tag: 15, inner: { tag: 11 } } as const },
+      { name: "tags", valueType: { tag: 14, inner: { tag: 8 } } as const },
     ];
     const bytes = createRecord(todoDescriptor, [
       uuidBytes("e20942bf-8789-e652-23fd-c86c3a105743"),
-      new TextEncoder().encode("owned-todo"),
+      Uint8Array.from([2, ...new TextEncoder().encode("owned-todo")]),
       Uint8Array.of(0),
       presentBytes(Uint8Array.of(1, 0, 0, 0)),
       presentBytes(uuidBytes("06839e1b-9b29-732c-1b39-8ee592bd2a68")),
-      concatBytes([Uint8Array.of(1, 0, 0, 0), new TextEncoder().encode("x")]),
+      concatBytes([Uint8Array.of(1, 0, 0, 0, 2), new TextEncoder().encode("x")]),
     ]);
 
     expect(decodeNestedRowBytes(todoColumns, bytes, todoDescriptor, "full-record")).toMatchObject({

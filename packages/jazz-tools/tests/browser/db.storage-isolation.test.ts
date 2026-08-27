@@ -195,5 +195,8 @@ function toBase64Url(value: unknown): string {
 }
 
 function makeFakeJwt(payload: Record<string, unknown>): string {
-  return `${toBase64Url({ alg: "HS256", typ: "JWT" })}.${toBase64Url(payload)}.bad-signature`;
+  return `${toBase64Url({ alg: "HS256", typ: "JWT" })}.${toBase64Url({
+    iss: "https://issuer.jazz.test",
+    ...payload,
+  })}.bad-signature`;
 }

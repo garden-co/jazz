@@ -5,8 +5,8 @@ use std::time::Duration;
 use jazz::row_input;
 use jazz::tools::public_schema::{PolicyExpr, TablePolicies};
 use jazz::tools::{
-    ColumnDescriptor, ColumnType, DurabilityTier, ObjectId, RowDescriptor, Session, TableName,
-    TableSchema, Value,
+    ColumnDescriptor, ColumnType, DurabilityTier, RowDescriptor, Session, TableName, TableSchema,
+    Value,
 };
 use jazz_server::JazzServer;
 use support::{
@@ -22,15 +22,15 @@ fn owned_docs_schema() -> jazz::tools::Schema {
         TableName::new("docs"),
         TableSchema::with_policies(
             RowDescriptor::new(vec![
-                ColumnDescriptor::new("owner_id", ColumnType::Uuid),
-                ColumnDescriptor::new("transfer_writer_id", ColumnType::Uuid),
+                ColumnDescriptor::new("owner_id", ColumnType::Text),
+                ColumnDescriptor::new("transfer_writer_id", ColumnType::Text),
                 ColumnDescriptor::new("title", ColumnType::Text),
             ]),
             TablePolicies::new()
                 .with_insert(PolicyExpr::True)
                 .with_select(PolicyExpr::or(vec![
-                    PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
-                    PolicyExpr::eq_session("transfer_writer_id", vec!["user_id".into()]),
+                    PolicyExpr::eq_session("owner_id", vec!["user".to_owned()]),
+                    PolicyExpr::eq_session("transfer_writer_id", vec!["user".to_owned()]),
                 ]))
                 .with_update(Some(PolicyExpr::True), PolicyExpr::True)
                 .with_delete(PolicyExpr::True),
@@ -47,6 +47,14 @@ fn user_client_context(
     context.backend_secret = None;
     context.admin_secret = None;
     context
+}
+
+fn canonical_user(user_id: &str) -> String {
+    Session::new("urn:jazz:test", user_id)
+        .author_subject()
+        .expect("test user identity")
+        .canonical()
+        .to_owned()
 }
 
 /// Revocation is forward-looking sync narrowing, not post-delivery redaction.
@@ -85,11 +93,11 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
             )
             .await;
 
-            let bob_owner_id = ObjectId::from_uuid(Uuid::new_v4());
-            let bob_user_id = bob_owner_id.uuid().to_string();
-            let alice_owner_id = ObjectId::from_uuid(Uuid::new_v4());
-            let writer_reader_id = ObjectId::from_uuid(Uuid::new_v4());
-            let writer_user_id = writer_reader_id.uuid().to_string();
+            let bob_user_id = Uuid::new_v4().to_string();
+            let bob_owner_id = canonical_user(&bob_user_id);
+            let alice_owner_id = canonical_user(&Uuid::new_v4().to_string());
+            let writer_user_id = Uuid::new_v4().to_string();
+            let writer_reader_id = canonical_user(&writer_user_id);
 
             let writer = jazz_testkit::connect(
                 server.make_client_context_for_user(schema.clone(), &writer_user_id),
@@ -105,7 +113,7 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
             wait_for_edge_query_ready(&bob, "docs", READY_TIMEOUT).await;
 
             let (doc_id, _, create_tx) = writer
-                .for_session(Session::new(writer_user_id.clone()))
+                .for_session(Session::new("urn:jazz:test", writer_user_id.clone()))
                 .insert(
                     "docs",
                     row_input!(
@@ -132,8 +140,11 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
             // that access only through this row's transfer_writer_id, keeping
             // Bob's owner-scoped revocation behavior intact.
             let revoke_tx = writer
-                .for_session(Session::new(writer_user_id))
-                .update(doc_id, vec![("owner_id".to_owned(), Value::Uuid(alice_owner_id))])
+                .for_session(Session::new("urn:jazz:test", writer_user_id))
+                .update(
+                    doc_id,
+                    vec![("owner_id".to_owned(), Value::Text(alice_owner_id))],
+                )
                 .expect("narrowly authorized writer transfers ownership away from bob");
             support::wait_for_edge_txs(&writer, &[revoke_tx.expect("ordinary mutation commits immediately")]).await;
 

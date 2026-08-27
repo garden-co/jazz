@@ -74,7 +74,7 @@ async fn rebac_exists_clause_denies_non_matching_insert_inner() {
     let protected_policies = permissions(|p| {
         p.allow_read().always();
         p.allow_insert().where_(pe::exists(
-            pe::table("admins").where_(pe::eq("user_id", pe::session("user_id"))),
+            pe::table("admins").where_(pe::eq("user_id", pe::session(vec!["claims", "sub"]))),
         ));
     });
     let schema = SchemaBuilder::new()
@@ -138,7 +138,7 @@ async fn rebac_update_denied_by_using_exists_policy_inner() {
         p.allow_insert().always();
         p.allow_update()
             .where_old(pe::exists(
-                pe::table("admins").where_(pe::eq("user_id", pe::session("user_id"))),
+                pe::table("admins").where_(pe::eq("user_id", pe::session(vec!["claims", "sub"]))),
             ))
             .where_new(pe::always());
     });
@@ -149,7 +149,7 @@ async fn rebac_update_denied_by_using_exists_policy_inner() {
                 .policies(permissions(|p| {
                     p.allow_read().always();
                     p.allow_insert()
-                        .where_(pe::eq("user_id", pe::session("user_id")));
+                        .where_(pe::eq("user_id", pe::session(vec!["claims", "sub"])));
                 })),
         )
         .table(
@@ -248,7 +248,7 @@ async fn local_update_using_exists_policy_allows_admin_and_denies_non_admin_inne
     let protected_policies = permissions(|p| {
         p.allow_update()
             .where_old(pe::exists(
-                pe::table("admins").where_(pe::eq("user_id", pe::session("user_id"))),
+                pe::table("admins").where_(pe::eq("user_id", pe::session(vec!["claims", "sub"]))),
             ))
             .where_new(pe::always());
     });
@@ -284,7 +284,7 @@ async fn local_update_using_exists_policy_allows_admin_and_denies_non_admin_inne
         .0;
 
     let bob_err = client
-        .for_session(Session::new(super::BOB_ID))
+        .for_session(Session::new("urn:jazz:test", super::BOB_ID))
         .update(
             protected,
             vec![("data".into(), Value::Text("bob update".into()))],
@@ -293,7 +293,7 @@ async fn local_update_using_exists_policy_allows_admin_and_denies_non_admin_inne
     assert_client_policy_denied(bob_err, "protected", Operation::Update);
 
     client
-        .for_session(Session::new(super::ALICE_ID))
+        .for_session(Session::new("urn:jazz:test", super::ALICE_ID))
         .update(
             protected,
             vec![("data".into(), Value::Text("alice update".into()))],
