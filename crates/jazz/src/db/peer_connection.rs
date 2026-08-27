@@ -339,10 +339,143 @@ where
     /// consuming inbound work, and entries leave only after logical wire
     /// admission. A permanently stalled peer therefore cannot manufacture an
     /// independent unbounded response backlog.
-    pub(super) pending_control_responses: VecDeque<SyncMessage>,
+    pub(super) pending_control_responses: VecDeque<PendingSubscriberControlResponse>,
     pub(super) link: ConnectionLink,
     pub(super) last_resume_bytes: Option<usize>,
     pub(super) auxiliary_pump: PeerIoPump,
+}
+
+/// A connection-owned response that has been produced but not yet admitted by
+/// the bounded wire adapter.
+///
+/// Most control protocol frames intentionally bypass `send_with_sync_context`:
+/// unlike a replicated payload, they must not opportunistically inject a
+/// catalogue snapshot ahead of a rejection or proof receipt. Repair payloads
+/// retain the sync context because their normal send path carries its
+/// per-peer bookkeeping.
+#[derive(Clone)]
+pub(super) enum PendingSubscriberControlResponse {
+    Direct(SyncMessage),
+    WithSyncContext(SyncMessage),
+    AuthorizationScopeSequence(PendingAuthorizationScopeSequence),
+}
+
+/// Lazily emits one authorization-scope proof sequence. The clauses are the
+/// authority's already-derived semantic hydration state; retaining this plan
+/// avoids copying it into a second, expanded wire-message queue when a bounded
+/// adapter is full between any two proof frames.
+#[derive(Clone)]
+pub(super) struct PendingAuthorizationScopeSequence {
+    request_id: PermissionAdviceRequestId,
+    key: crate::protocol::AuthorizationSupportScopeKey,
+    hydration: ServedAuthorizationScopeHydration,
+    next_step: usize,
+}
+
+impl PendingAuthorizationScopeSequence {
+    fn next_message(&self) -> Option<SyncMessage> {
+        let clause_count = self.hydration.clauses.len();
+        let proof_steps = clause_count.checked_mul(3)?;
+        if self.next_step < proof_steps {
+            let clause = &self.hydration.clauses[self.next_step / 3];
+            return Some(match self.next_step % 3 {
+                0 => clause.register.clone(),
+                1 => clause.subscribe.clone(),
+                2 => SyncMessage::AuthorizationScopeView {
+                    request_id: self.request_id,
+                    key: self.key.clone(),
+                    clause_index: (self.next_step / 3) as u16,
+                    clause_count: clause_count as u16,
+                    view: crate::protocol::ViewUpdatePayload::from_view_update(clause.view.clone())
+                        .expect("authority scope clauses are view updates"),
+                },
+                _ => unreachable!("modulo three has only three cases"),
+            });
+        }
+        if self.next_step == proof_steps {
+            return Some(SyncMessage::AuthorizationScopeAggregateReceipt {
+                request_id: self.request_id,
+                receipt: self.hydration.receipt.clone(),
+            });
+        }
+        let unsubscribe_index = self.next_step.checked_sub(proof_steps + 1)?;
+        self.hydration
+            .clauses
+            .get(unsubscribe_index)
+            .map(|clause| SyncMessage::Unsubscribe {
+                subscription: clause.subscription,
+            })
+    }
+
+    fn advance(&mut self) {
+        self.next_step = self.next_step.saturating_add(1);
+    }
+}
+
+impl PendingSubscriberControlResponse {
+    fn direct(message: SyncMessage) -> Self {
+        Self::Direct(message)
+    }
+
+    fn with_sync_context(message: SyncMessage) -> Self {
+        Self::WithSyncContext(message)
+    }
+
+    #[cfg(test)]
+    pub(super) fn message(&self) -> &SyncMessage {
+        match self {
+            Self::Direct(message) | Self::WithSyncContext(message) => message,
+            Self::AuthorizationScopeSequence(_) => {
+                panic!("scope sequences generate messages lazily")
+            }
+        }
+    }
+}
+
+fn queue_direct_control(
+    pending: &mut VecDeque<PendingSubscriberControlResponse>,
+    message: SyncMessage,
+) {
+    pending.push_back(PendingSubscriberControlResponse::direct(message));
+}
+
+fn queue_sync_context_control(
+    pending: &mut VecDeque<PendingSubscriberControlResponse>,
+    message: SyncMessage,
+) {
+    pending.push_back(PendingSubscriberControlResponse::with_sync_context(message));
+}
+
+fn queue_authorization_scope_sequence(
+    pending: &mut VecDeque<PendingSubscriberControlResponse>,
+    request_id: PermissionAdviceRequestId,
+    key: crate::protocol::AuthorizationSupportScopeKey,
+    hydration: ServedAuthorizationScopeHydration,
+) {
+    pending.push_back(
+        PendingSubscriberControlResponse::AuthorizationScopeSequence(
+            PendingAuthorizationScopeSequence {
+                request_id,
+                key,
+                hydration,
+                next_step: 0,
+            },
+        ),
+    );
+}
+
+macro_rules! flush_subscriber_controls_or_stop {
+    ($connection:expr, $peer:expr) => {
+        if !flush_pending_control_responses(
+            &$connection.node,
+            $peer,
+            $connection.transport.as_mut(),
+            &mut $connection.pending_control_responses,
+            &$connection.scheduler,
+        )? {
+            return Ok(true);
+        }
+    };
 }
 
 pub(super) enum ConnectionLink {
@@ -361,6 +494,11 @@ pub(super) struct UpstreamConnectionState {
     pub(super) large_value_uploads: LargeValueUploadQueues,
     pub(super) awaiting_large_value_uploads: BTreeMap<TxId, groove::large_values::LargeValueRef>,
     pub(super) failed_large_value_uploads: BTreeSet<TxId>,
+    /// Exact repair fetches whose byte admission has not happened yet.
+    /// Kept separately from the paired repair payload so a bounded wire
+    /// adapter cannot lose the one-shot request between detecting a missing
+    /// version and recording the ViewUpdate that needs it.
+    pub(super) pending_row_version_fetches: VecDeque<Vec<crate::protocol::RowVersionRef>>,
     pub(super) pending_row_version_repairs: VecDeque<PendingRowVersionRepair>,
     pub(super) scope_view_cuts: BTreeMap<SubscriptionKey, crate::time::GlobalTime>,
     pub(super) scope_receipts: BTreeMap<SubscriptionKey, AuthorizationScopeReceipt>,
@@ -489,7 +627,7 @@ pub(super) struct SubscriberConnectionState {
     pub(super) served: BTreeMap<SubscriptionKey, CoverageKey>,
     pub(super) coverage_groups: BTreeMap<CoverageKey, CoverageGroup>,
     pub(super) shape_registrations: BTreeMap<ShapeRegistrationKey, SubscriberShapeRegistration>,
-    pub(super) deferred_subscribe_rejections: VecDeque<SyncMessage>,
+    pub(super) deferred_subscribe_rejections: VecDeque<PendingSubscriberControlResponse>,
     pub(super) served_current_rows: BTreeMap<SubscriptionKey, String>,
     pub(super) scope_purposes: BTreeMap<SubscriptionKey, AuthorizedScopePurpose>,
     pub(super) scope_aggregates:
@@ -694,12 +832,13 @@ where
                 });
                 send_with_sync_context(&self.node, peer, self.transport.as_mut(), update)?;
                 if let Some((subscription, receipt)) = receipt {
-                    self.transport
-                        .send(SyncMessage::AuthorizationScopeReceipt {
+                    queue_direct_control(
+                        &mut self.pending_control_responses,
+                        SyncMessage::AuthorizationScopeReceipt {
                             subscription,
                             receipt,
-                        })
-                        .map_err(transport_error)?;
+                        },
+                    );
                 }
             }
         }
@@ -881,12 +1020,13 @@ where
                 });
                 send_with_sync_context(&self.node, peer, self.transport.as_mut(), update)?;
                 if let Some((subscription, receipt)) = receipt {
-                    self.transport
-                        .send(SyncMessage::AuthorizationScopeReceipt {
+                    queue_direct_control(
+                        &mut self.pending_control_responses,
+                        SyncMessage::AuthorizationScopeReceipt {
                             subscription,
                             receipt,
-                        })
-                        .map_err(transport_error)?;
+                        },
+                    );
                 }
             }
         }
@@ -944,6 +1084,7 @@ where
                 large_value_uploads,
                 awaiting_large_value_uploads,
                 failed_large_value_uploads,
+                pending_row_version_fetches,
                 pending_row_version_repairs,
                 scope_view_cuts,
                 scope_receipts,
@@ -952,6 +1093,22 @@ where
             }) => {
                 let stop = Box::pin(async {
                     let outbound_stop = Box::pin(async {
+                        if let Some(requests) = pending_row_version_fetches.front().cloned() {
+                            if let Err(error) = self
+                                .transport
+                                .send(SyncMessage::FetchRowVersions { requests })
+                            {
+                                if handle_transport_backpressure(
+                                    &self.node,
+                                    &self.scheduler,
+                                    &error,
+                                ) {
+                                    return Ok(true);
+                                }
+                                return Err(transport_error(error));
+                            }
+                            pending_row_version_fetches.pop_front();
+                        }
                         if let Some(message) = self.auxiliary_pump.take_outbound(64) {
                             if let Err(error) = self.transport.send(message.clone()) {
                                 self.auxiliary_pump.restore_outbound(message);
@@ -1583,11 +1740,7 @@ where
                                         summarize_subscription_key(subscription),
                                         missing.len()
                                     ));
-                                    self.transport
-                                        .send(SyncMessage::FetchRowVersions {
-                                            requests: missing.clone(),
-                                        })
-                                        .map_err(transport_error)?;
+                                    pending_row_version_fetches.push_back(missing.clone());
                                     pending_row_version_repairs.push_back(
                                         PendingRowVersionRepair {
                                             requests: missing,
@@ -1595,6 +1748,8 @@ where
                                             authority_receipt_eligible,
                                         },
                                     );
+                                    schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                    return Ok(true);
                                 }
                             }
                             SyncMessage::SubscribeRejected {
@@ -2200,7 +2355,7 @@ where
                     // than asking the byte transport to retain another
                     // logical message after its one admitted backlog.
                     for subscription in active_subscriptions {
-                        self.pending_control_responses.push_back(
+                        queue_direct_control(&mut self.pending_control_responses,
                             SyncMessage::SubscribeRejected {
                                 subscription,
                                 reason: rejection.reason.clone(),
@@ -2255,6 +2410,8 @@ where
                     return Ok(true);
                 }
                 if !flush_pending_control_responses(
+                    &self.node,
+                    peer,
                     self.transport.as_mut(),
                     &mut self.pending_control_responses,
                     &self.scheduler,
@@ -2264,6 +2421,9 @@ where
                 if let Some(message) = self.auxiliary_pump.take_outbound(64) {
                     if let Err(error) = self.transport.send(message.clone()) {
                         self.auxiliary_pump.restore_outbound(message);
+                        if handle_transport_backpressure(&self.node, &self.scheduler, &error) {
+                            return Ok(true);
+                        }
                         return Err(transport_error(error));
                     }
                     self.auxiliary_pump.acknowledge_outbound(&message);
@@ -2350,7 +2510,7 @@ where
                             serve_authorization_scope_intent(
                                 &self.node,
                                 peer,
-                                self.transport.as_mut(),
+                                &mut self.pending_control_responses,
                                 ingest_context.identity,
                                 connection_epoch,
                                 request_id,
@@ -2360,6 +2520,10 @@ where
                                 authority_scope_hydration_count,
                             )
                             .await?;
+                            if !self.pending_control_responses.is_empty() {
+                                schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                flush_subscriber_controls_or_stop!(self, peer);
+                            }
                             continue;
                         }
                         // Legacy direct answers and caller-authored support
@@ -2402,7 +2566,7 @@ where
                                         error.message.clone(),
                                     ),
                                 );
-                                self.pending_control_responses.push_back(
+                                queue_direct_control(&mut self.pending_control_responses,
                                     unsupported_shape_capability_rejection_message(
                                         register_shape_rejection_subscription(
                                             shape_id,
@@ -2412,6 +2576,7 @@ where
                                     ),
                                 );
                                 schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                flush_subscriber_controls_or_stop!(self, peer);
                                 return Ok(true);
                             }
                             let shape_validation = {
@@ -2423,7 +2588,7 @@ where
                                 Ok(None) => None,
                                 Err(error) => {
                                     if is_server_shape_validation_failure(&error) {
-                                        self.pending_control_responses.push_back(
+                                        queue_direct_control(&mut self.pending_control_responses,
                                             server_subscription_failure_rejection_message(
                                                 register_shape_rejection_subscription(
                                                     shape_id,
@@ -2433,6 +2598,7 @@ where
                                             ),
                                         );
                                         schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                        flush_subscriber_controls_or_stop!(self, peer);
                                         return Ok(true);
                                     } else {
                                         drop_peer_request(&self.node);
@@ -2482,16 +2648,17 @@ where
                                             binding_id: binding.binding_id(),
                                             read_view: read_view_key,
                                         };
-                                        self.pending_control_responses.push_back(
+                                        queue_direct_control(&mut self.pending_control_responses,
                                             unsupported_shape_capability_rejection_message(
                                                 subscription,
                                                 detail,
                                             ),
                                         );
                                         schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                        flush_subscriber_controls_or_stop!(self, peer);
                                         return Ok(true);
                                     } else if let Err(error) = supported {
-                                        self.pending_control_responses.push_back(
+                                        queue_direct_control(&mut self.pending_control_responses,
                                             server_subscription_failure_rejection_message(
                                                 SubscriptionKey {
                                                     shape_id,
@@ -2502,6 +2669,7 @@ where
                                             ),
                                         );
                                         schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                        flush_subscriber_controls_or_stop!(self, peer);
                                         return Ok(true);
                                     }
                                 }
@@ -2519,7 +2687,7 @@ where
                                     SubscriberShapeRegistration::RejectedUnsupportedCapability(
                                         detail,
                                     ) => {
-                                        self.pending_control_responses.push_back(
+                                        queue_direct_control(&mut self.pending_control_responses,
                                             unsupported_shape_capability_rejection_message(
                                                 register_shape_rejection_subscription(
                                                     shape_id,
@@ -2529,6 +2697,7 @@ where
                                             ),
                                         );
                                         schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                        flush_subscriber_controls_or_stop!(self, peer);
                                         return Ok(true);
                                     }
                                     _ => {}
@@ -2548,13 +2717,14 @@ where
                                     .await
                             };
                             if let Err(error) = register_result {
-                                self.pending_control_responses.push_back(
+                                queue_direct_control(&mut self.pending_control_responses,
                                     server_subscription_failure_rejection_message(
                                         rejection_subscription,
                                         &error,
                                     ),
                                 );
                                 schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                flush_subscriber_controls_or_stop!(self, peer);
                                 return Ok(true);
                             }
                             let registration = if awaiting_catalogue_admission {
@@ -2599,7 +2769,8 @@ where
                                     // Keep the original permanent rejection, but let views
                                     // already served by this connection flush first. A rejected
                                     // shape must not starve unrelated subscriptions.
-                                    deferred_subscribe_rejections.push_back(
+                                    queue_direct_control(
+                                        deferred_subscribe_rejections,
                                         unsupported_shape_capability_rejection_message(
                                             subscription,
                                             detail,
@@ -2614,13 +2785,14 @@ where
                             };
                             let Some(shape) = self.node.borrow().registered_shape(shape_id) else {
                                 if pending_catalogue_admission {
-                                    self.pending_control_responses.push_back(
+                                    queue_direct_control(&mut self.pending_control_responses,
                                         SyncMessage::SubscribeRejected {
                                             subscription,
                                             reason: SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission,
                                         },
                                     );
                                     schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                    flush_subscriber_controls_or_stop!(self, peer);
                                     return Ok(true);
                                 } else {
                                     drop_peer_request(&self.node);
@@ -2723,19 +2895,21 @@ where
                                 )
                                 .await;
                             if let Err(crate::node::Error::QueryCapability(detail)) = supported {
-                                self.pending_control_responses.push_back(
+                                queue_direct_control(&mut self.pending_control_responses,
                                     unsupported_shape_capability_rejection_message(
                                         subscription,
                                         detail,
                                     ),
                                 );
                                 schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                flush_subscriber_controls_or_stop!(self, peer);
                                 return Ok(true);
                             } else if let Err(error) = supported {
-                                self.pending_control_responses.push_back(
+                                queue_direct_control(&mut self.pending_control_responses,
                                     server_subscription_failure_rejection_message(subscription, &error),
                                 );
                                 schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                flush_subscriber_controls_or_stop!(self, peer);
                                 return Ok(true);
                             }
                             let coverage = coverage_key(&shape, &binding, opts.clone());
@@ -2915,7 +3089,7 @@ where
                                     update,
                                 )?;
                                 if let Some((subscription, receipt)) = receipt {
-                                    self.pending_control_responses.push_back(
+                                    queue_direct_control(&mut self.pending_control_responses,
                                         SyncMessage::AuthorizationScopeReceipt {
                                             subscription,
                                             receipt,
@@ -3024,12 +3198,14 @@ where
                                 peer.serve_row_versions(&mut node, &requests).await?
                             };
                             for response in responses {
-                                send_with_sync_context(
-                                    &self.node,
-                                    peer,
-                                    self.transport.as_mut(),
+                                queue_sync_context_control(
+                                    &mut self.pending_control_responses,
                                     response,
-                                )?;
+                                );
+                            }
+                            if !self.pending_control_responses.is_empty() {
+                                schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                return Ok(true);
                             }
                         }
                         other => {
@@ -3226,7 +3402,7 @@ where
                                     continue;
                                 }
                                 Err(crate::node::Error::QueryCapability(detail)) => {
-                                    self.pending_control_responses.push_back(
+                                    queue_direct_control(&mut self.pending_control_responses,
                                         unsupported_shape_capability_rejection_message(
                                             subscription,
                                             detail,
@@ -3236,7 +3412,7 @@ where
                                     return Ok(true);
                                 }
                                 Err(error) => {
-                                    self.pending_control_responses.push_back(
+                                    queue_direct_control(&mut self.pending_control_responses,
                                         server_subscription_failure_rejection_message(
                                             subscription,
                                             &error,
@@ -3272,7 +3448,7 @@ where
                                 update,
                             )?;
                             if let Some((subscription, receipt)) = receipt {
-                                self.pending_control_responses.push_back(
+                                queue_direct_control(&mut self.pending_control_responses,
                                     SyncMessage::AuthorizationScopeReceipt {
                                         subscription,
                                         receipt,
@@ -3316,7 +3492,7 @@ where
                             }
                             Err(error) => {
                                 for subscription in group.subscribers.iter().copied() {
-                                    self.pending_control_responses.push_back(
+                                    queue_direct_control(&mut self.pending_control_responses,
                                         server_subscription_failure_rejection_message(
                                             subscription,
                                             &error,
@@ -3368,7 +3544,7 @@ where
                                     update,
                                 )?;
                                 if let Some((subscription, receipt)) = receipt {
-                                    self.pending_control_responses.push_back(
+                                    queue_direct_control(&mut self.pending_control_responses,
                                         SyncMessage::AuthorizationScopeReceipt {
                                             subscription,
                                             receipt,
@@ -3406,6 +3582,8 @@ where
                         self.pending_control_responses.push_back(response);
                     }
                     if !flush_pending_control_responses(
+                        &self.node,
+                        peer,
                         self.transport.as_mut(),
                         &mut self.pending_control_responses,
                         &self.scheduler,
@@ -3717,7 +3895,7 @@ where
 async fn serve_authorization_scope_intent<S>(
     node: &SharedNodeState<S>,
     peer: &mut PeerState,
-    transport: &mut dyn Transport,
+    pending_control_responses: &mut VecDeque<PendingSubscriberControlResponse>,
     identity: AuthorSubject,
     connection_epoch: u64,
     request_id: PermissionAdviceRequestId,
@@ -3735,17 +3913,19 @@ where
     if !node.borrow().is_history_complete()
         || !subscriber_permissions_ready(node.borrow().permissions_ready(), trust)
     {
-        transport
-            .send(SyncMessage::AuthorizationScopeUnavailable { request_id })
-            .map_err(transport_error)?;
+        queue_direct_control(
+            pending_control_responses,
+            SyncMessage::AuthorizationScopeUnavailable { request_id },
+        );
         return Ok(());
     }
     let scope = match node.borrow().authorization_support_scope(identity, &action) {
         Ok(scope) => scope,
         Err(_) => {
-            transport
-                .send(SyncMessage::AuthorizationScopeUnavailable { request_id })
-                .map_err(transport_error)?;
+            queue_direct_control(
+                pending_control_responses,
+                SyncMessage::AuthorizationScopeUnavailable { request_id },
+            );
             return Ok(());
         }
     };
@@ -3766,9 +3946,10 @@ where
             let mut node = node.lock().await;
             evaluate_authoritative_permission_advice(&mut node, identity, action).await
         };
-        transport
-            .send(SyncMessage::AuthorizationScopeDecision { request_id, advice })
-            .map_err(transport_error)?;
+        queue_direct_control(
+            pending_control_responses,
+            SyncMessage::AuthorizationScopeDecision { request_id, advice },
+        );
         return Ok(());
     }
     let current_claims_revision = node.borrow().session_claim_revision(identity);
@@ -3782,37 +3963,12 @@ where
             && hydration.receipt.settled_through == current_cut
     });
     if let Some(hydration) = hydrations.get(&scope.key) {
-        for (index, clause) in hydration.clauses.iter().enumerate() {
-            transport
-                .send(clause.register.clone())
-                .map_err(transport_error)?;
-            transport
-                .send(clause.subscribe.clone())
-                .map_err(transport_error)?;
-            transport
-                .send(SyncMessage::AuthorizationScopeView {
-                    request_id,
-                    key: scope.key.clone(),
-                    clause_index: index as u16,
-                    clause_count,
-                    view: crate::protocol::ViewUpdatePayload::from_view_update(clause.view.clone())
-                        .expect("authority scope clauses are view updates"),
-                })
-                .map_err(transport_error)?;
-        }
-        transport
-            .send(SyncMessage::AuthorizationScopeAggregateReceipt {
-                request_id,
-                receipt: hydration.receipt.clone(),
-            })
-            .map_err(transport_error)?;
-        for clause in &hydration.clauses {
-            transport
-                .send(SyncMessage::Unsubscribe {
-                    subscription: clause.subscription,
-                })
-                .map_err(transport_error)?;
-        }
+        queue_authorization_scope_sequence(
+            pending_control_responses,
+            request_id,
+            scope.key.clone(),
+            hydration.clone(),
+        );
         return Ok(());
     }
     *hydration_count = hydration_count.saturating_add(1);
@@ -3833,9 +3989,10 @@ where
             read_view: scope.options.read_view_key(),
         };
         if !aggregate.register(subscription, (shape.shape_id(), binding.binding_id())) {
-            transport
-                .send(SyncMessage::AuthorizationScopeUnavailable { request_id })
-                .map_err(transport_error)?;
+            queue_direct_control(
+                pending_control_responses,
+                SyncMessage::AuthorizationScopeUnavailable { request_id },
+            );
             return Ok(());
         }
         let supported = node
@@ -3851,9 +4008,10 @@ where
             )
             .await;
         if supported.is_err() {
-            transport
-                .send(SyncMessage::AuthorizationScopeUnavailable { request_id })
-                .map_err(transport_error)?;
+            queue_direct_control(
+                pending_control_responses,
+                SyncMessage::AuthorizationScopeUnavailable { request_id },
+            );
             return Ok(());
         }
         let values = binding_values_in_param_order(shape, binding);
@@ -3862,14 +4020,12 @@ where
             ast: ShapeAst::from_validated(shape),
             opts: scope.options.clone(),
         };
-        transport.send(register.clone()).map_err(transport_error)?;
         let subscribe = SyncMessage::Subscribe(Subscribe {
             shape_id: shape.shape_id(),
             subscription,
             values,
             known_state: None,
         });
-        transport.send(subscribe.clone()).map_err(transport_error)?;
         peer.declare_known_state(subscription, None);
         let update = {
             let mut node = node.lock().await;
@@ -3883,9 +4039,10 @@ where
             .await?
         };
         let Some(update) = update else {
-            transport
-                .send(SyncMessage::AuthorizationScopeUnavailable { request_id })
-                .map_err(transport_error)?;
+            queue_direct_control(
+                pending_control_responses,
+                SyncMessage::AuthorizationScopeUnavailable { request_id },
+            );
             return Ok(());
         };
         let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
@@ -3902,21 +4059,12 @@ where
         if aggregate.apply(subscription, *cut, progress).is_none()
             && index + 1 == support_clauses.len()
         {
-            transport
-                .send(SyncMessage::AuthorizationScopeUnavailable { request_id })
-                .map_err(transport_error)?;
+            queue_direct_control(
+                pending_control_responses,
+                SyncMessage::AuthorizationScopeUnavailable { request_id },
+            );
             return Ok(());
         }
-        transport
-            .send(SyncMessage::AuthorizationScopeView {
-                request_id,
-                key: scope.key.clone(),
-                clause_index: index as u16,
-                clause_count,
-                view: crate::protocol::ViewUpdatePayload::from_view_update(update.clone())
-                    .expect("scope hydration produces view updates"),
-            })
-            .map_err(transport_error)?;
         support_subscriptions.push(subscription);
         served_clauses.push(ServedAuthorizationScopeClause {
             subscription,
@@ -3926,9 +4074,10 @@ where
         });
     }
     let Some((settled_through, authorization_progress)) = aggregate.bounds() else {
-        transport
-            .send(SyncMessage::AuthorizationScopeUnavailable { request_id })
-            .map_err(transport_error)?;
+        queue_direct_control(
+            pending_control_responses,
+            SyncMessage::AuthorizationScopeUnavailable { request_id },
+        );
         return Ok(());
     };
     let receipt = AuthorizationScopeReceipt {
@@ -3941,30 +4090,20 @@ where
         settled_through,
         authorization_progress,
     };
-    transport
-        .send(SyncMessage::AuthorizationScopeAggregateReceipt {
-            request_id,
-            receipt: receipt.clone(),
-        })
-        .map_err(transport_error)?;
+    let hydration = ServedAuthorizationScopeHydration {
+        clauses: served_clauses,
+        receipt,
+    };
     if hydrations.len() < MAX_AUTHORIZATION_SCOPES {
-        hydrations.insert(
-            scope.key,
-            ServedAuthorizationScopeHydration {
-                clauses: served_clauses,
-                receipt,
-            },
-        );
+        hydrations.insert(scope.key.clone(), hydration.clone());
     }
     // Scope views are proof material, not application subscriptions.  Their
     // lifetime ends after the receipt; FIFO keeps the receiver's local
     // evaluation ahead of this cleanup.
     for subscription in support_subscriptions {
-        transport
-            .send(SyncMessage::Unsubscribe { subscription })
-            .map_err(transport_error)?;
         peer.forget_subscription_with_node(&mut node.borrow_mut(), subscription);
     }
+    queue_authorization_scope_sequence(pending_control_responses, request_id, scope.key, hydration);
     Ok(())
 }
 
@@ -4450,29 +4589,58 @@ fn flush_pending_chunk_response(
 /// a rejected byte admission as a completed reply would otherwise leave the
 /// requester waiting forever. One retained message bounds a stalled link; the
 /// subscriber tick stops as soon as it creates one.
-fn flush_pending_control_responses(
+fn flush_pending_control_responses<S>(
+    node: &SharedNodeState<S>,
+    peer: &mut PeerState,
     transport: &mut dyn Transport,
-    pending: &mut VecDeque<SyncMessage>,
+    pending: &mut VecDeque<PendingSubscriberControlResponse>,
     scheduler: &SharedTickScheduler,
-) -> Result<bool, Error> {
-    let Some(response) = pending.front().cloned() else {
-        return Ok(true);
-    };
-    match transport.send(response) {
-        Ok(()) => {
-            pending.pop_front();
-            if pending.is_empty() {
-                Ok(true)
-            } else {
-                schedule_tick_in(scheduler, TickUrgency::Immediate);
-                Ok(false)
+) -> Result<bool, Error>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    loop {
+        let Some(response) = pending.front() else {
+            return Ok(true);
+        };
+        let send_result = match response {
+            PendingSubscriberControlResponse::Direct(response) => {
+                transport.send(response.clone()).map_err(transport_error)
             }
+            PendingSubscriberControlResponse::WithSyncContext(response) => {
+                send_with_sync_context(node, peer, transport, response.clone())
+            }
+            PendingSubscriberControlResponse::AuthorizationScopeSequence(sequence) => {
+                let Some(response) = sequence.next_message() else {
+                    pending.pop_front();
+                    continue;
+                };
+                transport.send(response).map_err(transport_error)
+            }
+        };
+        match send_result {
+            Ok(()) => {
+                let finished = match pending.front_mut() {
+                    Some(PendingSubscriberControlResponse::AuthorizationScopeSequence(
+                        sequence,
+                    )) => {
+                        sequence.advance();
+                        sequence.next_message().is_none()
+                    }
+                    Some(PendingSubscriberControlResponse::Direct(_))
+                    | Some(PendingSubscriberControlResponse::WithSyncContext(_)) => true,
+                    None => unreachable!("accepted control operation remains queued"),
+                };
+                if finished {
+                    pending.pop_front();
+                }
+            }
+            Err(error) if error.code == ErrorCode::Backpressure => {
+                schedule_tick_in(scheduler, TickUrgency::Deferred);
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
         }
-        Err(TransportError::Backpressure) => {
-            schedule_tick_in(scheduler, TickUrgency::Deferred);
-            Ok(false)
-        }
-        Err(error) => Err(transport_error(error)),
     }
 }
 
