@@ -1100,6 +1100,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           subject: "application-owned-subject",
           iss: externalIssuer,
           sub: externalUserId,
+          authMode: "external",
         },
       },
     ]);

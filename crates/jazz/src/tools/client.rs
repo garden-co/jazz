@@ -1260,6 +1260,7 @@ impl ClientDb {
         ClientDbInner::reconnect_upstream(&self.inner).await
     }
 
+    #[cfg(feature = "testing")]
     fn disconnect_upstream(&self) -> bool {
         self.inner.borrow_mut().disconnect_upstream()
     }
