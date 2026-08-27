@@ -86,6 +86,16 @@ pub(crate) fn exact_known_state_declaration_for_test(
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 const PENDING_BINDING_SOURCE_SHAPE: &str = "__jazz_pending_binding_source";
 
+#[cfg(test)]
+thread_local! {
+    static CLIENT_PHYSICAL_ROW_QUERY_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_client_physical_row_query_calls_for_test() -> usize {
+    CLIENT_PHYSICAL_ROW_QUERY_CALLS.with(|calls| calls.replace(0))
+}
+
 /// Aggregate terminal membership is structurally identified by the aggregate
 /// query plan and its synthetic group-key member. Its table label is not an
 /// identity and must not participate in public delivery decisions.
@@ -2294,6 +2304,8 @@ where
         identity: AuthorSubject,
         row_uuid: RowUuid,
     ) -> Result<Vec<CurrentRow>, Error> {
+        #[cfg(test)]
+        CLIENT_PHYSICAL_ROW_QUERY_CALLS.with(|calls| calls.set(calls.get() + 1));
         self.query_rows_for_physical_row_in_authorization_mode(
             shape,
             binding,

@@ -1,5 +1,5 @@
 use jazz::groove::storage::MemoryStorage;
-use jazz_example_w1_benchmark::Fixture;
+use jazz_example_benchmark_w1::Fixture;
 
 fn main() {
     divan::main();

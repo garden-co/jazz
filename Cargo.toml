@@ -28,6 +28,7 @@ members = [
   "examples/epic-drop/benchmarks",
   "examples/band-chat/benchmarks",
   "examples/music-agent/benchmarks",
+  "examples/world-tour/benchmarks",
   "examples/poster-shop/benchmarks",
   "examples/jamazon-warehouse/benchmarks",
   "examples/benchmarks/smoke",
