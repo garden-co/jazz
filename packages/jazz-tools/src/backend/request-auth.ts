@@ -32,7 +32,18 @@ type LocalJwksDocument = {
   keys: Array<Record<string, unknown>>;
 };
 
-const jwksDocuments = new Map<string, LocalJwksDocument>();
+type CachedJwksDocument = {
+  document: LocalJwksDocument;
+  expiresAtMs: number;
+};
+
+// Expiry is fail closed: never use keys older than five minutes,
+// even when the JWKS provider is unavailable.
+const JWKS_CACHE_TTL_MS = 5 * 60 * 1000;
+const jwksDocuments = new Map<string, CachedJwksDocument>();
+const jwksFetches = new Map<string, Promise<LocalJwksDocument>>();
+const jwksRefreshNotBefore = new Map<string, number>();
+const JWKS_FORCED_REFRESH_COOLDOWN_MS = 30_000;
 const staticJwtKeys = new Map<string, Promise<Awaited<ReturnType<typeof importJWK>>>>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -127,16 +138,43 @@ async function getRemoteJwksDocument(
   jwksUrl: string,
   forceRefresh = false,
 ): Promise<LocalJwksDocument> {
-  if (!forceRefresh) {
-    const cached = jwksDocuments.get(jwksUrl);
-    if (cached) {
-      return cached;
-    }
+  const cached = jwksDocuments.get(jwksUrl);
+  const now = Date.now();
+  if (!forceRefresh && cached && now < cached.expiresAtMs) {
+    return cached.document;
   }
 
-  const document = await fetchRemoteJwks(jwksUrl);
-  jwksDocuments.set(jwksUrl, document);
-  return document;
+  const pending = jwksFetches.get(jwksUrl);
+  if (pending) {
+    return pending;
+  }
+
+  if (
+    forceRefresh &&
+    cached &&
+    now < cached.expiresAtMs &&
+    now < (jwksRefreshNotBefore.get(jwksUrl) ?? 0)
+  ) {
+    return cached.document;
+  }
+
+  const fetchPromise = fetchRemoteJwks(jwksUrl).then((document) => {
+    const refreshedAtMs = Date.now();
+    jwksDocuments.set(jwksUrl, {
+      document,
+      expiresAtMs: refreshedAtMs + JWKS_CACHE_TTL_MS,
+    });
+    jwksRefreshNotBefore.set(jwksUrl, refreshedAtMs + JWKS_FORCED_REFRESH_COOLDOWN_MS);
+    return document;
+  });
+  jwksFetches.set(jwksUrl, fetchPromise);
+  try {
+    return await fetchPromise;
+  } finally {
+    if (jwksFetches.get(jwksUrl) === fetchPromise) {
+      jwksFetches.delete(jwksUrl);
+    }
+  }
 }
 
 function readString(value: unknown): string | undefined {
