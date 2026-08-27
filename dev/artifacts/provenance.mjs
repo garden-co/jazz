@@ -301,14 +301,14 @@ const artifactRoots = {
   napi: "crates/jazz-napi/Cargo.toml",
 };
 
-function workspaceDependencyInputs(root, kind) {
+export function workspaceDependencyInputs(root, rootManifest) {
   const result = spawnSync("cargo", ["metadata", "--format-version", "1", "--no-deps"], {
     cwd: root,
     encoding: "utf8",
   });
   if (result.status !== 0) {
     throw new Error(
-      `artifact provenance: cargo metadata failed for ${kind}: ${result.stderr.trim() || "unknown error"}`,
+      `artifact provenance: cargo metadata failed for ${rootManifest}: ${result.stderr.trim() || "unknown error"}`,
     );
   }
   let metadata;
@@ -316,17 +316,20 @@ function workspaceDependencyInputs(root, kind) {
     metadata = JSON.parse(result.stdout);
   } catch (error) {
     throw new Error(
-      `artifact provenance: cargo metadata was invalid for ${kind}: ${error.message}`,
+      `artifact provenance: cargo metadata was invalid for ${rootManifest}: ${error.message}`,
     );
   }
   const canonicalRoot = realpathSync(root);
   const packages = new Map(
     metadata.packages.map((pkg) => [resolve(dirname(pkg.manifest_path)), pkg]),
   );
-  const rootDirectory = resolve(canonicalRoot, dirname(artifactRoots[kind]));
+  const rootDirectory = resolve(canonicalRoot, dirname(rootManifest));
   if (!packages.has(rootDirectory)) {
-    throw new Error(`artifact provenance: cargo metadata omitted ${artifactRoots[kind]}`);
+    throw new Error(`artifact provenance: cargo metadata omitted ${rootManifest}`);
   }
+  // This is deliberately the conservative declared closure: optional and
+  // target-conditional path dependencies invalidate artifacts even when a
+  // particular build does not enable them.
   const pending = [rootDirectory];
   const visited = new Set();
   while (pending.length) {
@@ -412,7 +415,7 @@ function packageInputsFingerprint(root, kind) {
   if (!(kind in inputsFor)) throw new Error(`unknown artifact kind: ${kind}`);
   const trackedInputs = trackedFiles(root, [
     ...inputsFor[kind],
-    ...workspaceDependencyInputs(root, kind),
+    ...workspaceDependencyInputs(root, artifactRoots[kind]),
   ]);
   const contents = trackedInputContents(root, trackedInputs);
   const inputHash = createHash("sha256");
