@@ -31,7 +31,7 @@ const stepsPerTrack = 16;
 const PHASE_TIMEOUT_MS = 25_000;
 const FAULT_TIMEOUT_MS = 15_000;
 const CLEANUP_TIMEOUT_MS = 10_000;
-const PHASE_COUNT = 6;
+const PHASE_COUNT = 7;
 const FAULT_COUNT = 5;
 const COMPENSATION_COUNT = 1;
 const SCHEDULER_COUNT = 1;
@@ -73,6 +73,7 @@ describe("Wequencer cross-topology recovery", () => {
     let editorProfile: { id: string };
     let ownerPresence: { id: string };
     let editorPresence: { id: string };
+    let creatorMembership: { id: string };
     let editorMembership: { id: string };
     let tracks: Array<{ id: string }>;
     let offlineStep: { id: string };
@@ -182,7 +183,7 @@ describe("Wequencer cross-topology recovery", () => {
                   loop_steps: 16,
                 })
                 .wait({ tier: "edge" });
-              await owner
+              creatorMembership = await owner
                 .insert(app.session_members, {
                   session_id: session.id,
                   member_author: userIdentity("urn:jazz:test", "wequencer-owner"),
@@ -242,6 +243,43 @@ describe("Wequencer cross-topology recovery", () => {
               );
             },
             faultsAfter: [{ kind: "failure", target: "authorization" }],
+          },
+          {
+            name: "immutable creator authority survives owner-membership changes",
+            run: async () => {
+              // This deliberately removes the mutable `owner` role record.
+              // The session row's immutable `$createdBy` remains the source
+              // of administrative authority, so the creator can replace its
+              // collaboration role and still administer membership.
+              await owner.delete(app.session_members, creatorMembership.id).wait({ tier: "edge" });
+              await owner
+                .insert(app.session_members, {
+                  session_id: session.id,
+                  member_author: userIdentity("urn:jazz:test", "wequencer-owner"),
+                  role: "viewer",
+                })
+                .wait({ tier: "edge" });
+              await owner
+                .insert(app.session_members, {
+                  session_id: session.id,
+                  member_author: userIdentity("urn:jazz:test", "wequencer-admin-proof"),
+                  role: "viewer",
+                })
+                .wait({ tier: "edge" });
+              // Deleting a track is an administrative action too: it must
+              // not accidentally recover the old mutable-owner authority.
+              await owner.delete(app.tracks, tracks[3]!.id).wait({ tier: "edge" });
+              // Restore the collaboration role for the later edit scenarios;
+              // this is a new mutable row, not the source of the authority
+              // just exercised above.
+              creatorMembership = await owner
+                .insert(app.session_members, {
+                  session_id: session.id,
+                  member_author: userIdentity("urn:jazz:test", "wequencer-owner"),
+                  role: "owner",
+                })
+                .wait({ tier: "edge" });
+            },
           },
           {
             name: "concurrent ordered sequencer edits and presence",

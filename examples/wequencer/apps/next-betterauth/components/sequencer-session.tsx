@@ -19,7 +19,9 @@ export function SequencerSession({
   profileId: string;
 }) {
   const db = useDb();
-  const { data: sessions = [] } = useAll(app.sessions.where({ id: sessionId }));
+  const { data: sessions = [] } = useAll(
+    app.sessions.where({ id: sessionId }).select("*", "$createdBy"),
+  );
   const { data: tracks = [] } = useAll(
     app.tracks.where({ session_id: sessionId }).orderBy("position", "asc"),
   );
@@ -30,16 +32,14 @@ export function SequencerSession({
       .limit(1),
   );
   const { data: presence = [] } = useAll(app.presence.where({ session_id: sessionId }));
-  // Only createSession writes an owner membership, for the row creator. The
-  // policy itself remains creator-bound and does not treat this role as transferable.
-  const { data: creatorMembership = [] } = useAll(
-    app.session_members.where({ session_id: sessionId, member_author: author, role: "owner" }),
-  );
   const transport = observations[0];
   const session = sessions[0];
   const playhead = transport?.bar ?? 0;
   const title = session?.title ?? "Loading session…";
-  const isCreator = creatorMembership.length > 0;
+  // `$createdBy` is immutable system metadata. Unlike a mutable `owner`
+  // membership record, it remains the creator's administrative identity even
+  // if that record is removed or its collaboration role changes.
+  const isCreator = session?.$createdBy === author;
   const [memberUserId, setMemberUserId] = useState("");
   const [memberRole, setMemberRole] = useState<"editor" | "viewer">("editor");
 
