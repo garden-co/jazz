@@ -124,6 +124,8 @@ test("jazz-rn autolinks a New-Architecture relay host without legacy artifacts",
   assert.match(podspec, /requires the React Native New Architecture/);
   assert.match(androidBuild, /relayNativeArtifactsPresent/);
   assert.match(androidBuild, /externalNativeBuild/);
+  assert.match(androidBuild, /KotlinCompile/);
+  assert.match(androidBuild, /generateCodegenArtifactsFromSchema/);
   assert.doesNotMatch(androidBuild, /AndroidManifestNew/);
   assert.match(androidBuild, /requires the React Native New Architecture/);
   assert.match(androidPackage, /class JazzRelayPackage/);
@@ -222,6 +224,8 @@ test("relay artifact staging targets every Android ABI and iOS framework slice",
   assert.match(script, /\[x86_64\]=x86_64-linux-android/);
   assert.match(script, /JazzNativeRelay\.xcframework/);
   assert.match(script, /aarch64-apple-ios-sim x86_64-apple-ios/);
+  assert.match(script, /simulator_stage=.*simulator/);
+  assert.match(script, /\$simulator_stage\/libjazz_native_relay\.a/);
   assert.match(script, /nativeRelayAbi/);
 });
 
@@ -297,7 +301,7 @@ test("relay verification rejects a manifest-sealed XCFramework without its devic
     "ios-arm64/libjazz_native_relay.a",
     "ios-arm64_x86_64-simulator/libjazz_native_relay.a",
   ];
-  const info = (includeDevice) => `<?xml version="1.0" encoding="UTF-8"?>
+  const info = (includeDevice, simulatorLibrary = "libjazz_native_relay.a") => `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict><key>AvailableLibraries</key><array>
 ${
@@ -305,7 +309,7 @@ ${
     ? "<dict><key>LibraryIdentifier</key><string>ios-arm64</string><key>LibraryPath</key><string>libjazz_native_relay.a</string><key>SupportedArchitectures</key><array><string>arm64</string></array><key>SupportedPlatform</key><string>ios</string></dict>"
     : ""
 }
-<dict><key>LibraryIdentifier</key><string>ios-arm64_x86_64-simulator</string><key>LibraryPath</key><string>libjazz_native_relay.a</string><key>SupportedArchitectures</key><array><string>arm64</string><string>x86_64</string></array><key>SupportedPlatform</key><string>ios</string><key>SupportedPlatformVariant</key><string>simulator</string></dict>
+<dict><key>LibraryIdentifier</key><string>ios-arm64_x86_64-simulator</string><key>LibraryPath</key><string>${simulatorLibrary}</string><key>SupportedArchitectures</key><array><string>arm64</string><string>x86_64</string></array><key>SupportedPlatform</key><string>ios</string><key>SupportedPlatformVariant</key><string>simulator</string></dict>
 </array></dict></plist>`;
   const writeArtifactFiles = async (root, files) => {
     for (const file of files) {
@@ -374,6 +378,25 @@ ${
         stdio: "pipe",
       },
     );
+
+    const simulatorDirectory = join(iosRoot, "ios-arm64_x86_64-simulator");
+    await rm(join(simulatorDirectory, "libjazz_native_relay.a"));
+    await writeFile(join(simulatorDirectory, "libjazz_native_relay_simulator.a"), "fixture\n");
+    await writeFile(join(iosRoot, "Info.plist"), info(true, "libjazz_native_relay_simulator.a"));
+    await writeManifest(iosRoot, join(packageRoot, "ios/jazz-native-relay.manifest.json"));
+    assert.throws(
+      () =>
+        execFileSync(
+          process.execPath,
+          [verifier.pathname, "--package-root", packageRoot, "android", "ios"],
+          { env: environment, stdio: "pipe" },
+        ),
+      /inconsistent static-library names/,
+      "an XCFramework must use one internal static-library basename across slices",
+    );
+
+    await rm(join(simulatorDirectory, "libjazz_native_relay_simulator.a"));
+    await writeFile(join(simulatorDirectory, "libjazz_native_relay.a"), "fixture\n");
 
     await writeFile(join(iosRoot, "Info.plist"), info(false));
     await writeManifest(iosRoot, join(packageRoot, "ios/jazz-native-relay.manifest.json"));
