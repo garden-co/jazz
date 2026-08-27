@@ -199,6 +199,7 @@ pub(super) fn storage_read_metrics_buckets(metrics: &StorageReadMetrics) -> Stri
     [
         ("history_rows", metrics.history_rows),
         ("history_indexes", metrics.history_indexes),
+        ("ahead_current_rows", metrics.ahead_current_rows),
         ("global_current_rows", metrics.global_current_rows),
         ("global_current_indexes", metrics.global_current_indexes),
         (
