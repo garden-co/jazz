@@ -192,4 +192,39 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
     await reconnected;
     expect(manager.isExplicitlyOffline()).toBe(false);
   });
+
+  it("waits for worker transport state only while a follower is attaching", async () => {
+    const ready = deferred<void>();
+    const connection = {
+      ready: vi.fn(() => ready.promise),
+      disconnect: vi.fn(async () => undefined),
+      reconnect: vi.fn(async () => undefined),
+      openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
+    } as unknown as BrowserWorkerConnection;
+    const host = {
+      config: { serverUrl: "https://example.test" },
+      isShuttingDown: false,
+      runtimeSource: {
+        createBrowserWorkerConnection: vi.fn(() => connection),
+      },
+      markUnauthenticated: vi.fn(),
+      clearAuthError: vi.fn(),
+    } as unknown as DbForConnection;
+    const manager = new BrowserConnectionManager(host);
+    (
+      manager as unknown as {
+        onClientCreated(input: {
+          schemaKey: string;
+          schema: Record<string, never>;
+          client: JazzClient;
+        }): void;
+      }
+    ).onClientCreated({ schemaKey: "empty", schema: {}, client: {} as JazzClient });
+
+    const initial = manager.initialExplicitOfflineState();
+    expect(initial).not.toBeNull();
+    ready.resolve();
+    await initial;
+    expect(manager.initialExplicitOfflineState()).toBeNull();
+  });
 });

@@ -131,6 +131,16 @@ export abstract class ConnectionManager {
   /** Resolves when that explicit offline state is cleared. */
   abstract waitForReconnect(signal?: AbortSignal): Promise<void>;
 
+  /**
+   * Browser worker followers learn the namespace-wide explicit-offline state
+   * during their initial handshake. Other runtimes already have a synchronous
+   * state snapshot, so they deliberately return `null`: tier choice must not
+   * gain an asynchronous gap after an operation has started.
+   */
+  initialExplicitOfflineState(): Promise<void> | null {
+    return null;
+  }
+
   openInspectorControlPort(): Promise<MessagePort> {
     return Promise.reject(new Error("This runtime has no shared browser worker"));
   }

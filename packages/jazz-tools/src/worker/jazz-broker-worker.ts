@@ -43,6 +43,7 @@ type TabPeer = {
   flushRequestId: number | null;
   flushPumpComplete: boolean;
   flushObserved: boolean;
+  transportWaitAbort: AbortController;
   onMessage: (event: MessageEvent<BrowserFollowerPortRequest>) => void;
   onMessageError: () => void;
 };
@@ -369,20 +370,32 @@ function publishExplicitOffline(context: RuntimeContext): void {
 function waitForTransportStateChange(
   context: RuntimeContext,
   observedEpoch: number,
+  signal?: AbortSignal,
 ): Promise<void> {
-  if (context.transportStateEpoch !== observedEpoch) return Promise.resolve();
-  return new Promise<void>((resolve) => context.transportStateWaiters.add(resolve));
+  if (context.transportStateEpoch !== observedEpoch || signal?.aborted) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const finish = () => {
+      context.transportStateWaiters.delete(finish);
+      signal?.removeEventListener("abort", finish);
+      resolve();
+    };
+    signal?.addEventListener("abort", finish, { once: true });
+    context.transportStateWaiters.add(finish);
+  });
 }
 
 async function waitForServerConnection(
   context: RuntimeContext,
   runtime: NativeRuntimeAdapter,
+  signal?: AbortSignal,
 ): Promise<void> {
   for (;;) {
+    if (signal?.aborted) return;
     await context.transportTransition;
+    if (signal?.aborted) return;
     if (context.explicitlyDisconnected) {
       const epoch = context.transportStateEpoch;
-      await waitForTransportStateChange(context, epoch);
+      await waitForTransportStateChange(context, epoch, signal);
       continue;
     }
     await runtime.waitForUpstreamServerConnection();
@@ -411,6 +424,7 @@ function attachTab(context: RuntimeContext, tabId: string, port: MessagePort): v
     flushRequestId: null,
     flushPumpComplete: false,
     flushObserved: false,
+    transportWaitAbort: new AbortController(),
     onMessage,
     onMessageError,
   };
@@ -567,7 +581,8 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       result(peer, message.id);
       return;
     }
-    await waitForServerConnection(peer.context, activeRuntime);
+    await waitForServerConnection(peer.context, activeRuntime, peer.transportWaitAbort.signal);
+    if (peer.transportWaitAbort.signal.aborted) return;
     result(peer, message.id);
   } catch (error) {
     if ("id" in message) result(peer, message.id, asError(error));
@@ -651,6 +666,7 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
 }
 
 function result(peer: TabPeer, id: number, error?: Error): void {
+  if (peer.context.peers.get(peer.tabId) !== peer) return;
   post(peer.port, { type: "result", id, ...(error ? { error: errorDetails(error) } : {}) });
 }
 
@@ -669,6 +685,7 @@ function closeTab(context: RuntimeContext, tabId: string, closePort = true): voi
   const peer = context.peers.get(tabId);
   if (!peer) return;
   context.peers.delete(tabId);
+  peer.transportWaitAbort.abort();
   acknowledgeReset(context, tabId);
   peer.port.removeEventListener("message", peer.onMessage);
   peer.port.removeEventListener("messageerror", peer.onMessageError);
