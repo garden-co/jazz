@@ -66,13 +66,5 @@ function render(target: string, tasks: Task[], editable: boolean) {
   );
 }
 
-db.subscribeAll(
-  app.tasks.orderBy("title"),
-  ({ all }) => render("#main-tasks", all, false),
-  mainView,
-);
-db.subscribeAll(
-  app.tasks.orderBy("title"),
-  ({ all }) => render("#draft-tasks", all, true),
-  draftView,
-);
+db.subscribe(app.tasks.orderBy("title"), (tasks) => render("#main-tasks", tasks, false), mainView);
+db.subscribe(app.tasks.orderBy("title"), (tasks) => render("#draft-tasks", tasks, true), draftView);

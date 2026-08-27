@@ -14,8 +14,8 @@ export async function readTodosOneshot(db: Db) {
 
 // #region subscribe-vue
 export function subscribeTodos(db: Db, onUpdate: (results: unknown[]) => void) {
-  const unsubscribe = db.subscribeAll(app.todos.where({ done: false }), ({ all }) => {
-    onUpdate(all ?? []);
+  const unsubscribe = db.subscribe(app.todos.where({ done: false }), (todos) => {
+    onUpdate(todos);
   });
 
   return unsubscribe;
@@ -72,7 +72,7 @@ export async function combinedQuery(db: Db) {
 
 // #region reading-tier-vue
 export function subscribeTodosAtEdge(db: Db, onCount: (count: number) => void) {
-  return db.subscribeAll(app.todos.where({ done: false }), ({ all }) => onCount(all?.length ?? 0), {
+  return db.subscribe(app.todos.where({ done: false }), (todos) => onCount(todos.length), {
     tier: "edge",
     localUpdates: "immediate",
   });

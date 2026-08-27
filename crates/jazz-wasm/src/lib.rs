@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -3227,46 +3227,38 @@ fn subscription_stream_to_js(
     let state = (
         db,
         Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>,
-        HashSet::<String>::new(),
     );
-    readable_stream_from_stream(stream::unfold(
-        state,
-        |(db, mut source, layouts)| async move {
-            let mut event = match source.next().await {
-                Some(event) => event,
-                None => return None,
-            };
-            let mut retry_attempt = 0;
-            loop {
-                match db.hydrate_subscription_event_for_binding(&mut event).await {
-                    Ok(()) => break,
-                    Err(jazz::db::BindingHydrationError::RetryableChunkUnavailable {
-                        retry_after_ms,
-                    }) => {
-                        // Keep this event ahead of the source stream. A fulfilled
-                        // ReadableStream pull without enqueueing does not cause a
-                        // new pull at HWM 0, so wait for a real delayed wake before
-                        // retrying rather than returning an empty chunk or spinning.
-                        let delay_ms = subscription_retry_delay_ms(retry_attempt, retry_after_ms);
-                        if let Err(error) = wait_for_subscription_retry(delay_ms).await {
-                            return Some((Err(error), (db, source, layouts)));
-                        }
-                        retry_attempt = retry_attempt.saturating_add(1);
+    readable_stream_from_stream(stream::unfold(state, |(db, mut source)| async move {
+        let mut event = match source.next().await {
+            Some(event) => event,
+            None => return None,
+        };
+        let mut retry_attempt = 0;
+        loop {
+            match db.hydrate_subscription_event_for_binding(&mut event).await {
+                Ok(()) => break,
+                Err(jazz::db::BindingHydrationError::RetryableChunkUnavailable {
+                    retry_after_ms,
+                }) => {
+                    // Keep this event ahead of the source stream. A fulfilled
+                    // ReadableStream pull without enqueueing does not cause a
+                    // new pull at HWM 0, so wait for a real delayed wake before
+                    // retrying rather than returning an empty chunk or spinning.
+                    let delay_ms = subscription_retry_delay_ms(retry_attempt, retry_after_ms);
+                    if let Err(error) = wait_for_subscription_retry(delay_ms).await {
+                        return Some((Err(error), (db, source)));
                     }
-                    Err(jazz::db::BindingHydrationError::Error(error)) => {
-                        // Do not retain a fatal event: surfacing the stream error
-                        // drops SubscriptionStream and runs its cleanup guard.
-                        return Some((Err(to_js_error(error)), (db, source, layouts)));
-                    }
+                    retry_attempt = retry_attempt.saturating_add(1);
+                }
+                Err(jazz::db::BindingHydrationError::Error(error)) => {
+                    // Do not retain a fatal event: surfacing the stream error
+                    // drops SubscriptionStream and runs its cleanup guard.
+                    return Some((Err(to_js_error(error)), (db, source)));
                 }
             }
-            let mut prospective_layouts = layouts.clone();
-            match subscription_chunk_to_js(event, &mut prospective_layouts) {
-                Ok(chunk) => Some((Ok(chunk), (db, source, prospective_layouts))),
-                Err(error) => Some((Err(error), (db, source, layouts))),
-            }
-        },
-    ))
+        }
+        Some((subscription_chunk_to_js(event), (db, source)))
+    }))
 }
 
 const INITIAL_SUBSCRIPTION_RETRY_MS: u32 = 25;
@@ -3390,10 +3382,7 @@ impl Drop for SubscriptionRetryTimer {
     }
 }
 
-fn subscription_chunk_to_js(
-    event: SubscriptionEvent,
-    published_terminal_layouts: &mut HashSet<String>,
-) -> Result<JsValue, JsValue> {
+fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue> {
     let object = js_sys::Object::new();
     match event {
         SubscriptionEvent::Delta {
@@ -3402,43 +3391,21 @@ fn subscription_chunk_to_js(
             added,
             updated,
             removed,
-            ordered_suffix_start,
             terminal_operations,
-            terminal_layout,
             settled,
             tier,
             ..
         } => {
-            let (added, updated, removed) = if terminal_operations.is_empty() {
-                (added, updated, removed)
-            } else {
-                (Vec::new(), Vec::new(), Vec::new())
-            };
             let delta =
                 encode_subscription_delta(&added, &updated, &removed).map_err(to_js_error)?;
-            if let Some(layout) = terminal_layout.as_ref() {
-                if terminal_operations
-                    .iter()
-                    .any(|operation| operation.root_descriptor != layout.root_descriptor)
-                {
-                    return Err(JsValue::from_str(
-                        "terminal operation descriptor disagrees with its prepared root layout",
-                    ));
-                }
+            if terminal_operations
+                .iter()
+                .any(|operation| operation.path.is_empty())
+            {
+                return Err(JsValue::from_str(
+                    "native producer emitted a root terminal operation",
+                ));
             }
-            let terminal_layout_id = if terminal_operations.is_empty() {
-                ""
-            } else {
-                terminal_layout
-                    .as_ref()
-                    .ok_or_else(|| {
-                        JsValue::from_str(
-                            "terminal operation arrived without a prepared root layout",
-                        )
-                    })?
-                    .id
-                    .as_str()
-            };
             set_prop(&object, "type", JsValue::from_str("delta"))?;
             set_prop(
                 &object,
@@ -3448,46 +3415,14 @@ fn subscription_chunk_to_js(
             set_prop(
                 &object,
                 "terminalOperations",
-                jazz::binding_codec::terminal_operations_to_json(
-                    &terminal_operations,
-                    terminal_layout_id,
-                )
-                .map_err(to_js_error)?
-                .serialize(&serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true))
-                .map_err(to_js_error)?,
-            )?;
-            let terminal_layouts = if terminal_operations.is_empty() {
-                Vec::new()
-            } else {
-                let layout = terminal_layout.as_ref().ok_or_else(|| {
-                    JsValue::from_str("terminal operation arrived without a prepared root layout")
-                })?;
-                published_terminal_layouts
-                    .insert(layout.id.clone())
-                    .then(|| {
-                        jazz::binding_codec::terminal_layout_to_json(layout).map_err(to_js_error)
-                    })
-                    .transpose()?
-                    .into_iter()
-                    .collect()
-            };
-            set_prop(
-                &object,
-                "terminalLayouts",
-                serde_json::Value::Array(terminal_layouts)
+                jazz::binding_codec::terminal_operations_to_json(&terminal_operations)
+                    .map_err(to_js_error)?
                     .serialize(
                         &serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true),
                     )
                     .map_err(to_js_error)?,
             )?;
             set_prop(&object, "reset", JsValue::from_bool(reset))?;
-            if let Some(start) = ordered_suffix_start {
-                set_prop(
-                    &object,
-                    "orderedSuffixStart",
-                    JsValue::from_f64(start as f64),
-                )?;
-            }
             set_prop(&object, "publishable", JsValue::from_bool(publishable))?;
             set_prop(&object, "settled", JsValue::from_bool(settled))?;
             set_prop(&object, "tier", JsValue::from_str(&format!("{tier:?}")))?;

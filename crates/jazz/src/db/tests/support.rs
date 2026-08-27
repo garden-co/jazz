@@ -1674,17 +1674,6 @@ pub(super) fn row(byte: u8) -> RowUuid {
     RowUuid::from_bytes([byte; 16])
 }
 
-pub(super) fn relation_snapshot_row(table: &str, row_uuid: RowUuid) -> CurrentRow {
-    let descriptor = RecordDescriptor::new([("row_uuid".to_owned(), ValueType::Uuid)]);
-    let raw = descriptor
-        .create(&[groove::records::Value::Uuid(row_uuid.0)])
-        .expect("encode relation snapshot row");
-    CurrentRow::new(table, OwnedRecord::new(raw, descriptor))
-}
-
-/// A reset may carry canonical relation provenance while the materialized
-/// related row is named by a newer read schema. Ordinary removal must use the
-/// same projected edge identity, retaining an unrelated same-UUID row.
 pub(super) fn cells(title: &str, done: bool, owner: AuthorSubject) -> RowCells {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.to_owned())),

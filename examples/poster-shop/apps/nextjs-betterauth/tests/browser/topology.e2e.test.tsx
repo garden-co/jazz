@@ -190,12 +190,10 @@ describe("PosterShop cross-topology recovery", () => {
                 "edge",
               );
               ctx.trackSubscription(
-                reader.subscribeAll(
+                reader.subscribe(
                   canvasQueries(canvas.id).shapeWindow,
-                  (delta) => {
-                    windowSnapshots.push(
-                      (delta.all ?? []).map((row) => ({ id: row.id, zIndex: row.zIndex })),
-                    );
+                  (rows) => {
+                    windowSnapshots.push(rows.map((row) => ({ id: row.id, zIndex: row.zIndex })));
                   },
                   { tier: "edge" },
                 ),

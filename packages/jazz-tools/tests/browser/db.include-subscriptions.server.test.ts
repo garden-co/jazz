@@ -138,7 +138,7 @@ describe("websocket include subscriptions", () => {
     ]);
   }, 45_000);
 
-  it("delivers depth-3 reverse include material from client A to client B subscribeAll", async () => {
+  it("delivers depth-3 reverse include material from client A to client B subscribe", async () => {
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
       uniqueDbName("include-subscriptions"),
     );
@@ -171,10 +171,10 @@ describe("websocket include subscriptions", () => {
       })
       .requireIncludes();
     const unsubscribe = ctx.trackSubscription(
-      dbB.subscribeAll(
+      dbB.subscribe(
         selectedIncludeQuery,
-        (delta) => {
-          snapshots.push(delta.all as OrgWithDeepIncludes[]);
+        (rows) => {
+          snapshots.push(rows as OrgWithDeepIncludes[]);
         },
         { tier: "global" },
       ),
@@ -182,7 +182,7 @@ describe("websocket include subscriptions", () => {
     await waitForCondition(
       async () => snapshots.length > 0,
       10_000,
-      "client B subscribeAll did not produce an initial snapshot",
+      "client B subscribe did not produce an initial snapshot",
     );
 
     const org = await withTimeout(
@@ -221,7 +221,7 @@ describe("websocket include subscriptions", () => {
             hasProjectedTodo(rows, org.id, todo.id, "ship it"),
         ),
       15_000,
-      `client B subscribeAll received client A's projected depth-3 reverse include; snapshots=${JSON.stringify(
+      `client B subscribe received client A's projected depth-3 reverse include; snapshots=${JSON.stringify(
         snapshots.slice(-3),
       )}`,
     );
@@ -236,7 +236,7 @@ describe("websocket include subscriptions", () => {
       async () =>
         snapshots.some((rows) => hasProjectedTodo(rows, org.id, todo.id, "ship it again")),
       15_000,
-      `client B subscribeAll received projected client A todo update; snapshots=${JSON.stringify(
+      `client B subscribe received projected client A todo update; snapshots=${JSON.stringify(
         snapshots.slice(-3),
       )}`,
     );

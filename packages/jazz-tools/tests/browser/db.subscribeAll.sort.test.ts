@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
+import {
+  createDb,
+  getDbSubscriptionSource,
+  type Db,
+  type QueryBuilder,
+  type TableProxy,
+} from "../../src/runtime/db.js";
 import type { SubscriptionDelta } from "../../src/runtime/subscription-manager.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 
@@ -97,13 +103,16 @@ function hasUpdateForId(delta: SubscriptionDelta<Todo>, id: string): boolean {
   return delta.delta.some((change) => change.kind === 2 && change.id === id);
 }
 
-describe("db.subscribeAll sorting browser integration", () => {
+describe("internal subscription delta sorting browser integration", () => {
   it("keeps unique ids and deterministic order after a sort-field move causes multiple shifts", async () => {
     await withDb("real-move-multi-shift", async (db) => {
       const deltas: Array<SubscriptionDelta<Todo>> = [];
-      const unsubscribe = db.subscribeAll(sortedByRankAscQuery, (delta) => {
-        deltas.push(delta);
-      });
+      const unsubscribe = getDbSubscriptionSource(db).subscribeDelta(
+        sortedByRankAscQuery,
+        (delta) => {
+          deltas.push(delta);
+        },
+      );
 
       try {
         const {
@@ -151,9 +160,12 @@ describe("db.subscribeAll sorting browser integration", () => {
   it("keeps order stable when updating a non-sort field", async () => {
     await withDb("stable-non-sort-update", async (db) => {
       const deltas: Array<SubscriptionDelta<Todo>> = [];
-      const unsubscribe = db.subscribeAll(sortedByRankAscQuery, (delta) => {
-        deltas.push(delta);
-      });
+      const unsubscribe = getDbSubscriptionSource(db).subscribeDelta(
+        sortedByRankAscQuery,
+        (delta) => {
+          deltas.push(delta);
+        },
+      );
 
       try {
         const {
@@ -194,9 +206,12 @@ describe("db.subscribeAll sorting browser integration", () => {
   it("reorders when updating the sort field", async () => {
     await withDb("move-on-sort-update", async (db) => {
       const snapshots: Todo[][] = [];
-      const unsubscribe = db.subscribeAll(sortedByRankAscQuery, (delta) => {
-        snapshots.push(delta.all);
-      });
+      const unsubscribe = getDbSubscriptionSource(db).subscribeDelta(
+        sortedByRankAscQuery,
+        (delta) => {
+          snapshots.push(delta.all);
+        },
+      );
 
       try {
         const {
@@ -236,9 +251,12 @@ describe("db.subscribeAll sorting browser integration", () => {
   it("preserves sorted order after removing a middle row", async () => {
     await withDb("remove-middle", async (db) => {
       const snapshots: Todo[][] = [];
-      const unsubscribe = db.subscribeAll(sortedByRankAscQuery, (delta) => {
-        snapshots.push(delta.all);
-      });
+      const unsubscribe = getDbSubscriptionSource(db).subscribeDelta(
+        sortedByRankAscQuery,
+        (delta) => {
+          snapshots.push(delta.all);
+        },
+      );
 
       try {
         const {
@@ -278,9 +296,12 @@ describe("db.subscribeAll sorting browser integration", () => {
   it("uses stable id ordering when orderBy is omitted", async () => {
     await withDb("default-id-order", async (db) => {
       const snapshots: Todo[][] = [];
-      const unsubscribe = db.subscribeAll(makeTodosQuery({}), (delta) => {
-        snapshots.push(delta.all);
-      });
+      const unsubscribe = getDbSubscriptionSource(db).subscribeDelta(
+        makeTodosQuery({}),
+        (delta) => {
+          snapshots.push(delta.all);
+        },
+      );
 
       try {
         const {
@@ -340,7 +361,7 @@ describe("db.subscribeAll sorting browser integration", () => {
   it("supports descending sort and reorders correctly", async () => {
     await withDb("desc-order", async (db) => {
       const snapshots: Todo[][] = [];
-      const unsubscribe = db.subscribeAll(
+      const unsubscribe = getDbSubscriptionSource(db).subscribeDelta(
         makeTodosQuery({ orderBy: [["rank", "desc"]] }),
         (delta) => {
           snapshots.push(delta.all);
@@ -383,9 +404,12 @@ describe("db.subscribeAll sorting browser integration", () => {
   it("uses id as deterministic tie-break for equal sort values", async () => {
     await withDb("tie-break-id", async (db) => {
       const snapshots: Todo[][] = [];
-      const unsubscribe = db.subscribeAll(sortedByRankAscQuery, (delta) => {
-        snapshots.push(delta.all);
-      });
+      const unsubscribe = getDbSubscriptionSource(db).subscribeDelta(
+        sortedByRankAscQuery,
+        (delta) => {
+          snapshots.push(delta.all);
+        },
+      );
 
       try {
         const {
@@ -415,7 +439,7 @@ describe("db.subscribeAll sorting browser integration", () => {
   it("applies multi-column sorting deterministically", async () => {
     await withDb("multi-column-sort", async (db) => {
       const snapshots: Todo[][] = [];
-      const unsubscribe = db.subscribeAll(
+      const unsubscribe = getDbSubscriptionSource(db).subscribeDelta(
         makeTodosQuery({
           orderBy: [
             ["rank", "asc"],
@@ -463,9 +487,12 @@ describe("db.subscribeAll sorting browser integration", () => {
   it("does not reposition on no-op sort-field update", async () => {
     await withDb("noop-sort-update", async (db) => {
       const snapshots: Todo[][] = [];
-      const unsubscribe = db.subscribeAll(sortedByRankAscQuery, (delta) => {
-        snapshots.push(delta.all);
-      });
+      const unsubscribe = getDbSubscriptionSource(db).subscribeDelta(
+        sortedByRankAscQuery,
+        (delta) => {
+          snapshots.push(delta.all);
+        },
+      );
 
       try {
         const {
@@ -504,7 +531,7 @@ describe("db.subscribeAll sorting browser integration", () => {
   it("keeps window order correct around limit/offset boundaries", async () => {
     await withDb("limit-offset-boundary", async (db) => {
       const snapshots: Todo[][] = [];
-      const unsubscribe = db.subscribeAll(
+      const unsubscribe = getDbSubscriptionSource(db).subscribeDelta(
         makeTodosQuery({ orderBy: [["rank", "asc"]], offset: 1, limit: 2 }),
         (delta) => {
           snapshots.push(delta.all);
@@ -553,9 +580,12 @@ describe("db.subscribeAll sorting browser integration", () => {
   it("handles mixed add/remove/update changes with deterministic final order", async () => {
     await withDb("mixed-delta", async (db) => {
       const snapshots: Todo[][] = [];
-      const unsubscribe = db.subscribeAll(sortedByRankAscQuery, (delta) => {
-        snapshots.push(delta.all);
-      });
+      const unsubscribe = getDbSubscriptionSource(db).subscribeDelta(
+        sortedByRankAscQuery,
+        (delta) => {
+          snapshots.push(delta.all);
+        },
+      );
 
       try {
         const {
@@ -600,9 +630,12 @@ describe("db.subscribeAll sorting browser integration", () => {
   it("inserts new rows at top, middle, and bottom positions", async () => {
     await withDb("insert-positioning", async (db) => {
       const snapshots: Todo[][] = [];
-      const unsubscribe = db.subscribeAll(sortedByRankAscQuery, (delta) => {
-        snapshots.push(delta.all);
-      });
+      const unsubscribe = getDbSubscriptionSource(db).subscribeDelta(
+        sortedByRankAscQuery,
+        (delta) => {
+          snapshots.push(delta.all);
+        },
+      );
 
       try {
         const {
@@ -674,9 +707,12 @@ describe("db.subscribeAll sorting browser integration", () => {
 
     const db2 = await createDb({ appId, driver: { type: "persistent", dbName } });
     const snapshots: Todo[][] = [];
-    const unsubscribe = db2.subscribeAll(sortedByRankAscQuery, (delta) => {
-      snapshots.push(delta.all);
-    });
+    const unsubscribe = getDbSubscriptionSource(db2).subscribeDelta(
+      sortedByRankAscQuery,
+      (delta) => {
+        snapshots.push(delta.all);
+      },
+    );
 
     try {
       await waitForCondition(
@@ -705,7 +741,7 @@ describe("db.subscribeAll sorting browser integration", () => {
 
     const db2 = await createDb({ appId, driver: { type: "persistent", dbName } });
     const snapshots: Todo[][] = [];
-    const unsubscribe = db2.subscribeAll(makeTodosQuery({}), (delta) => {
+    const unsubscribe = getDbSubscriptionSource(db2).subscribeDelta(makeTodosQuery({}), (delta) => {
       snapshots.push(delta.all);
     });
 
@@ -726,10 +762,13 @@ describe("db.subscribeAll sorting browser integration", () => {
     await withDb("null-sort-values", async (db) => {
       const snapshots: Todo[][] = [];
       let sawInitialReset = false;
-      const unsubscribe = db.subscribeAll(sortedByRankAscQuery, (delta) => {
-        sawInitialReset ||= delta.reset === true;
-        snapshots.push(delta.all);
-      });
+      const unsubscribe = getDbSubscriptionSource(db).subscribeDelta(
+        sortedByRankAscQuery,
+        (delta) => {
+          sawInitialReset ||= delta.reset === true;
+          snapshots.push(delta.all);
+        },
+      );
 
       try {
         await waitForCondition(
@@ -775,7 +814,7 @@ describe("db.subscribeAll sorting browser integration", () => {
   it("supports explicit id descending ordering", async () => {
     await withDb("order-by-id-desc", async (db) => {
       const snapshots: Todo[][] = [];
-      const unsubscribe = db.subscribeAll(
+      const unsubscribe = getDbSubscriptionSource(db).subscribeDelta(
         makeTodosQuery({ orderBy: [["id", "desc"]] }),
         (delta) => {
           snapshots.push(delta.all);
@@ -820,7 +859,7 @@ describe("db.subscribeAll sorting browser integration", () => {
   it("shifts offset window when removing a row before the window", async () => {
     await withDb("offset-shift-on-remove-before-window", async (db) => {
       const snapshots: Todo[][] = [];
-      const unsubscribe = db.subscribeAll(
+      const unsubscribe = getDbSubscriptionSource(db).subscribeDelta(
         makeTodosQuery({ orderBy: [["rank", "asc"]], offset: 1, limit: 2 }),
         (delta) => {
           snapshots.push(delta.all);
@@ -869,7 +908,7 @@ describe("db.subscribeAll sorting browser integration", () => {
   it("respects explicit id descending tie-break in mixed sorting", async () => {
     await withDb("mixed-sort-rank-id-desc", async (db) => {
       const snapshots: Todo[][] = [];
-      const unsubscribe = db.subscribeAll(
+      const unsubscribe = getDbSubscriptionSource(db).subscribeDelta(
         makeTodosQuery({
           orderBy: [
             ["rank", "asc"],

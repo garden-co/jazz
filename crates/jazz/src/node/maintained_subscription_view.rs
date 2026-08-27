@@ -135,9 +135,6 @@ pub(crate) struct ResultTransitions {
     pub(crate) result_payload_removes: Vec<ResultMemberEntry>,
     pub(crate) program_fact_adds: Vec<ProgramFactEntry>,
     pub(crate) program_fact_removes: Vec<ProgramFactEntry>,
-    /// Root occurrences whose retained collector record changed in this tick.
-    /// The future structured carrier can render exactly these parents.
-    pub(crate) structured_app_row_changes: BTreeSet<RowUuid>,
     /// Generic Groove terminal patches. These bypass relation/result assembly
     /// and are forwarded unchanged to the subscription boundary.
     pub(crate) terminal_operations: Vec<TerminalOperation>,
@@ -303,9 +300,6 @@ impl MaintainedSubscriptionView {
             transitions
                 .result_payload_removes
                 .extend(delta_transitions.result_payload_removes);
-            transitions
-                .structured_app_row_changes
-                .extend(delta_transitions.structured_app_row_changes);
             transitions.observed_result_delta_batches +=
                 delta_transitions.observed_result_delta_batches;
             transitions.requires_authoritative_membership_reconcile |=
@@ -395,7 +389,6 @@ impl MaintainedSubscriptionView {
                 }
                 NetEvent::StructuredAppRow(root, record) => {
                     self.apply_structured_app_row_delta(root, record, weight);
-                    transitions.structured_app_row_changes.insert(root);
                 }
             }
         }
