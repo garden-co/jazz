@@ -1424,12 +1424,48 @@ struct LoweredRel {
     pending_reachable: Option<PendingReachable>,
 }
 
+fn validate_exists_rel_join_conditions(
+    table: &TableName,
+    path: &str,
+    rel: &RelExpr,
+) -> Result<(), SchemaConversionError> {
+    match rel {
+        RelExpr::TableScan { .. } => Ok(()),
+        RelExpr::Filter { input, .. } | RelExpr::Project { input, .. } => {
+            validate_exists_rel_join_conditions(table, path, input)
+        }
+        RelExpr::Union { inputs } => {
+            for input in inputs {
+                validate_exists_rel_join_conditions(table, path, input)?;
+            }
+            Ok(())
+        }
+        RelExpr::Join {
+            left, right, on, ..
+        } => {
+            if on.len() > 1 {
+                return Err(err(
+                    format!("$.{}.{}", table.as_str(), path),
+                    "core schema ExistsRel joins support exactly one column equality",
+                ));
+            }
+            validate_exists_rel_join_conditions(table, path, left)?;
+            validate_exists_rel_join_conditions(table, path, right)
+        }
+        RelExpr::Gather { seed, step, .. } => {
+            validate_exists_rel_join_conditions(table, path, seed)?;
+            validate_exists_rel_join_conditions(table, path, step)
+        }
+    }
+}
+
 fn append_exists_rel_policy_clause(
     table: &TableName,
     path: &str,
     mut query: Query,
     rel: &RelExpr,
 ) -> Result<Query, SchemaConversionError> {
+    validate_exists_rel_join_conditions(table, path, rel)?;
     let mut lowered = lower_exists_rel(table, path, rel)?;
     let correlation_index = lowered
         .filters
