@@ -60,6 +60,60 @@ fn authenticated_client_upload_uses_authority_clock_for_forward_skew() {
     );
 }
 
+/// This stays at the peer/transport seam because public client APIs cannot
+/// deliberately hold one accepted wire frame while rejecting the next logical
+/// message. It proves the ownership boundary: a fate rejected by a bounded
+/// transport remains in the connection-owned FIFO until the transport accepts
+/// it, rather than disappearing with the synchronous tick turn.
+#[test]
+fn downstream_fate_retries_after_bounded_transport_backpressure() {
+    let identity = AuthorSubject::for_test_bytes([0xc2; 16]);
+    let schema = schema();
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let outbound = Rc::new(RefCell::new(VecDeque::new()));
+    let subscriber = server.accept_subscriber(
+        Box::new(BackpressureOnceTransport {
+            outbound: Rc::clone(&outbound),
+            failed: false,
+        }),
+        identity,
+    );
+    let fate = SyncMessage::FateUpdate {
+        tx_id: TxId::new(TxTime::from(2), NodeUuid::from_bytes([0xc2; 16])),
+        fate: Fate::Accepted,
+        global_time: None,
+        durability: Some(DurabilityTier::Edge),
+    };
+    subscriber
+        .borrow()
+        .downstream_fates
+        .borrow_mut()
+        .push(fate.clone());
+
+    subscriber
+        .borrow_mut()
+        .tick()
+        .expect("backpressure retains the fate and schedules a retry");
+    assert_eq!(
+        subscriber.borrow().downstream_fates.borrow().as_slice(),
+        std::slice::from_ref(&fate),
+        "a rejected wire admission leaves the exact fate at its semantic producer"
+    );
+    assert!(outbound.borrow().is_empty());
+
+    subscriber
+        .borrow_mut()
+        .tick()
+        .expect("later capacity accepts the retained fate");
+    assert!(subscriber.borrow().downstream_fates.borrow().is_empty());
+    assert!(matches!(
+        outbound.borrow_mut().pop_front(),
+        Some(SyncMessage::CatalogueSnapshot(_))
+    ));
+    assert_eq!(outbound.borrow_mut().pop_front(), Some(fate));
+    assert!(outbound.borrow().is_empty());
+}
+
 #[test]
 fn catalogue_fingerprint_change_is_eager_only_on_trusted_backend_link() {
     // This stays internal because trust is authenticated by the host at the
