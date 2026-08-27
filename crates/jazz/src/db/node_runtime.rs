@@ -1442,6 +1442,7 @@ where
         let chunk_completion_generation = self.chunk_resolver.completion_generation();
         if self.chunk_resolver.has_pending_local_demand()
             || chunk_completion_generation != self.observed_chunk_completion_generation.get()
+            || self.node.lock().await.has_pending_query_runtime()
         {
             stats.subscription_events += Box::pin(refresh_subscriptions_in(
                 &self.node,

@@ -1,6 +1,16 @@
 use super::*;
 
 impl Database {
+    /// Whether a suspended IVM evaluation still needs a future owner turn.
+    ///
+    /// An external chunk completion can wake an evaluation which then starts a
+    /// second asynchronous operation (for example, durable install metadata).
+    /// Once the chunk request itself is complete, callers must still keep
+    /// polling this work until the runtime reaches a terminal state.
+    pub fn has_pending_progress(&self) -> bool {
+        self.ivm_runtime.has_pending_incremental()
+    }
+
     /// Drive every suspended incremental evaluation until the runtime is
     /// either quiescent or waiting for storage.
     ///
