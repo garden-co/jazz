@@ -1762,7 +1762,9 @@ export class NativeRuntimeAdapter implements Runtime {
     // so. The settled membership from the worker is the authorization
     // boundary; lowering it to Local here would re-scan cached rows that a
     // fresh remote receipt had just removed.
-    const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
+    const exactEdgeAuthorityRead = this.isPolicyScopedExactEdgeRead(coreQueryJson, tier);
+    const authorityTier = exactEdgeAuthorityRead ? "global" : tier;
+    const opts = readOptions(authorityTier, queryIncludesDeleted(coreQueryJson), optionsJson);
     if (queryUsesNativeRelationApi(coreQueryJson)) {
       if (this.readAuthorizationHost === "trusted-serving") {
         if (!this.db.allRelationQueryForIdentity) {
@@ -1784,7 +1786,7 @@ export class NativeRuntimeAdapter implements Runtime {
       return rowsFromBatches(readRowBatches(payload), this.schema);
     }
     const query = this.prepareQuery(coreQueryJson);
-    const attachment = await this.attachQueryIfNeeded(tier, optionsJson, query, session);
+    const attachment = await this.attachQueryIfNeeded(authorityTier, optionsJson, query, session);
     if (this.closed) return [];
     this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
     try {
@@ -1820,7 +1822,12 @@ export class NativeRuntimeAdapter implements Runtime {
       const projectedColumns = subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns;
       let rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx);
       let rowStates = rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
-      if (!pendingTx && (tier === "edge" || tier === "global") && rowStates.length > 0) {
+      if (
+        !exactEdgeAuthorityRead &&
+        !pendingTx &&
+        (tier === "edge" || tier === "global") &&
+        rowStates.length > 0
+      ) {
         await this.refreshRowsFromEdge(session, rowStates);
         if (this.closed) return [];
         rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx);
@@ -2416,14 +2423,21 @@ export class NativeRuntimeAdapter implements Runtime {
         array_subqueries: [],
       });
       const query = this.prepareQuery(queryJson);
-      let attachment: unknown;
+      let authorityAttachment: unknown;
       try {
-        attachment = await this.attachQueryIfNeeded("edge", null, query, session);
+        // Row-body refreshes turn an already-authorized Edge result into an
+        // exact-id request. A browser relay cannot use its local materialized
+        // row as that request's authority: first acquire its matching Global
+        // receipt, then hydrate from that receipt while the broad Edge query
+        // continues to own the result membership returned to the caller.
+        authorityAttachment = await this.attachQueryIfNeeded("global", null, query, session);
         if (this.closed) return;
-        const opts = readOptions("edge", false, null);
+        const opts = readOptions("global", false, null);
         await this.readRowsForHostAsync(query, opts, session?.identity);
       } finally {
-        if (attachment !== undefined && !this.closed) this.db.detachQuery?.(attachment);
+        if (authorityAttachment !== undefined && !this.closed) {
+          this.db.detachQuery?.(authorityAttachment);
+        }
       }
     }
   }
@@ -2441,6 +2455,29 @@ export class NativeRuntimeAdapter implements Runtime {
       this.preparedQueries.set(key, query);
     }
     return query;
+  }
+
+  /**
+   * A browser relay may only answer a policy-scoped exact Edge request from
+   * the matching authority membership. Route that one-shot through Global
+   * coverage directly: opening an Edge child first would await the very
+   * Global receipt that only this request can schedule.
+   */
+  private isPolicyScopedExactEdgeRead(queryJson: string, tier: string | null | undefined): boolean {
+    if (tier !== "edge") return false;
+    try {
+      const query = JSON.parse(queryJson) as {
+        table?: unknown;
+        conditions?: Array<{ column?: unknown; op?: unknown }>;
+      };
+      if (typeof query.table !== "string" || !this.table(query.table).policies) return false;
+      return (
+        query.conditions?.some((condition) => condition.column === "id" && condition.op === "eq") ??
+        false
+      );
+    } catch {
+      return false;
+    }
   }
 
   private async attachQueryIfNeeded(

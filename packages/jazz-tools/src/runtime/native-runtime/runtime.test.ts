@@ -2497,6 +2497,112 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(detached).toEqual([]);
   });
 
+  it("hydrates broad Edge members through an exact Global receipt, never a local fallback", async () => {
+    const attachments: unknown[] = [];
+    const readOptions: unknown[] = [];
+    const detached: unknown[] = [];
+    const row = {
+      table: "todos",
+      rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+      title: "authority-selected todo",
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: (_query: unknown, opts: unknown) => {
+              readOptions.push(opts);
+              return encodeRows([row]);
+            },
+            attachQuery: (_query: unknown, opts: unknown) => {
+              attachments.push(opts);
+              return { tier: (opts as { tier: string }).tier };
+            },
+            connectUpstream: () => new FakeTransport([]),
+            queryAttachmentIsCovered: () => true,
+            detachQuery: (attachment: unknown) => detached.push(attachment),
+            prepareQuery: () => ({}),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    runtime.connectUpstreamPeer();
+
+    await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "edge")).resolves.toEqual([
+      {
+        id: "00000000-0000-0000-0000-000000000001",
+        table: "todos",
+        values: [{ type: "Text", value: "authority-selected todo" }],
+      },
+    ]);
+
+    expect(attachments).toEqual([{ tier: "edge" }, { tier: "global" }]);
+    expect(readOptions).toEqual([{ tier: "edge" }, { tier: "global" }, { tier: "edge" }]);
+    expect(detached).toEqual([{ tier: "global" }, { tier: "edge" }]);
+  });
+
+  it("opens a policy-scoped exact Edge read from its Global authority receipt", async () => {
+    const attachments: unknown[] = [];
+    const readOptions: unknown[] = [];
+    const policySchema: WasmSchema = {
+      todos: {
+        ...testSchema.todos,
+        policies: { select: { using: { type: "True" } } },
+      },
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: (_query: unknown, opts: unknown) => {
+              readOptions.push(opts);
+              return encodeRows([]);
+            },
+            attachQuery: (_query: unknown, opts: unknown) => {
+              attachments.push(opts);
+              return {};
+            },
+            connectUpstream: () => new FakeTransport([]),
+            queryAttachmentIsCovered: () => true,
+            detachQuery: () => undefined,
+            prepareQuery: () => ({}),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      policySchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    runtime.connectUpstreamPeer();
+
+    await expect(
+      runtime.query(
+        JSON.stringify({
+          table: "todos",
+          conditions: [{ column: "id", op: "eq", value: "00000000-0000-0000-0000-000000000001" }],
+        }),
+        null,
+        "edge",
+      ),
+    ).resolves.toEqual([]);
+
+    expect(attachments).toEqual([{ tier: "global" }]);
+    expect(readOptions).toEqual([{ tier: "global" }]);
+  });
+
   it("ignores the removed propagate read option", async () => {
     const readOptions: unknown[] = [];
     const runtime = new NativeRuntimeAdapter(
