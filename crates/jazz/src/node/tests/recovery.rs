@@ -50,6 +50,34 @@ fn opening_existing_storage_recovers_mirrors_and_high_water_marks() {
 }
 
 #[test]
+fn reopening_rejects_a_colliding_durable_node_alias_before_decoding_history() {
+    // This must plant impossible persisted metadata directly: public APIs never
+    // create duplicate aliases, while recovery is the fail-closed boundary.
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    {
+        let mut reopened_node = open_node_at(&temp_dir, schema.clone());
+        let mut batch = reopened_node.database.open_batch();
+        batch.insert(
+            "jazz_nodes",
+            vec![Value::U64(999), Value::Uuid(node(1).0)],
+        );
+        let applied = crate::db::block_on(reopened_node.database.apply_batch(batch)).unwrap();
+        let persisted = crate::db::block_on(applied.persist());
+        reopened_node.database.finish_persistence(persisted).unwrap();
+        crate::db::block_on(reopened_node.database.close()).unwrap();
+    }
+
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    assert!(matches!(
+        crate::db::block_on(NodeState::new(node(1), schema, storage)),
+        Err(Error::InvalidStoredValue("node UUID has conflicting durable aliases"))
+    ));
+}
+
+#[test]
 fn contribution_merge_provenance_survives_reopen() {
     let schema = schema();
     let temp_dir = tempfile::tempdir().unwrap();

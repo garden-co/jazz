@@ -257,6 +257,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn packed_hlc_golden_boundaries_are_big_endian_ordered_u64s() {
+        assert_eq!(TxTime::new(0, 0).0, 0x0000_0000_0000_0000);
+        assert_eq!(
+            TxTime::new(0, HLC_MAX_LOGICAL_COUNTER).0,
+            0x0000_0000_0003_ffff
+        );
+        assert_eq!(TxTime::new(1, 0).0, 0x0000_0000_0004_0000);
+        assert_eq!(
+            TxTime::new(HLC_MAX_PHYSICAL_MS, HLC_MAX_LOGICAL_COUNTER).0,
+            u64::MAX
+        );
+        assert!(TxTime::new(0, HLC_MAX_LOGICAL_COUNTER) < TxTime::new(1, 0));
+    }
+
     /// Public Unix-millisecond provenance reconstructs only the zero logical
     /// counter and rejects values that cannot fit the 46-bit HLC layout.
     #[test]
