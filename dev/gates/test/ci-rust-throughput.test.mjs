@@ -1335,10 +1335,7 @@ test("CodSpeed preserves example benchmark package and bench coverage", () => {
       "jazz-example-big-label-benchmark",
       "jazz-example-band-chat-benchmark",
     ]) {
-      assert.match(
-        commands.get(command),
-        new RegExp(`--package ${benchmarkPackage}(?: |$)`),
-      );
+      assert.match(commands.get(command), new RegExp(`--package ${benchmarkPackage}(?: |$)`));
     }
   }
   for (const bench of ["fixture", "ahead_current", "loads"]) {
