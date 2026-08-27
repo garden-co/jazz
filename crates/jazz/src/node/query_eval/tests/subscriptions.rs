@@ -197,13 +197,17 @@ fn policy_root_retains_reachable_point_access_paths() {
     );
 }
 
+/// A point-scoped policy subscription admits alice's issue, then retracts it
+/// when ownership changes or the row is deleted.
+///
+/// alice ──subscribe──► node ──owner transfer/delete──► retraction
 #[test]
 fn maintained_policy_point_subscription_retracts_for_delete_and_owner_transfer() {
     let schema = owner_policy_schema();
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xc3; 16]), schema.clone());
     let owner = author(0x72);
     let other_owner = author(0x73);
-    node.set_session_claims(
+    node.set_test_provider_claims(
         owner,
         BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.test_uuid()))]),
     );

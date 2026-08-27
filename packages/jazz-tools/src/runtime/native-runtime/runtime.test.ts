@@ -5292,11 +5292,21 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     const beginTransactionAttributed = vi.fn(
       (_openBatchId: string, _author: Uint8Array) => undefined,
     );
-    const beginStreamingMutationAttributedEncoded = vi.fn(() => ({
-      push: () => undefined,
-      finish: () => fakeWrite(),
-      abort: () => undefined,
-    }));
+    const beginStreamingMutationAttributedEncoded = vi.fn(
+      (
+        _table: string,
+        _rowId: Uint8Array,
+        _cells: Uint8Array,
+        _column: string,
+        _mutation: "insert" | "update" | "upsert" | undefined,
+        _author: Uint8Array | undefined,
+        _attribution: Uint8Array,
+      ) => ({
+        push: () => undefined,
+        finish: () => fakeWrite(),
+        abort: () => undefined,
+      }),
+    );
     const nativeDb = fakeDb({
       insertWithIdEncodedAttributed,
       beginTransaction,
