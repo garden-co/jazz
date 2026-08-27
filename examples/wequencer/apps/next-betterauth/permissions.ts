@@ -3,30 +3,33 @@ import { app } from "./schema";
 
 export default s.definePermissions(app, ({ policy, session, anyOf, allOf, allowedTo }) => {
   const isMember = (sessionId: RowRefValue) =>
-    policy.session_members.exists.where({ session_id: sessionId, user_id: session.user_id });
+    policy.session_members.exists.where({
+      session_id: sessionId,
+      user_id: session.claims["user_id"],
+    });
   const canEdit = (sessionId: RowRefValue) =>
     anyOf([
       policy.session_members.exists.where({
         session_id: sessionId,
-        user_id: session.user_id,
+        user_id: session.claims["user_id"],
         role: "editor",
       }),
       policy.session_members.exists.where({
         session_id: sessionId,
-        user_id: session.user_id,
+        user_id: session.claims["user_id"],
         role: "owner",
       }),
     ]);
   const isOwner = (sessionId: RowRefValue) =>
     policy.session_members.exists.where({
       session_id: sessionId,
-      user_id: session.user_id,
+      user_id: session.claims["user_id"],
       role: "owner",
     });
 
-  policy.profiles.allowRead.where({ user_id: session.user_id });
-  policy.profiles.allowInsert.where({ user_id: session.user_id });
-  policy.profiles.allowUpdate.where({ user_id: session.user_id });
+  policy.profiles.allowRead.where({ user_id: session.claims["user_id"] });
+  policy.profiles.allowInsert.where({ user_id: session.claims["user_id"] });
+  policy.profiles.allowUpdate.where({ user_id: session.claims["user_id"] });
 
   policy.sessions.allowRead.where((row) => isMember(row.id));
   policy.sessions.allowInsert.always();
