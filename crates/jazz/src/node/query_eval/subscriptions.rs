@@ -184,13 +184,6 @@ where
 
     pub(crate) fn apply_unsubscribe(&mut self, subscription: SubscriptionKey) {
         let binding_view_key = self.binding_view_key_for_subscription(subscription).ok();
-        let retain_bounded_browser_membership = self.authored_commit_durability
-            == DurabilityTier::None
-            && self
-                .query
-                .registered_shapes
-                .get(&subscription.shape_id)
-                .is_some_and(|shape| shape.query().offset != 0);
         if let Some(bindings) = self
             .query
             .registered_bindings
@@ -201,10 +194,12 @@ where
         if let Some(binding_view_key) = binding_view_key
             && !self.registered_binding_resolves_to_binding_view_key(binding_view_key)
         {
-            if !retain_bounded_browser_membership {
-                self.clear_settled_result_view(binding_view_key);
-                self.query.settled_program_facts.remove(&binding_view_key);
-            }
+            // Registered bindings are the receipt ownership record. Once the
+            // last downstream usage site releases this exact binding view,
+            // revoke its authority-selected membership rather than retaining
+            // a browser cache after scope teardown.
+            self.clear_settled_result_view(binding_view_key);
+            self.query.settled_program_facts.remove(&binding_view_key);
             self.query
                 .known_state_declared_binding_views
                 .remove(&binding_view_key);
@@ -226,6 +221,16 @@ where
             .values()
             .map(BTreeMap::len)
             .sum()
+    }
+
+    #[cfg(feature = "testing")]
+    /// Internal receipt-lifetime coverage needs to observe canonical caches:
+    /// public reads intentionally treat a Local overlay as best-effort.
+    pub fn settled_authoritative_receipt_counts_for_test(&self) -> (usize, usize) {
+        (
+            self.query.settled_result_sets.len(),
+            self.query.settled_program_facts.len(),
+        )
     }
 
     fn registered_binding_resolves_to_binding_view_key(

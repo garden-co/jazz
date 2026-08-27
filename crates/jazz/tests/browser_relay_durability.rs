@@ -1895,6 +1895,127 @@ fn browser_relay_keeps_offset_window_membership_when_materializing_locally() {
     );
 }
 
+/// A detached bounded Edge read releases its exact authoritative receipt.
+/// Alice repeatedly reads distinct offset windows through a browser worker;
+/// every final detach must clear its membership before the next scope opens.
+///
+/// ```text
+/// alice one-shot Edge window ──receipt──► worker ──receipt──► main
+/// alice detach ──unsubscribe──► worker ──unsubscribe──► core
+/// ```
+///
+/// The test-only receipt count is necessary because a Local overlay may
+/// legitimately retain row bodies after detach, while authoritative membership
+/// itself must not outlive the usage-site scope.
+#[test]
+fn browser_relay_releases_each_detached_bounded_one_shot_receipt() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xc3; 16]);
+    let main_thread = open_db(0x1d, alice, &schema);
+    let worker = open_db(0x2d, alice, &schema);
+    let core = open_core(0x3d, &schema);
+    let writer = open_db(0x4d, alice, &schema);
+    main_thread.set_non_durable_client();
+
+    let (writer_transport, core_writer_transport) = duplex();
+    let _writer_connection = block_on(writer.connect_upstream(writer_transport));
+    let _core_writer = core.accept_subscriber(core_writer_transport, alice);
+    for index in 0..12 {
+        writer
+            .insert(
+                "todos",
+                BTreeMap::from([(
+                    "title".to_owned(),
+                    Value::String(format!("todo-{index:02}")),
+                )]),
+                Default::default(),
+            )
+            .expect("seed ordered todo");
+    }
+    for _ in 0..24 {
+        writer.tick().expect("upload ordered todos");
+        core.tick().expect("accept ordered todos");
+        writer.tick().expect("settle ordered todos");
+    }
+
+    let (main_transport, worker_subscriber_transport) = duplex();
+    let _main_connection = block_on(main_thread.connect_upstream(main_transport));
+    let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
+    let (worker_upstream_transport, core_transport) = duplex();
+    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
+    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+
+    for offset in 1..=5 {
+        let query = main_thread
+            .prepare_query(
+                &Query::from("todos")
+                    .order_by("title", OrderDirection::Asc)
+                    .offset(offset)
+                    .limit(2),
+            )
+            .expect("prepare distinct bounded window");
+        let attachment = main_thread
+            .attach_query_with_opts(
+                &query,
+                ReadOpts {
+                    tier: DurabilityTier::Edge,
+                    ..ReadOpts::default()
+                },
+            )
+            .expect("attach bounded Edge read");
+        for _ in 0..12 {
+            main_thread.tick().expect("send bounded window");
+            worker.tick().expect("forward bounded window");
+            core.tick().expect("serve bounded window");
+            worker.tick().expect("relay bounded window");
+            main_thread.tick().expect("apply bounded receipt");
+            if main_thread.query_attachment_is_covered(&attachment) {
+                break;
+            }
+        }
+        assert!(
+            main_thread.query_attachment_is_covered(&attachment),
+            "offset {offset} never received its authority receipt"
+        );
+        assert_eq!(
+            block_on(main_thread.all(
+                &query,
+                ReadOpts {
+                    tier: DurabilityTier::Edge,
+                    ..ReadOpts::default()
+                },
+            ))
+            .expect("read bounded authority receipt")
+            .len(),
+            2,
+            "offset {offset} has its exact bounded membership while attached"
+        );
+
+        main_thread.detach_query(attachment);
+        assert_eq!(
+            main_thread.settled_authoritative_receipt_counts_for_test(),
+            (0, 0),
+            "final detach of offset {offset} must release its authority receipt"
+        );
+        for _ in 0..4 {
+            main_thread.tick().expect("send bounded detach");
+            worker.tick().expect("retire worker bounded view");
+            core.tick().expect("retire core bounded view");
+            worker.tick().expect("apply bounded teardown");
+        }
+        assert_eq!(
+            main_thread.query_coverage_attachment_counts_for_test(),
+            (0, 0),
+            "offset {offset} leaves no live coverage owner"
+        );
+        assert_eq!(
+            main_thread.settled_authoritative_receipt_counts_for_test(),
+            (0, 0),
+            "offset {offset} leaves no retained authority membership"
+        );
+    }
+}
+
 /// Empty is a valid authority result. After withholding the relay's premature
 /// cache snapshot, the later upstream response must still produce an explicit
 /// settled handoff so Edge reads and subscriptions can complete.
