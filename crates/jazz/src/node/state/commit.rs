@@ -330,11 +330,16 @@ where
                 &table_schema.name,
             )?;
             for parent in &commit.parents {
-                let parent_versions = self.query_versions_for_tx(*parent).await?;
-                let same_row = parent_versions.iter().filter(|version| {
-                    version.row_uuid() == commit.row_uuid
-                        && self.physical_table_id_for_version(version).ok() == Some(table_id)
-                });
+                let parent_versions = self
+                    .query_versions_for_tx_table(
+                        *parent,
+                        write_schema_version,
+                        &table_schema.name,
+                    )
+                    .await?;
+                let same_row = parent_versions
+                    .iter()
+                    .filter(|version| self.physical_table_id_for_version(version).ok() == Some(table_id));
                 if same_row.clone().next().is_some()
                     && !same_row.into_iter().any(|version| version.branch_key() == &branch_key)
                 {

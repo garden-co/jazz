@@ -3,9 +3,9 @@
 use std::collections::BTreeMap;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, InsertOptions, LocalUpdates, MergeableTxOps, PreparedQuery,
-    Propagation, ReadOpts, SubscriptionEvent, SubscriptionStream, UpdateOptions, WriteIdentity,
-    block_on,
+    Db, DbConfig, DbIdentity, DeleteOptions, InsertOptions, LocalUpdates, MergeableTxOps,
+    PreparedQuery, Propagation, ReadOpts, RestoreOptions, SubscriptionEvent, SubscriptionStream,
+    UpdateOptions, WriteIdentity, block_on,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
@@ -38,6 +38,7 @@ pub struct Fixture<S: OrderedKvStorage> {
     maintained_activity: PreparedQuery,
     point_activity: PreparedQuery,
     activity_transition_row: RowUuid,
+    task_transition_row: RowUuid,
     activity_transition_matching: bool,
     activity_update_identity: WriteIdentity,
 }
@@ -266,6 +267,7 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
             maintained_activity,
             point_activity,
             activity_transition_row: row_id(4, PROJECTS),
+            task_transition_row: task_ids[0],
             activity_transition_matching: false,
             activity_update_identity,
         };
@@ -364,6 +366,27 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
         .expect("toggle W1 indexed predicate");
         block_on(write.wait(DurabilityTier::Local)).expect("settle W1 indexed predicate toggle");
         self.activity_transition_matching = !self.activity_transition_matching;
+    }
+
+    pub fn delete_target_task(&self) {
+        let write = block_on(self.db.delete(
+            "tasks",
+            self.task_transition_row,
+            DeleteOptions::default(),
+        ))
+        .expect("delete W1 target task");
+        block_on(write.wait(DurabilityTier::Local)).expect("settle W1 target deletion");
+    }
+
+    pub fn restore_target_task(&self) {
+        let write = block_on(self.db.restore(
+            "tasks",
+            self.task_transition_row,
+            None,
+            RestoreOptions::default(),
+        ))
+        .expect("restore W1 target task");
+        block_on(write.wait(DurabilityTier::Local)).expect("settle W1 target restore");
     }
 }
 
