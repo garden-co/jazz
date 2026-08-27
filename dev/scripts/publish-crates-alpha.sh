@@ -29,12 +29,30 @@ for crate_spec in "${crates[@]}"; do
   name="${crate_spec%%:*}"
   version="${crate_spec##*:}"
 
+  # `cargo publish -p` accepts any package in the workspace.  Resolve the
+  # exact metadata object before running it so the checked-in list cannot
+  # accidentally publish a package which opted out of crates.io.  Cargo emits
+  # `null` for unrestricted packages, `[]` for `publish = false`, and an array
+  # of registry names for an explicit allowlist.
   if ! jq -e \
     --arg name "$name" \
     --arg version "$version" \
-    'any(.packages[]; .name == $name and .version == $version)' \
+    '
+      .workspace_members as $workspace_members |
+      any(
+        .packages[];
+        .id as $id |
+        .name == $name and
+        .version == $version and
+        ($workspace_members | index($id)) and
+        (
+          .publish == null or
+          ((.publish | type) == "array" and (.publish | index("crates-io")))
+        )
+      )
+    ' \
     <<<"$metadata" >/dev/null; then
-    echo "Expected ${name}@${version} in Cargo workspace metadata" >&2
+    echo "Expected publishable workspace crate ${name}@${version} for crates.io" >&2
     exit 1
   fi
 done

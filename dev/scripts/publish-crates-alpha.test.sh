@@ -130,6 +130,15 @@ EOF
 sed 's/3\.0\.0-alpha\.0/3.0.0-alpha.1/g' \
   "$TEMP/metadata-valid.json" >"$TEMP/metadata-wrong-version.json"
 
+jq '.packages[0].publish = []' \
+  "$TEMP/metadata-valid.json" >"$TEMP/metadata-publish-disabled.json"
+jq '.packages[0].publish = ["internal"]' \
+  "$TEMP/metadata-valid.json" >"$TEMP/metadata-other-registry.json"
+jq '.packages[0].publish = ["internal", "crates-io"]' \
+  "$TEMP/metadata-valid.json" >"$TEMP/metadata-crates-io-allowed.json"
+jq '.workspace_members = []' \
+  "$TEMP/metadata-valid.json" >"$TEMP/metadata-not-workspace-member.json"
+
 fail() {
   echo "$1" >&2
   exit 1
@@ -180,6 +189,27 @@ assert_log missing-package 'metadata --no-deps --format-version 1'
 run_case wrong-version "$TEMP/metadata-wrong-version.json" dry-run
 [[ "$CASE_STATUS" -ne 0 ]] || fail 'wrong package version must fail'
 assert_log wrong-version 'metadata --no-deps --format-version 1'
+
+run_case publish-disabled "$TEMP/metadata-publish-disabled.json" publish
+[[ "$CASE_STATUS" -ne 0 ]] || fail 'publish = false must fail before publishing'
+assert_log publish-disabled 'metadata --no-deps --format-version 1'
+
+run_case other-registry "$TEMP/metadata-other-registry.json" publish
+[[ "$CASE_STATUS" -ne 0 ]] || fail 'non-crates.io registry allowlist must fail before publishing'
+assert_log other-registry 'metadata --no-deps --format-version 1'
+
+run_case not-workspace-member "$TEMP/metadata-not-workspace-member.json" publish
+[[ "$CASE_STATUS" -ne 0 ]] || fail 'non-workspace package must fail before publishing'
+assert_log not-workspace-member 'metadata --no-deps --format-version 1'
+
+run_case crates-io-allowed "$TEMP/metadata-crates-io-allowed.json" dry-run
+[[ "$CASE_STATUS" -eq 0 ]] || {
+  cat "$CASE_OUTPUT" >&2
+  fail 'explicit crates.io registry allowlist must succeed'
+}
+assert_log crates-io-allowed \
+  'metadata --no-deps --format-version 1' \
+  'publish --allow-dirty --dry-run -p jazz-wasm-tracing'
 
 run_case valid-dry-run "$TEMP/metadata-valid.json" dry-run
 [[ "$CASE_STATUS" -eq 0 ]] || {
