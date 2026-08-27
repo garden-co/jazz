@@ -149,6 +149,9 @@ class TestPort {
       else this.outcomes.push(message);
       return;
     }
+    // Bootstrap liveness is intentionally not a follower event or a runtime
+    // connection outcome; tests only retain the latter two protocol classes.
+    if (message.type === "worker-alive") return;
     const waiterIndex = this.eventWaiters.findIndex(({ predicate }) => predicate(message));
     if (waiterIndex >= 0) {
       this.eventWaiters.splice(waiterIndex, 1)[0]!.resolve(message);

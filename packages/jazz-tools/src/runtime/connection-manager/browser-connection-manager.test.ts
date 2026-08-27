@@ -194,7 +194,7 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
   });
 
   it("waits for worker transport state only while a follower is attaching", async () => {
-    const ready = deferred<void>();
+    const ready = deferred();
     const connection = {
       ready: vi.fn(() => ready.promise),
       disconnect: vi.fn(async () => undefined),
