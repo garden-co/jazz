@@ -654,7 +654,10 @@ fn edge_defers_mergeable_fate_until_permission_scope_settles() {
     );
     assert_eq!(edge_to_client.deferred_edge_fate_count(), 1);
     assert_eq!(edge_to_client.edge_scope_subscription_count(), 1);
-    assert_eq!(transaction_state(&mut edge, tx_id).0, Fate::Pending);
+    assert!(
+        block_on(edge.transaction_state(tx_id)).is_none(),
+        "an unresolved permission scope must keep the unit outside edge history"
+    );
 
     let [fate] = drain_edge_fates(&mut edge_to_client, &mut edge, u64::MAX - SKEW_TOLERANCE_MS)
         .try_into()
@@ -711,7 +714,10 @@ fn edge_permission_scope_is_write_policy_claim_not_whole_table() {
             .is_none()
     );
     assert_eq!(edge_to_client.deferred_edge_fate_count(), 1);
-    assert_eq!(transaction_state(&mut edge, tx_id).0, Fate::Pending);
+    assert!(
+        block_on(edge.transaction_state(tx_id)).is_none(),
+        "the narrow write-policy scope must not create pending table history"
+    );
 }
 
 #[test]
@@ -985,10 +991,9 @@ fn settled_permission_scope_for_one_writer_claim_does_not_unlock_whole_table() {
         .is_empty()
     );
     assert_eq!(edge_to_b.deferred_edge_fate_count(), 1);
-    assert_eq!(
-        transaction_state(&mut edge, first_b).0,
-        Fate::Pending,
-        "settled writer-A scope must not satisfy missing writer-B scope"
+    assert!(
+        block_on(edge.transaction_state(first_b)).is_none(),
+        "settled writer-A scope must not admit writer-B into edge history"
     );
 }
 
@@ -1064,7 +1069,10 @@ fn edge_restart_recovers_deferred_fate_from_client_outbox_redelivery() {
     );
     assert_eq!(edge_to_client.deferred_edge_fate_count(), 1);
     assert_eq!(edge_to_client.edge_scope_subscription_count(), 1);
-    assert_eq!(transaction_state(&mut edge, tx_id).0, Fate::Pending);
+    assert!(
+        block_on(edge.transaction_state(tx_id)).is_none(),
+        "a deferred edge upload must not persist before its permission scope settles"
+    );
     drop(edge);
     drop(edge_to_client);
 
@@ -1085,10 +1093,9 @@ fn edge_restart_recovers_deferred_fate_from_client_outbox_redelivery() {
         edge_to_client.subscription_result_sets(scope_key).is_none(),
         "scope subscription result state must not survive through a fresh peer after restart"
     );
-    assert_eq!(
-        transaction_state(&mut edge, tx_id).0,
-        Fate::Pending,
-        "the pending relay history survives restart, but not the in-memory gate"
+    assert!(
+        block_on(edge.transaction_state(tx_id)).is_none(),
+        "the unresolved upload must leave no durable edge history after restart"
     );
 
     let SyncMessage::CommitUnit { tx, versions } = unit else {
