@@ -25,7 +25,12 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     fingerprint: string,
     private readonly callbacks: Pick<
       BrowserWorkerConnectionContext,
-      "onAuthFailure" | "onAuthRestored" | "onFailure" | "onStorageReset" | "onStorageInvalidated"
+      | "onAuthFailure"
+      | "onAuthRestored"
+      | "onExplicitOfflineChange"
+      | "onFailure"
+      | "onStorageReset"
+      | "onStorageInvalidated"
     >,
   ) {
     // A local database namespace is one browser replica/session. Tabs opening
@@ -127,6 +132,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
           {
             onAuthFailure: this.callbacks.onAuthFailure,
             onAuthRestored: this.callbacks.onAuthRestored,
+            onExplicitOfflineChange: this.callbacks.onExplicitOfflineChange,
             onFailure: this.callbacks.onFailure,
             onStorageReset: this.callbacks.onStorageReset,
             onStorageInvalidated: this.callbacks.onStorageInvalidated,

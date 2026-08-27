@@ -26,6 +26,7 @@ pub(super) enum OperatorState {
     Join(JoinState),
     SemiJoin(AntiJoinState),
     AntiJoin(AntiJoinState),
+    TopBy(AsOf<TopByIncrementalState, SubTick>),
     Recursive(AsOf<RecursiveState, Tick>),
     CollectBy(CollectByIncrementalState),
     StreamingChecksum(Box<StreamingChecksumOperatorState>),
@@ -84,8 +85,33 @@ mod collect_by_state_tests {
     }
 }
 
-type CollectByOrderKey = (Vec<TopBySortPart>, Bytes);
+pub(super) type CollectByOrderKey = (Vec<TopBySortPart>, Bytes);
 type CollectByGroups = BTreeMap<Vec<u8>, BTreeMap<CollectByOrderKey, i64>>;
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct TopByIncrementalState {
+    groups: CollectByGroups,
+}
+
+impl TopByIncrementalState {
+    /// Remove only groups touched by this update so a long-lived subscription
+    /// does not retain one empty map for every departed group.
+    fn remove_empty_touched_groups<I>(&mut self, groups: I)
+    where
+        I: IntoIterator<Item = Vec<u8>>,
+    {
+        for group in groups {
+            if self.groups.get(&group).is_some_and(BTreeMap::is_empty) {
+                self.groups.remove(&group);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn group_count(&self) -> usize {
+        self.groups.len()
+    }
+}
 
 pub(super) fn operator_state_for(operator: &OpType) -> OperatorState {
     match operator {
@@ -93,6 +119,7 @@ pub(super) fn operator_state_for(operator: &OpType) -> OperatorState {
         OpType::SemiJoin(_) => OperatorState::SemiJoin(AntiJoinState),
         OpType::AntiJoin(_) => OperatorState::AntiJoin(AntiJoinState),
         OpType::Recursive(_) => OperatorState::Recursive(AsOf::new(RecursiveState::default())),
+        OpType::TopBy(_) => OperatorState::TopBy(AsOf::new(TopByIncrementalState::default())),
         OpType::CollectBy(_) => OperatorState::CollectBy(CollectByIncrementalState::default()),
         OpType::StreamingChecksum(_) => OperatorState::StreamingChecksum(Box::default()),
         _ => OperatorState::Stateless,
@@ -1653,59 +1680,34 @@ impl TickEvaluator<'_> {
         if input.deltas.is_empty() || top_by.limit == TopByLimit::Finite(0) {
             return Ok(RecordDeltas::empty(output_desc));
         }
-        let [input_node] = self
-            .graph
-            .node(node)
-            .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?
-            .descriptor
-            .inputs
-            .as_slice()
-        else {
-            return Err(IvmRuntimeError::GraphInputArityMismatch(node));
+        let operator_key = self.operator_key(node)?;
+        let mut operator = self
+            .operator_states
+            .remove(&operator_key)
+            .unwrap_or_else(|| operator_state_for(&OpType::TopBy(top_by.clone())));
+        let OperatorState::TopBy(state) = &mut operator else {
+            return Err(IvmRuntimeError::NodeStateOperatorMismatch(node));
         };
-        let arrangement_key = self.arrangement_key(
-            *input_node,
-            output_desc,
-            &top_by.group_fields,
-            ValueComparison::Exact,
-        )?;
-        let sub_tick = self.arrangement_sub_tick(&arrangement_key);
-        let mut arrangement = self
-            .arrangement_states
-            .remove(&arrangement_key)
-            .unwrap_or_default();
-        let should_apply_arrangement = self.context.arrangement_update_mode
-            == ArrangementUpdateMode::Replace
-            || arrangement.as_of() != Some(sub_tick);
-        if should_apply_arrangement {
-            let replace_within_same_tick = self.context.arrangement_update_mode
-                == ArrangementUpdateMode::Replace
-                && arrangement
-                    .as_of()
-                    .is_some_and(|current| current.tick == sub_tick.tick);
-            if !replace_within_same_tick
-                && arrangement
-                    .as_of()
-                    .is_some_and(|current| current > sub_tick)
-            {
-                return Err(IvmRuntimeError::OutOfOrderRuntimeState {
-                    current: format!("{:?}", arrangement.as_of().expect("checked above")),
-                    next: format!("{sub_tick:?}"),
-                });
-            }
-            arrangement.value_mut().apply_record_deltas(
-                output_desc,
-                &top_by.group_fields,
-                &input.deltas,
-                self.context.arrangement_update_mode,
-            )?;
-            if replace_within_same_tick {
-                arrangement.replace_as_of_at_least(sub_tick);
+        let sub_tick = SubTick {
+            tick: self.current_tick,
+            sub_tick: if operator_key.scope == ScopeId::root() {
+                0
             } else {
-                arrangement.mark_forward_as_of(sub_tick)?;
-            }
+                self.context.sub_tick
+            },
+        };
+        if state.as_of().is_some_and(|current| current > sub_tick) {
+            return Err(IvmRuntimeError::OutOfOrderRuntimeState {
+                current: format!("{:?}", state.as_of().expect("checked above")),
+                next: format!("{sub_tick:?}"),
+            });
         }
-
+        if self.context.arrangement_update_mode == ArrangementUpdateMode::Accumulate
+            && state.as_of() == Some(sub_tick)
+        {
+            self.operator_states.insert(operator_key, operator);
+            return Ok(RecordDeltas::empty(output_desc));
+        }
         let mut touched_groups = BTreeMap::<Vec<u8>, Vec<RecordDelta>>::new();
         for delta in &input.deltas {
             let group_key =
@@ -1717,17 +1719,55 @@ impl TickEvaluator<'_> {
         }
 
         let mut output = Vec::new();
-        for (group_prefix, group_deltas) in touched_groups {
-            let after_records = arrangement.value().records_for_key(&group_prefix);
-            let after = top_by_window_from_records(output_desc, after_records.clone(), top_by)?;
-            let before =
-                top_by_window_before_from_deltas(output_desc, after_records, group_deltas, top_by)?;
+        let replace = self.context.arrangement_update_mode == ArrangementUpdateMode::Replace;
+        let before = touched_groups
+            .keys()
+            .map(|group| {
+                Ok((
+                    group.clone(),
+                    if replace {
+                        Vec::new()
+                    } else {
+                        top_by_window_from_ordered_group(state.value().groups.get(group), top_by)
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, IvmRuntimeError>>()?;
+        if replace {
+            state.value_mut().groups.clear();
+        }
+        for (group_prefix, group_deltas) in &touched_groups {
+            let group = state
+                .value_mut()
+                .groups
+                .entry(group_prefix.clone())
+                .or_default();
+            for delta in group_deltas {
+                let order_key = (
+                    top_by_sort_key(output_desc, delta.raw(), top_by)?,
+                    delta.record.clone(),
+                );
+                let weight = group.entry(order_key.clone()).or_default();
+                *weight += delta.weight;
+                if *weight == 0 {
+                    group.remove(&order_key);
+                }
+            }
+        }
+        state
+            .value_mut()
+            .remove_empty_touched_groups(touched_groups.keys().cloned());
+        state.mark_forward_as_of(sub_tick)?;
+        for group_prefix in touched_groups.keys() {
+            let before = before.get(group_prefix).cloned().unwrap_or_default();
+            let after =
+                top_by_window_from_ordered_group(state.value().groups.get(group_prefix), top_by);
             let windows = self.root_ordering_windows.entry(node).or_default();
             extend_root_window_positions(output_desc, &before, &mut windows.before)?;
             extend_root_window_positions(output_desc, &after, &mut windows.after)?;
             output.extend(diff_record_windows(before, after));
         }
-        self.insert_arrangement(arrangement_key, arrangement);
+        self.operator_states.insert(operator_key, operator);
 
         Ok(RecordDeltas {
             descriptor: output_desc,

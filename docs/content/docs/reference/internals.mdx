@@ -226,6 +226,12 @@ database namespace. The worker owns the IndexedDB page store and the server conn
 communicates with that runtime through a message port. There is no tab-leader election, Web Locks
 dependency, or per-tab durable database.
 
+Calling `db.disconnect()` in one tab explicitly takes that **whole persistent namespace** offline:
+the worker has one upstream connection, so every attached tab uses local-first fallback for
+`"remote-if-possible"` reads and remote reads wait until any tab calls `db.reconnect()`. This is
+intentional; disconnecting only one tab while continuing to sync its writes through the shared
+worker would give that tab an incoherent offline contract.
+
 The main thread keeps a responsive client-side peer while the SharedWorker commits durable state in
 the background.
 

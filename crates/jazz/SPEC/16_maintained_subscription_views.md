@@ -43,6 +43,14 @@ are coverage facts for the maintained subscription view only; they do not become
 complete transaction payload refs. The peer state machine MUST NOT answer a live
 subscription by running an independent semantic scan.
 
+A maintained peer publication MUST retain the complete semantic read view and
+tier resolved at admission. Initial hydration, suspended retries, incremental
+evaluation, authoritative reconciliation, settlement, and authorization
+progress all use that same immutable context. An explicit replacement installs
+one complete replacement context, and every continuation uses that retained
+context; reconciliation MUST NOT substitute the default read view or reconstruct
+selectors from the opaque `ReadViewKey`.
+
 `groove/SPEC/INVARIANTS.md::INV-INC-1` is the mechanism law for this chapter:
 maintained-view ingestion, application, publication, snapshot assembly, diffing,
 and subscriber delivery are bounded by the size of the change and affected keys,
@@ -113,7 +121,7 @@ For non-system peers, the maintained graph begins from the shared
 policy-composed lowered-query core from ch. 14: the user query intersected with
 the table read policy under the authenticated peer identity, lowered over the
 subscription's visible-current base source. Claim operands are rewritten to
-server-derived parameters before lowering. `claim("author")` is the stable subject
+server-derived parameters before lowering. `claim("user")` is the stable subject
 identity. Recognized claims that do not yet have a runtime value fail closed.
 
 Policy composition is not merely an output filter. Policy dependency tables are

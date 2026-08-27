@@ -7,7 +7,7 @@ import { useAuthState } from "./use-auth-state.js";
 import { makeFakeClient } from "./test-utils.js";
 
 describe("useAuthState", () => {
-  it("returns authMode, userId, claims", async () => {
+  it("returns authMode, canonical user, and claims", async () => {
     const client = makeFakeClient({
       authMode: "local-first",
       userId: "u-1",
@@ -19,12 +19,12 @@ describe("useAuthState", () => {
       ),
     });
     expect(result.current.authMode).toBe("local-first");
-    expect(result.current.userId).toBe("u-1");
+    expect(result.current.user).toBe("u-1");
     expect(result.current.claims).toEqual({ role: "admin" });
     expect(result.current.error).toBeUndefined();
   });
 
-  it("reflects markUnauthenticated via error field; preserves last-known userId", async () => {
+  it("reflects markUnauthenticated via error field; preserves last-known user", async () => {
     const client = makeFakeClient({ authMode: "external", userId: "u-1", claims: {} });
     const { result } = renderHook(() => useAuthState(), {
       wrapper: ({ children }) => (
@@ -33,7 +33,7 @@ describe("useAuthState", () => {
     });
     act(() => client.__markUnauthenticated("expired"));
     expect(result.current.error).toBe("expired");
-    expect(result.current.userId).toBe("u-1");
+    expect(result.current.user).toBe("u-1");
   });
 
   it("returns no status or transport", () => {
@@ -44,8 +44,10 @@ describe("useAuthState", () => {
       ),
     });
     // @ts-expect-error — no status field
-    result.current.status;
+    void result.current.status;
     // @ts-expect-error — no transport field
-    result.current.transport;
+    void result.current.transport;
+    // @ts-expect-error — canonical identity is exposed only as user
+    void result.current.userId;
   });
 });

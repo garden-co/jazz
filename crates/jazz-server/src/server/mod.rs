@@ -2,6 +2,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::thread;
 
+#[cfg(test)]
+use std::sync::Mutex as StdMutex;
+
 use crate::middleware::AuthConfig;
 use crate::middleware::auth::JwtVerifier;
 use jazz::serving::StorageConfig;
@@ -106,6 +109,16 @@ pub struct ServerState {
     pub(crate) core_server_shell: StdRwLock<Option<ServerRuntimeHandle>>,
     pub(crate) core_server_shell_storage_config: Option<StorageConfig>,
     pub(crate) storage_factory: Option<Arc<dyn jazz::groove::storage::StorageFactory>>,
+    /// Serializes durable-catalogue reconciliation into the local runtime shell.
+    ///
+    /// Catalogue storage can advance while a previous bridge is in flight, but
+    /// bridge installs must reach the shell in the same order so an older head
+    /// cannot overwrite a newer one.
+    pub(crate) runtime_catalogue_publication: tokio::sync::Mutex<()>,
+    #[cfg(test)]
+    runtime_catalogue_before_publication_hook: StdMutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    runtime_catalogue_after_permissions_read_hook: StdMutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Whether the current Edge shell generation has a fully installed,
     /// validated catalogue and local projection registry. A durable Ready
     /// generation remains usable offline; blank and refreshing generations do
@@ -170,6 +183,52 @@ fn client_shell_snapshot<T: Clone>(
 }
 
 impl ServerState {
+    #[cfg(test)]
+    pub(crate) fn set_runtime_catalogue_before_publication_hook_for_test(
+        &self,
+        hook: Box<dyn FnOnce() + Send>,
+    ) {
+        *self
+            .runtime_catalogue_before_publication_hook
+            .lock()
+            .expect("runtime catalogue test hook lock") = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_runtime_catalogue_before_publication_hook_for_test(&self) {
+        let hook = self
+            .runtime_catalogue_before_publication_hook
+            .lock()
+            .expect("runtime catalogue test hook lock")
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_runtime_catalogue_after_permissions_read_hook_for_test(
+        &self,
+        hook: Box<dyn FnOnce() + Send>,
+    ) {
+        *self
+            .runtime_catalogue_after_permissions_read_hook
+            .lock()
+            .expect("runtime catalogue test hook lock") = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_runtime_catalogue_after_permissions_read_hook_for_test(&self) {
+        let hook = self
+            .runtime_catalogue_after_permissions_read_hook
+            .lock()
+            .expect("runtime catalogue test hook lock")
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
     /// Test-only observation of whether an edge has installed a runtime shell.
     #[cfg(feature = "test")]
     #[doc(hidden)]
@@ -546,6 +605,9 @@ mod tests {
             core_server_shell: StdRwLock::new(None),
             core_server_shell_storage_config: None,
             storage_factory: None,
+            runtime_catalogue_publication: tokio::sync::Mutex::new(()),
+            runtime_catalogue_before_publication_hook: StdMutex::new(None),
+            runtime_catalogue_after_permissions_read_hook: StdMutex::new(None),
             dynamic_edge_catalogue_ready: AtomicBool::new(true),
             shutdown: ShutdownController::new(timeout),
         })

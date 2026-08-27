@@ -12,8 +12,8 @@ import {
   LOCAL_FIRST_JWT_ISSUER,
   SYSTEM_SESSION_ISSUER,
   parseJwtPayload,
-  sessionFromVerifiedReservedJwtPayload,
-  sessionFromJwtPayload,
+  internalSessionFromVerifiedReservedJwtPayload,
+  internalSessionFromJwtPayload,
   type JwtPayload,
 } from "../runtime/client-session.js";
 import type { Session } from "../runtime/context.js";
@@ -330,7 +330,7 @@ function requireJwtPayload(token: string): JwtPayload {
 }
 
 function requireJwtSession(payload: JwtPayload): Session {
-  const session = sessionFromJwtPayload(payload);
+  const session = internalSessionFromJwtPayload(payload);
   if (!session) {
     throw new Error("Invalid JWT payload");
   }
@@ -450,7 +450,7 @@ export async function resolveRequestSession(
     }
 
     const verifiedUserId = await verifyLocalFirstIdentityProof(token, config.appId);
-    const session = sessionFromVerifiedReservedJwtPayload(payload, "local-first");
+    const session = internalSessionFromVerifiedReservedJwtPayload(payload, "local-first");
     if (!session) {
       throw new Error("Invalid JWT payload");
     }

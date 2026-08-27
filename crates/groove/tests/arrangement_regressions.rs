@@ -74,7 +74,8 @@ fn reachability_graph() -> GraphBuilder {
 
 #[futures_test::test]
 async fn sibling_joins_sharing_an_arrangement_do_not_double_count() {
-    let storage = MemoryStorage::new(&["albums", "artists"]);
+    let storage =
+        MemoryStorage::new(&["albums", "artists"]).expect("valid memory storage families");
     let mut db = Database::new(albums_artists_schema(), storage)
         .await
         .unwrap();
@@ -134,7 +135,7 @@ async fn sibling_joins_sharing_an_arrangement_do_not_double_count() {
 
 #[futures_test::test]
 async fn recursive_incremental_ticks_do_not_inflate_shared_edge_arrangements() {
-    let storage = MemoryStorage::new(&["edges"]);
+    let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
     let mut db = Database::new(edges_schema(), storage).await.unwrap();
     let sub = db.subscribe_one_sink(reachability_graph()).await.unwrap();
     let _empty_initial = sub.recv().unwrap();
@@ -178,7 +179,7 @@ async fn recursive_incremental_ticks_do_not_inflate_shared_edge_arrangements() {
 
 #[futures_test::test]
 async fn arrangement_shared_across_sub_ticks_is_applied_once_per_tick() {
-    let storage = MemoryStorage::new(&["edges"]);
+    let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
     let mut db = Database::new(edges_schema(), storage).await.unwrap();
 
     // The recursive subscription advances the shared edges-by-src arrangement

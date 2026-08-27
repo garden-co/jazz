@@ -29,7 +29,7 @@ Three tables: the workspace itself, a members join table that records each user'
   ../examples/docs/todo-client-localfirst-react/src/group-permissions-snippets.tsx#group-permissions
 </include>
 
-- **Contributor** edit access uses `allOf` to require both `$createdBy: session.author` (the row belongs to this author) and a matching contributor membership. Writers and admins bypass the creator check entirely.
+- **Contributor** edit access uses `allOf` to require both `$createdBy: session.user` (the row belongs to this author) and a matching contributor membership. Writers and admins bypass the creator check entirely.
 - **Bootstrap insert**: the second branch of `allowInsert` lets the workspace creator add themselves as the first admin&hairsp;—&hairsp;otherwise `isAdmin` would block everyone, since there are no members yet.
 - **Leave on your own**: members can delete their own membership row regardless of role. Admins can remove anyone.
 

@@ -111,6 +111,7 @@ pub(super) fn arg_by_winner_before_from_deltas(
     })
 }
 
+#[cfg(test)]
 pub(super) fn top_by_window_from_records(
     descriptor: RecordDescriptor,
     records: Vec<(Bytes, i64)>,
@@ -159,23 +160,38 @@ pub(super) fn top_by_window_from_records(
     Ok(window)
 }
 
-pub(super) fn top_by_window_before_from_deltas(
-    descriptor: RecordDescriptor,
-    after_records: Vec<(Bytes, i64)>,
-    deltas: Vec<RecordDelta>,
+pub(super) fn top_by_window_from_ordered_group(
+    records: Option<&BTreeMap<CollectByOrderKey, i64>>,
     top_by: &TopByOp,
-) -> Result<Vec<WindowedRecord>, IvmRuntimeError> {
-    // Reconstruct the pre-tick multiset keyed by record bytes — the same
-    // identity the arrangement consolidates by. Keying by sort key would
-    // collapse distinct records that tie through (order_cols, tie_cols).
-    let mut records = BTreeMap::<Bytes, i64>::new();
-    for (record, weight) in after_records {
-        *records.entry(record).or_default() += weight;
+) -> Vec<WindowedRecord> {
+    let mut window = Vec::new();
+    let mut to_skip = top_by.offset;
+    let mut remaining = match top_by.limit {
+        TopByLimit::Finite(limit) => Some(limit),
+        TopByLimit::Unbounded => None,
+    };
+    for ((_, record), weight) in records.into_iter().flatten() {
+        if remaining == Some(0) {
+            break;
+        }
+        if *weight <= 0 {
+            continue;
+        }
+        let copies = *weight as u64;
+        let available = copies.saturating_sub(to_skip);
+        to_skip = to_skip.saturating_sub(copies);
+        let taken = remaining.map_or(available, |remaining| available.min(remaining));
+        if taken > 0 {
+            window.push((
+                record.clone(),
+                i64::try_from(taken).expect("window copies cannot exceed positive input weight"),
+            ));
+            if let Some(remaining) = &mut remaining {
+                *remaining -= taken;
+            }
+        }
     }
-    for delta in deltas {
-        *records.entry(delta.record.clone()).or_default() -= delta.weight;
-    }
-    top_by_window_from_records(descriptor, records.into_iter().collect(), top_by)
+    window
 }
 
 pub(super) fn records_before_deltas(
@@ -964,7 +980,7 @@ fn collect_by_sort_key_for_fields(
         .collect()
 }
 
-fn top_by_sort_key(
+pub(super) fn top_by_sort_key(
     descriptor: RecordDescriptor,
     record: &[u8],
     top_by: &TopByOp,

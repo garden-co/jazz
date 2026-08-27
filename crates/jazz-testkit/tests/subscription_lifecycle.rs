@@ -51,7 +51,7 @@ fn membership_documents_schema() -> Schema {
                         .where_(pe::exists(pe::table("memberships").where_(
                             pe::rel::all_of([
                                 pe::rel::eq_outer("folder_id", "id"),
-                                pe::rel::eq_session("member_id", "user_id"),
+                                pe::rel::eq_session("member_id", vec!["claims", "sub"]),
                             ]),
                         )));
                 })),

@@ -12,6 +12,7 @@ base64 = "0.22"
 console_error_panic_hook = { version = "0.1", optional = true }
 ed25519-dalek = "2"
 futures-util = "0.3.31"
+futures-channel = "0.3.31"
 idb-tree = { path = "../idb-tree" }
 jazz = { path = "../jazz", default-features = false }
 js-sys = "0.3.82"

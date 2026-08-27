@@ -16,7 +16,7 @@ export function resetProfileGuard() {
 export function useMyProfile(): Profile | null {
   const db = useDb();
   const session = useSession();
-  const userId = session?.user_id ?? null;
+  const userId = session?.user ?? null;
   const [optimisticProfile, setOptimisticProfile] = useState<Profile | null>(null);
   const [confirmedProfileId, setConfirmedProfileId] = useState<string | null>(null);
   const sharedWriteOptions = useMemo(

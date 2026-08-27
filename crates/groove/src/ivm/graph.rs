@@ -45,7 +45,7 @@ use super::op_types::*;
 ///     ])
 ///     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
 /// ]);
-/// let mut database = Database::new(schema, MemoryStorage::new(&["albums", "artists"])).await?;
+/// let mut database = Database::new(schema, MemoryStorage::new(&["albums", "artists"]).expect("valid memory storage families")).await?;
 ///
 /// let mut batch = database.open_batch();
 /// batch.insert("artists", vec![Value::U64(1), Value::String("Wayne Shorter".into())]);
@@ -99,7 +99,7 @@ use super::op_types::*;
 ///     ColumnSchema::new("title", ColumnType::String),
 /// ])
 /// .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-/// let mut database = Database::new(schema, MemoryStorage::new(&["albums"])).await?;
+/// let mut database = Database::new(schema, MemoryStorage::new(&["albums"]).expect("valid memory storage families")).await?;
 ///
 /// let binding_descriptor = RecordDescriptor::new([("artist_id", ColumnType::U64.clone())]);
 /// let graph = GraphBuilder::join(

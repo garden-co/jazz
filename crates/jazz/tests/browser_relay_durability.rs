@@ -13,6 +13,7 @@ use jazz::db::{
 use jazz::groove::records::Value;
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid};
+use jazz::node::CurrentRow;
 use jazz::protocol::{
     RegisterShapeOptions, ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage,
 };
@@ -1681,6 +1682,338 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
         )),
         "fresh included Edge subscription must publish the authority result, got {events:?}"
     );
+}
+
+#[test]
+fn browser_relay_keeps_offset_window_membership_when_materializing_locally() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xc2; 16]);
+    let main_thread = open_db(0x1c, alice, &schema);
+    let worker = open_db(0x2c, alice, &schema);
+    let core = open_core(0x3c, &schema);
+    let writer = open_db(0x4c, alice, &schema);
+    main_thread.set_non_durable_client();
+
+    let (writer_transport, core_writer_transport) = duplex();
+    let _writer_connection = block_on(writer.connect_upstream(writer_transport));
+    let _core_writer = core.accept_subscriber(core_writer_transport, alice);
+    let mut todo_ids = Vec::new();
+    for index in 0..24 {
+        let todo = writer
+            .insert(
+                "todos",
+                BTreeMap::from([(
+                    "title".to_owned(),
+                    Value::String(format!("todo-{index:02}")),
+                )]),
+                Default::default(),
+            )
+            .expect("seed ordered todo");
+        todo_ids.push(todo.row_uuid());
+    }
+    for _ in 0..32 {
+        writer.tick().expect("upload ordered todos");
+        core.tick().expect("accept ordered todos");
+        writer.tick().expect("settle ordered todos");
+    }
+
+    let (main_transport, worker_subscriber_transport) = duplex();
+    let _main_connection = block_on(main_thread.connect_upstream(main_transport));
+    let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
+    let (worker_upstream_transport, core_transport) = duplex();
+    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
+    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+
+    let query = main_thread
+        .prepare_query(
+            &Query::from("todos")
+                .order_by("title", OrderDirection::Asc)
+                .offset(8)
+                .limit(16),
+        )
+        .expect("prepare offset window");
+    let mut subscription = block_on(main_thread.subscribe(
+        &query,
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe through browser relay");
+    assert!(subscription.try_next_event().is_none());
+
+    for _ in 0..12 {
+        main_thread.tick().expect("register browser window");
+        worker.tick().expect("forward browser window");
+        core.tick().expect("serve browser window");
+        worker.tick().expect("relay browser window");
+        main_thread.tick().expect("apply browser window");
+    }
+
+    let edge_rows = block_on(main_thread.all(
+        &query,
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("read authoritative window");
+    let local_rows = block_on(main_thread.all(&query, ReadOpts::default()))
+        .expect("read materialized browser window");
+    let row_ids = |rows: &[CurrentRow]| rows.iter().map(CurrentRow::row_uuid).collect::<Vec<_>>();
+    let expected = todo_ids[8..24].to_vec();
+    assert_eq!(
+        row_ids(&edge_rows),
+        expected,
+        "authority keeps the requested window"
+    );
+    assert_eq!(
+        row_ids(&local_rows),
+        row_ids(&edge_rows),
+        "the browser cache must materialize the authoritative result membership without applying the offset again",
+    );
+
+    let contained_local = main_thread
+        .prepare_query(
+            &Query::from("todos")
+                .order_by("title", OrderDirection::Asc)
+                .offset(8)
+                .limit(2),
+        )
+        .expect("prepare contained local window");
+    assert_eq!(
+        row_ids(
+            &block_on(main_thread.all(
+                &contained_local,
+                ReadOpts {
+                    tier: DurabilityTier::Local,
+                    ..ReadOpts::default()
+                },
+            ))
+            .expect("read a contained local window without its own edge subscription"),
+        ),
+        todo_ids[8..10].to_vec(),
+        "a narrower Local read derives its relative slice from the received authority window",
+    );
+
+    let narrower = main_thread
+        .prepare_query(
+            &Query::from("todos")
+                .order_by("title", OrderDirection::Asc)
+                .offset(10)
+                .limit(4),
+        )
+        .expect("prepare narrower offset window");
+    let mut narrower_subscription = block_on(main_thread.subscribe(
+        &narrower,
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe narrower window through browser relay");
+    assert!(narrower_subscription.try_next_event().is_none());
+    for _ in 0..12 {
+        main_thread
+            .tick()
+            .expect("register narrower browser window");
+        worker.tick().expect("forward narrower browser window");
+        core.tick().expect("serve narrower browser window");
+        worker.tick().expect("relay narrower browser window");
+        main_thread.tick().expect("apply narrower browser window");
+    }
+    assert_eq!(
+        row_ids(
+            &block_on(main_thread.all(
+                &narrower,
+                ReadOpts {
+                    tier: DurabilityTier::Edge,
+                    ..ReadOpts::default()
+                },
+            ))
+            .expect("read narrower authority window"),
+        ),
+        todo_ids[10..14].to_vec(),
+        "a distinct bounded shape receives its own authority membership rather than borrowing raw rows from the first window",
+    );
+
+    writer
+        .insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String("todo-00a".to_owned()))]),
+            Default::default(),
+        )
+        .expect("insert row before bounded windows");
+    for _ in 0..12 {
+        writer.tick().expect("upload boundary-shifting todo");
+        core.tick().expect("accept boundary-shifting todo");
+        worker.tick().expect("relay boundary-shifting todo");
+        main_thread.tick().expect("apply boundary-shifting todo");
+    }
+    let shifted = todo_ids[7..23].to_vec();
+    assert_eq!(
+        row_ids(
+            &block_on(main_thread.all(
+                &query,
+                ReadOpts {
+                    tier: DurabilityTier::Edge,
+                    ..ReadOpts::default()
+                },
+            ))
+            .expect("read shifted authority window"),
+        ),
+        shifted,
+        "a changed upstream membership invalidates and replaces the cached window",
+    );
+    assert_eq!(
+        row_ids(
+            &block_on(main_thread.all(
+                &narrower,
+                ReadOpts {
+                    tier: DurabilityTier::Edge,
+                    ..ReadOpts::default()
+                },
+            ))
+            .expect("read shifted narrower authority window"),
+        ),
+        todo_ids[9..13].to_vec(),
+        "each bounded receipt shifts independently after a new leading member",
+    );
+    assert_eq!(
+        row_ids(
+            &block_on(main_thread.all(
+                &contained_local,
+                ReadOpts {
+                    tier: DurabilityTier::Local,
+                    ..ReadOpts::default()
+                },
+            ))
+            .expect("read shifted contained local window"),
+        ),
+        todo_ids[7..9].to_vec(),
+        "a local subwindow is invalidated with the authority window it derives from",
+    );
+}
+
+/// A detached bounded Edge read releases its exact authoritative receipt.
+/// Alice repeatedly reads distinct offset windows through a browser worker;
+/// every final detach must clear its membership before the next scope opens.
+///
+/// ```text
+/// alice one-shot Edge window ──receipt──► worker ──receipt──► main
+/// alice detach ──unsubscribe──► worker ──unsubscribe──► core
+/// ```
+///
+/// The test-only receipt count is necessary because a Local overlay may
+/// legitimately retain row bodies after detach, while authoritative membership
+/// itself must not outlive the usage-site scope.
+#[test]
+fn browser_relay_releases_each_detached_bounded_one_shot_receipt() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xc3; 16]);
+    let main_thread = open_db(0x1d, alice, &schema);
+    let worker = open_db(0x2d, alice, &schema);
+    let core = open_core(0x3d, &schema);
+    let writer = open_db(0x4d, alice, &schema);
+    main_thread.set_non_durable_client();
+
+    let (writer_transport, core_writer_transport) = duplex();
+    let _writer_connection = block_on(writer.connect_upstream(writer_transport));
+    let _core_writer = core.accept_subscriber(core_writer_transport, alice);
+    for index in 0..12 {
+        writer
+            .insert(
+                "todos",
+                BTreeMap::from([(
+                    "title".to_owned(),
+                    Value::String(format!("todo-{index:02}")),
+                )]),
+                Default::default(),
+            )
+            .expect("seed ordered todo");
+    }
+    for _ in 0..24 {
+        writer.tick().expect("upload ordered todos");
+        core.tick().expect("accept ordered todos");
+        writer.tick().expect("settle ordered todos");
+    }
+
+    let (main_transport, worker_subscriber_transport) = duplex();
+    let _main_connection = block_on(main_thread.connect_upstream(main_transport));
+    let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
+    let (worker_upstream_transport, core_transport) = duplex();
+    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
+    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+
+    for offset in 1..=5 {
+        let query = main_thread
+            .prepare_query(
+                &Query::from("todos")
+                    .order_by("title", OrderDirection::Asc)
+                    .offset(offset)
+                    .limit(2),
+            )
+            .expect("prepare distinct bounded window");
+        let attachment = main_thread
+            .attach_query_with_opts(
+                &query,
+                ReadOpts {
+                    tier: DurabilityTier::Edge,
+                    ..ReadOpts::default()
+                },
+            )
+            .expect("attach bounded Edge read");
+        for _ in 0..12 {
+            main_thread.tick().expect("send bounded window");
+            worker.tick().expect("forward bounded window");
+            core.tick().expect("serve bounded window");
+            worker.tick().expect("relay bounded window");
+            main_thread.tick().expect("apply bounded receipt");
+            if main_thread.query_attachment_is_covered(&attachment) {
+                break;
+            }
+        }
+        assert!(
+            main_thread.query_attachment_is_covered(&attachment),
+            "offset {offset} never received its authority receipt"
+        );
+        assert_eq!(
+            block_on(main_thread.all(
+                &query,
+                ReadOpts {
+                    tier: DurabilityTier::Edge,
+                    ..ReadOpts::default()
+                },
+            ))
+            .expect("read bounded authority receipt")
+            .len(),
+            2,
+            "offset {offset} has its exact bounded membership while attached"
+        );
+
+        main_thread.detach_query(attachment);
+        assert_eq!(
+            main_thread.settled_authoritative_receipt_counts_for_test(),
+            (0, 0),
+            "final detach of offset {offset} must release its authority receipt"
+        );
+        for _ in 0..4 {
+            main_thread.tick().expect("send bounded detach");
+            worker.tick().expect("retire worker bounded view");
+            core.tick().expect("retire core bounded view");
+            worker.tick().expect("apply bounded teardown");
+        }
+        assert_eq!(
+            main_thread.query_coverage_attachment_counts_for_test(),
+            (0, 0),
+            "offset {offset} leaves no live coverage owner"
+        );
+        assert_eq!(
+            main_thread.settled_authoritative_receipt_counts_for_test(),
+            (0, 0),
+            "offset {offset} leaves no retained authority membership"
+        );
+    }
 }
 
 /// Empty is a valid authority result. After withholding the relay's premature

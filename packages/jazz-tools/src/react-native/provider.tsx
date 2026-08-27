@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { Session } from "../runtime/context.js";
+import type { PublicSession } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
 import {
   JazzProvider as CoreJazzProvider,
@@ -15,7 +15,7 @@ export { JazzClientProvider, type JazzClientProviderProps } from "../react-core/
 
 interface JazzClientContextValue {
   db: Db;
-  session: Session | null;
+  session: PublicSession | null;
   shutdown: CreatedJazzClient["shutdown"];
 }
 

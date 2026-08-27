@@ -154,6 +154,8 @@ pub enum MemoryStorageSnapshotError {
     Decode(postcard::Error),
     #[error("unsupported memory storage snapshot version {found}; expected {expected}")]
     UnsupportedVersion { found: u16, expected: u16 },
+    #[error("memory storage snapshot has an invalid physical column-family name: {0}")]
+    InvalidColumnFamily(#[from] Error),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -175,11 +177,12 @@ pub struct MemoryStorage {
 }
 
 impl MemoryStorage {
-    /// Construct storage with the supplied column families.
-    pub fn new(column_families: &[&str]) -> Self {
+    /// Construct storage with the supplied portable column-family names.
+    pub fn new(column_families: &[&str]) -> Result<Self, Error> {
+        super::validate_physical_storage_names(column_families)?;
         let storage = Self::default();
         storage.ensure_column_families(column_families);
-        storage
+        Ok(storage)
     }
 
     fn ensure_column_families(&self, column_families: &[&str]) {
@@ -229,6 +232,7 @@ impl MemoryStorage {
                 expected: MEMORY_STORAGE_SNAPSHOT_VERSION,
             });
         }
+        super::validate_physical_storage_names(snapshot.column_families.keys())?;
         *self.inner.lock().expect("memory storage mutex poisoned") = snapshot.column_families;
         Ok(())
     }
@@ -430,6 +434,7 @@ impl OrderedKvStorage for MemoryStorage {
 impl ReopenableStorage for MemoryStorage {
     fn reopen(self, column_families: Vec<String>) -> StorageFuture<'static, Result<Self, Error>> {
         Box::pin(async move {
+            super::validate_physical_storage_names(&column_families)?;
             let column_families = column_families
                 .iter()
                 .map(String::as_str)
@@ -445,9 +450,17 @@ mod tests {
     use super::*;
     use crate::storage::collect_scan;
 
+    #[test]
+    fn fallible_open_uses_portable_physical_name_contract() {
+        assert!(MemoryStorage::new(&["records"]).is_ok());
+        assert!(MemoryStorage::new(&["records\0evil"]).is_err());
+        let too_long = "a".repeat(super::super::MAX_APPLICATION_STORAGE_NAME_BYTES + 1);
+        assert!(MemoryStorage::new(&[too_long.as_str()]).is_err());
+    }
+
     #[futures_test::test]
     async fn lazy_reverse_prefix_scan_keeps_its_prefix_across_batches() {
-        let storage = MemoryStorage::new(&["rows"]);
+        let storage = MemoryStorage::new(&["rows"]).expect("valid memory storage families");
         for index in 0..300 {
             let key = format!("a/{index:03}").into_bytes();
             storage.set("rows".into(), key.clone(), key).await.unwrap();
@@ -480,7 +493,7 @@ mod tests {
 
     #[futures_test::test]
     async fn lazy_scan_observes_a_later_committed_value_in_its_next_batch() {
-        let storage = MemoryStorage::new(&["rows"]);
+        let storage = MemoryStorage::new(&["rows"]).expect("valid memory storage families");
         for index in 0..257 {
             let key = format!("row:{index:03}").into_bytes();
             storage
@@ -507,7 +520,7 @@ mod tests {
 
     #[futures_test::test]
     async fn snapshot_round_trip_preserves_column_families_and_values() {
-        let storage = MemoryStorage::new(&["rows", "meta"]);
+        let storage = MemoryStorage::new(&["rows", "meta"]).expect("valid memory storage families");
         storage
             .set("rows".into(), b"a".to_vec(), b"one".to_vec())
             .await
@@ -544,14 +557,14 @@ mod tests {
 
     #[futures_test::test]
     async fn import_snapshot_replaces_existing_contents() {
-        let source = MemoryStorage::new(&["rows"]);
+        let source = MemoryStorage::new(&["rows"]).expect("valid memory storage families");
         source
             .set("rows".into(), b"a".to_vec(), b"one".to_vec())
             .await
             .unwrap();
         let snapshot = source.export_snapshot().unwrap();
 
-        let target = MemoryStorage::new(&["other"]);
+        let target = MemoryStorage::new(&["other"]).expect("valid memory storage families");
         target
             .set("other".into(), b"stale".to_vec(), b"value".to_vec())
             .await
@@ -569,8 +582,31 @@ mod tests {
     }
 
     #[futures_test::test]
+    async fn import_snapshot_rejects_invalid_families_without_replacing_state() {
+        let storage = MemoryStorage::new(&["rows"]).expect("valid memory storage families");
+        storage
+            .set("rows".into(), b"keep".to_vec(), b"value".to_vec())
+            .await
+            .unwrap();
+        let snapshot = MemoryStorageSnapshot {
+            version: MEMORY_STORAGE_SNAPSHOT_VERSION,
+            column_families: BTreeMap::from([("rows\0evil".to_owned(), BTreeMap::new())]),
+        };
+        let bytes = postcard::to_allocvec(&snapshot).unwrap();
+
+        assert!(matches!(
+            storage.import_snapshot(&bytes),
+            Err(MemoryStorageSnapshotError::InvalidColumnFamily(_))
+        ));
+        assert_eq!(
+            storage.get("rows".into(), b"keep".to_vec()).await.unwrap(),
+            Some(b"value".to_vec())
+        );
+    }
+
+    #[futures_test::test]
     async fn approximate_class_bytes_sums_keys_and_values_exactly() {
-        let storage = MemoryStorage::new(&["rows"]);
+        let storage = MemoryStorage::new(&["rows"]).expect("valid memory storage families");
         storage
             .set("rows".into(), b"a".to_vec(), b"one".to_vec())
             .await

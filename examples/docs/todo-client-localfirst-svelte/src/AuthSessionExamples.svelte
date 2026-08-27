@@ -8,24 +8,24 @@
   const session = getSession();
   // #endregion auth-session-svelte-hook
 
-  // #region auth-session-svelte-user-id
-  const sessionUserId = $derived(session.current?.user_id ?? null);
-  // #endregion auth-session-svelte-user-id
+  // #region auth-session-svelte-user
+  const sessionUser = $derived(session.current?.user ?? null);
+  // #endregion auth-session-svelte-user
 
   // #region auth-session-svelte-query
   const ownedTodos = new QuerySubscription(
-    () => (sessionUserId ? app.todos.where({ owner_id: sessionUserId }) : undefined),
+    () => (sessionUser ? app.todos.where({ owner_id: sessionUser }) : undefined),
   );
   // #endregion auth-session-svelte-query
 
   // #region auth-session-svelte-insert
   function addOwnedTodo(title: string) {
-    if (!sessionUserId) return;
+    if (!sessionUser) return;
 
     db.insert(app.todos, {
       title,
       done: false,
-      owner_id: sessionUserId,
+      owner_id: sessionUser,
     });
   }
   // #endregion auth-session-svelte-insert

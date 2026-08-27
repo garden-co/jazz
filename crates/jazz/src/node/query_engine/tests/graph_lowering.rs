@@ -2165,7 +2165,7 @@ fn binding_descriptor_types_do_not_depend_on_runtime_array_values() {
 
 #[test]
 fn nested_binding_value_source_keeps_sibling_nullable_claim_route() {
-    let user_id = ClaimPath(vec!["user_id".to_owned()]);
+    let user_id = ClaimPath(vec!["user".to_owned()]);
     let join_code = ClaimPath(vec!["join_code".to_owned()]);
     let typed_user_id = claim_param_field(&user_id);
     let typed_join_code = claim_param_field(&join_code);

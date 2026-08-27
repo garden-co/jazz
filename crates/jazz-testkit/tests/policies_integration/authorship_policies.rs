@@ -71,8 +71,8 @@ async fn backend_session_transaction_preserves_raw_claims_and_logical_author() {
 
 async fn backend_session_transaction_preserves_raw_claims_and_logical_author_inner() {
     let session_policy = pe::all_of([
-        pe::eq("owner", pe::session("user_id")),
-        pe::eq("$createdBy", pe::session("author")),
+        pe::eq("owner", pe::session(vec!["claims", "sub"])),
+        pe::eq("$createdBy", pe::session("user")),
     ]);
     let schema = SchemaBuilder::new()
         .table(
@@ -176,7 +176,7 @@ async fn created_by_policies_scope_crud_to_creators() {
 }
 
 async fn created_by_policies_scope_crud_to_creators_inner() {
-    let created_by_policy = pe::eq("$createdBy", pe::session("author"));
+    let created_by_policy = pe::eq("$createdBy", pe::session("user"));
     let schema = SchemaBuilder::new()
         .table(make_notes_schema(
             "notes",
@@ -295,7 +295,7 @@ async fn created_by_policies_hide_server_generated_rows_without_attribution() {
 }
 
 async fn created_by_policies_hide_server_generated_rows_without_attribution_inner() {
-    let created_by_policy = pe::eq("$createdBy", pe::session("author"));
+    let created_by_policy = pe::eq("$createdBy", pe::session("user"));
     let schema = SchemaBuilder::new()
         .table(make_notes_schema(
             "notes",
@@ -380,7 +380,7 @@ async fn created_by_policies_can_allow_reads_from_system_author() {
 }
 
 async fn created_by_policies_can_allow_reads_from_system_author_inner() {
-    let created_by_policy = pe::eq("$createdBy", pe::session("author"));
+    let created_by_policy = pe::eq("$createdBy", pe::session("user"));
     let system_author_policy = pe::eq("$createdBy", "jazz:system");
     let schema = SchemaBuilder::new()
         .table(make_notes_schema(
@@ -479,7 +479,7 @@ async fn created_by_policies_allow_backend_attribution_to_specific_user() {
 }
 
 async fn created_by_policies_allow_backend_attribution_to_specific_user_inner() {
-    let created_by_policy = pe::eq("$createdBy", pe::session("author"));
+    let created_by_policy = pe::eq("$createdBy", pe::session("user"));
     let schema = SchemaBuilder::new()
         .table(make_notes_schema(
             "notes",
@@ -552,7 +552,7 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor() {
 }
 
 async fn updated_by_select_policy_moves_visibility_to_last_editor_inner() {
-    let updated_by_policy = pe::eq("$updatedBy", pe::session("author"));
+    let updated_by_policy = pe::eq("$updatedBy", pe::session("user"));
     let shared_policy = pe::eq("shared", true);
     let schema = SchemaBuilder::new()
         .table(

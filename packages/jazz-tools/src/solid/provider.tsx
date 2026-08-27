@@ -1,5 +1,5 @@
 import { createContext, useContext, type JSX, type Accessor, Show, createEffect } from "solid-js";
-import type { Session } from "../runtime/context.js";
+import type { PublicSession } from "../runtime/context.js";
 import {
   createSolidJazzClient,
   isPendingSolidJazzClientReady,
@@ -71,7 +71,7 @@ export function useDb<TDb = Db>(): Accessor<TDb> {
   return () => client.db as TDb;
 }
 
-export function useSession(): Accessor<Session | null> {
+export function useSession(): Accessor<PublicSession | null> {
   const client = useJazzClient();
   return () => client.session;
 }
