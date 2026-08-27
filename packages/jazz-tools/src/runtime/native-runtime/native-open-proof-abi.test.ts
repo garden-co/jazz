@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { authorForNativeOpenConfig } from "./native-codec.js";
 import { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 
 const schema = {};
@@ -48,6 +49,16 @@ function fakeDb() {
 }
 
 describe("self-signed native open ABI", () => {
+  it("keeps reserved authors out of the ordinary config while retaining external authors", () => {
+    for (const issuer of ["urn:jazz:local-first", "urn:jazz:anonymous"]) {
+      const reserved = new TextEncoder().encode(JSON.stringify([issuer, "alice"]));
+      expect(new TextDecoder().decode(authorForNativeOpenConfig(reserved, proof))).toBe(
+        '["https://jazz.invalid","self-signed-open"]',
+      );
+    }
+    expect(authorForNativeOpenConfig(author)).toBe(author);
+  });
+
   it("fails explicitly against an old native artifact instead of falling back to its raw open", () => {
     const oldArtifact = { openMemory: vi.fn(() => fakeDb()) };
 

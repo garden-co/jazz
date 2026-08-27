@@ -168,14 +168,15 @@ async function initialize(context: RuntimeContext): Promise<void> {
       handleStorageInvalidation(context),
     );
     const schema = encodeSchema(options.schema);
+    const proof = options.selfSignedClientProof;
     const config = openConfig(
       options.node,
       options.author,
       1,
       false,
       options.initialSyncFlushEvery,
+      proof,
     );
-    const proof = options.selfSignedClientProof;
     if (proof && typeof wasmModule.WasmDb.openBrowserWithSelfSignedProof !== "function") {
       throw new Error(
         "WASM runtime does not support self-signed client opens; rebuild the matching Jazz WASM artifact",
