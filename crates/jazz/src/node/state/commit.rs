@@ -269,16 +269,9 @@ where
         for (_, commit) in &commits {
             commit.validate()?;
         }
-        self.prepare_and_stage_large_commit_values(&mut commits).await?;
-        let staged_ids = commits
-            .iter()
-            .flat_map(|(_, commit)| commit.staged_large_values.iter().copied())
-            .collect::<BTreeSet<_>>();
-        self.ensure_large_value_stages_current(&staged_ids).await?;
         let tx_id = TxId::new(made_at, self.node_uuid);
         let made_by = commits[0].1.made_by;
         let permission_subject = commits[0].1.effective_permission_subject();
-        let user_metadata_json = commits[0].1.user_metadata_json.clone();
         let tx = Transaction {
             tx_id,
             kind: TxKind::Mergeable,
@@ -291,9 +284,16 @@ where
             row_read_set: None,
             absent_read_set: None,
             predicate_read_set: None,
-            user_metadata_json,
+            user_metadata_json: commits[0].1.user_metadata_json.clone(),
             contribution_merge,
         };
+        let contribution_merge = self.admit_contribution_merge_for_storage(&tx)?;
+        self.prepare_and_stage_large_commit_values(&mut commits).await?;
+        let staged_ids = commits
+            .iter()
+            .flat_map(|(_, commit)| commit.staged_large_values.iter().copied())
+            .collect::<BTreeSet<_>>();
+        self.ensure_large_value_stages_current(&staged_ids).await?;
         let tx_node_alias = self.ensure_node_alias(tx_id.node).await?;
         let mut batch = self.database.open_batch();
         for (_, commit) in &commits {
@@ -301,7 +301,6 @@ where
                 batch.accept_large_value(*staged_id);
             }
         }
-        let contribution_merge = self.contribution_merge_storage_value(tx.contribution_merge.as_ref())?;
         batch.insert(
             "jazz_transactions",
             transaction_values(

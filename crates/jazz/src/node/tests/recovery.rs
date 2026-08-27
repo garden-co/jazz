@@ -221,6 +221,47 @@ fn contribution_operation_payloads_use_physical_columns_and_canonical_groove_byt
     );
 }
 
+#[test]
+fn unknown_durable_contribution_component_tag_is_rejected_by_the_storage_decoder() {
+    let schema = schema();
+    let (_dir, core) = open_node_with_schema(node(1), schema);
+    let stored = core
+        .contribution_merge_storage_value(Some(&canonical_contribution_provenance(TxId::new(
+            TxTime::from(10),
+            node(1),
+        ))))
+        .unwrap();
+    let Value::Nullable(Some(record)) = stored else {
+        panic!("fixture stores contribution provenance")
+    };
+    let Value::Record(record) = *record else {
+        panic!("fixture contribution provenance is a record")
+    };
+    let merge = ContributionMergeStorageRecord::new(record);
+    let Value::Record(substitution) = merge.substitutions().unwrap().remove(0) else {
+        panic!("fixture substitution is a record")
+    };
+    let substitution = ContributionSubstitutionStorageRecord::new(substitution);
+    let coordinate = substitution.target().unwrap();
+    let descriptor = coordinate.descriptor().clone();
+    let records::ValueType::Enum(component_schema) = record_field_type(&descriptor, 4) else {
+        panic!("fixture contribution component is an enum")
+    };
+    let coordinate = ContributionCoordinateStorageRecord::new(coordinate);
+    let payload = coordinate.component().unwrap().into_record();
+    let error = crate::node::codec::contribution_component_from_storage(
+        records::EnumValue::new(127, payload),
+        component_schema,
+        "todos",
+        &mut |_table, _physical_column| Ok("title".to_owned()),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::InvalidStoredValue("transaction contribution component tag is invalid")
+    ));
+}
+
 fn contribution_operation_schema() -> JazzSchema {
     JazzSchema::new_with_branch_columns([TableSchema::new(
         "sets",
@@ -364,6 +405,118 @@ fn ingress_rejects_noncanonical_and_wrong_strategy_operation_identities_before_p
             "invalid operation identity must be rejected before it reaches durable transaction state"
         );
     }
+}
+
+#[test]
+fn local_rejected_and_bulk_view_ingress_share_operation_admission_before_mutation() {
+    let schema = schema();
+    let invalid_tx_id = TxId::new(TxTime::from(40), node(0x31));
+    let invalid_provenance = || {
+        let coordinate = ContributionCoordinate {
+            branch_key: BranchKey::default(),
+            table: "todos".to_owned(),
+            row_uuid: row(0x61),
+            layer: MergeAspect::Content,
+            component: ContributionComponent::Operation {
+                column: "title".to_owned(),
+                identity: vec![0],
+            },
+        };
+        ContributionMergeProvenance::canonical(
+            BranchKey::default(),
+            BranchKey::default(),
+            vec![ContributionSubstitution {
+                target: coordinate.clone(),
+                sources: vec![ContributionDot {
+                    tx_id: invalid_tx_id,
+                    coordinate,
+                }],
+            }],
+        )
+        .unwrap()
+    };
+    let invalid_transaction = || operation_transaction(invalid_tx_id, invalid_provenance());
+
+    let (_local_dir, mut local) = open_node_with_schema(node(0x31), schema.clone());
+    let local_result = local
+        .commit_mergeable_many_at_with_schema_versions_and_provenance(
+            vec![((schema.version_id()), MergeableCommit::new("todos", row(0x61), 40)
+                .cells(title_cells("local")))],
+            invalid_tx_id.time,
+            Some(invalid_provenance()),
+        )
+        .resolve();
+    let error = match local_result {
+        Err(error) => error,
+        Ok(_) => panic!("invalid local provenance must not publish a transaction"),
+    };
+    assert!(matches!(
+        error,
+        Error::InvalidStoredValue("lww contribution column must not use an operation identity")
+    ));
+    assert!(local.query_transaction(invalid_tx_id).unwrap().is_none());
+
+    let (_rejected_dir, mut rejected) = open_node_with_schema(node(0x31), schema.clone());
+    let error = rejected
+        .ingest_rejected_transaction(
+            invalid_transaction(),
+            Fate::Rejected(RejectionReason::MalformedCommit("fixture".to_owned())),
+        )
+        .resolve()
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::InvalidStoredValue("lww contribution column must not use an operation identity")
+    ));
+    assert!(rejected.query_transaction(invalid_tx_id).unwrap().is_none());
+
+    let (_view_dir, mut view) = open_node_with_schema(node(0x31), schema);
+    let bundle = VersionBundle {
+        tx: invalid_transaction(),
+        versions: vec![version_record(row(0x61), Vec::new(), title_cells("view"), None)],
+        scope: crate::protocol::VersionBundleScope::CompleteTransaction,
+        fate: Fate::Accepted,
+        global_time: Some(GlobalTime(40)),
+        durability: DurabilityTier::Local,
+    };
+    let error = view
+        .ingest_reset_view_bundle_refs_in_bulk(&[bundle.as_ref()], None)
+        .resolve()
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::InvalidStoredValue("lww contribution column must not use an operation identity")
+    ));
+    assert!(view.query_transaction(invalid_tx_id).unwrap().is_none());
+}
+
+#[test]
+fn ingress_rejects_operation_coordinates_outside_the_content_layer() {
+    let schema = contribution_operation_schema();
+    let (_dir, mut core) = open_node_with_schema(node(0x31), schema.clone());
+    let tx_id = TxId::new(TxTime::from(45), node(0x31));
+    let mut provenance = operation_provenance(tx_id, "count", Vec::new());
+    let substitution = &mut provenance.substitutions[0];
+    for coordinate in std::iter::once(&mut substitution.target).chain(
+        substitution
+            .sources
+            .iter_mut()
+            .map(|source| &mut source.coordinate),
+    ) {
+        coordinate.layer = MergeAspect::Deletion;
+    }
+    let error = core
+        .ingest_commit_unit_settled(
+            operation_transaction(tx_id, provenance),
+            vec![operation_version(&schema, "count", Value::U64(1))],
+            u64::MAX - SKEW_TOLERANCE_MS,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::InvalidStoredValue("contribution operation must belong to the content layer")
+    ));
+    assert!(core.query_transaction(tx_id).unwrap().is_none());
 }
 
 #[test]
