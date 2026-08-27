@@ -13,7 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { hostname } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { afterEach, assert, describe, expect, it, vi } from "vitest";
 import { structuralSchemaHash } from "./dev/schema-utils.js";
@@ -44,7 +44,7 @@ const bootstrapVerifierPath = fileURLToPath(
 );
 
 const packageRoot = dirname(fileURLToPath(import.meta.url));
-const tmpBase = join(packageRoot, ".test-tmp");
+const tmpBase = join(tmpdir(), "jazz-tools-cli-tests");
 const tempRoots: string[] = [];
 const APP_ID = "test-app";
 
@@ -113,6 +113,38 @@ function spawnMigrationCreate(
   );
 }
 
+async function typecheckGeneratedMigration(migrationPath: string): Promise<void> {
+  const tsconfigPath = join(dirname(dirname(migrationPath)), "generated-migration.tsconfig.json");
+  await writeFile(
+    tsconfigPath,
+    JSON.stringify({
+      compilerOptions: {
+        target: "ES2022",
+        module: "NodeNext",
+        moduleResolution: "NodeNext",
+        skipLibCheck: true,
+        ignoreDeprecations: "6.0",
+        baseUrl: dirname(packageRoot),
+        paths: { "jazz-tools": ["src/index.ts"] },
+      },
+      files: [migrationPath],
+    }),
+  );
+  const result = spawnSync(
+    process.execPath,
+    [
+      join(dirname(packageRoot), "node_modules", "typescript", "bin", "tsc"),
+      "--noEmit",
+      "--project",
+      tsconfigPath,
+    ],
+    { cwd: dirname(packageRoot), encoding: "utf8" },
+  );
+  if (result.status !== 0) {
+    throw new Error(`Generated migration failed to typecheck:\n${result.stdout}\n${result.stderr}`);
+  }
+}
+
 async function waitForCrashMarker(marker: string, child: ReturnType<typeof spawn>): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (!(await fileExists(marker))) {
@@ -147,7 +179,9 @@ async function captureConsoleLogs<T>(
   run: () => Promise<T>,
 ): Promise<{ result: T; logs: string[] }> {
   const logs: string[] = [];
-  const stripAnsi = (line: string): string => line.replace(/\u001b\[[0-9;]*m/g, "");
+  const ansiEscape = String.fromCodePoint(27);
+  const ansiSgrPattern = new RegExp(`${ansiEscape}\\[[0-9;]*m`, "g");
+  const stripAnsi = (line: string): string => line.replace(ansiSgrPattern, "");
   const logSpy = vi
     .spyOn(console, "log")
     .mockImplementation((message?: unknown, ...rest: unknown[]) => {
@@ -1522,7 +1556,7 @@ describe("cli migrations", () => {
     );
   });
 
-  it("preserves merge strategy markers in generated migration schema witnesses", async () => {
+  it("renders a type-valid BIGINT counter migration", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
     const fromHash = "4141414141414141414141414141414141414141414141414141414141414141";
@@ -1539,10 +1573,11 @@ describe("cli migrations", () => {
             columns: [
               {
                 name: "value",
-                column_type: { type: "Integer" },
+                column_type: { type: "BigInt" },
                 nullable: false,
                 merge_strategy: "Counter",
               },
+              { name: "removedValue", column_type: { type: "BigInt" }, nullable: true },
               { name: "label", column_type: { type: "Text" }, nullable: false },
             ],
           },
@@ -1555,11 +1590,12 @@ describe("cli migrations", () => {
             columns: [
               {
                 name: "value",
-                column_type: { type: "Integer" },
+                column_type: { type: "BigInt" },
                 nullable: false,
                 merge_strategy: "Counter",
               },
-              { name: "label", column_type: { type: "Text" }, nullable: true },
+              { name: "addedValue", column_type: { type: "BigInt" }, nullable: true },
+              { name: "label", column_type: { type: "Text" }, nullable: false },
             ],
           },
         });
@@ -1586,7 +1622,10 @@ describe("cli migrations", () => {
     }
 
     const generated = await readFile(filePath, "utf8");
-    expect(generated).toContain('"value": s.int().merge("counter"),');
+    expect(generated).toContain('"addedValue": s.add.bigint({ default: null }),');
+    expect(generated).toContain('"removedValue": s.drop.bigint({ backwardsDefault: null }),');
+    expect(generated).toContain('"value": s.bigint().merge("counter"),');
+    await typecheckGeneratedMigration(filePath);
   });
 
   it("still creates a migration file for nullability-only schema changes", async () => {

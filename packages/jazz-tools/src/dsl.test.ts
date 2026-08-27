@@ -221,18 +221,25 @@ describe("schema default DSL", () => {
 });
 
 describe("column merge strategy DSL", () => {
-  it("stores counter merge strategy on integer columns and exports it to wasm schema", () => {
+  it("stores counter merge strategy on integer and bigint columns and exports them to wasm schema", () => {
     resetCollectedState();
     table("counters", {
-      value: col.int().merge("counter"),
+      integerValue: col.int().merge("counter"),
+      bigintValue: col.bigint().merge("counter"),
       label: col.string(),
     });
 
     const schema = getCollectedSchema();
     expect(schema.tables[0]?.columns).toEqual([
       {
-        name: "value",
+        name: "integerValue",
         sqlType: "INTEGER",
+        nullable: false,
+        mergeStrategy: "counter",
+      },
+      {
+        name: "bigintValue",
+        sqlType: "BIGINT",
         nullable: false,
         mergeStrategy: "counter",
       },
@@ -247,8 +254,14 @@ describe("column merge strategy DSL", () => {
       counters: {
         columns: [
           {
-            name: "value",
+            name: "integerValue",
             column_type: { type: "Integer" },
+            nullable: false,
+            merge_strategy: "Counter",
+          },
+          {
+            name: "bigintValue",
+            column_type: { type: "BigInt" },
             nullable: false,
             merge_strategy: "Counter",
           },
@@ -290,9 +303,18 @@ describe("column merge strategy DSL", () => {
   });
 
   it("rejects counter merge strategy on non-integer columns", () => {
-    expect(() => col.string().merge("counter" as never)).toThrow(
-      "Counter merge strategy is only supported on non-nullable INTEGER columns.",
-    );
+    const invalidDeclarations = [
+      () => col.timestamp().merge("counter" as never),
+      () => col.string().merge("counter" as never),
+      () => col.float().merge("counter" as never),
+      () => col.array(col.int()).merge("counter" as never),
+    ];
+
+    for (const declareColumn of invalidDeclarations) {
+      expect(declareColumn).toThrow(
+        "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
+      );
+    }
   });
 
   it("rejects counter merge strategy on nullable integer columns in either chaining order", () => {
@@ -301,10 +323,43 @@ describe("column merge strategy DSL", () => {
         .int()
         .optional()
         .merge("counter" as never),
-    ).toThrow("Counter merge strategy is only supported on non-nullable INTEGER columns.");
-    expect(() => col.int().merge("counter").optional()).toThrow(
-      "Counter merge strategy is only supported on non-nullable INTEGER columns.",
+    ).toThrow(
+      "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
     );
+    expect(() => col.int().merge("counter").optional()).toThrow(
+      "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
+    );
+    expect(() =>
+      col
+        .bigint()
+        .optional()
+        .merge("counter" as never),
+    ).toThrow(
+      "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
+    );
+    expect(() => col.bigint().merge("counter").optional()).toThrow(
+      "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
+    );
+  });
+
+  it("types counter merge strategy by column and nullability", () => {
+    if (false) {
+      col.int().merge("counter");
+      col.bigint().merge("counter");
+
+      // @ts-expect-error nullable integer columns cannot use counter
+      col.int().optional().merge("counter");
+      // @ts-expect-error nullable bigint columns cannot use counter
+      col.bigint().optional().merge("counter");
+      // @ts-expect-error timestamp columns cannot use counter
+      col.timestamp().merge("counter");
+      // @ts-expect-error text columns cannot use counter
+      col.string().merge("counter");
+      // @ts-expect-error double columns cannot use counter
+      col.float().merge("counter");
+      // @ts-expect-error array columns cannot use counter
+      col.array(col.int()).merge("counter");
+    }
   });
 
   it("stores g-set merge strategy on array columns and exports it to wasm schema", () => {

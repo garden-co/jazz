@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { WasmSchema } from "./drivers/types.js";
-import { createDb, type Db, type QueryBuilder, type TableProxy } from "./runtime/db.js";
+import {
+  createDb,
+  getDbSubscriptionSource,
+  type Db,
+  type QueryBuilder,
+  type TableProxy,
+} from "./runtime/db.js";
 import { applySubscriptionDelta, type SubscriptionDelta } from "./runtime/subscription-manager.js";
 import { SubscriptionsOrchestrator } from "./subscriptions-orchestrator.js";
 
@@ -66,7 +72,7 @@ async function withRealManager<T>(
 ): Promise<T> {
   const appId = `orchestrator-int-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const db = await createDb({ appId });
-  const manager = new SubscriptionsOrchestrator({ appId }, db);
+  const manager = new SubscriptionsOrchestrator({ appId }, getDbSubscriptionSource(db));
 
   try {
     return await run({ appId, db, manager });

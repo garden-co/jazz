@@ -1,0 +1,66 @@
+:root {
+  font-family: Inter, system-ui, sans-serif;
+  color: #17202a;
+  background: #f7f9fb;
+}
+body {
+  margin: 0;
+}
+main {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 3rem 1.5rem;
+}
+header {
+  display: flex;
+  justify-content: space-between;
+  gap: 2rem;
+  align-items: start;
+}
+.eyebrow {
+  color: #52616b;
+  font-size: 0.8rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.browser {
+  display: grid;
+  grid-template-columns: 13rem 1fr;
+  margin-top: 2rem;
+  min-height: 20rem;
+  background: white;
+  border: 1px solid #dce3e8;
+  border-radius: 0.75rem;
+  overflow: hidden;
+}
+aside {
+  padding: 1rem;
+  background: #f0f4f6;
+}
+aside button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  margin: 0.25rem 0;
+}
+aside button.selected {
+  font-weight: 700;
+}
+.browser > section {
+  padding: 1rem;
+}
+.upload {
+  display: inline-flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+li {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid #edf0f2;
+}
+li span {
+  color: #52616b;
+}

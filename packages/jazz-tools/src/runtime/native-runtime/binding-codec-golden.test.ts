@@ -2,13 +2,7 @@ import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
-import type {
-  ColumnDescriptor,
-  NativeRowDelta,
-  NativeTerminalRootLayout,
-  Value,
-} from "../../drivers/types.js";
-import { SubscriptionManager } from "../subscription-manager.js";
+import type { NativeTerminalOperation } from "../../drivers/types.js";
 import { PostcardReader } from "./native-codec.js";
 import {
   readNativeRelationSubscriptionSnapshot,
@@ -22,16 +16,11 @@ type BindingCodecGoldenFixture = {
   terminal: {
     events: Array<{
       type: "delta";
-      terminalLayouts: NativeTerminalRootLayout[];
-      terminalOperations: NonNullable<NativeRowDelta["terminalOperations"]>;
+      terminalOperations: NativeTerminalOperation[];
     }>;
     rejections: Array<Record<string, unknown>>;
   };
 };
-
-const columns: ColumnDescriptor[] = [
-  { name: "title", column_type: { type: "Text" }, nullable: false },
-];
 
 // Rust owns the fixture and both NAPI/WASM call the same production postcard
 // encoder. This keeps byte-level representations and the actual TS reducer in
@@ -78,85 +67,29 @@ describe("binding codec golden contract", () => {
     expect(delta.addedOccurrenceKeys.map((key) => key[0])).toEqual([1]);
     expect(delta.updatedOccurrenceKeys.map((key) => key[0])).toEqual([2]);
     expect(delta.removedOccurrenceKeys.map((key) => key[0])).toEqual([2]);
+    expect(delta.addedIndices).toEqual([2]);
+    expect(delta.updatedPreviousIndices).toEqual([4]);
+    expect(delta.updatedIndices).toEqual([1]);
+    expect(delta.removedIndices).toEqual([3]);
   });
 
-  it("applies actual terminal publication, layout reuse, and edits through SubscriptionManager", () => {
+  it("keeps the terminal JSON codec contract stable", () => {
     const fixture = bindingCodecGoldenFixture();
-    const manager = new SubscriptionManager<{ id: string; title: string }>();
-
-    const first = manager.handleDelta(
-      nativeTerminalDelta(fixture.terminal.events[0]!),
-      terminalRow,
-      columns,
-    );
-    expect(first.all).toEqual([{ id: "11111111-1111-1111-1111-111111111111", title: "first" }]);
-
-    const reusedLayout = fixture.terminal.events[2]!;
-    expect(reusedLayout.terminalLayouts).toEqual([]);
-    const updated = manager.handleDelta(nativeTerminalDelta(reusedLayout), terminalRow, columns);
-    expect(updated.all).toEqual([{ id: "11111111-1111-1111-1111-111111111111", title: "updated" }]);
-
-    const logicalManager = new SubscriptionManager<{ id: string; title: string }>();
-    const logicalInserted = logicalManager.handleDelta(
-      nativeTerminalDelta(fixture.terminal.events[1]!),
-      terminalRow,
-      columns,
-    );
-    expect(logicalInserted.all).toEqual([
-      { id: "21212121-2121-2121-2121-212121212121", title: "note" },
-    ]);
-    const logicalRemoved = logicalManager.handleDelta(
-      nativeTerminalDelta(fixture.terminal.events[3]!),
-      terminalRow,
-      columns,
-    );
-    expect(logicalRemoved.all).toEqual([]);
-
     const operationKinds = fixture.terminal.events.flatMap((event) =>
       event.terminalOperations.map((operation) => Object.keys(operation.edit)[0]),
     );
     expect(operationKinds).toEqual(["Insert", "Insert", "Update", "Move", "Remove"]);
+    expect(
+      fixture.terminal.events.flatMap((event) =>
+        event.terminalOperations.map((operation) => operation.path),
+      ),
+    ).toEqual(Array.from({ length: 5 }, () => [{ Collection: "children" }]));
     expect(fixture.terminal.rejections).toEqual([
-      { type: "UnsupportedShapeCapability", detail: "terminal layout missing" },
+      { type: "UnsupportedShapeCapability", detail: "unsupported descendant terminal shape" },
       { type: "ServerFailure", code: "TableNotFound" },
     ]);
   });
-
-  it("fails closed when a planted CurrentRow or Logical descriptor byte drifts", () => {
-    const fixture = bindingCodecGoldenFixture();
-    for (const source of [fixture.terminal.events[0]!, fixture.terminal.events[1]!]) {
-      const event = structuredClone(source);
-      const descriptor = event.terminalLayouts[0]!.rootDescriptor;
-      descriptor[descriptor.length - 1] = 4; // String -> I32, still a valid descriptor.
-      const manager = new SubscriptionManager<{ id: string; title: string }>();
-      expect(() => manager.handleDelta(nativeTerminalDelta(event), terminalRow, columns)).toThrow(
-        /terminal root layout/,
-      );
-    }
-  });
 });
-
-function terminalRow(row: { id: string; values: Value[] }): { id: string; title: string } {
-  const title = row.values[0];
-  if (title?.type !== "Text") throw new Error("golden terminal title did not decode as text");
-  return { id: row.id, title: title.value };
-}
-
-function nativeTerminalDelta(
-  event: BindingCodecGoldenFixture["terminal"]["events"][number],
-): NativeRowDelta {
-  return {
-    __jazzNativeRowDelta: true,
-    added: new Uint8Array(),
-    updated: new Uint8Array(),
-    removed: new Uint8Array(),
-    addedCount: 0,
-    updatedCount: 0,
-    removedCount: 0,
-    terminalLayouts: event.terminalLayouts,
-    terminalOperations: event.terminalOperations,
-  };
-}
 
 function bindingCodecGoldenFixture(): BindingCodecGoldenFixture {
   return JSON.parse(

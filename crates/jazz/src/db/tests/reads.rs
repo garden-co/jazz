@@ -2037,62 +2037,6 @@ fn payload_enum_match_filters_one_shot_and_maintained_case_transitions() {
 }
 
 #[test]
-fn projected_relation_edge_removal_removes_only_its_renamed_related_row() {
-    let root = row(0x91);
-    let target = row(0x92);
-    let projected_edge = RelationEdge {
-        source_table: "posts".to_owned(),
-        source_row: root,
-        relation: "author".to_owned(),
-        target_table: "people".to_owned(),
-        target_row: target,
-    };
-    let mut snapshot = RelationSnapshot {
-        root_count: 1,
-        rows: vec![
-            relation_snapshot_row("posts", root),
-            relation_snapshot_row("people", target),
-            relation_snapshot_row("archived_people", target),
-        ],
-        edges: vec![projected_edge.clone()],
-    };
-    let mut index = RelationSnapshotIndex::from_snapshot(&snapshot);
-
-    let event = apply_maintained_update_to_snapshot(
-        &mut snapshot,
-        &mut index,
-        LocalMaintainedViewSubscriptionUpdate {
-            authoritative_membership_changed: false,
-            added: Vec::new(),
-            removed: Vec::new(),
-            added_edges: Vec::new(),
-            removed_edges: vec![projected_edge],
-            terminal_operations: Vec::new(),
-            terminal_layout: None,
-        },
-        DurabilityTier::Edge,
-        true,
-        false,
-    );
-
-    assert!(matches!(event, SubscriptionEvent::Delta { .. }));
-    assert!(snapshot.edges.is_empty());
-    assert_eq!(snapshot.rows.len(), 2);
-    assert!(
-        snapshot
-            .rows
-            .iter()
-            .any(|row| row.table() == "archived_people" && row.row_uuid() == target)
-    );
-    assert!(
-        !snapshot
-            .rows
-            .iter()
-            .any(|row| row.table() == "people" && row.row_uuid() == target)
-    );
-}
-
-#[test]
 fn client_read_advice_is_unknown_even_when_a_local_winner_exists() {
     let schema = owner_read_schema();
     let owner = AuthorSubject::for_test_bytes([0xa1; 16]);

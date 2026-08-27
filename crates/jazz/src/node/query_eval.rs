@@ -436,6 +436,7 @@ where
         identity: AuthorSubject,
         output: CurrentQueryProgramOutput,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<QueryProgram, Error> {
         let request = self.current_query_program_request_with_inline_binding_source(
             shape,
@@ -444,7 +445,7 @@ where
             identity,
             output,
             &ReadViewSpec::default(),
-            QueryAuthorizationMode::TrustedServing,
+            authorization_mode,
         )?;
         self.compile_query_program_request_with_access_paths(request, access_paths)
             .await
@@ -1044,13 +1045,14 @@ where
         {
             return Ok(Vec::new());
         }
+        let has_one_shot_access_path = settled_binding_view.is_none()
+            && !self.one_shot_access_paths(shape, binding, tier)?.is_empty();
         // A concrete one-shot access path is binding-specific. Inline that
         // binding so execution keeps the selected graph instead of replacing it
-        // with the generic cached parameterized plan.
-        let inline_query = if prepared_plan.is_none()
-            && settled_binding_view.is_none()
-            && !self.one_shot_access_paths(shape, binding, tier)?.is_empty()
-        {
+        // with the generic cached parameterized plan. Prepared Local reads also
+        // take this path: their reusable graph cannot embed the current binding's
+        // physical index prefix and would otherwise hydrate the complete table.
+        let inline_query = if has_one_shot_access_path {
             let schema = self
                 .catalogue
                 .catalogue_schemas
@@ -1067,8 +1069,10 @@ where
             .as_ref()
             .map(|(shape, binding)| (shape, binding))
             .unwrap_or((shape, binding));
-        let prepared_plan = prepared_plan
-            .filter(|plan| !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker));
+        let prepared_plan = prepared_plan.filter(|plan| {
+            !has_one_shot_access_path
+                && !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker)
+        });
         let program = if prepared_plan.is_some() {
             None
         } else {
@@ -2259,13 +2263,52 @@ where
     /// Execute a serving query with its root constrained to a physical row
     /// UUID. This is for internal authorization probes: public `id` may be a
     /// declared user column and must not be used as the storage-row selector.
-    pub(in crate::node) async fn query_rows_for_link_physical_row(
+    pub(crate) async fn query_rows_for_link_physical_row(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
         identity: AuthorSubject,
         row_uuid: RowUuid,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.query_rows_for_physical_row_in_authorization_mode(
+            shape,
+            binding,
+            tier,
+            identity,
+            row_uuid,
+            QueryAuthorizationMode::TrustedServing,
+        )
+        .await
+    }
+
+    pub(crate) async fn query_rows_for_client_physical_row(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorSubject,
+        row_uuid: RowUuid,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.query_rows_for_physical_row_in_authorization_mode(
+            shape,
+            binding,
+            tier,
+            identity,
+            row_uuid,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .await
+    }
+
+    async fn query_rows_for_physical_row_in_authorization_mode(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorSubject,
+        row_uuid: RowUuid,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table = self
             .table_in_schema(&shape.query().table, shape.schema_version())?
@@ -2282,6 +2325,7 @@ where
                 identity,
                 CurrentQueryProgramOutput::AppRows,
                 access_paths,
+                authorization_mode,
             )
             .await?;
         // A policy can introduce claim parameters even though this physical
@@ -2865,9 +2909,6 @@ where
                 transitions
                     .program_fact_removes
                     .extend(snapshot_transitions.program_fact_removes);
-                transitions
-                    .structured_app_row_changes
-                    .extend(snapshot_transitions.structured_app_row_changes);
                 true
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => false,
@@ -2901,9 +2942,6 @@ where
                         transitions
                             .program_fact_removes
                             .extend(delta_transitions.program_fact_removes);
-                        transitions
-                            .structured_app_row_changes
-                            .extend(delta_transitions.structured_app_row_changes);
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {

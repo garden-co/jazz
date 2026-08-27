@@ -95,12 +95,20 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
         .drain_local_maintained_view_subscription(&mut local, Some(binding_view))
         .expect("drain client-local maintained update")
         .expect("ordinary content update produces a delta");
-    assert!(!update.authoritative_membership_changed);
+    let LocalMaintainedViewSubscriptionUpdate::Flat {
+        authoritative_membership_changed,
+        added,
+        removed,
+        ..
+    } = update
+    else {
+        panic!("flat issue query produced a structured maintained update");
+    };
+    assert!(!authoritative_membership_changed);
     let issue_occurrence = OutputOccurrenceId::single_source(ObjectId::from_uuid(issue.0));
-    assert!(update.added.iter().any(|(id, _)| id == &issue_occurrence));
-    assert!(update.removed.iter().any(|id| id == &issue_occurrence));
-    let updated = update
-        .added
+    assert!(added.iter().any(|(id, _)| id == &issue_occurrence));
+    assert!(removed.iter().any(|id| id == &issue_occurrence));
+    let updated = added
         .iter()
         .find(|(id, _)| id == &issue_occurrence)
         .expect("updated issue is paired as an add/remove update");

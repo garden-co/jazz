@@ -145,14 +145,19 @@ impl LocalMaintainedViewSubscription {
     }
 }
 
-pub(crate) struct LocalMaintainedViewSubscriptionUpdate {
-    pub(crate) authoritative_membership_changed: bool,
-    pub(crate) added: Vec<(OutputOccurrenceId, CurrentRow)>,
-    pub(crate) removed: Vec<OutputOccurrenceId>,
-    pub(crate) added_edges: Vec<(RelationEdge, Option<CurrentRow>)>,
-    pub(crate) removed_edges: Vec<RelationEdge>,
-    pub(crate) terminal_operations: Vec<groove::ivm::TerminalOperation>,
-    pub(crate) terminal_layout: Option<crate::db::TerminalRootLayout>,
+pub(crate) enum LocalMaintainedViewSubscriptionUpdate {
+    /// Flat membership owns public occurrence rows. Groove root operations
+    /// only order the root groups those occurrences belong to.
+    Flat {
+        authoritative_membership_changed: bool,
+        added: Vec<(OutputOccurrenceId, CurrentRow)>,
+        removed: Vec<OutputOccurrenceId>,
+        terminal_operations: Vec<groove::ivm::TerminalOperation>,
+    },
+    /// Structured output is published directly from Groove's terminal tree.
+    Structured {
+        terminal_operations: Vec<groove::ivm::TerminalOperation>,
+    },
 }
 
 fn result_member_matches_row_keys(
@@ -517,7 +522,6 @@ where
             ),
         >::new();
         let mut fact_states = BTreeMap::<ProgramFactEntry, (bool, bool)>::new();
-        let mut structured_app_row_changes = BTreeSet::new();
         let mut terminal_operations = Vec::new();
         let mut authoritative_membership_changed = false;
         let mut authoritative_member_adds = BTreeSet::new();
@@ -650,7 +654,6 @@ where
                         &local.tables,
                         &self.node_aliases,
                     )?;
-                    structured_app_row_changes.extend(transitions.structured_app_row_changes);
                     terminal_operations.extend(transitions.terminal_operations);
                     for entry in transitions.adds {
                         let before = local.result_set.contains(&entry);
@@ -704,7 +707,6 @@ where
         if states.is_empty()
             && payload_states.is_empty()
             && fact_states.is_empty()
-            && structured_app_row_changes.is_empty()
             && terminal_operations.is_empty()
         {
             return Ok((None, suppressed_authoritative_change));
@@ -712,7 +714,6 @@ where
         let mut transitions = super::maintained_subscription_view::ResultTransitions {
             authoritative_membership_changed,
             authoritative_member_adds,
-            structured_app_row_changes,
             terminal_operations,
             ..Default::default()
         };
@@ -786,11 +787,7 @@ where
         let structured_output = !local.result_query.array_subqueries.is_empty();
         let authoritative_membership_changed = transitions.authoritative_membership_changed;
         let authoritative_member_adds = transitions.authoritative_member_adds;
-        let structured_app_row_changes = transitions.structured_app_row_changes.clone();
         let terminal_operations = transitions.terminal_operations.clone();
-        let terminal_layout = (!terminal_operations.is_empty())
-            .then(|| local.terminal_schemas.terminal_root_layout().cloned())
-            .flatten();
         let aggregate_replacements = transitions
             .adds
             .iter()
@@ -805,8 +802,6 @@ where
             .collect::<Result<BTreeSet<_>, _>>()?;
         let mut added = Vec::new();
         let mut removed = Vec::new();
-        let mut added_edges = Vec::new();
-        let mut removed_edges = Vec::new();
         for member in transitions.result_payload_removes {
             local.result_payloads.remove(&member);
         }
@@ -891,69 +886,22 @@ where
             }
         }
         for fact in transitions.program_fact_removes {
-            if local.program_facts.remove(&fact) {
-                if materialize_update
-                    && !structured_output
-                    && let ProgramFactEntry::RelationEdge(edge) = fact
-                {
-                    removed_edges.push(
-                        self.project_relation_edge_through_read_schema(
-                            &edge,
-                            local.result_schema_version,
-                        )
-                        .await?,
-                    );
-                }
-            }
+            local.program_facts.remove(&fact);
         }
         for fact in transitions.program_fact_adds {
-            let edge = (materialize_update && !structured_output)
-                .then(|| match &fact {
-                    ProgramFactEntry::RelationEdge(edge) => Some(edge.clone()),
-                    _ => None,
-                })
-                .flatten();
-            if local.program_facts.insert(fact)
-                && let Some(edge) = edge
-            {
-                let relation_edge = self
-                    .project_relation_edge_through_read_schema(&edge, local.result_schema_version)
-                    .await?;
-                let row = if let Some(version) = &edge.target_version {
-                    self.materialize_local_maintained_view_relation_edge_row(
-                        local,
-                        edge.target_table.as_str(),
-                        edge.target_row,
-                        version.tx,
-                    )
-                    .await?
-                } else {
-                    None
-                };
-                added_edges.push((relation_edge, row));
-            }
+            local.program_facts.insert(fact);
         }
-        if materialize_update && structured_output {
-            for root in structured_app_row_changes {
-                match local.maintained.structured_app_row(root) {
-                    Some(record) => added.push((
-                        OutputOccurrenceId::single_source(ObjectId::from_uuid(root.0)),
-                        CurrentRow::new(local.result_table.clone(), record),
-                    )),
-                    None => removed.push(OutputOccurrenceId::single_source(ObjectId::from_uuid(
-                        root.0,
-                    ))),
-                }
+        Ok(if structured_output {
+            LocalMaintainedViewSubscriptionUpdate::Structured {
+                terminal_operations,
             }
-        }
-        Ok(LocalMaintainedViewSubscriptionUpdate {
-            authoritative_membership_changed,
-            added,
-            removed,
-            added_edges,
-            removed_edges,
-            terminal_operations,
-            terminal_layout,
+        } else {
+            LocalMaintainedViewSubscriptionUpdate::Flat {
+                authoritative_membership_changed,
+                added,
+                removed,
+                terminal_operations,
+            }
         })
     }
 }

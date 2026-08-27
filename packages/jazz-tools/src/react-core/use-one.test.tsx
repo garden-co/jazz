@@ -27,7 +27,7 @@ function makeHarness() {
     getAuthState: () => ({ authMode: "local-first" as const, session: null }),
     onAuthChanged: () => () => {},
     updateAuthToken: () => {},
-    subscribeAll: (query: QueryBuilder<Todo>, next: (delta: SubscriptionDelta<Todo>) => void) => {
+    subscribeDelta: (query: QueryBuilder<Todo>, next: (delta: SubscriptionDelta<Todo>) => void) => {
       subscribedQuery = query;
       callback = next;
       return vi.fn();

@@ -556,6 +556,14 @@ impl OrderedKvStorage for ReopenRefusingMemoryStorage {
         self.inner.get(cf, key)
     }
 
+    fn put_if_absent(&self, cf: String, key: Vec<u8>, value: Vec<u8>) -> groove::storage::StorageFuture<'_, Result<Option<Vec<u8>>, groove::storage::Error>> {
+        self.inner.put_if_absent(cf, key, value)
+    }
+
+    fn compare_and_delete(&self, cf: String, key: Vec<u8>, expected: Vec<u8>) -> groove::storage::StorageFuture<'_, Result<bool, groove::storage::Error>> {
+        self.inner.compare_and_delete(cf, key, expected)
+    }
+
     fn set(
         &self,
         cf: String,
