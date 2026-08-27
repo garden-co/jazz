@@ -179,7 +179,9 @@ async function captureConsoleLogs<T>(
   run: () => Promise<T>,
 ): Promise<{ result: T; logs: string[] }> {
   const logs: string[] = [];
-  const stripAnsi = (line: string): string => line.replace(/\u001b\[[0-9;]*m/g, "");
+  const ansiEscape = String.fromCodePoint(27);
+  const ansiSgrPattern = new RegExp(`${ansiEscape}\\[[0-9;]*m`, "g");
+  const stripAnsi = (line: string): string => line.replace(ansiSgrPattern, "");
   const logSpy = vi
     .spyOn(console, "log")
     .mockImplementation((message?: unknown, ...rest: unknown[]) => {

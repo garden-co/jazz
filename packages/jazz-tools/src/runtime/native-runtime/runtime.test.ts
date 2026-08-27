@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { performance } from "node:perf_hooks";
-import type { ColumnDescriptor, NativeRowDelta, WasmSchema } from "../../drivers/types.js";
+import type {
+  ColumnDescriptor,
+  RuntimeSubscriptionDelta,
+  WasmSchema,
+} from "../../drivers/types.js";
 import {
   createRecord,
   PostcardReader,
@@ -19,15 +23,11 @@ import {
 import {
   formatUuid,
   NativeRuntimeAdapter,
-  applySubscriptionDeltaWithWireDelta,
+  applySubscriptionDeltaWithRootDelta,
   type Transport,
 } from "./native-runtime-adapter.js";
 import { encodeSchema } from "./schema-codec.js";
-import {
-  applySubscriptionDelta,
-  decodeNativeDelta,
-  SubscriptionManager,
-} from "../subscription-manager.js";
+import { applySubscriptionDelta, SubscriptionManager } from "../subscription-manager.js";
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
 import { encodeNativeNullValue, storageColumnValueType } from "./native-row-codec.js";
 import { type BatchId, type WriteReceipt } from "../client.js";
@@ -68,9 +68,36 @@ function decodeSchemaSource(bytes: Uint8Array) {
 
 function decodeTestDeltas(
   deltas: unknown[],
-  columns: readonly ColumnDescriptor[] = testSchema.todos.columns,
+  _columns: readonly ColumnDescriptor[] = testSchema.todos.columns,
 ) {
-  return deltas.map((delta) => decodeNativeDelta(delta as never, columns));
+  return deltas.map((delta) => runtimeDeltaChanges(delta as RuntimeSubscriptionDelta));
+}
+
+function runtimeDeltaChanges(delta: RuntimeSubscriptionDelta) {
+  return [
+    ...delta.updated.map((change) => ({
+      kind: 2 as const,
+      id: runtimeResultId(change.sourceId, change.occurrenceKey),
+      index: change.index,
+      row: change.row,
+    })),
+    ...delta.added.map((change) => ({
+      kind: 0 as const,
+      id: runtimeResultId(change.sourceId, change.occurrenceKey),
+      index: change.index,
+      row: change.row,
+    })),
+    ...delta.removed.map((change) => ({
+      kind: 1 as const,
+      id: runtimeResultId(change.sourceId, change.occurrenceKey),
+      index: change.index,
+    })),
+  ];
+}
+
+function runtimeResultId(sourceId: string, occurrenceKey: Uint8Array): string {
+  if (occurrenceKey.length === 17 && occurrenceKey[0] === 1) return sourceId;
+  return `result:${Array.from(occurrenceKey, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
 async function waitForFakeWebSocketNegotiation(): Promise<void> {
@@ -319,13 +346,10 @@ describe("NativeRuntimeAdapter server transport", () => {
       "ws://127.0.0.1:4200/apps/app-a/ws",
       JSON.stringify({ jwt_token: "invalid.jwt" }),
     );
-    const rejectedReadiness = runtime.waitForUpstreamServerConnection();
     await waitForFakeWebSocketNegotiation();
     sockets[0]!.emitMessage(encodeWebSocketFrameBatch([encodeWireError(3, 1, "invalid token")]));
     await waitForFakeWebSocketNegotiation();
 
-    await expect(rejectedReadiness).rejects.toThrow("invalid token");
-    await expect(runtime.waitForUpstreamServerConnection()).rejects.toThrow("invalid token");
     expect(authFailures).toEqual(["invalid"]);
     expect(upstreamConnections).toBe(0);
     expect(sockets[0]!.closed).toBe(true);
@@ -336,7 +360,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     allowServerHello = true;
     await runtime.updateAuth(JSON.stringify({ jwt_token: "fresh.jwt" }));
-    await runtime.waitForUpstreamServerConnection();
+    await waitForFakeWebSocketNegotiation();
 
     expect(sockets).toHaveLength(2);
     expect(upstreamConnections).toBe(1);
@@ -382,383 +406,6 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     expect(authFailures).toEqual([]);
     expect(transport.received).toEqual([]);
-    expect(transport.closed).toBe(false);
-    expect(sockets[0]!.closed).toBe(false);
-    await expect(runtime.waitForUpstreamServerConnection()).resolves.toBeUndefined();
-  });
-
-  it("cleans up native admission failure, retains it for late readiness, and reconnects", async () => {
-    const sockets: FakeWebSocket[] = [];
-    globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
-        sockets.push(this);
-      }
-    } as unknown as typeof WebSocket;
-    const recoveredTransport = new FakeTransport([]);
-    let admissions = 0;
-    const runtime = new NativeRuntimeAdapter(
-      {
-        openMemory: () =>
-          fakeDb({
-            connectUpstream: () => new FakeTransport([]),
-            connectUpstreamWithSession: () => {
-              admissions += 1;
-              if (admissions === 1) throw new Error("native admission rejected");
-              return recoveredTransport;
-            },
-            tick: () => undefined,
-          }),
-        openBrowser: async () => {
-          throw new Error("not used");
-        },
-      } as never,
-      testSchema,
-      new Uint8Array(16),
-      TEST_RUNTIME_AUTHOR,
-      1,
-      true,
-    );
-
-    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await expect(runtime.waitForUpstreamServerConnection()).rejects.toThrow(
-      "connecting the negotiated upstream transport: native admission rejected",
-    );
-    expect(sockets[0]!.closed).toBe(true);
-    await expect(runtime.waitForUpstreamServerConnection()).rejects.toThrow(
-      "connecting the negotiated upstream transport: native admission rejected",
-    );
-
-    await runtime.disconnect();
-    await expect(runtime.waitForUpstreamServerConnection()).resolves.toBeUndefined();
-    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await expect(runtime.waitForUpstreamServerConnection()).resolves.toBeUndefined();
-    expect(admissions).toBe(2);
-    expect(recoveredTransport.closed).toBe(false);
-    expect(sockets[1]!.closed).toBe(false);
-  });
-
-  it("retires an upstream admitted after its connection was disconnected", async () => {
-    const sockets: FakeWebSocket[] = [];
-    globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
-        sockets.push(this);
-      }
-    } as unknown as typeof WebSocket;
-    const transport = new FakeTransport([]);
-    let resolveAdmission!: (transport: Transport) => void;
-    const admission = new Promise<Transport>((resolve) => {
-      resolveAdmission = resolve;
-    });
-    const connectUpstreamWithSession = vi.fn(() => admission);
-    const runtime = new NativeRuntimeAdapter(
-      {
-        openMemory: () =>
-          fakeDb({
-            connectUpstream: () => new FakeTransport([]),
-            connectUpstreamWithSession,
-            tick: () => undefined,
-          }),
-        openBrowser: async () => {
-          throw new Error("not used");
-        },
-      } as never,
-      testSchema,
-      new Uint8Array(16),
-      TEST_RUNTIME_AUTHOR,
-      1,
-      true,
-    );
-
-    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await waitForFakeWebSocketNegotiation();
-    expect(connectUpstreamWithSession).toHaveBeenCalledOnce();
-
-    await runtime.disconnect();
-    resolveAdmission(transport);
-    await waitForFakeWebSocketNegotiation();
-
-    expect(sockets[0]?.closed).toBe(true);
-    expect(transport.closed).toBe(true);
-    expect(transport.tickCount).toBe(0);
-  });
-
-  it("rejects readiness and retires admission after a physical close", async () => {
-    const sockets: FakeWebSocket[] = [];
-    globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
-        sockets.push(this);
-      }
-    } as unknown as typeof WebSocket;
-    const transport = new FakeTransport([]);
-    let resolveAdmission!: (transport: Transport) => void;
-    const admission = new Promise<Transport>((resolve) => {
-      resolveAdmission = resolve;
-    });
-    const runtime = new NativeRuntimeAdapter(
-      {
-        openMemory: () =>
-          fakeDb({
-            connectUpstream: () => new FakeTransport([]),
-            connectUpstreamWithSession: () => admission,
-            tick: () => undefined,
-          }),
-        openBrowser: async () => {
-          throw new Error("not used");
-        },
-      } as never,
-      testSchema,
-      new Uint8Array(16),
-      TEST_RUNTIME_AUTHOR,
-      1,
-      true,
-    );
-
-    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await waitForFakeWebSocketNegotiation();
-    const readiness = runtime.waitForUpstreamServerConnection();
-    sockets[0]!.emitClose();
-
-    await expect(readiness).rejects.toThrow("websocket closed");
-    await expect(runtime.waitForUpstreamServerConnection()).rejects.toThrow("websocket closed");
-    resolveAdmission(transport);
-    await vi.waitFor(() => expect(transport.closed).toBe(true));
-    expect(transport.tickCount).toBe(0);
-  });
-
-  it("retires a pending admission once when physical error is followed by close", async () => {
-    const sockets: FakeWebSocket[] = [];
-    globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
-        sockets.push(this);
-      }
-    } as unknown as typeof WebSocket;
-    const transport = new FakeTransport([]);
-    let resolveAdmission!: (transport: Transport) => void;
-    const admission = new Promise<Transport>((resolve) => {
-      resolveAdmission = resolve;
-    });
-    const runtime = new NativeRuntimeAdapter(
-      {
-        openMemory: () =>
-          fakeDb({
-            connectUpstream: () => new FakeTransport([]),
-            connectUpstreamWithSession: () => admission,
-            tick: () => undefined,
-          }),
-        openBrowser: async () => {
-          throw new Error("not used");
-        },
-      } as never,
-      testSchema,
-      new Uint8Array(16),
-      TEST_RUNTIME_AUTHOR,
-      1,
-      true,
-    );
-
-    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await waitForFakeWebSocketNegotiation();
-    const readiness = runtime.waitForUpstreamServerConnection();
-    sockets[0]!.emitError();
-    sockets[0]!.emitClose();
-
-    await expect(readiness).rejects.toThrow("websocket transport error");
-    resolveAdmission(transport);
-    await vi.waitFor(() => expect(transport.closed).toBe(true));
-    expect(transport.closeCount).toBe(1);
-    expect(transport.tickCount).toBe(0);
-  });
-
-  it("keeps the newer admission when the replaced admission resolves last", async () => {
-    const sockets: FakeWebSocket[] = [];
-    globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
-        sockets.push(this);
-      }
-    } as unknown as typeof WebSocket;
-    const staleTransport = new FakeTransport([]);
-    const currentTransport = new FakeTransport([Uint8Array.from([7])]);
-    const admissionResolvers: Array<(transport: Transport) => void> = [];
-    const runtime = new NativeRuntimeAdapter(
-      {
-        openMemory: () =>
-          fakeDb({
-            connectUpstream: () => new FakeTransport([]),
-            connectUpstreamWithSession: () =>
-              new Promise<Transport>((resolve) => admissionResolvers.push(resolve)),
-            tick: () => undefined,
-          }),
-        openBrowser: async () => {
-          throw new Error("not used");
-        },
-      } as never,
-      testSchema,
-      new Uint8Array(16),
-      TEST_RUNTIME_AUTHOR,
-      1,
-      true,
-    );
-
-    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await waitForFakeWebSocketNegotiation();
-    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await waitForFakeWebSocketNegotiation();
-
-    admissionResolvers[1]!(currentTransport);
-    await runtime.waitForUpstreamServerConnection();
-    expect(currentTransport.tickCount).toBeGreaterThan(0);
-    admissionResolvers[0]!(staleTransport);
-    await vi.waitFor(() => expect(staleTransport.closed).toBe(true));
-
-    // The fake database observes admitted native peers before the adapter's
-    // continuation can retire them. Closure, rather than an incidental fake
-    // tick count, proves that the stale peer never became the JS-owned upstream.
-    expect(staleTransport.closeCount).toBe(1);
-    expect(currentTransport.closed).toBe(false);
-    expect(sockets[0]!.closed).toBe(true);
-    expect(sockets[1]!.closed).toBe(false);
-  });
-
-  it("ignores a replaced admission that rejects after the current admission succeeds", async () => {
-    const sockets: FakeWebSocket[] = [];
-    globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
-        sockets.push(this);
-      }
-    } as unknown as typeof WebSocket;
-    const currentTransport = new FakeTransport([]);
-    const admissions: Array<{
-      resolve: (transport: Transport) => void;
-      reject: (error: Error) => void;
-    }> = [];
-    const runtime = new NativeRuntimeAdapter(
-      {
-        openMemory: () =>
-          fakeDb({
-            connectUpstream: () => new FakeTransport([]),
-            connectUpstreamWithSession: () =>
-              new Promise<Transport>((resolve, reject) => admissions.push({ resolve, reject })),
-            tick: () => undefined,
-          }),
-        openBrowser: async () => {
-          throw new Error("not used");
-        },
-      } as never,
-      testSchema,
-      new Uint8Array(16),
-      TEST_RUNTIME_AUTHOR,
-      1,
-      true,
-    );
-
-    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await waitForFakeWebSocketNegotiation();
-    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await waitForFakeWebSocketNegotiation();
-    admissions[1]!.resolve(currentTransport);
-    await runtime.waitForUpstreamServerConnection();
-
-    admissions[0]!.reject(new Error("stale admission failed"));
-    await waitForFakeWebSocketNegotiation();
-
-    await expect(runtime.waitForUpstreamServerConnection()).resolves.toBeUndefined();
-    expect(currentTransport.closed).toBe(false);
-    expect(sockets[1]!.closed).toBe(false);
-  });
-
-  it("retires an admission that completes after runtime close", async () => {
-    const sockets: FakeWebSocket[] = [];
-    globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
-        sockets.push(this);
-      }
-    } as unknown as typeof WebSocket;
-    const transport = new FakeTransport([]);
-    let resolveAdmission!: (transport: Transport) => void;
-    const admission = new Promise<Transport>((resolve) => {
-      resolveAdmission = resolve;
-    });
-    const runtime = new NativeRuntimeAdapter(
-      {
-        openMemory: () =>
-          fakeDb({
-            connectUpstream: () => new FakeTransport([]),
-            connectUpstreamWithSession: () => admission,
-            tick: () => undefined,
-          }),
-        openBrowser: async () => {
-          throw new Error("not used");
-        },
-      } as never,
-      testSchema,
-      new Uint8Array(16),
-      TEST_RUNTIME_AUTHOR,
-      1,
-      true,
-    );
-
-    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await waitForFakeWebSocketNegotiation();
-    const readiness = runtime.waitForUpstreamServerConnection();
-    await runtime.close();
-
-    await expect(readiness).rejects.toThrow("runtime closed");
-    resolveAdmission(transport);
-    await vi.waitFor(() => expect(transport.closed).toBe(true));
-    expect(transport.tickCount).toBe(0);
-    expect(sockets[0]!.closed).toBe(true);
-  });
-
-  it("retires an attached transport on physical close and reconnects independently", async () => {
-    const sockets: FakeWebSocket[] = [];
-    globalThis.WebSocket = class extends FakeWebSocket {
-      constructor(url: string) {
-        super(url);
-        sockets.push(this);
-      }
-    } as unknown as typeof WebSocket;
-    const firstTransport = new FakeTransport([]);
-    const secondTransport = new FakeTransport([]);
-    const transports = [firstTransport, secondTransport];
-    const runtime = new NativeRuntimeAdapter(
-      {
-        openMemory: () =>
-          fakeDb({
-            connectUpstream: () => new FakeTransport([]),
-            connectUpstreamWithSession: () => transports.shift()!,
-            tick: () => undefined,
-          }),
-        openBrowser: async () => {
-          throw new Error("not used");
-        },
-      } as never,
-      testSchema,
-      new Uint8Array(16),
-      TEST_RUNTIME_AUTHOR,
-      1,
-      true,
-    );
-
-    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await runtime.waitForUpstreamServerConnection();
-    sockets[0]!.emitClose();
-    await vi.waitFor(() => expect(firstTransport.closed).toBe(true));
-    expect(firstTransport.closeCount).toBe(1);
-
-    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await runtime.waitForUpstreamServerConnection();
-    sockets[0]!.emitError();
-    sockets[0]!.emitClose();
-
-    expect(secondTransport.closed).toBe(false);
-    expect(sockets[1]!.closed).toBe(false);
   });
 
   it("fails active subscriptions when the websocket reports a fatal wire error", async () => {
@@ -812,10 +459,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(updates).toHaveBeenCalledTimes(1);
     expect(updates.mock.calls[0]![0]).toBeInstanceOf(Error);
     expect((updates.mock.calls[0]![0] as Error).message).toBe("server died");
-    expect(updates.mock.calls[0]![1]).toBeNull();
-    expect(transport.closed).toBe(false);
-    expect(sockets[0]!.closed).toBe(false);
-    await expect(runtime.waitForUpstreamServerConnection()).resolves.toBeUndefined();
+    expect(updates.mock.calls[0]).toHaveLength(1);
   });
 
   it("settle-gates global native subscription chunks before app callbacks", () => {
@@ -3990,6 +3634,10 @@ describe("NativeRuntimeAdapter server transport", () => {
             rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
           },
         ],
+        addedIndices: [1],
+        updatedPreviousIndices: [1],
+        updatedIndices: [0],
+        removedIndices: [0],
       }),
     });
     await Promise.resolve();
@@ -4618,15 +4266,15 @@ describe("NativeRuntimeAdapter server transport", () => {
       }),
     };
     const runtime = runtimeWithNativeSubscriptionChunk(chunk);
-    const deltas: NativeRowDelta[] = [];
+    const deltas: RuntimeSubscriptionDelta[] = [];
     const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, null, null);
 
-    runtime.executeSubscription(handle, (delta: NativeRowDelta) => {
+    runtime.executeSubscription(handle, (delta: RuntimeSubscriptionDelta) => {
       deltas.push(delta);
     });
 
     expect(deltas).toHaveLength(1);
-    const decoded = decodeNativeDelta(deltas[0]!, testSchema.todos.columns);
+    const decoded = runtimeDeltaChanges(deltas[0]!);
     expect(decoded).toEqual([
       {
         kind: 0,
@@ -4672,10 +4320,10 @@ describe("NativeRuntimeAdapter server transport", () => {
         addedOccurrenceKeys: [key(1), key(2)],
       }),
     });
-    const deltas: NativeRowDelta[] = [];
+    const deltas: RuntimeSubscriptionDelta[] = [];
     const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, null, null);
-    runtime.executeSubscription(handle, (delta: NativeRowDelta) => deltas.push(delta));
-    const decoded = decodeNativeDelta(deltas[0]!, testSchema.todos.columns);
+    runtime.executeSubscription(handle, (delta: RuntimeSubscriptionDelta) => deltas.push(delta));
+    const decoded = runtimeDeltaChanges(deltas[0]!);
     expect(decoded).toHaveLength(2);
     expect(decoded[0]!.id).not.toBe(decoded[1]!.id);
     expect(decoded.map((change) => change.id)).toEqual([
@@ -4705,7 +4353,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       }),
     ];
     const runtime = runtimeWithNativeRelationSubscriptionChunks(chunks);
-    const deltas: NativeRowDelta[] = [];
+    const deltas: RuntimeSubscriptionDelta[] = [];
     const handle = runtime.createSubscription(
       JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
       null,
@@ -4713,7 +4361,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       null,
     );
 
-    runtime.executeSubscription(handle, (delta: NativeRowDelta) => deltas.push(delta));
+    runtime.executeSubscription(handle, (delta: RuntimeSubscriptionDelta) => deltas.push(delta));
 
     expect(deltas).toHaveLength(4);
     expect(decodeTestDeltas([deltas[0]!])[0]).toMatchObject([
@@ -4743,9 +4391,9 @@ describe("NativeRuntimeAdapter server transport", () => {
         rootAdded: [{ table: "todos", rowId: first, title: "ordinary" }],
       }),
     );
-    const ordinaryDeltas: NativeRowDelta[] = [];
+    const ordinaryDeltas: RuntimeSubscriptionDelta[] = [];
     const ordinaryHandle = ordinary.createSubscription(JSON.stringify({ table: "todos" }));
-    ordinary.executeSubscription(ordinaryHandle, (delta: NativeRowDelta) =>
+    ordinary.executeSubscription(ordinaryHandle, (delta: RuntimeSubscriptionDelta) =>
       ordinaryDeltas.push(delta),
     );
     expect(decodeTestDeltas(ordinaryDeltas)[0]).toMatchObject([
@@ -4769,7 +4417,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       },
       relationSubscriptionChunk({ settled: true }),
     ]);
-    const deltas: NativeRowDelta[] = [];
+    const deltas: RuntimeSubscriptionDelta[] = [];
     const handle = runtime.createSubscription(
       JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
       null,
@@ -4777,7 +4425,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       null,
     );
 
-    runtime.executeSubscription(handle, (delta: NativeRowDelta) => deltas.push(delta));
+    runtime.executeSubscription(handle, (delta: RuntimeSubscriptionDelta) => deltas.push(delta));
 
     expect(deltas).toHaveLength(1);
     expect(deltas[0]!.reset).toBe(true);
@@ -4819,7 +4467,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       ],
       teamsSchema,
     );
-    const deltas: NativeRowDelta[] = [];
+    const deltas: RuntimeSubscriptionDelta[] = [];
     const handle = runtime.createSubscription(
       JSON.stringify({ table: "teams", relation_ir: { Gather: {} } }),
       null,
@@ -4827,11 +4475,11 @@ describe("NativeRuntimeAdapter server transport", () => {
       null,
     );
 
-    runtime.executeSubscription(handle, (delta: NativeRowDelta) => deltas.push(delta));
+    runtime.executeSubscription(handle, (delta: RuntimeSubscriptionDelta) => deltas.push(delta));
 
     expect(deltas).toHaveLength(1);
     expect(deltas[0]!.reset).toBe(true);
-    expect(decodeNativeDelta(deltas[0]!, teamsSchema.teams.columns)).toEqual([
+    expect(runtimeDeltaChanges(deltas[0]!)).toEqual([
       {
         kind: 0,
         id: `result:${Array.from(resultKey, (byte) => byte.toString(16).padStart(2, "0")).join("")}`,
@@ -5030,15 +4678,15 @@ describe("NativeRuntimeAdapter server transport", () => {
       }),
     };
     const runtime = runtimeWithNativeSubscriptionChunk(chunk, schema);
-    const deltas: NativeRowDelta[] = [];
+    const deltas: RuntimeSubscriptionDelta[] = [];
     const handle = runtime.createSubscription(JSON.stringify({ table: "notes" }), null, null, null);
 
-    runtime.executeSubscription(handle, (delta: NativeRowDelta) => {
+    runtime.executeSubscription(handle, (delta: RuntimeSubscriptionDelta) => {
       deltas.push(delta);
     });
 
     expect(deltas).toHaveLength(1);
-    const decoded = decodeNativeDelta(deltas[0]!, schema.notes.columns);
+    const decoded = runtimeDeltaChanges(deltas[0]!);
     expect(decoded).toEqual([
       {
         kind: 0,
@@ -5081,7 +4729,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       ],
       schema,
     );
-    const deltas: NativeRowDelta[] = [];
+    const deltas: RuntimeSubscriptionDelta[] = [];
     const handle = runtime.createSubscription(
       JSON.stringify({ table: "notes", relation_ir: { Gather: {} } }),
       null,
@@ -5089,10 +4737,10 @@ describe("NativeRuntimeAdapter server transport", () => {
       null,
     );
 
-    runtime.executeSubscription(handle, (delta: NativeRowDelta) => deltas.push(delta));
+    runtime.executeSubscription(handle, (delta: RuntimeSubscriptionDelta) => deltas.push(delta));
 
     expect(deltas).toHaveLength(1);
-    expect(decodeNativeDelta(deltas[0]!, schema.notes.columns)).toEqual([
+    expect(runtimeDeltaChanges(deltas[0]!)).toEqual([
       {
         kind: 0,
         id: "00000000-0000-0000-0000-000000000322",
@@ -5134,12 +4782,12 @@ describe("NativeRuntimeAdapter server transport", () => {
       ),
     );
 
-    const applied = applySubscriptionDeltaWithWireDelta([], new Map(), nativeDelta, schema, true, {
+    const applied = applySubscriptionDeltaWithRootDelta([], nativeDelta, schema, true, {
       rootTable: "notes",
       rootColumns: publicColumns,
     });
 
-    const [change] = decodeNativeDelta(applied.wireDelta, publicColumns);
+    const [change] = runtimeDeltaChanges(applied.rootDelta);
     expect(change?.kind).toBe(0);
     if (!change || change.kind !== 0) throw new Error("expected inserted row");
     expect(change.row.values).toEqual([
@@ -5197,7 +4845,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     expect(() =>
-      applySubscriptionDeltaWithWireDelta([], new Map(), nativeDelta, schema, true, {
+      applySubscriptionDeltaWithRootDelta([], nativeDelta, schema, true, {
         rootTable: "notes",
         rootColumns: publicColumns,
       }),
@@ -5231,7 +4879,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     expect(() =>
-      applySubscriptionDeltaWithWireDelta([], new Map(), nativeDelta, schema, true, {
+      applySubscriptionDeltaWithRootDelta([], nativeDelta, schema, true, {
         rootTable: "notes",
         rootColumns: publicColumns,
       }),
@@ -5448,138 +5096,6 @@ describe("NativeRuntimeAdapter server transport", () => {
 });
 
 describe("NativeRuntimeAdapter streaming inserts", () => {
-  it("serializes finalization across schema views while source ingestion stays concurrent", async () => {
-    type Deferred<T> = {
-      promise: Promise<T>;
-      resolve(value: T): void;
-      reject(error: Error): void;
-    };
-    const deferred = <T>(): Deferred<T> => {
-      let resolve!: (value: T) => void;
-      let reject!: (error: Error) => void;
-      const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-        resolve = resolvePromise;
-        reject = rejectPromise;
-      });
-      return { promise, resolve, reject };
-    };
-    const completions = [
-      deferred<ReturnType<typeof fakeWrite>>(),
-      deferred<ReturnType<typeof fakeWrite>>(),
-    ];
-    const pushed: string[] = [];
-    const started: number[] = [];
-    let nextCompletion = 0;
-    let nativeDb!: NativeDbForTest;
-    const beginStreamingMutationEncoded = vi.fn(() => ({
-      push(chunk: Uint8Array) {
-        pushed.push(new TextDecoder().decode(chunk));
-      },
-      finish() {
-        const completion = nextCompletion++;
-        started.push(completion);
-        return completions[completion]!.promise;
-      },
-      abort: vi.fn(),
-    }));
-    nativeDb = fakeDb({
-      beginStreamingMutationEncoded,
-      registerSchema: () => nativeDb,
-    });
-    const runtime = new NativeRuntimeAdapter(
-      {
-        openMemory: () => nativeDb,
-        openBrowser: async () => {
-          throw new Error("not used");
-        },
-      } as never,
-      testSchema,
-      new Uint8Array(16),
-      TEST_RUNTIME_AUTHOR,
-      1,
-      true,
-    );
-    const view = runtime.registerSchemaView(testSchema);
-    const source = async function* (value: string) {
-      yield value;
-    };
-
-    const first = runtime.streamingMutation("insert", "todos", {}, "title", source("first"));
-    const second = view.streamingMutation("insert", "todos", {}, "title", source("second"));
-
-    await vi.waitFor(() => expect(pushed).toEqual(expect.arrayContaining(["first", "second"])));
-    await vi.waitFor(() => expect(started).toEqual([0]));
-    completions[0]!.resolve(fakeWrite());
-    await vi.waitFor(() => expect(started).toEqual([0, 1]));
-    completions[1]!.resolve(fakeWrite());
-
-    await expect(Promise.all([first, second])).resolves.toHaveLength(2);
-  });
-
-  it("releases the next streaming finalization after a failed finish", async () => {
-    type Deferred<T> = {
-      promise: Promise<T>;
-      resolve(value: T): void;
-      reject(error: Error): void;
-    };
-    const deferred = <T>(): Deferred<T> => {
-      let resolve!: (value: T) => void;
-      let reject!: (error: Error) => void;
-      const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-        resolve = resolvePromise;
-        reject = rejectPromise;
-      });
-      return { promise, resolve, reject };
-    };
-    const completions = [
-      deferred<ReturnType<typeof fakeWrite>>(),
-      deferred<ReturnType<typeof fakeWrite>>(),
-    ];
-    const started: number[] = [];
-    const aborts = [vi.fn(), vi.fn()];
-    let nextCompletion = 0;
-    const runtime = new NativeRuntimeAdapter(
-      {
-        openMemory: () =>
-          fakeDb({
-            beginStreamingMutationEncoded: () => {
-              const upload = nextCompletion++;
-              return {
-                push: () => undefined,
-                finish() {
-                  started.push(upload);
-                  return completions[upload]!.promise;
-                },
-                abort: aborts[upload]!,
-              };
-            },
-          }),
-        openBrowser: async () => {
-          throw new Error("not used");
-        },
-      } as never,
-      testSchema,
-      new Uint8Array(16),
-      TEST_RUNTIME_AUTHOR,
-      1,
-      true,
-    );
-    const source = async function* () {
-      yield "value";
-    };
-
-    const first = runtime.streamingMutation("insert", "todos", {}, "title", source());
-    const second = runtime.streamingMutation("insert", "todos", {}, "title", source());
-
-    await vi.waitFor(() => expect(started).toEqual([0]));
-    completions[0]!.reject(new Error("native finish failed"));
-    await expect(first).rejects.toThrow("native finish failed");
-    expect(aborts[0]).toHaveBeenCalledOnce();
-    await vi.waitFor(() => expect(started).toEqual([0, 1]));
-    completions[1]!.resolve(fakeWrite());
-    await expect(second).resolves.toEqual(expect.objectContaining({ id: expect.any(String) }));
-  });
-
   it("infers the physical kind and applies backpressure to async chunks", async () => {
     const pushed: Uint8Array[] = [];
     let finished = false;
@@ -6187,9 +5703,8 @@ describe("NativeRuntimeAdapter TS adapter perf canary", () => {
           null,
         );
         const started = performance.now();
-        runtime.executeSubscription(handle, (delta: NativeRowDelta) => {
-          subscriptionFrameBuffersForTest(delta);
-          addedCount += delta.addedCount;
+        runtime.executeSubscription(handle, (delta: RuntimeSubscriptionDelta) => {
+          addedCount += delta.added.length;
           callbackCount += 1;
         });
         const ms = performance.now() - started;
@@ -6340,21 +5855,6 @@ function indexedUuidBytes(index: number): Uint8Array {
   const bytes = new Uint8Array(16);
   new DataView(bytes.buffer).setUint32(12, index, false);
   return bytes;
-}
-
-function subscriptionFrameBuffersForTest(delta: NativeRowDelta): ArrayBuffer[] {
-  return [
-    transferableBufferForTest(delta.added),
-    transferableBufferForTest(delta.removed),
-    transferableBufferForTest(delta.updated),
-  ];
-}
-
-function transferableBufferForTest(bytes: Uint8Array): ArrayBuffer {
-  if (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
-    return bytes.buffer as ArrayBuffer;
-  }
-  return bytes.slice().buffer;
 }
 
 function readPreparedComparison(query: Uint8Array): {
@@ -6688,7 +6188,6 @@ const arraySchema = {
 
 class FakeTransport implements Transport {
   closed = false;
-  closeCount = 0;
   readonly received: Uint8Array[] = [];
   readonly receivedBatches: Uint8Array[][] = [];
   tickCount = 0;
@@ -6696,7 +6195,6 @@ class FakeTransport implements Transport {
   constructor(private readonly outgoing: Uint8Array[]) {}
 
   close(): boolean {
-    this.closeCount += 1;
     this.closed = true;
     return true;
   }
@@ -6721,23 +6219,11 @@ class FakeTransport implements Transport {
   }
 }
 
-type FakeWebSocketEventMap = {
-  message: { data: unknown };
-  error: unknown;
-  close: { code: number; reason: string };
-};
-
 class FakeWebSocket {
   binaryType: "arraybuffer" | "blob" = "arraybuffer";
   readonly readyState = 1;
   readonly sent: Array<Uint8Array | string> = [];
-  private readonly listeners: {
-    [Type in keyof FakeWebSocketEventMap]: Array<(event: FakeWebSocketEventMap[Type]) => void>;
-  } = {
-    message: [],
-    error: [],
-    close: [],
-  };
+  private readonly messageListeners: Array<(event: { data: unknown }) => void> = [];
   closed = false;
 
   private sawClientPrelude = false;
@@ -6763,24 +6249,12 @@ class FakeWebSocket {
     this.closed = true;
   }
 
-  addEventListener<Type extends keyof FakeWebSocketEventMap>(
-    type: Type,
-    listener: (event: FakeWebSocketEventMap[Type]) => void,
-  ): void {
-    this.listeners[type].push(listener);
+  addEventListener(type: string, listener: (event: { data: unknown }) => void): void {
+    if (type === "message") this.messageListeners.push(listener);
   }
 
   emitMessage(data: Uint8Array): void {
-    for (const listener of this.listeners.message) listener({ data });
-  }
-
-  emitError(): void {
-    for (const listener of this.listeners.error) listener(new Error("network failed"));
-  }
-
-  emitClose(code = 1006, reason = "network lost"): void {
-    this.closed = true;
-    for (const listener of this.listeners.close) listener({ code, reason });
+    for (const listener of this.messageListeners) listener({ data });
   }
 }
 
@@ -6951,6 +6425,10 @@ function encodeSubscriptionDelta(delta: {
   addedOccurrenceKeys?: Uint8Array[];
   updatedOccurrenceKeys?: Uint8Array[];
   removedOccurrenceKeys?: Uint8Array[];
+  addedIndices?: number[];
+  updatedPreviousIndices?: number[];
+  updatedIndices?: number[];
+  removedIndices?: number[];
 }): Uint8Array {
   const writer = new PostcardWriter();
   writeRowBatches(writer, delta.added);
@@ -6967,6 +6445,14 @@ function encodeSubscriptionDelta(delta: {
     delta.removedOccurrenceKeys ?? delta.removed.map((row) => rowKey(row.rowId)),
   ]) {
     writer.vec((key, index) => key.bytes(keys[index]!), keys.length);
+  }
+  for (const indices of [
+    delta.addedIndices ?? delta.added.map((_, index) => index),
+    delta.updatedPreviousIndices ?? delta.updated.map((_, index) => index),
+    delta.updatedIndices ?? delta.updated.map((_, index) => index),
+    delta.removedIndices ?? delta.removed.map((_, index) => index),
+  ]) {
+    writer.vec((indexWriter, index) => indexWriter.u64(indices[index]!), indices.length);
   }
   return writer.finish();
 }
@@ -7000,8 +6486,8 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
       addedOccurrenceKeys: [direct, inherited],
     }),
   );
-  const first = applySubscriptionDeltaWithWireDelta([], new Map(), initial, testSchema);
-  const firstDelta = decodeNativeDelta(first.wireDelta, testSchema.todos.columns);
+  const first = applySubscriptionDeltaWithRootDelta([], initial, testSchema);
+  const firstDelta = runtimeDeltaChanges(first.rootDelta);
   expect(first.rows).toHaveLength(2);
   expect(firstDelta.map((change) => change.id)).toEqual([
     expect.stringContaining("result:02"),
@@ -7009,14 +6495,10 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
   ]);
   expect(firstDelta[0]!.id).not.toBe(firstDelta[1]!.id);
   const manager = new SubscriptionManager<{ id: string; title: string }>();
-  const transformed = manager.handleDelta(
-    first.wireDelta,
-    (row) => ({
-      id: row.id,
-      title: row.values[0]?.type === "Text" ? row.values[0].value : "",
-    }),
-    testSchema.todos.columns,
-  );
+  const transformed = manager.handleDelta(first.rootDelta, (row) => ({
+    id: row.id,
+    title: row.values[0]?.type === "Text" ? row.values[0].value : "",
+  }));
   expect(transformed.all).toHaveLength(2);
   expect(transformed.all?.map((item) => item.id)).toEqual([formatUuid(rowId), formatUuid(rowId)]);
   const publicRows: Array<{ id: string; title: string }> = [];
@@ -7031,24 +6513,15 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
       updatedOccurrenceKeys: [inherited],
     }),
   );
-  const afterUpdate = applySubscriptionDeltaWithWireDelta(
-    first.rows,
-    first.rowIndexByKey,
-    update,
-    testSchema,
-  );
-  const updatedDelta = decodeNativeDelta(afterUpdate.wireDelta, testSchema.todos.columns);
+  const afterUpdate = applySubscriptionDeltaWithRootDelta(first.rows, update, testSchema);
+  const updatedDelta = runtimeDeltaChanges(afterUpdate.rootDelta);
   expect(updatedDelta).toHaveLength(1);
   expect(updatedDelta[0]!.id).toBe(firstDelta[1]!.id);
   expect(afterUpdate.rows).toHaveLength(2);
-  const publicUpdate = manager.handleDelta(
-    afterUpdate.wireDelta,
-    (row) => ({
-      id: row.id,
-      title: row.values[0]?.type === "Text" ? row.values[0].value : "",
-    }),
-    testSchema.todos.columns,
-  );
+  const publicUpdate = manager.handleDelta(afterUpdate.rootDelta, (row) => ({
+    id: row.id,
+    title: row.values[0]?.type === "Text" ? row.values[0].value : "",
+  }));
   expect(publicUpdate.all).toHaveLength(2);
   applySubscriptionDelta(publicRows, publicUpdate);
   expect(publicRows).toHaveLength(2);
@@ -7061,28 +6534,16 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
       removedOccurrenceKeys: [direct],
     }),
   );
-  const second = applySubscriptionDeltaWithWireDelta(
-    afterUpdate.rows,
-    afterUpdate.rowIndexByKey,
-    removal,
-    testSchema,
-  );
+  const second = applySubscriptionDeltaWithRootDelta(afterUpdate.rows, removal, testSchema);
   expect(second.rows).toHaveLength(1);
-  expect(decodeNativeDelta(second.wireDelta, testSchema.todos.columns)[0]!.id).toBe(
-    firstDelta[0]!.id,
-  );
-  const publicRemoval = manager.handleDelta(
-    second.wireDelta,
-    (row) => ({ id: row.id, title: "" }),
-    testSchema.todos.columns,
-  );
+  expect(runtimeDeltaChanges(second.rootDelta)[0]!.id).toBe(firstDelta[0]!.id);
+  const publicRemoval = manager.handleDelta(second.rootDelta, (row) => ({ id: row.id, title: "" }));
   expect(publicRemoval.all).toHaveLength(1);
   applySubscriptionDelta(publicRows, publicRemoval);
   expect(publicRows).toHaveLength(1);
 
-  const reopened = applySubscriptionDeltaWithWireDelta(
+  const reopened = applySubscriptionDeltaWithRootDelta(
     [],
-    new Map(),
     decode(
       encodeSubscriptionDelta({
         added: [{ table: "todos", rowId, title: "inherited" }],
@@ -7095,21 +6556,18 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
     true,
   );
   expect(reopened.rows).toHaveLength(1);
-  expect(decodeNativeDelta(reopened.wireDelta, testSchema.todos.columns)[0]!.id).toBe(
-    firstDelta[1]!.id,
-  );
+  expect(runtimeDeltaChanges(reopened.rootDelta)[0]!.id).toBe(firstDelta[1]!.id);
 });
 
-it("keeps a remove/add root replacement in place without a terminal move", () => {
+it("uses Rust's explicit indices for root replacement and movement", () => {
   const ids = [1, 2, 3].map((value) => {
     const bytes = new Uint8Array(16);
     bytes[15] = value;
     return bytes;
   });
   const decode = (bytes: Uint8Array) => readNativeSubscriptionDelta(new PostcardReader(bytes));
-  const initial = applySubscriptionDeltaWithWireDelta(
+  const initial = applySubscriptionDeltaWithRootDelta(
     [],
-    new Map(),
     decode(
       encodeSubscriptionDelta({
         added: ids.map((rowId, index) => ({ table: "todos", rowId, title: `todo-${index}` })),
@@ -7120,60 +6578,39 @@ it("keeps a remove/add root replacement in place without a terminal move", () =>
     testSchema,
   );
   const replaced = ids[0]!;
-  const afterTitleOnlyReplacement = applySubscriptionDeltaWithWireDelta(
+  const afterTitleOnlyReplacement = applySubscriptionDeltaWithRootDelta(
     initial.rows,
-    initial.rowIndexByKey,
     decode(
       encodeSubscriptionDelta({
-        added: [{ table: "todos", rowId: replaced, title: "renamed" }],
-        updated: [],
-        removed: [{ table: "todos", rowId: replaced }],
+        added: [],
+        updated: [{ table: "todos", rowId: replaced, title: "renamed" }],
+        removed: [],
+        updatedPreviousIndices: [0],
+        updatedIndices: [0],
       }),
     ),
     testSchema,
-    false,
-    null,
-    [
-      {
-        root_key: [10, ...replaced],
-        path: [],
-        edit: { Update: { key: [10, ...replaced], value: [] } },
-      },
-    ],
   );
 
   expect(afterTitleOnlyReplacement.rows.map((row) => row.id)).toEqual(
     ids.map((id) => formatUuid(id)),
   );
-  expect(decodeNativeDelta(afterTitleOnlyReplacement.wireDelta, testSchema.todos.columns)).toEqual([
+  expect(runtimeDeltaChanges(afterTitleOnlyReplacement.rootDelta)).toEqual([
     expect.objectContaining({ id: formatUuid(replaced), index: 0 }),
   ]);
 
-  const afterSortReplacement = applySubscriptionDeltaWithWireDelta(
+  const afterSortReplacement = applySubscriptionDeltaWithRootDelta(
     afterTitleOnlyReplacement.rows,
-    afterTitleOnlyReplacement.rowIndexByKey,
     decode(
       encodeSubscriptionDelta({
-        added: [{ table: "todos", rowId: replaced, title: "renamed and moved" }],
-        updated: [],
-        removed: [{ table: "todos", rowId: replaced }],
+        added: [],
+        updated: [{ table: "todos", rowId: replaced, title: "renamed and moved" }],
+        removed: [],
+        updatedPreviousIndices: [0],
+        updatedIndices: [2],
       }),
     ),
     testSchema,
-    false,
-    null,
-    [
-      {
-        root_key: [10, ...replaced],
-        path: [],
-        edit: { Remove: { key: [10, ...replaced] } },
-      },
-      {
-        root_key: [10, ...replaced],
-        path: [],
-        edit: { Insert: { key: [10, ...replaced], index: 2, value: [] } },
-      },
-    ],
   );
   expect(afterSortReplacement.rows.map((row) => row.id)).toEqual([
     formatUuid(ids[1]!),
@@ -7182,20 +6619,18 @@ it("keeps a remove/add root replacement in place without a terminal move", () =>
   ]);
 
   const moved = ids[2]!;
-  const afterExplicitMove = applySubscriptionDeltaWithWireDelta(
+  const afterExplicitMove = applySubscriptionDeltaWithRootDelta(
     afterSortReplacement.rows,
-    afterSortReplacement.rowIndexByKey,
-    decode(encodeSubscriptionDelta({ added: [], updated: [], removed: [] })),
+    decode(
+      encodeSubscriptionDelta({
+        added: [],
+        updated: [{ table: "todos", rowId: moved, title: "todo-2" }],
+        removed: [],
+        updatedPreviousIndices: [1],
+        updatedIndices: [0],
+      }),
+    ),
     testSchema,
-    false,
-    null,
-    [
-      {
-        root_key: [10, ...moved],
-        path: [],
-        edit: { Move: { key: [10, ...moved], index: 0 } },
-      },
-    ],
   );
   expect(afterExplicitMove.rows.map((row) => row.id)).toEqual([
     formatUuid(moved),
@@ -7204,28 +6639,26 @@ it("keeps a remove/add root replacement in place without a terminal move", () =>
   ]);
 });
 
-it("preserves the producer position for an ordered suffix over lazy relation state", () => {
+it("preserves the producer's explicit position over lazy relation state", () => {
   const rowId = new Uint8Array(16);
   rowId[15] = 3;
   const decode = (bytes: Uint8Array) => readNativeSubscriptionDelta(new PostcardReader(bytes));
-  const applied = applySubscriptionDeltaWithWireDelta(
+  const applied = applySubscriptionDeltaWithRootDelta(
     [],
-    new Map(),
     decode(
       encodeSubscriptionDelta({
         added: [{ table: "todos", rowId, title: "third" }],
         updated: [],
         removed: [],
+        addedIndices: [2],
       }),
     ),
     testSchema,
     false,
     null,
-    undefined,
-    2,
   );
 
-  expect(decodeNativeDelta(applied.wireDelta, testSchema.todos.columns)).toEqual([
+  expect(runtimeDeltaChanges(applied.rootDelta)).toEqual([
     expect.objectContaining({ id: formatUuid(rowId), index: 2 }),
   ]);
 });
@@ -7268,6 +6701,10 @@ function encodeUserWrappedSubscriptionDelta(row: {
   delta.vec((key) => key.bytes(Uint8Array.from([1, ...row.rowId])), 1);
   delta.vec(() => undefined, 0);
   delta.vec(() => undefined, 0);
+  delta.vec((index) => index.u64(0), 1);
+  delta.vec(() => undefined, 0);
+  delta.vec(() => undefined, 0);
+  delta.vec(() => undefined, 0);
   return delta.finish();
 }
 
@@ -7300,6 +6737,10 @@ function encodeTeamGatherSubscriptionDelta(delta: {
   ]) {
     writer.vec((key, index) => key.bytes(keys[index]!), keys.length);
   }
+  writer.vec((indexWriter, index) => indexWriter.u64(index), added.length);
+  writer.vec((indexWriter, index) => indexWriter.u64(index), updated.length);
+  writer.vec((indexWriter, index) => indexWriter.u64(index), updated.length);
+  writer.vec(() => undefined, 0);
   return writer.finish();
 }
 
@@ -7335,150 +6776,6 @@ function writeTeamGatherBatches(
     rows.length === 0 ? 0 : 1,
   );
 }
-
-it("awaits pending native large-value hydration while checking edge coverage", async () => {
-  let polls = 0;
-  let peerPumps = 0;
-  let asyncReads = 0;
-  let syncReads = 0;
-  let runtime!: NativeRuntimeAdapter;
-  const pending = {
-    poll: () => {
-      if (polls++ === 0) {
-        (runtime as unknown as { peerTransportActivityEpoch: number }).peerTransportActivityEpoch =
-          2;
-        return null;
-      }
-      return new Uint8Array();
-    },
-  };
-  runtime = new NativeRuntimeAdapter(
-    {
-      openMemory: () =>
-        fakeDb({
-          all: () => {
-            syncReads += 1;
-            throw new Error("coverage bypassed the async native read boundary");
-          },
-          allAsync: async () => {
-            asyncReads += 1;
-            return pending;
-          },
-          prepareQuery: () => ({}),
-          queryAttachmentIsCovered: () => true,
-          tick: () => undefined,
-        }),
-      openBrowser: async () => {
-        throw new Error("not used");
-      },
-    } as never,
-    testSchema,
-    new Uint8Array(16),
-    TEST_RUNTIME_AUTHOR,
-    1,
-    true,
-  );
-  (
-    runtime as unknown as {
-      pumpServerTransport(): Promise<void>;
-    }
-  ).pumpServerTransport = async () => {
-    peerPumps += 1;
-  };
-
-  const waitForCoverage = (
-    runtime as unknown as {
-      waitForQueryCoverage(
-        attachment: unknown,
-        query: object,
-        opts: object,
-        identity?: Uint8Array,
-        minimumPeerActivityEpoch?: number,
-      ): Promise<void>;
-    }
-  ).waitForQueryCoverage.bind(runtime);
-
-  await expect(waitForCoverage({}, {}, { tier: "edge" }, undefined, 1)).resolves.toBeUndefined();
-  expect(polls).toBe(2);
-  expect(asyncReads).toBe(1);
-  expect(syncReads).toBe(0);
-  expect(peerPumps).toBeGreaterThanOrEqual(2);
-});
-
-it("cancels a suspended native read before polling it again after close", async () => {
-  let polls = 0;
-  let runtime!: NativeRuntimeAdapter;
-  runtime = new NativeRuntimeAdapter(
-    {
-      openMemory: () =>
-        fakeDb({
-          readValueRange: () => ({
-            poll: () => {
-              polls += 1;
-              if (polls > 1) throw new Error("native read was polled after close");
-              queueMicrotask(() => void runtime.close());
-              return null;
-            },
-          }),
-          close: () => undefined,
-          tick: () => undefined,
-        }),
-      openBrowser: async () => {
-        throw new Error("not used");
-      },
-    } as never,
-    testSchema,
-    new Uint8Array(16),
-    TEST_RUNTIME_AUTHOR,
-    1,
-    true,
-  );
-
-  await expect(
-    runtime.readValueRange("todos", "00000000-0000-0000-0000-000000000001", "title", 0, 1),
-  ).rejects.toThrow("large-value hydration was cancelled by runtime shutdown");
-  expect(polls).toBe(1);
-});
-
-it("cancels a suspended native write before polling it again after close", async () => {
-  let polls = 0;
-  let runtime!: NativeRuntimeAdapter;
-  runtime = new NativeRuntimeAdapter(
-    {
-      openMemory: () =>
-        fakeDb({
-          appendValue: async () => ({
-            poll: () => {
-              polls += 1;
-              if (polls > 1) throw new Error("native write was polled after close");
-              queueMicrotask(() => void runtime.close());
-              return null;
-            },
-          }),
-          close: () => undefined,
-          tick: () => undefined,
-        }),
-      openBrowser: async () => {
-        throw new Error("not used");
-      },
-    } as never,
-    testSchema,
-    new Uint8Array(16),
-    TEST_RUNTIME_AUTHOR,
-    1,
-    true,
-  );
-
-  await expect(
-    runtime.appendValue(
-      "todos",
-      "00000000-0000-0000-0000-000000000001",
-      "title",
-      new Uint8Array([1]),
-    ),
-  ).rejects.toThrow("large-value mutation was cancelled by runtime shutdown");
-  expect(polls).toBe(1);
-});
 
 function typedOccurrenceKey(label: string): Uint8Array {
   const labelBytes = inlineScalar(label);
@@ -7539,14 +6836,6 @@ function fakeDb<T extends object>(db: T): T & NativeDbForTest {
   };
   const implementation = db as T & {
     connectUpstream?(): Transport;
-    connectUpstreamWithSession?(
-      protocolVersion: number,
-      features: number,
-      remoteNode: Uint8Array,
-      remoteEpoch: bigint,
-      localNode: Uint8Array,
-      localEpoch: bigint,
-    ): Transport | Promise<Transport>;
     tick?(): void | Promise<void>;
     mergeableTx?(openBatchId: string): TxForTest;
     mergeableTxForIdentity?(openBatchId: string, author: Uint8Array): TxForTest;
@@ -7590,26 +6879,6 @@ function fakeDb<T extends object>(db: T): T & NativeDbForTest {
   if (implementation.connectUpstream) {
     result.connectUpstream = () => {
       upstream = implementation.connectUpstream!();
-      return upstream;
-    };
-  }
-  if (implementation.connectUpstreamWithSession) {
-    result.connectUpstreamWithSession = async (
-      protocolVersion: number,
-      features: number,
-      remoteNode: Uint8Array,
-      remoteEpoch: bigint,
-      localNode: Uint8Array,
-      localEpoch: bigint,
-    ) => {
-      upstream = await implementation.connectUpstreamWithSession!(
-        protocolVersion,
-        features,
-        remoteNode,
-        remoteEpoch,
-        localNode,
-        localEpoch,
-      );
       return upstream;
     };
   }

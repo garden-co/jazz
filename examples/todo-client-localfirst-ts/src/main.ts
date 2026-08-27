@@ -120,7 +120,7 @@ export async function startApp(
 
   // Subscribe to all todos.
   const query = app.todos;
-  const unsubscribe = db.subscribeAll(query, ({ all: todos }) => {
+  const unsubscribe = db.subscribe(query, (todos) => {
     const ordered = orderTodosWithDepth(todos);
     parentSelect.innerHTML = "";
     parentSelect.appendChild(noParentOption);

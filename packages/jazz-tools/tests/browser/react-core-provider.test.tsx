@@ -551,7 +551,7 @@ describe("react-core provider/hooks browser coverage", () => {
           listeners.delete(listener);
         };
       },
-      subscribeAll(
+      subscribeDelta(
         _query: QueryBuilder<Todo>,
         callback: (delta: SubscriptionDelta<Todo>) => void,
         _options?: QueryOptions,

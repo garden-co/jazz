@@ -739,11 +739,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const updates: ReturnType<SubscriptionManager<WasmRow>["handleDelta"]>[] = [];
     const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "local");
     runtime.executeSubscription(handle, (delta: unknown) => {
+      if (delta instanceof Error) throw delta;
       updates.push(
         manager.handleDelta(
           delta as Parameters<SubscriptionManager<WasmRow>["handleDelta"]>[0],
           (row) => row,
-          TEST_SCHEMA.todos.columns,
         ),
       );
     });
@@ -829,7 +829,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     runtime.unsubscribe(localOnly);
   });
 
-  it("returns raw NAPI subscription payloads as Uint8Array with registered terminal layouts", async () => {
+  it("returns raw NAPI subscription payloads without duplicate root terminal edits", async () => {
     const { NapiDb } = await loadNapiModule();
     const node = deterministicBytes("jazz-napi-native-runtime-raw-subscription:node");
     const author = testAuthorBytes("jazz-napi-native-runtime-raw-subscription:author");
@@ -898,11 +898,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const updates: ReturnType<SubscriptionManager<WasmRow>["handleDelta"]>[] = [];
     const handle = runtime.createSubscription(JSON.stringify({ table: "blobs" }), null, "local");
     runtime.executeSubscription(handle, (delta: unknown) => {
+      if (delta instanceof Error) throw delta;
       updates.push(
         manager.handleDelta(
           delta as Parameters<SubscriptionManager<WasmRow>["handleDelta"]>[0],
           (row) => row,
-          BYTEA_SCHEMA.blobs.columns,
         ),
       );
     });
@@ -921,26 +921,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       .find((event) => event.type === "delta" && event.reset === false);
 
     const rawIncremental = expectRawBinaryPayload(rawDelta);
-    expect(rawIncremental.terminalOperations).toHaveLength(1);
-    const rawOperation = rawIncremental.terminalOperations[0];
-    expect(rawIncremental.terminalLayouts).toHaveLength(1);
-    const rawLayout = rawIncremental.terminalLayouts[0];
-    expect(rawOperation?.rootLayoutId).toBe(rawLayout?.id);
-    expect(rawLayout?.rootDescriptor.length).toBeGreaterThan(0);
-    expect(
-      rawLayout?.rootDescriptor.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255),
-    ).toBe(true);
-    expect(rawOperation?.root_key.length).toBeGreaterThan(0);
-    expect(
-      rawOperation?.root_key.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255),
-    ).toBe(true);
-    expect(rawOperation?.path).toEqual([]);
-    if (!rawOperation || !("Insert" in rawOperation.edit)) {
-      throw new Error("expected an inserted terminal operation");
-    }
-    const rawTerminalValue = rawOperation.edit.Insert.value;
-    expect(rawOperation.edit.Insert.key).toEqual(rawOperation.root_key);
-    expect(rawTerminalValue.slice(-fullByteRange.byteLength)).toEqual(Array.from(fullByteRange));
+    expect(rawIncremental.terminalOperations).toEqual([]);
 
     const delivered = updates[1]?.delta[0];
     expect(delivered?.id).toBe(inserted.id);
@@ -1126,7 +1107,6 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         manager.handleDelta(
           delta as Parameters<SubscriptionManager<WasmRow>["handleDelta"]>[0],
           (row) => row,
-          TEST_SCHEMA.todos.columns,
         ),
       );
     });
@@ -1284,7 +1264,6 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       aliceSubscription.handleDelta(
         delta as Parameters<SubscriptionManager<WasmRow>["handleDelta"]>[0],
         (row) => row,
-        OWNED_TODOS_SCHEMA.todos.columns,
       );
     const aliceDecodedUpdates: ReturnType<SubscriptionManager<WasmRow>["handleDelta"]>[] = [];
 

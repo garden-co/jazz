@@ -257,7 +257,7 @@ describe("History & Conflict Management", () => {
    * Alice subscribes, Bob updates a todo — Alice's subscription fires
    * with a delta containing the change.
    *
-   *   dbAlice subscribes via subscribeAll
+   *   dbAlice subscribes via subscribe
    *   dbBob updates a todo
    *   subscription callback fires with delta containing bob's update
    */
@@ -287,8 +287,8 @@ describe("History & Conflict Management", () => {
     // Alice subscribes
     const snapshots: Todo[][] = [];
     const unsub = ctx.trackSubscription(
-      dbAlice.subscribeAll(allTodos, (delta) => {
-        snapshots.push([...delta.all]);
+      dbAlice.subscribe(allTodos, (rows) => {
+        snapshots.push(rows);
       }),
     );
 

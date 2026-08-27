@@ -138,7 +138,6 @@
     "test:browser:focused": "node scripts/test-browser-focused.mjs",
     "typecheck:browser-helpers": "tsc --project tests/browser/tsconfig.browser-helpers.json",
     "test:browser:contract": "node scripts/test-browser-focused.test.mjs",
-    "test:terminal-layout-contract": "vitest run --config vitest.config.ts src/runtime/terminal-layout-contract-matrix.test.ts --reporter=verbose --passWithNoTests=false",
     "bench:abstract:node": "JAZZ_ABSTRACT_BENCH=1 vitest run --config vitest.config.ts src/runtime/schema-marshalling.abstract-bench.test.ts",
     "bench:abstract:browser": "JAZZ_ABSTRACT_BENCH=1 vitest run --config vitest.config.browser.ts tests/browser/schema-marshalling.abstract-bench.test.ts",
     "bench:realistic:browser": "vitest run --config vitest.config.browser.ts tests/browser/realistic-bench.test.ts",

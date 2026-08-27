@@ -950,19 +950,19 @@ describe("raw websocket private read gate", () => {
     const chatSnapshots: Chat[][] = [];
     const messageSnapshots: Message[][] = [];
     const unsubscribeChats = ctx.trackSubscription(
-      bob.subscribeAll(
+      bob.subscribe(
         app.chats,
-        (delta) => {
-          chatSnapshots.push([...delta.all]);
+        (rows) => {
+          chatSnapshots.push(rows);
         },
         { tier: "edge" },
       ),
     );
     const unsubscribeMessages = ctx.trackSubscription(
-      bob.subscribeAll(
+      bob.subscribe(
         app.messages,
-        (delta) => {
-          messageSnapshots.push([...delta.all]);
+        (rows) => {
+          messageSnapshots.push(rows);
         },
         { tier: "edge" },
       ),
@@ -1076,12 +1076,12 @@ async function waitForSubscription<T extends { id: string }>(
         ),
       );
     }, timeoutMs);
-    unsubscribe = db.subscribeAll(
+    unsubscribe = db.subscribe(
       query,
-      (delta) => {
+      (rows) => {
         if (settled) return;
-        lastRows = delta.all;
-        if (!predicate(delta.all)) return;
+        lastRows = rows;
+        if (!predicate(rows)) return;
         settled = true;
         clearTimeout(timeoutId);
         resolve(unsubscribe);

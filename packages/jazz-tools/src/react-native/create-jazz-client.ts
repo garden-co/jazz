@@ -1,10 +1,10 @@
 import type { PublicSession } from "../runtime/context.js";
-import type { Db } from "../runtime/db.js";
+import { getDbSubscriptionSource, type Db } from "../runtime/db.js";
+import { getDbInternalSession } from "../runtime/db-internal-session.js";
 import { runCleanupSteps } from "../runtime/run-cleanup-steps.js";
 import { SubscriptionsOrchestrator, trackPromise } from "../subscriptions-orchestrator.js";
 import { attachSubscriptionStore } from "../subscription-store-internal.js";
 import { createDb, type DbConfig } from "./create-db.js";
-import { getDbInternalSession } from "../runtime/db-internal-session.js";
 
 export interface JazzClient {
   db: Db;
@@ -17,7 +17,7 @@ async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
   let session = db.getAuthState().session;
   const manager = new SubscriptionsOrchestrator(
     { appId: config.appId },
-    db,
+    getDbSubscriptionSource(db),
     getDbInternalSession(db),
   );
   await manager.init();

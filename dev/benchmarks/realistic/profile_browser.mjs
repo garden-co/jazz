@@ -861,10 +861,10 @@ function buildB5Setup(scenario, serverInfo, dbPrefix) {
         user_id: allowedPrincipalId,
         claims: { auth_mode: "local-first" },
       };
-      const unsubscribe = allowedDb.subscribeAll(
+      const unsubscribe = allowedDb.subscribe(
         visibleDocumentsQuery,
-        (delta) => {
-          warmAllowedVisible = delta.all.length;
+        (rows) => {
+          warmAllowedVisible = rows.length;
         },
         undefined,
         allowedSession,

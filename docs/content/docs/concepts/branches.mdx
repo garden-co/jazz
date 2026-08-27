@@ -53,7 +53,7 @@ const documents = await db.all(app.documents.orderBy("title", "asc"), {
   base: "main",
 });
 
-const unsubscribe = db.subscribeAll(app.documents, ({ all }) => renderDocuments(all), {
+const unsubscribe = db.subscribe(app.documents, (documents) => renderDocuments(documents), {
   branch: "draft",
   base: "main",
 });
