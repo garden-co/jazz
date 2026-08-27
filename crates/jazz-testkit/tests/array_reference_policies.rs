@@ -31,7 +31,7 @@ fn test_user_id(subject: &str) -> String {
 /// `project_ids` (`Array<Uuid>` reference to projects). Projects are readable
 /// only in reverse through a team row that the session can read.
 fn team_project_schema(index_only_name: bool) -> Schema {
-    let member_policy = pe::contains("member_ids", pe::session("user_id"));
+    let member_policy = pe::contains("member_ids", pe::session(vec!["claims", "sub"]));
     let teams_policies = permissions(|p| {
         p.allow_read().where_(member_policy);
         p.allow_insert().always();

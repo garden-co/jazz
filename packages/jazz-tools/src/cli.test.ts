@@ -332,7 +332,7 @@ import { schema as s } from ${JSON.stringify(importPath)};
 import { app } from ${JSON.stringify(appImportPath)};
 
 export default s.definePermissions(app, ({ policy, session }) => [
-  policy.todos.allowRead.where({ ownerId: session.user_id }),
+  policy.todos.allowRead.where({ ownerId: session.user }),
 ]);
 `;
 }
@@ -393,11 +393,11 @@ import { schema as s } from ${JSON.stringify(importPath)};
 import { app } from ${JSON.stringify(appImportPath)};
 
 export default s.definePermissions(app, ({ policy, session }) => [
-  policy.todos.allowRead.where({ ownerId: session.user_id }),
-  policy.todos.allowInsert.where({ ownerId: session.user_id }),
+  policy.todos.allowRead.where({ ownerId: session.user }),
+  policy.todos.allowInsert.where({ ownerId: session.user }),
   policy.todos.allowUpdate
-    .whereOld({ ownerId: session.user_id })
-    .whereNew({ ownerId: session.user_id }),
+    .whereOld({ ownerId: session.user })
+    .whereNew({ ownerId: session.user }),
 ]);
 `;
 }
@@ -429,7 +429,7 @@ import { schema as s } from ${JSON.stringify(importPath)};
 import { app } from ${JSON.stringify(appImportPath)};
 
 export const permissions = s.definePermissions(app, ({ policy, session }) => [
-  policy.todos.allowRead.where({ ownerId: session.user_id }),
+  policy.todos.allowRead.where({ ownerId: session.user }),
 ]);
 `;
 }

@@ -7,7 +7,7 @@ const CHAT_ID = process.env.NEXT_PUBLIC_CHAT_ID!;
 
 const messagePermissions = definePermissions(app, ({ policy, allOf, anyOf, session }) => {
   const isAdmin = session.where({ "claims.role": "admin" });
-  const canMutateGenericChat = { $createdBy: session.author };
+  const canMutateGenericChat = { $createdBy: session.user };
   // `allowUpdate` is evaluated independently on the old and new row. Use the
   // same room/role predicate for both sides so a General-message creator
   // cannot satisfy the old-row rule then move the message into Announcements.

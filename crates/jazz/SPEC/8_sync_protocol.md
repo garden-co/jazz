@@ -606,12 +606,15 @@ context and relies on known-state redelivery for correctness.
 An edge that acts as mergeable fate authority needs the relevant policy data
 before it can decide a write's fate. It therefore must defer fate assignment
 until the relevant **permission-scope subscription** has settled; until then it
-stores the unit as pending relay history and defers (`INV-SYNC-18`).
+retains the unit only in its in-memory deferred-admission state, outside edge
+history (`INV-SYNC-18`). Once the scope settles, the edge ingests the authorized
+unit exactly once and routes its edge fate; a denied unit is rejected without
+being ingested.
 
 A permission-scope subscription is an _upstream_ subscription opened by the edge
 against core for the policy data required by its acceptance gate. It is keyed by
 `(policy_shape, writer_claim)` (ch. 9 §9.5): the write policy's query shape bound
-to the writer's `claim("author")`. This hydrates only the policy rows that writer's
+to the writer's `claim("user")`. This hydrates only the policy rows that writer's
 writes can depend on, never a whole table.
 
 Permission scopes are shared at the sync level whenever one settled subscription

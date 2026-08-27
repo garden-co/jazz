@@ -4,7 +4,7 @@ import {
   LOCAL_FIRST_JWT_ISSUER,
   STATIC_BEARER_SESSION_ISSUER,
   markTrustedReservedSession,
-  sessionFromVerifiedReservedJwtPayload,
+  internalSessionFromVerifiedReservedJwtPayload,
 } from "./client-session.js";
 import { selfSignedClientProofFromConfig } from "./default-runtime-source.js";
 
@@ -14,7 +14,7 @@ describe("selfSignedClientProofFromConfig", () => {
       [LOCAL_FIRST_JWT_ISSUER, "local-first"],
       [ANONYMOUS_JWT_ISSUER, "anonymous"],
     ] as const) {
-      const session = sessionFromVerifiedReservedJwtPayload(
+      const session = internalSessionFromVerifiedReservedJwtPayload(
         { iss: issuer, sub: "alice" },
         authMode,
       )!;
@@ -47,7 +47,12 @@ describe("selfSignedClientProofFromConfig", () => {
     expect(
       selfSignedClientProofFromConfig(
         { appId: "proof-app", jwtToken: "external-token" },
-        { issuer: "https://issuer.example", user_id: "alice", claims: {}, authMode: "external" },
+        {
+          issuer: "https://issuer.example",
+          user_id: "alice",
+          claims: {},
+          authMode: "external",
+        },
       ),
     ).toBeUndefined();
   });

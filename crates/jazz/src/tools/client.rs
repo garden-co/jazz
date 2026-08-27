@@ -1232,13 +1232,14 @@ impl ClientDb {
         .await
     }
 
-    fn disconnect_upstream(&self) -> bool {
-        self.inner.borrow_mut().disconnect_upstream()
-    }
-
     #[cfg(feature = "testing")]
     async fn reconnect_upstream(&self) -> Result<bool> {
         ClientDbInner::reconnect_upstream(&self.inner).await
+    }
+
+    #[cfg(feature = "testing")]
+    fn disconnect_upstream(&self) -> bool {
+        self.inner.borrow_mut().disconnect_upstream()
     }
 
     fn ensure_tick_driver_running(&self) -> Result<()> {
@@ -2054,24 +2055,25 @@ fn session_claims_to_core_claims(session: &Session) -> Result<HashMap<String, Co
     };
     let mut core_claims = HashMap::new();
     for (name, value) in claims {
-        core_claims.insert(name, json_claim_to_core_value(value)?);
+        core_claims.insert(
+            crate::query::provider_claim_key(&name),
+            json_claim_to_core_value(value)?,
+        );
     }
-    core_claims.insert("sub".to_owned(), CoreValue::String(session.user_id.clone()));
-    core_claims.insert("iss".to_owned(), CoreValue::String(session.issuer.clone()));
     core_claims.insert(
-        "issuer".to_owned(),
-        CoreValue::String(session.issuer.clone()),
+        crate::query::provider_claim_key("sub"),
+        CoreValue::String(session.user_id.clone()),
     );
     core_claims.insert(
-        "user_id".to_owned(),
-        CoreValue::String(session.user_id.clone()),
+        crate::query::provider_claim_key("iss"),
+        CoreValue::String(session.issuer.clone()),
     );
     core_claims.insert(
         "authMode".to_owned(),
         CoreValue::String(auth_mode_claim_value(session.auth_mode).to_owned()),
     );
     core_claims.insert(
-        "author".to_owned(),
+        "user".to_owned(),
         CoreValue::String(session.author_subject()?.canonical().to_owned()),
     );
     Ok(core_claims)
@@ -3565,30 +3567,35 @@ mod tests {
     }
 
     #[test]
-    fn client_session_preserves_provider_subject_and_adds_logical_author() {
+    fn client_session_preserves_provider_subject_and_adds_logical_user_identity() {
         let session = Session::new(CoreAuthorSubject::LOCAL_FIRST_ISSUER, "trusted-user")
             .with_auth_mode(crate::tools::public_api::session::AuthMode::LocalFirst)
             .with_claims(json!({
                 "sub": "spoofed-subject",
                 "user_id": "spoofed-user",
+                "user": "provider-user",
                 "authMode": "external",
             }));
 
         let claims = session_claims_to_core_claims(&session).unwrap();
         assert_eq!(
-            claims.get("sub"),
+            claims.get(&crate::query::provider_claim_key("sub")),
             Some(&CoreValue::String("trusted-user".to_owned()))
         );
         assert_eq!(
-            claims.get("user_id"),
-            Some(&CoreValue::String("trusted-user".to_owned()))
+            claims.get(&crate::query::provider_claim_key("user_id")),
+            Some(&CoreValue::String("spoofed-user".to_owned()))
+        );
+        assert_eq!(
+            claims.get(&crate::query::provider_claim_key("user")),
+            Some(&CoreValue::String("provider-user".to_owned()))
         );
         assert_eq!(
             claims.get("authMode"),
             Some(&CoreValue::String("local-first".to_owned()))
         );
         assert_eq!(
-            claims.get("author"),
+            claims.get("user"),
             Some(&CoreValue::String(
                 CoreAuthorSubject::reserved(CoreAuthorSubject::LOCAL_FIRST_ISSUER, "trusted-user")
                     .unwrap()

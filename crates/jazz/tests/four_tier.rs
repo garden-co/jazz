@@ -31,7 +31,7 @@ fn schema() -> JazzSchema {
     // fixture writes intentionally public; declaring SELECT alone now closes
     // the remaining operation clauses.
     let policies = TablePolicies::new()
-        .with_select(session_eq("owner", &["claims", "sub"]))
+        .with_select(session_eq("owner", &["user"]))
         .with_insert(jazz::tools::PolicyExpr::True)
         .with_update(
             Some(jazz::tools::PolicyExpr::True),
@@ -43,7 +43,7 @@ fn schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new("todos")
                     .column("title", ColumnType::Text)
-                    .column("owner", ColumnType::Uuid)
+                    .column("owner", ColumnType::Text)
                     .policies(policies),
             )
             .build(),
@@ -58,14 +58,14 @@ fn public_write_schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new("todos")
                     .column("title", ColumnType::Text)
-                    .column("owner", ColumnType::Uuid),
+                    .column("owner", ColumnType::Text),
             )
             .build(),
     )
 }
 
 fn read_write_policy_schema() -> JazzSchema {
-    let owner = session_eq("owner", &["claims", "sub"]);
+    let owner = session_eq("owner", &["user"]);
     let policies = TablePolicies::new()
         .with_select(owner.clone())
         .with_insert(owner.clone())
@@ -76,7 +76,7 @@ fn read_write_policy_schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new("todos")
                     .column("title", ColumnType::Text)
-                    .column("owner", ColumnType::Uuid)
+                    .column("owner", ColumnType::Text)
                     .policies(policies),
             )
             .build(),
@@ -86,10 +86,7 @@ fn read_write_policy_schema() -> JazzSchema {
 fn access_write_policy_schema() -> JazzSchema {
     let canvas = exists(
         "canvasInvites",
-        vec![
-            outer_eq("canvas", "id"),
-            session_eq("userID", &["claims", "sub"]),
-        ],
+        vec![outer_eq("canvas", "id"), session_eq("userID", &["user"])],
     );
     let policies = TablePolicies::new()
         .with_select(canvas.clone())
@@ -106,7 +103,7 @@ fn access_write_policy_schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new("canvasInvites")
                     .fk_column("canvas", "canvases")
-                    .column("userID", ColumnType::Uuid),
+                    .column("userID", ColumnType::Text),
             )
             .build(),
     )
@@ -138,7 +135,10 @@ fn reopen_node(
 fn cells(title: &str, owner: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.to_owned())),
-        ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
+        (
+            "owner".to_owned(),
+            Value::String(owner.canonical().to_owned()),
+        ),
     ])
 }
 
@@ -159,11 +159,11 @@ fn permission_scope_key(
         .expect("table should have a write policy");
     let mut values = BTreeMap::new();
     values.insert(
-        "__jazz_claim_sub".to_owned(),
-        Value::Uuid(writer.test_uuid()),
+        "__jazz_claim_user".to_owned(),
+        Value::String(writer.canonical().to_owned()),
     );
     let shape = Query::from(table)
-        .filter(eq(col("owner"), param("__jazz_claim_sub")))
+        .filter(eq(col("owner"), param("__jazz_claim_user")))
         .validate(schema)
         .expect("policy should validate as a scope shape");
     let binding = shape
@@ -189,7 +189,10 @@ fn whole_table_key(schema: &JazzSchema, table: &str) -> SubscriptionKey {
 fn invite_cells(canvas: RowUuid, user: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("canvas".to_owned(), Value::Uuid(canvas.0)),
-        ("userID".to_owned(), Value::Uuid(user.test_uuid())),
+        (
+            "userID".to_owned(),
+            Value::String(user.canonical().to_owned()),
+        ),
     ])
 }
 
@@ -355,10 +358,7 @@ fn core_ingest(
 
 fn install_uuid_sub_claim(node: &mut NodeState<RocksDbStorage>, identity: AuthorSubject) {
     if identity != AuthorSubject::SYSTEM {
-        node.admit_test_session_claims(
-            identity,
-            BTreeMap::from([("sub".to_owned(), Value::Uuid(identity.test_uuid()))]),
-        );
+        node.admit_test_session_claims(identity, BTreeMap::new());
     }
 }
 

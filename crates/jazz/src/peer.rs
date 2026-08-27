@@ -134,6 +134,8 @@ pub struct MaintainedSubscriptionViewMetricsFootprint {
     pub version_tx_entries: usize,
     /// Active replacement winner entries across content and deletion maps.
     pub replacement_entries: usize,
+    /// Active recursive app-row roots retained for structured array output.
+    pub structured_app_rows: usize,
     /// Approximate heap bytes retained by result_weights.
     pub result_weights_bytes: usize,
     /// Approximate heap bytes retained by result_payloads.
@@ -142,6 +144,8 @@ pub struct MaintainedSubscriptionViewMetricsFootprint {
     pub versions_bytes: usize,
     /// Approximate heap bytes retained by ReplacementIndex.
     pub replacements_bytes: usize,
+    /// Approximate heap bytes retained by recursive app-row roots.
+    pub structured_app_rows_bytes: usize,
     /// Approximate heap bytes retained by maintained-view indexes.
     pub total_heap_bytes: usize,
 }
@@ -168,10 +172,12 @@ impl From<MaintainedSubscriptionViewIndexFootprint> for MaintainedSubscriptionVi
             version_identities: footprint.version_identities,
             version_tx_entries: footprint.version_tx_entries,
             replacement_entries: footprint.replacement_entries,
+            structured_app_rows: footprint.structured_app_rows,
             result_weights_bytes: footprint.result_weights_bytes,
             result_payloads_bytes: footprint.result_payloads_bytes,
             versions_bytes: footprint.versions_bytes,
             replacements_bytes: footprint.replacements_bytes,
+            structured_app_rows_bytes: footprint.structured_app_rows_bytes,
             total_heap_bytes: footprint.total_heap_bytes,
         }
     }
