@@ -564,8 +564,16 @@ jobs:
           test -f packages/jazz-tools/dist/permissions/index.js
 
       - name: Verify staged jazz-rn relay artifacts
+        env:
+          # `resolve-preview-artifacts` only permits reuse after proving the
+          # release source and preview source have equivalent trees. Preserve
+          # the latter's commit SHA here: it is the value sealed into its
+          # relay-artifact manifests, whereas main's merge commit has a
+          # different SHA despite the same source tree.
+          JAZZ_REUSE_PREVIEW_ARTIFACTS: ${{ needs.resolve-preview-artifacts.outputs.use_preview_artifacts }}
+          JAZZ_RELEASE_PR_HEAD_SHA: ${{ needs.release-push-gate.outputs.release_pr_head_sha }}
         run: |
-          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" \
+          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(node dev/artifacts/release-artifact-source-revision.mjs)" \
             node crates/jazz-rn/scripts/verify-relay-artifacts.mjs android ios
 
       - name: Resolve lock-stepped npm package versions
