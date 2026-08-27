@@ -114,6 +114,53 @@ fn downstream_fate_retries_after_bounded_transport_backpressure() {
     assert!(outbound.borrow().is_empty());
 }
 
+/// The ordinary-wire chunk responder is a legacy path below the public chunk
+/// API. It needs the same bounded ownership rule as fates: a rejected byte
+/// admission retains one response batch and does not consume another inbound
+/// request until that batch is accepted.
+#[test]
+fn ordinary_wire_chunk_response_retries_after_bounded_transport_backpressure() {
+    let identity = AuthorSubject::for_test_bytes([0xc3; 16]);
+    let schema = schema();
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let outbound = Rc::new(RefCell::new(VecDeque::new()));
+    let subscriber = server.accept_subscriber(
+        Box::new(BackpressureOnceTransport {
+            outbound: Rc::clone(&outbound),
+            failed: false,
+        }),
+        identity,
+    );
+    let batch = ChunkResponseBatch {
+        responses: vec![ChunkResponseEntry {
+            request_id: 3,
+            result: ChunkResponse::Unavailable,
+        }],
+    };
+    subscriber.borrow_mut().pending_chunk_response = Some(batch.clone());
+
+    subscriber
+        .borrow_mut()
+        .tick()
+        .expect("backpressure retains the ordinary-wire chunk response");
+    assert_eq!(
+        subscriber.borrow().pending_chunk_response,
+        Some(batch.clone())
+    );
+    assert!(outbound.borrow().is_empty());
+
+    subscriber
+        .borrow_mut()
+        .tick()
+        .expect("later capacity accepts the retained chunk response");
+    assert!(subscriber.borrow().pending_chunk_response.is_none());
+    assert_eq!(
+        outbound.borrow_mut().pop_front(),
+        Some(SyncMessage::ChunkResponseBatch(batch))
+    );
+    assert!(outbound.borrow().is_empty());
+}
+
 #[test]
 fn catalogue_fingerprint_change_is_eager_only_on_trusted_backend_link() {
     // This stays internal because trust is authenticated by the host at the
