@@ -52,7 +52,7 @@ const ROCKSDB_LARGE_BLOCK_BYTES: usize = 64 * 1024;
 const ROCKSDB_APPEND_TARGET_FILE_BYTES: u64 = 128 * 1024 * 1024;
 const ROCKSDB_OVERWRITE_TARGET_FILE_BYTES: u64 = 64 * 1024 * 1024;
 // `WalNoSync` trades per-commit fsync latency for a bounded loss window. A
-// successful boundary syncs the WAL after this many committed write batches.
+// successful boundary syncs the WAL after this many backend write batches.
 const ROCKSDB_WAL_SYNC_WRITE_BATCHES: usize = 64;
 
 const CLASS_HISTORY_CF: &str = "__groove_class_history";
@@ -74,7 +74,7 @@ pub enum Durability {
     #[default]
     FullSync,
     /// Keep WAL atomicity without fsyncing every commit. The WAL is synced
-    /// after 64 committed write batches and at explicit durability boundaries.
+    /// after 64 backend write batches and at explicit durability boundaries.
     WalNoSync,
 }
 
@@ -228,7 +228,7 @@ impl RocksDbStorage {
     /// Open with the default durability tier.
     ///
     /// Default is [`Durability::WalNoSync`]: the WAL preserves batch atomicity,
-    /// while a real synchronous WAL flush every 64 committed write batches
+    /// while a real synchronous WAL flush every 64 backend write batches
     /// bounds the power-loss window without fsyncing every commit. Explicit
     /// durability boundaries and close also synchronously flush all preceding
     /// writes. RocksDB's background WAL byte syncing only smooths write I/O; it
@@ -382,6 +382,27 @@ impl RocksDbStorage {
         #[cfg(test)]
         self.last_wal_flush_sync.set(Some(sync));
         self.db.flush_wal(sync).storage()
+    }
+
+    fn finish_write_batch(&self) -> Result<(), Error> {
+        let should_flush = self
+            .write_flush_cadence
+            .borrow_mut()
+            .as_mut()
+            .is_some_and(|cadence| {
+                cadence.pending = cadence.pending.saturating_add(1);
+                cadence.pending >= cadence.every
+            });
+        if should_flush {
+            // Only a successful synchronous WAL flush completes the
+            // durability boundary. Keep the pending debt on failure so the
+            // error is exposed and the next batch retries the boundary.
+            self.flush_wal(true)?;
+            if let Some(cadence) = self.write_flush_cadence.borrow_mut().as_mut() {
+                cadence.pending = 0;
+            }
+        }
+        Ok(())
     }
 
     /// Snapshot RocksDB's per-column-family size and background-work
@@ -724,6 +745,7 @@ impl OrderedKvStorage for RocksDbStorage {
                     .put_cf_opt(self.cf_handle(&cf)?, key, value, &self.write_options)
                     .storage()?;
             }
+            self.finish_write_batch()?;
             Ok(None)
         })
     }
@@ -754,6 +776,7 @@ impl OrderedKvStorage for RocksDbStorage {
                     .delete_cf_opt(self.cf_handle(&cf)?, key, &self.write_options)
                     .storage()?;
             }
+            self.finish_write_batch()?;
             Ok(true)
         })
     }
@@ -800,12 +823,13 @@ impl OrderedKvStorage for RocksDbStorage {
                 .lock()
                 .expect("RocksDB mutation gate poisoned");
             if cf == "default" {
-                self.db.put_opt(key, value, &self.write_options).storage()
+                self.db.put_opt(key, value, &self.write_options).storage()?;
             } else {
                 self.db
                     .put_cf_opt(self.cf_handle(&cf)?, key, value, &self.write_options)
-                    .storage()
+                    .storage()?;
             }
+            self.finish_write_batch()
         })
     }
 
@@ -816,12 +840,13 @@ impl OrderedKvStorage for RocksDbStorage {
                 .lock()
                 .expect("RocksDB mutation gate poisoned");
             if cf == "default" {
-                self.db.delete_opt(key, &self.write_options).storage()
+                self.db.delete_opt(key, &self.write_options).storage()?;
             } else {
                 self.db
                     .delete_cf_opt(self.cf_handle(&cf)?, key, &self.write_options)
-                    .storage()
+                    .storage()?;
             }
+            self.finish_write_batch()
         })
     }
 
@@ -948,23 +973,7 @@ impl OrderedKvStorage for RocksDbStorage {
             }
 
             self.db.write_opt(&batch, &self.write_options).storage()?;
-            let should_flush =
-                self.write_flush_cadence
-                    .borrow_mut()
-                    .as_mut()
-                    .is_some_and(|cadence| {
-                        cadence.pending = cadence.pending.saturating_add(1);
-                        cadence.pending >= cadence.every
-                    });
-            if should_flush {
-                // Only a successful synchronous WAL flush completes the
-                // durability boundary. Keep the pending debt on failure so the
-                // error is exposed and the next batch retries the boundary.
-                self.flush_wal(true)?;
-                if let Some(cadence) = self.write_flush_cadence.borrow_mut().as_mut() {
-                    cadence.pending = 0;
-                }
-            }
+            self.finish_write_batch()?;
             Ok(())
         })
     }
@@ -1365,6 +1374,85 @@ mod tests {
                 .iter()
                 .any(|name| name == "must-not-be-admitted"),
             "open must reject before admitting requested families"
+        );
+    }
+
+    #[test]
+    fn successful_mutation_entry_points_share_one_flush_cadence() {
+        use groove::storage::OwnedWriteOperation;
+
+        // This stays internal because cadence accounting and the real WAL-sync
+        // receipt are not deterministically observable through public reads.
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        ready(storage.set_write_flush_cadence(5)).unwrap();
+
+        assert_eq!(
+            ready(storage.put_if_absent(
+                "records".to_owned(),
+                b"conditional".to_vec(),
+                b"value".to_vec(),
+            ))
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            ready(storage.put_if_absent(
+                "records".to_owned(),
+                b"conditional".to_vec(),
+                b"other".to_vec(),
+            ))
+            .unwrap(),
+            Some(b"value".to_vec())
+        );
+        assert!(
+            !ready(storage.compare_and_delete(
+                "records".to_owned(),
+                b"conditional".to_vec(),
+                b"wrong".to_vec(),
+            ))
+            .unwrap()
+        );
+        assert_eq!(
+            storage
+                .write_flush_cadence
+                .borrow()
+                .as_ref()
+                .map(|cadence| cadence.pending),
+            Some(1),
+            "conditional no-ops must not count as write batches"
+        );
+
+        assert!(
+            ready(storage.compare_and_delete(
+                "records".to_owned(),
+                b"conditional".to_vec(),
+                b"value".to_vec(),
+            ))
+            .unwrap()
+        );
+        ready(storage.set("records".to_owned(), b"direct".to_vec(), b"value".to_vec())).unwrap();
+        ready(storage.delete("records".to_owned(), b"direct".to_vec())).unwrap();
+        ready(storage.write_many(vec![OwnedWriteOperation::Set {
+            cf: "records".to_owned(),
+            key: b"batch".to_vec(),
+            value: b"value".to_vec(),
+        }]))
+        .unwrap();
+
+        assert_eq!(
+            storage.last_wal_flush_sync.get(),
+            Some(true),
+            "five successful mutation calls must reach one real sync boundary"
+        );
+        assert_eq!(
+            storage
+                .write_flush_cadence
+                .borrow()
+                .as_ref()
+                .map(|cadence| cadence.pending),
+            Some(0),
+            "each successful entry point must count exactly once"
         );
     }
 
