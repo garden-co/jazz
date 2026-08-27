@@ -1376,7 +1376,7 @@ fn exclusive_read_for_write_schema() -> JazzSchema {
                 .column("owner", PublicColumnType::Uuid)
                 .policies(
                     PublicTablePolicies::new()
-                        .with_select(public_session_eq("owner", &["user_id"]))
+                        .with_select(public_session_eq("owner", &["claims", "sub"]))
                         .with_insert(PublicPolicyExpr::True)
                         .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True),
                 ),
@@ -1395,7 +1395,7 @@ fn exclusive_session_mutations_deny_hidden_existing_targets_without_disclosure()
     let alice = AuthorSubject::for_test_bytes([0xa4; 16]);
     let bob = AuthorSubject::for_test_bytes([0xb4; 16]);
     let target = row(0xc4);
-    db.set_identity_claims(alice, test_provider_claims(alice));
+    db.set_test_provider_claims(alice, test_provider_claims(alice));
     db.insert(
         "todos",
         cells("bob secret", false, bob),
@@ -1463,7 +1463,7 @@ fn exclusive_session_absent_upsert_records_absence_and_observes_its_overlay() {
     let schema = exclusive_read_for_write_schema();
     let db = open_db(0xd5, AuthorSubject::SYSTEM, &schema);
     let alice = AuthorSubject::for_test_bytes([0xa5; 16]);
-    db.set_identity_claims(alice, test_provider_claims(alice));
+    db.set_test_provider_claims(alice, test_provider_claims(alice));
 
     let successful = row(0xc5);
     let success_open = OpenTransactionId::new();
@@ -1525,7 +1525,7 @@ fn exclusive_session_update_authorizes_snapshot_then_conflicts_on_toctou_change(
     let alice = AuthorSubject::for_test_bytes([0xa6; 16]);
     let bob = AuthorSubject::for_test_bytes([0xb6; 16]);
     let target = row(0xc7);
-    db.set_identity_claims(alice, test_provider_claims(alice));
+    db.set_test_provider_claims(alice, test_provider_claims(alice));
     db.insert(
         "todos",
         cells("snapshot", false, alice),
@@ -1566,7 +1566,7 @@ fn mergeable_session_mutations_observe_visible_rows_in_their_overlay() {
     let schema = exclusive_read_for_write_schema();
     let db = open_db(0xd7, AuthorSubject::SYSTEM, &schema);
     let alice = AuthorSubject::for_test_bytes([0xa7; 16]);
-    db.set_identity_claims(alice, test_provider_claims(alice));
+    db.set_test_provider_claims(alice, test_provider_claims(alice));
     let target = row(0xc8);
     let open = OpenTransactionId::new();
     db.begin_mergeable_for_identity(open, alice).unwrap();
@@ -1666,10 +1666,13 @@ fn mergeable_transaction_identity_reads_are_not_forced_to_begin_author() {
     let bob = AuthorSubject::for_test_bytes([0xb3; 16]);
     let open = OpenTransactionId::new();
     let prepared = db
-        .prepare_query(&db.table("todos").filter(eq(col("owner"), claim("user_id"))))
+        .prepare_query(&db.table("todos").filter(eq(
+            col("owner"),
+            claim(crate::query::provider_claim_key("sub")),
+        )))
         .unwrap();
-    db.set_identity_claims(alice, test_provider_claims(alice));
-    db.set_identity_claims(bob, test_provider_claims(bob));
+    db.set_test_provider_claims(alice, test_provider_claims(alice));
+    db.set_test_provider_claims(bob, test_provider_claims(bob));
     let alice_row = row(0xa3);
     let bob_row = row(0xb3);
     db.insert(

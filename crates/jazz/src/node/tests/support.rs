@@ -293,7 +293,7 @@ pub(super) fn install_test_uuid_sub_claim<S>(
     if identity == AuthorSubject::SYSTEM {
         return;
     }
-    node.set_session_claims(
+    node.set_test_provider_claims(
         identity,
         BTreeMap::from([("sub".to_owned(), Value::Uuid(identity.test_uuid()))]),
     );

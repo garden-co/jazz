@@ -191,9 +191,9 @@ You can use these edit metadata magic columns directly in `permissions.ts`. This
 "creator can read/edit/delete their own rows" policies without adding explicit `owner_id` columns.
 
 For the most common case, Jazz also exposes `policy.<table>.managedByCreator()` and `isCreator` as
-shorthand for the same `$createdBy === session.author` condition. `session.author` is the
-canonical `[iss,sub]` logical author; `session.user_id` remains the raw provider user id for
-application-owned columns. You can still write the raw
+shorthand for the same `$createdBy === session.user` condition. `session.user` is the
+canonical `[iss,sub]` logical author. Raw provider identity fields remain available as
+`session.claims.iss` and `session.claims.sub` for application-owned columns. You can still write the raw
 `$createdBy` comparison yourself whenever you want the explicit form.
 
 <include cwd lang="ts" meta='title="permissions.ts"'>

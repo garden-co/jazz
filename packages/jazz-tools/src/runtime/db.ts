@@ -47,11 +47,16 @@ import { SubscriptionManager, type SubscriptionDelta } from "./subscription-mana
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
 import {
   parseJwtPayload,
-  resolveClientSessionSync,
-  sessionFromVerifiedReservedJwtPayload,
-  type ClientSessionInput,
+  internalSessionFromVerifiedReservedJwtPayload,
+  resolveClientInternalSessionSync,
 } from "./client-session.js";
 import { canonicalAuthorSubject } from "./author-id.js";
+import {
+  getDbInternalSession,
+  getTrustedReservedSession,
+  setDbInternalSession,
+  setTrustedReservedSession,
+} from "./db-internal-session.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import {
   normalizeBuiltQuery,
@@ -101,8 +106,6 @@ export type DbConfig = {
   telemetryCollectorUrl?: string;
   /** Enable runtime tracing for DevTools-only diagnostics. */
   devMode?: boolean;
-  /** @internal Session produced by a first-party reserved-issuer auth flow. */
-  trustedReservedSession?: ClientSessionInput["trustedReservedSession"];
 } & (
   | {
       /** Local-first auth via a local seed. */
@@ -147,11 +150,11 @@ export function resolveDefaultPersistentDbName(config: DbConfig): string {
     return explicitDbName;
   }
 
-  const session = resolveClientSessionSync({
+  const session = resolveClientInternalSessionSync({
     appId: config.appId,
     jwtToken: config.jwtToken,
     cookieSession: config.cookieSession,
-    trustedReservedSession: config.trustedReservedSession,
+    trustedReservedSession: getTrustedReservedSession(config),
   });
 
   if (!session?.user_id || session.authMode === "anonymous") {
@@ -565,6 +568,256 @@ function toWriteRecordForOperation(
   }
 }
 
+type WireSplicePage = { kind: "bytes" | "text_utf16" | "text_utf8"; from: number; to: number };
+
+type WireLargeValueUpdate =
+  | {
+      kind: "splice";
+      column: string;
+      within: WireSplicePage;
+      splices: Array<{ at: number; delete: number; insert: number[] }>;
+    }
+  | {
+      kind: "json_set";
+      column: string;
+      edits: Array<{ at: string; value: unknown }>;
+    };
+
+function isPartialLargeValueUpdate(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && ("splices" in value || "edits" in value);
+}
+
+function requireRecord(value: unknown, message: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(message);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireNonNegativeCoordinate(value: unknown, label: string, column: string): number {
+  const coordinate = Number(value);
+  if (!Number.isSafeInteger(coordinate) || coordinate < 0) {
+    throw new Error(`${label} for "${column}" must be a non-negative safe integer.`);
+  }
+  return coordinate;
+}
+
+function requirePageRange(from: number, to: number, column: string): void {
+  if (from > to) {
+    throw new Error(`Large-value page for "${column}" must have from <= to.`);
+  }
+}
+
+function splitLargeValueUpdate(
+  data: Record<string, unknown>,
+  schema: WasmSchema,
+  table: string,
+): { ordinary: Record<string, unknown>; descriptors: WireLargeValueUpdate[] } {
+  const ordinary: Record<string, unknown> = {};
+  const descriptors: WireLargeValueUpdate[] = [];
+  const columns = schema[table]?.columns;
+  if (!columns) throw new Error(`Unknown table "${table}"`);
+  for (const [column, value] of Object.entries(data)) {
+    if (!isPartialLargeValueUpdate(value)) {
+      ordinary[column] = value;
+      continue;
+    }
+    const type = columns.find((candidate) => candidate.name === column)?.column_type;
+    if (!type) throw new Error(`Unknown column "${column}" in table "${table}"`);
+    if ("splices" in value && "within" in value) {
+      const within = requireRecord(
+        value.within,
+        `Large-value update "${column}" has an invalid page.`,
+      );
+      const splices = value.splices;
+      if (!Array.isArray(splices))
+        throw new Error(`Large-value update "${column}" has invalid splices.`);
+      let page: WireSplicePage;
+      if ("fromUtf8" in within || "toUtf8" in within) {
+        if (type.type !== "Text")
+          throw new Error(`UTF-8 splice requires a Text column, got "${column}".`);
+        const from = requireNonNegativeCoordinate(within.fromUtf8, "fromUtf8", column);
+        const to = requireNonNegativeCoordinate(within.toUtf8, "toUtf8", column);
+        requirePageRange(from, to, column);
+        page = { kind: "text_utf8", from, to };
+      } else if (type.type === "Bytea") {
+        const from = requireNonNegativeCoordinate(within.from, "from", column);
+        const to = requireNonNegativeCoordinate(within.to, "to", column);
+        requirePageRange(from, to, column);
+        page = { kind: "bytes", from, to };
+      } else if (type.type === "Text") {
+        const from = requireNonNegativeCoordinate(within.from, "from", column);
+        const to = requireNonNegativeCoordinate(within.to, "to", column);
+        requirePageRange(from, to, column);
+        page = { kind: "text_utf16", from, to };
+      } else {
+        throw new Error(`Splice requires a Text or Bytea column, got "${column}".`);
+      }
+      descriptors.push({
+        kind: "splice",
+        column,
+        within: page,
+        splices: splices.map((splice) => {
+          const item = requireRecord(splice, `Large-value splice for "${column}" is invalid.`);
+          const utf8 = page.kind === "text_utf8";
+          const at = requireNonNegativeCoordinate(utf8 ? item.atUtf8 : item.at, "at", column);
+          const deleted = requireNonNegativeCoordinate(
+            utf8 ? item.deleteUtf8 : item.delete,
+            "delete",
+            column,
+          );
+          const insert = item.insert;
+          let bytes: number[];
+          if (page.kind === "bytes") {
+            if (!(insert instanceof Uint8Array)) {
+              throw new Error(`Byte splice insert for "${column}" must be a Uint8Array.`);
+            }
+            bytes = [...insert];
+          } else {
+            if (typeof insert !== "string") {
+              throw new Error(`Text splice insert for "${column}" must be a string.`);
+            }
+            bytes = [...new TextEncoder().encode(insert)];
+          }
+          return { at, delete: deleted, insert: bytes };
+        }),
+      });
+      continue;
+    }
+    if ("edits" in value) {
+      if (type.type !== "Json")
+        throw new Error(`JSON set requires a JSON column, got "${column}".`);
+      if (!Array.isArray(value.edits))
+        throw new Error(`JSON update "${column}" has invalid edits.`);
+      descriptors.push({
+        kind: "json_set",
+        column,
+        edits: value.edits.map((edit) => {
+          const item = requireRecord(edit, `JSON update edit for "${column}" is invalid.`);
+          if (item.op !== "set" || typeof item.at !== "string") {
+            throw new Error(
+              `JSON update "${column}" supports only { op: "set", at, value } edits.`,
+            );
+          }
+          return { at: item.at, value: item.value };
+        }),
+      });
+      continue;
+    }
+    ordinary[column] = value;
+  }
+  return { ordinary, descriptors };
+}
+
+type PartialValueSelection =
+  | { from: number; to: number }
+  | { fromUtf8: number; toUtf8: number }
+  | { at: string };
+
+function utf16Boundary(text: string, offset: number): boolean {
+  if (offset < 0 || offset > text.length) return false;
+  if (offset === 0 || offset === text.length) return true;
+  const before = text.charCodeAt(offset - 1);
+  const after = text.charCodeAt(offset);
+  return !(before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff);
+}
+
+function jsonPointerToken(token: string): string {
+  let decoded = "";
+  for (let index = 0; index < token.length; index += 1) {
+    const character = token[index]!;
+    if (character !== "~") {
+      decoded += character;
+      continue;
+    }
+    const escape = token[++index];
+    if (escape === "0") decoded += "~";
+    else if (escape === "1") decoded += "/";
+    else throw new Error("JSON pointer has an invalid escape.");
+  }
+  return decoded;
+}
+
+function jsonPointerValue(value: unknown, pointer: string): unknown {
+  if (pointer === "") return value;
+  if (!pointer.startsWith("/")) throw new Error("JSON pointer must be empty or begin with '/'.");
+  let current: unknown = value;
+  for (const rawToken of pointer.slice(1).split("/")) {
+    const token = jsonPointerToken(rawToken);
+    if (Array.isArray(current)) {
+      if (!/^(0|[1-9]\d*)$/.test(token)) {
+        throw new Error("JSON array pointer token is not an index.");
+      }
+      const index = Number(token);
+      if (!Number.isSafeInteger(index) || index >= current.length) {
+        throw new Error("JSON pointer path does not exist.");
+      }
+      current = current[index];
+    } else if (typeof current === "object" && current !== null && Object.hasOwn(current, token)) {
+      current = (current as Record<string, unknown>)[token];
+    } else {
+      throw new Error("JSON pointer path does not exist.");
+    }
+  }
+  return current;
+}
+
+/**
+ * Temporary binding-level materialization until #2090 carries exact terminal
+ * demand into Groove. It preserves the public result/coordinate contract and
+ * only touches selected columns; it must not be used as a chunk-demand model.
+ */
+function applyPartialValueSelections<T>(
+  row: T,
+  selections: Record<string, PartialValueSelection>,
+): T {
+  if (Object.keys(selections).length === 0 || typeof row !== "object" || row === null) return row;
+  const projected = { ...(row as Record<string, unknown>) };
+  for (const [column, selection] of Object.entries(selections)) {
+    const value = projected[column];
+    if ("at" in selection) {
+      projected[column] = jsonPointerValue(value, selection.at);
+      continue;
+    }
+    if (value instanceof Uint8Array) {
+      if ("fromUtf8" in selection || selection.from > selection.to || selection.to > value.length) {
+        throw new Error(`Byte range for "${column}" is out of bounds.`);
+      }
+      projected[column] = value.slice(selection.from, selection.to);
+      continue;
+    }
+    if (typeof value !== "string") {
+      throw new Error(`Large-value selection for "${column}" has an incompatible column type.`);
+    }
+    if ("fromUtf8" in selection) {
+      const bytes = new TextEncoder().encode(value);
+      if (
+        selection.fromUtf8 > selection.toUtf8 ||
+        selection.toUtf8 > bytes.length ||
+        (selection.fromUtf8 < bytes.length &&
+          (bytes[selection.fromUtf8]! & 0b1100_0000) === 0b1000_0000) ||
+        (selection.toUtf8 < bytes.length &&
+          (bytes[selection.toUtf8]! & 0b1100_0000) === 0b1000_0000)
+      ) {
+        throw new Error(`UTF-8 range for "${column}" splits a code point or is out of bounds.`);
+      }
+      projected[column] = new TextDecoder("utf-8", { fatal: true }).decode(
+        bytes.slice(selection.fromUtf8, selection.toUtf8),
+      );
+      continue;
+    }
+    if (
+      selection.from > selection.to ||
+      !utf16Boundary(value, selection.from) ||
+      !utf16Boundary(value, selection.to)
+    ) {
+      throw new Error(`UTF-16 range for "${column}" splits a surrogate pair or is out of bounds.`);
+    }
+    projected[column] = value.slice(selection.from, selection.to);
+  }
+  return projected as T;
+}
+
 function escapeWriteErrorReason(message: string): string {
   return message.replaceAll('"', '\\"');
 }
@@ -576,7 +829,13 @@ function escapeWriteErrorReason(message: string): string {
  * @typeParam T - The row type (e.g., `{ id: string; title: string; done: boolean }`)
  * @typeParam Init - The init type for inserts (e.g., `{ title: string; done: boolean }`)
  */
-export interface TableProxy<T, Init, StreamingInit = unknown, StreamingUpdate = unknown> {
+export interface TableProxy<
+  T,
+  Init,
+  StreamingInit = unknown,
+  StreamingUpdate = unknown,
+  LargeValueUpdate = unknown,
+> {
   /** Table name */
   readonly _table: string;
   /** Schema reference */
@@ -591,6 +850,8 @@ export interface TableProxy<T, Init, StreamingInit = unknown, StreamingUpdate = 
   readonly _streamingInitType?: StreamingInit;
   /** @internal Phantom brand — enables exact streaming update/upsert inference. */
   readonly _streamingUpdateType?: StreamingUpdate;
+  /** @internal Phantom — preserves typed page-edit descriptors on table handles. */
+  readonly _largeValueUpdateType?: LargeValueUpdate;
 }
 
 export interface ColumnTransform {
@@ -642,7 +903,7 @@ function transformOutputColumns(
 }
 
 function transformInputColumns(
-  table: TableProxy<unknown, unknown, unknown>,
+  table: TableProxy<any, any, any, any, any>,
   data: unknown,
 ): Record<string, unknown> {
   const record = data as Record<string, unknown>;
@@ -660,7 +921,7 @@ function transformInputColumns(
 }
 
 function splitStreamingMutation(
-  table: TableProxy<unknown, unknown, unknown>,
+  table: TableProxy<any, any, any, any, any>,
   data: unknown,
 ): {
   column: string;
@@ -842,7 +1103,9 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     if (ownerClient) this.bindOwnerClient(ownerClient);
   }
 
-  private bindTable<T, Init>(table: TableProxy<T, Init>): DbTransactionHandleBinding {
+  private bindTable<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate>(
+    table: TableProxy<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate>,
+  ): DbTransactionHandleBinding {
     const client = this.resolveClient(table._schema);
     if (!dbTxHandleBindings.has(this)) this.bindOwnerClient(client);
     return this.requireBinding("table operation");
@@ -972,6 +1235,8 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     options?: UpdateOptions,
   ): void {
     this.bindTable(table);
+    // `edits` is valid ordinary JSON data. Only `applyDiffs` interprets the
+    // descriptor-shaped DSL, so upsert must preserve that JSON shape exactly.
     const transformedData = transformInputColumns(table, data);
     const values = toWriteRecordForOperation(
       "Upsert",
@@ -1082,7 +1347,10 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       builtQuery.select,
     );
     return transformedRows.map((row) =>
-      transformOutputRow(outputTable === builtQuery.table ? query : {}, row),
+      transformOutputRow(
+        outputTable === builtQuery.table ? query : {},
+        applyPartialValueSelections(row, builtQuery.partialSelect),
+      ),
     );
   }
 
@@ -1156,7 +1424,12 @@ export class Db {
   ) {
     this.config = config;
     this.runtimeSource = runtimeSource;
-    this.authStateStore = createAuthStateStore(config, authStateOptions);
+    const sessionInput = {
+      ...config,
+      trustedReservedSession: getTrustedReservedSession(config),
+    };
+    setDbInternalSession(this, resolveClientInternalSessionSync(sessionInput));
+    this.authStateStore = createAuthStateStore(sessionInput, authStateOptions);
     this.connection = new DirectConnectionManager(this.dbForConnection());
     dbSubscriptionSources.set(this, {
       all: (query, options) => this.all(query, options),
@@ -1213,7 +1486,7 @@ export class Db {
         this.config.appId,
         ttlSeconds,
       );
-      const trustedReservedSession = sessionFromVerifiedReservedJwtPayload(
+      const trustedReservedSession = internalSessionFromVerifiedReservedJwtPayload(
         parseJwtPayload(newToken) ?? {},
         "local-first",
       );
@@ -1240,19 +1513,42 @@ export class Db {
     this.authStateStore.markUnauthenticated(reason);
   }
 
+  private publishAuthStateWithInternalSession<T>(
+    nextSession: Session | null,
+    publish: () => T,
+  ): { value: T; rollback: () => void } {
+    const previousSession = getDbInternalSession(this);
+    setDbInternalSession(this, nextSession);
+    const rollback = () => setDbInternalSession(this, previousSession);
+    try {
+      return { value: publish(), rollback };
+    } catch (error) {
+      rollback();
+      throw error;
+    }
+  }
+
   protected applyAuthUpdate(token: string | null, trustedReservedSession?: Session): boolean {
     const jwtToken = token ?? undefined;
     const previousToken = this.config.jwtToken;
     const previousState = this.authStateStore.getState();
-    const nextState = this.authStateStore.applyJwtToken(jwtToken, trustedReservedSession);
+    const nextInternalSession = resolveClientInternalSessionSync({
+      ...this.config,
+      jwtToken,
+      trustedReservedSession,
+    });
+    const published = this.publishAuthStateWithInternalSession(nextInternalSession, () =>
+      this.authStateStore.applyJwtToken(jwtToken, trustedReservedSession),
+    );
     const tokenChanged = previousToken !== jwtToken;
 
-    if (!tokenChanged && nextState === previousState) {
+    if (!tokenChanged && published.value === previousState) {
+      published.rollback();
       return false;
     }
 
     this.config.jwtToken = jwtToken;
-    this.config.trustedReservedSession = trustedReservedSession;
+    setTrustedReservedSession(this.config, trustedReservedSession);
 
     this.connection.updateAuth({ jwtToken, trustedReservedSession });
 
@@ -1263,10 +1559,17 @@ export class Db {
     const cookieSession = session ?? undefined;
     const previousSession = this.config.cookieSession;
     const previousState = this.authStateStore.getState();
-    const nextState = this.authStateStore.applyCookieSession(cookieSession);
+    const nextInternalSession = resolveClientInternalSessionSync({
+      ...this.config,
+      cookieSession,
+    });
+    const published = this.publishAuthStateWithInternalSession(nextInternalSession, () =>
+      this.authStateStore.applyCookieSession(cookieSession),
+    );
     const sessionChanged = JSON.stringify(previousSession) !== JSON.stringify(cookieSession);
 
-    if (!sessionChanged && nextState === previousState) {
+    if (!sessionChanged && published.value === previousState) {
+      published.rollback();
       return false;
     }
 
@@ -1649,6 +1952,8 @@ export class Db {
     options?: UpdateOptions,
   ): WriteHandle {
     const client = this.getClient(table._schema);
+    // `edits` is valid ordinary JSON data. Only `applyDiffs` interprets the
+    // descriptor-shaped DSL, so upsert must preserve that JSON shape exactly.
     const transformedData = transformInputColumns(table, data);
     const values = toWriteRecordForOperation(
       "Upsert",
@@ -1694,6 +1999,42 @@ export class Db {
         table._table,
         id,
         updates,
+        normalizeUpdateOptions(table._schema, table._table, options),
+        context?.session,
+        context?.attribution,
+      ),
+    );
+  }
+
+  /**
+   * Apply page-relative text/bytes splices or JSON edits to an existing value.
+   * This works for either inline or indirect storage; whole-column replacement
+   * remains {@link update}.
+   */
+  applyDiffs<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate>(
+    table: TableProxy<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate>,
+    id: string,
+    data: LargeValueUpdate,
+    options?: UpdateOptions,
+  ): WriteHandle {
+    const client = this.getClient(table._schema);
+    const { ordinary, descriptors } = splitLargeValueUpdate(
+      data as Record<string, unknown>,
+      table._schema,
+      table._table,
+    );
+    if (Object.keys(ordinary).length > 0 || descriptors.length === 0) {
+      throw new Error(
+        "applyDiffs accepts one or more field diff descriptors, not whole-column values.",
+      );
+    }
+    const context = this.getRuntimeOperationContext();
+    return this.wrapWriteWait(
+      client.updateLargeValues(
+        table._table,
+        id,
+        {},
+        descriptors,
         normalizeUpdateOptions(table._schema, table._table, options),
         context?.session,
         context?.attribution,
@@ -1898,7 +2239,10 @@ export class Db {
       builtQuery.select,
     );
     return transformedRows.map((row) =>
-      transformOutputRow(outputTable === builtQuery.table ? query : {}, row),
+      transformOutputRow(
+        outputTable === builtQuery.table ? query : {},
+        applyPartialValueSelections(row, builtQuery.partialSelect),
+      ),
     );
   }
 
@@ -1914,10 +2258,7 @@ export class Db {
     return results[0] ?? null;
   }
 
-  /**
-   * Subscribe to a query and receive its complete current result whenever it changes.
-   * Each callback receives a fresh result array.
-   */
+  /** Subscribe to a query and receive its complete current result whenever it changes. */
   subscribe<T extends { id: string }>(
     query: QueryBuilder<T>,
     callback: (rows: T[]) => void,
@@ -1988,7 +2329,10 @@ export class Db {
     const transform = (row: WasmRow): T =>
       transformOutputRow(
         outputTable === builtQuery.table ? query : {},
-        transformRow(row, outputSchema, outputTable, outputIncludes, builtQuery.select),
+        applyPartialValueSelections(
+          transformRow(row, outputSchema, outputTable, outputIncludes, builtQuery.select),
+          builtQuery.partialSelect,
+        ),
       );
     const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
       const typedDelta = manager.handleDelta(delta, transform);
@@ -2342,15 +2686,12 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
       const jwtToken = runtimeSource.mintLocalFirstToken(
         createRuntimeTokenOptions(secret, config.appId, 3600),
       );
-      const trustedReservedSession = sessionFromVerifiedReservedJwtPayload(
+      const trustedReservedSession = internalSessionFromVerifiedReservedJwtPayload(
         parseJwtPayload(jwtToken) ?? {},
         "local-first",
       );
-      resolvedConfig = {
-        ...configWithoutAuth,
-        jwtToken,
-        trustedReservedSession,
-      };
+      resolvedConfig = { ...configWithoutAuth, jwtToken };
+      setTrustedReservedSession(resolvedConfig, trustedReservedSession);
     }
   } else if (!config.jwtToken && !config.cookieSession && !config.adminSecret) {
     // Anonymous: mint an ephemeral keypair + anonymous JWT.
@@ -2360,11 +2701,12 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
     const jwtToken = runtimeSource.mintAnonymousToken(
       createRuntimeTokenOptions(ephemeralSeed, config.appId, 3600),
     );
-    const trustedReservedSession = sessionFromVerifiedReservedJwtPayload(
+    const trustedReservedSession = internalSessionFromVerifiedReservedJwtPayload(
       parseJwtPayload(jwtToken) ?? {},
       "anonymous",
     );
-    resolvedConfig = { ...configWithoutAuth, jwtToken, trustedReservedSession };
+    resolvedConfig = { ...configWithoutAuth, jwtToken };
+    setTrustedReservedSession(resolvedConfig, trustedReservedSession);
   }
 
   const driver = resolveStorageDriver(resolvedConfig.driver);

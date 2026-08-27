@@ -215,6 +215,13 @@ declare module "jazz-wasm" {
       patch: Uint8Array,
       options?: UpdateOptions,
     ): WasmWrite;
+    updateLargeValuesEncoded(
+      table: string,
+      rowId: Uint8Array,
+      patch: Uint8Array,
+      descriptors: unknown,
+      updatedAtMs?: number | null,
+    ): WasmWrite;
     requestUpdatePermissionAdviceEncoded(
       table: string,
       rowId: Uint8Array,
@@ -251,6 +258,12 @@ declare module "jazz-wasm" {
       localEpoch: bigint,
     ): Promise<WasmTransport>;
     acceptSubscriber(identity: Uint8Array, claims: Record<string, unknown>): WasmTransport;
+    acceptSubscriberWithSelfSignedProof(
+      claims: Record<string, unknown>,
+      token: string,
+      appId: string,
+      claimedAuthor: string,
+    ): WasmTransport;
     mergeableTx(openBatchId: string): WasmTx;
     mergeableTxForIdentity(openBatchId: string, author: Uint8Array): WasmTx;
     exclusiveTx(openBatchId: string): WasmTx;

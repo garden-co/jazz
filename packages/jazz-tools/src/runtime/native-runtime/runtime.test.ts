@@ -37,7 +37,7 @@ import {
   STATIC_BEARER_SESSION_ISSUER,
   SYSTEM_SESSION_ISSUER,
   TRUSTED_RESERVED_SESSION_TOKEN_FIELD,
-  sessionFromVerifiedReservedJwtPayload,
+  internalSessionFromVerifiedReservedJwtPayload,
   trustedReservedSessionToken,
 } from "../client-session.js";
 import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
@@ -620,6 +620,121 @@ describe("NativeRuntimeAdapter server transport", () => {
     ]);
   });
 
+  it("routes typed large-value update descriptors only for ordinary update contexts", () => {
+    const calls: unknown[][] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => Uint8Array.from([0]),
+            prepareQuery: () => ({}),
+            updateLargeValuesEncoded: (...args: unknown[]) => {
+              calls.push(args);
+              return fakeWrite();
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const descriptors = [
+      {
+        kind: "splice",
+        column: "title",
+        within: { kind: "text_utf16", from: 0, to: 4 },
+        splices: [{ at: 0, delete: 0, insert: [120] }],
+      },
+    ];
+
+    const receipt = runtime.updateLargeValues(
+      "todos",
+      "00000000-0000-0000-0000-000000000001",
+      {},
+      descriptors,
+      JSON.stringify({ updated_at: 43_000 }),
+    );
+
+    expect(receipt.kind).toBe("committed");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.[0]).toBe("todos");
+    expect(formatUuid(calls[0]?.[1] as Uint8Array)).toBe("00000000-0000-0000-0000-000000000001");
+    expect(calls[0]?.[3]).toBe(descriptors);
+    expect(calls[0]?.[4]).toBe(43_000);
+
+    expect(() =>
+      runtime.updateLargeValues(
+        "todos",
+        "00000000-0000-0000-0000-000000000001",
+        {},
+        descriptors,
+        JSON.stringify({ batch_id: "00000000000000000000000000000001" }),
+      ),
+    ).toThrow("Update failed: WriteError");
+    expect(() =>
+      runtime.updateLargeValues(
+        "todos",
+        "00000000-0000-0000-0000-000000000001",
+        {},
+        descriptors,
+        JSON.stringify({ branch_view: { head: { values: {} } } }),
+      ),
+    ).toThrow("Typed large-value updates are not supported in branch views.");
+    expect(() =>
+      runtime.updateLargeValues(
+        "todos",
+        "00000000-0000-0000-0000-000000000001",
+        {},
+        descriptors,
+        JSON.stringify({ user_id: "00000000-0000-0000-0000-000000000009" }),
+      ),
+    ).toThrow("Typed large-value updates do not yet support an attributed identity.");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("accepts typed partial projections as ordinary carrier columns", async () => {
+    const rowId = uuidBytes("00000000-0000-0000-0000-000000000001");
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => encodeRows([{ table: "todos", rowId, title: "A😀BC" }]),
+            prepareQuery: () => ({}),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    await expect(
+      runtime.query(
+        JSON.stringify({
+          table: "todos",
+          select_columns: [{ kind: "text_utf16", column: "title", from: 1, to: 3 }],
+        }),
+      ),
+    ).resolves.toEqual([
+      {
+        table: "todos",
+        id: "00000000-0000-0000-0000-000000000001",
+        values: [{ type: "Text", value: "A😀BC" }],
+      },
+    ]);
+  });
+
   it("serves default and local queries from fresh local state", async () => {
     const insertedRowIds: Uint8Array[] = [];
     const write = {
@@ -1099,13 +1214,8 @@ describe("NativeRuntimeAdapter server transport", () => {
           role: "reader",
           subject: "application-owned-subject",
           iss: externalIssuer,
-          issuer: externalIssuer,
           sub: externalUserId,
-          user_id: externalUserId,
-          userId: externalUserId,
-          author: `["${externalIssuer}","${externalUserId}"]`,
           authMode: "external",
-          auth_mode: "external",
         },
       },
     ]);
@@ -1180,7 +1290,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
   it("admits verified reserved sessions carrying the in-process runtime capability", async () => {
     const authors: string[] = [];
-    const trustedSession = sessionFromVerifiedReservedJwtPayload(
+    const trustedSession = internalSessionFromVerifiedReservedJwtPayload(
       { iss: LOCAL_FIRST_JWT_ISSUER, sub: "verified-user" },
       "local-first",
     )!;
@@ -1268,7 +1378,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       [LOCAL_FIRST_JWT_ISSUER, "local-first"],
       [ANONYMOUS_JWT_ISSUER, "anonymous"],
     ] as const) {
-      const trustedSession = sessionFromVerifiedReservedJwtPayload(
+      const trustedSession = internalSessionFromVerifiedReservedJwtPayload(
         { iss: issuer, sub: `${authMode}-browser-user` },
         authMode,
       )!;
@@ -5593,7 +5703,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
         abort: vi.fn(),
       }),
     );
-    const trustedSession = sessionFromVerifiedReservedJwtPayload(
+    const trustedSession = internalSessionFromVerifiedReservedJwtPayload(
       { iss: LOCAL_FIRST_JWT_ISSUER, sub: "verified-writer" },
       "local-first",
     )!;

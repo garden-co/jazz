@@ -116,6 +116,39 @@ Required fields cannot be set to `null`.
   </Tab>
 </Tabs>
 
+### Editing a page of a large value
+
+Use `update(...)` to replace a complete primitive. Use `applyDiffs(...)` when
+editing a selected page of a `bytes` or `string` column, or when setting an
+existing JSON member. Splice coordinates are relative to `within`, and multiple
+splices run in order against the result of the previous splice. The mutation is
+still one ordinary row update, so all fields in one call succeed or fail
+together.
+
+```ts
+db.applyDiffs(app.documents, documentId, {
+  bytes: {
+    within: { from: 1_000_000, to: 2_000_000 },
+    splices: [{ at: 4, delete: 3, insert: new Uint8Array([1, 2]) }],
+  },
+  text: {
+    within: { from: 4, to: 124 }, // UTF-16 coordinates
+    splices: [{ at: 3, delete: 1, insert: "revised" }],
+  },
+  metadata: {
+    edits: [{ op: "set", at: "/chapters/0/title", value: "New title" }],
+  },
+});
+```
+
+For byte-oriented text, use `{ fromUtf8, toUtf8 }` in `within` and
+`{ atUtf8, deleteUtf8, insert }` in each splice. Jazz rejects out-of-range
+coordinates and text boundaries that split a code point or surrogate pair. This
+revision does not add a page-staleness/CAS check; keep page coordinates aligned
+with the value your application last read. `applyDiffs(...)` is for existing
+rows only; inserts and full replacement continue to use the ordinary mutation
+methods.
+
 ## Write durability tiers
 
 For ordinary mutations and mergeable transactions, the tier passed to `wait({ tier })` controls how

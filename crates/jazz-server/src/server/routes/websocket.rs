@@ -30,7 +30,6 @@ use jazz::wire::{
 use tokio::sync::mpsc;
 
 use crate::server::ServerState;
-use jazz::tools::public_schema::AuthMode;
 
 const WS_REQUIRED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD;
 const WS_HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -286,70 +285,20 @@ fn session_claims(
 ) -> Result<BTreeMap<String, CoreValue>, String> {
     let author = session
         .author_subject()
-        .map_err(|error| error.to_string())?
-        .canonical()
-        .to_owned();
-    let mut json = match session.claims {
-        serde_json::Value::Object(map) => map,
-        _ => serde_json::Map::new(),
+        .map_err(|error| error.to_string())?;
+    let provider_claims = match session.claims {
+        serde_json::Value::Object(map) => map.into_iter().collect(),
+        _ => BTreeMap::new(),
     };
-    json.insert(
-        "subject".to_owned(),
-        serde_json::Value::String(session.user_id.clone()),
-    );
-    json.insert(
-        "iss".to_owned(),
-        serde_json::Value::String(session.issuer.clone()),
-    );
-    json.insert(
-        "issuer".to_owned(),
-        serde_json::Value::String(session.issuer.clone()),
-    );
-    json.insert(
-        "sub".to_owned(),
-        serde_json::Value::String(session.user_id.clone()),
-    );
-    json.insert(
-        "user_id".to_owned(),
-        serde_json::Value::String(session.user_id),
-    );
-    json.insert("author".to_owned(), serde_json::Value::String(author));
-    json.insert(
-        "authMode".to_owned(),
-        serde_json::Value::String(
-            match session.auth_mode {
-                AuthMode::External => "external",
-                AuthMode::LocalFirst => "local-first",
-                AuthMode::Anonymous => "anonymous",
-            }
-            .to_owned(),
-        ),
-    );
-    json.into_iter()
-        .map(|(key, value)| json_claim_to_core_value(value).map(|value| (key, value)))
-        .collect()
-}
-
-fn json_claim_to_core_value(value: serde_json::Value) -> Result<CoreValue, String> {
-    match value {
-        serde_json::Value::Null => Ok(CoreValue::Nullable(None)),
-        serde_json::Value::Bool(value) => Ok(CoreValue::Bool(value)),
-        serde_json::Value::Number(value) => {
-            jazz::tools::policy_claims::json_number_to_policy_claim(
-                value,
-                jazz::tools::policy_claims::NumericClaimOrigin::ExactJson,
-            )
-        }
-        serde_json::Value::String(value) => Ok(CoreValue::String(value)),
-        serde_json::Value::Array(values) => values
-            .into_iter()
-            .map(json_claim_to_core_value)
-            .collect::<Result<Vec<_>, _>>()
-            .map(CoreValue::Array),
-        serde_json::Value::Object(_) => {
-            Err("nested claim objects are not supported yet".to_owned())
-        }
-    }
+    let provider_claims =
+        jazz::serving::auth_admission::jwt_json_claims_to_policy_claims(provider_claims)
+            .map_err(|error| error.to_string())?;
+    Ok(jazz::serving::auth_admission::admitted_session_claims(
+        &session.issuer,
+        &session.user_id,
+        author,
+        provider_claims,
+    ))
 }
 
 fn ws_peer_identity(identity: &str) -> Result<AuthorSubject, String> {
@@ -1053,11 +1002,11 @@ mod tests {
 
     use crate::middleware::AuthConfig;
     use crate::server::{ServerBuilder, StorageBackend};
-    use jazz::tools::AppId;
     use jazz::tools::public_schema::{
         ColumnType, PolicyExpr, Schema, SchemaBuilder, TablePolicies,
         TableSchema as PublicTableSchema,
     };
+    use jazz::tools::{AppId, AuthMode};
 
     const WS_STORM_SIZE: usize = 24;
 
@@ -1145,20 +1094,49 @@ mod tests {
     }
 
     #[test]
-    fn websocket_session_claim_numbers_match_admission_classification() {
+    fn websocket_session_claims_use_canonical_and_collision_proof_namespaces() {
+        let session = Session::new("https://issuer.example", "verified-subject").with_claims(
+            serde_json::json!({
+                "user": "provider-spoof",
+                "role": "writer",
+                "iss": "spoofed-issuer",
+                "sub": "spoofed-subject",
+                "score": 7
+            }),
+        );
+        let claims = session_claims(session).expect("admit websocket claims");
+
         assert_eq!(
-            json_claim_to_core_value(serde_json::json!(7)).unwrap(),
-            CoreValue::U64(7)
+            claims.get("user"),
+            Some(&CoreValue::String(
+                r#"["https://issuer.example","verified-subject"]"#.to_owned()
+            ))
         );
         assert_eq!(
-            json_claim_to_core_value(serde_json::json!(-7)).unwrap(),
-            CoreValue::I64(-7)
+            claims.get("\0claims:user"),
+            Some(&CoreValue::String("provider-spoof".to_owned()))
         );
         assert_eq!(
-            json_claim_to_core_value(serde_json::json!(9_007_199_254_740_992_u64)).unwrap(),
-            CoreValue::U64(9_007_199_254_740_992)
+            claims.get("\0claims:role"),
+            Some(&CoreValue::String("writer".to_owned()))
         );
-        assert!(json_claim_to_core_value(serde_json::json!({ "role": "admin" })).is_err());
+        assert_eq!(claims.get("\0claims:score"), Some(&CoreValue::U64(7)));
+        assert_eq!(
+            claims.get("\0claims:iss"),
+            Some(&CoreValue::String("https://issuer.example".to_owned()))
+        );
+        assert_eq!(
+            claims.get("\0claims:sub"),
+            Some(&CoreValue::String("verified-subject".to_owned()))
+        );
+        for forbidden in [
+            "role", "iss", "sub", "issuer", "subject", "user_id", "author",
+        ] {
+            assert!(
+                !claims.contains_key(forbidden),
+                "raw alias leaked: {forbidden}"
+            );
+        }
     }
 
     #[test]
@@ -1278,18 +1256,17 @@ mod tests {
     }
 
     fn ws_private_docs_schema_convert() -> JazzSchema {
-        let source =
-            SchemaBuilder::new()
-                .table(
-                    PublicTableSchema::builder("docs")
-                        .column("title", ColumnType::Text)
-                        .column("owner", ColumnType::Text)
-                        .policies(public_table_policies().with_select(PolicyExpr::eq_session(
-                            "owner",
-                            vec!["user_id".to_owned()],
-                        ))),
-                )
-                .build();
+        let source = SchemaBuilder::new()
+            .table(
+                PublicTableSchema::builder("docs")
+                    .column("title", ColumnType::Text)
+                    .column("owner", ColumnType::Text)
+                    .policies(
+                        public_table_policies()
+                            .with_select(PolicyExpr::eq_session("owner", vec!["user".to_owned()])),
+                    ),
+            )
+            .build();
         jazz::schema::JazzSchema::new(&source)
             .expect("websocket private docs public schema compiles")
     }
@@ -1382,37 +1359,31 @@ mod tests {
         assert_eq!(admission.identity, identity);
         assert_eq!(admission.trust, CommitUnitTrust::Session);
         assert_eq!(
-            admission.claims.get("role"),
+            admission.claims.get("\0claims:role"),
             Some(&CoreValue::String("reader".to_owned()))
         );
         assert_eq!(
-            admission.claims.get("teams"),
+            admission.claims.get("\0claims:teams"),
             Some(&CoreValue::Array(vec![
                 CoreValue::String("eng".to_owned()),
                 CoreValue::String("ops".to_owned()),
             ]))
         );
-        assert_eq!(admission.claims.get("beta"), Some(&CoreValue::Bool(true)));
         assert_eq!(
-            admission.claims.get("login_count"),
+            admission.claims.get("\0claims:beta"),
+            Some(&CoreValue::Bool(true))
+        );
+        assert_eq!(
+            admission.claims.get("\0claims:login_count"),
             Some(&CoreValue::U64(7))
         );
         assert_eq!(
-            admission.claims.get("subject"),
+            admission.claims.get("\0claims:sub"),
             Some(&CoreValue::String(user_id.clone()))
         );
-        assert_eq!(
-            admission.claims.get("sub"),
-            Some(&CoreValue::String(user_id.clone()))
-        );
-        assert_eq!(
-            admission.claims.get("user_id"),
-            Some(&CoreValue::String(user_id))
-        );
-        assert_eq!(
-            admission.claims.get("authMode"),
-            Some(&CoreValue::String("external".to_owned()))
-        );
+        assert!(!admission.claims.contains_key("subject"));
+        assert!(!admission.claims.contains_key("user_id"));
+        assert!(!admission.claims.contains_key("authMode"));
     }
 
     // Internal route-boundary test: this proves the reusable core

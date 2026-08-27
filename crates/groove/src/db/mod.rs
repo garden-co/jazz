@@ -86,6 +86,20 @@ fn large_value_reclaim_key(node_ref: &crate::large_values::NodeRef) -> Result<Ve
     Ok(key)
 }
 
+/// Durable marker for a remotely hydrated immutable node whose byte write has
+/// happened but whose Groove reference metadata still needs installation.
+/// This lives in Groove's metadata plane rather than in the blob backend: a
+/// locator remains an opaque capability to that backend.
+fn large_value_pending_install_key(
+    node_ref: &crate::large_values::NodeRef,
+) -> Result<Vec<u8>, Error> {
+    let mut key = b"install/".to_vec();
+    key.extend(postcard::to_allocvec(node_ref).map_err(|error| {
+        Error::InvalidLargeValueMetadata(format!("cannot encode pending install identity: {error}"))
+    })?);
+    Ok(key)
+}
+
 #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
 struct LargeValueNodeReferences {
     references: u64,
@@ -227,6 +241,84 @@ struct MetadataChunkInstallObserver {
     resident_install: Option<ResidentLifecycleInstall>,
 }
 
+/// The recovery journal is intentionally separate from byte storage and from
+/// metadata installation. It only answers whether a particular exact chunk
+/// needs reconciliation, allowing normal resident reads to avoid both the
+/// observer and the large-value lifecycle mutex.
+#[derive(Clone)]
+struct MetadataChunkInstallJournal {
+    storage: std::rc::Weak<LayoutStorage>,
+}
+
+impl crate::chunks::ChunkInstallJournal for MetadataChunkInstallJournal {
+    fn mark_pending(
+        &self,
+        node_ref: crate::large_values::NodeRef,
+    ) -> crate::chunks::ChunkFuture<'_, Result<(), crate::chunks::ChunkError>> {
+        Box::pin(async move {
+            let storage = self.storage.upgrade().ok_or_else(|| {
+                crate::chunks::ChunkError::Backend(
+                    "database storage closed while recording chunk installation".to_owned(),
+                )
+            })?;
+            let key = large_value_pending_install_key(&node_ref)
+                .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
+            let existing = storage
+                .put_if_absent(LARGE_VALUE_METADATA_CF.to_owned(), key, Vec::new())
+                .await
+                .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
+            if existing.is_some_and(|value| !value.is_empty()) {
+                return Err(crate::chunks::ChunkError::Integrity);
+            }
+            Ok(())
+        })
+    }
+
+    fn is_pending(
+        &self,
+        node_ref: crate::large_values::NodeRef,
+    ) -> crate::chunks::ChunkFuture<'_, Result<bool, crate::chunks::ChunkError>> {
+        Box::pin(async move {
+            let storage = self.storage.upgrade().ok_or_else(|| {
+                crate::chunks::ChunkError::Backend(
+                    "database storage closed while reading chunk installation journal".to_owned(),
+                )
+            })?;
+            let key = large_value_pending_install_key(&node_ref)
+                .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
+            match storage
+                .get(LARGE_VALUE_METADATA_CF.to_owned(), key)
+                .await
+                .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?
+            {
+                None => Ok(false),
+                Some(value) if value.is_empty() => Ok(true),
+                Some(_) => Err(crate::chunks::ChunkError::Integrity),
+            }
+        })
+    }
+
+    fn complete(
+        &self,
+        node_ref: crate::large_values::NodeRef,
+    ) -> crate::chunks::ChunkFuture<'_, Result<(), crate::chunks::ChunkError>> {
+        Box::pin(async move {
+            let storage = self.storage.upgrade().ok_or_else(|| {
+                crate::chunks::ChunkError::Backend(
+                    "database storage closed while completing chunk installation".to_owned(),
+                )
+            })?;
+            let key = large_value_pending_install_key(&node_ref)
+                .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
+            storage
+                .compare_and_delete(LARGE_VALUE_METADATA_CF.to_owned(), key, Vec::new())
+                .await
+                .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
+            Ok(())
+        })
+    }
+}
+
 #[derive(Clone)]
 struct ResidentLifecycleInstall {
     storage: OwnedStorage<'static>,
@@ -347,6 +439,16 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
                         .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?,
                 });
             }
+            // The recovery marker and all node/root metadata share the same
+            // durability boundary. In particular, a resident publication
+            // keeps both staged until its persistence receipt settles; it
+            // cannot leave resident bytes with neither metadata nor a retry
+            // marker after a cancelled/failed publication.
+            operations.push(OwnedWriteOperation::Delete {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: large_value_pending_install_key(&node_ref)
+                    .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?,
+            });
             if let Some(install) = resident_install {
                 if install.durable.get() {
                     match storage.write_many(operations).await {
@@ -368,6 +470,10 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
                     .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))
             }
         })
+    }
+
+    fn completes_install_journal(&self) -> bool {
+        true
     }
 }
 

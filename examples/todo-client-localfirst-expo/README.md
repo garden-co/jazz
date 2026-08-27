@@ -21,7 +21,7 @@ Expo example scaffolding for local-first todos using `jazz-tools/react` + `jazz-
   - Physical device: `http://<your-lan-ip>:1625`
 - If you set `EXPO_PUBLIC_JAZZ_SERVER_URL` to `localhost`/`127.0.0.1`, the app now rewrites it in dev when needed so devices can still reach your host machine.
 - Auth uses local-first identity via `ExpoAuthSecretStore` (backed by `expo-secure-store`).
-- Todos carry `owner_id`, and mutations are authorized against `session.user_id`.
+- Todos carry `owner_id`, and mutations are authorized against `session.user`.
 
 ## Commands
 

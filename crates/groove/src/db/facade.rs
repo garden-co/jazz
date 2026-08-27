@@ -75,13 +75,16 @@ impl Database {
             Rc::new(crate::chunks::UnavailableChunkResolver);
         let large_value_lifecycle = std::sync::Arc::new(futures::lock::Mutex::new(()));
         ivm_runtime.set_chunk_provider(Rc::new(
-            crate::chunks::StorageChunkProvider::with_resolver_and_observer(
+            crate::chunks::StorageChunkProvider::with_resolver_observer_and_journal(
                 chunk_storage.clone(),
                 chunk_resolver.clone(),
                 Rc::new(MetadataChunkInstallObserver {
                     storage: Rc::downgrade(&storage),
                     lifecycle: std::sync::Arc::downgrade(&large_value_lifecycle),
                     resident_install: None,
+                }),
+                Rc::new(MetadataChunkInstallJournal {
+                    storage: Rc::downgrade(&storage),
                 }),
             ),
         ));
@@ -189,13 +192,16 @@ impl Database {
     /// evaluation reads directly through it.
     pub fn set_chunk_storage(&mut self, storage: Rc<dyn crate::chunks::ChunkStorage>) {
         self.ivm_runtime.set_chunk_provider(Rc::new(
-            crate::chunks::StorageChunkProvider::with_resolver_and_observer(
+            crate::chunks::StorageChunkProvider::with_resolver_observer_and_journal(
                 storage.clone(),
                 self.chunk_resolver.clone(),
                 Rc::new(MetadataChunkInstallObserver {
                     storage: Rc::downgrade(&self.storage),
                     lifecycle: std::sync::Arc::downgrade(&self.large_value_lifecycle),
                     resident_install: None,
+                }),
+                Rc::new(MetadataChunkInstallJournal {
+                    storage: Rc::downgrade(&self.storage),
                 }),
             ),
         ));
@@ -207,13 +213,16 @@ impl Database {
         resolver: Rc<dyn crate::chunks::MissingChunkResolver>,
     ) {
         self.ivm_runtime.set_chunk_provider(Rc::new(
-            crate::chunks::StorageChunkProvider::with_resolver_and_observer(
+            crate::chunks::StorageChunkProvider::with_resolver_observer_and_journal(
                 self.chunk_storage.clone(),
                 resolver.clone(),
                 Rc::new(MetadataChunkInstallObserver {
                     storage: Rc::downgrade(&self.storage),
                     lifecycle: std::sync::Arc::downgrade(&self.large_value_lifecycle),
                     resident_install: None,
+                }),
+                Rc::new(MetadataChunkInstallJournal {
+                    storage: Rc::downgrade(&self.storage),
                 }),
             ),
         ));
@@ -1524,6 +1533,37 @@ impl Database {
                         .into()
                     });
                 }
+                Err(crate::ivm::runtime::IvmRuntimeError::EvaluationBlocked) => {
+                    let requests = inputs.take_missing_chunks();
+                    if requests.is_empty() {
+                        return Err(crate::ivm::runtime::IvmRuntimeError::EvaluationBlocked.into());
+                    }
+                    for request in requests {
+                        let bytes = provider
+                            .get(request.clone())
+                            .await
+                            .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
+                        inputs.install_chunk_from_provider(request, bytes);
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    /// Resolve a final logical UTF-16 position to its byte position. This uses
+    /// the same edit-aware, chunk-demanding UTF-16 cursor as range reads, so
+    /// callers can lower a UTF-16 splice into the canonical byte edit tail.
+    pub async fn large_text_utf16_offset_to_byte(
+        &self,
+        value: &crate::large_values::LargeValueRef,
+        offset: u64,
+    ) -> Result<u64, Error> {
+        let mut inputs = crate::ivm::runtime::evaluation_session::EvaluationInputs::default();
+        let provider = self.ivm_runtime.chunk_provider();
+        loop {
+            match crate::large_values::utf16_offset_to_byte_attempt(value, offset, &mut inputs) {
+                Ok(byte_offset) => return Ok(byte_offset),
                 Err(crate::ivm::runtime::IvmRuntimeError::EvaluationBlocked) => {
                     let requests = inputs.take_missing_chunks();
                     if requests.is_empty() {

@@ -53,7 +53,6 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures::future::LocalBoxFuture;
 use futures::lock::Mutex as LocalMutex;
-use jazz::db::StreamingMutationKind as CoreStreamingMutationKind;
 use jazz::db::{
     ConnectionSessionContext as CoreConnectionSessionContext, Db as CoreDb,
     DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
@@ -65,6 +64,9 @@ use jazz::db::{
     StreamingValueUpload as CoreStreamingValueUpload, SubscriptionEvent as CoreSubscriptionEvent,
     SubscriptionStream, TickScheduler as CoreTickScheduler, TickUrgency as CoreTickUrgency,
     WireTransportAdapter as CoreWireTransportAdapter, WriteHandle, block_on as core_block_on,
+};
+use jazz::db::{
+    LargeValueUpdate as CoreLargeValueUpdate, StreamingMutationKind as CoreStreamingMutationKind,
 };
 use jazz::groove::records::{
     BorrowedRecord as CoreBorrowedRecord, RecordDescriptor, Value as CoreValue,
@@ -1463,6 +1465,64 @@ impl NapiDb {
                 Rc::clone(db),
                 core_block_on(db.update(&table, row_id, patch, options))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
+    /// Binding-only entrypoint for typed partial-value updates. The public
+    /// TypeScript API validates column-kind-specific descriptors before they
+    /// reach this encoded boundary.
+    #[napi(js_name = "updateLargeValuesEncoded")]
+    pub fn update_large_values_encoded(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        patch: Uint8Array,
+        mutations: JsonValue,
+        updated_at_ms: Option<f64>,
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let patch = decode_core_cells(&patch)?;
+        let mutations: Vec<CoreLargeValueUpdate> =
+            serde_json::from_value(mutations).map_err(|error| {
+                napi::Error::from_reason(format!(
+                    "invalid partial-value update descriptor: {error}"
+                ))
+            })?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        // This binding-only ABI must retain the ordinary write-option
+        // timestamp contract. A direct `as u64` would turn NaN, fractions,
+        // negatives, and unsafe JavaScript numbers into unrelated HLC input.
+        let updated_at_ms = updated_at_ms
+            .map(|value| checked_u64(value, "updatedAtMs"))
+            .transpose()?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                match updated_at_ms {
+                    Some(now_ms) => core_block_on(db.update_with_large_value_mutations_at_ms(
+                        &table, row_id, patch, mutations, now_ms,
+                    )),
+                    None => core_block_on(
+                        db.update_with_large_value_mutations(&table, row_id, patch, mutations),
+                    ),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                match updated_at_ms {
+                    Some(now_ms) => core_block_on(db.update_with_large_value_mutations_at_ms(
+                        &table, row_id, patch, mutations, now_ms,
+                    )),
+                    None => core_block_on(
+                        db.update_with_large_value_mutations(&table, row_id, patch, mutations),
+                    ),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
     }
@@ -3657,14 +3717,19 @@ fn core_write_persistent(
 }
 
 fn core_claims_from_json(
-    _author: CoreAuthorSubject,
+    author: CoreAuthorSubject,
     claims: Option<JsonValue>,
 ) -> napi::Result<BTreeMap<String, CoreValue>> {
-    let claims = match claims {
+    let mut claims = match claims {
         None | Some(JsonValue::Null) => BTreeMap::new(),
         Some(JsonValue::Object(map)) => map
             .into_iter()
-            .map(|(key, value)| Ok((key, core_claim_value_from_json(value)?)))
+            .map(|(key, value)| {
+                Ok((
+                    jazz::query::provider_claim_key(&key),
+                    core_claim_value_from_json(value)?,
+                ))
+            })
             .collect::<napi::Result<BTreeMap<_, _>>>()?,
         Some(_) => {
             return Err(napi::Error::from_reason(
@@ -3672,7 +3737,44 @@ fn core_claims_from_json(
             ));
         }
     };
+    // This public NAPI ingress receives either an external canonical subject
+    // or one already verified by a distinct first-party proof ABI. Raw provider
+    // claims are always namespaced, including provider `user` and `authMode`;
+    // the two top-level policy fields are derived here and cannot be spoofed.
+    claims.insert(
+        "user".to_owned(),
+        CoreValue::String(author.canonical().to_owned()),
+    );
+    claims.insert(
+        "authMode".to_owned(),
+        CoreValue::String(auth_mode_for_author(&author).to_owned()),
+    );
+    let (issuer, subject): (String, String) = serde_json::from_str(author.canonical())
+        .expect("author subjects always have canonical issuer/subject JSON");
+    claims.insert(
+        jazz::query::provider_claim_key("iss"),
+        CoreValue::String(issuer),
+    );
+    claims.insert(
+        jazz::query::provider_claim_key("sub"),
+        CoreValue::String(subject),
+    );
     Ok(claims)
+}
+
+/// The public NAPI claim ingress deliberately does not trust an application
+/// supplied `authMode`. It is a property of the already-admitted identity:
+/// verified Jazz-owned issuers carry their matching mode and every other
+/// public subject is external.
+fn auth_mode_for_author(author: &CoreAuthorSubject) -> &'static str {
+    let issuer = serde_json::from_str::<(String, String)>(author.canonical())
+        .ok()
+        .map(|(issuer, _)| issuer);
+    match issuer.as_deref() {
+        Some(CoreAuthorSubject::LOCAL_FIRST_ISSUER) => "local-first",
+        Some(CoreAuthorSubject::ANONYMOUS_ISSUER) => "anonymous",
+        _ => "external",
+    }
 }
 
 fn core_claim_value_from_json(value: JsonValue) -> napi::Result<CoreValue> {
@@ -4781,6 +4883,77 @@ mod tests {
     use napi::bindgen_prelude::{BigInt, Either, Either3, Either4};
     use serde_json::json;
     use std::cell::RefCell;
+
+    #[test]
+    fn identity_claim_ingress_namespaces_provider_values_and_derives_reserved_fields() {
+        let author = CoreAuthorSubject::authenticated("https://issuer.example", "alice").unwrap();
+        let claims = crate::core_claims_from_json(
+            author.clone(),
+            Some(json!({
+                "user": "forged-user",
+                "iss": "forged-issuer",
+                "sub": "provider-subject",
+                "custom": "provider-value",
+                "authMode": "local-first",
+            })),
+        )
+        .expect("NAPI claims are scalar provider data");
+
+        assert_eq!(
+            claims.get("user"),
+            Some(&CoreValue::String(author.canonical().to_owned())),
+            "session.user must come from the supplied canonical author"
+        );
+        assert_eq!(
+            claims.get("authMode"),
+            Some(&CoreValue::String("external".to_owned())),
+            "the public NAPI ingress derives external auth mode"
+        );
+        for (name, value) in [
+            ("user", "forged-user"),
+            ("custom", "provider-value"),
+            ("authMode", "local-first"),
+        ] {
+            assert_eq!(
+                claims.get(&jazz::query::provider_claim_key(name)),
+                Some(&CoreValue::String(value.to_owned())),
+                "raw provider {name} stays below session.claims"
+            );
+        }
+        assert_eq!(
+            claims.get(&jazz::query::provider_claim_key("iss")),
+            Some(&CoreValue::String("https://issuer.example".to_owned())),
+            "session.claims.iss must agree with the admitted author rather than a supplied claim"
+        );
+        assert_eq!(
+            claims.get(&jazz::query::provider_claim_key("sub")),
+            Some(&CoreValue::String("alice".to_owned())),
+            "session.claims.sub must agree with the admitted author rather than a supplied claim"
+        );
+    }
+
+    #[test]
+    fn identity_claim_ingress_derives_first_party_auth_mode_from_verified_author() {
+        let author = CoreAuthorSubject::from_canonical(r#"["urn:jazz:local-first","alice"]"#)
+            .expect("canonical first-party author");
+        let claims =
+            crate::core_claims_from_json(author.clone(), Some(json!({ "authMode": "external" })))
+                .expect("NAPI claims are scalar provider data");
+
+        assert_eq!(
+            claims.get("user"),
+            Some(&CoreValue::String(author.canonical().to_owned()))
+        );
+        assert_eq!(
+            claims.get("authMode"),
+            Some(&CoreValue::String("local-first".to_owned())),
+            "a provider claim must not override the mode verified by the native open ABI"
+        );
+        assert_eq!(
+            claims.get(&jazz::query::provider_claim_key("authMode")),
+            Some(&CoreValue::String("external".to_owned()))
+        );
+    }
 
     #[test]
     fn public_author_ingress_requires_a_verified_self_signed_open_proof() {

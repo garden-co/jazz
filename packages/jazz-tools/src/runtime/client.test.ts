@@ -165,6 +165,31 @@ describe("JazzClient subscription ownership", () => {
   });
 });
 
+describe("JazzClient native session boundary", () => {
+  it("keeps public author out of serialized query sessions", async () => {
+    const runtime = makeFakeRuntime();
+    runtime.query.mockResolvedValue([]);
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const session = {
+      issuer: "https://issuer.example",
+      user_id: "alice",
+      claims: { role: "reader" },
+      authMode: "external",
+    } as const;
+
+    await client.query('{"table":"todos"}', undefined, session);
+
+    const serialized = JSON.parse(runtime.query.mock.calls[0][1] ?? "null");
+    expect(serialized).toEqual({
+      issuer: "https://issuer.example",
+      user_id: "alice",
+      claims: { role: "reader" },
+      authMode: "external",
+    });
+    expect(serialized).not.toHaveProperty("author");
+  });
+});
+
 describe("JazzClient.updateAuthToken", () => {
   it("forwards refreshed JWT to the Rust runtime via runtime.updateAuth", () => {
     const runtime = makeFakeRuntime();

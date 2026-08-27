@@ -848,7 +848,7 @@ fn m3_differential_schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         "teams",
         "identity_key",
-        &["author"],
+        &["claims", "sub"],
         "id",
     );
     let string_same_table_policy = crate::test_public_schema::seeded_recursive_access_policy(
@@ -864,7 +864,7 @@ fn m3_differential_schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         "teams",
         "identity_key_text",
-        &["author"],
+        &["claims", "sub"],
         "id",
     );
 
@@ -998,7 +998,7 @@ fn m3_differential_shapes(schema: &JazzSchema) -> Vec<DifferentialShape> {
                 "parent",
                 [],
             )
-            .seeded_by("group_access_edges", "user_id", "author", "group_id")
+            .seeded_by("group_access_edges", "user_id", "user", "group_id")
             .validate(schema)
             .unwrap(),
     );
@@ -1130,7 +1130,7 @@ fn aggregate_differential_specs() -> Vec<AggregateSpec> {
 
 fn created_by_shape(schema: &JazzSchema) -> ValidatedQuery {
     Query::from("docs")
-        .filter(eq(col("$createdBy"), claim("author")))
+        .filter(eq(col("$createdBy"), claim("user")))
         .validate(schema)
         .unwrap()
 }

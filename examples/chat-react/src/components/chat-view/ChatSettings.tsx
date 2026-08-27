@@ -60,7 +60,7 @@ function ChatSettingsContent({
 }) {
   const db = useDb();
   const session = useSession();
-  const userId = session?.user_id ?? null;
+  const userId = session?.user ?? null;
   const [willShare, setWillShare] = useState(false);
 
   const { data: chatRows = [] } = useAll(app.chats.where({ id: chatId }));

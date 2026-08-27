@@ -8,24 +8,24 @@ export function AuthSessionExamples() {
   const session = useSession();
   // #endregion auth-session-react-hook
 
-  // #region auth-session-react-user-id
-  const sessionUserId = session?.user_id ?? null;
-  // #endregion auth-session-react-user-id
+  // #region auth-session-react-user
+  const sessionUser = session?.user ?? null;
+  // #endregion auth-session-react-user
 
   // #region auth-session-react-query
   const { data: ownedTodos = [] } = useAll(
-    sessionUserId ? app.todos.where({ owner_id: sessionUserId }) : undefined,
+    sessionUser ? app.todos.where({ owner_id: sessionUser }) : undefined,
   );
   // #endregion auth-session-react-query
 
   // #region auth-session-react-insert
   function addOwnedTodo(title: string) {
-    if (!sessionUserId) return;
+    if (!sessionUser) return;
 
     db.insert(app.todos, {
       title,
       done: false,
-      owner_id: sessionUserId,
+      owner_id: sessionUser,
     });
   }
   // #endregion auth-session-react-insert
