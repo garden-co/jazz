@@ -81,10 +81,7 @@ describe("loadEnvFileIntoProcessEnv", () => {
   it("loads production files without leaking development values", async () => {
     const root = await tempRoots.create("jazz-env-production-");
     await writeFile(join(root, ".env"), "JAZZ_BUG_121_FILE_PRECEDENCE=base\n");
-    await writeFile(
-      join(root, ".env.development.local"),
-      "JAZZ_BUG_121_MODE_ONLY=development\n",
-    );
+    await writeFile(join(root, ".env.development.local"), "JAZZ_BUG_121_MODE_ONLY=development\n");
     await writeFile(
       join(root, ".env.production"),
       "JAZZ_BUG_121_FILE_PRECEDENCE=production\nJAZZ_BUG_121_MODE_ONLY=production\n",

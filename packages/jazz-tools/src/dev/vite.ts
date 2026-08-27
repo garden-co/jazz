@@ -55,6 +55,7 @@ export interface ViteDevServer {
   config: {
     root: string;
     command: string;
+    mode?: string;
     env?: Record<string, string>;
     server?: {
       port?: number;
@@ -79,6 +80,13 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
     serverUrl: "VITE_JAZZ_SERVER_URL",
     telemetryCollectorUrl: "VITE_JAZZ_TELEMETRY_COLLECTOR_URL",
   });
+  let envLoaded = false;
+
+  async function ensureEnvLoaded(root: string, mode: string): Promise<void> {
+    if (envLoaded) return;
+    await loadEnvFileIntoProcessEnv(root, mode);
+    envLoaded = true;
+  }
 
   return {
     name: "jazz",
@@ -89,14 +97,8 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
         ssr?: { external?: true | string[] };
         optimizeDeps?: { exclude?: string[] };
       },
-      env?: { command?: string },
+      env?: { command?: string; mode?: string },
     ) {
-      if (env?.command === "serve" && options.server !== false) {
-        runtime.prepareEnv({
-          ...options,
-          schemaDir: options.schemaDir ?? config.root ?? process.cwd(),
-        });
-      }
       const existingSsr = config.ssr?.external;
       const existingExclude = config.optimizeDeps?.exclude ?? [];
       const jazzWasmEntry = resolveJazzWasmEntry();
@@ -104,13 +106,24 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
       // already covered — preserve the bool rather than coercing to an array.
       const ssrExternal: true | string[] =
         existingSsr === true ? true : Array.from(new Set([...(existingSsr ?? []), "jazz-napi"]));
-      return {
+      const merged = {
         optimizeDeps: { exclude: Array.from(new Set([...existingExclude, "jazz-wasm"])) },
         ssr: { external: ssrExternal },
         ...(jazzWasmEntry
           ? { resolve: { alias: [{ find: /^jazz-wasm$/, replacement: jazzWasmEntry }] } }
           : {}),
       };
+      if (env?.command !== "serve" || options.server === false) {
+        return merged;
+      }
+      const root = config.root ?? process.cwd();
+      return ensureEnvLoaded(root, env.mode ?? "development").then(() => {
+        runtime.prepareEnv({
+          ...options,
+          schemaDir: options.schemaDir ?? root,
+        });
+        return merged;
+      });
     },
 
     async configureServer(viteServer: ViteDevServer) {
@@ -120,10 +133,11 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
         return;
       }
 
-      // Vite does not populate process.env from .env for unprefixed
-      // keys, so the managed runtime's env-driven cloud-mode check would
-      // otherwise never fire. Backfill before reading.
-      loadEnvFileIntoProcessEnv(viteServer.config.root);
+      // Vite does not populate process.env from env files for unprefixed keys,
+      // so the managed runtime's env-driven cloud-mode check would otherwise
+      // never fire. The config hook normally loads them first; this is the
+      // fallback for direct callers that skip that hook.
+      await ensureEnvLoaded(viteServer.config.root, viteServer.config.mode ?? "development");
 
       const schemaDir = options.schemaDir ?? viteServer.config.root;
 

@@ -127,9 +127,10 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
   async function ensureInitialised(
     serverConfig: ViteServerConfigLike | undefined,
     root: string,
+    mode: string,
   ): Promise<ManagedRuntime> {
     if (managed) return managed;
-    loadEnvFileIntoProcessEnv(root);
+    await loadEnvFileIntoProcessEnv(root, mode);
     managed = await runtime.initialize(buildInitOptions(serverConfig, root));
     return managed;
   }
@@ -152,7 +153,7 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
         return merged;
       }
       const root = config.root ? resolve(config.root) : process.cwd();
-      return ensureInitialised(config.server, root).then(() => merged);
+      return ensureInitialised(config.server, root, env.mode ?? "development").then(() => merged);
     },
 
     async configureServer(viteServer: ViteDevServer): Promise<void> {
@@ -161,7 +162,11 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
 
       let resolvedRuntime: ManagedRuntime;
       try {
-        resolvedRuntime = await ensureInitialised(viteServer.config.server, viteServer.config.root);
+        resolvedRuntime = await ensureInitialised(
+          viteServer.config.server,
+          viteServer.config.root,
+          viteServer.config.mode ?? "development",
+        );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         viteServer.ws.send({
