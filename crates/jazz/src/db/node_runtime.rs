@@ -192,13 +192,10 @@ where
     }
 
     pub(super) fn queue_pending_upload(&self, tx_id: TxId, unit: Option<SyncMessage>) {
-        let mut outbox = self.outbox.borrow_mut();
-        if !outbox.push(PendingUpload { tx_id, unit }) {
-            return;
+        if queue_pending_upload_in(&self.outbox, tx_id, unit) {
+            self.mark_subscriber_connections_dirty();
+            self.schedule_tick(TickUrgency::Deferred);
         }
-        drop(outbox);
-        self.mark_subscriber_connections_dirty();
-        self.schedule_tick(TickUrgency::Deferred);
     }
 
     pub(super) fn queue_local_publication(
@@ -564,12 +561,13 @@ where
         tier: DurabilityTier,
     ) -> Option<Result<TxId, Error>> {
         let state = crate::db::block_on(self.node.borrow_mut().transaction_state(tx_id));
-        let Some((fate, _, durability)) = state else {
+        let Some((fate, global_time, durability)) = state else {
             return Some(Err(Error::new(
                 ErrorCode::NotObserved,
                 format!("transaction {tx_id:?} is not known locally"),
             )));
         };
+        let satisfied = transaction_satisfies_wait(&fate, global_time, durability, tier);
         match fate {
             Fate::Rejected(reason) => {
                 if let Err(error) = self.consume_mutation_error(tx_id) {
@@ -577,7 +575,7 @@ where
                 }
                 Some(Err(write_rejected(tx_id, reason)))
             }
-            Fate::Pending | Fate::Accepted if durability >= tier => Some(Ok(tx_id)),
+            Fate::Pending | Fate::Accepted if satisfied => Some(Ok(tx_id)),
             Fate::Pending | Fate::Accepted => None,
         }
     }
@@ -773,6 +771,7 @@ where
         *self.active_authority_view_receipts.borrow_mut() = Some(AuthorityViewReceipts {
             connection_epoch,
             confirmation_floor,
+            subscriptions: BTreeSet::new(),
             binding_views: BTreeSet::new(),
         });
         // A replacement link invalidates the prior link's receipt before the
@@ -952,6 +951,7 @@ where
             awaiting_initial_authority_coverage: Rc::clone(
                 &self.awaiting_initial_authority_coverage,
             ),
+            query_coverage_registrations: Rc::clone(&self.query_coverage_registrations),
             active_authority_view_receipts: Rc::clone(&self.active_authority_view_receipts),
             scheduler: Rc::clone(&self.scheduler),
             upload_retry_clock: Rc::clone(&self.upload_retry_clock),
@@ -1090,21 +1090,20 @@ where
     }
 
     /// Accept a subscriber whose host shell is wired as an edge fate authority.
-    pub fn accept_edge_authority_subscriber_with_claims(
+    pub fn accept_edge_authority_subscriber_with_claims_and_trust(
         &self,
         transport: Box<dyn Transport>,
         identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
+        trust: CommitUnitTrust,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
-        self.accept_subscriber_with_peer(
-            transport,
-            identity,
-            CommitUnitTrust::Session,
-            claims,
-            None,
-            PeerState::edge_client(identity),
-            true,
-        )
+        let peer = match trust {
+            CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAdmin => {
+                PeerState::edge_client_with_permission_identity(identity, AuthorSubject::SYSTEM)
+            }
+            CommitUnitTrust::Session => PeerState::edge_client(identity),
+        };
+        self.accept_subscriber_with_peer(transport, identity, trust, claims, None, peer, true)
     }
 
     /// Accept a reconnecting subscriber, resuming from a previous cursor.
@@ -1201,6 +1200,7 @@ where
             awaiting_initial_authority_coverage: Rc::clone(
                 &self.awaiting_initial_authority_coverage,
             ),
+            query_coverage_registrations: Rc::clone(&self.query_coverage_registrations),
             active_authority_view_receipts: Rc::clone(&self.active_authority_view_receipts),
             scheduler: Rc::clone(&self.scheduler),
             upload_retry_clock: Rc::clone(&self.upload_retry_clock),
@@ -1429,6 +1429,7 @@ where
                 fallback_connection.map(|connection| AuthorityViewReceipts {
                     connection_epoch: connection.borrow().connection_epoch,
                     confirmation_floor: self.node.borrow().committed_global_time(),
+                    subscriptions: BTreeSet::new(),
                     binding_views: BTreeSet::new(),
                 });
             // Cached rows remain readable as stale/local state, but their

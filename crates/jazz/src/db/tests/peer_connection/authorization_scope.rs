@@ -174,6 +174,93 @@ fn delayed_duplicate_usage_resets_stale_authorization_with_replacement_row() {
 }
 
 #[test]
+fn late_detached_view_update_does_not_cover_equal_shape_reattachment() {
+    let schema = schema();
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+    let (client_transport, server_transport, _client_sent, server_sent) = duplex_with_taps();
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos");
+    let prepared = prepared(&client, &query);
+
+    let first = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .expect("attach first Global query usage");
+    let first_subscription = first.subscription();
+    client.tick().unwrap();
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        if server_sent.borrow().iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+                    subscription,
+                    peer_payload_inventory,
+                    ..
+                }) if *subscription == first_subscription
+                    && !peer_payload_inventory.opening_pending
+            )
+        }) {
+            break;
+        }
+    }
+    let late_update_index = server_sent
+        .borrow()
+        .iter()
+        .position(|message| {
+            matches!(
+                message,
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+                    subscription,
+                    peer_payload_inventory,
+                    ..
+                }) if *subscription == first_subscription
+                    && !peer_payload_inventory.opening_pending
+            )
+        })
+        .expect("first usage receives a complete ViewUpdate");
+    let late_first_update = server_sent
+        .borrow_mut()
+        .remove(late_update_index)
+        .expect("held first ViewUpdate");
+    upstream.borrow_mut().tick().unwrap();
+
+    client.detach_query(first);
+    client.tick().unwrap();
+    let second = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .expect("reattach equal-shape Global query");
+    assert_ne!(
+        second.subscription(),
+        first_subscription,
+        "fresh authority coverage owns a distinct wire subscription"
+    );
+    client.tick().unwrap();
+
+    server_sent.borrow_mut().push_back(late_first_update);
+    upstream.borrow_mut().tick().unwrap();
+    assert!(
+        !client.query_attachment_is_covered(&second),
+        "a processed late update for the detached subscription cannot cover the reattachment"
+    );
+
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        upstream.borrow_mut().tick().unwrap();
+        if client.query_attachment_is_covered(&second) {
+            break;
+        }
+    }
+    assert!(
+        client.query_attachment_is_covered(&second),
+        "the reattachment is covered by its own complete ViewUpdate"
+    );
+    client.detach_query(second);
+}
+
+#[test]
 fn legacy_authorization_scope_subscribe_is_rejected_before_shape_admission() {
     let schema = schema_with_explicit_public_read();
     let identity = AuthorSubject::for_test_bytes([0xc1; 16]);

@@ -28,7 +28,7 @@ Invariant digest:
 - `INV-API-12`: `Db::restore` MUST reject empty cell data with `ErrorCode::Schema` and MUST lower a non-empty restore to content write plus `DeletionEvent::Restored`.
 - `INV-API-13`: Every local write method MUST return a `WriteHandle` carrying the affected `RowUuid`, backing `TxId`, and local durability tier.
 - `INV-API-14`: A local write on a `Db` MUST be `DurabilityTier::Local` and queued for upstream upload; a `Db` (always a client) MUST NOT self-finalize. Self-finalization to `Accepted`/`Global` is a core `Node` behavior (ch. 9).
-- `INV-API-15`: `WriteHandle::wait(tier)` MUST return the handle `TxId` when the requested tier is locally satisfied, MUST return `ErrorCode::WriteRejected` for rejected fates, and MUST return `ErrorCode::NotObserved` when the requested tier is not locally observed.
+- `INV-API-15`: `WriteHandle::wait(tier)` MUST return the handle `TxId` only when the requested tier is locally satisfied, MUST return `ErrorCode::WriteRejected` for rejected fates, and MUST return `ErrorCode::NotObserved` when the requested tier is not locally observed. A `Global` wait additionally MUST require `Fate::Accepted` and an authority-assigned `GlobalTime`; a bare `Global` durability claim MUST NOT complete it.
 - `INV-API-16`: `Transport` implementations MUST be non-blocking; `try_recv() == None` MUST mean no inbound message is currently staged and MUST NOT be interpreted by `Db` as disconnect.
 - `INV-API-17`: Db::connectupstream MUST make every already-registered facade subscription eligible for immediate upstream announcement without requiring re-registration.
 - `INV-API-18`: `Db::subscribe` MUST announce newly registered subscriptions to all existing upstream connections so query-driven sync can request remote completion on the next tick.
@@ -46,6 +46,8 @@ Invariant digest:
 - `INV-API-33`: Ordinary `Db` reads and subscriptions MUST use client-local lowering: policy is enforced by the trusted upstream before emission and is never re-applied to received rows. Local/None reads scan locally available data; Edge/Global settled reads consume the identity-scoped settled view received upstream.
 - `INV-API-29`: A `Db` is a client: facade writes MUST keep `permission_subject == made_by`, and a `Db` MUST reject any attempt to attribute a write to another author. Cross-author attribution is a node-level concern on the ingest side (a trusted serving `Node`, `INV-RLS-18`, ch. 9), never a `Db` capability.
 - `INV-API-30`: Reopening persistent storage with the same `DbIdentity` MUST schedule every locally originated transaction that reached `Local` durability and has not reached terminal settlement for upstream delivery. Locally originated means `TxId.node == DbIdentity.node` and `Transaction.made_by == DbIdentity.author`; delivery is at-least-once by `TxId` and relies on idempotent authority handling.
+- `INV-API-34`: An edge outbox MUST retain an edge-accepted upload until an authenticated terminal rejection or an `Accepted` receipt carrying both Global durability and an authority-assigned `GlobalTime` for that `TxId` arrives directly from the currently admitted upstream fate authority; a featureless/unnegotiated link, local acceptance, hydrated state, staged/replayed updates, and receipts from detached or superseded authorities MUST NOT release it.
+- `INV-SYNC-30`: A fresh `Edge`/`Global` settled one-shot read MUST obtain settled authority coverage for its exact current usage-site subscription; an update for a detached predecessor MUST NOT satisfy it even when shape, binding, and options are equal. This freshness rule MUST NOT change local-read semantics or prevent reuse of still-live maintained subscription coverage.
 
   A durable browser relay is the narrow topology exception to the exact-node
   recovery test: it also schedules unsettled transactions made by the same
@@ -204,6 +206,15 @@ only after that state has been observed locally through synchronization (§13.5)
 until then, the local view may be empty. Reads do not perform an implicit network
 wait.
 
+Repeated settled reads require a freshness proof, not merely a locally
+materialized result from an earlier request. Each newly initiated `Edge` or
+`Global` one-shot owns a fresh usage-site subscription and waits for settled
+authority coverage addressed to that exact subscription. A late update for a
+detached predecessor cannot satisfy the new read, even when its shape, binding,
+and options are identical. Synchronous and local-tier reads retain their local
+semantics, and still-live maintained subscriptions may continue sharing their
+coverage group (`INV-SYNC-30`, ch. 8 and ch. 16).
+
 `Db::subscribe(query, opts)` opens a live subscription at the requested effective
 tier. `Local` subscriptions are first-class application-facing subscriptions:
 they include the node's own pending committed writes and must be able to drive
@@ -278,9 +289,13 @@ patch over the row's current local cells, so omitted fields keep their value
 
 The write handle is the caller's durability and fate observation point. It
 carries the affected `RowUuid`, the backing `TxId` (`mergeable_tx_id()`), and the local
-durability tier (`INV-API-13`). `wait(tier)` returns immediately when the tier is
-locally satisfied, `WriteRejected` when the write's fate is rejected, and
-`NotObserved` when the requested tier has not yet been observed (`INV-API-15`).
+durability tier (`INV-API-13`). `wait(tier)` returns only when the requested
+tier's full observation condition is satisfied, returns `WriteRejected` when the
+write's fate is rejected, and returns `NotObserved` while that condition is not
+yet observed. In particular, a `Global` wait requires the conjunction
+`Fate::Accepted`, `DurabilityTier::Global`, and an authority-assigned
+`GlobalTime`; a hydrated or propagated `Global` durability claim without the
+other two facts does not complete it (`INV-API-15`, ch. 3).
 
 Each single-call write creates **one mergeable transaction**. `mergeable_tx()`
 groups multiple facade writes under one `TxId`; the resulting commit unit carries
@@ -302,6 +317,16 @@ Here, locally originated means both `TxId.node == DbIdentity.node` and
 using the same author is not this client's backlog. Replayed delivery is
 at-least-once by `TxId`; the authority's idempotent commit-unit handling makes
 that safe, while each individual connection still sends a `TxId` at most once.
+
+An edge-authority decision is likewise not permission to discard the edge's
+upstream outbox entry. The edge retains an edge-accepted upload until a terminal
+rejection, or an `Accepted` receipt that carries both Global durability and an
+authority-assigned `GlobalTime`, arrives for that `TxId` directly on the
+authenticated connection to the currently admitted upstream fate authority.
+A featureless/unnegotiated link has no such authority identity. Local
+acceptance, view hydration, staged or replayed updates, and receipts associated
+with a featureless, detached, or superseded authority cannot release the entry
+(`INV-API-34`, ch. 9).
 
 Field-level semantics are the same regardless of the write method. An explicit
 null clears a nullable column. A JSON column accepts only syntactically valid
