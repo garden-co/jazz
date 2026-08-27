@@ -270,6 +270,47 @@ mod tests {
             u64::MAX
         );
         assert!(TxTime::new(0, HLC_MAX_LOGICAL_COUNTER) < TxTime::new(1, 0));
+
+        // These are the actual ordered-primary-key bytes, not merely the
+        // in-memory integer ordering.  The leading tag is Groove's U64 key
+        // arm; the remaining bytes must preserve packed HLC order.
+        let first = groove::db::PrimaryKeyValue::U64(TxTime::new(0, HLC_MAX_LOGICAL_COUNTER).0)
+            .into_bytes();
+        let second = groove::db::PrimaryKeyValue::U64(TxTime::new(1, 0).0).into_bytes();
+        assert_eq!(first, vec![3, 0, 0, 0, 0, 0, 3, 255, 255]);
+        assert_eq!(second, vec![3, 0, 0, 0, 0, 0, 4, 0, 0]);
+        assert!(first < second);
+    }
+
+    #[test]
+    fn global_time_has_the_same_packed_boundary_and_overflow_contract() {
+        assert_eq!(GlobalTime::new(0, 0).unwrap().0, 0);
+        assert_eq!(
+            GlobalTime::new(0, HLC_MAX_LOGICAL_COUNTER).unwrap().0,
+            0x0000_0000_0003_ffff
+        );
+        assert_eq!(GlobalTime::new(1, 0).unwrap().0, 0x0000_0000_0004_0000);
+        assert_eq!(
+            GlobalTime::new(HLC_MAX_PHYSICAL_MS, HLC_MAX_LOGICAL_COUNTER)
+                .unwrap()
+                .0,
+            u64::MAX
+        );
+        assert_eq!(
+            GlobalTime::tick(GlobalTime::new(17, HLC_MAX_LOGICAL_COUNTER).unwrap(), 17,),
+            Ok(GlobalTime::new(18, 0).unwrap())
+        );
+        assert_eq!(
+            GlobalTime::tick(
+                GlobalTime::new(HLC_MAX_PHYSICAL_MS, HLC_MAX_LOGICAL_COUNTER).unwrap(),
+                HLC_MAX_PHYSICAL_MS,
+            ),
+            Err(HlcOverflow {
+                physical_ms: HLC_MAX_PHYSICAL_MS,
+            })
+        );
+        assert_eq!(GlobalTime::new(HLC_MAX_PHYSICAL_MS + 1, 0), None);
+        assert_eq!(GlobalTime::new(0, HLC_MAX_LOGICAL_COUNTER + 1), None);
     }
 
     /// Public Unix-millisecond provenance reconstructs only the zero logical

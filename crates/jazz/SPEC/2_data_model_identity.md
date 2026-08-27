@@ -184,11 +184,13 @@ primary keys, and indexes are not the portable data-model contract. The layout
 is covered by `schema::storage_lowering_declares_system_columns_by_shape`.
 
 **Identity encoding.** Every UUID identity is exactly its 16 canonical bytes;
-lexicographic byte order is the physical and semantic order. `TxTime` packs physical milliseconds in the high 46 bits
+lexicographic byte order is the physical and semantic order. `TxTime` and the
+authority-assigned `GlobalTime` use the same packed HLC representation: physical milliseconds in the high 46 bits
 and a logical counter in the low 18. It can represent Unix milliseconds through
 approximately year 4200 and 262,144 ordered positions per millisecond. On
 logical exhaustion it advances physical time by one millisecond; only the final
-packed position returns a typed clock-overflow (`INV-DATA-4`). `TxTime` remains
+packed position returns a typed clock-overflow (`INV-DATA-4`). Their unsigned
+packed order is the canonical storage order. `TxTime` remains
 an opaque ordering/version field: public row provenance exposes only physical
 Unix milliseconds. UUID object identities retain their newtype encodings;
 `AuthorSubject::SYSTEM` is the canonical JSON string
