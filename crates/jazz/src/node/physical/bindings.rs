@@ -128,6 +128,16 @@ pub(super) fn validate_physical_variant_cases(
     let mut by_table = BTreeMap::<PhysicalTableId, BTreeMap<u32, SchemaVersionId>>::new();
     for (schema_version, mapping) in mappings {
         for table in mapping.tables.values() {
+            let mut column_ids = BTreeSet::new();
+            if table
+                .columns
+                .values()
+                .any(|column_id| !column_ids.insert(*column_id))
+            {
+                return Err(Error::InvalidStoredValue(
+                    "physical table maps multiple columns to one id",
+                ));
+            }
             let tag = if table.variant_cases.is_empty() {
                 groove_variant_tag(*aliases.get(schema_version).ok_or(
                     Error::InvalidStoredValue("variant-case schema alias missing"),

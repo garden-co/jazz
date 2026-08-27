@@ -217,6 +217,115 @@ fn catalogue_snapshot_preserves_active_schema_storage_identity() {
 }
 
 #[test]
+fn authored_columns_cross_nodes_with_different_physical_column_ids() {
+    // Physical column ids are deliberately node-local. This internal wire-
+    // boundary test makes the same evolved schema allocate `body` differently
+    // on each node, then verifies that logical names cross the wire and each
+    // side persists only its own id.
+    let base = schema();
+    let filler = SchemaVersion::new(build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("scratch", PublicColumnType::Text),
+        ),
+    ));
+    let evolved = SchemaVersion::new(catalogue_evolved_schema());
+    let (_authority_dir, mut authority) = open_node_with_schema(node(0x63), base.clone());
+    publish_schema_lineage(
+        &mut authority,
+        filler.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            filler.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "scratch".to_owned(),
+                    default: v(""),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    publish_schema_lineage(
+        &mut authority,
+        evolved.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: v(""),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    authority
+        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorSubject::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: evolved.id,
+            },
+        })
+        .unwrap();
+
+    let (receiver_dir, mut receiver) =
+        open_node_with_schema(node(0x64), evolved.schema.clone());
+    let receiver_body_id =
+        receiver.catalogue.physical_mappings[&evolved.id].tables["todos"].columns["body"];
+    let authority_body_id =
+        authority.catalogue.physical_mappings[&evolved.id].tables["todos"].columns["body"];
+    assert_ne!(authority_body_id, receiver_body_id);
+    receiver
+        .apply_trusted_catalogue_snapshot_settled(authority.catalogue_snapshot().unwrap())
+        .unwrap();
+    assert_eq!(
+        receiver.catalogue.physical_mappings[&evolved.id].tables["todos"].columns["body"],
+        receiver_body_id
+    );
+
+    let (tx_id, unit) = authority
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(0x65), 10)
+                .cells(BTreeMap::from([("body".to_owned(), v("authored"))]))
+                .authored_columns(BTreeSet::from(["body".to_owned()])),
+        )
+        .unwrap();
+    receiver.apply_sync_message_settled(unit).unwrap();
+    let stored = receiver.query_versions_for_tx(tx_id).unwrap();
+    assert_eq!(stored[0].authored_column_ids().unwrap(), Some(BTreeSet::from([receiver_body_id])));
+    assert_eq!(
+        receiver
+            .version_record_from_row(&stored[0])
+            .unwrap()
+            .authored_columns(),
+        Some(&BTreeSet::from(["body".to_owned()]))
+    );
+    drop(receiver);
+
+    let mut reopened = reopen_node_at(&receiver_dir, node(0x64), evolved.schema);
+    let stored = reopened.query_versions_for_tx(tx_id).unwrap();
+    assert_eq!(
+        reopened
+            .version_record_from_row(&stored[0])
+            .unwrap()
+            .authored_columns(),
+        Some(&BTreeSet::from(["body".to_owned()]))
+    );
+}
+
+#[test]
 fn settled_view_projects_old_authored_row_into_clients_active_schema() {
     // Internal because settled result-set installation is a sync receiver
     // boundary; schema projection itself is asserted through the query API.

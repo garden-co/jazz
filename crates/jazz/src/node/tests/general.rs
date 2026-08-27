@@ -1032,7 +1032,14 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
                 .collect(),
             authored_columns: deletion
                 .is_none()
-                .then(|| table.columns.iter().map(|column| column.name.clone()).collect()),
+                .then(|| {
+                    table
+                        .columns
+                        .iter()
+                        .enumerate()
+                        .map(|(index, _)| PhysicalColumnId(index as u64 + 1))
+                        .collect()
+                }),
             deletion,
         }
     }
@@ -1057,6 +1064,17 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
                 .create(&content_values)
                 .unwrap(),
             content.record.raw()
+        );
+        let authored_columns_idx = content
+            .record
+            .descriptor()
+            .field_index("authored_columns")
+            .unwrap();
+        assert_eq!(
+            content_values[authored_columns_idx],
+            Value::Nullable(Some(Box::new(Value::Array(
+                (1..=table.columns.len() as u64).map(Value::U64).collect()
+            ))))
         );
 
         let current_values = global_current_values(table, &content, Some(GlobalTime(7))).unwrap();
@@ -1127,6 +1145,33 @@ fn mergeable_commits_persist_transaction_and_history_rows() {
             .is_empty()
     );
     assert!(database.query_graph(history).unwrap().iter().next().is_some());
+}
+
+#[test]
+fn stored_authored_columns_require_a_canonical_physical_id_array() {
+    assert_eq!(
+        authored_column_ids_from_value(Value::Array(vec![Value::U64(2), Value::U64(5)]))
+            .unwrap(),
+        BTreeSet::from([PhysicalColumnId(2), PhysicalColumnId(5)])
+    );
+    assert!(matches!(
+        authored_column_ids_from_value(Value::Array(vec![Value::U64(2), Value::U64(2)])),
+        Err(Error::InvalidStoredValue(
+            "authored physical column ids must be strictly increasing"
+        ))
+    ));
+    assert!(matches!(
+        authored_column_ids_from_value(Value::Array(vec![Value::U64(5), Value::U64(2)])),
+        Err(Error::InvalidStoredValue(
+            "authored physical column ids must be strictly increasing"
+        ))
+    ));
+    assert!(matches!(
+        authored_column_ids_from_value(Value::Bytes(Vec::new())),
+        Err(Error::InvalidStoredValue(
+            "authored columns must be an array of physical column ids"
+        ))
+    ));
 }
 
 #[test]

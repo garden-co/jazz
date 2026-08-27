@@ -2,6 +2,91 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    pub(super) fn authored_column_ids_for_names(
+        &self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        columns: Option<&BTreeSet<String>>,
+    ) -> Result<Option<BTreeSet<PhysicalColumnId>>, Error> {
+        let Some(columns) = columns else {
+            return Ok(None);
+        };
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(table))
+            .ok_or(Error::InvalidStoredValue(
+                "authored columns physical table mapping missing",
+            ))?;
+        columns
+            .iter()
+            .map(|column| {
+                mapping
+                    .columns
+                    .get(column)
+                    .copied()
+                    .ok_or(Error::InvalidStoredValue(
+                        "authored column physical mapping missing",
+                    ))
+            })
+            .collect::<Result<BTreeSet<_>, _>>()
+            .map(Some)
+    }
+
+    pub(super) fn authored_column_names_for_ids(
+        &self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        columns: Option<&BTreeSet<PhysicalColumnId>>,
+    ) -> Result<Option<BTreeSet<String>>, Error> {
+        let Some(columns) = columns else {
+            return Ok(None);
+        };
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(table))
+            .ok_or(Error::InvalidStoredValue(
+                "authored columns physical table mapping missing",
+        ))?;
+        let mut names_by_id = BTreeMap::new();
+        for (name, id) in &mapping.columns {
+            if names_by_id.insert(*id, name.clone()).is_some() {
+                return Err(Error::InvalidStoredValue(
+                    "physical table maps multiple authored columns to one id",
+                ));
+            }
+        }
+        columns
+            .iter()
+            .map(|column| {
+                names_by_id.get(column).cloned().ok_or(Error::InvalidStoredValue(
+                    "stored authored column id is absent from its schema mapping",
+                ))
+            })
+            .collect::<Result<BTreeSet<_>, _>>()
+            .map(Some)
+    }
+
+    pub(super) fn authored_columns_for_version(
+        &self,
+        version: &VersionRow,
+    ) -> Result<Option<BTreeSet<String>>, Error> {
+        let schema_version = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "authored columns schema version alias missing",
+            ))?;
+        let ids = version.authored_column_ids()?;
+        self.authored_column_names_for_ids(
+            schema_version,
+            version.table(),
+            ids.as_ref(),
+        )
+    }
+
     pub(super) fn prepared_physical_write_plan(
         &mut self,
         schema_version: SchemaVersionId,

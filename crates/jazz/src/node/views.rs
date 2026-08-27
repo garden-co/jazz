@@ -1933,7 +1933,7 @@ where
         // authored cells were replaced by typed nulls.
         let has_complete_authored_payload = has_authored_layout
             && (version.layer() == VersionLayer::Deletion
-                || match version.authored_columns(&authored_table)? {
+                || match self.authored_columns_for_version(version)? {
                     Some(authored) => authored.iter().all(|column| {
                         version
                             .cell(&authored_table, column)

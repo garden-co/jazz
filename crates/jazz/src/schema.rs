@@ -1040,11 +1040,12 @@ impl TableSchema {
                 storage_column_type(user_column).nullable(),
             )
         }));
-        // Absent on legacy records. When present, this is a serialized set of
-        // user columns explicitly authored by this version.
+        // Absent on legacy records. When present, this is a strictly ordered
+        // set of node-local physical column ids explicitly authored by this
+        // version. Logical names remain a wire/schema-boundary concern.
         columns.push(column(
             "authored_columns",
-            GrooveColumnType::Bytes.nullable(),
+            GrooveColumnType::U64.array_of().nullable(),
         ));
 
         GrooveTableSchema::new(name, columns)
@@ -1123,7 +1124,7 @@ impl TableSchema {
         }));
         content_columns.push(column(
             "authored_columns",
-            GrooveColumnType::Bytes.nullable(),
+            GrooveColumnType::U64.array_of().nullable(),
         ));
         let mut content_table = GrooveTableSchema::new(
             format!("jazz_{}_global_current", self.name),
@@ -1188,7 +1189,7 @@ impl TableSchema {
         }));
         content_columns.push(column(
             "authored_columns",
-            GrooveColumnType::Bytes.nullable(),
+            GrooveColumnType::U64.array_of().nullable(),
         ));
         vec![
             GrooveTableSchema::new(format!("jazz_{}_ahead_current", self.name), content_columns)
@@ -2045,6 +2046,8 @@ mod tests {
         let current_tables = schema.tables[0].global_current_storage_tables();
         let global_current = &current_tables[0];
         let register_global_current = &current_tables[1];
+        let ahead_tables = schema.tables[0].ahead_current_storage_tables();
+        let ahead_current = &ahead_tables[0];
 
         for table in [&history, &register, global_current, register_global_current] {
             for name in ["created_by", "updated_by"] {
@@ -2059,6 +2062,19 @@ mod tests {
                     table.name
                 );
             }
+        }
+
+        for table in [&history, global_current, ahead_current] {
+            assert_eq!(
+                table
+                    .columns
+                    .iter()
+                    .find(|column| column.name == "authored_columns")
+                    .map(|column| &column.column_type),
+                Some(&GrooveColumnType::U64.array_of().nullable()),
+                "authored_columns must remain a native physical-id array in {}",
+                table.name
+            );
         }
 
         assert!(

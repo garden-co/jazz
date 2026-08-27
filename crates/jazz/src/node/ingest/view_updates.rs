@@ -190,8 +190,8 @@ where
                 MergeStrategy::Lww => {
                     let mut best: Option<(crate::time::TxTimeSortKey, Value)> = None;
                     for version in heads {
-                        if version
-                            .authored_columns(table_schema)?
+                        if self
+                            .authored_columns_for_version(version)?
                             .is_some_and(|columns| !columns.contains(&column.name))
                         {
                             continue;
