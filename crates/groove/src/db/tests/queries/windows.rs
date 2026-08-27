@@ -810,3 +810,114 @@ async fn top_by_maintains_weighted_window_across_duplicate_lifecycle() {
         ]
     );
 }
+
+#[futures_test::test]
+async fn top_by_incremental_window_matches_fresh_hydration_across_seeded_updates() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
+    let graph = history_top_by_stamp_asc_offset(1, 2);
+    let subscription = database.subscribe_one_sink(graph.clone()).await.unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+    let mut materialized = std::collections::BTreeMap::new();
+    let mut known = std::collections::BTreeMap::<(u64, u64, u64), String>::new();
+
+    // Seed a full window in one partition so the oracle cannot accidentally
+    // spend its whole generated trace below the offset boundary.
+    let mut batch = database.open_batch();
+    for (stamp, title) in [(1, "seed-first"), (2, "seed-second"), (3, "seed-third")] {
+        known.insert((1, stamp, 1), title.to_owned());
+        batch.insert("history", history_values(1, stamp, 1, title));
+    }
+    database.commit_batch(batch).await.unwrap();
+    apply_top_by_deltas(&mut materialized, subscription.recv().unwrap());
+    let mut seed = 0x70_b9_u64;
+
+    for step in 0..72 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let key = (
+            (seed >> 4) % 3 + 1,
+            (seed >> 12) % 8 + 1,
+            (seed >> 20) % 3 + 1,
+        );
+        let mut batch = database.open_batch();
+        match ((seed >> 28) % 3, known.get(&key)) {
+            (0, None) => {
+                let title = format!("insert-{step}");
+                known.insert(key, title.clone());
+                batch.insert("history", history_values(key.0, key.1, key.2, &title));
+            }
+            (1, Some(_)) => {
+                let title = format!("replace-{step}");
+                known.insert(key, title.clone());
+                batch.update("history", history_values(key.0, key.1, key.2, &title));
+            }
+            (_, Some(_)) => {
+                known.remove(&key);
+                batch.delete("history", history_key(key.0, key.1, key.2));
+            }
+            _ => continue,
+        }
+        database.commit_batch(batch).await.unwrap();
+
+        while let Ok(deltas) = subscription.try_recv() {
+            apply_top_by_deltas(&mut materialized, deltas);
+        }
+
+        // A separately hydrated consumer must agree with the explicit reference
+        // model, as must the incrementally maintained consumer.
+        let hydrated = database.subscribe_one_sink(graph.clone()).await.unwrap();
+        let mut expected = std::collections::BTreeMap::new();
+        apply_top_by_deltas(&mut expected, hydrated.recv().unwrap());
+        assert!(database.unsubscribe(hydrated.id()));
+        let oracle = top_by_offset_window_oracle(&known);
+        assert_eq!(
+            expected, oracle,
+            "fresh hydration disagreed with the reference window after seed step {step}"
+        );
+        assert_eq!(
+            materialized, oracle,
+            "incremental TopBy differed from fresh hydration after seed step {step}"
+        );
+    }
+}
+
+fn top_by_offset_window_oracle(
+    known: &std::collections::BTreeMap<(u64, u64, u64), String>,
+) -> std::collections::BTreeMap<(u64, u64, u64, String), i64> {
+    let mut per_row = std::collections::BTreeMap::<u64, Vec<(u64, u64, String)>>::new();
+    for (&(row, stamp, node), title) in known {
+        per_row
+            .entry(row)
+            .or_default()
+            .push((stamp, node, title.clone()));
+    }
+    let mut window = std::collections::BTreeMap::new();
+    for (row, records) in &mut per_row {
+        records.sort();
+        for (stamp, node, title) in records.iter().skip(1).take(2) {
+            window.insert((*row, *stamp, *node, title.clone()), 1);
+        }
+    }
+    window
+}
+
+fn apply_top_by_deltas(
+    materialized: &mut std::collections::BTreeMap<(u64, u64, u64, String), i64>,
+    deltas: RecordDeltas,
+) {
+    for (values, weight) in deltas.to_values().unwrap() {
+        let [
+            Value::U64(row),
+            Value::U64(stamp),
+            Value::U64(node),
+            Value::String(title),
+        ] = values.as_slice()
+        else {
+            panic!("expected history delta, got {values:?}");
+        };
+        *materialized
+            .entry((*row, *stamp, *node, title.clone()))
+            .or_default() += weight;
+    }
+    materialized.retain(|_, weight| *weight != 0);
+}
