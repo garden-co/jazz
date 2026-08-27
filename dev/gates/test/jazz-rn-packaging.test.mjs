@@ -124,10 +124,7 @@ test("jazz-rn autolinks a New-Architecture relay host without legacy artifacts",
   assert.match(podspec, /requires the React Native New Architecture/);
   assert.match(androidBuild, /relayNativeArtifactsPresent/);
   assert.match(androidBuild, /externalNativeBuild/);
-  assert.match(
-    androidBuild,
-    /sourceSets\s*\{\s*main\s*\{\s*java\.srcDir\("\$buildDir\/generated\/source\/codegen\/java"\)\s*}\s*}/s,
-  );
+  assert.doesNotMatch(androidBuild, /generated\/source\/codegen\/java/);
   assert.doesNotMatch(androidBuild, /KotlinCompile/);
   assert.doesNotMatch(androidBuild, /AndroidManifestNew/);
   assert.match(androidBuild, /requires the React Native New Architecture/);
@@ -158,7 +155,7 @@ test("jazz-rn reserves a thin binary relay TurboModule boundary for matching nat
   );
   const androidRelay = await readFile(
     new URL(
-      "../../../crates/jazz-rn/android/src/main/java/com/jazzrn/JazzRelayModule.kt",
+      "../../../crates/jazz-rn/android/src/main/java/com/jazzrn/JazzRelayModule.java",
       import.meta.url,
     ),
     "utf8",
@@ -172,8 +169,12 @@ test("jazz-rn reserves a thin binary relay TurboModule boundary for matching nat
   assert.match(relay, /matching native development or release build/);
   assert.match(codegenGate, /for platform in android ios/);
   assert.match(codegenGate, /NativeJazzRelay/);
+  assert.match(codegenGate, /com\/facebook\/fbreact\/specs\/NativeJazzRelaySpec\.java/);
+  assert.match(codegenGate, /class NativeJazzRelaySpec/);
   assert.match(androidRelay, /JazzRelayBridge/);
-  assert.match(androidRelay, /getAbiVersion\(\): Double = bridge\?\.abiVersion\(\) \?: 0\.0/);
+  assert.match(androidRelay, /import com\.facebook\.fbreact\.specs\.NativeJazzRelaySpec/);
+  assert.match(androidRelay, /class JazzRelayModule extends NativeJazzRelaySpec/);
+  assert.match(androidRelay, /double getAbiVersion\(\)/);
   assert.match(androidRelay, /E_JAZZ_RELAY_UNAVAILABLE/);
 });
 

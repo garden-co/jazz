@@ -27,4 +27,15 @@ for platform in android ios; do
     echo "React Native Codegen did not generate the JazzRelay command methods for Android" >&2
     exit 1
   fi
+  if [[ "$platform" == android ]]; then
+    generated_spec=$(find "$output_dir/$platform" \
+      -path '*/generated/source/codegen/java/com/facebook/fbreact/specs/NativeJazzRelaySpec.java' \
+      -type f -print -quit)
+    if [[ -z "$generated_spec" ]] \
+      || ! rg -q 'package com\.facebook\.fbreact\.specs;' "$generated_spec" \
+      || ! rg -q 'class NativeJazzRelaySpec' "$generated_spec"; then
+      echo "React Native Codegen did not generate the NativeJazzRelaySpec Java base class in its canonical package" >&2
+      exit 1
+    fi
+  fi
 done

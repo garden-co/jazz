@@ -67,15 +67,6 @@ android {
     buildConfig true
   }
 
-  // React Native codegen emits the Java TurboModule base class here. Keep that
-  // generated Java directory in the library's main source set so Kotlin can
-  // resolve NativeJazzRelaySpec when compiling the linked AAR.
-  sourceSets {
-    main {
-      java.srcDir("$buildDir/generated/source/codegen/java")
-    }
-  }
-
   buildTypes {
     release {
       minifyEnabled false
