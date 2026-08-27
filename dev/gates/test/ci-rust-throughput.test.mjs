@@ -1360,11 +1360,7 @@ test("CodSpeed builds the BandChat caught-up fast-resume receipt", () => {
     /cargo codspeed build [^\n]*--package jazz-example-band-chat-benchmark[^\n]*--bench fast_resume/,
   );
   assert.throws(
-    () =>
-      assert.match(
-        codspeedWorkflow.replace(" --bench fast_resume", ""),
-        /--bench fast_resume/,
-      ),
+    () => assert.match(codspeedWorkflow.replace(" --bench fast_resume", ""), /--bench fast_resume/),
     /fast_resume/,
   );
 });
