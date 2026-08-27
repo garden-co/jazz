@@ -914,6 +914,11 @@ self.database.finish_persistence(persisted)?;
             .map_err(Error::Groove)
     }
 
+    /// Whether an earlier non-blocking query-runtime turn left resumable work.
+    pub(crate) fn has_pending_query_runtime(&self) -> bool {
+        self.database.has_pending_progress()
+    }
+
     pub(crate) async fn set_initial_sync_flush_cadence(
         &mut self,
         every: usize,
