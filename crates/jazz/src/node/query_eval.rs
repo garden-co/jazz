@@ -107,6 +107,16 @@ fn is_public_aggregate_result_member(
     aggregate_query && matches!(member, ResultMemberEntry::Synthetic { .. })
 }
 
+/// A host-settled result membership and the slice offset to apply relative to
+/// that membership.  A non-durable client may retain only a bounded authority
+/// window, so a narrower read inside that window cannot use its absolute
+/// offset against the local cache.
+#[derive(Clone, Debug)]
+struct ClientSettledBindingView {
+    key: BindingViewKey,
+    relative_offset: usize,
+}
+
 fn replace_stale_authoritative_occurrence_member(
     result_set: &mut BTreeSet<ResultMemberEntry>,
     result_payloads: &mut BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
@@ -786,7 +796,16 @@ where
             (shape, binding)
         };
         let mut input_shape = self.normalized_row_set_shape(shape, binding)?;
-        let settled_window_input = (settled_binding_view.is_some()
+        let settled_view_matches_query_window = settled_binding_view.is_some_and(|binding_view| {
+            self.query
+                .registered_shapes
+                .get(&binding_view.shape_id)
+                .is_some_and(|source_shape| {
+                    source_shape.query().offset == shape.query().offset
+                        && source_shape.query().limit == shape.query().limit
+                })
+        });
+        let settled_window_input = (settled_view_matches_query_window
             && shape.query().aggregate.is_none())
         .then(|| match input_shape.nodes.get(&input_shape.root) {
             Some(RowSetExpr::Slice { input, .. }) => Some(input.clone()),
@@ -1038,13 +1057,21 @@ where
             self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
             return Ok(rows);
         }
+        let client_settled_binding_view = (authorization_mode
+            == QueryAuthorizationMode::ClientLocal)
+            .then(|| {
+                self.client_settled_binding_view_for_query(
+                    shape,
+                    binding,
+                    tier,
+                    &ReadViewSpec::default(),
+                )
+            })
+            .flatten();
         let settled_binding_view = match authorization_mode {
-            QueryAuthorizationMode::ClientLocal => self.client_settled_binding_view_key_for_query(
-                shape,
-                binding,
-                tier,
-                &ReadViewSpec::default(),
-            ),
+            QueryAuthorizationMode::ClientLocal => {
+                client_settled_binding_view.as_ref().map(|view| view.key)
+            }
             QueryAuthorizationMode::TrustedServing => (tier == DurabilityTier::Global)
                 .then(|| self.settled_binding_view_key_for_query(shape, binding))
                 .transpose()?
@@ -1079,7 +1106,33 @@ where
         } else {
             None
         };
-        let (shape, binding) = inline_query
+        let rebased_window_query = client_settled_binding_view
+            .as_ref()
+            .filter(|view| {
+                view.relative_offset != 0 || {
+                    self.query
+                        .registered_shapes
+                        .get(&view.key.shape_id)
+                        .is_some_and(|source| source.query().limit != shape.query().limit)
+                }
+            })
+            .map(|view| {
+                let schema = self
+                    .catalogue
+                    .catalogue_schemas
+                    .get(&shape.schema_version())
+                    .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
+                let mut rebased_query = shape.query().clone();
+                rebased_query.offset = view.relative_offset;
+                let rebased_shape = rebased_query
+                    .validate_with_schema_version(&schema.schema, shape.schema_version())?;
+                let rebased_binding = rebased_shape.bind(binding.values().clone())?;
+                Ok::<_, Error>((rebased_shape, rebased_binding))
+            })
+            .transpose()?;
+        let (shape, binding) = rebased_window_query
+            .as_ref()
+            .or(inline_query.as_ref())
             .as_ref()
             .map(|(shape, binding)| (shape, binding))
             .unwrap_or((shape, binding));
@@ -1418,24 +1471,107 @@ where
         tier: DurabilityTier,
         read_view: &ReadViewSpec,
     ) -> Option<BindingViewKey> {
-        (tier >= DurabilityTier::Edge).then(|| {
-            BindingViewKey::new(
-                shape.shape_id(),
-                binding.binding_id(),
-                RegisterShapeOptions {
-                    // A non-durable browser-side runtime consumes the worker
-                    // relay's Edge handoff rather than the worker's Global
-                    // upstream coverage.
-                    tier: if self.authored_commit_durability == DurabilityTier::None {
-                        tier
-                    } else {
-                        DurabilityTier::Global
-                    },
-                    read_view: read_view.clone(),
-                    ..RegisterShapeOptions::default()
+        self.client_settled_binding_view_for_query(shape, binding, tier, read_view)
+            .map(|view| view.key)
+    }
+
+    fn client_settled_binding_view_for_query(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        read_view: &ReadViewSpec,
+    ) -> Option<ClientSettledBindingView> {
+        let settled_tier = if tier >= DurabilityTier::Edge {
+            tier
+        } else if self.authored_commit_durability == DurabilityTier::None
+            && shape.query().offset != 0
+        {
+            // The browser main thread keeps received rows only as a
+            // materialized cache. After its worker has supplied an Edge
+            // window, a Local read of that same nonzero-offset shape must
+            // consume the selected membership rather than offsetting the
+            // small cache a second time. Before that receipt, preserve the
+            // ordinary local overlay path.
+            DurabilityTier::Edge
+        } else {
+            return None;
+        };
+        let binding_view = BindingViewKey::new(
+            shape.shape_id(),
+            binding.binding_id(),
+            RegisterShapeOptions {
+                // A non-durable browser-side runtime consumes the worker
+                // relay's Edge handoff rather than the worker's Global
+                // upstream coverage.
+                tier: if self.authored_commit_durability == DurabilityTier::None {
+                    settled_tier
+                } else {
+                    DurabilityTier::Global
+                },
+                read_view: read_view.clone(),
+                ..RegisterShapeOptions::default()
+            }
+            .read_view_key(),
+        );
+        if tier == DurabilityTier::Local
+            && !self.query.settled_result_sets.contains_key(&binding_view)
+        {
+            // A store read may request a narrower window than the one the
+            // browser worker already delivered. It is safe to reuse a source
+            // only when the source query is identical apart from its root
+            // window and fully contains the requested window. The caller
+            // applies the requested slice relative to that source membership.
+            let target = shape.query();
+            let target_end = target
+                .limit
+                .map(|limit| target.offset.saturating_add(limit));
+            let mut target_without_window = target.clone();
+            target_without_window.offset = 0;
+            target_without_window.limit = None;
+            let read_view_key = RegisterShapeOptions {
+                tier: DurabilityTier::Edge,
+                read_view: read_view.clone(),
+                ..RegisterShapeOptions::default()
+            }
+            .read_view_key();
+            return self.query.registered_shapes.values().find_map(|source_shape| {
+                if source_shape.schema_version() != shape.schema_version()
+                    || source_shape.params() != shape.params()
+                {
+                    return None;
                 }
-                .read_view_key(),
-            )
+                let source = source_shape.query();
+                let mut source_without_window = source.clone();
+                source_without_window.offset = 0;
+                source_without_window.limit = None;
+                if source_without_window != target_without_window || source.offset > target.offset {
+                    return None;
+                }
+                let source_end = source
+                    .limit
+                    .map(|limit| source.offset.saturating_add(limit));
+                if matches!((source_end, target_end), (Some(source_end), Some(target_end)) if target_end > source_end)
+                    || matches!((source_end, target_end), (Some(_), None))
+                {
+                    return None;
+                }
+                let key = BindingViewKey::new(
+                    source_shape.shape_id(),
+                    binding.binding_id(),
+                    read_view_key,
+                );
+                self.query.settled_result_sets.contains_key(&key).then_some(
+                    ClientSettledBindingView {
+                        key,
+                        relative_offset: target.offset - source.offset,
+                    },
+                )
+            });
+        }
+        Some(ClientSettledBindingView {
+            key: binding_view,
+            relative_offset: 0,
         })
     }
 
@@ -2795,6 +2931,46 @@ where
             read_view,
             QueryAuthorizationMode::TrustedServing,
             None,
+            PreparedClaimBindingMode::Strict,
+        )
+        .await
+    }
+
+    /// Re-publish an Edge window from a durable relay to its non-durable
+    /// browser peer. The relay's Global receipt already names the
+    /// authority-selected members, so this must consume that membership as
+    /// its source instead of applying the query window a second time.
+    pub(crate) async fn open_seeded_relay_edge_subscription_view(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorSubject,
+        read_view: &ReadViewSpec,
+    ) -> Result<
+        (
+            MultisinkSubscription,
+            MaintainedSubscriptionView,
+            MaintainedTerminalSchemas,
+            super::maintained_subscription_view::ResultTransitions,
+            BTreeMap<String, TableSchema>,
+            bool,
+        ),
+        Error,
+    > {
+        let settled_binding_view = self.client_settled_binding_view_key_for_query(
+            shape,
+            binding,
+            DurabilityTier::Edge,
+            read_view,
+        );
+        self.open_seeded_maintained_subscription_view_in_authorization_mode(
+            shape,
+            binding,
+            identity,
+            DurabilityTier::Edge,
+            read_view,
+            QueryAuthorizationMode::ClientLocal,
+            settled_binding_view,
             PreparedClaimBindingMode::Strict,
         )
         .await

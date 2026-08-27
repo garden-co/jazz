@@ -184,6 +184,13 @@ where
 
     pub(crate) fn apply_unsubscribe(&mut self, subscription: SubscriptionKey) {
         let binding_view_key = self.binding_view_key_for_subscription(subscription).ok();
+        let retain_bounded_browser_membership = self.authored_commit_durability
+            == DurabilityTier::None
+            && self
+                .query
+                .registered_shapes
+                .get(&subscription.shape_id)
+                .is_some_and(|shape| shape.query().offset != 0);
         if let Some(bindings) = self
             .query
             .registered_bindings
@@ -194,8 +201,10 @@ where
         if let Some(binding_view_key) = binding_view_key
             && !self.registered_binding_resolves_to_binding_view_key(binding_view_key)
         {
-            self.clear_settled_result_view(binding_view_key);
-            self.query.settled_program_facts.remove(&binding_view_key);
+            if !retain_bounded_browser_membership {
+                self.clear_settled_result_view(binding_view_key);
+                self.query.settled_program_facts.remove(&binding_view_key);
+            }
             self.query
                 .known_state_declared_binding_views
                 .remove(&binding_view_key);
@@ -344,12 +353,15 @@ where
     pub(crate) fn settled_result_transitions_for_subscription(
         &self,
         subscription: SubscriptionKey,
+        source_binding_view: Option<BindingViewKey>,
         previous_member_result_set: &BTreeSet<ResultMemberEntry>,
         previous_program_fact_set: &BTreeSet<ProgramFactEntry>,
         result_table_filter: Option<&str>,
         output_tables: &BTreeMap<String, TableSchema>,
     ) -> Result<Option<super::maintained_subscription_view::ResultTransitions>, Error> {
-        let binding_view_key = self.binding_view_key_for_subscription(subscription)?;
+        let binding_view_key = source_binding_view
+            .map(Ok)
+            .unwrap_or_else(|| self.binding_view_key_for_subscription(subscription))?;
         // Settled binding views are shared by canonical query binding, while a
         // table read policy is identity-scoped. Never relay a synthetic
         // aggregate from that shared cache across an identity boundary; the
