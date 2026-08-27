@@ -22,7 +22,7 @@ struct FailTransactionReadMemoryStorage {
 impl FailTransactionReadMemoryStorage {
     fn new(column_families: &[&str]) -> Self {
         Self {
-            inner: MemoryStorage::new(column_families),
+            inner: MemoryStorage::new(column_families).expect("valid memory storage families"),
             fail_after_transaction_reads: Rc::new(Cell::new(None)),
         }
     }

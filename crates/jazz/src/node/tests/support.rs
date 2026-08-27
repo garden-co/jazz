@@ -542,7 +542,7 @@ struct ReopenRefusingMemoryStorage {
 impl ReopenRefusingMemoryStorage {
     fn new(column_families: &[&str]) -> Self {
         Self {
-            inner: MemoryStorage::new(column_families),
+            inner: MemoryStorage::new(column_families).expect("valid memory storage families"),
         }
     }
 }

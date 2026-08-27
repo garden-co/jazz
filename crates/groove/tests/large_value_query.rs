@@ -34,9 +34,12 @@ async fn count_star_does_not_fetch_an_unused_indirect_column() {
         })
         .collect::<Vec<_>>();
     let (provider, control) = TestChunkProvider::controlled(chunks);
-    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     database.set_chunk_provider(Rc::new(provider));
     let descriptor = RecordDescriptor::new([("body", ValueType::String)]);
     let source = GraphBuilder::values(
@@ -86,9 +89,12 @@ async fn projection_does_not_fetch_an_unselected_indirect_column() {
         })
         .collect::<Vec<_>>();
     let (provider, control) = TestChunkProvider::controlled(chunks);
-    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     database.set_chunk_provider(Rc::new(provider));
     let descriptor = RecordDescriptor::new([("id", ValueType::U64), ("body", ValueType::Bytes)]);
     let graph = GraphBuilder::values(
@@ -126,9 +132,12 @@ async fn filter_does_not_fetch_an_indirect_column_the_predicate_does_not_referen
         })
         .collect::<Vec<_>>();
     let (provider, control) = TestChunkProvider::controlled(chunks);
-    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     database.set_chunk_provider(Rc::new(provider));
     let descriptor = RecordDescriptor::new([("id", ValueType::U64), ("body", ValueType::Bytes)]);
     let graph = GraphBuilder::values(
@@ -167,9 +176,12 @@ async fn join_fetches_only_key_and_selected_large_fields() {
         })
         .collect::<Vec<_>>();
     let (provider, control) = TestChunkProvider::controlled(chunks);
-    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     database.set_chunk_provider(Rc::new(provider));
     let left = GraphBuilder::values(
         RecordDescriptor::new([("id", ValueType::U64), ("body", ValueType::String)]),
@@ -233,9 +245,12 @@ async fn subscription_materializes_large_insert_and_update_deltas_atomically() {
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let mut database = Database::new(schema, MemoryStorage::new(&column_family_refs))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        schema,
+        MemoryStorage::new(&column_family_refs).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     database.set_chunk_provider(Rc::new(provider));
     let subscription = database
         .subscribe_one_sink(GraphBuilder::table("docs"))
@@ -307,9 +322,12 @@ async fn streaming_checksum_subscription_retracts_old_source_and_installs_new_so
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let mut database = Database::new(schema, MemoryStorage::new(&column_family_refs))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        schema,
+        MemoryStorage::new(&column_family_refs).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     database.set_chunk_provider(Rc::new(provider));
     let subscription = database
         .subscribe_one_sink(GraphBuilder::table("files").streaming_checksum(
@@ -381,9 +399,12 @@ async fn indirect_string_materializes_as_the_ordinary_logical_query_value() {
         })
         .collect::<Vec<_>>();
     let (provider, control) = TestChunkProvider::controlled(chunks);
-    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     database.set_chunk_provider(Rc::new(provider));
     let descriptor = RecordDescriptor::new([("body", ValueType::String)]);
     let graph = GraphBuilder::values(descriptor, [vec![Value::Large(prepared.value_ref)]]).unwrap();
@@ -422,9 +443,12 @@ fn query_future_stays_pending_while_required_chunks_are_paused() {
             .collect::<Vec<_>>();
         let (provider, control) = TestChunkProvider::controlled(chunks);
         control.pause();
-        let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
-            .await
-            .unwrap();
+        let mut database = Database::new(
+            DatabaseSchema::new([]),
+            MemoryStorage::new(&[]).expect("valid memory storage families"),
+        )
+        .await
+        .unwrap();
         database.set_chunk_provider(Rc::new(provider));
         let descriptor = RecordDescriptor::new([("body", ValueType::String)]);
         let graph =
@@ -464,9 +488,12 @@ async fn chunk_failure_is_reported_without_publishing_a_partial_result() {
         .collect::<Vec<_>>();
     let (provider, control) = TestChunkProvider::controlled(chunks);
     control.fail_next(ChunkError::Backend("injected failure".to_owned()));
-    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     database.set_chunk_provider(Rc::new(provider));
     let descriptor = RecordDescriptor::new([("body", ValueType::String)]);
     let graph = GraphBuilder::values(descriptor, [vec![Value::Large(prepared.value_ref)]]).unwrap();
@@ -494,9 +521,12 @@ async fn indirect_scalars_materialize_inside_composite_values() {
         })
         .collect::<Vec<_>>();
     let (provider, _) = TestChunkProvider::controlled(chunks);
-    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     database.set_chunk_provider(Rc::new(provider));
     let descriptor = RecordDescriptor::new([(
         "items",
@@ -546,9 +576,12 @@ async fn predicates_compare_indirect_strings_by_logical_value() {
         })
         .collect::<Vec<_>>();
     let (provider, _) = TestChunkProvider::controlled(chunks);
-    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     database.set_chunk_provider(Rc::new(provider));
     let descriptor = RecordDescriptor::new([("body", ValueType::String)]);
     let graph = GraphBuilder::values(descriptor, [vec![Value::Large(prepared.value_ref)]])
@@ -579,9 +612,12 @@ async fn predicates_compare_present_nullable_indirect_strings_logically() {
         )
     });
     let (provider, _) = TestChunkProvider::controlled(chunks);
-    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     database.set_chunk_provider(Rc::new(provider));
     let descriptor =
         RecordDescriptor::new([("body", ValueType::Nullable(Box::new(ValueType::String)))]);
@@ -628,9 +664,12 @@ async fn lexical_predicate_stops_chunk_requests_after_decisive_prefix_mismatch()
         })
         .collect::<Vec<_>>();
     let (provider, control) = TestChunkProvider::controlled(chunks);
-    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     database.set_chunk_provider(Rc::new(provider));
     let graph = GraphBuilder::values(
         RecordDescriptor::new([("body", ValueType::String)]),
@@ -678,9 +717,12 @@ async fn public_consolidation_future_keeps_chunk_suspension_inside_groove() {
         .collect::<Vec<_>>();
     let (provider, control) = TestChunkProvider::controlled(chunks);
     control.pause();
-    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     database.set_chunk_provider(Rc::new(provider));
     let mut consolidation = Box::pin(database.consolidate_large_value(with_tail));
     let waker = noop_waker();
@@ -734,9 +776,12 @@ async fn public_append_preparation_localizes_automatic_tail_consolidation() {
         })
         .collect::<Vec<_>>();
     let (provider, _) = TestChunkProvider::controlled(chunks);
-    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     database.set_chunk_provider(Rc::new(provider));
 
     let prepared = database
@@ -772,9 +817,12 @@ async fn json_pointer_observes_literal_indirect_json_semantics() {
         })
         .collect::<Vec<_>>();
     let (provider, _) = TestChunkProvider::controlled(chunks);
-    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     database.set_chunk_provider(Rc::new(provider));
 
     assert_eq!(
@@ -816,9 +864,12 @@ async fn root_array_json_pointer_stops_after_the_selected_complete_element() {
         .collect::<Vec<_>>();
     let total_chunks = chunks.len();
     let (provider, control) = TestChunkProvider::controlled(chunks);
-    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     database.set_chunk_provider(Rc::new(provider));
 
     assert_eq!(
@@ -853,9 +904,12 @@ async fn object_json_pointer_preserves_last_duplicate_key_semantics() {
         })
         .collect::<Vec<_>>();
     let (provider, _) = TestChunkProvider::controlled(chunks);
-    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     database.set_chunk_provider(Rc::new(provider));
     assert_eq!(
         database
@@ -885,9 +939,12 @@ async fn utf16_ranges_use_tree_metrics_and_tail_coordinates_without_prefix_hydra
         .collect::<Vec<_>>();
     let total_chunks = chunks.len();
     let (provider, control) = TestChunkProvider::controlled(chunks);
-    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     database.set_chunk_provider(Rc::new(provider));
 
     let total = prepared.value_ref.utf16_length.unwrap();
@@ -963,9 +1020,12 @@ async fn utf16_offsets_use_tree_metrics_and_reject_surrogate_interiors() {
         .collect::<Vec<_>>();
     let total_chunks = chunks.len();
     let (provider, control) = TestChunkProvider::controlled(chunks);
-    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     database.set_chunk_provider(Rc::new(provider));
 
     let prefix_utf16 = prefix.encode_utf16().count() as u64;
@@ -1046,9 +1106,12 @@ async fn sequential_cursor_reads_post_edit_logical_value_in_atomic_bounded_windo
         })
         .collect::<Vec<_>>();
     let (provider, control) = TestChunkProvider::controlled(chunks);
-    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     let owned = OwnedChunkProvider::new_with_budget(Rc::new(provider), 96 * 1024);
     database.set_owned_chunk_provider(owned.clone());
     let mut cursor = groove::large_values::LargeValueCursor::new(with_tail, 31_337).unwrap();
@@ -1106,9 +1169,12 @@ async fn cached_streaming_checksum_obeys_cooperative_work_budget() {
         })
         .collect::<Vec<_>>();
     let (provider, control) = TestChunkProvider::controlled(chunks);
-    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     let owned = OwnedChunkProvider::new_with_budget(Rc::new(provider), 4 * 1024 * 1024);
     database.set_owned_chunk_provider(owned);
 
@@ -1170,9 +1236,12 @@ async fn graph_streaming_checksum_yields_and_publishes_one_complete_row() {
         })
         .collect::<Vec<_>>();
     let (provider, control) = TestChunkProvider::controlled(chunks);
-    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     let owned = OwnedChunkProvider::new_with_budget(Rc::new(provider), 4 * 1024 * 1024);
     database.set_owned_chunk_provider(owned.clone());
     database
@@ -1227,9 +1296,12 @@ async fn graph_streaming_checksum_failure_publishes_nothing_and_can_retry() {
         })
         .collect::<Vec<_>>();
     let (provider, control) = TestChunkProvider::controlled(chunks);
-    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
-        .await
-        .unwrap();
+    let mut database = Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).expect("valid memory storage families"),
+    )
+    .await
+    .unwrap();
     let owned = OwnedChunkProvider::new_with_budget(Rc::new(provider), 128 * 1024);
     database.set_owned_chunk_provider(owned.clone());
     let descriptor = RecordDescriptor::new([("body", ValueType::Bytes)]);

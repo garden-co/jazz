@@ -4,7 +4,8 @@ use super::*;
 
 #[futures_test::test]
 async fn arg_max_by_hydrates_and_tracks_winner_changes() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -55,7 +56,8 @@ async fn arg_max_by_hydrates_and_tracks_winner_changes() {
 
 #[futures_test::test]
 async fn arg_max_by_suppresses_non_winner_and_net_zero_deltas() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_arg_max())
@@ -85,7 +87,8 @@ async fn arg_max_by_suppresses_non_winner_and_net_zero_deltas() {
 
 #[futures_test::test]
 async fn arg_max_by_handles_multi_delta_same_group_and_tie_by_pk_order() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_arg_max())
@@ -106,7 +109,8 @@ async fn arg_max_by_handles_multi_delta_same_group_and_tie_by_pk_order() {
 
 #[futures_test::test]
 async fn arg_min_by_hydrates_initial_snapshot_winner() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -135,7 +139,8 @@ async fn arg_min_by_hydrates_initial_snapshot_winner() {
 
 #[futures_test::test]
 async fn arg_min_by_tracks_lower_insert_and_current_winner_delete() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_arg_min())
@@ -176,7 +181,8 @@ async fn arg_min_by_tracks_lower_insert_and_current_winner_delete() {
 
 #[futures_test::test]
 async fn arg_min_by_handles_same_tick_replacement_and_tie_by_pk_order() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_arg_min())
@@ -207,7 +213,8 @@ async fn arg_min_by_handles_same_tick_replacement_and_tie_by_pk_order() {
 
 #[futures_test::test]
 async fn top_by_hydrates_limit_two() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -236,7 +243,8 @@ async fn top_by_hydrates_limit_two() {
 
 #[futures_test::test]
 async fn top_by_releases_departed_groups_from_runtime_state() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_top_by_stamp_asc(1))
@@ -264,7 +272,8 @@ async fn top_by_releases_departed_groups_from_runtime_state() {
 
 #[futures_test::test]
 async fn unbounded_top_by_propagates_payload_replacement_with_stable_order_key() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -292,7 +301,8 @@ async fn unbounded_top_by_propagates_payload_replacement_with_stable_order_key()
 
 #[futures_test::test]
 async fn finite_top_by_applies_stable_payload_replacement_only_inside_window() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -325,7 +335,8 @@ async fn finite_top_by_applies_stable_payload_replacement_only_inside_window() {
 
 #[futures_test::test]
 async fn top_by_finite_zero_stays_empty() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -346,7 +357,8 @@ async fn top_by_finite_zero_stays_empty() {
 
 #[futures_test::test]
 async fn top_by_boundary_insert_and_delete_updates_window() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_top_by_stamp_asc(2))
@@ -386,7 +398,8 @@ async fn top_by_boundary_insert_and_delete_updates_window() {
 
 #[futures_test::test]
 async fn top_by_suppresses_outside_window_changes() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_top_by_stamp_asc(2))
@@ -413,7 +426,8 @@ async fn top_by_suppresses_outside_window_changes() {
 
 #[futures_test::test]
 async fn top_by_descending_order_keeps_largest_values() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -442,7 +456,8 @@ async fn top_by_descending_order_keeps_largest_values() {
 
 #[futures_test::test]
 async fn top_by_offset_keeps_requested_window() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -474,7 +489,7 @@ async fn top_by_offset_keeps_requested_window() {
 
 #[futures_test::test]
 async fn top_by_orders_nullable_sort_keys_null_first() {
-    let storage = MemoryStorage::new(&["scores"]);
+    let storage = MemoryStorage::new(&["scores"]).expect("valid memory storage families");
     let mut database = Database::new(nullable_scores_schema(), storage)
         .await
         .unwrap();
@@ -527,7 +542,8 @@ async fn top_by_orders_nullable_sort_keys_null_first() {
 
 #[futures_test::test]
 async fn top_by_uses_stable_tie_field() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_top_by_stamp_asc(1))
@@ -572,7 +588,8 @@ fn union_history_top_by(offset: u64, limit: u64) -> GraphBuilder {
 
 #[futures_test::test]
 async fn top_by_counts_duplicate_multiplicity_toward_window_occupancy() {
-    let storage = MemoryStorage::new(&["history", "history_shadow"]);
+    let storage =
+        MemoryStorage::new(&["history", "history_shadow"]).expect("valid memory storage families");
     let mut database = Database::new(two_history_tables_schema(), storage)
         .await
         .unwrap();
@@ -595,7 +612,8 @@ async fn top_by_counts_duplicate_multiplicity_toward_window_occupancy() {
 
 #[futures_test::test]
 async fn top_by_offset_splits_duplicate_copies_across_boundary() {
-    let storage = MemoryStorage::new(&["history", "history_shadow"]);
+    let storage =
+        MemoryStorage::new(&["history", "history_shadow"]).expect("valid memory storage families");
     let mut database = Database::new(two_history_tables_schema(), storage)
         .await
         .unwrap();
@@ -626,7 +644,8 @@ async fn top_by_offset_splits_duplicate_copies_across_boundary() {
 
 #[futures_test::test]
 async fn top_by_emits_weighted_diff_when_duplicate_copy_enters_window() {
-    let storage = MemoryStorage::new(&["history", "history_shadow"]);
+    let storage =
+        MemoryStorage::new(&["history", "history_shadow"]).expect("valid memory storage families");
     let mut database = Database::new(two_history_tables_schema(), storage)
         .await
         .unwrap();
@@ -667,7 +686,8 @@ async fn top_by_emits_weighted_diff_when_duplicate_copy_enters_window() {
 
 #[futures_test::test]
 async fn top_by_replaces_window_tie_with_distinct_record_on_delete() {
-    let storage = MemoryStorage::new(&["history", "history_shadow"]);
+    let storage =
+        MemoryStorage::new(&["history", "history_shadow"]).expect("valid memory storage families");
     let mut database = Database::new(two_history_tables_schema(), storage)
         .await
         .unwrap();
@@ -700,7 +720,8 @@ async fn top_by_replaces_window_tie_with_distinct_record_on_delete() {
 
 #[futures_test::test]
 async fn top_by_maintains_weighted_window_across_duplicate_lifecycle() {
-    let storage = MemoryStorage::new(&["history", "history_shadow"]);
+    let storage =
+        MemoryStorage::new(&["history", "history_shadow"]).expect("valid memory storage families");
     let mut database = Database::new(two_history_tables_schema(), storage)
         .await
         .unwrap();
@@ -841,7 +862,8 @@ async fn top_by_maintains_weighted_window_across_duplicate_lifecycle() {
 
 #[futures_test::test]
 async fn top_by_incremental_window_matches_fresh_hydration_across_seeded_updates() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let graph = history_top_by_stamp_asc_offset(1, 2);
     let subscription = database.subscribe_one_sink(graph.clone()).await.unwrap();

@@ -223,7 +223,7 @@ fn open_db_with_schema(
         author,
         history_complete,
         schema,
-        MemoryStorage::new,
+        |refs| MemoryStorage::new(refs).expect("valid memory storage families"),
         "open core realistic benchmark db",
     )
 }

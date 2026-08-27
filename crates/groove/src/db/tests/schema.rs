@@ -1,6 +1,168 @@
 //! Schema admission, variants, enum registries, row encoding, and validation.
 
 use super::*;
+use crate::storage::TestStorage;
+
+fn storage_name_table(name: impl Into<String>) -> TableSchema {
+    TableSchema::new(name, [ColumnSchema::new("id", ColumnType::U64)])
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
+}
+
+fn storage_name_direct_store(name: impl Into<String>) -> DirectRecordStoreSchema {
+    DirectRecordStoreSchema::new(
+        name,
+        RecordDescriptor::new([("id", ValueType::U64)]),
+        RecordDescriptor::new([("value", ValueType::Bytes)]),
+    )
+}
+
+/// Schema names are rejected before `LayoutStorage` can create its durable
+/// class-layout marker (or issue any other storage operation).
+#[futures_test::test]
+async fn reserved_application_storage_names_fail_before_durable_open() {
+    for name in [
+        "__groove_large_values",
+        "__groove_class_meta",
+        "__groove_storage_internal_v3",
+        "indices",
+        "default",
+        "contains\0nul",
+    ] {
+        let schema = DatabaseSchema::new([storage_name_table(name)]);
+        let (storage, control) = TestStorage::controlled(&["__groove_class_meta"]);
+        let error = match Database::new_with_storage_layout(
+            schema,
+            storage,
+            StorageLayout::jazz_class_v1(),
+        )
+        .await
+        {
+            Ok(_) => panic!("reserved application storage name must fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            Error::InvalidApplicationStorageName { name: rejected, .. } if rejected == name
+        ));
+        assert!(
+            control.observed().is_empty(),
+            "{name:?} reached storage before rejection: {:?}",
+            control.observed()
+        );
+    }
+
+    let schema = DatabaseSchema::new([])
+        .with_direct_record_store(storage_name_direct_store("__groove_large_values"));
+    let (storage, control) = TestStorage::controlled(&["__groove_class_meta"]);
+    let error =
+        match Database::new_with_storage_layout(schema, storage, StorageLayout::jazz_class_v1())
+            .await
+        {
+            Ok(_) => panic!("reserved direct-record-store name must fail"),
+            Err(error) => error,
+        };
+    assert!(matches!(
+        error,
+        Error::InvalidApplicationStorageName { name, .. } if name == "__groove_large_values"
+    ));
+    assert!(control.observed().is_empty());
+}
+
+#[futures_test::test]
+async fn application_storage_names_reject_duplicates_and_are_case_sensitive() {
+    let duplicate = DatabaseSchema::new([storage_name_table("records")])
+        .with_direct_record_store(storage_name_direct_store("records"));
+    let error = match Database::new(
+        duplicate,
+        MemoryStorage::new(&["records"]).expect("valid memory storage families"),
+    )
+    .await
+    {
+        Ok(_) => panic!("duplicate application storage name must fail"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        Error::DuplicateApplicationStorageName(name) if name == "records"
+    ));
+
+    // Backend CF identity is byte/case-sensitive. Reserve only the exact
+    // engine namespace rather than silently folding app names differently by
+    // backend.
+    let schema = DatabaseSchema::new([storage_name_table("__GROOVE_large_values")]);
+    let storage = MemoryStorage::new(&["__GROOVE_large_values", LARGE_VALUE_METADATA_CF])
+        .expect("valid memory storage families");
+    Database::new(schema, storage)
+        .await
+        .expect("case-distinct application name is valid");
+}
+
+#[futures_test::test]
+async fn application_storage_name_length_is_portable_before_open() {
+    let too_long = "a".repeat(crate::storage::MAX_APPLICATION_STORAGE_NAME_BYTES + 1);
+    let schema = DatabaseSchema::new([storage_name_table(too_long.clone())]);
+    let (storage, control) = TestStorage::controlled(&["__groove_class_meta"]);
+    let error =
+        match Database::new_with_storage_layout(schema, storage, StorageLayout::jazz_class_v1())
+            .await
+        {
+            Ok(_) => panic!("oversized name must be rejected before storage access"),
+            Err(error) => error,
+        };
+    assert!(matches!(
+        error,
+        Error::InvalidApplicationStorageName { name, .. } if name == too_long
+    ));
+    assert!(control.observed().is_empty());
+}
+
+#[futures_test::test]
+async fn live_table_registration_cannot_bypass_application_storage_namespace_checks() {
+    let too_long = "a".repeat(crate::storage::MAX_APPLICATION_STORAGE_NAME_BYTES + 1);
+    for name in [
+        "__groove_class_meta".to_owned(),
+        "indices".to_owned(),
+        "default".to_owned(),
+        "contains\0nul".to_owned(),
+        too_long,
+    ] {
+        let (storage, control) = TestStorage::controlled(&[LARGE_VALUE_METADATA_CF]);
+        let mut database = Database::new(DatabaseSchema::new([]), storage)
+            .await
+            .expect("empty database opens");
+        control.take_observed();
+
+        let error = database
+            .register_table(storage_name_table(name.clone()))
+            .expect_err("reserved table must not enter the live schema");
+        assert!(matches!(
+            error,
+            Error::InvalidApplicationStorageName { name: rejected, .. } if rejected == name
+        ));
+        assert!(database.table_schema(&name).is_err());
+        assert!(
+            control.observed().is_empty(),
+            "live registration for {name:?} reached durable storage: {:?}",
+            control.observed()
+        );
+    }
+
+    let direct = storage_name_direct_store("already_direct");
+    let schema = DatabaseSchema::new([]).with_direct_record_store(direct);
+    let (storage, control) = TestStorage::controlled(&["already_direct", LARGE_VALUE_METADATA_CF]);
+    let mut database = Database::new(schema, storage)
+        .await
+        .expect("schema with direct store opens");
+    control.take_observed();
+    let error = database
+        .register_table(storage_name_table("already_direct"))
+        .expect_err("table must not alias a direct record store");
+    assert!(matches!(
+        error,
+        Error::DuplicateApplicationStorageName(name) if name == "already_direct"
+    ));
+    assert!(control.observed().is_empty());
+}
 
 #[futures_test::test]
 async fn live_variant_table_evolves_direct_payload_enum_registry_before_new_layout() {
@@ -11,7 +173,8 @@ async fn live_variant_table_evolves_direct_payload_enum_registry_before_new_layo
     )
     .nullable();
     let schema = DatabaseSchema::new([live_variant_enum_table(old_state)]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let mut database = Database::new(schema, storage).await.unwrap();
 
     database
@@ -113,7 +276,8 @@ async fn live_table_evolves_nested_payload_and_scalar_enum_registries() {
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let mut database = Database::new(schema, storage).await.unwrap();
 
     database
@@ -164,7 +328,8 @@ async fn live_table_evolves_nested_payload_and_scalar_enum_registries() {
 async fn live_table_rejects_non_additive_enum_registry_mutations() {
     let old_payload = payload_enum_type(44, [("draft", ValueType::U64)]).nullable();
     let schema = DatabaseSchema::new([live_variant_enum_table(old_payload.clone())]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let mut database = Database::new(schema, storage).await.unwrap();
     let incompatible = [
         payload_enum_type(44, [("renamed", ValueType::U64)]).nullable(),

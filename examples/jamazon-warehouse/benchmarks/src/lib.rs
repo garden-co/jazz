@@ -41,7 +41,7 @@ impl Fixture {
         let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         let db = block_on(Db::open(DbConfig::new(
             schema,
-            MemoryStorage::new(&refs),
+            MemoryStorage::new(&refs).expect("valid memory storage families"),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x6a; 16]),
                 author: AuthorSubject::SYSTEM,

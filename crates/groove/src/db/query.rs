@@ -223,7 +223,7 @@ impl Database {
     /// #         ColumnSchema::new("year", ColumnType::U64),
     /// #     ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #       .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// #     Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await
+    /// #     Database::new(schema, MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families")).await
     /// # }
     /// # let mut database = db().await?;
     /// let subscription = database.subscribe_one_sink(GraphBuilder::table("albums")).await?;
@@ -301,7 +301,7 @@ impl Database {
     /// #         ColumnSchema::new("year", ColumnType::U64),
     /// #     ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #       .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// #     Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await
+    /// #     Database::new(schema, MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families")).await
     /// # }
     /// # let mut database = db().await?;
     /// # let mut batch = database.open_batch();
@@ -349,7 +349,7 @@ impl Database {
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families")).await?;
     /// let query = Query::Select(Box::new(
     ///     Select::new([SelectItem::Wildcard])
     ///         .from([TableRef::named("albums")])
@@ -404,7 +404,7 @@ impl Database {
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families")).await?;
     /// # let mut batch = database.open_batch();
     /// # batch.insert("albums", vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)]);
     /// # let applied = database.apply_batch(batch).await?;
@@ -571,7 +571,7 @@ impl Database {
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families")).await?;
     /// let binding_descriptor = RecordDescriptor::new([("year", ColumnType::U64.clone())]);
     /// let shape = database.prepare_one_sink(
     ///     GraphBuilder::join(
@@ -676,7 +676,7 @@ impl Database {
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families")).await?;
     /// # let mut batch = database.open_batch();
     /// # batch.insert("albums", vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)]);
     /// # batch.insert("albums", vec![Value::U64(2), Value::String("Blue Train".into()), Value::U64(1957)]);
@@ -720,7 +720,7 @@ impl Database {
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families")).await?;
     /// # let mut batch = database.open_batch();
     /// # batch.insert("albums", vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)]);
     /// # let applied = database.apply_batch(batch).await?;

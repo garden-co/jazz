@@ -2010,7 +2010,9 @@ fn core_storage(schema: &crate::schema::JazzSchema, context: &AppContext) -> Res
         .map(String::as_str)
         .collect::<Vec<_>>();
     match context.storage {
-        ClientStorage::Memory => Ok(CoreStorage::new(CoreMemoryStorage::new(&refs))),
+        ClientStorage::Memory => Ok(CoreStorage::new(
+            CoreMemoryStorage::new(&refs).expect("valid memory storage families"),
+        )),
         ClientStorage::Persistent => {
             let factory = context.storage_factory.as_ref().ok_or_else(|| {
                 JazzError::Connection(

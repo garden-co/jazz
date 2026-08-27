@@ -1910,7 +1910,7 @@ impl NapiDb {
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
         let db = open_core_db(
             schema,
-            CoreMemoryStorage::new(&refs),
+            CoreMemoryStorage::new(&refs).expect("valid memory storage families"),
             config,
             identity,
             false,
@@ -1933,7 +1933,7 @@ impl NapiDb {
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
         let db = open_core_db(
             schema,
-            CoreMemoryStorage::new(&refs),
+            CoreMemoryStorage::new(&refs).expect("valid memory storage families"),
             config,
             identity,
             true,
@@ -1969,7 +1969,7 @@ impl NapiDb {
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
         let db = open_core_db(
             schema,
-            CoreMemoryStorage::new(&refs),
+            CoreMemoryStorage::new(&refs).expect("valid memory storage families"),
             config,
             identity,
             false,
@@ -5909,7 +5909,7 @@ mod tests {
         let owner = Rc::new(
             core_block_on(CoreDb::open(CoreDbConfig::new(
                 schema.clone(),
-                CoreMemoryStorage::new(&refs),
+                CoreMemoryStorage::new(&refs).expect("valid memory storage families"),
                 CoreDbIdentity {
                     node: CoreNodeUuid::from_bytes([0x44; 16]),
                     author: CoreAuthorSubject::for_test_bytes([0xa4; 16]),
@@ -6009,7 +6009,7 @@ mod tests {
         let other_owner = Rc::new(
             core_block_on(CoreDb::open(CoreDbConfig::new(
                 schema.clone(),
-                CoreMemoryStorage::new(&refs),
+                CoreMemoryStorage::new(&refs).expect("valid memory storage families"),
                 CoreDbIdentity {
                     node: CoreNodeUuid::from_bytes([0x46; 16]),
                     author: CoreAuthorSubject::for_test_bytes([0xa6; 16]),

@@ -42,7 +42,7 @@ impl Database {
     /// )
     /// .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// let storage = MemoryStorage::new(&["albums", "indices"]);
+    /// let storage = MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
     ///
     /// let database = Database::new(schema, storage).await?;
     /// assert!(database.last_commit_metrics().is_none());
@@ -64,6 +64,11 @@ impl Database {
     where
         S: ReopenableStorage + 'static,
     {
+        // This must precede `LayoutStorage::new`, whose marker initialization
+        // can otherwise create durable engine state for an invalid schema. The
+        // caller has already opened the backend; this guards Groove's own
+        // marker/mutation path.
+        validate_application_storage_names(&schema)?;
         validate_durable_key_schema(&schema)?;
         let mut ivm_runtime = IvmRuntime::new(schema)?;
         let storage = Rc::new(LayoutStorage::new(storage, storage_layout).await?);
@@ -1705,7 +1710,7 @@ impl Database {
     ///     ),
     /// );
     /// let column_families = schema.column_families();
-    /// let storage = MemoryStorage::new(&column_families);
+    /// let storage = MemoryStorage::new(&column_families).expect("valid memory storage families");
     /// let database = Database::new(schema, storage).await?;
     ///
     /// let art = database.direct_record_store("album_art")?;

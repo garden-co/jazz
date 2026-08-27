@@ -101,7 +101,8 @@ fn open_db() -> (Db<MemoryStorage>, JazzSchema) {
             .build(),
     );
     let families = schema.column_families();
-    let storage = MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>());
+    let storage = MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>())
+        .expect("valid memory storage families");
     let db = block_on(Db::open(
         DbConfig::new(
             schema.clone(),
@@ -129,7 +130,8 @@ fn open_history_complete_db() -> (Db<MemoryStorage>, JazzSchema) {
             .build(),
     );
     let families = schema.column_families();
-    let storage = MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>());
+    let storage = MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>())
+        .expect("valid memory storage families");
     let db = block_on(Db::open_history_complete(
         DbConfig::new(
             schema.clone(),
@@ -313,7 +315,8 @@ fn branch_view_join_projects_branch_column_subsets_and_shared_tables() {
     let db = block_on(Db::open(
         DbConfig::new(
             schema,
-            MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>()),
+            MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>())
+                .expect("valid memory storage families"),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x83; 16]),
                 author: AuthorSubject::SYSTEM,
@@ -433,7 +436,8 @@ fn branch_view_reachability_consumes_effective_sources() {
     let families = schema.column_families();
     let db = block_on(Db::open(DbConfig::new(
         schema.clone(),
-        MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>()),
+        MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>())
+            .expect("valid memory storage families"),
         DbIdentity {
             node: NodeUuid::from_bytes([0x9d; 16]),
             author: AuthorSubject::SYSTEM,
@@ -543,7 +547,8 @@ fn open_policy_db() -> (Db<MemoryStorage>, JazzSchema) {
             .build(),
     );
     let families = schema.column_families();
-    let storage = MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>());
+    let storage = MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>())
+        .expect("valid memory storage families");
     let db = block_on(Db::open(
         DbConfig::new(
             schema.clone(),
@@ -678,7 +683,8 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
     let families = schema.column_families();
     let db = block_on(Db::open(DbConfig::new(
         schema.clone(),
-        MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>()),
+        MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>())
+            .expect("valid memory storage families"),
         DbIdentity {
             node: NodeUuid::from_bytes([0xa9; 16]),
             author: AuthorSubject::SYSTEM,

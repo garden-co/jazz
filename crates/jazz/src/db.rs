@@ -2432,7 +2432,7 @@ pub mod doctest_support {
         let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
         Db::open(DbConfig {
             schema,
-            storage: MemoryStorage::new(&refs),
+            storage: MemoryStorage::new(&refs).expect("valid memory storage families"),
             identity: DbIdentity {
                 node: NodeUuid::from_bytes([0x11; 16]),
                 author: AuthorSubject::for_test_bytes([0xa1; 16]),

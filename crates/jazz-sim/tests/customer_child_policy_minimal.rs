@@ -162,7 +162,7 @@ fn db_config(
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     DbConfig {
         schema,
-        storage: MemoryStorage::new(&refs),
+        storage: MemoryStorage::new(&refs).expect("valid memory storage families"),
         identity: DbIdentity {
             node: node_uuid,
             author,

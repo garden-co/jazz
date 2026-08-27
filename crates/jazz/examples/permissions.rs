@@ -206,7 +206,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let storage = MemoryStorage::new(&column_family_refs);
+    let storage = MemoryStorage::new(&column_family_refs).expect("valid memory storage families");
     let owner = author(0xa1);
     let other = author(0xb2);
 

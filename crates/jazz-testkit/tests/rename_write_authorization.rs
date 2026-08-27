@@ -89,8 +89,12 @@ fn owner_write_policies(select: PolicyExpr) -> TablePolicies {
 fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> NodeState<MemoryStorage> {
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-    block_on(NodeState::new(node_uuid, schema, MemoryStorage::new(&refs)))
-        .expect("open memory node")
+    block_on(NodeState::new(
+        node_uuid,
+        schema,
+        MemoryStorage::new(&refs).expect("valid memory storage families"),
+    ))
+    .expect("open memory node")
 }
 
 fn rename_lens(v1: &SchemaVersion, v2: &SchemaVersion) -> MigrationLens {

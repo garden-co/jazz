@@ -310,7 +310,7 @@ fn run_m3_aggregate_churn_curve() {
     let mut core = NodeState::new(
         node(0x76),
         schema.clone(),
-        MemoryStorage::new(&column_family_refs),
+        MemoryStorage::new(&column_family_refs).expect("valid memory storage families"),
     )
     .unwrap();
     let mut parents = BTreeMap::new();
@@ -481,7 +481,7 @@ fn m3_maintained_one_shot_differential_oracle_f64_approximate_control() {
     let mut core = NodeState::new(
         node(0x78),
         schema.clone(),
-        MemoryStorage::new(&column_family_refs),
+        MemoryStorage::new(&column_family_refs).expect("valid memory storage families"),
     )
     .unwrap();
     let mut parents = BTreeMap::new();
