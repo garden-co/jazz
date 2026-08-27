@@ -1167,6 +1167,70 @@ mod tests {
         encode(&header, claims, &key).unwrap()
     }
 
+    fn make_raw_jwt(claims: serde_json::Value) -> String {
+        let key = EncodingKey::from_secret(TEST_JWKS_SECRET.as_bytes());
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some(TEST_JWKS_KID.to_string());
+        encode(&header, &claims, &key).unwrap()
+    }
+
+    #[tokio::test]
+    async fn bug_119_external_jwt_admission_is_bound_and_time_limited() {
+        let config = make_test_config();
+        let verifier = test_jwt_verifier();
+        let now = config.clock.now_seconds();
+        let cases = [
+            (
+                "wrong issuer",
+                serde_json::json!({
+                    "iss": "https://other-issuer.jazz.test",
+                    "aud": "jazz-audience",
+                    "sub": "user-123",
+                    "exp": now + 3_600,
+                }),
+            ),
+            (
+                "wrong audience",
+                serde_json::json!({
+                    "iss": "https://issuer.jazz.test",
+                    "aud": "other-audience",
+                    "sub": "user-123",
+                    "exp": now + 3_600,
+                }),
+            ),
+            (
+                "missing expiration",
+                serde_json::json!({
+                    "iss": "https://issuer.jazz.test",
+                    "aud": "jazz-audience",
+                    "sub": "user-123",
+                }),
+            ),
+            (
+                "not yet valid",
+                serde_json::json!({
+                    "iss": "https://issuer.jazz.test",
+                    "aud": "jazz-audience",
+                    "sub": "user-123",
+                    "nbf": now + 600,
+                    "exp": now + 3_600,
+                }),
+            ),
+        ];
+
+        for (case, claims) in cases {
+            let token = make_raw_jwt(claims);
+            let mut headers = HeaderMap::new();
+            headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+            assert!(
+                extract_session(&headers, test_app_id(), &config, Some(&verifier))
+                    .await
+                    .is_err(),
+                "{case} JWT must be rejected"
+            );
+        }
+    }
+
     #[test]
     fn external_jwt_subject_rejects_blank_but_preserves_exact_opaque_bytes() {
         for subject in ["", " \t\n "] {

@@ -1164,19 +1164,19 @@ mod tests {
     }
 
     #[test]
-    fn ws_cookie_origin_uses_forwarded_host_before_host() {
+    fn bug_302_cookie_origin_ignores_forwarded_host_without_trusted_proxy() {
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::ORIGIN,
-            "https://app.example".parse().unwrap(),
+            "https://evil.example".parse().unwrap(),
         );
-        headers.insert(axum::http::header::HOST, "internal.local".parse().unwrap());
-        headers.insert("X-Forwarded-Host", "app.example".parse().unwrap());
-
-        assert!(validate_ws_cookie_origin(&headers).is_ok());
-
+        headers.insert(axum::http::header::HOST, "app.example".parse().unwrap());
         headers.insert("X-Forwarded-Host", "evil.example".parse().unwrap());
-        assert!(validate_ws_cookie_origin(&headers).is_err());
+
+        assert!(
+            validate_ws_cookie_origin(&headers).is_err(),
+            "an untrusted forwarded host must not bypass the cookie origin guard"
+        );
     }
 
     #[test]

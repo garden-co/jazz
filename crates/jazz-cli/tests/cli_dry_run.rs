@@ -938,19 +938,39 @@ fn dry_run_reads_alpha_env_and_cli_can_override_storage() {
 }
 
 #[test]
-fn dry_run_accepts_backend_secret_env_alias() {
+fn bug_306_rejects_privileged_secret_aliases_with_actionable_replacements() {
+    let cases = [
+        ("JAZZ_ADMIN_SECRET", "JAZZ_SERVER_AUTH_STATIC_BEARER"),
+        ("JAZZ_BACKEND_SECRET", "JAZZ_SERVER_AUTH_STATIC_BEARER"),
+    ];
+
+    for (secret_env, replacement) in cases {
+        let output = jazz_server_command()
+            .arg("dry-run")
+            .env(secret_env, "privileged-secret")
+            .output()
+            .expect("run jazz-server dry-run with privileged secret env");
+
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{secret_env} must not become an ordinary bearer credential"
+        );
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr).expect("dry-run stderr is utf-8");
+        assert!(stderr.contains(secret_env), "{stderr}");
+        assert!(stderr.contains(replacement), "{stderr}");
+    }
+
     let output = jazz_server_command()
-        .arg("dry-run")
-        .env("JAZZ_BACKEND_SECRET", "backend-secret")
+        .args(["dry-run", "--admin-secret", "privileged-secret"])
         .output()
-        .expect("run jazz-server dry-run with backend secret env");
-
-    assert!(output.status.success());
-    assert!(output.stderr.is_empty());
-
-    let stdout = String::from_utf8(output.stdout).expect("dry-run stdout is utf-8");
-    let lines: Vec<&str> = stdout.lines().collect();
-    assert!(lines.contains(&"auth.mode=static-bearer"));
+        .expect("run jazz-server dry-run with admin secret flag");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).expect("dry-run stderr is utf-8");
+    assert!(stderr.contains("--admin-secret"), "{stderr}");
+    assert!(stderr.contains("--auth-static-bearer"), "{stderr}");
 }
 
 #[test]
