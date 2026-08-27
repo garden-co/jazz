@@ -117,6 +117,86 @@ fn maintained_policy_point_subscription_keeps_full_current_source_for_deletion_l
     );
 }
 
+/// A policy-bearing resource query retains exact scans for literal recursive
+/// access and edge rows, while its own current row source remains uncapped.
+///
+/// alice ──query resource policy──► resources full current source
+///       └──literal reachable filters──► exact access + edge sources
+#[test]
+fn policy_root_retains_reachable_point_access_paths() {
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("teams").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("resources")
+                    .column("name", PublicColumnType::Text)
+                    .column("owner", PublicColumnType::Uuid)
+                    .policies(PublicTablePolicies::new().with_select(
+                        PublicPolicyExpr::eq_session(
+                            "owner",
+                            vec!["claims".to_owned(), "sub".to_owned()],
+                        ),
+                    )),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("resourceAccess")
+                    .fk_column("resource", "resources")
+                    .fk_column("team", "teams"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("teamMemberships")
+                    .fk_column("member", "teams")
+                    .fk_column("parent", "teams"),
+            ),
+    );
+    let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([0xc4; 16]), schema.clone());
+    let access = row(0xc5);
+    let edge = row(0xc6);
+    let shape = Query::from("resources")
+        .reachable_via_with_access_filters(
+            "resourceAccess",
+            "resource",
+            "team",
+            param("team"),
+            [eq(col("id"), lit(Value::Uuid(access.0)))],
+            "teamMemberships",
+            "member",
+            "parent",
+            [eq(col("id"), lit(Value::Uuid(edge.0)))],
+        )
+        .validate_runtime(&schema)
+        .unwrap();
+    let binding = shape
+        .bind(BTreeMap::from([(
+            "team".to_owned(),
+            Value::Uuid(row(0xc7).0),
+        )]))
+        .unwrap();
+    let paths = node
+        .current_query_primary_key_access_paths(&shape, &binding)
+        .unwrap();
+    let reachable = &shape.query().reachable[0];
+
+    assert!(
+        !paths.contains_key(&root_source_id("resources")),
+        "the policy-bearing root must retain its complete current source"
+    );
+    assert!(
+        matches!(
+            paths.get(&reachable_access_source_id(reachable, "reachable:0")),
+            Some(CurrentAccessPath::PrimaryKey(values)) if values == &[Value::Uuid(access.0)]
+        ),
+        "the literal access edge remains independently safe to point-scan"
+    );
+    assert!(
+        matches!(
+            paths.get(&reachable_edge_source_id(reachable, "reachable:0")),
+            Some(CurrentAccessPath::PrimaryKey(values)) if values == &[Value::Uuid(edge.0)]
+        ),
+        "the literal recursive edge remains independently safe to point-scan"
+    );
+}
+
 #[test]
 fn maintained_policy_point_subscription_retracts_for_delete_and_owner_transfer() {
     let schema = owner_policy_schema();
