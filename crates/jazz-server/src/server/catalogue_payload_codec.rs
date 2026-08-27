@@ -9,6 +9,9 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use jazz::protocol_limits::{
+    MAX_POLICY_EXPRESSION_DEPTH, MAX_POLICY_EXPRESSION_NODES, PolicyExpressionLimitError,
+};
 use jazz::tools::ObjectId;
 use jazz::tools::public_schema::{CmpOp, Operation, PolicyExpr, PolicyValue};
 use jazz::tools::public_schema::{
@@ -38,6 +41,8 @@ pub enum CatalogueEncodingError {
     InvalidTypeTag { tag: u8, context: &'static str },
     /// Invalid UTF-8 string.
     InvalidUtf8 { context: &'static str },
+    /// A named recursive-policy protocol boundary was crossed.
+    ProtocolLimit(PolicyExpressionLimitError),
     /// Generic decode error.
     DecodeError { message: String },
 }
@@ -57,6 +62,7 @@ impl std::fmt::Display for CatalogueEncodingError {
             CatalogueEncodingError::InvalidUtf8 { context } => {
                 write!(f, "invalid UTF-8 in {context}")
             }
+            CatalogueEncodingError::ProtocolLimit(error) => std::fmt::Display::fmt(error, f),
             CatalogueEncodingError::DecodeError { message } => {
                 write!(f, "decode error: {message}")
             }
@@ -1907,13 +1913,117 @@ fn decode_policy_expr(
     data: &[u8],
     offset: &mut usize,
 ) -> Result<PolicyExpr, CatalogueEncodingError> {
+    let mut frames = Vec::new();
+    let mut nodes = 0_usize;
+
+    'decode: loop {
+        let depth = frames.len() + 1;
+        if depth > MAX_POLICY_EXPRESSION_DEPTH {
+            return Err(policy_expression_limit(
+                "MAX_POLICY_EXPRESSION_DEPTH",
+                MAX_POLICY_EXPRESSION_DEPTH,
+                depth,
+            ));
+        }
+        if nodes >= MAX_POLICY_EXPRESSION_NODES {
+            return Err(policy_expression_limit(
+                "MAX_POLICY_EXPRESSION_NODES",
+                MAX_POLICY_EXPRESSION_NODES,
+                nodes + 1,
+            ));
+        }
+        nodes += 1;
+
+        let mut expression = match decode_policy_expr_node(data, offset, nodes)? {
+            DecodedPolicyNode::Complete(expression) => expression,
+            DecodedPolicyNode::Children(frame) => {
+                frames.push(frame);
+                continue;
+            }
+        };
+
+        while let Some(frame) = frames.pop() {
+            match frame {
+                PolicyDecodeFrame::Exists { table } => {
+                    expression = PolicyExpr::Exists {
+                        table,
+                        condition: Box::new(expression),
+                    };
+                }
+                PolicyDecodeFrame::Not => {
+                    expression = PolicyExpr::Not(Box::new(expression));
+                }
+                PolicyDecodeFrame::And {
+                    mut remaining,
+                    mut expressions,
+                } => {
+                    expressions.push(expression);
+                    remaining -= 1;
+                    if remaining == 0 {
+                        expression = PolicyExpr::And(expressions);
+                    } else {
+                        frames.push(PolicyDecodeFrame::And {
+                            remaining,
+                            expressions,
+                        });
+                        continue 'decode;
+                    }
+                }
+                PolicyDecodeFrame::Or {
+                    mut remaining,
+                    mut expressions,
+                } => {
+                    expressions.push(expression);
+                    remaining -= 1;
+                    if remaining == 0 {
+                        expression = PolicyExpr::Or(expressions);
+                    } else {
+                        frames.push(PolicyDecodeFrame::Or {
+                            remaining,
+                            expressions,
+                        });
+                        continue 'decode;
+                    }
+                }
+            }
+        }
+        return Ok(expression);
+    }
+}
+
+enum DecodedPolicyNode {
+    Complete(PolicyExpr),
+    Children(PolicyDecodeFrame),
+}
+
+enum PolicyDecodeFrame {
+    Exists {
+        table: String,
+    },
+    And {
+        remaining: usize,
+        expressions: Vec<PolicyExpr>,
+    },
+    Or {
+        remaining: usize,
+        expressions: Vec<PolicyExpr>,
+    },
+    Not,
+}
+
+fn decode_policy_expr_node(
+    data: &[u8],
+    offset: &mut usize,
+    nodes: usize,
+) -> Result<DecodedPolicyNode, CatalogueEncodingError> {
+    let complete = |expression| Ok(DecodedPolicyNode::Complete(expression));
     let tag = read_u8(data, offset)?;
     match tag {
         POLICY_EXPR_CMP => {
             let column = read_string(data, offset, "policy_cmp_column")?;
             let op = decode_cmp_op(data, offset)?;
             let value = decode_policy_value(data, offset)?;
-            Ok(PolicyExpr::Cmp { column, op, value })
+            complete(PolicyExpr::Cmp { column, op, value })
         }
         POLICY_EXPR_SESSION_CMP => {
             let count = read_count(data, offset, "policy_session_cmp_path")?;
@@ -1923,11 +2033,11 @@ fn decode_policy_expr(
             }
             let op = decode_cmp_op(data, offset)?;
             let value = decode_value(data, offset)?;
-            Ok(PolicyExpr::SessionCmp { path, op, value })
+            complete(PolicyExpr::SessionCmp { path, op, value })
         }
         POLICY_EXPR_IS_NULL => {
             let column = read_string(data, offset, "policy_is_null_column")?;
-            Ok(PolicyExpr::IsNull { column })
+            complete(PolicyExpr::IsNull { column })
         }
         POLICY_EXPR_SESSION_IS_NULL => {
             let count = read_count(data, offset, "policy_session_is_null_path")?;
@@ -1935,11 +2045,11 @@ fn decode_policy_expr(
             for _ in 0..count {
                 path.push(read_string(data, offset, "policy_session_is_null_path")?);
             }
-            Ok(PolicyExpr::SessionIsNull { path })
+            complete(PolicyExpr::SessionIsNull { path })
         }
         POLICY_EXPR_IS_NOT_NULL => {
             let column = read_string(data, offset, "policy_is_not_null_column")?;
-            Ok(PolicyExpr::IsNotNull { column })
+            complete(PolicyExpr::IsNotNull { column })
         }
         POLICY_EXPR_SESSION_IS_NOT_NULL => {
             let count = read_count(data, offset, "policy_session_is_not_null_path")?;
@@ -1951,12 +2061,12 @@ fn decode_policy_expr(
                     "policy_session_is_not_null_path",
                 )?);
             }
-            Ok(PolicyExpr::SessionIsNotNull { path })
+            complete(PolicyExpr::SessionIsNotNull { path })
         }
         POLICY_EXPR_CONTAINS => {
             let column = read_string(data, offset, "policy_contains_column")?;
             let value = decode_policy_value(data, offset)?;
-            Ok(PolicyExpr::Contains { column, value })
+            complete(PolicyExpr::Contains { column, value })
         }
         POLICY_EXPR_SESSION_CONTAINS => {
             let count = read_count(data, offset, "policy_session_contains_path")?;
@@ -1965,7 +2075,7 @@ fn decode_policy_expr(
                 path.push(read_string(data, offset, "policy_session_contains_path")?);
             }
             let value = decode_value(data, offset)?;
-            Ok(PolicyExpr::SessionContains { path, value })
+            complete(PolicyExpr::SessionContains { path, value })
         }
         POLICY_EXPR_IN => {
             let column = read_string(data, offset, "policy_in_column")?;
@@ -1974,7 +2084,7 @@ fn decode_policy_expr(
             for _ in 0..count {
                 session_path.push(read_string(data, offset, "policy_in_session_path")?);
             }
-            Ok(PolicyExpr::In {
+            complete(PolicyExpr::In {
                 column,
                 session_path,
             })
@@ -1986,7 +2096,7 @@ fn decode_policy_expr(
             for _ in 0..count {
                 values.push(decode_policy_value(data, offset)?);
             }
-            Ok(PolicyExpr::InList { column, values })
+            complete(PolicyExpr::InList { column, values })
         }
         POLICY_EXPR_SESSION_IN_LIST => {
             let path_count = read_count(data, offset, "policy_session_in_list_path")?;
@@ -1999,24 +2109,22 @@ fn decode_policy_expr(
             for _ in 0..value_count {
                 values.push(decode_value(data, offset)?);
             }
-            Ok(PolicyExpr::SessionInList { path, values })
+            complete(PolicyExpr::SessionInList { path, values })
         }
         POLICY_EXPR_EXISTS => {
             let table = read_string(data, offset, "policy_exists_table")?;
-            let condition = decode_policy_expr(data, offset)?;
-            Ok(PolicyExpr::Exists {
+            Ok(DecodedPolicyNode::Children(PolicyDecodeFrame::Exists {
                 table,
-                condition: Box::new(condition),
-            })
+            }))
         }
         POLICY_EXPR_EXISTS_REL => {
             let rel = decode_canonical_relation_expr(data, offset)?;
-            Ok(PolicyExpr::ExistsRel { rel })
+            complete(PolicyExpr::ExistsRel { rel })
         }
         POLICY_EXPR_INHERITS => {
             let operation = decode_policy_operation(data, offset)?;
             let via_column = read_string(data, offset, "policy_inherits_via_column")?;
-            Ok(PolicyExpr::Inherits {
+            complete(PolicyExpr::Inherits {
                 operation,
                 via_column,
                 max_depth: None,
@@ -2026,7 +2134,7 @@ fn decode_policy_expr(
             let operation = decode_policy_operation(data, offset)?;
             let via_column = read_string(data, offset, "policy_inherits_via_column")?;
             let max_depth = read_u32(data, offset)? as usize;
-            Ok(PolicyExpr::Inherits {
+            complete(PolicyExpr::Inherits {
                 operation,
                 via_column,
                 max_depth: Some(max_depth),
@@ -2042,7 +2150,7 @@ fn decode_policy_expr(
             } else {
                 None
             };
-            Ok(PolicyExpr::InheritsReferencing {
+            complete(PolicyExpr::InheritsReferencing {
                 operation,
                 source_table,
                 via_column,
@@ -2051,31 +2159,56 @@ fn decode_policy_expr(
         }
         POLICY_EXPR_AND => {
             let count = read_count(data, offset, "policy_and")?;
-            let mut exprs = Vec::with_capacity(count);
-            for _ in 0..count {
-                exprs.push(decode_policy_expr(data, offset)?);
+            if count == 0 {
+                return complete(PolicyExpr::And(Vec::new()));
             }
-            Ok(PolicyExpr::And(exprs))
+            validate_policy_child_count(nodes, count)?;
+            Ok(DecodedPolicyNode::Children(PolicyDecodeFrame::And {
+                remaining: count,
+                expressions: Vec::with_capacity(count),
+            }))
         }
         POLICY_EXPR_OR => {
             let count = read_count(data, offset, "policy_or")?;
-            let mut exprs = Vec::with_capacity(count);
-            for _ in 0..count {
-                exprs.push(decode_policy_expr(data, offset)?);
+            if count == 0 {
+                return complete(PolicyExpr::Or(Vec::new()));
             }
-            Ok(PolicyExpr::Or(exprs))
+            validate_policy_child_count(nodes, count)?;
+            Ok(DecodedPolicyNode::Children(PolicyDecodeFrame::Or {
+                remaining: count,
+                expressions: Vec::with_capacity(count),
+            }))
         }
-        POLICY_EXPR_NOT => {
-            let inner = decode_policy_expr(data, offset)?;
-            Ok(PolicyExpr::Not(Box::new(inner)))
-        }
-        POLICY_EXPR_TRUE => Ok(PolicyExpr::True),
-        POLICY_EXPR_FALSE => Ok(PolicyExpr::False),
+        POLICY_EXPR_NOT => Ok(DecodedPolicyNode::Children(PolicyDecodeFrame::Not)),
+        POLICY_EXPR_TRUE => complete(PolicyExpr::True),
+        POLICY_EXPR_FALSE => complete(PolicyExpr::False),
         _ => Err(CatalogueEncodingError::InvalidTypeTag {
             tag,
             context: "policy_expr",
         }),
     }
+}
+
+fn validate_policy_child_count(
+    nodes: usize,
+    children: usize,
+) -> Result<(), CatalogueEncodingError> {
+    if children > MAX_POLICY_EXPRESSION_NODES - nodes {
+        return Err(policy_expression_limit(
+            "MAX_POLICY_EXPRESSION_NODES",
+            MAX_POLICY_EXPRESSION_NODES,
+            nodes.saturating_add(children),
+        ));
+    }
+    Ok(())
+}
+
+fn policy_expression_limit(
+    limit: &'static str,
+    max: usize,
+    actual: usize,
+) -> CatalogueEncodingError {
+    CatalogueEncodingError::ProtocolLimit(PolicyExpressionLimitError { limit, max, actual })
 }
 
 fn encode_policy_value(buf: &mut Vec<u8>, value: &PolicyValue) {
@@ -3130,9 +3263,6 @@ mod tests {
         );
     }
 
-    const BUG_124_POLICY_EXPRESSION_MAX_DEPTH: usize = 64;
-    const BUG_124_POLICY_EXPRESSION_MAX_NODES: usize = 4_096;
-
     fn nested_policy_expression(nodes: usize) -> PolicyExpr {
         assert!(nodes > 0);
         (1..nodes).fold(PolicyExpr::True, |expression, _| {
@@ -3156,37 +3286,44 @@ mod tests {
     fn permissions_decode_enforces_policy_depth_and_total_node_boundaries() {
         // This stays internal because the binary catalogue decoder is the
         // untrusted boundary and public policy builders already own their tree.
-        let at_depth_limit = permissions_with_policy(nested_policy_expression(
-            BUG_124_POLICY_EXPRESSION_MAX_DEPTH,
-        ));
+        let at_depth_limit =
+            permissions_with_policy(nested_policy_expression(MAX_POLICY_EXPRESSION_DEPTH));
         assert_eq!(
             decode_permissions(&encode_permissions(&at_depth_limit))
                 .expect("exact catalogue policy depth boundary remains valid"),
             at_depth_limit
         );
 
-        let over_depth_limit = permissions_with_policy(nested_policy_expression(
-            BUG_124_POLICY_EXPRESSION_MAX_DEPTH + 1,
-        ));
-        assert!(
-            decode_permissions(&encode_permissions(&over_depth_limit)).is_err(),
-            "catalogue policy depth must be rejected while parsing"
+        let over_depth_limit =
+            permissions_with_policy(nested_policy_expression(MAX_POLICY_EXPRESSION_DEPTH + 1));
+        assert_eq!(
+            decode_permissions(&encode_permissions(&over_depth_limit))
+                .expect_err("catalogue policy depth must be rejected while parsing"),
+            CatalogueEncodingError::ProtocolLimit(PolicyExpressionLimitError {
+                limit: "MAX_POLICY_EXPRESSION_DEPTH",
+                max: MAX_POLICY_EXPRESSION_DEPTH,
+                actual: MAX_POLICY_EXPRESSION_DEPTH + 1,
+            })
         );
 
         let at_node_limit =
-            permissions_with_policy(wide_policy_expression(BUG_124_POLICY_EXPRESSION_MAX_NODES));
+            permissions_with_policy(wide_policy_expression(MAX_POLICY_EXPRESSION_NODES));
         assert_eq!(
             decode_permissions(&encode_permissions(&at_node_limit))
                 .expect("exact catalogue policy node boundary remains valid"),
             at_node_limit
         );
 
-        let over_node_limit = permissions_with_policy(wide_policy_expression(
-            BUG_124_POLICY_EXPRESSION_MAX_NODES + 1,
-        ));
-        assert!(
-            decode_permissions(&encode_permissions(&over_node_limit)).is_err(),
-            "catalogue policy node count must be rejected while parsing"
+        let over_node_limit =
+            permissions_with_policy(wide_policy_expression(MAX_POLICY_EXPRESSION_NODES + 1));
+        assert_eq!(
+            decode_permissions(&encode_permissions(&over_node_limit))
+                .expect_err("catalogue policy node count must be rejected while parsing"),
+            CatalogueEncodingError::ProtocolLimit(PolicyExpressionLimitError {
+                limit: "MAX_POLICY_EXPRESSION_NODES",
+                max: MAX_POLICY_EXPRESSION_NODES,
+                actual: MAX_POLICY_EXPRESSION_NODES + 1,
+            })
         );
     }
 
