@@ -2357,9 +2357,28 @@ async fn late_publication_metadata_write_failure_is_fatal_and_observable() {
     assert!(subscription.try_recv().is_err());
     database.finish_persistence(second.persist().await).unwrap();
 
-    control.fail_next(TestStorageOperation::WriteMany);
+    // A cold install now journals before it stages bytes. Pause that first
+    // write so this receipt can inject the failure at the *later* metadata
+    // durability boundary it is intended to exercise, rather than turning a
+    // pre-staging journal write into an unrelated query-local failure.
+    control.take_observed();
+    control.pause_on(TestStorageOperation::WriteMany);
     resolver_ready.set(true);
-    let error = database.flush().await.unwrap_err();
+    let mut flush = Box::pin(database.flush());
+    assert!(futures::poll!(flush.as_mut()).is_pending());
+    assert_eq!(
+        control.take_observed(),
+        vec![TestStorageOperation::WriteMany]
+    );
+    control.release_one();
+    assert!(futures::poll!(flush.as_mut()).is_pending());
+    assert_eq!(
+        control.take_observed(),
+        vec![TestStorageOperation::WriteMany]
+    );
+    control.fail_next(TestStorageOperation::WriteMany);
+    control.release_one();
+    let error = flush.await.unwrap_err();
     assert!(matches!(
         error,
         Error::IvmRuntime(IvmRuntimeError::Chunk(
