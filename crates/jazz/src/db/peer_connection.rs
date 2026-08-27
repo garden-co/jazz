@@ -342,6 +342,7 @@ where
     pub(super) pending_relay_subscription_rejections: PendingRelaySubscriptionRejections,
     pub(super) latest_coverage_subscriptions: LatestCoverageSubscriptions,
     pub(super) awaiting_initial_authority_coverage: AwaitingInitialAuthorityCoverage,
+    pub(super) query_coverage_registrations: QueryCoverageRegistrations,
     pub(super) active_authority_view_receipts: ActiveAuthorityViewReceipts,
     pub(super) scheduler: SharedTickScheduler,
     pub(super) upload_retry_clock: SharedUploadRetryClock,
@@ -1750,6 +1751,7 @@ where
                                         &mut pending_view_updates,
                                         &self.awaiting_initial_authority_coverage,
                                         &mut pending_initial_coverage_clears,
+                                        &self.query_coverage_registrations,
                                         &self.active_authority_view_receipts,
                                         self.connection_epoch,
                                     )
@@ -1770,6 +1772,7 @@ where
                                         &mut pending_view_updates,
                                         &self.awaiting_initial_authority_coverage,
                                         &mut pending_initial_coverage_clears,
+                                        &self.query_coverage_registrations,
                                         &self.active_authority_view_receipts,
                                         self.connection_epoch,
                                     )
@@ -2009,6 +2012,7 @@ where
                                         &mut pending_view_updates,
                                         &self.awaiting_initial_authority_coverage,
                                         &mut pending_initial_coverage_clears,
+                                        &self.query_coverage_registrations,
                                         &self.active_authority_view_receipts,
                                         self.connection_epoch,
                                     )
@@ -2222,8 +2226,33 @@ where
                                 scope_receipts.insert(subscription, receipt);
                             }
                             message => {
-                                if let SyncMessage::FateUpdate { tx_id, .. } = &message {
-                                    let admitted = *self.admitted_upstream_authority.borrow();
+                                let admitted = *self.admitted_upstream_authority.borrow();
+                                let current_authority_receipt_eligible =
+                                    authority_receipt_eligible
+                                        && expected_scope_authority.is_some_and(|expected| {
+                                            admitted.is_some_and(|admitted| {
+                                                admitted.same_admitted_link(expected)
+                                            })
+                                        });
+                                let routed_fate = matches!(
+                                    &message,
+                                    SyncMessage::FateUpdate { tx_id, .. }
+                                        if self.edge_fate_routes.borrow().contains_key(tx_id)
+                                );
+                                // The Edge outbox is tied to an authenticated
+                                // selected authority. Ordinary direct uploads
+                                // keep their legacy featureless-link receipt
+                                // behavior, which has no routed Edge fate to
+                                // discharge.
+                                let outbox_release_receipt_eligible =
+                                    current_authority_receipt_eligible
+                                        || (!routed_fate
+                                            && authority_receipt_eligible
+                                            && expected_scope_authority.is_none());
+                                if let SyncMessage::FateUpdate { tx_id: _, .. } = &message {
+                                    // Authenticated authority links must match the
+                                    // currently admitted connection, not merely
+                                    // deliver a direct, unstaged frame.
                                     // Gate fate before any NodeState mutation. A
                                     // parallel, stale, or featureless upstream is
                                     // not merely forbidden from forwarding an
@@ -2231,14 +2260,7 @@ where
                                     // transaction's local state. Ordinary Core
                                     // client links have no edge route and retain
                                     // their normal fate transport.
-                                    let routed = self.edge_fate_routes.borrow().contains_key(tx_id);
-                                    if routed
-                                        && !matches!(
-                                            (admitted, *expected_scope_authority),
-                                            (Some(admitted), Some(expected))
-                                                if admitted.same_admitted_link(expected)
-                                        )
-                                    {
+                                    if routed_fate && !current_authority_receipt_eligible {
                                         drop_peer_request(&self.node);
                                         continue;
                                     }
@@ -2253,11 +2275,16 @@ where
                                     SyncMessage::FateUpdate {
                                         tx_id,
                                         fate,
+                                        global_time,
                                         durability,
                                         ..
-                                    } if matches!(fate, Fate::Rejected(_))
-                                        || durability
-                                            .is_some_and(|tier| tier >= DurabilityTier::Global) =>
+                                    } if outbox_release_receipt_eligible
+                                        && (matches!(fate, Fate::Rejected(_))
+                                            || (matches!(fate, Fate::Accepted)
+                                                && global_time.is_some()
+                                                && durability.is_some_and(|tier| {
+                                                    tier >= DurabilityTier::Global
+                                                }))) =>
                                     {
                                         Some(*tx_id)
                                     }
@@ -2269,6 +2296,7 @@ where
                                         &mut pending_view_updates,
                                         &self.awaiting_initial_authority_coverage,
                                         &mut pending_initial_coverage_clears,
+                                        &self.query_coverage_registrations,
                                         &self.active_authority_view_receipts,
                                         self.connection_epoch,
                                     )
@@ -2356,6 +2384,7 @@ where
                             &mut pending_view_updates,
                             &self.awaiting_initial_authority_coverage,
                             &mut pending_initial_coverage_clears,
+                            &self.query_coverage_registrations,
                             &self.active_authority_view_receipts,
                             self.connection_epoch,
                         )
@@ -3444,24 +3473,15 @@ where
                                             && durability >= DurabilityTier::Edge
                                     });
                                 if admitted {
-                                    let mut outbox = outbox.borrow_mut();
-                                    if !outbox.iter().any(|pending| pending.tx_id == tx_id) {
-                                        outbox.push(PendingUpload {
-                                            tx_id,
-                                            unit: Some(unit),
-                                        });
+                                    if queue_pending_upload_in(&outbox, tx_id, Some(unit)) {
                                         schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
                                     }
                                 }
                             }
-                            if let Some((tx_id, unit)) = local_upload {
-                                let mut outbox = outbox.borrow_mut();
-                                if outbox.push(PendingUpload {
-                                        tx_id,
-                                        unit: Some(unit),
-                                    }) {
-                                    schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
-                                }
+                            if let Some((tx_id, unit)) = local_upload
+                                && queue_pending_upload_in(&outbox, tx_id, Some(unit))
+                            {
+                                schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
                             }
                         }
                     }
@@ -3525,12 +3545,7 @@ where
                     }
                     for tx_id in admitted {
                         let unit = self.node.lock().await.commit_unit_for(tx_id).await?;
-                        let mut outbox = outbox.borrow_mut();
-                        if !outbox.iter().any(|pending| pending.tx_id == tx_id) {
-                            outbox.push(PendingUpload {
-                                tx_id,
-                                unit: Some(unit),
-                            });
+                        if queue_pending_upload_in(&outbox, tx_id, Some(unit)) {
                             schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
                         }
                     }
@@ -3968,6 +3983,7 @@ async fn apply_pending_authority_view_updates<S>(
     pending: &mut Vec<PendingAuthorityViewUpdate>,
     awaiting: &AwaitingInitialAuthorityCoverage,
     clears: &mut BTreeSet<CoverageKey>,
+    query_coverage_registrations: &QueryCoverageRegistrations,
     active_authority_view_receipts: &ActiveAuthorityViewReceipts,
     connection_epoch: u64,
 ) -> Result<(), Error>
@@ -3991,12 +4007,12 @@ where
         .max();
     let node_ref = node.borrow();
     let confirmed_binding_views = confirmed_subscriptions
-        .into_iter()
+        .iter()
         .filter_map(|(subscription, settled_through)| {
             node_ref
-                .binding_view_key_for_subscription(subscription)
+                .binding_view_key_for_subscription(*subscription)
                 .ok()
-                .map(|binding_view| (binding_view, settled_through))
+                .map(|binding_view| (*subscription, binding_view, *settled_through))
         })
         .collect::<Vec<_>>();
     drop(node_ref);
@@ -4015,6 +4031,7 @@ where
                 // Until that dependency closure is proven exact, no receipt
                 // remains safe and later confirmation must reach this cut.
                 receipts.binding_views.clear();
+                receipts.subscriptions.clear();
                 receipts.confirmation_floor = receipts.confirmation_floor.max(invalidation_cut);
             }
         }
@@ -4029,13 +4046,16 @@ where
     if let Some(receipts) = active_authority_view_receipts.borrow_mut().as_mut()
         && receipts.connection_epoch == connection_epoch
     {
-        receipts
-            .binding_views
-            .extend(confirmed_binding_views.into_iter().filter_map(
-                |(binding_view, settled_through)| {
-                    (settled_through >= receipts.confirmation_floor).then_some(binding_view)
-                },
-            ));
+        let registrations = query_coverage_registrations.borrow();
+        for (subscription, binding_view, settled_through) in confirmed_binding_views {
+            if settled_through < receipts.confirmation_floor {
+                continue;
+            }
+            receipts.binding_views.insert(binding_view);
+            if registrations.contains_key(&subscription) {
+                receipts.subscriptions.insert(subscription);
+            }
+        }
     }
     if !clears.is_empty() {
         let mut awaiting = awaiting.borrow_mut();

@@ -433,6 +433,145 @@ fn failed_send_restore_keeps_its_relay_reservation_across_later_admission() {
     );
 }
 
+// This internal receipt exercises the binding handoff itself: an encoded
+// auxiliary request is not owned by a socket until its reservation commits.
+#[test]
+fn reserved_wire_chunk_request_retries_after_backpressure_without_changing_its_id() {
+    crate::db::block_on(async {
+        let resolver = PeerChunkResolver::default();
+        let database = groove::db::Database::new(
+            groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new()),
+            groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF])
+                .expect("valid memory storage families"),
+        )
+        .await
+        .unwrap();
+        let pump = PeerIoPump::new(
+            resolver.clone(),
+            database.local_chunk_reader(),
+            47,
+            PeerIoPumpRole::Upstream,
+        );
+        let mut pending = resolver.resolve(groove::chunks::ChunkRequest {
+            object_hash: [47; 32],
+            locator: groove::large_values::Locator::random(),
+        });
+        let waker = futures::task::noop_waker();
+        let mut context = Context::from_waker(&waker);
+        assert!(matches!(
+            Pin::new(&mut pending).poll(&mut context),
+            Poll::Pending
+        ));
+
+        let features = crate::wire::current_wire_features();
+        let mut first = pump
+            .reserve_outbound_wire_frame(crate::wire::WIRE_PROTOCOL_VERSION, features, None)
+            .unwrap()
+            .expect("chunk request is reserved for the first send");
+        let first_frame = first.take_frame();
+        drop(first);
+
+        let mut retry = pump
+            .reserve_outbound_wire_frame(crate::wire::WIRE_PROTOCOL_VERSION, features, None)
+            .unwrap()
+            .expect("backpressured request remains reserved for retry");
+        let retry_frame = retry.take_frame();
+        retry.commit();
+
+        let request_id = |frame: Vec<u8>| {
+            let crate::wire::WireFrame::Message(envelope) =
+                crate::wire::decode_frame(&frame).unwrap()
+            else {
+                panic!("reserved request is an ordinary wire message");
+            };
+            let payload =
+                crate::wire::decompress_sync_payload(&envelope.payload, envelope.features).unwrap();
+            let SyncMessage::ChunkRequestBatch(batch) =
+                crate::wire::decode_sync_message_for_features(&payload, features).unwrap()
+            else {
+                panic!("upstream reservation carries a chunk request");
+            };
+            batch.requests[0].request_id
+        };
+        assert_eq!(
+            request_id(retry_frame),
+            request_id(first_frame),
+            "backpressure retries the exact same chunk request once"
+        );
+        assert!(
+            pump.reserve_outbound_wire_frame(crate::wire::WIRE_PROTOCOL_VERSION, features, None)
+                .unwrap()
+                .is_none(),
+            "committing the retry consumes the request exactly once"
+        );
+        drop(pending);
+    });
+}
+
+// This internal receipt covers the relay-response reservation, whose capacity
+// claim must survive a rejected send until the retry actually commits.
+#[test]
+fn reserved_wire_chunk_response_restores_its_relay_obligation_after_backpressure() {
+    let resolver = PeerChunkResolver::default();
+    let database = crate::db::block_on(groove::db::Database::new(
+        groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new()),
+        groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF])
+            .expect("valid memory storage families"),
+    ))
+    .unwrap();
+    let pump = PeerIoPump::new(
+        resolver.clone(),
+        database.local_chunk_reader(),
+        48,
+        PeerIoPumpRole::Subscriber,
+    );
+    let response = ChunkResponseEntry {
+        request_id: 48,
+        result: ChunkResponse::Found(vec![48]),
+    };
+    {
+        let mut state = resolver.state.borrow_mut();
+        state.relay_responses.insert(48, vec![response.clone()]);
+        state.relay_chunk_obligations = 1;
+    }
+
+    let features = crate::wire::current_wire_features();
+    let mut first = pump
+        .reserve_outbound_wire_frame(crate::wire::WIRE_PROTOCOL_VERSION, features, None)
+        .unwrap()
+        .expect("chunk response is reserved for the first send");
+    let first_frame = first.take_frame();
+    drop(first);
+    assert_eq!(
+        retained_relay_obligations(&resolver.state.borrow()),
+        1,
+        "a rejected send retains its relay capacity claim"
+    );
+
+    let mut retry = pump
+        .reserve_outbound_wire_frame(crate::wire::WIRE_PROTOCOL_VERSION, features, None)
+        .unwrap()
+        .expect("backpressured response remains reserved for retry");
+    let retry_frame = retry.take_frame();
+    retry.commit();
+
+    assert_eq!(
+        first_frame, retry_frame,
+        "the retry sends one unchanged response frame"
+    );
+    assert_eq!(
+        retained_relay_obligations(&resolver.state.borrow()),
+        0,
+        "committing the retry releases the relay claim exactly once"
+    );
+    assert!(
+        pump.reserve_outbound_wire_frame(crate::wire::WIRE_PROTOCOL_VERSION, features, None)
+            .unwrap()
+            .is_none(),
+        "the committed response is not replayed"
+    );
+}
+
 #[test]
 fn partial_drain_then_disconnect_releases_only_that_connections_obligations() {
     let resolver = PeerChunkResolver::default();

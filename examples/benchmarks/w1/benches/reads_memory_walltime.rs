@@ -1,5 +1,5 @@
 use jazz::groove::storage::MemoryStorage;
-use jazz_example_benchmark_w1::Fixture;
+use jazz_example_benchmark_w1::{Fixture, ResumeFixture};
 
 fn main() {
     divan::main();
@@ -86,6 +86,44 @@ fn resubscribe_activity_point_profile_s_memory(bencher: divan::Bencher<'_, '_>) 
     let fixture = Fixture::<MemoryStorage>::memory(300, 1_200, 9_000);
     assert_eq!(fixture.subscribe_point_activity_once(), 1);
     bencher.bench_local(|| fixture.subscribe_point_activity_once());
+}
+
+#[divan::bench(args = [900, 9_000], sample_count = 1)]
+fn delete_task_point_scaling_memory(bencher: divan::Bencher<'_, '_>, activity_events: usize) {
+    bencher
+        .with_inputs(|| Fixture::<MemoryStorage>::memory(300, 1_200, activity_events))
+        .bench_local_values(|fixture| {
+            fixture.delete_target_task();
+            fixture
+        });
+}
+
+#[divan::bench(args = [900, 9_000], sample_count = 1)]
+fn restore_task_point_scaling_memory(bencher: divan::Bencher<'_, '_>, activity_events: usize) {
+    bencher
+        .with_inputs(|| {
+            let fixture = Fixture::<MemoryStorage>::memory(300, 1_200, activity_events);
+            fixture.delete_target_task();
+            fixture
+        })
+        .bench_local_values(|fixture| {
+            fixture.restore_target_task();
+            fixture
+        });
+}
+
+/// One-row byte-wire resume after the full W1 topology is prepared off-clock.
+#[divan::bench(args = [(300, 1_200, 900), (500, 2_000, 1_500)], sample_count = 1)]
+fn resume_one_task_update_scaling_memory(
+    bencher: divan::Bencher<'_, '_>,
+    (tasks, comments, activity): (usize, usize, usize),
+) {
+    bencher
+        .with_inputs(|| ResumeFixture::memory(tasks, comments, activity))
+        .bench_local_values(|mut fixture| {
+            let resume_bytes = fixture.resume_once();
+            (fixture, resume_bytes)
+        });
 }
 
 /// Fixed-result scaling receipt exposing query-engine candidate hydration.

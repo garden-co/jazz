@@ -11,6 +11,7 @@ pub(super) fn assert_authority_rejects_staged_write(
         write.write_state().unwrap(),
         WriteState {
             fate: Fate::Pending,
+            global_time: None,
             durability: DurabilityTier::Local,
         },
         "the client must stage the write locally until the authority assigns its fate"
@@ -28,6 +29,7 @@ pub(super) fn assert_authority_rejects_staged_write(
         write.write_state().unwrap(),
         WriteState {
             fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            global_time: None,
             durability: DurabilityTier::Local,
         },
         "only the authority may reject a staged write for policy authorization"

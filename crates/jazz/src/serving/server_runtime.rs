@@ -22,12 +22,15 @@ use crate::serving::{
     AbiBytes, InMemoryServerShell, InMemoryServerShellConfig, NodeRole, ServerSession,
     StorageConfig,
 };
-use crate::wire::{WireFrame, WireTransport, decode_frame, decode_sync_message};
-use futures::StreamExt;
+use crate::tools::native_transport_connector::{
+    NativeTransportTerminal, NativeTransportTerminalFuture,
+};
+use crate::wire::{TransportError, WireFrame, WireTransport, decode_frame, decode_sync_message};
 use futures::channel::mpsc;
 use futures::future::LocalBoxFuture;
 use futures::task::LocalSpawnExt;
 use futures::task::{ArcWake, waker};
+use futures::{FutureExt, StreamExt};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot, watch};
 
 /// Sendable handle for the thread that owns the in-memory server shell.
@@ -70,6 +73,50 @@ impl ServerRuntimeFrameStream {
     }
 }
 
+/// Terminal reason for an attached edge-to-authority wire transport.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ServerUpstreamTerminalReason {
+    /// The target-owned native socket pump reported its terminal outcome.
+    NativeTransport(NativeTransportTerminal),
+    /// The adapter rejected an outbound frame because its pump had failed.
+    TransportFailed(String),
+    /// Wire decoding or semantic auxiliary routing failed.
+    ProtocolFailed(String),
+    /// The owner dropped the connection to cancel its local wire driver.
+    Cancelled,
+    /// The shell owner stopped without returning a more specific reason.
+    RuntimeStopped,
+}
+
+/// Owned lifetime signal for an attached edge-to-authority wire transport.
+pub struct ServerUpstreamConnection {
+    terminal: Option<oneshot::Receiver<ServerUpstreamTerminalReason>>,
+    cancel: Option<oneshot::Sender<()>>,
+}
+
+impl ServerUpstreamConnection {
+    /// Resolve with the reason the socket/semantic pump stopped.
+    pub async fn terminal(mut self) -> ServerUpstreamTerminalReason {
+        let terminal = self
+            .terminal
+            .take()
+            .expect("upstream terminal receiver is consumed exactly once");
+        let reason = terminal
+            .await
+            .unwrap_or(ServerUpstreamTerminalReason::RuntimeStopped);
+        self.cancel.take();
+        reason
+    }
+}
+
+impl Drop for ServerUpstreamConnection {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+    }
+}
+
 struct ServerShellInner {
     jobs: Mutex<Option<mpsc::UnboundedSender<ServerShellCommand>>>,
     join: Mutex<Option<thread::JoinHandle<()>>>,
@@ -108,10 +155,11 @@ enum ServerShellCommand {
     RunAsync(AsyncServerShellJob),
     AttachUpstreamWire {
         transport: Box<dyn WireTransport + Send>,
+        transport_terminal: NativeTransportTerminalFuture,
         protocol_version: u16,
         features: crate::wire::WireFeatures,
         session_context: Option<ConnectionSessionContext>,
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<ServerUpstreamConnection, String>>,
     },
     Shutdown(std_mpsc::Sender<()>),
 }
@@ -269,6 +317,7 @@ fn run_server_shell_owner(
                 }
                 ServerShellCommand::AttachUpstreamWire {
                     transport,
+                    transport_terminal,
                     protocol_version,
                     features,
                     session_context,
@@ -276,19 +325,46 @@ fn run_server_shell_owner(
                 } => {
                     let io =
                         shell.connect_upstream_wire_io(protocol_version, features, session_context);
+                    let connection_id = io.connection_id;
                     let (wake_tx, wake_rx) = mpsc::unbounded();
                     if let Ok(mut wakers) = io_wakers.lock() {
                         wakers.push(wake_tx);
                     }
-                    let spawn_result = spawner.spawn_local(drive_upstream_wire(
-                        transport,
-                        io,
-                        wake_rx,
-                        scheduler.clone(),
-                    ));
-                    let _ = reply.send(spawn_result.map_err(|error| {
-                        format!("failed to spawn local upstream wire pump: {error}")
-                    }));
+                    let (terminal_tx, terminal) = oneshot::channel();
+                    let (cancel, cancel_rx) = oneshot::channel();
+                    let wire_scheduler = scheduler.clone();
+                    let spawn_result = spawner.spawn_local(async move {
+                        let reason = drive_upstream_wire(
+                            transport,
+                            transport_terminal,
+                            io,
+                            wake_rx,
+                            wire_scheduler,
+                            cancel_rx,
+                        )
+                        .await;
+                        let _ = terminal_tx.send(reason);
+                    });
+                    let connection = spawn_result
+                        .map(|()| ServerUpstreamConnection {
+                            terminal: Some(terminal),
+                            cancel: Some(cancel),
+                        })
+                        .map_err(|error| {
+                            format!("failed to spawn local upstream wire pump: {error}")
+                        });
+                    if connection.is_ok() {
+                        // Creating the semantic upstream queues its initial
+                        // claims/frontier work, but unlike the in-memory attach
+                        // path it has no caller-owned tick. Queue that first
+                        // shell turn only after the wire pump exists so initial
+                        // bootstrap and reconnect both flush without waiting
+                        // for unrelated downstream activity.
+                        scheduler.schedule_tick(TickUrgency::Immediate);
+                    } else {
+                        shell.disconnect_upstream_wire_io(connection_id);
+                    }
+                    let _ = reply.send(connection);
                 }
                 ServerShellCommand::Shutdown(stopped) => {
                     // Native storage is destroyed on its owner thread before
@@ -329,81 +405,138 @@ async fn yield_to_local_tasks() {
 
 async fn drive_upstream_wire(
     mut wire: Box<dyn WireTransport + Send>,
+    mut transport_terminal: NativeTransportTerminalFuture,
     io: super::ServerUpstreamIo,
     mut wake_rx: mpsc::UnboundedReceiver<()>,
     scheduler: ServerShellTickScheduler,
-) {
-    loop {
-        let mut staged_semantic_input = false;
-        while let Some(frame) = wire.try_recv_frame() {
-            match io.pump.route_incoming_wire_frame(frame, io.features).await {
-                Ok(Some(canonical)) => {
-                    io.transport
-                        .queues
-                        .borrow_mut()
-                        .inbound
-                        .push_back(canonical);
-                    staged_semantic_input = true;
-                }
-                Ok(None) => {}
-                Err(_) => {
-                    io.pump.disconnect();
-                    return;
-                }
-            }
-        }
-        // The socket callback can notify the host before this local pump gets
-        // a turn to stage its frame. Schedule only after canonical input is
-        // actually visible to the shell, otherwise a downstream activity tick
-        // may observe an empty queue and leave the edge dormant indefinitely.
-        if staged_semantic_input {
-            scheduler.schedule_tick(TickUrgency::Immediate);
-        }
+    mut cancel_rx: oneshot::Receiver<()>,
+) -> ServerUpstreamTerminalReason {
+    let connection_id = io.connection_id;
+    let reason = async {
         loop {
-            let frame = io.transport.queues.borrow_mut().outbound.pop_front();
-            let Some(frame) = frame else { break };
-            if wire.send_frame(frame).is_err() {
-                io.pump.disconnect();
-                return;
-            }
-        }
-        loop {
-            let frame =
-                match io
-                    .pump
-                    .take_outbound_wire_frame(io.protocol_version, io.features, None)
-                {
-                    Ok(frame) => frame,
-                    Err(_) => {
-                        io.pump.disconnect();
-                        return;
+            let mut staged_semantic_input = false;
+            while let Some(frame) = wire.try_recv_frame() {
+                match io.pump.route_incoming_wire_frame(frame, io.features).await {
+                    Ok(Some(canonical)) => {
+                        io.transport
+                            .queues
+                            .borrow_mut()
+                            .inbound
+                            .push_back(canonical);
+                        staged_semantic_input = true;
                     }
-                };
-            let Some(frame) = frame else { break };
-            if wire.send_frame(frame).is_err() {
-                io.pump.disconnect();
-                return;
-            }
-        }
-
-        let external_wake = wake_rx.next();
-        let auxiliary_wake = io.pump.outbound_ready();
-        futures::pin_mut!(external_wake, auxiliary_wake);
-        match futures::future::select(external_wake, auxiliary_wake).await {
-            futures::future::Either::Left((Some(()), _)) => {}
-            futures::future::Either::Right(((), _)) => {
-                // Disconnect wakes `outbound_ready` to let the owner tear
-                // down cleanly; it is not another unit of socket work.
-                if io.pump.is_disconnected() {
-                    return;
+                    Ok(None) => {}
+                    Err(error) => {
+                        return ServerUpstreamTerminalReason::ProtocolFailed(error);
+                    }
                 }
             }
-            futures::future::Either::Left((None, _)) => {
-                io.pump.disconnect();
-                return;
+            // The socket callback can notify the host before this local pump gets
+            // a turn to stage its frame. Schedule only after canonical input is
+            // actually visible to the shell, otherwise a downstream activity tick
+            // may observe an empty queue and leave the edge dormant indefinitely.
+            if staged_semantic_input {
+                scheduler.schedule_tick(TickUrgency::Immediate);
+            }
+            let mut transport_backpressured = false;
+            loop {
+                let frame = io.transport.queues.borrow_mut().outbound.pop_front();
+                let Some(frame) = frame else { break };
+                match wire.send_frame(frame.clone()) {
+                    Ok(()) => {}
+                    Err(TransportError::Backpressure) => {
+                        // Backpressure is a retry signal from this live
+                        // transport, not a disconnect. Put the exact frame
+                        // back ahead of later semantic work so its FIFO
+                        // obligation cannot be lost or overtaken.
+                        io.transport.queues.borrow_mut().outbound.push_front(frame);
+                        transport_backpressured = true;
+                        break;
+                    }
+                    Err(TransportError::Failed(error)) => {
+                        return ServerUpstreamTerminalReason::TransportFailed(error);
+                    }
+                }
+            }
+            if !transport_backpressured {
+                loop {
+                    let reservation = match io.pump.reserve_outbound_wire_frame(
+                        io.protocol_version,
+                        io.features,
+                        None,
+                    ) {
+                        Ok(reservation) => reservation,
+                        Err(error) => {
+                            return ServerUpstreamTerminalReason::ProtocolFailed(error);
+                        }
+                    };
+                    let Some(mut reservation) = reservation else {
+                        break;
+                    };
+                    match wire.send_frame(reservation.take_frame()) {
+                        Ok(()) => reservation.commit(),
+                        Err(TransportError::Backpressure) => {
+                            // The reservation restores requests and relay
+                            // responses (including their capacity claim) to
+                            // their exact FIFO lane before we wait for this
+                            // same transport to become writable again.
+                            drop(reservation);
+                            break;
+                        }
+                        Err(TransportError::Failed(error)) => {
+                            // Do not let a failed connection consume the
+                            // auxiliary obligation while the driver reports
+                            // its terminal outcome to the reconnect owner.
+                            drop(reservation);
+                            return ServerUpstreamTerminalReason::TransportFailed(error);
+                        }
+                    }
+                }
+            }
+
+            let external_wake = wake_rx.next().fuse();
+            let auxiliary_wake = io.pump.outbound_ready().fuse();
+            let transport_stopped = transport_terminal.as_mut().fuse();
+            let cancelled = (&mut cancel_rx).fuse();
+            futures::pin_mut!(external_wake, auxiliary_wake, transport_stopped, cancelled);
+            futures::select_biased! {
+                _ = cancelled => return ServerUpstreamTerminalReason::Cancelled,
+                terminal = transport_stopped => {
+                    return ServerUpstreamTerminalReason::NativeTransport(terminal);
+                }
+                wake = external_wake => {
+                    if wake.is_none() {
+                        return ServerUpstreamTerminalReason::RuntimeStopped;
+                    }
+                }
+                _ = auxiliary_wake => {
+                    if io.pump.is_disconnected() {
+                        return ServerUpstreamTerminalReason::TransportFailed(
+                            "upstream semantic transport disconnected".to_owned(),
+                        );
+                    }
+                }
             }
         }
     }
+    .await;
+    io.pump.disconnect();
+    let (detached_tx, detached_rx) = oneshot::channel();
+    if scheduler
+        .jobs
+        .unbounded_send(ServerShellCommand::Run(Box::new(move |shell| {
+            shell.disconnect_upstream_wire_io(connection_id);
+            let _ = detached_tx.send(());
+        })))
+        .is_ok()
+    {
+        // Do not expose the terminal event to the reconnect loop until the
+        // dead semantic link has relinquished authority. Otherwise the
+        // replacement wire can attach as a parallel non-owner and strand
+        // writes retained during the outage.
+        let _ = detached_rx.await;
+    }
+    reason
 }
 
 impl ServerRuntimeHandle {
@@ -877,13 +1010,15 @@ impl ServerRuntimeHandle {
     pub async fn connect_upstream_wire(
         &self,
         transport: Box<dyn WireTransport + Send>,
+        transport_terminal: NativeTransportTerminalFuture,
         protocol_version: u16,
         features: crate::wire::WireFeatures,
         session_context: Option<ConnectionSessionContext>,
-    ) -> Result<(), String> {
+    ) -> Result<ServerUpstreamConnection, String> {
         let (reply, response) = oneshot::channel();
         self.send(ServerShellCommand::AttachUpstreamWire {
             transport,
+            transport_terminal,
             protocol_version,
             features,
             session_context,
@@ -1161,9 +1296,165 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct FirstSendBackpressureState {
+        rejected: bool,
+        sent: Vec<Vec<u8>>,
+    }
+
+    struct FirstSendBackpressureWire {
+        state: Arc<Mutex<FirstSendBackpressureState>>,
+    }
+
+    impl WireTransport for FirstSendBackpressureWire {
+        fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), crate::wire::TransportError> {
+            let mut state = self.state.lock().unwrap();
+            if !state.rejected {
+                state.rejected = true;
+                return Err(crate::wire::TransportError::Backpressure);
+            }
+            state.sent.push(frame);
+            Ok(())
+        }
+
+        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
     fn encode_message(message: SyncMessage) -> Vec<u8> {
         let payload = encode_sync_message(&message).unwrap();
         encode_frame(&WireFrame::Message(WireEnvelope::new(0, 0, payload))).unwrap()
+    }
+
+    // This internal test is necessary because the terminal reason crosses the
+    // shell's thread-affine local executor; no public API exposes that channel.
+    #[test]
+    fn upstream_connection_returns_the_driver_terminal_reason() {
+        let (terminal_tx, terminal) = oneshot::channel();
+        let (cancel, _cancelled) = oneshot::channel();
+        let connection = ServerUpstreamConnection {
+            terminal: Some(terminal),
+            cancel: Some(cancel),
+        };
+        terminal_tx
+            .send(ServerUpstreamTerminalReason::TransportFailed(
+                "socket closed".to_owned(),
+            ))
+            .unwrap();
+
+        assert_eq!(
+            futures::executor::block_on(connection.terminal()),
+            ServerUpstreamTerminalReason::TransportFailed("socket closed".to_owned())
+        );
+    }
+
+    // This internal test is necessary because cancellation owns a local wire
+    // pump rather than an application-facing session.
+    #[test]
+    fn dropping_upstream_connection_cancels_its_wire_driver() {
+        let (_terminal_tx, terminal) = oneshot::channel();
+        let (cancel, cancelled) = oneshot::channel();
+        let connection = ServerUpstreamConnection {
+            terminal: Some(terminal),
+            cancel: Some(cancel),
+        };
+
+        drop(connection);
+
+        assert!(futures::executor::block_on(cancelled).is_ok());
+    }
+
+    // This internal receipt is necessary because retrying the native
+    // binding-owned wire driver is below the public server API. It proves a
+    // full bounded queue retains its canonical frame and retries that same
+    // live transport rather than reconnecting and losing the obligation.
+    #[test]
+    fn semantic_backpressure_retries_the_same_queued_frame_once() {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let mut shell = InMemoryServerShell::start(InMemoryServerShellConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x75; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        ))
+        .unwrap();
+        let (jobs, _pending_jobs) = mpsc::unbounded();
+        let (activity_tx, _) = watch::channel(0_u64);
+        let scheduler = ServerShellTickScheduler {
+            jobs,
+            activity_tx,
+            io_wakers: Arc::new(Mutex::new(Vec::new())),
+            state: Arc::new(ServerShellTickState::default()),
+        };
+        shell.set_tick_scheduler(Some(Rc::new(scheduler.clone())));
+        let io = shell.connect_upstream_wire_io(
+            crate::wire::WIRE_PROTOCOL_VERSION,
+            crate::wire::FEATURE_NONE,
+            None,
+        );
+        let expected = encode_message(SyncMessage::SessionClaims {
+            identity: AuthorSubject::for_test_bytes([0x75; 16]),
+            claims: BTreeMap::new(),
+        });
+        io.transport
+            .queues
+            .borrow_mut()
+            .outbound
+            .push_back(expected.clone());
+
+        let state = Arc::new(Mutex::new(FirstSendBackpressureState::default()));
+        let wire = FirstSendBackpressureWire {
+            state: Arc::clone(&state),
+        };
+        let (wake_tx, wake_rx) = mpsc::unbounded();
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
+        let mut executor = futures::executor::LocalPool::new();
+        executor
+            .spawner()
+            .spawn_local(async move {
+                let _ = drive_upstream_wire(
+                    Box::new(wire),
+                    Box::pin(futures::future::pending()),
+                    io,
+                    wake_rx,
+                    scheduler,
+                    cancel_rx,
+                )
+                .await;
+            })
+            .unwrap();
+
+        executor.run_until_stalled();
+        assert!(state.lock().unwrap().sent.is_empty());
+        let connection_id = *shell
+            .wire_upstream_connections
+            .keys()
+            .next()
+            .expect("the original upstream owner remains attached");
+        assert_eq!(
+            shell.wire_upstream_connections.len(),
+            1,
+            "backpressure does not replace the live semantic connection"
+        );
+
+        wake_tx.unbounded_send(()).unwrap();
+        executor.run_until_stalled();
+        assert_eq!(
+            state.lock().unwrap().sent,
+            vec![expected],
+            "the front-of-queue semantic frame is delivered exactly once after retry"
+        );
+        assert!(
+            shell.wire_upstream_connections.contains_key(&connection_id),
+            "the retry uses the original live transport owner"
+        );
     }
 
     #[test]
@@ -1283,10 +1574,21 @@ mod tests {
             claims: BTreeMap::new(),
         }));
         let (_wake_tx, wake_rx) = mpsc::unbounded();
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
         let mut executor = futures::executor::LocalPool::new();
         executor
             .spawner()
-            .spawn_local(drive_upstream_wire(Box::new(wire), io, wake_rx, scheduler))
+            .spawn_local(async move {
+                let _ = drive_upstream_wire(
+                    Box::new(wire),
+                    Box::pin(futures::future::pending()),
+                    io,
+                    wake_rx,
+                    scheduler,
+                    cancel_rx,
+                )
+                .await;
+            })
             .unwrap();
         executor.run_until_stalled();
 

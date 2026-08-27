@@ -155,6 +155,13 @@ and change stream (`INV-TX-21`, ch. 4). Crucially, **local durability does not
 imply upstream survival**: a committed local transaction that has not reached an
 upstream tier can be lost if local storage is destroyed (`INV-TX-12`).
 
+`Global` is therefore not a durability flag in isolation. An application
+`Global` wait completes only after it has observed all three parts of authority
+settlement for that transaction: `Fate::Accepted`, `DurabilityTier::Global`,
+and an authority-assigned `GlobalTime`. Hydration or propagation that supplies
+only a `Global` durability claim cannot complete that wait (`INV-API-15`, ch.
+13).
+
 _Further invariants._ `INV-TX-10` — applying a fate update never moves
 `global_time` backward and raises `durability` only monotonically.
 
