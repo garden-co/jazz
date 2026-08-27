@@ -3,13 +3,17 @@ use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use futures_channel::mpsc::{unbounded, UnboundedSender};
 use futures_util::future::{AbortHandle, Abortable};
 use futures_util::lock::Mutex as LocalMutex;
 use futures_util::stream;
+use futures_util::task::{waker, ArcWake};
 use futures_util::{Stream, StreamExt};
 #[cfg(target_arch = "wasm32")]
 use idb_tree::IndexedDbPageStore;
@@ -232,6 +236,7 @@ struct WasmStreamingMutationState {
     cells: RowCells,
     column: String,
     identity: Option<AuthorSubject>,
+    attribution: Option<AuthorSubject>,
     updated_at_ms: Option<u64>,
     head: Option<BranchSelector>,
     base: Option<BranchViewBase>,
@@ -290,7 +295,7 @@ impl WasmStreamingMutation {
                         state.updated_at_ms,
                         state.head,
                         state.base,
-                        None,
+                        state.attribution,
                     )
                     .await
                     .map_err(to_js_error)?,
@@ -309,7 +314,7 @@ impl WasmStreamingMutation {
                         state.updated_at_ms,
                         state.head,
                         state.base,
-                        None,
+                        state.attribution,
                     )
                     .await
                     .map_err(to_js_error)?,
@@ -406,6 +411,10 @@ impl WasmWrite {
 pub struct WasmDb {
     inner: WasmDbInner,
     owns_runtime: bool,
+    // This is set only by the explicit backend-open ABI.  Attributed writes
+    // are otherwise a privilege-escalation surface, because their author is
+    // provenance while admission remains the runtime's SYSTEM identity.
+    trusted_backend: bool,
 }
 
 enum WasmDbInner {
@@ -588,6 +597,24 @@ struct WasmWireTransport {
 
 struct WasmTickScheduler {
     callback: js_sys::Function,
+    progress_wake: UnboundedSender<()>,
+    progress_wake_pending: Arc<AtomicBool>,
+}
+
+/// `Waker` itself must be Send + Sync, while a JS callback is deliberately
+/// thread-affine. Keep only a thread-safe channel in the waker and forward it
+/// back to the WASM local task before touching JS.
+struct WasmQueryRuntimeWake {
+    sender: UnboundedSender<()>,
+    pending: Arc<AtomicBool>,
+}
+
+impl ArcWake for WasmQueryRuntimeWake {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        if !arc_self.pending.swap(true, Ordering::AcqRel) {
+            let _ = arc_self.sender.unbounded_send(());
+        }
+    }
 }
 
 impl TickScheduler for WasmTickScheduler {
@@ -606,6 +633,13 @@ impl TickScheduler for WasmTickScheduler {
             &JsValue::NULL,
             &JsValue::from_str(&format!("after:{delay_ms}")),
         );
+    }
+
+    fn query_runtime_waker(&self) -> Option<Waker> {
+        Some(waker(Arc::new(WasmQueryRuntimeWake {
+            sender: self.progress_wake.clone(),
+            pending: Arc::clone(&self.progress_wake_pending),
+        })))
     }
 }
 
@@ -961,7 +995,21 @@ impl WasmDbInner {
     }
 
     fn set_tick_scheduler(&self, callback: js_sys::Function) {
-        let scheduler = Rc::new(WasmTickScheduler { callback });
+        let (progress_wake, mut progress_events) = unbounded();
+        let progress_wake_pending = Arc::new(AtomicBool::new(false));
+        let progress_callback = callback.clone();
+        let progress_pending = Arc::clone(&progress_wake_pending);
+        wasm_bindgen_futures::spawn_local(async move {
+            while progress_events.next().await.is_some() {
+                progress_pending.store(false, Ordering::Release);
+                let _ = progress_callback.call1(&JsValue::NULL, &JsValue::from_str("immediate"));
+            }
+        });
+        let scheduler = Rc::new(WasmTickScheduler {
+            callback,
+            progress_wake,
+            progress_wake_pending,
+        });
         with_wasm_db!(self, |db| db.set_tick_scheduler(Some(scheduler)))
     }
 
@@ -998,6 +1046,12 @@ enum WasmTxKind {
 
 #[wasm_bindgen]
 impl WasmDb {
+    fn require_trusted_backend(&self) -> Result<(), JsValue> {
+        self.trusted_backend.then_some(()).ok_or_else(|| {
+            JsValue::from_str("backend attribution requires an explicit backend runtime")
+        })
+    }
+
     #[wasm_bindgen(js_name = insertEncoded)]
     pub fn insert_encoded_with_options(
         &self,
@@ -1170,6 +1224,144 @@ impl WasmDb {
         }
     }
 
+    /// Backend-only root insert. Admission remains SYSTEM while `author` is
+    /// retained as row provenance; the public raw open cannot enable this.
+    #[wasm_bindgen(js_name = insertWithIdEncodedAttributed)]
+    pub fn insert_with_id_encoded_attributed(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        cells: Vec<u8>,
+        author: Vec<u8>,
+    ) -> Result<WasmWrite, JsValue> {
+        self.require_trusted_backend()?;
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let cells = decode_cells(&cells)?;
+        let author = author_id_from_bytes(&author)?;
+        match &self.inner {
+            WasmDbInner::Memory(db) => wasm_write_memory(
+                Rc::clone(db),
+                block_on(db.insert_with_id_attributed(author, &table, row_id, cells))
+                    .map_err(to_js_error)?,
+            ),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => wasm_write_browser(
+                Rc::clone(db),
+                block_on(db.insert_with_id_attributed(author, &table, row_id, cells))
+                    .map_err(to_js_error)?,
+            ),
+            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
+        }
+    }
+
+    #[wasm_bindgen(js_name = updateEncodedAttributed)]
+    pub fn update_encoded_attributed(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        patch: Vec<u8>,
+        author: Vec<u8>,
+    ) -> Result<WasmWrite, JsValue> {
+        self.require_trusted_backend()?;
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let patch = decode_cells(&patch)?;
+        let author = author_id_from_bytes(&author)?;
+        match &self.inner {
+            WasmDbInner::Memory(db) => wasm_write_memory(
+                Rc::clone(db),
+                block_on(db.update_attributed(author, &table, row_id, patch))
+                    .map_err(to_js_error)?,
+            ),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => wasm_write_browser(
+                Rc::clone(db),
+                block_on(db.update_attributed(author, &table, row_id, patch))
+                    .map_err(to_js_error)?,
+            ),
+            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
+        }
+    }
+
+    #[wasm_bindgen(js_name = upsertEncodedAttributed)]
+    pub fn upsert_encoded_attributed(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        cells: Vec<u8>,
+        author: Vec<u8>,
+    ) -> Result<WasmWrite, JsValue> {
+        self.require_trusted_backend()?;
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let cells = decode_cells(&cells)?;
+        let author = author_id_from_bytes(&author)?;
+        match &self.inner {
+            WasmDbInner::Memory(db) => wasm_write_memory(
+                Rc::clone(db),
+                block_on(db.upsert_attributed(author, &table, row_id, cells))
+                    .map_err(to_js_error)?,
+            ),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => wasm_write_browser(
+                Rc::clone(db),
+                block_on(db.upsert_attributed(author, &table, row_id, cells))
+                    .map_err(to_js_error)?,
+            ),
+            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
+        }
+    }
+
+    #[wasm_bindgen(js_name = deleteAttributed)]
+    pub fn delete_attributed(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        author: Vec<u8>,
+    ) -> Result<WasmWrite, JsValue> {
+        self.require_trusted_backend()?;
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let author = author_id_from_bytes(&author)?;
+        match &self.inner {
+            WasmDbInner::Memory(db) => wasm_write_memory(
+                Rc::clone(db),
+                block_on(db.delete_attributed(author, &table, row_id)).map_err(to_js_error)?,
+            ),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => wasm_write_browser(
+                Rc::clone(db),
+                block_on(db.delete_attributed(author, &table, row_id)).map_err(to_js_error)?,
+            ),
+            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
+        }
+    }
+
+    #[wasm_bindgen(js_name = restoreEncodedAttributed)]
+    pub fn restore_encoded_attributed(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        cells: Vec<u8>,
+        author: Vec<u8>,
+    ) -> Result<WasmWrite, JsValue> {
+        self.require_trusted_backend()?;
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let cells = decode_cells(&cells)?;
+        let author = author_id_from_bytes(&author)?;
+        match &self.inner {
+            WasmDbInner::Memory(db) => wasm_write_memory(
+                Rc::clone(db),
+                block_on(db.restore_attributed(author, &table, row_id, cells))
+                    .map_err(to_js_error)?,
+            ),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => wasm_write_browser(
+                Rc::clone(db),
+                block_on(db.restore_attributed(author, &table, row_id, cells))
+                    .map_err(to_js_error)?,
+            ),
+            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
+        }
+    }
+
     #[wasm_bindgen(js_name = openMemory)]
     pub fn open_memory(schema: Vec<u8>, config: Vec<u8>) -> Result<WasmDb, JsValue> {
         console_error_panic_hook::set_once();
@@ -1183,6 +1375,32 @@ impl WasmDb {
         Ok(Self {
             inner: WasmDbInner::Memory(Rc::new(db)),
             owns_runtime: true,
+            trusted_backend: false,
+        })
+    }
+
+    /// Open a deliberate backend runtime. This remains a separate ABI from
+    /// `openMemory`: the public raw-open configuration can never select the
+    /// privileged system author.
+    #[wasm_bindgen(js_name = openMemoryAsBackend)]
+    pub fn open_memory_as_backend(schema: Vec<u8>, config: Vec<u8>) -> Result<WasmDb, JsValue> {
+        console_error_panic_hook::set_once();
+        let (schema, config) = decode_open_args(&schema, &config)?;
+        let identity = backend_open_identity(&config)?;
+        let refs = schema.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let db = block_on(open_backend_db(
+            schema,
+            MemoryStorage::new(&refs),
+            config,
+            identity,
+        ))
+        .map_err(to_js_error)?;
+        db.set_deferred_local_persistence(true);
+        Ok(Self {
+            inner: WasmDbInner::Memory(Rc::new(db)),
+            owns_runtime: true,
+            trusted_backend: true,
         })
     }
 
@@ -1209,6 +1427,7 @@ impl WasmDb {
         Ok(Self {
             inner: WasmDbInner::Memory(Rc::new(db)),
             owns_runtime: true,
+            trusted_backend: false,
         })
     }
 
@@ -1236,6 +1455,7 @@ impl WasmDb {
         Ok(Self {
             inner: WasmDbInner::Browser(Rc::new(db)),
             owns_runtime: true,
+            trusted_backend: false,
         })
     }
 
@@ -1267,6 +1487,7 @@ impl WasmDb {
         Ok(Self {
             inner: WasmDbInner::Browser(Rc::new(db)),
             owns_runtime: true,
+            trusted_backend: false,
         })
     }
 
@@ -1280,6 +1501,7 @@ impl WasmDb {
                 .register_schema_view(schema)
                 .map_err(to_js_error)?,
             owns_runtime: false,
+            trusted_backend: self.trusted_backend,
         })
     }
 
@@ -1334,6 +1556,33 @@ impl WasmDb {
                 .map_err(to_js_error),
             _ => Err(JsValue::from_str(&unknown_transaction_kind_message(&kind))),
         }
+    }
+
+    /// Begin the only supported attributed transaction shape.  It is distinct
+    /// from `beginTransaction` so an older binding fails closed rather than
+    /// silently converting external provenance into SYSTEM authorship.
+    #[wasm_bindgen(js_name = beginTransactionAttributed)]
+    pub fn begin_transaction_attributed(
+        &self,
+        open_batch_id: String,
+        attribution: Vec<u8>,
+    ) -> Result<(), JsValue> {
+        self.require_trusted_backend()?;
+        let open_batch_id = open_batch_id
+            .parse::<OpenTransactionId>()
+            .map_err(|error| JsValue::from_str(&error))?;
+        let attribution = author_id_from_bytes(&attribution)?;
+        match &self.inner {
+            WasmDbInner::Memory(db) => {
+                block_on(db.begin_mergeable_attributed(open_batch_id, attribution))
+            }
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => {
+                block_on(db.begin_mergeable_attributed(open_batch_id, attribution))
+            }
+            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+        }
+        .map_err(to_js_error)
     }
 
     /// Commit an owner-wide mergeable transaction by id.
@@ -1904,6 +2153,84 @@ impl WasmDb {
         head: Option<JsValue>,
         base: Option<JsValue>,
     ) -> Result<WasmStreamingMutation, JsValue> {
+        self.begin_streaming_mutation_inner(
+            table,
+            row_id,
+            cells,
+            column,
+            mutation,
+            author,
+            None,
+            updated_at_ms,
+            head,
+            base,
+        )
+    }
+
+    /// Trusted-backend streaming counterpart.  SYSTEM remains the admission
+    /// identity; `attribution` is only final row provenance.  Branch streaming
+    /// remains intentionally unsupported until its state model is designed.
+    #[wasm_bindgen(js_name = beginStreamingMutationAttributedEncoded)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_streaming_mutation_attributed_encoded(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        cells: Vec<u8>,
+        column: String,
+        mutation: Option<String>,
+        author: Option<Vec<u8>>,
+        attribution: Vec<u8>,
+        updated_at_ms: Option<f64>,
+        head: Option<JsValue>,
+        base: Option<JsValue>,
+    ) -> Result<WasmStreamingMutation, JsValue> {
+        self.require_trusted_backend()?;
+        if author.is_some() {
+            return Err(JsValue::from_str(
+                "backend-attributed streaming mutations cannot override backend admission identity",
+            ));
+        }
+        if head
+            .as_ref()
+            .is_some_and(|value| !value.is_null() && !value.is_undefined())
+            || base
+                .as_ref()
+                .is_some_and(|value| !value.is_null() && !value.is_undefined())
+        {
+            return Err(JsValue::from_str(
+                "backend-attributed streaming mutations do not support branch writes",
+            ));
+        }
+        let attribution = author_id_from_bytes(&attribution)?;
+        self.begin_streaming_mutation_inner(
+            table,
+            row_id,
+            cells,
+            column,
+            mutation,
+            None,
+            Some(attribution),
+            updated_at_ms,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn begin_streaming_mutation_inner(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        cells: Vec<u8>,
+        column: String,
+        mutation: Option<String>,
+        author: Option<Vec<u8>>,
+        attribution: Option<AuthorSubject>,
+        updated_at_ms: Option<f64>,
+        head: Option<JsValue>,
+        base: Option<JsValue>,
+    ) -> Result<WasmStreamingMutation, JsValue> {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let cells = decode_cells(&cells)?;
         let mutation = match mutation.as_deref().unwrap_or("insert") {
@@ -1946,6 +2273,7 @@ impl WasmDb {
                 cells,
                 column,
                 identity,
+                attribution,
                 updated_at_ms,
                 head,
                 base,
@@ -2949,9 +3277,50 @@ where
     }
 }
 
+async fn open_backend_db<S>(
+    schema: JazzSchema,
+    storage: S,
+    config: WasmOpenDbConfig,
+    identity: DbIdentity,
+) -> Result<Db<S>, jazz::db::Error>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    let mut db_config = DbConfig::new(schema, storage, identity);
+    if let Some(seed) = config.row_id_seed {
+        db_config = db_config.with_id_source(SeededRowIdSource::new(seed));
+    }
+    let initial_sync_flush_every = config.initial_sync_flush_every;
+    // SAFETY: this function is called solely by the explicit, non-raw backend
+    // open ABI above, after it has validated the caller-controlled envelope.
+    let db = if config.history_complete {
+        unsafe { Db::open_history_complete_with_backend_attribution(db_config).await? }
+    } else {
+        unsafe { Db::open_with_backend_attribution(db_config).await? }
+    };
+    configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
+    Ok(db)
+}
+
 fn validate_untrusted_open_author(config: &WasmOpenDbConfig) -> Result<(), JsValue> {
     validate_untrusted_open_author_core(config)
         .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+fn backend_open_identity(config: &WasmOpenDbConfig) -> Result<DbIdentity, JsValue> {
+    backend_open_identity_core(config).map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+fn backend_open_identity_core(
+    config: &WasmOpenDbConfig,
+) -> Result<DbIdentity, jazz::ids::AuthorSubjectError> {
+    // Validate every caller-controlled field at the ordinary fail-closed
+    // ingress before this explicit, intentional backend ABI derives SYSTEM.
+    validate_untrusted_open_author_core(config)?;
+    Ok(DbIdentity {
+        node: config.identity.node,
+        author: AuthorSubject::SYSTEM,
+    })
 }
 
 fn validate_untrusted_open_author_core(
@@ -3937,6 +4306,7 @@ mod dynamic_schema_view_tests {
         let binding = WasmDb {
             inner: WasmDbInner::Memory(db),
             owns_runtime: false,
+            trusted_backend: false,
         };
         let subscriber = AuthorSubject::from_canonical(
             &serde_json::to_string(&("https://wasm.test", "subscriber")).unwrap(),
@@ -4079,6 +4449,35 @@ mod dynamic_schema_view_tests {
                 "ordinary WasmDb.openMemory must reject reserved issuer {issuer}"
             );
         }
+    }
+
+    #[test]
+    fn explicit_wasm_backend_open_derives_system_after_raw_validation() {
+        let config = WasmOpenDbConfig {
+            identity: WasmDbIdentity {
+                node: NodeUuid::from_bytes([0x6b; 16]),
+                author: AuthorSubject::from_canonical(
+                    &serde_json::to_string(&("https://issuer.test", "backend")).unwrap(),
+                )
+                .unwrap(),
+            },
+            row_id_seed: None,
+            history_complete: false,
+            initial_sync_flush_every: None,
+        };
+        assert_eq!(
+            backend_open_identity_core(&config).unwrap().author,
+            AuthorSubject::SYSTEM
+        );
+
+        let reserved = WasmOpenDbConfig {
+            identity: WasmDbIdentity {
+                node: config.identity.node,
+                author: AuthorSubject::SYSTEM,
+            },
+            ..config
+        };
+        assert!(backend_open_identity_core(&reserved).is_err());
     }
 
     #[test]
@@ -4363,6 +4762,7 @@ mod dynamic_schema_view_tests {
             let binding = WasmDb {
                 inner: WasmDbInner::Memory(Rc::clone(&owner)),
                 owns_runtime: false,
+                trusted_backend: false,
             };
             let alice = AuthorSubject::for_test_bytes([0xa7; 16]);
             let bob = AuthorSubject::for_test_bytes([0xb7; 16]);
@@ -4392,6 +4792,7 @@ mod dynamic_schema_view_tests {
             let view_binding = WasmDb {
                 inner: WasmDbInner::Memory(Rc::clone(&view)),
                 owns_runtime: false,
+                trusted_backend: false,
             };
             let view_query = WasmPreparedQuery {
                 inner: view.prepare_query(&view.table("items")).unwrap(),
@@ -4436,6 +4837,7 @@ mod dynamic_schema_view_tests {
             let other_binding = WasmDb {
                 inner: WasmDbInner::Memory(Rc::clone(&other_owner)),
                 owns_runtime: false,
+                trusted_backend: false,
             };
             other_binding
                 .begin_transaction(

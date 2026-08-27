@@ -5399,7 +5399,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     );
   });
 
-  it("uses the explicit backend NAPI ABI for provenance without passing it as admission", () => {
+  it("uses the explicit backend binding ABI for provenance without passing it as admission", async () => {
     const insertWithIdEncodedAttributed = vi.fn(
       (_table: string, _rowId: Uint8Array, _cells: Uint8Array, _author: Uint8Array) => fakeWrite(),
     );
@@ -5407,16 +5407,26 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     const beginTransactionAttributed = vi.fn(
       (_openBatchId: string, _author: Uint8Array) => undefined,
     );
-    const beginStreamingMutationEncoded = vi.fn(() => ({
-      push: () => undefined,
-      finish: () => fakeWrite(),
-      abort: () => undefined,
-    }));
+    const beginStreamingMutationAttributedEncoded = vi.fn(
+      (
+        _table: string,
+        _rowId: Uint8Array,
+        _cells: Uint8Array,
+        _column: string,
+        _mutation: "insert" | "update" | "upsert" | undefined,
+        _author: Uint8Array | undefined,
+        _attribution: Uint8Array,
+      ) => ({
+        push: () => undefined,
+        finish: () => fakeWrite(),
+        abort: () => undefined,
+      }),
+    );
     const nativeDb = fakeDb({
       insertWithIdEncodedAttributed,
       beginTransaction,
       beginTransactionAttributed,
-      beginStreamingMutationEncoded,
+      beginStreamingMutationAttributedEncoded,
     });
     const runtime = new NativeRuntimeAdapter(
       {
@@ -5453,6 +5463,21 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     const transactionCall = beginTransactionAttributed.mock.calls[0];
     expect(transactionCall?.[0]).toBe("attributed-batch");
     expect(new TextDecoder().decode(transactionCall?.[1])).toBe(attribution);
+
+    await runtime.streamingMutation(
+      "insert",
+      "todos",
+      {},
+      "title",
+      (async function* () {
+        yield "credited to alice";
+      })(),
+      context,
+      "00000000-0000-0000-0000-000000000125",
+    );
+    const streamingCall = beginStreamingMutationAttributedEncoded.mock.calls[0];
+    expect(streamingCall?.[0]).toBe("todos");
+    expect(new TextDecoder().decode(streamingCall?.[6])).toBe(attribution);
 
     const branched = JSON.stringify({ attribution, branch_view: { head: { values: {} } } });
     expect(() =>

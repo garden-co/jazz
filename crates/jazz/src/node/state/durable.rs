@@ -908,10 +908,24 @@ self.database.finish_persistence(persisted)?;
     /// Resume all query work that can make progress now, without holding the
     /// caller open for storage-blocked nodes.
     pub(crate) async fn drive_ready_query_runtime(&mut self) -> Result<(), Error> {
+        self.drive_ready_query_runtime_with_waker(None).await
+    }
+
+    /// Resume runnable query work and retain a host-owned wake bridge for any
+    /// cold storage operation that starts during this owner turn.
+    pub(crate) async fn drive_ready_query_runtime_with_waker(
+        &mut self,
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<(), Error> {
         self.database
-            .drive_ready_progress()
+            .drive_ready_progress_with_waker(progress_waker)
             .await
             .map_err(Error::Groove)
+    }
+
+    /// Whether an earlier non-blocking query-runtime turn left resumable work.
+    pub(crate) fn has_pending_query_runtime(&self) -> bool {
+        self.database.has_pending_progress()
     }
 
     pub(crate) async fn set_initial_sync_flush_cadence(

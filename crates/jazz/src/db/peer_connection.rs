@@ -40,6 +40,7 @@ async fn finish_peer_publication_outcome<S, T>(
     node: &SharedNodeState<S>,
     subscriptions: &SubscriptionList,
     active_authority_view_receipts: &ActiveAuthorityViewReceipts,
+    progress_waker: Option<&Waker>,
     outcome: PublicationOutcome<T>,
 ) -> Result<(T, usize), Error>
 where
@@ -49,6 +50,7 @@ where
         node,
         subscriptions,
         active_authority_view_receipts,
+        progress_waker,
         outcome,
         true,
     )
@@ -60,6 +62,7 @@ async fn finish_peer_publication_outcome_with_refresh<S, T>(
     node: &SharedNodeState<S>,
     subscriptions: &SubscriptionList,
     active_authority_view_receipts: &ActiveAuthorityViewReceipts,
+    progress_waker: Option<&Waker>,
     outcome: PublicationOutcome<T>,
     refresh: bool,
 ) -> Result<(T, usize, bool), Error>
@@ -77,9 +80,13 @@ where
         if !publications.is_empty() {
             published_any = true;
             if refresh {
-                changed +=
-                    refresh_subscriptions_in(node, subscriptions, active_authority_view_receipts)
-                        .await?;
+                changed += refresh_subscriptions_in(
+                    node,
+                    subscriptions,
+                    active_authority_view_receipts,
+                    progress_waker,
+                )
+                .await?;
             }
             let mut persisted = Vec::with_capacity(publications.len());
             for publication in &publications {
@@ -1091,6 +1098,11 @@ where
             return Err(error);
         }
         let mut stats = DbTickStats::default();
+        let progress_waker = self
+            .scheduler
+            .borrow()
+            .as_ref()
+            .and_then(|scheduler| scheduler.query_runtime_waker());
         let connection_epoch = self.connection_epoch;
         self.observe_shared_subscriber_dirty_epoch();
         self.bind_subscriber_session_claims();
@@ -1195,6 +1207,7 @@ where
                                             &self.node,
                                             &self.subscriptions,
                                             &self.active_authority_view_receipts,
+                                            progress_waker.as_ref(),
                                             outcome,
                                         )
                                         .await?;
@@ -1253,6 +1266,7 @@ where
                                         &self.node,
                                         &self.subscriptions,
                                         &self.active_authority_view_receipts,
+                                        progress_waker.as_ref(),
                                         outcome,
                                     )
                                     .await?;
@@ -2337,6 +2351,7 @@ where
                             &self.node,
                             &self.subscriptions,
                             &self.active_authority_view_receipts,
+                            progress_waker.as_ref(),
                         )
                         .await?;
                         let mut persisted = Vec::with_capacity(publications.len());
@@ -2359,6 +2374,7 @@ where
                                 &self.node,
                                 &self.subscriptions,
                                 &self.active_authority_view_receipts,
+                                progress_waker.as_ref(),
                             )
                             .await?;
                         }
@@ -3073,6 +3089,7 @@ where
                                 &self.node,
                                 &self.subscriptions,
                                 &self.active_authority_view_receipts,
+                                progress_waker.as_ref(),
                                 outcome,
                                 false,
                             )
@@ -3355,6 +3372,7 @@ where
                                 &self.node,
                                 &self.subscriptions,
                                 &self.active_authority_view_receipts,
+                                progress_waker.as_ref(),
                                 outcome,
                                 false,
                             )
@@ -3438,6 +3456,7 @@ where
                             &self.node,
                             &self.subscriptions,
                             &self.active_authority_view_receipts,
+                            progress_waker.as_ref(),
                             outcome,
                             false,
                         )
@@ -3499,6 +3518,7 @@ where
                         &self.node,
                         &self.subscriptions,
                         &self.active_authority_view_receipts,
+                        progress_waker.as_ref(),
                     )
                     .await?;
                 }
