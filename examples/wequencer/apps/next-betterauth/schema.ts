@@ -1,9 +1,13 @@
 import { schema as s } from "jazz-tools";
+import { schema as betterAuthSchema } from "./schema-better-auth/schema";
 
 const schema = {
+  ...betterAuthSchema,
   profiles: s.table({
-    user_id: s.string(),
-    display_name: s.string(),
+    // App-owned identity is the canonical Jazz author, not a provider's raw
+    // user id. The provider's own tables remain private to the backend.
+    author: s.string(),
+    displayName: s.string(),
   }),
   sessions: s.table({
     title: s.string(),
@@ -13,12 +17,12 @@ const schema = {
   session_members: s
     .table({
       session_id: s.ref("sessions"),
-      user_id: s.string(),
+      member_author: s.string(),
       role: s.enum("owner", "editor", "viewer"),
     })
-    .indexOnly(["session_id", "user_id"]),
-  // These compound indexes mirror the ordered, parent-scoped subscriptions
-  // below. Position is ordinary application data: concurrent reordering uses
+    .indexOnly(["session_id", "member_author"]),
+  // These per-column indexes support the parent filter and ordered subscriptions
+  // below. They are not one compound index. Position is ordinary application data: concurrent reordering uses
   // Jazz's normal row merge behavior, rather than a hidden list CRDT.
   tracks: s
     .table({

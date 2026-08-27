@@ -247,14 +247,30 @@ button:disabled {
   aspect-ratio: 1;
   min-height: 2.3rem;
   padding: 0.1rem;
-  transition: transform 100ms ease, filter 100ms ease;
+  transition:
+    transform 100ms ease,
+    filter 100ms ease;
 }
-.pad:hover { transform: translateY(-1px); }
-.pad-on { border-color: transparent; color: #111827; font-weight: 700; }
+.pad:hover {
+  transform: translateY(-1px);
+}
+.pad-on {
+  border-color: transparent;
+  color: #111827;
+  font-weight: 700;
+}
 @media (max-width: 720px) {
-  .track-lane { grid-template-columns: 1fr; gap: 0.35rem; }
-  .step-ruler { margin-left: 0; }
-  .transport { align-items: flex-end; flex-direction: column; }
+  .track-lane {
+    grid-template-columns: 1fr;
+    gap: 0.35rem;
+  }
+  .step-ruler {
+    margin-left: 0;
+  }
+  .transport {
+    align-items: flex-end;
+    flex-direction: column;
+  }
 }
 
 .todo-widget form {

@@ -1,26 +1,27 @@
 "use client";
 
 import { useState } from "react";
-import { useAll, useDb } from "jazz-tools/react";
+import { useAll, useDb, useSession } from "jazz-tools/react";
 import { app } from "@/schema";
 import { SequencerSession } from "@/components/sequencer-session";
 
 const TRACK_COLORS = ["#ff7a59", "#f5c451", "#5dd6c0", "#7998ff"];
 const INSTRUMENTS = ["Kick", "Snare", "Closed hat", "Bass"];
 
-export function SessionBrowser({ userId, displayName }: { userId: string; displayName: string }) {
+export function SessionBrowser({ issuer }: { issuer: string }) {
   const db = useDb();
+  const session = useSession();
+  const author = session?.user;
   const { data: sessions = [], isLoading } = useAll(app.sessions.orderBy("$createdAt", "desc"));
-  const { data: profiles = [] } = useAll(app.profiles.where({ user_id: userId }));
+  const { data: profiles = [] } = useAll(app.profiles.where({ author }));
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [createdProfileId, setCreatedProfileId] = useState<string | null>(null);
 
   function createSession() {
     // This is an explicit user action, not account bootstrap on the initial
     // read-through path. A production app's server route may additionally
     // create default shared structures with its trusted backend credential.
-    const profile =
-      profiles[0] ?? db.insert(app.profiles, { user_id: userId, display_name: displayName }).value;
+    const profile = profiles[0];
+    if (!profile) return;
     const session = db.insert(app.sessions, {
       title: "Late-night rehearsal",
       tempo_bpm: 124,
@@ -28,7 +29,7 @@ export function SessionBrowser({ userId, displayName }: { userId: string; displa
     });
     db.insert(app.session_members, {
       session_id: session.value.id,
-      user_id: userId,
+      member_author: author,
       role: "owner",
     });
     for (const [position, name] of INSTRUMENTS.entries()) {
@@ -48,14 +49,22 @@ export function SessionBrowser({ userId, displayName }: { userId: string; displa
         });
       }
     }
-    setCreatedProfileId(profile.id);
     setSelectedId(session.value.id);
   }
 
   const selected = sessions.find((session) => session.id === selectedId) ?? sessions[0];
-  const profileId = createdProfileId ?? profiles[0]?.id;
-  if (selected && profileId)
-    return <SequencerSession sessionId={selected.id} userId={userId} profileId={profileId} />;
+  const profileId = profiles[0]?.id;
+  if (author && selected && profileId)
+    return (
+      <SequencerSession
+        sessionId={selected.id}
+        author={author}
+        issuer={issuer}
+        profileId={profileId}
+      />
+    );
+
+  if (!author) return <p className="loading-state">Opening your Jazz session…</p>;
 
   return (
     <section className="session-empty">

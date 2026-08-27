@@ -5,14 +5,17 @@ import { useAll, useDb } from "jazz-tools/react";
 import { app } from "@/schema";
 import { TrackLane } from "@/components/track-lane";
 import { schedulePresenceHeartbeat } from "@/components/presence-heartbeat";
+import { sessionAuthor } from "@/lib/identity";
 
 export function SequencerSession({
   sessionId,
-  userId,
+  author,
+  issuer,
   profileId,
 }: {
   sessionId: string;
-  userId: string;
+  author: string;
+  issuer: string;
   profileId: string;
 }) {
   const db = useDb();
@@ -21,17 +24,22 @@ export function SequencerSession({
     app.tracks.where({ session_id: sessionId }).orderBy("position", "asc"),
   );
   const { data: observations = [] } = useAll(
-    app.transport_observations.where({ session_id: sessionId }).orderBy("observed_at", "desc"),
+    app.transport_observations
+      .where({ session_id: sessionId })
+      .orderBy("observed_at", "desc")
+      .limit(1),
   );
   const { data: presence = [] } = useAll(app.presence.where({ session_id: sessionId }));
-  const { data: ownMembership = [] } = useAll(
-    app.session_members.where({ session_id: sessionId, user_id: userId }),
+  // Only createSession writes an owner membership, for the row creator. The
+  // policy itself remains creator-bound and does not treat this role as transferable.
+  const { data: creatorMembership = [] } = useAll(
+    app.session_members.where({ session_id: sessionId, member_author: author, role: "owner" }),
   );
   const transport = observations[0];
   const session = sessions[0];
   const playhead = transport?.bar ?? 0;
   const title = session?.title ?? "Loading session…";
-  const isOwner = ownMembership.some((membership) => membership.role === "owner");
+  const isCreator = creatorMembership.length > 0;
   const [memberUserId, setMemberUserId] = useState("");
   const [memberRole, setMemberRole] = useState<"editor" | "viewer">("editor");
 
@@ -72,7 +80,7 @@ export function SequencerSession({
     if (!invitedUserId) return;
     db.insert(app.session_members, {
       session_id: sessionId,
-      user_id: invitedUserId,
+      member_author: sessionAuthor(issuer, invitedUserId),
       role: memberRole,
     });
     setMemberUserId("");
@@ -99,14 +107,14 @@ export function SequencerSession({
       </header>
       <p className="transport-note">
         Transport is a convergent observation for collaborators, not a claim of sample-accurate
-        distributed clock sync. {presence.length} collaborator
-        {presence.length === 1 ? "" : "s"} present. Your id: {userId}
+        distributed clock sync. {presence.length} cached collaborator observation
+        {presence.length === 1 ? "" : "s"}; observations may be stale. Your author: {author}
       </p>
-      <p className="member-id">Your member ID: {userId}</p>
-      {isOwner ? (
+      <p className="member-id">Your canonical author: {author}</p>
+      {isCreator ? (
         <div className="member-controls">
           <label>
-            Collaborator user ID
+            Collaborator user ID from this auth provider
             <input value={memberUserId} onChange={(event) => setMemberUserId(event.target.value)} />
           </label>
           <label>

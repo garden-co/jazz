@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { userIdentity } from "jazz-tools";
 import { createDb, type Db } from "../../../../../../packages/jazz-tools/src/runtime/db.js";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
@@ -23,25 +24,7 @@ import permissions from "../../permissions.js";
 import { app, type Step } from "../../schema.js";
 
 const ctx = new TestCleanup();
-let pendingServerUnblock: string | undefined;
-
-async function restoreNetworkAndCleanup(): Promise<void> {
-  let networkError: unknown;
-  if (pendingServerUnblock) {
-    try {
-      await unblockJazzServerNetwork(pendingServerUnblock);
-      pendingServerUnblock = undefined;
-    } catch (error) {
-      networkError = error;
-    }
-  }
-  await ctx.cleanup();
-  if (networkError) {
-    throw new Error("failed to restore Wequencer test network", { cause: networkError });
-  }
-}
-
-afterEach(restoreNetworkAndCleanup);
+afterEach(async () => ctx.cleanup());
 
 const trackNames = ["Kick", "Snare", "Closed hat", "Bass"];
 const stepsPerTrack = 16;
@@ -96,6 +79,7 @@ describe("Wequencer cross-topology recovery", () => {
     let subscribedOwnerStepId: string;
     let transport: { id: string } | undefined;
     let subscribedTrackSteps: Step[] = [];
+    let restoreEditorNetwork: (() => Promise<void>) | undefined;
 
     const receipt = await runTopologyScenario(
       {
@@ -117,10 +101,19 @@ describe("Wequencer cross-topology recovery", () => {
             },
           },
           editor: {
-            restart: async () => {
+            restart: async ({ defer }) => {
               // Prevent the replacement client from cold-refetching before
               // the next phase can prove what survived in IndexedDB.
-              pendingServerUnblock = server.serverUrl;
+              let networkNeedsRestore = true;
+              const restoreNetwork = async () => {
+                if (!networkNeedsRestore) return;
+                await unblockJazzServerNetwork(server.serverUrl);
+                networkNeedsRestore = false;
+              };
+              // Register before acquiring the route block so partial failure
+              // is compensated by the topology runner as well.
+              defer("restore Wequencer editor network", async () => restoreNetwork());
+              restoreEditorNetwork = restoreNetwork;
               await blockJazzServerNetwork(server.serverUrl);
               await editor.disconnect();
               await editor.shutdown();
@@ -171,10 +164,16 @@ describe("Wequencer cross-topology recovery", () => {
               owner = await openClient(server, "owner", ownerToken, ownerDbName);
               editor = await openClient(server, "editor", editorToken, editorDbName);
               ownerProfile = await owner
-                .insert(app.profiles, { user_id: "wequencer-owner", display_name: "Owner" })
+                .insert(app.profiles, {
+                  author: userIdentity("urn:jazz:test", "wequencer-owner"),
+                  displayName: "Owner",
+                })
                 .wait({ tier: "edge" });
               editorProfile = await editor
-                .insert(app.profiles, { user_id: "wequencer-editor", display_name: "Editor" })
+                .insert(app.profiles, {
+                  author: userIdentity("urn:jazz:test", "wequencer-editor"),
+                  displayName: "Editor",
+                })
                 .wait({ tier: "edge" });
               session = await owner
                 .insert(app.sessions, {
@@ -186,14 +185,22 @@ describe("Wequencer cross-topology recovery", () => {
               await owner
                 .insert(app.session_members, {
                   session_id: session.id,
-                  user_id: "wequencer-owner",
+                  member_author: userIdentity("urn:jazz:test", "wequencer-owner"),
                   role: "owner",
+                })
+                .wait({ tier: "edge" });
+              await owner
+                .insert(app.transport_observations, {
+                  session_id: session.id,
+                  playing: false,
+                  bar: 0,
+                  observed_at: new Date(0),
                 })
                 .wait({ tier: "edge" });
               editorMembership = await owner
                 .insert(app.session_members, {
                   session_id: session.id,
-                  user_id: "wequencer-editor",
+                  member_author: userIdentity("urn:jazz:test", "wequencer-editor"),
                   role: "editor",
                 })
                 .wait({ tier: "edge" });
@@ -469,7 +476,9 @@ describe("Wequencer cross-topology recovery", () => {
                 20_000,
                 "edge",
               );
-              expect(observations.find((row) => row.id === transport!.id)).toMatchObject({
+              expect(observations).toHaveLength(1);
+              expect(observations[0]).toMatchObject({
+                id: transport!.id,
                 playing: true,
                 bar: 2,
               });
@@ -508,8 +517,8 @@ describe("Wequencer cross-topology recovery", () => {
                 enabled: true,
               });
 
-              await unblockJazzServerNetwork(server.serverUrl);
-              pendingServerUnblock = undefined;
+              await restoreEditorNetwork?.();
+              restoreEditorNetwork = undefined;
               await editor.reconnect();
               const settledProjectedWindow = await waitForQuery(
                 editor,
@@ -560,7 +569,8 @@ function sessionQueries(sessionId: string) {
     tracks: app.tracks.where({ session_id: sessionId }).orderBy("position", "asc"),
     observations: app.transport_observations
       .where({ session_id: sessionId })
-      .orderBy("observed_at", "desc"),
+      .orderBy("observed_at", "desc")
+      .limit(1),
     presence: app.presence.where({ session_id: sessionId }),
   };
 }

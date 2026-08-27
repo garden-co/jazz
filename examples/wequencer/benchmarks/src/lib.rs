@@ -53,8 +53,11 @@ impl Fixture {
             "profiles",
             profile_id,
             BTreeMap::from([
-                ("user_id".into(), Value::String("fixture-owner".into())),
-                ("display_name".into(), Value::String("Fixture Owner".into())),
+                (
+                    "author".into(),
+                    Value::String("[\"urn:jazz:benchmark\",\"fixture-owner\"]".into()),
+                ),
+                ("displayName".into(), Value::String("Fixture Owner".into())),
             ]),
         );
         insert(
@@ -63,7 +66,10 @@ impl Fixture {
             row_id(3, 0),
             BTreeMap::from([
                 ("session_id".into(), Value::Uuid(session_id.0)),
-                ("user_id".into(), Value::String("fixture-owner".into())),
+                (
+                    "member_author".into(),
+                    Value::String("[\"urn:jazz:benchmark\",\"fixture-owner\"]".into()),
+                ),
                 ("role".into(), Value::String("owner".into())),
             ]),
         );
@@ -107,6 +113,17 @@ impl Fixture {
         );
         insert(
             &db,
+            "transport_observations",
+            row_id(96, 1),
+            BTreeMap::from([
+                ("session_id".into(), Value::Uuid(session_id.0)),
+                ("playing".into(), Value::Bool(true)),
+                ("bar".into(), Value::I32(7)),
+                ("observed_at".into(), Value::U64(1)),
+            ]),
+        );
+        insert(
+            &db,
             "presence",
             row_id(97, 0),
             BTreeMap::from([
@@ -130,7 +147,10 @@ impl Fixture {
             .prepare_query(
                 &Query::from("session_members")
                     .filter(eq(col("session_id"), lit(session_id.0)))
-                    .filter(eq(col("user_id"), lit("fixture-owner"))),
+                    .filter(eq(
+                        col("member_author"),
+                        lit("[\"urn:jazz:benchmark\",\"fixture-owner\"]"),
+                    )),
             )
             .expect("prepare Wequencer membership query");
         let session_presence = db
@@ -149,7 +169,8 @@ impl Fixture {
             .prepare_query(
                 &Query::from("transport_observations")
                     .filter(eq(col("session_id"), lit(session_id.0)))
-                    .order_by("observed_at", OrderDirection::Desc),
+                    .order_by("observed_at", OrderDirection::Desc)
+                    .limit(1),
             )
             .expect("prepare Wequencer transport receipt query");
         Self {
@@ -231,10 +252,31 @@ impl Fixture {
     }
 
     pub fn playhead_window(&self, from: usize, length: usize) -> Vec<(u64, bool)> {
-        self.track_steps()
+        let query = self
+            .db
+            .prepare_query(
+                &Query::from("steps")
+                    .filter(eq(col("track_id"), lit(row_id(4, 0).0)))
+                    .order_by("position", OrderDirection::Asc)
+                    .offset(from)
+                    .limit(length),
+            )
+            .expect("prepare bounded Wequencer playhead query");
+        self.db
+            .read(&query)
+            .expect("read bounded Wequencer playhead query")
             .into_iter()
-            .skip(from)
-            .take(length)
+            .map(|row| {
+                let position = match row.cell(&self.step_table, "position") {
+                    Some(Value::I32(position)) => position as u64,
+                    value => panic!("unexpected step position: {value:?}"),
+                };
+                let enabled = match row.cell(&self.step_table, "enabled") {
+                    Some(Value::Bool(enabled)) => enabled,
+                    value => panic!("unexpected enabled value: {value:?}"),
+                };
+                (position, enabled)
+            })
             .collect()
     }
 
@@ -336,6 +378,7 @@ impl Fixture {
             "steps",
             row_id(32, 0),
             BTreeMap::from([("enabled".into(), Value::Bool(false))]),
+            UpdateOptions::default(),
         ))
         .expect("edit fan-out Wequencer step");
         block_on(write.wait(DurabilityTier::Local)).expect("fan-out step reaches local durability");
@@ -357,8 +400,8 @@ fn schema() -> JazzSchema {
     let source = SchemaBuilder::new()
         .table(
             TableSchemaBuilder::new("profiles")
-                .column("user_id", ColumnType::Text)
-                .column("display_name", ColumnType::Text),
+                .column("author", ColumnType::Text)
+                .column("displayName", ColumnType::Text),
         )
         .table(
             TableSchemaBuilder::new("sessions")
@@ -369,9 +412,9 @@ fn schema() -> JazzSchema {
         .table(
             TableSchemaBuilder::new("session_members")
                 .fk_column("session_id", "sessions")
-                .column("user_id", ColumnType::Text)
+                .column("member_author", ColumnType::Text)
                 .column("role", ColumnType::Text)
-                .index_only(["session_id", "user_id"]),
+                .index_only(["session_id", "member_author"]),
         )
         .table(
             TableSchemaBuilder::new("tracks")

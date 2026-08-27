@@ -1,121 +1,54 @@
-# next-betterauth
+# Wequencer (Next.js + Better Auth)
 
-A Next.js starter for [Jazz](https://jazz.tools) with a strict
-[Better Auth](https://better-auth.com) sign-in gate. The app is only
-accessible to authenticated users.
+Wequencer is a collaborative step-sequencer example: a session has members,
+ordered tracks, ordered pads, transport observations, and advisory presence.
+It is a product-shaped Jazz example, not an audio engine.
 
-## What this starter gives you
+## What it demonstrates
 
-- A public sign-in / sign-up page, and a simple todo dashboard which uses Jazz
-  for persistence, accessible to signed-in users.
-- Better Auth handling email/password sign-up, sign-in, sign-out, and JWTs.
-- A local Jazz dev server started automatically by the `withJazz` Next.js
-  plugin in `next.config.ts`.
-- Row-level permissions wired through `$createdBy`, so every row is
-  automatically scoped to the user who created it.
+- Better Auth persists generated tables through a trusted Jazz backend. Those
+  tables are deny-all to clients. Profiles and memberships store Jazz's
+  canonical issuer-scoped author, not a raw provider user id.
+- The authenticated dashboard performs idempotent profile bootstrap on the
+  server. Queries never create profiles, sessions, or membership rows.
+- The session creator manages membership through creator-bound policy. The
+  `owner` role records the creator's initial membership but is not transferable;
+  richer ownership semantics are tracked in [#2100](https://github.com/garden-co/jazz/issues/2100).
+  Editors change tracks, pads, and transport observations; viewers only read.
+- Each pad is an ordinary indexed row. Parent-scoped ordered queries keep a
+  4×16 grid locally responsive and converge independent edits after reconnect.
+- Presence heartbeats run every five seconds independently of subscription
+  rerenders. Observations may remain stale; they are advisory and never authorize a write.
 
-> [!TIP]
-> If you want local-first onboarding with an optional upgrade, use `next-hybrid` instead. If you want no auth at all, use `next-localfirst`.
+## Checks
 
-## Getting started
+```sh
+pnpm exec tsc --noEmit
+pnpm test
+pnpm test:browser:focused -- tests/browser/topology.e2e.test.ts
+cargo test -p jazz-example-wequencer-benchmark --tests
+```
 
-```bash
-pnpm install
+The topology receipt covers creator bootstrap, editor admission, ordered 64-pad
+projection, local offline edits, reconnect convergence, viewer denial, and
+advisory presence. The benchmark uses the same session/track/pad query shapes
+and asserts their ordering and subscription delivery contract.
+
+## Non-goals
+
+`transport_observations` records convergent UI state only. It does not provide
+sample-accurate clock synchronization, audio scheduling authority, conflict
+resolution for simultaneous edits to the same pad, presence expiry guarantees,
+or a secure invite-capability product. Those require separate designs rather
+than app-local assumptions.
+
+## Setup
+
+```sh
+cp .env.example .env
 pnpm dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000), create an account,
-and you'll land on `/dashboard` with a working todo list persisted via
-Jazz. The `withJazz` plugin spawns a local Jazz dev server automatically;
-set `BETTER_AUTH_SECRET` in `.env` before running (`openssl rand -base64
-32` or scaffold via `create-jazz`).
-
-## Architecture
-
-```
-app/
-  layout.tsx                      ← plain root layout
-  page.tsx                        ← public sign-in / sign-up form (redirects signed-in users to /dashboard)
-  dashboard/
-    layout.tsx                    ← auth guard + one-shot JWT fetch + JazzProvider
-    page.tsx                      ← greeting, sign-out, <TodoWidget />
-  api/auth/[...all]/route.ts      ← Better Auth catch-all handler
-schema.ts                         ← Jazz app schema (todos table)
-permissions.ts                    ← row-level access policy ($createdBy)
-components/todo-widget.tsx        ← Jazz-powered todo list
-lib/auth.ts                       ← Better Auth server config
-lib/auth-client.ts                ← Better Auth React client
-```
-
-## How it works
-
-Route protection is handled by two server components. `app/page.tsx` calls
-`auth.api.getSession()` and redirects signed-in users to `/dashboard`.
-`app/dashboard/layout.tsx` does the same check in the other direction,
-redirecting signed-out users back to `/`.
-
-`app/dashboard/layout.tsx` fetches a Better Auth JWT on each server render and
-passes it to `<JazzProvider>`. Because the layout guard guarantees a
-session on `/dashboard/*`, the provider is only mounted when the user is
-authenticated — there's no anonymous fallback path to reason about.
-
-`components/jazz-provider.tsx` mounts a `JwtRefresh` component inside the
-provider that re-mints the JWT via `authClient.$fetch("/token")` whenever
-`db.onAuthChanged` reports the token as expired, so long-lived sessions
-won't silently drop to unauthenticated.
-
-## Extending the schema
-
-Edit `schema.ts` to add tables. The Jazz dev server watches the file and
-republishes the schema on change — no restart needed.
-
-```ts
-const schema = {
-  todos: s.table({ title: s.string(), done: s.boolean() }),
-  projects: s.table({ name: s.string() }),
-};
-```
-
-Row ownership is enforced by `permissions.ts` via the `$createdBy` predicate,
-so you don't need an explicit `ownerId` column. Jazz records the creating
-session on every row and the permission policy scopes reads/writes to it.
-
-## Environment variables
-
-Scaffold via `create-jazz` to have `.env` populated automatically; otherwise
-write the values below by hand.
-
-| Variable                      | When       | Purpose                                                             |
-| ----------------------------- | ---------- | ------------------------------------------------------------------- |
-| `BETTER_AUTH_SECRET`          | always     | BetterAuth session signing. `lib/auth.ts` throws loudly if missing. |
-| `NEXT_PUBLIC_JAZZ_APP_ID`     | cloud only | Provisioned app ID. Unset in self-hosted dev — plugin injects it.   |
-| `NEXT_PUBLIC_JAZZ_SERVER_URL` | cloud only | Cloud sync URL (e.g. `https://v2.sync.jazz.tools`).                 |
-| `JAZZ_ADMIN_SECRET`           | cloud only | Admin credential for schema pushes to the cloud.                    |
-| `BACKEND_SECRET`              | cloud only | Backend signing credential.                                         |
-
-Generate a dev `BETTER_AUTH_SECRET` with `openssl rand -base64 32`. In
-self-hosted mode (no cloud env vars), the `withJazz` plugin spawns a local
-Jazz dev server and supplies its own credentials.
-
-## Deploying to production
-
-`.env` is gitignored and not committed. Production deployments must
-supply `BETTER_AUTH_SECRET` through your hosting provider's secret
-management. The value must be consistent across restarts — rotating it
-invalidates all existing Better Auth sessions.
-
-Better Auth's in-memory adapter (`lib/auth.ts`) is a placeholder.
-Swap it for a persistent database adapter before shipping, or users will
-be wiped on every process restart.
-
-## Known limitations
-
-- **In-memory user store.** The Better Auth memory adapter keeps
-  everything per-process, so HMR reloads, multi-worker deploys, and
-  serverless invocations all reset state. Swap for a persistent adapter
-  before shipping.
-
-## Where to go next
-
-- `schema.ts` and `permissions.ts` — the two files you'll touch most when
-  extending the starter.
+`withJazz` supplies public Jazz configuration during local development. The
+same `NEXT_PUBLIC_APP_ORIGIN` is the Better Auth origin and the canonical author
+issuer. Set stable `BETTER_AUTH_SECRET` and `BACKEND_SECRET` values before deploying.

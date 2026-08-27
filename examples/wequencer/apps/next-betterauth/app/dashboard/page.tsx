@@ -6,6 +6,7 @@ import { SessionBrowser } from "@/components/session-browser";
 export default function DashboardPage() {
   const { data: session } = authClient.useSession();
   if (!session) return null;
+  const issuer = process.env.NEXT_PUBLIC_APP_ORIGIN ?? "http://127.0.0.1:3000";
 
   async function handleSignOut() {
     await authClient.signOut();
@@ -27,7 +28,7 @@ export default function DashboardPage() {
           </button>
         </div>
       </header>
-      <SessionBrowser userId={session.user.id} displayName={session.user.name} />
+      <SessionBrowser issuer={issuer} />
     </main>
   );
 }

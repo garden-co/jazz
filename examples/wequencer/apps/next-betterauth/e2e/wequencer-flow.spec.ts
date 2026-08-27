@@ -47,7 +47,7 @@ async function signUp(page: Page, credentials: Credentials) {
 }
 
 async function invite(page: Page, userId: string, role: "editor" | "viewer") {
-  await page.getByLabel("Collaborator user ID").fill(userId);
+  await page.getByLabel("Collaborator user ID from this auth provider").fill(userId);
   await page.getByLabel("Role").selectOption(role);
   await page.getByRole("button", { name: "Add collaborator" }).click();
 }
