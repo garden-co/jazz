@@ -24,7 +24,7 @@ use crate::protocol::{
     BranchKey, ProgramFactEntry, RealRowMemberEntry, RelationEdgeEntry, ResultMemberEntry,
     ResultMemberPayloadEntry, ResultRowLayer, RowVersionRefEntry, SyntheticReplacementToken,
 };
-use crate::schema::TableSchema;
+use crate::schema::{RuntimeSchema, TableSchema};
 use crate::time::{GlobalTime, TxTime};
 use crate::tools::{ObjectId, OutputOccurrenceId};
 use crate::tx::TxId;
@@ -1490,14 +1490,16 @@ fn decode_typed_version_witness(
     let tx_time = TxTime(record_u64_idx(record, plan.tx_time_idx)?);
     let branch_key = match plan.branch_idx {
         Some(idx) => match record.get_idx(idx)? {
-            Value::Bytes(bytes) => BranchKey::from_canonical_bytes(&bytes).map_err(|_| {
-                super::Error::InvalidStoredValue("maintained witness branch key is invalid")
-            })?,
-            Value::Nullable(None) => BranchKey::default(),
-            Value::Nullable(Some(value)) => match *value {
-                Value::Bytes(bytes) => BranchKey::from_canonical_bytes(&bytes).map_err(|_| {
+            Value::Bytes(bytes) => RuntimeSchema::decode_persisted_branch_key(table, &bytes)
+                .map_err(|_| {
                     super::Error::InvalidStoredValue("maintained witness branch key is invalid")
                 })?,
+            Value::Nullable(None) => BranchKey::default(),
+            Value::Nullable(Some(value)) => match *value {
+                Value::Bytes(bytes) => RuntimeSchema::decode_persisted_branch_key(table, &bytes)
+                    .map_err(|_| {
+                        super::Error::InvalidStoredValue("maintained witness branch key is invalid")
+                    })?,
                 _ => return Err(super::Error::InvalidStoredValue("branch key must be bytes")),
             },
             _ => return Err(super::Error::InvalidStoredValue("branch key must be bytes")),

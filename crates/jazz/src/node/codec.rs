@@ -1606,6 +1606,11 @@ pub(super) fn authored_column_ids_from_value(
                 "authored columns must contain physical column ids",
             ));
         };
+        if id == 0 {
+            return Err(Error::InvalidStoredValue(
+                "authored physical column ids must be nonzero",
+            ));
+        }
         if previous.is_some_and(|previous| previous >= id) {
             return Err(Error::InvalidStoredValue(
                 "authored physical column ids must be strictly increasing",
