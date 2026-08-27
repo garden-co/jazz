@@ -796,8 +796,8 @@ where
                 // this newly connected successor has not seen it.
                 let mut routes = self.edge_fate_routes.borrow_mut();
                 let routed_txs = routes.keys().copied().collect::<Vec<_>>();
-                for pending in routes.values_mut() {
-                    for route in pending.iter_mut() {
+                for obligation in routes.values_mut() {
+                    for route in obligation.routes.iter_mut() {
                         route.authority = Some(context);
                     }
                 }
@@ -1387,14 +1387,16 @@ where
                 *self.admitted_upstream_authority.borrow_mut() = handoff;
                 let mut routes = self.edge_fate_routes.borrow_mut();
                 if let Some(handoff) = handoff {
-                    routes.retain(|_, pending| {
-                        pending.retain(|route| route.queue.upgrade().is_some());
-                        for route in pending.iter_mut() {
+                    routes.retain(|_, obligation| {
+                        obligation
+                            .routes
+                            .retain(|route| route.queue.upgrade().is_some());
+                        for route in obligation.routes.iter_mut() {
                             if route.authority == Some(authority) {
                                 route.authority = Some(handoff);
                             }
                         }
-                        !pending.is_empty()
+                        !obligation.routes.is_empty()
                     });
                     let routed_txs = routes.keys().copied().collect::<Vec<_>>();
                     drop(routes);
@@ -1432,14 +1434,16 @@ where
                     // No successor yet: preserve bounded live downstream
                     // routes for a later admitted authority.  Clearing them
                     // after an Edge acceptance would strand the caller.
-                    routes.retain(|_, pending| {
-                        pending.retain(|route| route.queue.upgrade().is_some());
-                        for route in pending.iter_mut() {
+                    routes.retain(|_, obligation| {
+                        obligation
+                            .routes
+                            .retain(|route| route.queue.upgrade().is_some());
+                        for route in obligation.routes.iter_mut() {
                             if route.authority == Some(authority) {
                                 route.authority = None;
                             }
                         }
-                        !pending.is_empty()
+                        !obligation.routes.is_empty()
                     });
                     self.schedule_tick(TickUrgency::Immediate);
                 }
