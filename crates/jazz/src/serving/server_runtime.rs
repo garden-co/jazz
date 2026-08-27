@@ -78,8 +78,6 @@ impl ServerRuntimeFrameStream {
 pub enum ServerUpstreamTerminalReason {
     /// The target-owned native socket pump reported its terminal outcome.
     NativeTransport(NativeTransportTerminal),
-    /// The bounded adapter queue could not accept an outbound frame.
-    Backpressure,
     /// The adapter rejected an outbound frame because its pump had failed.
     TransportFailed(String),
     /// Wire decoding or semantic auxiliary routing failed.
@@ -440,38 +438,58 @@ async fn drive_upstream_wire(
             if staged_semantic_input {
                 scheduler.schedule_tick(TickUrgency::Immediate);
             }
+            let mut transport_backpressured = false;
             loop {
                 let frame = io.transport.queues.borrow_mut().outbound.pop_front();
                 let Some(frame) = frame else { break };
-                match wire.send_frame(frame) {
+                match wire.send_frame(frame.clone()) {
                     Ok(()) => {}
                     Err(TransportError::Backpressure) => {
-                        return ServerUpstreamTerminalReason::Backpressure;
+                        // Backpressure is a retry signal from this live
+                        // transport, not a disconnect. Put the exact frame
+                        // back ahead of later semantic work so its FIFO
+                        // obligation cannot be lost or overtaken.
+                        io.transport.queues.borrow_mut().outbound.push_front(frame);
+                        transport_backpressured = true;
+                        break;
                     }
                     Err(TransportError::Failed(error)) => {
                         return ServerUpstreamTerminalReason::TransportFailed(error);
                     }
                 }
             }
-            loop {
-                let frame =
-                    match io
-                        .pump
-                        .take_outbound_wire_frame(io.protocol_version, io.features, None)
-                    {
-                        Ok(frame) => frame,
+            if !transport_backpressured {
+                loop {
+                    let reservation = match io.pump.reserve_outbound_wire_frame(
+                        io.protocol_version,
+                        io.features,
+                        None,
+                    ) {
+                        Ok(reservation) => reservation,
                         Err(error) => {
                             return ServerUpstreamTerminalReason::ProtocolFailed(error);
                         }
                     };
-                let Some(frame) = frame else { break };
-                match wire.send_frame(frame) {
-                    Ok(()) => {}
-                    Err(TransportError::Backpressure) => {
-                        return ServerUpstreamTerminalReason::Backpressure;
-                    }
-                    Err(TransportError::Failed(error)) => {
-                        return ServerUpstreamTerminalReason::TransportFailed(error);
+                    let Some(mut reservation) = reservation else {
+                        break;
+                    };
+                    match wire.send_frame(reservation.take_frame()) {
+                        Ok(()) => reservation.commit(),
+                        Err(TransportError::Backpressure) => {
+                            // The reservation restores requests and relay
+                            // responses (including their capacity claim) to
+                            // their exact FIFO lane before we wait for this
+                            // same transport to become writable again.
+                            drop(reservation);
+                            break;
+                        }
+                        Err(TransportError::Failed(error)) => {
+                            // Do not let a failed connection consume the
+                            // auxiliary obligation while the driver reports
+                            // its terminal outcome to the reconnect owner.
+                            drop(reservation);
+                            return ServerUpstreamTerminalReason::TransportFailed(error);
+                        }
                     }
                 }
             }
@@ -1278,6 +1296,32 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct FirstSendBackpressureState {
+        rejected: bool,
+        sent: Vec<Vec<u8>>,
+    }
+
+    struct FirstSendBackpressureWire {
+        state: Arc<Mutex<FirstSendBackpressureState>>,
+    }
+
+    impl WireTransport for FirstSendBackpressureWire {
+        fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), crate::wire::TransportError> {
+            let mut state = self.state.lock().unwrap();
+            if !state.rejected {
+                state.rejected = true;
+                return Err(crate::wire::TransportError::Backpressure);
+            }
+            state.sent.push(frame);
+            Ok(())
+        }
+
+        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
     fn encode_message(message: SyncMessage) -> Vec<u8> {
         let payload = encode_sync_message(&message).unwrap();
         encode_frame(&WireFrame::Message(WireEnvelope::new(0, 0, payload))).unwrap()
@@ -1319,6 +1363,98 @@ mod tests {
         drop(connection);
 
         assert!(futures::executor::block_on(cancelled).is_ok());
+    }
+
+    // This internal receipt is necessary because retrying the native
+    // binding-owned wire driver is below the public server API. It proves a
+    // full bounded queue retains its canonical frame and retries that same
+    // live transport rather than reconnecting and losing the obligation.
+    #[test]
+    fn semantic_backpressure_retries_the_same_queued_frame_once() {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let mut shell = InMemoryServerShell::start(InMemoryServerShellConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x75; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        ))
+        .unwrap();
+        let (jobs, _pending_jobs) = mpsc::unbounded();
+        let (activity_tx, _) = watch::channel(0_u64);
+        let scheduler = ServerShellTickScheduler {
+            jobs,
+            activity_tx,
+            io_wakers: Arc::new(Mutex::new(Vec::new())),
+            state: Arc::new(ServerShellTickState::default()),
+        };
+        shell.set_tick_scheduler(Some(Rc::new(scheduler.clone())));
+        let io = shell.connect_upstream_wire_io(
+            crate::wire::WIRE_PROTOCOL_VERSION,
+            crate::wire::FEATURE_NONE,
+            None,
+        );
+        let expected = encode_message(SyncMessage::SessionClaims {
+            identity: AuthorSubject::for_test_bytes([0x75; 16]),
+            claims: BTreeMap::new(),
+        });
+        io.transport
+            .queues
+            .borrow_mut()
+            .outbound
+            .push_back(expected.clone());
+
+        let state = Arc::new(Mutex::new(FirstSendBackpressureState::default()));
+        let wire = FirstSendBackpressureWire {
+            state: Arc::clone(&state),
+        };
+        let (wake_tx, wake_rx) = mpsc::unbounded();
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
+        let mut executor = futures::executor::LocalPool::new();
+        executor
+            .spawner()
+            .spawn_local(async move {
+                let _ = drive_upstream_wire(
+                    Box::new(wire),
+                    Box::pin(futures::future::pending()),
+                    io,
+                    wake_rx,
+                    scheduler,
+                    cancel_rx,
+                )
+                .await;
+            })
+            .unwrap();
+
+        executor.run_until_stalled();
+        assert!(state.lock().unwrap().sent.is_empty());
+        let connection_id = *shell
+            .wire_upstream_connections
+            .keys()
+            .next()
+            .expect("the original upstream owner remains attached");
+        assert_eq!(
+            shell.wire_upstream_connections.len(),
+            1,
+            "backpressure does not replace the live semantic connection"
+        );
+
+        wake_tx.unbounded_send(()).unwrap();
+        executor.run_until_stalled();
+        assert_eq!(
+            state.lock().unwrap().sent,
+            vec![expected],
+            "the front-of-queue semantic frame is delivered exactly once after retry"
+        );
+        assert!(
+            shell.wire_upstream_connections.contains_key(&connection_id),
+            "the retry uses the original live transport owner"
+        );
     }
 
     #[test]

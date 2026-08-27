@@ -2,9 +2,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::thread;
 
-#[cfg(test)]
-use std::sync::Mutex as StdMutex;
-
 use crate::middleware::AuthConfig;
 use crate::middleware::auth::JwtVerifier;
 use jazz::serving::StorageConfig;

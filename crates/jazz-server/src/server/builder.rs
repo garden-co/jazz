@@ -418,6 +418,7 @@ enum EdgeConnectorOutcome {
     Retryable(String),
     Reconnect(String),
     Fatal(String),
+    Stopped,
 }
 
 fn native_transport_outcome(error: NativeTransportError) -> EdgeConnectorOutcome {
@@ -426,22 +427,22 @@ fn native_transport_outcome(error: NativeTransportError) -> EdgeConnectorOutcome
 
 fn connected_transport_outcome(reason: ServerUpstreamTerminalReason) -> EdgeConnectorOutcome {
     match reason {
-        ServerUpstreamTerminalReason::NativeTransport(NativeTransportTerminal::Closed(reason)) => {
-            EdgeConnectorOutcome::Reconnect(reason)
+        ServerUpstreamTerminalReason::NativeTransport(NativeTransportTerminal::PeerClosed(
+            reason,
+        )) => EdgeConnectorOutcome::Reconnect(reason),
+        ServerUpstreamTerminalReason::NativeTransport(NativeTransportTerminal::OwnerDropped) => {
+            EdgeConnectorOutcome::Stopped
         }
         ServerUpstreamTerminalReason::NativeTransport(NativeTransportTerminal::Failed(error)) => {
             EdgeConnectorOutcome::Reconnect(error.to_string())
-        }
-        ServerUpstreamTerminalReason::Backpressure => {
-            EdgeConnectorOutcome::Reconnect("upstream transport backpressure".to_owned())
         }
         ServerUpstreamTerminalReason::TransportFailed(reason) => {
             EdgeConnectorOutcome::Reconnect(reason)
         }
         ServerUpstreamTerminalReason::ProtocolFailed(reason) => EdgeConnectorOutcome::Fatal(reason),
-        ServerUpstreamTerminalReason::Cancelled => {
-            EdgeConnectorOutcome::Reconnect("upstream wire driver was cancelled".to_owned())
-        }
+        // A local owner cancellation is shutdown/control flow, not a remote
+        // close that should create another connection generation.
+        ServerUpstreamTerminalReason::Cancelled => EdgeConnectorOutcome::Stopped,
         ServerUpstreamTerminalReason::RuntimeStopped => {
             EdgeConnectorOutcome::Fatal("server shell upstream driver stopped".to_owned())
         }
@@ -659,6 +660,7 @@ async fn handle_edge_connector_outcome(
     recovery_attempts: &mut u32,
 ) -> bool {
     let (reason, reconnect) = match outcome {
+        EdgeConnectorOutcome::Stopped => return false,
         EdgeConnectorOutcome::Fatal(reason) => {
             if let Some(state) = state.upgrade() {
                 state.set_edge_upstream_health(EdgeUpstreamHealth::Failed {
@@ -875,7 +877,7 @@ mod tests {
         fn connect(&self, _request: NativeTransportRequest) -> NativeTransportFuture {
             let connection = self.connect_count.fetch_add(1, Ordering::SeqCst);
             let terminal = if connection == 0 {
-                Box::pin(std::future::ready(NativeTransportTerminal::Closed(
+                Box::pin(std::future::ready(NativeTransportTerminal::PeerClosed(
                     "idle websocket closed".to_owned(),
                 )))
                     as jazz::tools::native_transport_connector::NativeTransportTerminalFuture
@@ -1546,6 +1548,22 @@ mod tests {
                 .await
                 .expect("builder retries after repaired catalogue");
         }
+    }
+
+    #[test]
+    fn owner_drop_stops_the_connector_while_peer_close_reconnects() {
+        assert!(matches!(
+            connected_transport_outcome(ServerUpstreamTerminalReason::NativeTransport(
+                NativeTransportTerminal::OwnerDropped,
+            )),
+            EdgeConnectorOutcome::Stopped
+        ));
+        assert!(matches!(
+            connected_transport_outcome(ServerUpstreamTerminalReason::NativeTransport(
+                NativeTransportTerminal::PeerClosed("peer closed".to_owned()),
+            )),
+            EdgeConnectorOutcome::Reconnect(reason) if reason == "peer closed"
+        ));
     }
 
     #[tokio::test]
