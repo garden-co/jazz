@@ -216,6 +216,76 @@ fn disconnect_reclaims_all_shapes_owned_by_the_departed_peer() {
     assert!(node.registered_shape(first_shape.shape_id()).is_none());
     assert!(node.registered_shape(second_shape.shape_id()).is_none());
 }
+// This stays internal because the registration announcement cache is a wire
+// optimization. The observable contract is that a same-cycle unsubscribe and
+// reattach still sends the registration before the replacement subscription.
+#[test]
+fn same_cycle_reattach_reannounces_shape_after_unsubscribe() {
+    let schema = schema();
+    let client = open_db(
+        0x7b,
+        AuthorSubject::for_test_bytes([0x7b; 16]),
+        &schema,
+    );
+    let query = Query::from("todos").filter(eq(col("title"), param("reattach_title")));
+    let prepared = prepared(&client, &query);
+    let (client_transport, _server_transport, client_sent, _) = duplex_with_taps();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+
+    let first = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    let first_subscription = first.subscription();
+    client.tick().unwrap();
+    assert!(client_sent.borrow().iter().any(
+        |message| matches!(message, SyncMessage::RegisterShape { shape_id, .. } if *shape_id == prepared.shape().shape_id())
+    ));
+    client_sent.borrow_mut().clear();
+
+    client.detach_query(first);
+    let replacement = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    let replacement_subscription = replacement.subscription();
+    client.tick().unwrap();
+
+    let sent = client_sent.borrow();
+    let unsubscribe = sent
+        .iter()
+        .position(|message| {
+            matches!(
+                message,
+                SyncMessage::Unsubscribe { subscription }
+                    if *subscription == first_subscription
+            )
+        })
+        .expect("the detached usage must unsubscribe");
+    let register = sent
+        .iter()
+        .position(|message| {
+            matches!(
+                message,
+                SyncMessage::RegisterShape { shape_id, .. }
+                    if *shape_id == prepared.shape().shape_id()
+            )
+        })
+        .expect("the replacement usage must reannounce its reclaimed shape");
+    let subscribe = sent
+        .iter()
+        .position(|message| {
+            matches!(
+                message,
+                SyncMessage::Subscribe(subscribe)
+                    if subscribe.subscription == replacement_subscription
+            )
+        })
+        .expect("the replacement usage must subscribe");
+    assert!(
+        unsubscribe < register && register < subscribe,
+        "unsubscribe must invalidate the announcement before the replacement subscribe is emitted"
+    );
+}
+
 
 // This stays internal because cardinality admission is a hostile-wire boundary;
 // public query APIs cannot forge an over-limit registration stream.

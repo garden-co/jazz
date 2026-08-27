@@ -1362,6 +1362,10 @@ where
                                     }
                                 }
                                 PendingUpstreamCommand::Unsubscribe(subscription) => {
+                                    announced_shapes.remove(&(
+                                        subscription.shape_id,
+                                        subscription.read_view,
+                                    ));
                                     self.node.borrow_mut().apply_unsubscribe(*subscription);
                                     if let Err(error) =
                                         self.transport.send(SyncMessage::Unsubscribe {
