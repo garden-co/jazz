@@ -257,6 +257,14 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     assert!(terminal_operations.is_empty());
 }
 
+/// A normal reader rehydrates a structured message subscription after a
+/// separately invite-scoped connection writes its membership.
+///
+/// Alice's invite-scoped connection ──membership──► server ──coverage──►
+/// Alice's normal connection ──structured subscribe──► message + sender.
+///
+/// This also exercises the bounded-stack peer admission path: the server must
+/// process the membership commit without carrying inactive Subscribe-arm state.
 #[test]
 fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_shot() {
     let schema = membership_scoped_relation_schema();

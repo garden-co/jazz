@@ -3057,8 +3057,15 @@ where
         let mut access_paths = BTreeMap::new();
         let equalities = root_literal_equalities(query, binding)?;
         let table = self.table_in_schema(&query.table, shape.schema_version())?;
+        // A maintained authorization scope reacts to both the content winner
+        // and its deletion register. The point source is only incrementally
+        // complete for an unscoped row: inside a policy graph, its content cap
+        // can strand the deletion-driven membership transition.
         let has_declared_id = table.columns.iter().any(|column| column.name == "id");
-        if !has_declared_id && let Some(value) = equalities.get("id").cloned() {
+        if !table.has_any_policy()
+            && !has_declared_id
+            && let Some(value) = equalities.get("id").cloned()
+        {
             access_paths.insert(
                 root_source_id(&query.table),
                 CurrentAccessPath::PrimaryKey(vec![value]),
