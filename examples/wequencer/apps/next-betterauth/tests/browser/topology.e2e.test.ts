@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { applySubscriptionDelta } from "jazz-tools";
 import { createDb, type Db } from "../../../../../../packages/jazz-tools/src/runtime/db.js";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
@@ -251,8 +250,8 @@ describe("Wequencer cross-topology recovery", () => {
               // its stream exactly as a consumer does, so this receipt proves
               // both its pre-write false snapshot and the later remote update.
               ctx.trackSubscription(
-                editor.subscribeAll(trackSteps(tracks[0].id), (delta) => {
-                  subscribedTrackSteps = applySubscriptionDelta<Step>(subscribedTrackSteps, delta);
+                editor.subscribe(trackSteps(tracks[0].id), (rows) => {
+                  subscribedTrackSteps = rows;
                 }),
               );
               await waitForCondition(
