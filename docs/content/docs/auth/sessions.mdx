@@ -156,9 +156,9 @@ fields such as `issuer` and `user_id` are intentionally not exposed on public se
 `session.user` is not a user-row reference, a display name, or the JWT `sub` alone. An application
 may store it in an ordinary string column to associate its own user/profile row with Jazz
 authorship, then compare that column with `session.user` or a row's `$createdBy`.
-The name `user` is reserved in policy evaluation; a provider claim named `user` remains visible in
-the public session's raw `claims` object but cannot be referenced as `session.claims.user` in a
-policy.
+The name `user` is reserved in policy evaluation. A provider claim named `user` remains visible in
+the public session's raw `claims` object and can be referenced explicitly as
+`session.claims["user"]`; it can never shadow the canonical `session.user` identity.
 
 For trusted invite or membership input where you have an issuer and subject but no active Jazz
 session, use the shared constructor:

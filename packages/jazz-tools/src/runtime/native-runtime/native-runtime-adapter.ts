@@ -343,6 +343,12 @@ type NativeDb = {
     localEpoch: bigint,
   ): Transport | Promise<Transport>;
   acceptSubscriber?(author: Uint8Array, claims: Record<string, unknown>): Transport;
+  acceptSubscriberWithSelfSignedProof?(
+    claims: Record<string, unknown>,
+    token: string,
+    appId: string,
+    claimedAuthor: string,
+  ): Transport;
   tick(): void | Promise<void>;
   close?(): void;
   free?(): void;
@@ -623,6 +629,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly schemaBytes: Uint8Array;
   private readonly configBytes: Uint8Array;
   private readonly peerIdentity: Uint8Array;
+  private readonly selfSignedClientProof: NativeSelfSignedClientProof | undefined;
   private readonly schemaHash: string;
   private readonly trustedBackend: boolean;
   private readonly preparedQueries = new Map<string, PreparedQuery>();
@@ -692,8 +699,15 @@ export class NativeRuntimeAdapter implements Runtime {
     author: Uint8Array,
     sourceId: number,
     historyComplete: boolean,
+    opts?: Pick<
+      NonNullable<ConstructorParameters<typeof NativeRuntimeAdapter>[6]>,
+      "selfSignedClientProof"
+    >,
   ): NativeRuntimeAdapter {
-    return new NativeRuntimeAdapter(null, schema, node, author, sourceId, historyComplete, { db });
+    return new NativeRuntimeAdapter(null, schema, node, author, sourceId, historyComplete, {
+      db,
+      selfSignedClientProof: opts?.selfSignedClientProof,
+    });
   }
 
   registerSchemaView(schema: WasmSchema): NativeRuntimeAdapter {
@@ -734,6 +748,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.writes = this.transactionOwner.writes;
     this.schemaBytes = encodeSchema(schema);
     this.trustedBackend = opts?.backendMode === true;
+    this.selfSignedClientProof = opts?.selfSignedClientProof;
     this.configBytes = openConfig(
       node,
       author,
@@ -982,6 +997,20 @@ export class NativeRuntimeAdapter implements Runtime {
 
   acceptPeer(claims: Record<string, unknown> = {}): Transport {
     if (this !== this.ownerRuntime) return this.ownerRuntime.acceptPeer(claims);
+    const proof = this.selfSignedClientProof;
+    if (proof) {
+      if (!this.db.acceptSubscriberWithSelfSignedProof) {
+        throw new Error(
+          "Native runtime does not support self-signed subscriber admission; rebuild the matching Jazz WASM artifact",
+        );
+      }
+      return this.db.acceptSubscriberWithSelfSignedProof(
+        claims,
+        proof.token,
+        proof.appId,
+        proof.claimedAuthor,
+      );
+    }
     if (!this.db.acceptSubscriber) {
       throw new Error("Native runtime does not expose subscriber links");
     }
