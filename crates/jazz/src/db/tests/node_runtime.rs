@@ -2112,11 +2112,12 @@ fn upload_cursor_hole_replays_only_the_missing_entry_on_that_upstream() {
 }
 
 /// Upload entries remain replayable until an applied terminal fate either
-/// rejects them or reaches Global durability.  An Accepted fate at Local or
-/// Edge is only progress: reconnect must resend it until a later Global fate
-/// releases the shared outbox entry.
+/// rejects them or carries accepted Global durability plus authority time. An
+/// Accepted fate at Local, Edge, or Global-without-time is only progress:
+/// reconnect must resend it until a later time-bearing Global fate releases the
+/// shared outbox entry.
 #[test]
-fn accepted_upload_releases_outbox_only_after_global_durability() {
+fn accepted_upload_releases_outbox_only_after_global_durability_and_authority_time() {
     let schema = schema();
     let author = AuthorSubject::for_test_bytes([0xe3; 16]);
     let client = open_db(0xe3, author, &schema);
@@ -2175,8 +2176,29 @@ fn accepted_upload_releases_outbox_only_after_global_durability() {
             global_time: None,
             durability: Some(DurabilityTier::Global),
         })
-        .expect("return global acceptance");
-    client.tick().expect("apply terminal global acceptance");
+        .expect("return timeless global acceptance");
+    client.tick().expect("apply timeless global acceptance");
+    assert!(
+        client
+            .node
+            .outbox
+            .borrow()
+            .iter()
+            .any(|pending| pending.tx_id == tx_id),
+        "Accepted+Global without authority time must retain the shared outbox upload"
+    );
+
+    authority
+        .send(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(7)),
+            durability: Some(DurabilityTier::Global),
+        })
+        .expect("return time-bearing global acceptance");
+    client
+        .tick()
+        .expect("apply terminal time-bearing global acceptance");
     assert!(
         !client
             .node
@@ -2184,7 +2206,7 @@ fn accepted_upload_releases_outbox_only_after_global_durability() {
             .borrow()
             .iter()
             .any(|pending| pending.tx_id == tx_id),
-        "Global acceptance releases the upload from the shared outbox"
+        "time-bearing Global acceptance releases the upload from the shared outbox"
     );
 }
 
