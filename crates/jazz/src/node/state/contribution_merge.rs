@@ -25,11 +25,18 @@ fn decode_contribution_gset_identity(
     identity: &[u8],
 ) -> Result<Value, Error> {
     let descriptor = contribution_gset_element_descriptor(column_type)?;
-    let element = records::BorrowedRecord::new(identity, &descriptor).get_idx(0)?;
-    if descriptor.create(std::slice::from_ref(&element))? != identity {
-        return Err(Error::InvalidStoredValue(
-            "g-set contribution operation identity must be canonical",
-        ));
+    let malformed = || {
+        Error::InvalidStoredValue("g-set contribution operation identity must be canonical")
+    };
+    let element = records::BorrowedRecord::new(identity, &descriptor)
+        .get_idx(0)
+        .map_err(|_| malformed())?;
+    if descriptor
+        .create(std::slice::from_ref(&element))
+        .map_err(|_| malformed())?
+        != identity
+    {
+        return Err(malformed());
     }
     Ok(element)
 }
