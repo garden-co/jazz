@@ -10,7 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Deref;
 
 use groove::records::{
-    RecordDescriptor, ScalarEnumSchema, SystemVariantRegistry, Value, ValueType,
+    EnumCase, EnumSchema, RecordDescriptor, ScalarEnumSchema, SystemVariantRegistry, Value,
+    ValueType,
 };
 use groove::schema::{
     ColumnType as GrooveColumnType, DatabaseSchema as GrooveDatabaseSchema,
@@ -1566,7 +1567,7 @@ fn transactions_table() -> GrooveTableSchema {
             column("absent_read_set", GrooveColumnType::Bytes.nullable()),
             column("predicate_read_set", GrooveColumnType::Bytes.nullable()),
             column("user_metadata", GrooveColumnType::String.nullable()),
-            column("contribution_merge", GrooveColumnType::Bytes.nullable()),
+            column("contribution_merge", contribution_merge_column()),
             column("permission_subject", GrooveColumnType::String.nullable()),
             column("merge_strategy", GrooveColumnType::String.nullable()),
             // upstream-decided: written only by fate/state application.
@@ -1588,6 +1589,85 @@ fn transactions_table() -> GrooveTableSchema {
         PrimaryKeyColumn::integer("node_id", IntegerKeyType::U64),
     ]))
     .with_index(GrooveIndexSchema::new("by_global_time", ["global_time"]))
+}
+
+fn contribution_component_column() -> GrooveColumnType {
+    GrooveColumnType::Enum(Box::new(
+        EnumSchema::new(
+            "jazz_contribution_component",
+            [
+                EnumCase::new(
+                    "column",
+                    // The public/wire contribution coordinate names a logical
+                    // column.  Its durable payload is instead this node's
+                    // stable physical-column identity; names are resolved at
+                    // the storage boundary through the retained catalogue.
+                    RecordDescriptor::new([("physical_column_id", ValueType::U64)]),
+                ),
+                EnumCase::new(
+                    "operation",
+                    RecordDescriptor::new([("identity", ValueType::Bytes)]),
+                ),
+                EnumCase::new(
+                    "register",
+                    RecordDescriptor::new(std::iter::empty::<(String, ValueType)>()),
+                ),
+            ],
+        )
+        .expect("valid contribution component enum"),
+    ))
+}
+
+fn contribution_coordinate_column() -> GrooveColumnType {
+    GrooveColumnType::Record(Box::new(RecordDescriptor::new([
+        ("branch_key", ValueType::Bytes),
+        ("physical_table_id", ValueType::U64),
+        ("row_uuid", ValueType::Uuid),
+        (
+            "layer",
+            storage_enum("jazz_contribution_layer", &["content", "deletion"]),
+        ),
+        ("component", contribution_component_column()),
+    ])))
+}
+
+fn contribution_dot_column() -> GrooveColumnType {
+    GrooveColumnType::Record(Box::new(RecordDescriptor::new([
+        ("tx_time", ValueType::U64),
+        ("tx_node", ValueType::Uuid),
+        ("coordinate", contribution_coordinate_column()),
+    ])))
+}
+
+fn contribution_merge_column() -> GrooveColumnType {
+    GrooveColumnType::Record(Box::new(RecordDescriptor::new([
+        ("source", ValueType::Bytes),
+        ("target", ValueType::Bytes),
+        (
+            "substitutions",
+            GrooveColumnType::Record(Box::new(RecordDescriptor::new([
+                ("target", contribution_coordinate_column()),
+                ("sources", contribution_dot_column().array_of()),
+            ])))
+            .array_of(),
+        ),
+    ])))
+    .nullable()
+}
+
+/// Bound physical type used by the transaction codec. Constructing the
+/// single-column table applies the same durable registry paths as the real
+/// `jazz_transactions.contribution_merge` column.
+pub(crate) fn contribution_merge_storage_type() -> GrooveColumnType {
+    GrooveTableSchema::new(
+        "jazz_transactions",
+        [column("contribution_merge", contribution_merge_column())],
+    )
+    .columns
+    .into_iter()
+    .next()
+    .expect("contribution merge storage column")
+    .column_type
 }
 
 fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
@@ -2150,6 +2230,60 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["branch_key", "row_uuid"]
         );
+    }
+
+    #[test]
+    fn contribution_merge_uses_native_nested_records_and_groove_enums() {
+        // Internal storage-shape coverage is necessary here because the public
+        // transaction API intentionally hides Groove's durable descriptor.
+        let transactions = transactions_table();
+        let column = transactions
+            .columns
+            .iter()
+            .find(|column| column.name == "contribution_merge")
+            .unwrap();
+        let GrooveColumnType::Nullable(provenance) = &column.column_type else {
+            panic!("contribution provenance must be nullable");
+        };
+        let GrooveColumnType::Record(provenance) = provenance.as_ref() else {
+            panic!("contribution provenance must be a native record");
+        };
+        assert_eq!(
+            provenance
+                .fields()
+                .iter()
+                .map(|field| field.name.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["source", "target", "substitutions"]
+        );
+
+        let GrooveColumnType::Array(substitution) = &provenance.fields()[2].value_type else {
+            panic!("contribution substitutions must be an array");
+        };
+        let GrooveColumnType::Record(substitution) = substitution.as_ref() else {
+            panic!("contribution substitutions must contain records");
+        };
+        let GrooveColumnType::Record(coordinate) = &substitution.fields()[0].value_type else {
+            panic!("contribution target must be a coordinate record");
+        };
+        let GrooveColumnType::EnumTag(layer) = &coordinate.fields()[3].value_type else {
+            panic!("contribution layer must be a Groove enum");
+        };
+        assert_eq!(layer.variants, ["content", "deletion"]);
+        let GrooveColumnType::Enum(component) = &coordinate.fields()[4].value_type else {
+            panic!("contribution component must be a Groove payload enum");
+        };
+        assert_eq!(
+            component
+                .cases
+                .iter()
+                .map(|case| case.name.as_str())
+                .collect::<Vec<_>>(),
+            ["column", "operation", "register"]
+        );
+        assert_eq!(component.tag("column").unwrap(), 0);
+        assert_eq!(component.tag("operation").unwrap(), 1);
+        assert_eq!(component.tag("register").unwrap(), 2);
     }
 
     #[test]

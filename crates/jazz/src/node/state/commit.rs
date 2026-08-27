@@ -293,6 +293,7 @@ where
                 batch.accept_large_value(*staged_id);
             }
         }
+        let contribution_merge = self.contribution_merge_storage_value(tx.contribution_merge.as_ref())?;
         batch.insert(
             "jazz_transactions",
             transaction_values(
@@ -301,6 +302,7 @@ where
                 Fate::Pending,
                 None,
                 self.authored_commit_durability,
+                contribution_merge,
             ),
         );
         let mut stored_versions = Vec::new();
