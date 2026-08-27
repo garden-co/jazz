@@ -33,6 +33,9 @@ type LocalJwksDocument = {
 };
 
 const jwksDocuments = new Map<string, LocalJwksDocument>();
+const jwksFetches = new Map<string, Promise<LocalJwksDocument>>();
+const jwksRefreshNotBefore = new Map<string, number>();
+const JWKS_FORCED_REFRESH_COOLDOWN_MS = 30_000;
 const staticJwtKeys = new Map<string, Promise<Awaited<ReturnType<typeof importJWK>>>>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -127,16 +130,33 @@ async function getRemoteJwksDocument(
   jwksUrl: string,
   forceRefresh = false,
 ): Promise<LocalJwksDocument> {
-  if (!forceRefresh) {
-    const cached = jwksDocuments.get(jwksUrl);
-    if (cached) {
-      return cached;
-    }
+  const cached = jwksDocuments.get(jwksUrl);
+  if (!forceRefresh && cached) {
+    return cached;
   }
 
-  const document = await fetchRemoteJwks(jwksUrl);
-  jwksDocuments.set(jwksUrl, document);
-  return document;
+  const pending = jwksFetches.get(jwksUrl);
+  if (pending) {
+    return pending;
+  }
+
+  if (forceRefresh && cached && Date.now() < (jwksRefreshNotBefore.get(jwksUrl) ?? 0)) {
+    return cached;
+  }
+
+  const fetchPromise = fetchRemoteJwks(jwksUrl).then((document) => {
+    jwksDocuments.set(jwksUrl, document);
+    jwksRefreshNotBefore.set(jwksUrl, Date.now() + JWKS_FORCED_REFRESH_COOLDOWN_MS);
+    return document;
+  });
+  jwksFetches.set(jwksUrl, fetchPromise);
+  try {
+    return await fetchPromise;
+  } finally {
+    if (jwksFetches.get(jwksUrl) === fetchPromise) {
+      jwksFetches.delete(jwksUrl);
+    }
+  }
 }
 
 function readString(value: unknown): string | undefined {
