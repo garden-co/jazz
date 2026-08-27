@@ -276,7 +276,7 @@ groove::define_record! {
 groove::define_record! {
     pub(super) struct ContributionCoordinateStorageRecord {
         0 => branch_key: Vec<u8>,
-        1 => table: String,
+        1 => physical_table_id: u64,
         2 => row_uuid: uuid::Uuid,
         3 => layer: MergeAspect,
         4 => component: records::EnumValue,
@@ -1134,12 +1134,19 @@ fn contribution_component_storage_value(
 fn contribution_coordinate_storage_record(
     coordinate: &ContributionCoordinate,
     descriptor: &records::RecordDescriptor,
+    resolve_table_id: &mut impl FnMut(&str) -> Result<PhysicalTableId, Error>,
     resolve_column_id: &mut impl FnMut(&str, &str) -> Result<PhysicalColumnId, Error>,
 ) -> Result<OwnedRecord, Error> {
+    let table_id = resolve_table_id(&coordinate.table)?;
+    if table_id.0 == 0 {
+        return Err(Error::InvalidStoredValue(
+            "contribution physical table id must be nonzero",
+        ));
+    }
     let record = ContributionCoordinateStorageRecord::encode(
         descriptor,
         coordinate.branch_key.canonical_bytes(),
-        coordinate.table.clone(),
+        table_id.0,
         coordinate.row_uuid.0,
         coordinate.layer,
         contribution_component_storage_value(
@@ -1157,6 +1164,7 @@ fn contribution_coordinate_storage_record(
 fn contribution_dot_storage_record(
     dot: &ContributionDot,
     descriptor: &records::RecordDescriptor,
+    resolve_table_id: &mut impl FnMut(&str) -> Result<PhysicalTableId, Error>,
     resolve_column_id: &mut impl FnMut(&str, &str) -> Result<PhysicalColumnId, Error>,
 ) -> Result<OwnedRecord, Error> {
     let coordinate = nested_record_descriptor(record_field_type(descriptor, 2));
@@ -1164,7 +1172,12 @@ fn contribution_dot_storage_record(
         descriptor,
         dot.tx_id.time.0,
         dot.tx_id.node.0,
-        contribution_coordinate_storage_record(&dot.coordinate, coordinate, resolve_column_id)?,
+        contribution_coordinate_storage_record(
+            &dot.coordinate,
+            coordinate,
+            resolve_table_id,
+            resolve_column_id,
+        )?,
     )?
     .record()
     .clone();
@@ -1174,18 +1187,25 @@ fn contribution_dot_storage_record(
 fn contribution_substitution_storage_record(
     substitution: &ContributionSubstitution,
     descriptor: &records::RecordDescriptor,
+    resolve_table_id: &mut impl FnMut(&str) -> Result<PhysicalTableId, Error>,
     resolve_column_id: &mut impl FnMut(&str, &str) -> Result<PhysicalColumnId, Error>,
 ) -> Result<OwnedRecord, Error> {
     let target = nested_record_descriptor(record_field_type(descriptor, 0));
     let source = nested_record_descriptor(array_element_type(record_field_type(descriptor, 1)));
     let record = ContributionSubstitutionStorageRecord::encode(
         descriptor,
-        contribution_coordinate_storage_record(&substitution.target, target, resolve_column_id)?,
+        contribution_coordinate_storage_record(
+            &substitution.target,
+            target,
+            resolve_table_id,
+            resolve_column_id,
+        )?,
         substitution
             .sources
             .iter()
             .map(|dot| {
-                contribution_dot_storage_record(dot, source, resolve_column_id).map(Value::Record)
+                contribution_dot_storage_record(dot, source, resolve_table_id, resolve_column_id)
+                    .map(Value::Record)
             })
             .collect::<Result<Vec<_>, _>>()?,
     )?
@@ -1196,6 +1216,7 @@ fn contribution_substitution_storage_record(
 
 pub(super) fn contribution_merge_storage_value(
     provenance: Option<&ContributionMergeProvenance>,
+    mut resolve_table_id: impl FnMut(&str) -> Result<PhysicalTableId, Error>,
     mut resolve_column_id: impl FnMut(&str, &str) -> Result<PhysicalColumnId, Error>,
 ) -> Result<Value, Error> {
     let descriptor = contribution_merge_descriptor();
@@ -1214,6 +1235,7 @@ pub(super) fn contribution_merge_storage_value(
                         contribution_substitution_storage_record(
                             item,
                             substitution,
+                            &mut resolve_table_id,
                             &mut resolve_column_id,
                         )
                         .map(Value::Record)
@@ -1266,6 +1288,7 @@ fn contribution_component_from_storage(
 
 fn contribution_coordinate_from_storage(
     record: OwnedRecord,
+    resolve_table_name: &mut impl FnMut(PhysicalTableId) -> Result<String, Error>,
     resolve_column_name: &mut impl FnMut(&str, PhysicalColumnId) -> Result<String, Error>,
 ) -> Result<ContributionCoordinate, Error> {
     let records::ValueType::Enum(component_schema) = record_field_type(record.descriptor(), 4)
@@ -1276,7 +1299,13 @@ fn contribution_coordinate_from_storage(
     };
     let component_schema = component_schema.clone();
     let record = ContributionCoordinateStorageRecord::new(record);
-    let table = record.table()?;
+    let table_id = PhysicalTableId(record.physical_table_id()?);
+    if table_id.0 == 0 {
+        return Err(Error::InvalidStoredValue(
+            "stored contribution physical table id must be nonzero",
+        ));
+    }
+    let table = resolve_table_name(table_id)?;
     let branch_key = BranchKey::from_canonical_bytes(&record.branch_key()?)
         .map_err(|_| Error::InvalidStoredValue("transaction contribution branch key is invalid"))?;
     Ok(ContributionCoordinate {
@@ -1295,6 +1324,7 @@ fn contribution_coordinate_from_storage(
 
 fn contribution_dot_from_storage(
     record: OwnedRecord,
+    resolve_table_name: &mut impl FnMut(PhysicalTableId) -> Result<String, Error>,
     resolve_column_name: &mut impl FnMut(&str, PhysicalColumnId) -> Result<String, Error>,
 ) -> Result<ContributionDot, Error> {
     let record = ContributionDotStorageRecord::new(record);
@@ -1302,6 +1332,7 @@ fn contribution_dot_from_storage(
         tx_id: TxId::new(TxTime(record.tx_time()?), NodeUuid(record.tx_node()?)),
         coordinate: contribution_coordinate_from_storage(
             record.coordinate()?,
+            resolve_table_name,
             resolve_column_name,
         )?,
     })
@@ -1309,16 +1340,23 @@ fn contribution_dot_from_storage(
 
 fn contribution_substitution_from_storage(
     record: OwnedRecord,
+    resolve_table_name: &mut impl FnMut(PhysicalTableId) -> Result<String, Error>,
     resolve_column_name: &mut impl FnMut(&str, PhysicalColumnId) -> Result<String, Error>,
 ) -> Result<ContributionSubstitution, Error> {
     let record = ContributionSubstitutionStorageRecord::new(record);
     Ok(ContributionSubstitution {
-        target: contribution_coordinate_from_storage(record.target()?, resolve_column_name)?,
+        target: contribution_coordinate_from_storage(
+            record.target()?,
+            resolve_table_name,
+            resolve_column_name,
+        )?,
         sources: record
             .sources()?
             .into_iter()
             .map(|source| match source {
-                Value::Record(record) => contribution_dot_from_storage(record, resolve_column_name),
+                Value::Record(record) => {
+                    contribution_dot_from_storage(record, resolve_table_name, resolve_column_name)
+                }
                 _ => Err(Error::InvalidStoredValue(
                     "transaction contribution dot must be a record",
                 )),
@@ -1329,6 +1367,7 @@ fn contribution_substitution_from_storage(
 
 pub(super) fn contribution_merge_from_storage_record(
     record: OwnedRecord,
+    mut resolve_table_name: impl FnMut(PhysicalTableId) -> Result<String, Error>,
     mut resolve_column_name: impl FnMut(&str, PhysicalColumnId) -> Result<String, Error>,
 ) -> Result<ContributionMergeProvenance, Error> {
     let descriptor = contribution_merge_descriptor();
@@ -1349,9 +1388,11 @@ pub(super) fn contribution_merge_from_storage_record(
             .substitutions()?
             .into_iter()
             .map(|substitution| match substitution {
-                Value::Record(record) => {
-                    contribution_substitution_from_storage(record, &mut resolve_column_name)
-                }
+                Value::Record(record) => contribution_substitution_from_storage(
+                    record,
+                    &mut resolve_table_name,
+                    &mut resolve_column_name,
+                ),
                 _ => Err(Error::InvalidStoredValue(
                     "transaction contribution substitution must be a record",
                 )),
