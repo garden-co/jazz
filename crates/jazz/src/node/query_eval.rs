@@ -422,9 +422,11 @@ where
             settled_binding_view,
             authorization_mode,
         )?;
-        // One-shot reads are the only compilation mode allowed to attach a
-        // physical source cap. Prepared/maintained and policy programs keep
-        // their ordinary unbounded access paths.
+        // One-shot reads can use every eligible access path. Maintained reads
+        // deliberately retain their ordinary source except for the separately
+        // proved physical primary-key path: secondary indexes can settle at a
+        // frontier distinct from their maintained source, while one immutable
+        // physical row has no such independent frontier.
         let access_paths = self.one_shot_access_paths(shape, binding, tier)?;
         self.compile_query_program_request_with_access_paths(request, access_paths)
             .await

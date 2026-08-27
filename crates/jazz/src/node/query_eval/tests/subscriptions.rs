@@ -2,6 +2,102 @@
 
 use super::*;
 
+fn graph_contains_point_scan(graph: &GraphBuilder) -> bool {
+    match graph {
+        GraphBuilder::Table {
+            scan: Some(groove::ivm::StaticScanSpec::Point(_)),
+            ..
+        } => true,
+        GraphBuilder::Recursive { seed, step, .. } => {
+            graph_contains_point_scan(seed) || graph_contains_point_scan(step)
+        }
+        GraphBuilder::Filter { input, .. }
+        | GraphBuilder::UnwrapNullable { input, .. }
+        | GraphBuilder::Unnest { input, .. }
+        | GraphBuilder::VariantProject { input, .. }
+        | GraphBuilder::Project { input, .. }
+        | GraphBuilder::StreamingChecksum { input, .. }
+        | GraphBuilder::ArgMaxBy { input, .. }
+        | GraphBuilder::ArgMinBy { input, .. }
+        | GraphBuilder::TopBy { input, .. }
+        | GraphBuilder::CollectBy { input, .. }
+        | GraphBuilder::Aggregate { input, .. } => graph_contains_point_scan(input),
+        GraphBuilder::Union { inputs } => inputs.iter().any(graph_contains_point_scan),
+        GraphBuilder::Join { left, right, .. }
+        | GraphBuilder::SemiJoin { left, right, .. }
+        | GraphBuilder::AntiJoin { left, right, .. } => {
+            graph_contains_point_scan(left) || graph_contains_point_scan(right)
+        }
+        GraphBuilder::Table { .. }
+        | GraphBuilder::InlineRecords { .. }
+        | GraphBuilder::Index { .. }
+        | GraphBuilder::FrontierSource { .. }
+        | GraphBuilder::BindingSource { .. } => false,
+    }
+}
+
+#[test]
+fn maintained_physical_point_hydration_uses_only_its_current_row_source() {
+    let (_dir, mut node) = open_node();
+    let alice = author(1);
+    let target = row(0);
+    commit_global_issue(&mut node, 0, "open", alice, 1);
+    commit_global_issue(&mut node, 1, "open", alice, 2);
+
+    let shape = Query::from("issues")
+        .filter(eq(col("id"), lit(Value::Uuid(target.0))))
+        .validate(&node.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let program = node
+        .compile_current_query_program_for_read_view(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            AuthorSubject::SYSTEM,
+            CurrentQueryProgramOutput::MaintainedView,
+            &ReadViewSpec::default(),
+        )
+        .expect("compile maintained physical-point program");
+    assert!(
+        program
+            .lowered
+            .terminals
+            .iter()
+            .any(|terminal| graph_contains_point_scan(&terminal.graph)),
+        "a maintained physical-point program must retain an exact physical source cap"
+    );
+    let (receiver, maintained, _schemas, transitions, _tables, _incomplete) = node
+        .open_seeded_maintained_subscription_view(
+            &shape,
+            &binding,
+            AuthorSubject::SYSTEM,
+            DurabilityTier::Global,
+            &ReadViewSpec::default(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        maintained
+            .active_result_members()
+            .iter()
+            .filter_map(crate::protocol::ResultMemberEntry::as_row)
+            .map(|(_, row, _)| row)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([target])
+    );
+    assert_eq!(
+        transitions
+            .adds
+            .iter()
+            .filter_map(crate::protocol::ResultMemberEntry::as_row)
+            .map(|(_, row, _)| row)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([target])
+    );
+    node.unsubscribe_groove_subscription(receiver.id());
+}
+
 #[test]
 fn query_subscription_result_sets_track_bindings_and_rehydrate() {
     let (_server_dir, mut server) = open_node();
