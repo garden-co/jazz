@@ -90,8 +90,10 @@ choice, not part of the portable storage contract.
 The storage layer supplies exactly the ordered byte map groove needs. It is
 partitioned into named column families and exposes a small set of operations
 (`OrderedKvStorage` in the reference implementation): point `get`, `set`, and
-`delete`; explicit ordered scan requests over a prefix or half-open range in
-either direction; a last-with-prefix helper; and atomic batch writes through
+`delete`; atomic `put_if_absent` and `compare_and_delete` for immutable-object
+installation and ABA-safe reclamation; explicit ordered scan requests over a
+prefix or half-open range in either direction; a last-with-prefix helper; and
+atomic batch writes through
 `write_many`. A request may carry a finite item bound. It is a backend contract,
 not a caller-side collection hint: the complete cursor yields no more than that
 many rows and an adapter stops traversal/hydration at that boundary.
@@ -115,6 +117,13 @@ have left the batch unapplied from a failure that may have followed a durable
 commit. Backends must classify an uncertain acknowledgement conservatively as
 possibly committed; only a definitely-uncommitted outcome permits callers to
 roll back in-process state or retry the same batch.
+
+`put_if_absent` and `compare_and_delete` are atomic at the persistence scope
+(`INV-STORAGE-28`). A backend either serializes them across every concurrently
+open handle (IDB and SQLite), shares one primitive boundary across clones
+(memory), or enforces exclusive open (RocksDB). Their comparison is over exact
+stored bytes, so deleting and reinstalling the same logical object with a new
+installation receipt cannot be mistaken for the earlier installation (ABA).
 
 _Further invariants._ `INV-STORAGE-2` — a prefix scan request returns exactly the keys
 with the given byte prefix, in its requested direction, including prefixes with no finite upper

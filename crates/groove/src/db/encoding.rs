@@ -206,30 +206,41 @@ pub(super) fn primary_key_bytes(
     Ok(bytes)
 }
 
-pub(super) fn decode_stored_table_record(
-    table: &TableSchema,
-    stored: Vec<u8>,
-) -> Result<VariantRecord, Error> {
-    let (variant_tag, payload) = split_variant_record(&stored)?;
-    let descriptor = table
-        .record_schema_for_variant(variant_tag)
-        .ok_or_else(|| Error::UnknownTableVariant {
-            table: table.name.clone(),
-            version: u64::from(variant_tag),
-        })?;
-    let record = OwnedRecord::new(payload.to_vec(), descriptor);
-    Ok(VariantRecord::new(variant_tag, record))
-}
-
-pub(super) fn decode_stored_key_value<'a>(
-    table: &TableSchema,
-    key: Vec<u8>,
-    stored: Vec<u8>,
-) -> Result<EncodedKeyValue<'a>, Error> {
-    Ok(EncodedKeyValue::from_variant(
-        key,
-        decode_stored_table_record(table, stored)?,
-    ))
+impl Database {
+    pub(super) fn decode_stored_key_value<'a>(
+        &self,
+        table: &TableSchema,
+        key: Vec<u8>,
+        stored: Vec<u8>,
+    ) -> Result<EncodedKeyValue<'a>, Error> {
+        let (variant_tag, payload) = split_variant_record(&stored)?;
+        let cached = self
+            .stored_record_descriptors
+            .borrow()
+            .get(&table.name)
+            .and_then(|variants| variants.get(&variant_tag))
+            .copied();
+        let descriptor = if let Some(descriptor) = cached {
+            descriptor
+        } else {
+            let descriptor = table
+                .record_schema_for_variant(variant_tag)
+                .ok_or_else(|| Error::UnknownTableVariant {
+                    table: table.name.clone(),
+                    version: u64::from(variant_tag),
+                })?;
+            self.stored_record_descriptors
+                .borrow_mut()
+                .entry(table.name.clone())
+                .or_default()
+                .insert(variant_tag, descriptor);
+            descriptor
+        };
+        Ok(EncodedKeyValue::from_variant(
+            key,
+            VariantRecord::new(variant_tag, OwnedRecord::new(payload.to_vec(), descriptor)),
+        ))
+    }
 }
 
 pub(crate) fn persisted_index_primary_key(

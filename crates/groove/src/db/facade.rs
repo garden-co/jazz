@@ -93,6 +93,7 @@ impl Database {
             last_commit_metrics: None,
             last_tick_metrics: None,
             storage_read_metrics: Rc::new(RefCell::new(StorageReadMetrics::default())),
+            stored_record_descriptors: RefCell::new(BTreeMap::new()),
             next_publication_id: 1,
             durable_publication_frontier: None,
             resident_publications: BTreeMap::new(),

@@ -4,5 +4,5 @@
     "rootDir": "./src/svelte",
     "outDir": "./dist/svelte"
   },
-  "include": ["src/svelte/**/*"]
+  "include": ["src/svelte/**/*", "src/types/**/*.d.ts"]
 }

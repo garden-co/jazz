@@ -1,0 +1,36 @@
+{
+  "name": "poster-shop-nextjs-betterauth",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "prebuild": "node src/lib/build-config.mjs",
+    "build": "jazz-tools validate && next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:browser": "vitest run --config vitest.config.browser.ts"
+  },
+  "dependencies": {
+    "better-auth": "1.7.1",
+    "jazz-napi": "workspace:*",
+    "jazz-tools": "workspace:*",
+    "next": "catalog:default",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:default",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "catalog:default",
+    "@vitest/browser": "catalog:default",
+    "@vitest/browser-playwright": "catalog:default",
+    "typescript": "catalog:default",
+    "vite": "catalog:default",
+    "vite-plugin-top-level-await": "catalog:default",
+    "vite-plugin-wasm": "catalog:default",
+    "vitest": "catalog:default"
+  }
+}

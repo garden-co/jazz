@@ -7,6 +7,7 @@ import { PostcardReader, PostcardWriter } from "./native-codec.js";
 
 export type WebSocketFrameHandler = (frame: Uint8Array) => void;
 export type WebSocketErrorHandler = (error: WireError) => void;
+export type WebSocketTerminalHandler = (error: WireError) => void;
 
 export type WireError = {
   code: string;
@@ -26,6 +27,7 @@ export type WebSocketCarrierOptions = {
   authJson?: string;
   onFrame: WebSocketFrameHandler;
   onError?: WebSocketErrorHandler;
+  onTerminal?: WebSocketTerminalHandler;
   WebSocket?: WebSocketConstructor;
 };
 
@@ -133,17 +135,20 @@ export class WebSocketCarrier {
   private readonly socket: BrowserWebSocket;
   private readonly onFrame: WebSocketFrameHandler;
   private readonly onError?: WebSocketErrorHandler;
+  private readonly onTerminal?: WebSocketTerminalHandler;
   private readonly opened: Promise<WebSocketNegotiation>;
   private resolveNegotiation!: (value: WebSocketNegotiation) => void;
   private rejectNegotiation!: (reason: unknown) => void;
   private negotiated = false;
   private closing = false;
+  private terminated = false;
 
   constructor(options: WebSocketCarrierOptions) {
     const WebSocketCtor = options.WebSocket ?? browserWebSocketConstructor();
     this.url = options.endpointUrl;
     this.onFrame = options.onFrame;
     this.onError = options.onError;
+    this.onTerminal = options.onTerminal;
     this.socket = new WebSocketCtor(this.url);
     this.socket.binaryType = "arraybuffer";
     this.opened = new Promise<WebSocketNegotiation>((resolve, reject) => {
@@ -155,28 +160,39 @@ export class WebSocketCarrier {
         this.socket.send(encodeWebSocketPrelude(options.authJson ?? "{}", options.peerIdentity));
         this.socket.send(encodeWebSocketFrameBatch([encodeWireClientHello()]));
       },
-      (error) => this.rejectNegotiation(error),
+      (error) => {
+        this.reportTerminal({
+          code: "websocket_error",
+          retry: "later",
+          message: error instanceof Error ? error.message : String(error),
+        });
+        this.close();
+      },
     );
     this.socket.addEventListener("message", (event) => {
       void this.handleMessage(event.data).catch((error) => {
-        this.rejectNegotiation(error);
+        this.reportTerminal(
+          {
+            code: "protocol_error",
+            retry: "never",
+            message: error instanceof Error ? error.message : String(error),
+          },
+          undefined,
+          false,
+        );
         this.close();
       });
     });
     this.socket.addEventListener("error", () => {
-      if (this.closing) return;
-      this.rejectNegotiation(new Error("websocket transport error"));
-      this.onError?.({
+      this.reportTerminal({
         code: "websocket_error",
         retry: "later",
         message: "websocket transport error",
       });
     });
     this.socket.addEventListener("close", (event) => {
-      if (this.closing) return;
-      this.rejectNegotiation(new Error("websocket transport closed during negotiation"));
       const close = websocketCloseDetails(event);
-      this.onError?.({
+      this.reportTerminal({
         code: "websocket_closed",
         retry: "later",
         message: `websocket closed (code=${close.code ?? "unknown"}, reason=${close.reason ?? "none"})`,
@@ -222,6 +238,18 @@ export class WebSocketCarrier {
     }
   }
 
+  private reportTerminal(
+    error: WireError,
+    negotiationError = new Error(error.message),
+    notifyError = true,
+  ): void {
+    if (this.closing || this.terminated) return;
+    this.terminated = true;
+    this.rejectNegotiation(negotiationError);
+    if (notifyError) this.onError?.(error);
+    this.onTerminal?.(error);
+  }
+
   private async handleMessage(data: unknown): Promise<void> {
     for (const frame of decodeWebSocketFrameBatch(await bytesFromWebSocketMessage(data))) {
       if (this.closing) return;
@@ -235,15 +263,23 @@ export class WebSocketCarrier {
         if (isWireError(frame)) {
           const error = decodeWireError(frame);
           if (wireAuthFailureReason(error)) {
-            this.onError?.(error);
-            this.rejectNegotiation(
+            this.reportTerminal(
+              error,
               new Error(`websocket authentication failed before server hello: ${error.message}`),
             );
             this.close();
             return;
           }
         }
-        this.rejectNegotiation(new Error("websocket received semantic frame before server hello"));
+        this.reportTerminal(
+          {
+            code: "protocol_error",
+            retry: "never",
+            message: "websocket received semantic frame before server hello",
+          },
+          undefined,
+          false,
+        );
         this.close();
         return;
       }

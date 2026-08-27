@@ -76,6 +76,7 @@ where
         let mut global_current_updates = Vec::new();
         let cleanup_rejected_versions = matches!(stored.fate, Fate::Rejected(_));
         let tx_versions = self.query_versions_for_tx(tx_id).await?;
+        #[cfg(test)]
         let content_versions = tx_versions
             .iter()
             .filter(|version| version.layer() == VersionLayer::Content)
@@ -117,12 +118,15 @@ where
                 stored.view_scoped_cardinality,
             ),
         );
-        if !matches!(stored.fate, Fate::Rejected(_)) {
-            for version in &content_versions {
-                self.update_merge_heads_for_content_version(&mut batch, version, false)
-                    .await?;
-            }
-        }
+        // Pending and accepted content versions both participate in local
+        // merge-head state. Ingest already installed this transaction's
+        // versions while it was pending, so advancing the fate must not replay
+        // reachability maintenance over its history. Besides being redundant,
+        // fate updates can arrive newest-first and turn that replay into a
+        // quadratic walk of one row's causal chain.
+        //
+        // Rejections are handled by `remove_rejected_local_versions`, which
+        // rebuilds the affected derived state after removing the rows.
         if let Some(global_time) = stored.global_time {
             for version in &global_current_updates {
                 self.write_global_current_update(&mut batch, version, global_time)?;
