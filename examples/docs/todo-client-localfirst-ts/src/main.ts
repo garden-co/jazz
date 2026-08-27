@@ -96,8 +96,7 @@ export async function startApp(
   const query = app.todos;
   db.subscribe(query, (todos) => {
     const ordered = orderTodosWithDepth(todos);
-    parentSelect.innerHTML = "";
-    parentSelect.appendChild(noParentOption);
+    parentSelect.replaceChildren(noParentOption);
     for (const todo of todos) {
       const option = document.createElement("option");
       option.value = todo.id;
@@ -105,19 +104,37 @@ export async function startApp(
       parentSelect.appendChild(option);
     }
 
-    list.innerHTML = ordered
-      .map(
-        ({ todo, depth }) => `
-      <li class="${todo.done ? "done" : ""}" data-depth="${depth}" style="padding-left: ${depth * 20}px;">
-        <input type="checkbox" ${todo.done ? "checked" : ""}
-               data-id="${todo.id}" class="toggle">
-        <span>${todo.title}</span>
-        ${todo.description ? `<small>${todo.description}</small>` : ""}
-        <button data-id="${todo.id}" class="delete-btn">&times;</button>
-      </li>
-    `,
-      )
-      .join("");
+    const items = document.createDocumentFragment();
+    for (const { todo, depth } of ordered) {
+      const item = document.createElement("li");
+      item.classList.toggle("done", todo.done);
+      item.dataset.depth = String(depth);
+      item.style.paddingLeft = `${depth * 20}px`;
+
+      const toggle = document.createElement("input");
+      toggle.type = "checkbox";
+      toggle.checked = todo.done;
+      toggle.dataset.id = todo.id;
+      toggle.className = "toggle";
+
+      const title = document.createElement("span");
+      title.textContent = todo.title;
+
+      item.append(toggle, title);
+      if (todo.description) {
+        const description = document.createElement("small");
+        description.textContent = todo.description;
+        item.appendChild(description);
+      }
+
+      const deleteButton = document.createElement("button");
+      deleteButton.dataset.id = todo.id;
+      deleteButton.className = "delete-btn";
+      deleteButton.textContent = "×";
+      item.appendChild(deleteButton);
+      items.appendChild(item);
+    }
+    list.replaceChildren(items);
   });
 
   // Add todo form

@@ -204,10 +204,22 @@ async fn ws_admission(
     if let Some(admin_secret) = auth.admin_secret.as_deref() {
         crate::middleware::auth::validate_admin_secret(Some(admin_secret), &state.auth_config)
             .map_err(|(_, message)| message.to_owned())?;
+        // An admin credential authenticates Edge's control plane, but ordinary
+        // relay commits must retain their transaction permission subject for
+        // application-policy evaluation. Catalogue bootstrap is the sole
+        // privileged admission, and is further checked at the protocol edge.
+        let trust = if prelude.bootstrap_catalogue
+            && peer_identity == AuthorSubject::SYSTEM
+            && state.topology == crate::server::ServerTopology::Core
+        {
+            CommitUnitTrust::TrustedAdmin
+        } else {
+            CommitUnitTrust::TrustedBackend
+        };
         return Ok(WebSocketAdmission {
             identity: peer_identity,
             claims: BTreeMap::new(),
-            trust: CommitUnitTrust::TrustedAdmin,
+            trust,
             credential: WebSocketCredential::Admin,
         });
     }
@@ -1290,6 +1302,61 @@ mod tests {
             .await
             .expect("build websocket convergence test state")
             .state
+    }
+
+    #[tokio::test]
+    async fn ws_admin_secret_only_elevates_system_catalogue_bootstrap_at_core() {
+        let state = make_ws_test_state().await;
+        let relay = ws_admission(
+            WebSocketPrelude {
+                peer_identity: AuthorSubject::SYSTEM.canonical().to_owned(),
+                bootstrap_catalogue: false,
+                auth: jazz::tools::websocket_prelude_auth::AuthConfig {
+                    admin_secret: Some("admin-secret".to_owned()),
+                    ..Default::default()
+                },
+            },
+            &HeaderMap::new(),
+            &state,
+        )
+        .await
+        .expect("admit authenticated edge relay");
+        assert_eq!(relay.credential, WebSocketCredential::Admin);
+        assert_eq!(relay.trust, CommitUnitTrust::TrustedBackend);
+
+        let bootstrap = ws_admission(
+            WebSocketPrelude {
+                peer_identity: AuthorSubject::SYSTEM.canonical().to_owned(),
+                bootstrap_catalogue: true,
+                auth: jazz::tools::websocket_prelude_auth::AuthConfig {
+                    admin_secret: Some("admin-secret".to_owned()),
+                    ..Default::default()
+                },
+            },
+            &HeaderMap::new(),
+            &state,
+        )
+        .await
+        .expect("admit authenticated catalogue bootstrap");
+        assert_eq!(bootstrap.trust, CommitUnitTrust::TrustedAdmin);
+
+        let non_system = ws_admission(
+            WebSocketPrelude {
+                peer_identity: AuthorSubject::for_test_bytes([0x77; 16])
+                    .canonical()
+                    .to_owned(),
+                bootstrap_catalogue: true,
+                auth: jazz::tools::websocket_prelude_auth::AuthConfig {
+                    admin_secret: Some("admin-secret".to_owned()),
+                    ..Default::default()
+                },
+            },
+            &HeaderMap::new(),
+            &state,
+        )
+        .await
+        .expect("admit authentication before protocol bootstrap rejection");
+        assert_eq!(non_system.trust, CommitUnitTrust::TrustedBackend);
     }
 
     #[tokio::test]
