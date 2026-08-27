@@ -124,17 +124,25 @@ describe("Vanilla TS Todo App E2E", () => {
 
   it("renders todo titles and descriptions as text instead of HTML", async () => {
     const { container: el, db } = await mountWithDb();
-    const ownerId = db.getAuthState().session?.user_id;
-    if (!ownerId) throw new Error("Todo test database is not authenticated");
     const title = '<img src="invalid" data-injected-title="true">';
     const description = '<img src="invalid" data-injected-description="true">';
 
-    db.insert(app.todos, { title, description, done: false, owner_id: ownerId });
+    addTodo(el, "Initial title");
 
     await waitFor(
       () => el.querySelectorAll("#todo-list li").length === 1,
       3000,
-      "Todo should appear after insertion",
+      "Todo should appear after submission",
+    );
+
+    const todoId = el.querySelector<HTMLSelectElement>("#parent-select")?.options[1]?.value;
+    if (!todoId) throw new Error("Submitted todo should be selectable as a parent");
+    db.update(app.todos, todoId, { title, description });
+
+    await waitFor(
+      () => el.querySelector("#todo-list li span")?.textContent === title,
+      3000,
+      "Updated todo should render",
     );
 
     expect(el.querySelector("#todo-list li span")?.textContent).toBe(title);
