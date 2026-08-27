@@ -199,6 +199,7 @@ async function initialize(context: RuntimeContext): Promise<void> {
       options.author,
       1,
       false,
+      { selfSignedClientProof: proof },
     );
     context.runtime = runtime;
     unownedDb = null;

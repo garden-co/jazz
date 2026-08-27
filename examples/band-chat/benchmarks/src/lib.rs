@@ -3,6 +3,10 @@
 //! The benchmark intentionally duplicates this small schema surface rather
 //! than importing application runtime or fixture helpers.
 
+mod fast_resume;
+
+pub use fast_resume::{FastResumeFixture, FastResumeReceipt};
+
 use std::collections::BTreeMap;
 
 use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, PreparedQuery, block_on};

@@ -10,7 +10,10 @@ use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchema};
-use jazz_wasm::{current_timestamp, derive_user_id, generate_id, mint_anonymous_token, WasmDb};
+use jazz_wasm::{
+    current_timestamp, derive_user_id, generate_id, mint_anonymous_token, mint_local_first_token,
+    WasmDb,
+};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
@@ -138,6 +141,62 @@ fn fixture_db() -> WasmDb {
         postcard::to_allocvec(&config).expect("encode open config postcard"),
     )
     .expect("open public WASM memory binding")
+}
+
+#[wasm_bindgen_test]
+fn self_signed_subscriber_admission_requires_the_exact_proof() {
+    let seed = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let app_id = "wasm-subscriber-proof";
+    let now_seconds = (js_sys::Date::now() / 1_000.0) as u64;
+    let token = mint_local_first_token(seed.to_owned(), app_id.to_owned(), 60, now_seconds)
+        .expect("mint a current local-first proof");
+    let claimed_author = serde_json::to_string(&(
+        AuthorSubject::LOCAL_FIRST_ISSUER,
+        derive_user_id(seed.to_owned()).expect("derive proof subject"),
+    ))
+    .expect("canonical proof author");
+    let schema = SchemaBuilder::new().build();
+    let config = OpenDbConfigFixture {
+        // The proof-bearing entrypoint must replace this ordinary placeholder,
+        // rather than treating an untrusted config author as privileged.
+        identity: OpenDbIdentityFixture {
+            node: NodeUuid::from_bytes([0x53; 16]),
+            author: AuthorSubject::for_test_bytes([0xa3; 16]),
+        },
+        row_id_seed: Some(53),
+        history_complete: false,
+        initial_sync_flush_every: None,
+    };
+    let db = WasmDb::open_memory_with_self_signed_proof(
+        serde_json::to_vec(&schema).expect("encode public schema JSON"),
+        postcard::to_allocvec(&config).expect("encode open config postcard"),
+        token.clone(),
+        app_id.to_owned(),
+        claimed_author.clone(),
+    )
+    .expect("open with a verified local-first proof");
+
+    // A raw worker-port identity is always untrusted; a valid canonical
+    // reserved identity must not bypass its issuer guard.
+    assert!(db
+        .accept_subscriber(claimed_author.as_bytes().to_vec(), JsValue::NULL)
+        .is_err());
+
+    db.accept_subscriber_with_self_signed_proof(
+        JsValue::NULL,
+        token.clone(),
+        app_id.to_owned(),
+        claimed_author.clone(),
+    )
+    .expect("the exact verified proof admits the local worker follower");
+    assert!(db
+        .accept_subscriber_with_self_signed_proof(
+            JsValue::NULL,
+            token,
+            "wrong-app".to_owned(),
+            claimed_author,
+        )
+        .is_err());
 }
 
 fn empty_cells() -> Vec<u8> {

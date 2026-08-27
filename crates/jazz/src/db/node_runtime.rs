@@ -956,6 +956,8 @@ where
             connection_epoch,
             startup_error: None,
             released_outbox_tx_ids: Vec::new(),
+            pending_chunk_response: None,
+            pending_control_responses: VecDeque::new(),
             link: ConnectionLink::Upstream(UpstreamConnectionState {
                 local_receiver,
                 pending,
@@ -967,6 +969,7 @@ where
                 large_value_uploads: transferred_large_value_uploads,
                 awaiting_large_value_uploads: BTreeMap::new(),
                 failed_large_value_uploads: BTreeSet::new(),
+                pending_row_version_fetches: VecDeque::new(),
                 pending_row_version_repairs: VecDeque::new(),
                 scope_view_cuts: BTreeMap::new(),
                 scope_receipts: BTreeMap::new(),
@@ -1202,6 +1205,8 @@ where
             connection_epoch,
             startup_error,
             released_outbox_tx_ids: Vec::new(),
+            pending_chunk_response: None,
+            pending_control_responses: VecDeque::new(),
             link: ConnectionLink::Subscriber(SubscriberConnectionState {
                 peer,
                 ingest_context,
@@ -2507,8 +2512,9 @@ where
                             terminal_operations,
                         } => {
                             let state_ref = &mut refresh;
-                            let previous_snapshot = state_ref.snapshot.clone();
-                            let previous_snapshot_index = state_ref.snapshot_index.clone();
+                            let previous = authoritative_membership_changed.then(|| {
+                                (state_ref.snapshot.clone(), state_ref.snapshot_index.clone())
+                            });
                             let mut event = apply_maintained_update_to_snapshot(
                                 &mut state_ref.snapshot,
                                 &mut state_ref.snapshot_index,
@@ -2524,6 +2530,9 @@ where
                                 None,
                             )?;
                             if authoritative_membership_changed {
+                                let (previous_snapshot, previous_snapshot_index) = previous.expect(
+                                    "authoritative membership changes retain prior snapshot",
+                                );
                                 order_maintained_snapshot_roots(
                                     &node.borrow(),
                                     &shape.query(),

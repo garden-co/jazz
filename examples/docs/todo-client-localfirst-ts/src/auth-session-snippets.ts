@@ -8,24 +8,22 @@ export async function authSessionExamples(config: DbConfig) {
   const session = db.getAuthState().session;
   // #endregion auth-session-ts-hook
 
-  // #region auth-session-ts-user-id
-  const sessionUserId = session?.user ?? null;
-  // #endregion auth-session-ts-user-id
+  // #region auth-session-ts-user
+  const sessionUser = session?.user ?? null;
+  // #endregion auth-session-ts-user
 
   // #region auth-session-ts-query
-  const ownedTodos = sessionUserId
-    ? await db.all(app.todos.where({ owner_id: sessionUserId }))
-    : [];
+  const ownedTodos = sessionUser ? await db.all(app.todos.where({ owner_id: sessionUser })) : [];
   // #endregion auth-session-ts-query
 
   // #region auth-session-ts-insert
   function addOwnedTodo(title: string) {
-    if (!sessionUserId) return;
+    if (!sessionUser) return;
 
     db.insert(app.todos, {
       title,
       done: false,
-      owner_id: sessionUserId,
+      owner_id: sessionUser,
     });
   }
   // #endregion auth-session-ts-insert
