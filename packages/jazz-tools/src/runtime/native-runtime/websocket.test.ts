@@ -124,7 +124,7 @@ describe("websocket frame carrier", () => {
   it("derives websocket peer identity from the full canonical session author", () => {
     const jwt = (issuer: string) =>
       `header.${btoa(JSON.stringify({ iss: issuer, sub: "same-provider-subject" }))}.signature`;
-    const fallback = new TextEncoder().encode('["urn:jazz:runtime-host","cache"]');
+    const fallback = new TextEncoder().encode('["https://jazz.test","cache"]');
 
     const issuerA = new TextDecoder().decode(
       peerIdentityForWebSocketAuth(
@@ -145,7 +145,7 @@ describe("websocket frame carrier", () => {
   });
 
   it("preserves verified external JWT issuer and subject bytes exactly", () => {
-    const fallback = new TextEncoder().encode('["urn:jazz:runtime-host","cache"]');
+    const fallback = new TextEncoder().encode('["https://jazz.test","cache"]');
     const jwt = (iss: string) =>
       `header.${btoa(JSON.stringify({ iss, sub: " provider-subject " }))}.signature`;
 
@@ -166,7 +166,7 @@ describe("websocket frame carrier", () => {
   });
 
   it("derives impersonated websocket peer identity from the complete backend session", () => {
-    const fallback = new TextEncoder().encode('["urn:jazz:runtime-host","cache"]');
+    const fallback = new TextEncoder().encode('["https://jazz.test","cache"]');
     const actual = new TextDecoder().decode(
       peerIdentityForWebSocketAuth(
         JSON.stringify({
@@ -184,7 +184,7 @@ describe("websocket frame carrier", () => {
   });
 
   it("matches the server's backend-session precedence over a simultaneous bearer token", () => {
-    const fallback = new TextEncoder().encode('["urn:jazz:runtime-host","cache"]');
+    const fallback = new TextEncoder().encode('["https://jazz.test","cache"]');
     const jwt = `header.${btoa(
       JSON.stringify({ iss: "https://bearer.example", sub: "bearer-subject" }),
     )}.signature`;
@@ -206,7 +206,7 @@ describe("websocket frame carrier", () => {
   });
 
   it("keeps admin websocket links sessionless despite accompanying bearer payloads", () => {
-    const fallback = new TextEncoder().encode('["urn:jazz:runtime-host","admin-cache"]');
+    const fallback = new TextEncoder().encode('["https://jazz.test","admin-cache"]');
     const validJwt = `header.${btoa(
       JSON.stringify({ iss: "https://issuer.example", sub: "provider-subject" }),
     )}.signature`;
