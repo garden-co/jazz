@@ -100,6 +100,8 @@ declare module "jazz-wasm" {
 
   export class WasmDb {
     static openMemory(schema: Uint8Array, config: Uint8Array): WasmDb;
+    /** Explicit trusted-backend ABI; raw open config cannot select SYSTEM. */
+    static openMemoryAsBackend(schema: Uint8Array, config: Uint8Array): WasmDb;
     static openMemoryWithSelfSignedProof(
       schema: Uint8Array,
       config: Uint8Array,

@@ -1178,6 +1178,30 @@ impl WasmDb {
         })
     }
 
+    /// Open a deliberate backend runtime. This remains a separate ABI from
+    /// `openMemory`: the public raw-open configuration can never select the
+    /// privileged system author.
+    #[wasm_bindgen(js_name = openMemoryAsBackend)]
+    pub fn open_memory_as_backend(schema: Vec<u8>, config: Vec<u8>) -> Result<WasmDb, JsValue> {
+        console_error_panic_hook::set_once();
+        let (schema, config) = decode_open_args(&schema, &config)?;
+        let identity = backend_open_identity(&config)?;
+        let refs = schema.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let db = block_on(open_backend_db(
+            schema,
+            MemoryStorage::new(&refs),
+            config,
+            identity,
+        ))
+        .map_err(to_js_error)?;
+        db.set_deferred_local_persistence(true);
+        Ok(Self {
+            inner: WasmDbInner::Memory(Rc::new(db)),
+            owns_runtime: true,
+        })
+    }
+
     /// Open with a verified Jazz self-signed client identity. This deliberately
     /// stays separate from `openMemory`: untrusted open config bytes can never
     /// select a Jazz-reserved identity.
@@ -2941,9 +2965,50 @@ where
     }
 }
 
+async fn open_backend_db<S>(
+    schema: JazzSchema,
+    storage: S,
+    config: WasmOpenDbConfig,
+    identity: DbIdentity,
+) -> Result<Db<S>, jazz::db::Error>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    let mut db_config = DbConfig::new(schema, storage, identity);
+    if let Some(seed) = config.row_id_seed {
+        db_config = db_config.with_id_source(SeededRowIdSource::new(seed));
+    }
+    let initial_sync_flush_every = config.initial_sync_flush_every;
+    // SAFETY: this function is called solely by the explicit, non-raw backend
+    // open ABI above, after it has validated the caller-controlled envelope.
+    let db = if config.history_complete {
+        unsafe { Db::open_history_complete_with_backend_attribution(db_config).await? }
+    } else {
+        unsafe { Db::open_with_backend_attribution(db_config).await? }
+    };
+    configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
+    Ok(db)
+}
+
 fn validate_untrusted_open_author(config: &WasmOpenDbConfig) -> Result<(), JsValue> {
     validate_untrusted_open_author_core(config)
         .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+fn backend_open_identity(config: &WasmOpenDbConfig) -> Result<DbIdentity, JsValue> {
+    backend_open_identity_core(config).map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+fn backend_open_identity_core(
+    config: &WasmOpenDbConfig,
+) -> Result<DbIdentity, jazz::ids::AuthorSubjectError> {
+    // Validate every caller-controlled field at the ordinary fail-closed
+    // ingress before this explicit, intentional backend ABI derives SYSTEM.
+    validate_untrusted_open_author_core(config)?;
+    Ok(DbIdentity {
+        node: config.identity.node,
+        author: AuthorSubject::SYSTEM,
+    })
 }
 
 fn validate_untrusted_open_author_core(
@@ -4071,6 +4136,35 @@ mod dynamic_schema_view_tests {
                 "ordinary WasmDb.openMemory must reject reserved issuer {issuer}"
             );
         }
+    }
+
+    #[test]
+    fn explicit_wasm_backend_open_derives_system_after_raw_validation() {
+        let config = WasmOpenDbConfig {
+            identity: WasmDbIdentity {
+                node: NodeUuid::from_bytes([0x6b; 16]),
+                author: AuthorSubject::from_canonical(
+                    &serde_json::to_string(&("https://issuer.test", "backend")).unwrap(),
+                )
+                .unwrap(),
+            },
+            row_id_seed: None,
+            history_complete: false,
+            initial_sync_flush_every: None,
+        };
+        assert_eq!(
+            backend_open_identity_core(&config).unwrap().author,
+            AuthorSubject::SYSTEM
+        );
+
+        let reserved = WasmOpenDbConfig {
+            identity: WasmDbIdentity {
+                node: config.identity.node,
+                author: AuthorSubject::SYSTEM,
+            },
+            ..config
+        };
+        assert!(backend_open_identity_core(&reserved).is_err());
     }
 
     #[test]
