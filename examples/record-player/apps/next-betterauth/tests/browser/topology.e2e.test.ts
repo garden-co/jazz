@@ -54,24 +54,30 @@ const recipientPermissions = s.definePermissions(recipientApp, ({ policy, sessio
 // scalar control: a correlated owner path through a referenced playlist.
 const relationalRecipientApp = s.defineApp({
   ...betterAuthSchema,
-  albums: s.table({
-    title: s.string(),
-    artist: s.string(),
-    cover_locator: s.string().optional(),
-  }),
-  tracks: s.table({
-    album_id: s.ref("albums"),
-    title: s.string(),
-    ordinal: s.int(),
-    duration_ms: s.int(),
-    audio_bytes: s.bytes().optional(),
-  }),
+  albums: s
+    .table({
+      title: s.string(),
+      artist: s.string(),
+      cover_locator: s.string().optional(),
+    })
+    .indexOnly(["title"]),
+  tracks: s
+    .table({
+      album_id: s.ref("albums"),
+      title: s.string(),
+      ordinal: s.int(),
+      duration_ms: s.int(),
+      audio_bytes: s.bytes().optional(),
+    })
+    .indexOnly(["album_id", "ordinal"]),
   playlists: s.table({ name: s.string() }),
-  playlist_entries: s.table({
-    playlist_id: s.ref("playlists"),
-    track_id: s.ref("tracks"),
-    position: s.float(),
-  }),
+  playlist_entries: s
+    .table({
+      playlist_id: s.ref("playlists"),
+      track_id: s.ref("tracks"),
+      position: s.float(),
+    })
+    .indexOnly(["playlist_id", "position"]),
   invitations: s.table({
     playlist_id: s.ref("playlists"),
     subject: s.string(),
@@ -154,7 +160,7 @@ const relationalRecipientPermissions = {
 };
 
 describe("RecordPlayer authenticated playlist topology", () => {
-  it("compiles the phased recipient control identically to RecordPlayer", () => {
+  it("keeps the phased recipient control schema and access paths identical to RecordPlayer", () => {
     expect(relationalRecipientApp.wasmSchema).toEqual(app.wasmSchema);
     expect(relationalRecipientPermissions).toEqual(permissions);
   });
