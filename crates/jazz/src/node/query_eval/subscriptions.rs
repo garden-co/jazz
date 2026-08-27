@@ -5,6 +5,20 @@
 //! and row materialization remain separate stages.
 
 use super::*;
+#[derive(Clone, Copy)]
+enum ShapeReclamation<'a> {
+    One(ShapeId),
+    Many(&'a BTreeSet<ShapeId>),
+}
+
+impl ShapeReclamation<'_> {
+    fn contains(self, shape_id: ShapeId) -> bool {
+        match self {
+            Self::One(reclaimed) => reclaimed == shape_id,
+            Self::Many(reclaimed) => reclaimed.contains(&shape_id),
+        }
+    }
+}
 
 impl<S> NodeState<S>
 where
@@ -147,77 +161,106 @@ where
     }
 
     pub(crate) fn release_shape_for_peer(&mut self, peer: u64, shape_id: ShapeId) {
-        let Some(owners) = self.query.peer_shape_owners.get_mut(&shape_id) else {
-            return;
+        let became_unowned = {
+            let Some(owners) = self.query.peer_shape_owners.get_mut(&shape_id) else {
+                return;
+            };
+            if !owners.remove(&peer) {
+                return;
+            }
+            owners.is_empty()
         };
-        owners.remove(&peer);
-        if owners.is_empty() {
-            self.query.peer_shape_owners.remove(&shape_id);
+        if !became_unowned {
+            return;
         }
-        self.reclaim_unowned_shape(shape_id);
+        self.query.peer_shape_owners.remove(&shape_id);
+        if self.query.locally_registered_shapes.contains(&shape_id) {
+            return;
+        }
+        self.reclaim_shapes(ShapeReclamation::One(shape_id));
     }
 
     pub(crate) fn release_shapes_for_peer(&mut self, peer: u64) {
-        let shapes = self
-            .query
-            .peer_shape_owners
-            .iter()
-            .filter_map(|(shape_id, owners)| owners.contains(&peer).then_some(*shape_id))
-            .collect::<Vec<_>>();
-        for shape_id in shapes {
-            self.release_shape_for_peer(peer, shape_id);
+        let mut newly_unowned = BTreeSet::new();
+        let locally_registered_shapes = &self.query.locally_registered_shapes;
+        self.query.peer_shape_owners.retain(|shape_id, owners| {
+            owners.remove(&peer);
+            if owners.is_empty() {
+                if !locally_registered_shapes.contains(shape_id) {
+                    newly_unowned.insert(*shape_id);
+                }
+                false
+            } else {
+                true
+            }
+        });
+        if !newly_unowned.is_empty() {
+            self.reclaim_shapes(ShapeReclamation::Many(&newly_unowned));
         }
     }
 
-    fn reclaim_unowned_shape(&mut self, shape_id: ShapeId) {
-        if self.query.peer_shape_owners.contains_key(&shape_id)
-            || self.query.locally_registered_shapes.contains(&shape_id)
-        {
-            return;
+    fn reclaim_shapes(&mut self, reclaimed: ShapeReclamation<'_>) {
+        match reclaimed {
+            ShapeReclamation::One(shape_id) => {
+                self.parking.parked_shape_registrations.remove(&shape_id);
+                self.parking.parked_binding_deltas.remove(&shape_id);
+                self.query.registered_shapes.remove(&shape_id);
+                self.query.registered_bindings.remove(&shape_id);
+            }
+            ShapeReclamation::Many(shape_ids) => {
+                self.parking
+                    .parked_shape_registrations
+                    .retain(|shape_id, _| !shape_ids.contains(shape_id));
+                self.parking
+                    .parked_binding_deltas
+                    .retain(|shape_id, _| !shape_ids.contains(shape_id));
+                self.query
+                    .registered_shapes
+                    .retain(|shape_id, _| !shape_ids.contains(shape_id));
+                self.query
+                    .registered_bindings
+                    .retain(|shape_id, _| !shape_ids.contains(shape_id));
+            }
         }
-        self.parking.parked_shape_registrations.remove(&shape_id);
-        self.parking.parked_binding_deltas.remove(&shape_id);
-        self.query.registered_shapes.remove(&shape_id);
-        self.query.registered_bindings.remove(&shape_id);
         self.query
             .query_shape_cache
-            .retain(|(cached_shape, _, _), _| *cached_shape != shape_id);
+            .retain(|(shape_id, _, _), _| !reclaimed.contains(*shape_id));
         self.query
             .applied_view_update_generations
-            .retain(|key, _| key.shape_id != shape_id);
+            .retain(|key, _| !reclaimed.contains(key.shape_id));
         self.query
             .settled_result_sets
-            .retain(|key, _| key.shape_id != shape_id);
+            .retain(|key, _| !reclaimed.contains(key.shape_id));
         self.query
             .settled_result_row_index
-            .retain(|key, _| key.shape_id != shape_id);
+            .retain(|key, _| !reclaimed.contains(key.shape_id));
         self.query
             .settled_program_facts
-            .retain(|key, _| key.shape_id != shape_id);
+            .retain(|key, _| !reclaimed.contains(key.shape_id));
         self.query
             .settled_through_by_binding_view
-            .retain(|key, _| key.shape_id != shape_id);
+            .retain(|key, _| !reclaimed.contains(key.shape_id));
         self.query
             .authorization_progress_by_binding_view
-            .retain(|key, _| key.shape_id != shape_id);
+            .retain(|key, _| !reclaimed.contains(key.shape_id));
         self.query
             .known_state_declared_binding_views
-            .retain(|key| key.shape_id != shape_id);
+            .retain(|key| !reclaimed.contains(key.shape_id));
         self.query
             .initial_hydration_binding_views
-            .retain(|key| key.shape_id != shape_id);
+            .retain(|key| !reclaimed.contains(key.shape_id));
         self.query
             .deferred_publication_binding_views
-            .retain(|key| key.shape_id != shape_id);
+            .retain(|key| !reclaimed.contains(key.shape_id));
         self.query
             .pending_authoritative_reset_binding_views
-            .retain(|key| key.shape_id != shape_id);
+            .retain(|key| !reclaimed.contains(key.shape_id));
         self.query
             .pending_opening_binding_views
-            .retain(|key| key.shape_id != shape_id);
+            .retain(|key| !reclaimed.contains(key.shape_id));
         self.query
             .pending_terminal_operations_by_binding_view
-            .retain(|key, _| key.shape_id != shape_id);
+            .retain(|key, _| !reclaimed.contains(key.shape_id));
     }
 
     pub(in crate::node) fn apply_subscribe(&mut self, subscribe: Subscribe) -> Result<(), Error> {
