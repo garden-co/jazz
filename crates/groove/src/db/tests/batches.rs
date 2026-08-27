@@ -1145,10 +1145,7 @@ async fn repeated_child_dag_finalizes_once_per_node_and_reclaims_without_leaks()
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(chunks.clone());
-    let prepared = crate::large_values::repeated_child_dag_fixture(
-        crate::large_values::MAX_TREE_DEPTH,
-        crate::large_values::BRANCH_MAX_CHILDREN,
-    );
+    let prepared = crate::large_values::positive_repeated_child_dag_fixture(2, 4);
     let physical_nodes = prepared.staged_chunks.len();
 
     let staged = database
@@ -1178,8 +1175,8 @@ async fn repeated_child_dag_finalizes_once_per_node_and_reclaims_without_leaks()
     }
 
     // A second descriptor-keyed upload sees a complete local graph. Its
-    // missing-frontier and admission walks must terminate over physical nodes,
-    // not enumerate the 64^32 logical occurrences.
+    // missing-frontier and admission walks must terminate over distinct
+    // physical nodes rather than repeat shared logical occurrences.
     let second = match database
         .begin_large_value_upload(prepared.value_ref.clone())
         .await
@@ -1275,10 +1272,7 @@ async fn resolver_installed_shared_dag_recursively_activates_and_reclaims_descen
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(chunks.clone());
-    let prepared = crate::large_values::repeated_child_dag_fixture(
-        2,
-        crate::large_values::BRANCH_MAX_CHILDREN,
-    );
+    let prepared = crate::large_values::positive_repeated_child_dag_fixture(2, 4);
     let resolver_chunks = prepared
         .staged_chunks
         .iter()
@@ -1377,7 +1371,7 @@ async fn resolver_branch_activation_composes_with_active_placeholder_children() 
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(chunks);
-    let prepared = crate::large_values::repeated_child_dag_fixture(1, 1);
+    let prepared = crate::large_values::positive_repeated_child_dag_fixture(1, 1);
     let root_chunk = prepared
         .staged_chunks
         .iter()
@@ -1565,7 +1559,7 @@ async fn last_root_publication_blocks_descendant_install_until_its_refcount_writ
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(chunks.clone());
-    let prepared = crate::large_values::repeated_child_dag_fixture(1, 4);
+    let prepared = crate::large_values::positive_repeated_child_dag_fixture(1, 4);
     let root_chunk = prepared
         .staged_chunks
         .iter()
@@ -1797,7 +1791,7 @@ async fn queued_resolver_before_last_root_delete_does_not_leak_child_reference()
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(chunks.clone());
-    let prepared = crate::large_values::repeated_child_dag_fixture(1, 4);
+    let prepared = crate::large_values::positive_repeated_child_dag_fixture(1, 4);
     let root_chunk = prepared
         .staged_chunks
         .iter()
@@ -2601,6 +2595,95 @@ async fn root_first_upload_requests_only_authenticated_missing_frontier() {
         }
     };
     assert_ne!(first_claim.id, second_claim.id);
+}
+
+#[futures_test::test]
+async fn zero_byte_upload_child_is_rejected_before_frontier_or_metadata_admission() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
+    let backend = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let managed = Rc::new(crate::chunks::ManagedChunkStorage::new(backend.clone()));
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(managed);
+    let prepared = crate::large_values::zero_metric_repeated_child_dag_fixture(
+        1,
+        crate::large_values::BRANCH_MIN_CHILDREN,
+    );
+    let root = prepared
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref == prepared.value_ref.root)
+        .unwrap()
+        .clone();
+
+    assert_eq!(
+        database
+            .begin_large_value_upload(prepared.value_ref.clone())
+            .await
+            .unwrap(),
+        crate::large_values::LargeValueUploadProgress::Missing(vec![
+            prepared.value_ref.root.clone()
+        ]),
+        "an absent root may be requested before its bytes can be authenticated"
+    );
+    assert!(matches!(
+        database
+            .continue_large_value_upload(prepared.value_ref.clone(), vec![root])
+            .await,
+        Err(Error::IvmRuntime(
+            crate::ivm::runtime::IvmRuntimeError::LargeValue(
+                crate::large_values::Error::MalformedNode
+            )
+        ))
+    ));
+
+    assert!(
+        database
+            .pending_large_value_uploads()
+            .await
+            .unwrap()
+            .is_empty(),
+        "rejection must remove the pending upload rather than expose child locators"
+    );
+    assert!(
+        database.staged_large_values().await.unwrap().is_empty(),
+        "a malformed root must not produce a staging receipt"
+    );
+    assert_eq!(
+        backend.len(),
+        0,
+        "batch admission must reject the authenticated root before staging bytes"
+    );
+    for chunk in &prepared.staged_chunks {
+        assert!(
+            database
+                .storage
+                .get(
+                    LARGE_VALUE_METADATA_CF.to_owned(),
+                    large_value_node_key(&chunk.node_ref).unwrap(),
+                )
+                .await
+                .unwrap()
+                .is_none(),
+            "a rejected root must not install node or child reference metadata"
+        );
+    }
+    assert_eq!(
+        database
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap(),
+        0,
+        "rejection before admission must not leave refcount reclamation work"
+    );
 }
 
 #[futures_test::test]

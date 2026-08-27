@@ -174,3 +174,16 @@ test("release fingerprint staging rejects omitted, duplicate, empty, and malform
     assert.throws(() => stageNativeFingerprints(root), expected, name);
   }
 });
+
+test("release publishing rebuilds when workflow changes invalidate preview artifacts", () => {
+  const workflow = readFileSync(
+    new URL("../../.github/workflows/publish-jazz-tools-alpha.yml", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(
+    workflow,
+    /if \(!treeReuseSafe\) \{\s+reason = `main tree \$\{currentTree\} differs from release PR head tree \$\{previewTree\}`;/,
+  );
+  assert.doesNotMatch(workflow, /workflow-only drift|nonWorkflowFiles/);
+});

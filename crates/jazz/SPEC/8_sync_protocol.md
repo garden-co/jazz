@@ -505,6 +505,27 @@ response clears the receiver's settled subscription result set before applying
 the replacement rows (`INV-SYNC-10`), because removals against a discarded
 server-side result set are no longer expressible.
 
+While a usage-site `SubscriptionKey` is active on a live link, its canonical
+attachment is immutable. The `Subscribe.shape_id` must equal
+`Subscribe.subscription.shape_id`; a mismatch is a malformed peer request and
+is dropped before registration lookup. After resolving the registration,
+binding values, and serving options to a canonical program instance, replaying
+the active key for that exact same instance is resource-idempotent: the serving
+peer replaces the usage site's known-state declaration, marks it pending for an
+initial refresh, and emits the resulting current-connection `ViewUpdate` and
+applicable authorization receipt. The replay retains one canonical coverage
+group, maintained view, and relayed subscription owner, and a later
+`Unsubscribe` still detaches that sole attachment. Reusing the key for a
+different canonical instance, or reusing a key already owned by the current-row
+producer, is a malformed peer request: the serving peer drops it without a wire
+response and preserves the original attachment and stream without any state or
+delivery side effect.
+Installing a current-row producer applies the same ownership rule after first
+admitting any queued peer requests. An identical current-row owner is an
+idempotent no-op; an ordinary subscription that already owns the derived key
+causes a local protocol error before current-row update construction, sending,
+or ownership registration.
+
 If a `Subscribe` request cannot be served because the registered shape/read-view
 has a permanent maintained-subscription capability gap, the serving peer replies
 with `SyncMessage::SubscribeRejected { subscription, reason }` addressed to the
