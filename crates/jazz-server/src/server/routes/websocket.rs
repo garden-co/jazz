@@ -250,6 +250,14 @@ async fn ws_admission(
     let backend_secret = headers
         .get("X-Jazz-Backend-Secret")
         .and_then(|value| value.to_str().ok());
+    let has_authenticated_backend_session = has_session_header
+        && matches!(
+            (
+                state.auth_config.backend_secret.as_deref(),
+                backend_secret,
+            ),
+            (Some(expected), Some(provided)) if expected == provided
+        );
     if backend_secret.is_some() && !has_jwt && !has_session_header {
         crate::middleware::auth::validate_backend_secret(backend_secret, &state.auth_config)
             .map_err(|(_, message)| message.to_owned())?;
@@ -262,7 +270,7 @@ async fn ws_admission(
     }
 
     if !has_jwt
-        && !has_session_header
+        && !has_authenticated_backend_session
         && ws_has_auth_cookie(&headers, state.auth_config.auth_cookie_name.as_deref())
     {
         validate_ws_cookie_origin(&headers, state.auth_config.trust_forwarded_host)?;
@@ -2339,6 +2347,10 @@ mod tests {
         // this read, later pump calls with no client work would never observe
         // that already-queued response.
         if sent == 0 {
+            // On a current-thread runtime the test-side pump can be re-polled
+            // before the route task that queued the response. Yield once so
+            // an idle read observes the already-scheduled server work.
+            tokio::task::yield_now().await;
             received += receive_core_websocket_transport_push_once(client, ws).await;
         }
         (sent, received)
