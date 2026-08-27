@@ -1318,22 +1318,42 @@ test("realistic timing retains every retired legacy smoke suite", () => {
   );
 });
 
-test("CodSpeed builds and runs the BigLabel benchmark variant", () => {
+test("CodSpeed preserves example benchmark package and bench coverage", () => {
+  const commands = new Map();
   for (const command of ["build", "run"]) {
-    assert.match(
-      codspeedWorkflow,
-      new RegExp(
-        `cargo codspeed ${command} --package jazz-example-benchmark-smoke --package jazz-example-big-label-benchmark`,
-      ),
+    const match = codspeedWorkflow.match(
+      new RegExp(`cargo codspeed ${command} [^\\n]*--package jazz-example-benchmark-smoke[^\\n]*`),
     );
+    assert.ok(match, `CodSpeed must ${command} the example benchmark suite`);
+    commands.set(command, match[0]);
   }
+
+  for (const command of ["build", "run"]) {
+    for (const benchmarkPackage of [
+      "jazz-example-benchmark-smoke",
+      "jazz-example-benchmark-w1",
+      "jazz-example-big-label-benchmark",
+      "jazz-example-band-chat-benchmark",
+    ]) {
+      assert.match(
+        commands.get(command),
+        new RegExp(`--package ${benchmarkPackage}(?: |$)`),
+      );
+    }
+  }
+  for (const bench of ["fixture", "ahead_current", "loads"]) {
+    assert.match(commands.get("build"), new RegExp(`--bench ${bench}(?: |$)`));
+  }
+
   assert.throws(
     () =>
       assert.match(
-        codspeedWorkflow.replaceAll(" --package jazz-example-big-label-benchmark", ""),
-        /jazz-example-big-label-benchmark/,
+        codspeedWorkflow
+          .replace(" --package jazz-example-benchmark-w1", "")
+          .match(/cargo codspeed build [^\n]*--package jazz-example-benchmark-smoke[^\n]*/)?.[0],
+        /--package jazz-example-benchmark-w1(?: |$)/,
       ),
-    /jazz-example-big-label-benchmark/,
+    /jazz-example-benchmark-w1/,
   );
 });
 
