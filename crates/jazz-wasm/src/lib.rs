@@ -3075,7 +3075,7 @@ fn author_id_from_bytes(bytes: &[u8]) -> Result<AuthorSubject, JsValue> {
 }
 
 fn claims_from_js(
-    _author: AuthorSubject,
+    author: AuthorSubject,
     claims: JsValue,
 ) -> Result<BTreeMap<String, Value>, JsValue> {
     let raw: serde_json::Value = serde_wasm_bindgen::from_value(claims).map_err(to_js_error)?;
@@ -3087,7 +3087,50 @@ fn claims_from_js(
             .collect::<Result<BTreeMap<_, _>, JsValue>>()?,
         _ => return Err(JsValue::from_str("identity claims must be an object")),
     };
-    Ok(claims)
+    Ok(admit_binding_claims(author, claims))
+}
+
+/// Admit raw provider claims received through a binding-local transport.
+///
+/// The transport identity is the authority for the reserved policy fields and
+/// for `session.claims.iss`/`session.claims.sub`; callers may not replace
+/// those values by supplying similarly named provider claims. All other
+/// provider values remain below the collision-proof `session.claims` prefix.
+fn admit_binding_claims(
+    author: AuthorSubject,
+    claims: BTreeMap<String, Value>,
+) -> BTreeMap<String, Value> {
+    let (issuer, subject): (String, String) = serde_json::from_str(author.canonical())
+        .expect("author subjects always have canonical issuer/subject JSON");
+    let mut admitted = claims
+        .into_iter()
+        .map(|(name, value)| (jazz::query::provider_claim_key(&name), value))
+        .collect::<BTreeMap<_, _>>();
+    admitted.insert(
+        jazz::query::provider_claim_key("iss"),
+        Value::String(issuer.clone()),
+    );
+    admitted.insert(
+        jazz::query::provider_claim_key("sub"),
+        Value::String(subject),
+    );
+    admitted.insert(
+        "user".to_owned(),
+        Value::String(author.canonical().to_owned()),
+    );
+    admitted.insert(
+        "authMode".to_owned(),
+        Value::String(auth_mode_for_author(&issuer).to_owned()),
+    );
+    admitted
+}
+
+fn auth_mode_for_author(issuer: &str) -> &'static str {
+    match issuer {
+        AuthorSubject::LOCAL_FIRST_ISSUER => "local-first",
+        AuthorSubject::ANONYMOUS_ISSUER => "anonymous",
+        _ => "external",
+    }
 }
 
 fn claim_value_from_json(value: serde_json::Value) -> Result<Value, JsValue> {
@@ -4126,6 +4169,59 @@ mod dynamic_schema_view_tests {
         assert_eq!(
             claim_value_from_json(serde_json::json!(-9_007_199_254_740_992_i64)).unwrap(),
             Value::F64(-9_007_199_254_740_992.0)
+        );
+    }
+
+    #[test]
+    fn binding_claim_admission_derives_identity_and_shadows_identity_named_provider_claims() {
+        let author = AuthorSubject::authenticated("https://issuer.example", "alice").unwrap();
+        let claims = admit_binding_claims(
+            author,
+            BTreeMap::from([
+                ("user".to_owned(), Value::String("forged-user".to_owned())),
+                (
+                    "authMode".to_owned(),
+                    Value::String("local-first".to_owned()),
+                ),
+                ("iss".to_owned(), Value::String("forged-issuer".to_owned())),
+                ("sub".to_owned(), Value::String("forged-subject".to_owned())),
+                ("role".to_owned(), Value::String("editor".to_owned())),
+            ]),
+        );
+
+        assert_eq!(
+            claims.get("user"),
+            Some(&Value::String(author.canonical().to_owned())),
+            "session.user must come from the admitted transport identity"
+        );
+        assert_eq!(
+            claims.get("authMode"),
+            Some(&Value::String("external".to_owned())),
+            "session.authMode must be derived rather than provider controlled"
+        );
+        assert_eq!(
+            claims.get(&jazz::query::provider_claim_key("iss")),
+            Some(&Value::String("https://issuer.example".to_owned())),
+            "session.claims.iss must agree with session.user"
+        );
+        assert_eq!(
+            claims.get(&jazz::query::provider_claim_key("sub")),
+            Some(&Value::String("alice".to_owned())),
+            "session.claims.sub must agree with session.user"
+        );
+        assert_eq!(
+            claims.get(&jazz::query::provider_claim_key("user")),
+            Some(&Value::String("forged-user".to_owned())),
+            "provider user remains available only below session.claims"
+        );
+        assert_eq!(
+            claims.get(&jazz::query::provider_claim_key("authMode")),
+            Some(&Value::String("local-first".to_owned())),
+            "provider authMode remains available only below session.claims"
+        );
+        assert_eq!(
+            claims.get(&jazz::query::provider_claim_key("role")),
+            Some(&Value::String("editor".to_owned()))
         );
     }
 

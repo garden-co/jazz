@@ -3711,6 +3711,16 @@ fn core_claims_from_json(
         "authMode".to_owned(),
         CoreValue::String(auth_mode_for_author(&author).to_owned()),
     );
+    let (issuer, subject): (String, String) = serde_json::from_str(author.canonical())
+        .expect("author subjects always have canonical issuer/subject JSON");
+    claims.insert(
+        jazz::query::provider_claim_key("iss"),
+        CoreValue::String(issuer),
+    );
+    claims.insert(
+        jazz::query::provider_claim_key("sub"),
+        CoreValue::String(subject),
+    );
     Ok(claims)
 }
 
@@ -4843,6 +4853,7 @@ mod tests {
             author.clone(),
             Some(json!({
                 "user": "forged-user",
+                "iss": "forged-issuer",
                 "sub": "provider-subject",
                 "custom": "provider-value",
                 "authMode": "local-first",
@@ -4862,7 +4873,6 @@ mod tests {
         );
         for (name, value) in [
             ("user", "forged-user"),
-            ("sub", "provider-subject"),
             ("custom", "provider-value"),
             ("authMode", "local-first"),
         ] {
@@ -4872,6 +4882,16 @@ mod tests {
                 "raw provider {name} stays below session.claims"
             );
         }
+        assert_eq!(
+            claims.get(&jazz::query::provider_claim_key("iss")),
+            Some(&CoreValue::String("https://issuer.example".to_owned())),
+            "session.claims.iss must agree with the admitted author rather than a supplied claim"
+        );
+        assert_eq!(
+            claims.get(&jazz::query::provider_claim_key("sub")),
+            Some(&CoreValue::String("alice".to_owned())),
+            "session.claims.sub must agree with the admitted author rather than a supplied claim"
+        );
     }
 
     #[test]
