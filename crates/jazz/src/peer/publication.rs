@@ -222,7 +222,7 @@ impl PeerState {
         } else {
             self.publication_states.entry(subscription).or_default();
         }
-        let (tier, read_view): (DurabilityTier, std::rc::Rc<ReadViewSpec>) = self
+        let (tier, read_view): (DurabilityTier, std::sync::Arc<ReadViewSpec>) = self
             .publication_states
             .get(&subscription)
             .and_then(|state| state.prepared_query.as_ref())
@@ -454,7 +454,7 @@ impl PeerState {
         let ((tier, read_view), has_runtime_plan) = if let Some(context) = cached_context {
             context
         } else {
-            ((opts.tier, std::rc::Rc::new(opts.read_view.clone())), false)
+            ((opts.tier, std::sync::Arc::new(opts.read_view.clone())), false)
         };
         if !has_runtime_plan {
             let plan = node.mark_peer_maintained_query_shape_cache(shape, binding, tier);
