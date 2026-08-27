@@ -106,25 +106,10 @@ impl TopByIncrementalState {
             }
         }
     }
-}
 
-#[cfg(test)]
-mod top_by_state_tests {
-    use super::*;
-
-    #[test]
-    fn top_by_state_releases_many_departed_groups() {
-        let mut state = TopByIncrementalState::default();
-        let departed = (0_u16..1_024)
-            .map(|group| group.to_be_bytes().to_vec())
-            .collect::<Vec<_>>();
-        for group in &departed {
-            state.groups.insert(group.clone(), BTreeMap::new());
-        }
-
-        state.remove_empty_touched_groups(departed);
-
-        assert!(state.groups.is_empty());
+    #[cfg(test)]
+    pub(super) fn group_count(&self) -> usize {
+        self.groups.len()
     }
 }
 

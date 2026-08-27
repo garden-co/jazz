@@ -235,6 +235,34 @@ async fn top_by_hydrates_limit_two() {
 }
 
 #[futures_test::test]
+async fn top_by_releases_departed_groups_from_runtime_state() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
+    let subscription = database
+        .subscribe_one_sink(history_top_by_stamp_asc(1))
+        .await
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    for row in 1..=1_024 {
+        batch.insert("history", history_values(row, 1, 1, "temporary"));
+    }
+    database.commit_batch(batch).await.unwrap();
+    let _initial = subscription.recv().unwrap();
+    assert_eq!(database.ivm_runtime.top_by_retained_group_count(), 1_024);
+
+    let mut batch = database.open_batch();
+    for row in 1..=1_024 {
+        batch.delete("history", history_key(row, 1, 1));
+    }
+    database.commit_batch(batch).await.unwrap();
+    let _removed = subscription.recv().unwrap();
+
+    assert_eq!(database.ivm_runtime.top_by_retained_group_count(), 0);
+}
+
+#[futures_test::test]
 async fn unbounded_top_by_propagates_payload_replacement_with_stable_order_key() {
     let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
     let mut database = Database::new(history_schema(), storage).await.unwrap();
