@@ -429,9 +429,19 @@ test("release, preview, and labeled platform gates seal and link the staged rela
     assert.match(
       guardedPreviewExpression,
       /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
-      "a fork with only rn-preview-release must skip native build and privileged publication",
+      "a fork label must skip the privileged build and publication paths",
     );
   }
+  assert.equal(
+    previewBuildWorkflow.jobs.build.secrets,
+    "inherit",
+    "the reusable build is privileged and must remain behind its same-repository guard",
+  );
+  assert.deepEqual(previewBuildWorkflow.jobs["publish-pkg-pr-new"].permissions, {
+    contents: "read",
+    "pull-requests": "write",
+    "id-token": "write",
+  });
   assert.match(previewBuild, /name: pkg-jazz-rn/);
   assert.match(previewBuild, /'\.\/crates\/jazz-rn'/);
   assert.doesNotMatch(
@@ -460,15 +470,17 @@ test("release, preview, and labeled platform gates seal and link the staged rela
 
   const previewMode = (labels, sameRepository) => ({
     runs:
-      labels.includes("preview-build") || (labels.includes("rn-preview-release") && sameRepository),
+      sameRepository &&
+      (labels.includes("preview-build") || labels.includes("rn-preview-release")),
     includesRn: labels.includes("rn-preview-release") && sameRepository,
   });
   assert.deepEqual(previewMode([], true), { runs: false, includesRn: false });
-  assert.deepEqual(previewMode(["preview-build"], false), { runs: true, includesRn: false });
+  assert.deepEqual(previewMode(["preview-build"], false), { runs: false, includesRn: false });
+  assert.deepEqual(previewMode(["preview-build"], true), { runs: true, includesRn: false });
   assert.deepEqual(previewMode(["rn-preview-release"], true), { runs: true, includesRn: true });
   assert.deepEqual(previewMode(["rn-preview-release"], false), { runs: false, includesRn: false });
   assert.deepEqual(previewMode(["preview-build", "rn-preview-release", "react-native"], false), {
-    runs: true,
+    runs: false,
     includesRn: false,
   });
   assert.deepEqual(previewMode(["preview-build", "rn-preview-release", "react-native"], true), {
