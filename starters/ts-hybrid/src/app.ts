@@ -104,11 +104,7 @@ export function mountApp(root: HTMLElement, initialDb: Db): AppHandle {
       .querySelector('[data-action="signin"]')
       ?.addEventListener("click", () => setView("signin"));
 
-    unsubscribeTodos = mountTodoWidget(
-      root.querySelector<HTMLElement>('[data-slot="todo"]')!,
-      db,
-      (query, callback, options) => db.subscribeAll(query, callback, options),
-    );
+    unsubscribeTodos = mountTodoWidget(root.querySelector<HTMLElement>('[data-slot="todo"]')!, db);
 
     const authBackupSlot = root.querySelector<HTMLElement>('[data-slot="auth-backup"]');
     if (authBackupSlot) mountAuthBackup(authBackupSlot);

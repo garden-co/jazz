@@ -15,8 +15,7 @@ use crate::db::{
     ErrorCode as CoreDbErrorCode, ExclusiveTxOps, LocalUpdates as CoreLocalUpdates,
     PeerConnection as CorePeerConnection, Propagation as CorePropagation, ReadOpts as CoreReadOpts,
     SubscriptionEvent as CoreSubscriptionEvent, SubscriptionOutputRow as CoreSubscriptionOutputRow,
-    TerminalRootLayout, TickScheduler, TickUrgency, Transport as CoreTransport,
-    WireTransportAdapter,
+    TickScheduler, TickUrgency, Transport as CoreTransport, WireTransportAdapter,
 };
 use crate::groove::records::{
     BorrowedRecord, OwnedRecord, Value as CoreValue, ValueType as CoreValueType,
@@ -76,14 +75,6 @@ fn load_tolerant_test_timeout(timeout: Duration) -> Duration {
 }
 
 type StorageBundle = CoreStorage;
-
-#[derive(Default)]
-struct AppliedTerminalOperations {
-    added: Vec<CoreSubscriptionOutputRow>,
-    updated: Vec<CoreSubscriptionOutputRow>,
-    removed: Vec<crate::db::RemovedRow>,
-    moved: Vec<OutputOccurrenceId>,
-}
 
 #[derive(Debug, Deserialize)]
 struct UnverifiedJwtClaims {
@@ -1654,8 +1645,6 @@ impl ClientDbInner {
                         added,
                         updated,
                         removed,
-                        terminal_operations,
-                        terminal_layout,
                         settled,
                         ..
                     } => {
@@ -1693,38 +1682,22 @@ impl ClientDbInner {
                             normalize_subscription_updates(surviving_rows, added, updated, |row| {
                                 &row.occurrence_id
                             });
-                        let terminal_changes;
-                        let (delta_added, delta_updated, delta_removed, delta_moved) =
-                            if terminal_operations.is_empty() {
-                                PublicQueryDecoder::apply_core_subscription_rows(
-                                    &mut current_rows,
-                                    &effective_added,
-                                    &effective_updated,
-                                    &removed,
-                                );
-                                (&effective_added, &effective_updated, &removed, &[][..])
-                            } else {
-                                let Some(layout) = terminal_layout.as_ref() else {
-                                    break;
-                                };
-                                let Ok(changes) =
-                                    PublicQueryDecoder::apply_core_subscription_terminal_operations(
-                                        &mut current_rows,
-                                        &terminal_operations,
-                                        layout,
-                                        &table,
-                                    )
-                                else {
-                                    break;
-                                };
-                                terminal_changes = changes;
-                                (
-                                    &terminal_changes.added,
-                                    &terminal_changes.updated,
-                                    &terminal_changes.removed,
-                                    terminal_changes.moved.as_slice(),
-                                )
-                            };
+                        let change_delta = (!reset_replaces_initial_view).then(|| {
+                            query_decoder.core_subscription_change_delta(
+                                &db,
+                                &query,
+                                &current_rows,
+                                &effective_added,
+                                &effective_updated,
+                                &removed,
+                            )
+                        });
+                        PublicQueryDecoder::apply_core_subscription_rows(
+                            &mut current_rows,
+                            &effective_added,
+                            &effective_updated,
+                            &removed,
+                        );
                         let rows_for_cache = current_rows
                             .iter()
                             .map(|row| row.row.clone())
@@ -1738,16 +1711,7 @@ impl ClientDbInner {
                                 &current_rows,
                             )
                         } else {
-                            query_decoder.core_subscription_change_delta(
-                                &db,
-                                &query,
-                                &previous_rows,
-                                &current_rows,
-                                delta_added,
-                                delta_updated,
-                                delta_removed,
-                                delta_moved,
-                            )
+                            change_delta.expect("non-reset subscription frame has a change delta")
                         };
                         if !reset_replaces_initial_view {
                             initial_hydration = false;
@@ -2413,147 +2377,6 @@ fn aggregate_public_values(
         .collect()
 }
 
-fn terminal_subscription_output_row(
-    table: &str,
-    occurrence_id: OutputOccurrenceId,
-    raw: &[u8],
-    layout: &TerminalRootLayout,
-) -> Result<CoreSubscriptionOutputRow> {
-    let fields = layout.root_descriptor.fields();
-    let Some(root_field) = fields.get(layout.root_key_slot) else {
-        return Err(JazzError::Query(
-            "terminal root layout key slot is out of bounds".to_owned(),
-        ));
-    };
-    if root_field.name.as_deref() != Some(layout.root_key_field_name.as_str()) {
-        return Err(JazzError::Query(
-            "terminal root layout key slot does not match its descriptor".to_owned(),
-        ));
-    }
-    // `CurrentRow`'s stable UUID accessor is deliberately fixed at slot zero.
-    // Structured app-row terminals currently preserve that invariant even
-    // though the binding layout names the slot explicitly.
-    if layout.root_key_slot != 0 {
-        return Err(JazzError::Query(
-            "terminal root layout cannot be represented as a current row".to_owned(),
-        ));
-    }
-    let mut occupied_slots = BTreeSet::from([layout.root_key_slot]);
-    for field in &layout.public_fields {
-        let Some(descriptor_field) = fields.get(field.slot) else {
-            return Err(JazzError::Query(format!(
-                "terminal root layout field {} is out of bounds",
-                field.name
-            )));
-        };
-        if descriptor_field.name.as_deref() != Some(field.descriptor_field_name.as_str())
-            || !occupied_slots.insert(field.slot)
-        {
-            return Err(JazzError::Query(format!(
-                "terminal root layout field {} does not match its descriptor",
-                field.name
-            )));
-        }
-    }
-
-    let borrowed = BorrowedRecord::new(raw, &layout.root_descriptor);
-    borrowed
-        .to_values()
-        .map_err(|error| JazzError::Query(format!("invalid terminal root payload: {error}")))?;
-    let row_uuid = borrowed
-        .get_uuid(layout.root_key_slot)
-        .map_err(|error| JazzError::Query(format!("invalid terminal root key: {error}")))?;
-    if occurrence_id.canonical_bytes().get(..16) != Some(row_uuid.as_bytes()) {
-        return Err(JazzError::Query(
-            "terminal root payload key does not match its addressed result".to_owned(),
-        ));
-    }
-
-    Ok(CoreSubscriptionOutputRow {
-        occurrence_id,
-        row: crate::node::CurrentRow::new(
-            table.to_owned(),
-            OwnedRecord::new(raw.to_vec(), layout.root_descriptor.clone()),
-        ),
-    })
-}
-
-/// Decode the Groove ordered key used to address one root output occurrence.
-/// Plain joins are UUID sequences. A union-derived joined source is preceded
-/// by its ordered UTF-8 discriminator.
-fn terminal_root_occurrence_id(encoded: &[u8]) -> Result<OutputOccurrenceId> {
-    fn uuid_at(encoded: &[u8], cursor: &mut usize) -> Option<ObjectId> {
-        if encoded.get(*cursor).copied() != Some(10) {
-            return None;
-        }
-        let start = *cursor + 1;
-        let end = start + 16;
-        let uuid = Uuid::from_slice(encoded.get(start..end)?).ok()?;
-        *cursor = end;
-        Some(ObjectId::from_uuid(uuid))
-    }
-
-    fn ordered_string_at(encoded: &[u8], cursor: &mut usize) -> Option<String> {
-        if encoded.get(*cursor).copied() != Some(6) {
-            return None;
-        }
-        *cursor += 1;
-        let mut decoded = Vec::new();
-        loop {
-            let byte = *encoded.get(*cursor)?;
-            *cursor += 1;
-            if byte != 0 {
-                decoded.push(byte);
-                continue;
-            }
-            match encoded.get(*cursor).copied()? {
-                0 => {
-                    *cursor += 1;
-                    break;
-                }
-                0xff => {
-                    *cursor += 1;
-                    decoded.push(0);
-                }
-                _ => return None,
-            }
-        }
-        String::from_utf8(decoded).ok()
-    }
-
-    let mut cursor = 0;
-    let root = uuid_at(encoded, &mut cursor)
-        .ok_or_else(|| JazzError::Query("terminal root key must begin with a UUID".to_owned()))?;
-    let mut joined = Vec::new();
-    let mut union_arms = Vec::new();
-    while cursor < encoded.len() {
-        let discriminator = if encoded[cursor] == 6 {
-            Some(ordered_string_at(encoded, &mut cursor).ok_or_else(|| {
-                JazzError::Query(
-                    "terminal root key contains an invalid union discriminator".to_owned(),
-                )
-            })?)
-        } else {
-            None
-        };
-        let joined_id = uuid_at(encoded, &mut cursor).ok_or_else(|| {
-            JazzError::Query("terminal root key contains an unsupported component".to_owned())
-        })?;
-        if let Some(discriminator) = discriminator {
-            union_arms.push((joined.len(), discriminator));
-        }
-        joined.push(joined_id);
-    }
-
-    if union_arms.is_empty() {
-        Ok(OutputOccurrenceId::new(root, joined))
-    } else {
-        OutputOccurrenceId::with_union_arms(root, joined, union_arms).ok_or_else(|| {
-            JazzError::Query("terminal root key contains invalid union discriminators".to_owned())
-        })
-    }
-}
-
 fn core_batch_id(tx_id: CoreTxId) -> TransactionId {
     TransactionId::from_committed_tx(tx_id)
 }
@@ -2978,166 +2801,41 @@ impl PublicQueryDecoder {
         updated_rows: &[CoreSubscriptionOutputRow],
         removed_rows: &[crate::db::RemovedRow],
     ) {
-        current_rows.retain(|row| {
-            !removed_rows
-                .iter()
-                .any(|removed| row.occurrence_id == removed.occurrence_id)
-        });
-        for row in updated_rows {
-            if let Some(position) = current_rows
-                .iter()
-                .position(|current| current.occurrence_id == row.occurrence_id)
-            {
-                current_rows[position] = row.clone();
-            }
+        let changed = added_rows
+            .iter()
+            .chain(updated_rows)
+            .map(|row| row.occurrence_id.clone())
+            .chain(removed_rows.iter().map(|row| row.occurrence_id.clone()))
+            .collect::<BTreeSet<_>>();
+        current_rows.retain(|row| !changed.contains(&row.occurrence_id));
+        let mut placements = added_rows
+            .iter()
+            .chain(updated_rows)
+            .cloned()
+            .collect::<Vec<_>>();
+        placements.sort_by_key(|row| row.index);
+        for row in placements {
+            let index = row.index.min(current_rows.len());
+            current_rows.insert(index, row);
         }
-        for row in added_rows {
-            if let Some(position) = current_rows
-                .iter()
-                .position(|current| current.occurrence_id == row.occurrence_id)
-            {
-                current_rows[position] = row.clone();
-            } else {
-                current_rows.push(row.clone());
-            }
-        }
-    }
-
-    /// Apply structured root edits emitted by an ordered terminal.
-    ///
-    /// These operations own both the projected payload and its position. The
-    /// producer-supplied layout is therefore the only valid descriptor for an
-    /// insert or update; a table descriptor cannot decode a projected record.
-    fn apply_core_subscription_terminal_operations(
-        current_rows: &mut Vec<CoreSubscriptionOutputRow>,
-        operations: &[groove::ivm::TerminalOperation],
-        layout: &TerminalRootLayout,
-        table: &str,
-    ) -> Result<AppliedTerminalOperations> {
-        let previous_rows = current_rows.clone();
-        let mut affected = BTreeSet::new();
-        for operation in operations {
-            if !operation.path.is_empty() {
-                continue;
-            }
-
-            if operation.root_descriptor != layout.root_descriptor {
-                return Err(JazzError::Query(
-                    "terminal operation descriptor disagrees with its prepared root layout"
-                        .to_owned(),
-                ));
-            }
-            let edit_key = match &operation.edit {
-                groove::ivm::TerminalEdit::Insert { key, .. }
-                | groove::ivm::TerminalEdit::Update { key, .. }
-                | groove::ivm::TerminalEdit::Remove { key }
-                | groove::ivm::TerminalEdit::Move { key, .. } => key,
-            };
-            if edit_key != &operation.root_key {
-                return Err(JazzError::Query(
-                    "terminal root edit key does not match its addressed root key".to_owned(),
-                ));
-            }
-
-            let occurrence_id = terminal_root_occurrence_id(&operation.root_key)?;
-            affected.insert(occurrence_id.clone());
-            match &operation.edit {
-                groove::ivm::TerminalEdit::Insert { index, value, .. } => {
-                    let row = terminal_subscription_output_row(
-                        table,
-                        occurrence_id.clone(),
-                        value,
-                        layout,
-                    )?;
-                    current_rows.retain(|current| current.occurrence_id != occurrence_id);
-                    current_rows.insert((*index).min(current_rows.len()), row);
-                }
-                groove::ivm::TerminalEdit::Update { value, .. } => {
-                    let Some(position) = current_rows
-                        .iter()
-                        .position(|current| current.occurrence_id == occurrence_id)
-                    else {
-                        return Err(JazzError::Query(
-                            "terminal root update addressed a missing result".to_owned(),
-                        ));
-                    };
-                    current_rows[position] =
-                        terminal_subscription_output_row(table, occurrence_id, value, layout)?;
-                }
-                groove::ivm::TerminalEdit::Remove { .. } => {
-                    current_rows.retain(|current| current.occurrence_id != occurrence_id);
-                }
-                groove::ivm::TerminalEdit::Move { index, .. } => {
-                    let Some(position) = current_rows
-                        .iter()
-                        .position(|current| current.occurrence_id == occurrence_id)
-                    else {
-                        return Err(JazzError::Query(
-                            "terminal root move addressed a missing result".to_owned(),
-                        ));
-                    };
-                    let row = current_rows.remove(position);
-                    current_rows.insert((*index).min(current_rows.len()), row);
-                }
-            }
-        }
-
-        let mut changes = AppliedTerminalOperations::default();
-        for occurrence_id in affected {
-            let previous = previous_rows
-                .iter()
-                .enumerate()
-                .find(|(_, row)| row.occurrence_id == occurrence_id);
-            let current = current_rows
-                .iter()
-                .enumerate()
-                .find(|(_, row)| row.occurrence_id == occurrence_id);
-            match (previous, current) {
-                (None, Some((_, row))) => changes.added.push(row.clone()),
-                (Some((_, row)), None) => changes.removed.push(crate::db::RemovedRow {
-                    table: row.row.table().to_owned(),
-                    row_uuid: row.row.row_uuid(),
-                    occurrence_id,
-                }),
-                (Some((previous_index, previous)), Some((current_index, current))) => {
-                    if previous.row != current.row {
-                        changes.updated.push(current.clone());
-                    }
-                    if previous_index != current_index {
-                        changes.moved.push(occurrence_id);
-                    }
-                }
-                (None, None) => {}
-            }
-        }
-        Ok(changes)
     }
 
     fn core_subscription_change_delta(
         &self,
         db: &Backend,
         query: &Query,
-        previous_rows: &[OutputOccurrenceId],
-        current_rows: &[CoreSubscriptionOutputRow],
+        previous_rows: &[CoreSubscriptionOutputRow],
         added_rows: &[CoreSubscriptionOutputRow],
         updated_rows: &[CoreSubscriptionOutputRow],
         removed_rows: &[crate::db::RemovedRow],
-        moved_rows: &[OutputOccurrenceId],
     ) -> Result<OrderedRowDelta> {
-        let index_of = |id: &OutputOccurrenceId| {
-            current_rows
-                .iter()
-                .position(|row| &row.occurrence_id == id)
-                .unwrap_or(0)
-        };
         let added = added_rows
             .iter()
             .map(|row| {
                 let public = self.core_subscription_row_to_public(db, query, row)?;
-                let index = index_of(public.id.as_occurrence());
                 Ok(OrderedAdded {
                     id: public.id.clone(),
-                    index,
+                    index: row.index,
                     row: public,
                 })
             })
@@ -3146,55 +2844,23 @@ impl PublicQueryDecoder {
             .iter()
             .map(|row| {
                 let public = self.core_subscription_row_to_public(db, query, row)?;
-                let new_index = index_of(public.id.as_occurrence());
-                let old_index = previous_rows
+                let content_changed = previous_rows
                     .iter()
-                    .position(|id| id == public.id.as_occurrence())
-                    .unwrap_or(new_index);
+                    .find(|previous| previous.occurrence_id == row.occurrence_id)
+                    .is_none_or(|previous| !previous.row.subscription_equivalent(&row.row));
                 Ok(OrderedUpdated {
                     id: public.id.clone(),
-                    old_index,
-                    new_index,
-                    row: Some(public),
+                    old_index: row.previous_index.unwrap_or(row.index),
+                    new_index: row.index,
+                    row: content_changed.then_some(public),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let updated_ids = updated
-            .iter()
-            .map(|update| update.id.as_occurrence().clone())
-            .collect::<BTreeSet<_>>();
-        let mut updated = updated;
-        for occurrence_id in moved_rows {
-            if updated_ids.contains(occurrence_id)
-                || added_rows
-                    .iter()
-                    .any(|row| row.occurrence_id == *occurrence_id)
-                || removed_rows
-                    .iter()
-                    .any(|row| row.occurrence_id == *occurrence_id)
-            {
-                continue;
-            }
-            let new_index = index_of(occurrence_id);
-            let old_index = previous_rows
-                .iter()
-                .position(|id| id == occurrence_id)
-                .unwrap_or(new_index);
-            updated.push(OrderedUpdated {
-                id: ResultKey::from_occurrence(occurrence_id.clone()),
-                old_index,
-                new_index,
-                row: None,
-            });
-        }
         let removed = removed_rows
             .iter()
             .map(|row| OrderedRemoved {
                 id: ResultKey::from_occurrence(row.occurrence_id.clone()),
-                index: previous_rows
-                    .iter()
-                    .position(|id| id == &row.occurrence_id)
-                    .unwrap_or(0),
+                index: row.index,
             })
             .collect();
         Ok(OrderedRowDelta {

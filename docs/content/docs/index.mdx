@@ -22,8 +22,8 @@ const app = s.defineApp(schema);
 db.insert(app.todos, { title: "Ship it", done: false });
 
 // Read — reactive, stays up to date across devices
-db.subscribeAll(app.todos.where({ done: false }), ({ all }) => {
-  console.log(all);
+db.subscribe(app.todos.where({ done: false }), (todos) => {
+  console.log(todos);
 });
 ```
 
