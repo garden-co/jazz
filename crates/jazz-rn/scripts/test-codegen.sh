@@ -66,3 +66,17 @@ if [[ ! -f "$generated_spec" ]] \
   echo "React Native Gradle codegen did not generate the NativeJazzRelaySpec Java base class in the package declared by jazz-rn" >&2
   exit 1
 fi
+
+# The generated spec's package is a compile-time part of the Android module
+# ABI, not merely codegen metadata. Keep both handwritten Android sources in
+# that same package: the Java TurboModule extends the generated base directly,
+# and the Kotlin autolinking package instantiates that Java implementation.
+for source in \
+  "$root/android/src/main/java/com/jazzrn/JazzRelayModule.java" \
+  "$root/android/src/main/java/com/jazzrn/JazzRelayPackage.kt"; do
+  source_package=$(sed -nE 's/^package ([A-Za-z0-9_.]+);?$/\1/p' "$source")
+  if [[ "$source_package" != "$android_package" ]]; then
+    echo "Android relay source $source is not in the package declared by jazz-rn codegen ($android_package)" >&2
+    exit 1
+  fi
+done
