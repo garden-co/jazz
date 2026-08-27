@@ -5779,6 +5779,9 @@ function runtimeWithNativeSubscriptionChunk(
   chunk: unknown,
   schema: WasmSchema = testSchema,
 ): NativeRuntimeAdapter {
+  // Native readAll drains its queue; returning the same non-empty batch forever
+  // would make the adapter's bounded drain loop spin rather than model NAPI.
+  const chunks = [chunk];
   return new NativeRuntimeAdapter(
     {
       openMemory: () =>
@@ -5786,7 +5789,7 @@ function runtimeWithNativeSubscriptionChunk(
           all: () => new Uint8Array([0]),
           prepareQuery: () => ({}),
           subscribe: () => ({
-            readAll: () => [chunk],
+            readAll: () => chunks.splice(0),
             close: () => true,
           }),
           tick: () => undefined,
@@ -5812,7 +5815,7 @@ function runtimeWithNativeRelationSubscriptionChunks(
       openMemory: () =>
         fakeDb({
           subscribeRelationQuery: () => ({
-            readAll: () => chunks,
+            readAll: () => chunks.splice(0),
             close: () => true,
           }),
           tick: () => undefined,
