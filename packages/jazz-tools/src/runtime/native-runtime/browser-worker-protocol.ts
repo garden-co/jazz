@@ -96,6 +96,11 @@ export type BrowserInspectorControlEvent =
 
 export type BrowserFollowerPortEvent =
   | { type: "frames"; frames: Uint8Array[] }
+  /**
+   * Explicit offline is a property of the durable SharedWorker namespace: it
+   * owns the one upstream server connection shared by all attached tabs.
+   */
+  | { type: "transport-state"; explicitlyDisconnected: boolean }
   | { type: "result"; id: number; error?: string }
   | { type: "auth-failure"; reason: string }
   | { type: "auth-restored" }

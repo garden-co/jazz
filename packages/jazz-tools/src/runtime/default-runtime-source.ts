@@ -217,6 +217,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     client,
     onAuthFailure,
     onAuthRestored,
+    onExplicitOfflineChange,
     onFailure,
     onStorageReset,
     onStorageInvalidated,
@@ -242,7 +243,14 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         config.runtimeSources.browserWorkerPort,
         sessionFromConfig(config)?.claims ?? {},
         dbName,
-        { onAuthFailure, onAuthRestored, onFailure, onStorageReset, onStorageInvalidated },
+        {
+          onAuthFailure,
+          onAuthRestored,
+          onExplicitOfflineChange,
+          onFailure,
+          onStorageReset,
+          onStorageInvalidated,
+        },
       );
     }
     return new SharedBrowserWorkerConnection(
@@ -264,7 +272,14 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         telemetryCollectorUrl: config.telemetryCollectorUrl,
       },
       createBrowserWorkerFingerprint(config, dbName, getRuntimeSchemaCacheKey(schema)),
-      { onAuthFailure, onAuthRestored, onFailure, onStorageReset, onStorageInvalidated },
+      {
+        onAuthFailure,
+        onAuthRestored,
+        onExplicitOfflineChange,
+        onFailure,
+        onStorageReset,
+        onStorageInvalidated,
+      },
     );
   }
 
@@ -274,6 +289,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     port,
     onAuthFailure,
     onAuthRestored,
+    onExplicitOfflineChange,
     onFailure,
   }: BrowserFollowerConnectionContext<DbConfig>): BrowserFollowerConnection {
     const runtime = client.getRuntime();
@@ -289,6 +305,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       {
         onAuthFailure,
         onAuthRestored,
+        onExplicitOfflineChange,
         onFailure,
       },
     );
