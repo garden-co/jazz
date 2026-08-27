@@ -10,6 +10,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use futures::task::{ArcWake, waker};
+
 use crate::db::{
     Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, Error as CoreDbError,
     ErrorCode as CoreDbErrorCode, ExclusiveTxOps, LocalUpdates as CoreLocalUpdates,
@@ -709,6 +711,21 @@ struct TickState {
     notify: tokio::sync::Notify,
 }
 
+/// Thread-safe wake bridge retained by cold Groove storage futures.
+///
+/// It does not poll the database itself. It only records one Immediate owner
+/// turn when an actually pending operation becomes ready.
+struct QueryRuntimeWake {
+    state: Arc<TickState>,
+}
+
+impl ArcWake for QueryRuntimeWake {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        arc_self.state.immediate.store(true, Ordering::Release);
+        arc_self.state.notify.notify_one();
+    }
+}
+
 impl TickSchedulerImpl {
     fn take(&self) -> Option<TickUrgency> {
         if self.state.immediate.swap(false, Ordering::AcqRel) {
@@ -757,6 +774,12 @@ impl TickScheduler for TickSchedulerImpl {
 
     fn schedule_tick_after(&self, delay_ms: u64) {
         self.wake_after(delay_ms);
+    }
+
+    fn query_runtime_waker(&self) -> Option<std::task::Waker> {
+        Some(waker(Arc::new(QueryRuntimeWake {
+            state: Arc::clone(&self.state),
+        })))
     }
 }
 
@@ -3435,6 +3458,18 @@ mod tests {
     use crate::tools::{ClientStorage, ColumnType, SchemaBuilder, TableSchema};
     use serde_json::json;
     use tempfile::TempDir;
+
+    #[test]
+    fn query_runtime_waker_enqueues_one_immediate_owner_turn() {
+        let scheduler = TickSchedulerImpl::default();
+        assert_eq!(scheduler.take(), None);
+        let waker = scheduler
+            .query_runtime_waker()
+            .expect("client scheduler provides cold-query wake bridge");
+        waker.wake_by_ref();
+        assert_eq!(scheduler.take(), Some(TickUrgency::Immediate));
+        assert_eq!(scheduler.take(), None, "waking does not create a hot loop");
+    }
 
     /// Product read tiers lower to the unchanged facade durability contract,
     /// keeping write durability independent of the read API migration.

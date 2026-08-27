@@ -46,12 +46,34 @@ impl Database {
     /// the runtime is either complete or waiting for storage.
     ///
     /// Unlike [`Self::drive_progress`], this does not hold an unrelated owner
-    /// loop open while cold inputs are being acquired. The storage futures are
-    /// still polled with the caller's waker, so their completion schedules the
-    /// next owner-loop turn.
+    /// loop open while cold inputs are being acquired. Hosts that need a wake
+    /// after this short turn can use [`Self::drive_ready_progress_with_waker`].
     pub async fn drive_ready_progress(&mut self) -> Result<(), Error> {
-        let progress =
-            std::future::poll_fn(|cx| std::task::Poll::Ready(self.poll_progress(cx))).await;
+        self.drive_ready_progress_with_waker(None).await
+    }
+
+    /// Drive currently runnable work without waiting for cold storage, using
+    /// `progress_waker` for any storage request that remains pending.
+    ///
+    /// A non-blocking owner turn returns immediately after it discovers cold
+    /// work. Its executor waker is therefore no longer a useful continuation
+    /// target. Runtime shells that can arrange another owner turn supply their
+    /// own durable wake bridge here; callers without one retain the historical
+    /// externally-driven polling behaviour.
+    pub async fn drive_ready_progress_with_waker(
+        &mut self,
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<(), Error> {
+        let progress = match progress_waker {
+            Some(progress_waker) => {
+                std::future::poll_fn(|_| {
+                    let mut progress_cx = std::task::Context::from_waker(progress_waker);
+                    std::task::Poll::Ready(self.poll_progress(&mut progress_cx))
+                })
+                .await
+            }
+            None => std::future::poll_fn(|cx| std::task::Poll::Ready(self.poll_progress(cx))).await,
+        };
         match progress {
             std::task::Poll::Ready(result) => result,
             std::task::Poll::Pending => Ok(()),
