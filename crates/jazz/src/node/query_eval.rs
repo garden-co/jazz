@@ -404,11 +404,13 @@ where
             prepared_claim_binding_mode,
             false,
         )?;
-        // Maintained/prepared programs must retain their established source
-        // graph. Physical source bounds are a one-shot-only optimization: even
-        // an otherwise unbounded optimized index source can settle against a
-        // different persisted frontier than the maintained full source.
-        self.compile_query_program_request(request).await
+        // Maintained index scans retain their established full source because
+        // an index can settle against a different persisted frontier. A
+        // physical primary-key source has no independent index frontier and
+        // remains incrementally complete for that one immutable row identity.
+        let access_paths = self.current_query_primary_key_access_paths(shape, binding)?;
+        self.compile_query_program_request_with_access_paths(request, access_paths)
+            .await
     }
 
     async fn compile_current_query_program_for_one_shot_read(
@@ -430,9 +432,11 @@ where
             settled_binding_view,
             authorization_mode,
         )?;
-        // One-shot reads are the only compilation mode allowed to attach a
-        // physical source cap. Prepared/maintained and policy programs keep
-        // their ordinary unbounded access paths.
+        // One-shot reads can use every eligible access path. Maintained reads
+        // deliberately retain their ordinary source except for the separately
+        // proved physical primary-key path: secondary indexes can settle at a
+        // frontier distinct from their maintained source, while one immutable
+        // physical row has no such independent frontier.
         let access_paths = self.one_shot_access_paths(shape, binding, tier)?;
         self.compile_query_program_request_with_access_paths(request, access_paths)
             .await
