@@ -315,11 +315,21 @@ describe("runtime permission repros for recursive gather and qualified predicate
         .wait({ tier: "edge" });
 
       const reader = context.forSession(
-        { issuer: REPRO_ISSUER, user_id: "reader", authMode: "external" },
+        {
+          issuer: REPRO_ISSUER,
+          user_id: "reader",
+          claims: {},
+          authMode: "external",
+        },
         relatedWriteApp,
       );
       const editor = context.forSession(
-        { issuer: REPRO_ISSUER, user_id: "editor", authMode: "external" },
+        {
+          issuer: REPRO_ISSUER,
+          user_id: "editor",
+          claims: {},
+          authMode: "external",
+        },
         relatedWriteApp,
       );
       await expect(
