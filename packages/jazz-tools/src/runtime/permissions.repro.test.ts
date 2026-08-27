@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it, onTestFinished } from "vitest";
 import { schema as s } from "../index.js";
 import { definePermissions } from "../permissions/index.js";
+import type { RowRefValue } from "../permissions/index.js";
 import { canonicalAuthorSubject } from "./author-id.js";
 import { deploy } from "../dev/catalogue.js";
 import { startLocalJazzServer } from "../testing/index.js";
@@ -57,6 +58,50 @@ const doubleRefReproApp = s.defineApp({
     administrator: s.boolean(),
   }),
 });
+
+const relatedWriteApp = s.defineApp({
+  playlists: s.table({ name: s.string() }),
+  invitations: s.table({
+    playlist_id: s.ref("playlists"),
+    subject: s.string(),
+    role: s.enum("listener", "editor"),
+    status: s.enum("pending", "accepted", "revoked"),
+  }),
+  playlist_entries: s.table({
+    playlist_id: s.ref("playlists"),
+    position: s.int(),
+  }),
+});
+
+const relatedWritePermissions = s.definePermissions(
+  relatedWriteApp,
+  ({ policy, anyOf, session, allowedTo }) => {
+    const canReadPlaylist = (playlistId: RowRefValue) =>
+      anyOf([
+        { $createdBy: session.user },
+        policy.invitations.exists.where({
+          playlist_id: playlistId,
+          subject: session.user,
+          status: "accepted",
+        }),
+      ]);
+    const hasEditorInvitation = (playlistId: RowRefValue) =>
+      policy.invitations.exists.where({
+        playlist_id: playlistId,
+        subject: session.user,
+        role: "editor",
+        status: "accepted",
+      });
+    policy.playlists.allowRead.where((playlist) => canReadPlaylist(playlist.id));
+    policy.playlists.allowInsert.always();
+    policy.playlists.allowUpdate.where({ $createdBy: session.user });
+    policy.invitations.allowInsert.always();
+    policy.playlist_entries.allowRead.where(allowedTo.read("playlist_id"));
+    policy.playlist_entries.allowInsert.where((entry) =>
+      anyOf([allowedTo.update("playlist_id"), hasEditorInvitation(entry.playlist_id)]),
+    );
+  },
+);
 
 type ReproPermissions = Parameters<typeof definePermissions<typeof reproApp>>[1];
 
@@ -222,6 +267,85 @@ async function createServerBackedReproContext(
 }
 
 describe("runtime permission repros for recursive gather and qualified predicates", () => {
+  it("keeps reader child inserts denied while editor child inserts settle at Edge", async () => {
+    const appId = randomUUID();
+    const backendSecret = `related-write-repro-backend-${appId}`;
+    const adminSecret = `related-write-repro-admin-${appId}`;
+    const server = await startLocalJazzServer({ appId, backendSecret, adminSecret });
+    let context: JazzContext | null = null;
+
+    try {
+      await deploy({
+        appId,
+        serverUrl: server.url,
+        adminSecret,
+        schema: relatedWriteApp,
+        permissions: relatedWritePermissions,
+      });
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+      context = createJazzContext({
+        appId: server.appId,
+        app: relatedWriteApp,
+        permissions: relatedWritePermissions,
+        driver: { type: "memory" },
+        serverUrl: server.url,
+        backendSecret,
+        env: "test",
+        tier: "edge",
+      });
+      const backend = context.asBackend(relatedWriteApp);
+      const playlist = await backend
+        .insert(relatedWriteApp.playlists, { name: "access" })
+        .wait({ tier: "edge" });
+      await backend
+        .insert(relatedWriteApp.invitations, {
+          playlist_id: playlist.id,
+          subject: reproUser("reader"),
+          role: "listener",
+          status: "accepted",
+        })
+        .wait({ tier: "edge" });
+      await backend
+        .insert(relatedWriteApp.invitations, {
+          playlist_id: playlist.id,
+          subject: reproUser("editor"),
+          role: "editor",
+          status: "accepted",
+        })
+        .wait({ tier: "edge" });
+
+      const reader = context.forSession(
+        { issuer: REPRO_ISSUER, user_id: "reader", authMode: "external" },
+        relatedWriteApp,
+      );
+      const editor = context.forSession(
+        { issuer: REPRO_ISSUER, user_id: "editor", authMode: "external" },
+        relatedWriteApp,
+      );
+      await expect(
+        reader
+          .insert(relatedWriteApp.playlist_entries, { playlist_id: playlist.id, position: 1 })
+          .wait({ tier: "edge" }),
+      ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
+      await expect(
+        reader
+          .insert(relatedWriteApp.playlist_entries, { playlist_id: playlist.id, position: 2 })
+          .wait({ tier: "edge" }),
+      ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
+      expect(await reader.all(relatedWriteApp.playlist_entries.where({}))).toEqual([]);
+      expect(await backend.all(relatedWriteApp.playlist_entries.where({}))).toEqual([]);
+      await expect(
+        editor
+          .insert(relatedWriteApp.playlist_entries, { playlist_id: playlist.id, position: 3 })
+          .wait({ tier: "edge" }),
+      ).resolves.toMatchObject({ position: 3 });
+    } finally {
+      await context?.shutdown();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await server.stop();
+    }
+  }, 30_000);
+
   it('keeps `allowedTo.read("target_team")` readable for team access rows', async () => {
     const context = await createServerBackedReproContext(
       ({ policy, allowedTo, anyOf, session }) => {

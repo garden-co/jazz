@@ -26,22 +26,23 @@ const recordPlayerPermissions = s.definePermissions(
           status: "accepted",
         }),
       ]);
+    const hasEditorInvitation = (playlistId: RowRefValue) =>
+      policy.invitations.exists.where({
+        playlist_id: playlistId,
+        subject: session.user,
+        role: "editor",
+        status: "accepted",
+      });
     const canEditPlaylist = (playlistId: RowRefValue) =>
-      anyOf([
-        { $createdBy: session.user },
-        policy.invitations.exists.where({
-          playlist_id: playlistId,
-          subject: session.user,
-          role: "editor",
-          status: "accepted",
-        }),
-      ]);
+      anyOf([{ $createdBy: session.user }, hasEditorInvitation(playlistId)]);
 
     policy.playlists.allowRead.where((playlist) => canReadPlaylist(playlist.id));
     policy.playlists.allowInsert.always();
     policy.playlists.allowUpdate.where({ $createdBy: session.user });
     policy.playlist_entries.allowRead.where(allowedTo.read("playlist_id"));
-    policy.playlist_entries.allowInsert.where((entry) => canEditPlaylist(entry.playlist_id));
+    policy.playlist_entries.allowInsert.where((entry) =>
+      anyOf([allowedTo.update("playlist_id"), hasEditorInvitation(entry.playlist_id)]),
+    );
     policy.playlist_entries.allowUpdate.where((entry) => canEditPlaylist(entry.playlist_id));
     policy.playlist_entries.allowDelete.where((entry) => canEditPlaylist(entry.playlist_id));
     policy.invitations.allowRead.where((invite) =>
