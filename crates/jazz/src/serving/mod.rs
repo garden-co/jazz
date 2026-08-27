@@ -1151,7 +1151,10 @@ impl InMemoryServerShell {
             None,
             session_context,
         ));
-        let connection = if self.role == NodeRole::Edge {
+        // Only public sessions are Edge authority writes. Trusted native and
+        // backend links retain ordinary local Edge admission, which remains
+        // available while the Core authority is disconnected.
+        let connection = if self.role == NodeRole::Edge && trust == CommitUnitTrust::Session {
             self.db
                 .accept_edge_authority_subscriber_with_claims_and_trust(
                     transport_adapter,
