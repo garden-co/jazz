@@ -8,7 +8,7 @@ import {
 
 export type UseLocalFirstAuthOptions = Pick<
   ExpoAuthSecretStoreOptions,
-  "key" | "appId" | "userId" | "sessionId"
+  "key" | "appId" | "profile"
 >;
 
 export function useLocalFirstAuth(options: UseLocalFirstAuthOptions = {}): LocalFirstAuth {

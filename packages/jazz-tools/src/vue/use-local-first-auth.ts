@@ -58,8 +58,9 @@ export interface UseLocalFirstAuth {
  *
  * @param store - optional {@link AuthSecretStore} override. Defaults to the
  *   shared {@link browserAuthSecretStore} singleton. Pass a custom store to
- *   isolate secrets per app, user, or session, or to swap in an alternative
- *   storage backend.
+ *   select an explicit local app/profile scope or an alternative storage
+ *   backend. Do not scope a durable local-first root by external user or
+ *   transient session identity.
  */
 export function useLocalFirstAuth(
   store: AuthSecretStore = browserAuthSecretStore,

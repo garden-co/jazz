@@ -28,7 +28,7 @@ async function mount(
   config: DbConfig = {
     appId: "band-chat-browser-receipt",
     driver: { type: "memory" },
-    secret: "Tb9eLjnS22z-_s9FK0EtiFIIRDe4EAygLAdni55RvAs",
+    secret: "jazz-auth-v1:Tb9eLjnS22z-_s9FK0EtiFIIRDe4EAygLAdni55RvAs",
   },
 ) {
   const element = document.createElement("div");

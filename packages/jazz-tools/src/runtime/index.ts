@@ -21,7 +21,7 @@ export {
   ExclusiveWriteHandle,
   ExclusiveWriteResult,
 } from "./client.js";
-export type { AppContext, PublicSession, RuntimeSourcesConfig } from "./context.js";
+export type { PublicSession, RuntimeSourcesConfig } from "./context.js";
 /** Encode the opaque logical identity exposed as `session.user` by bindings. */
 export { canonicalAuthorSubject as userIdentity } from "./author-id.js";
 export {
@@ -67,5 +67,12 @@ export {
   type IntrospectionSubscriptionGroup,
   type IntrospectionSubscriptionResponse,
 } from "./introspection-fetch.js";
-export { generateAuthSecret, BrowserAuthSecretStore } from "./auth-secret-store.js";
+export {
+  generateAuthSecret,
+  BrowserAuthSecretStore,
+  authSecretStorageKey,
+  formatAuthSecret,
+  parseAuthSecret,
+  AuthSecretFormatError,
+} from "./auth-secret-store.js";
 export type { AuthSecretStore, BrowserAuthSecretStoreOptions } from "./auth-secret-store.js";
