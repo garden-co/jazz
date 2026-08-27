@@ -279,6 +279,16 @@ describe("Wequencer cross-topology recovery", () => {
                   role: "owner",
                 })
                 .wait({ tier: "edge" });
+              // Keep the later offline/reopen scenario phase-independent: its
+              // original coverage intentionally includes all four tracks.
+              await owner
+                .restore(app.tracks, tracks[3]!.id, {
+                  session_id: session.id,
+                  position: 3,
+                  name: trackNames[3]!,
+                  color: "#333333",
+                })
+                .wait({ tier: "edge" });
             },
           },
           {
