@@ -177,8 +177,37 @@ struct ClientDbInner {
     closed_transactions: HashMap<OpenTransactionId, ClosedTransactionState>,
     tick_driver_error: Option<String>,
     tick_driver_error_notify: Arc<tokio::sync::Notify>,
+    subscription_forwarders: HashMap<u64, SubscriptionForwarder>,
+    next_subscription_forwarder: u64,
     shutdown_state: ShutdownState,
     shutdown_notify: Arc<tokio::sync::Notify>,
+}
+
+/// A public subscription admission or forwarding task owned by the facade.
+///
+/// Shutdown closes admission through `cancellation` and waits for `completion`
+/// before releasing the core database. This keeps a retained public stream from
+/// retaining a core stream (and therefore persistent storage) past shutdown.
+struct SubscriptionForwarder {
+    cancellation: oneshot::Sender<()>,
+    completion: oneshot::Receiver<()>,
+}
+
+/// Completes a forwarding admission even when its async future returns early.
+struct SubscriptionForwarderCompletion(Option<oneshot::Sender<()>>);
+
+impl SubscriptionForwarderCompletion {
+    fn new(sender: oneshot::Sender<()>) -> Self {
+        Self(Some(sender))
+    }
+}
+
+impl Drop for SubscriptionForwarderCompletion {
+    fn drop(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -776,7 +805,7 @@ impl ClientDb {
     }
 
     async fn close(&self) -> Result<()> {
-        let backend = {
+        let (backend, forwarders) = {
             let mut inner = self.inner.borrow_mut();
             match inner.shutdown_state {
                 ShutdownState::Open => {
@@ -785,7 +814,9 @@ impl ClientDb {
                     inner.tick_driver_error = Some("client shut down".to_string());
                     inner.tick_driver_error_notify.notify_waiters();
                     inner.shutdown_state = ShutdownState::Closing;
-                    inner.db.take().ok_or_else(ClientDbInner::shutdown_error)?
+                    let backend = inner.db.take().ok_or_else(ClientDbInner::shutdown_error)?;
+                    let forwarders = std::mem::take(&mut inner.subscription_forwarders);
+                    (backend, forwarders)
                 }
                 ShutdownState::Closing | ShutdownState::Closed => {
                     drop(inner);
@@ -798,6 +829,18 @@ impl ClientDb {
                 }
             }
         };
+        let mut completions = Vec::with_capacity(forwarders.len());
+        for SubscriptionForwarder {
+            cancellation,
+            completion,
+        } in forwarders.into_values()
+        {
+            let _ = cancellation.send(());
+            completions.push(completion);
+        }
+        for completion in completions {
+            let _ = completion.await;
+        }
         let mut completion = ShutdownCompletion::new(Rc::clone(&self.inner));
         let result = backend.close().await.map_err(|error| error.to_string());
         completion.finish(result)
@@ -1291,6 +1334,33 @@ impl ClientDbInner {
         }
     }
 
+    fn admit_subscription(
+        &mut self,
+    ) -> Result<(oneshot::Receiver<()>, SubscriptionForwarderCompletion)> {
+        self.ensure_tick_driver_running()?;
+        self.subscription_forwarders.retain(|_, forwarder| {
+            matches!(
+                forwarder.completion.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            )
+        });
+        let id = self.next_subscription_forwarder;
+        self.next_subscription_forwarder = self.next_subscription_forwarder.wrapping_add(1);
+        let (cancellation, cancellation_rx) = oneshot::channel();
+        let (completion, completion_rx) = oneshot::channel();
+        self.subscription_forwarders.insert(
+            id,
+            SubscriptionForwarder {
+                cancellation,
+                completion: completion_rx,
+            },
+        );
+        Ok((
+            cancellation_rx,
+            SubscriptionForwarderCompletion::new(completion),
+        ))
+    }
+
     fn record_tick_driver_failure(&mut self, error: String) {
         self.tick_driver_error = Some(error);
         self.tick_driver_error_notify.notify_waiters();
@@ -1337,6 +1407,8 @@ impl ClientDbInner {
             closed_transactions: HashMap::new(),
             tick_driver_error: None,
             tick_driver_error_notify: Arc::new(tokio::sync::Notify::new()),
+            subscription_forwarders: HashMap::new(),
+            next_subscription_forwarder: 0,
             shutdown_state: ShutdownState::Open,
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         };
@@ -1531,6 +1603,10 @@ impl ClientDbInner {
         tx: mpsc::UnboundedSender<SubscriptionStreamItem>,
         mut cancellation: oneshot::Receiver<()>,
     ) -> Result<()> {
+        // Register before cloning the backend or awaiting core admission. A
+        // concurrent shutdown can therefore cancel and await this path even
+        // when core subscription setup is still in flight.
+        let (mut shutdown_cancellation, completion) = inner.borrow_mut().admit_subscription()?;
         let (db, prepared) = {
             let inner = inner.borrow();
             let prepared = inner
@@ -1539,12 +1615,15 @@ impl ClientDbInner {
                 .map_err(|error| JazzError::Query(error.to_string()))?;
             (inner.backend_clone()?, prepared)
         };
-        let stream = db
-            .subscribe(&prepared, opts)
-            .await
-            .map_err(|error| JazzError::Query(error.to_string()))?;
+        let stream = tokio::select! {
+            biased;
+            _ = &mut shutdown_cancellation => return Err(ClientDbInner::shutdown_error()),
+            stream = db.subscribe(&prepared, opts) => stream
+                .map_err(|error| JazzError::Query(error.to_string()))?,
+        };
         let inner = Rc::clone(inner);
         tokio::task::spawn_local(async move {
+            let _completion = completion;
             let mut stream = stream;
             let mut current_rows: Vec<CoreSubscriptionOutputRow> = Vec::new();
             // A fresh subscription may be hydrated by consecutive reset
@@ -1556,6 +1635,7 @@ impl ClientDbInner {
                 let Some(event) = (tokio::select! {
                     biased;
                     _ = &mut cancellation => None,
+                    _ = &mut shutdown_cancellation => None,
                     event = stream.next_event() => event,
                 }) else {
                     break;
@@ -4061,6 +4141,168 @@ mod tests {
                 vec![Value::Text("rehydrated".to_string()), Value::Boolean(false)]
             )]
         );
+    }
+
+    /// A retained public subscription must become terminal during shutdown so
+    /// that alice can reopen the same persistent client directory immediately.
+    ///
+    /// ```text
+    /// alice ──subscribe──► local core stream
+    /// alice ──shutdown───► cancel forwarder ──► close RocksDB
+    /// alice ──reopen─────► same directory
+    /// ```
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_terminates_retained_subscription_before_persistent_reopen() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let data_dir = TempDir::new().expect("temp client dir");
+                let app_id = AppId::from_name("retained-subscription-persistent-reopen");
+                let context = make_offline_context_with_storage(
+                    app_id,
+                    data_dir.path().to_path_buf(),
+                    declared_todo_schema(),
+                    ClientStorage::Persistent,
+                );
+                let client = JazzClient::connect(context.clone())
+                    .await
+                    .expect("connect offline client");
+                let mut subscription = client
+                    .subscribe_with_read_tier(Query::from("todos"), ReadTier::LocalFirst)
+                    .await
+                    .expect("subscribe before shutdown");
+
+                client
+                    .shutdown()
+                    .await
+                    .expect("close retained subscription");
+
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    while subscription.next().await.is_some() {}
+                })
+                .await
+                .expect("retained public stream must close after shutdown");
+
+                let restarted = JazzClient::connect(context)
+                    .await
+                    .expect("reopen persistent directory after retained stream shutdown");
+                restarted
+                    .shutdown()
+                    .await
+                    .expect("close reopened persistent client");
+            })
+            .await;
+    }
+
+    /// A failed public subscription admission must complete its facade
+    /// lifecycle before alice shuts down and reopens persistent storage.
+    ///
+    /// ```text
+    /// alice ──subscribe missing table──► admission error
+    /// alice ──shutdown─────────────────► close RocksDB
+    /// alice ──reopen───────────────────► same directory
+    /// ```
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_subscription_admission_is_terminal_before_persistent_reopen() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let data_dir = TempDir::new().expect("temp client dir");
+                let app_id = AppId::from_name("failed-subscription-admission-reopen");
+                let context = make_offline_context_with_storage(
+                    app_id,
+                    data_dir.path().to_path_buf(),
+                    declared_todo_schema(),
+                    ClientStorage::Persistent,
+                );
+                let client = JazzClient::connect(context.clone())
+                    .await
+                    .expect("connect offline client");
+
+                let error = match client
+                    .subscribe_with_read_tier(Query::from("missing"), ReadTier::LocalFirst)
+                    .await
+                {
+                    Ok(_) => panic!("missing-table subscription must fail"),
+                    Err(error) => error,
+                };
+                assert!(
+                    matches!(error, JazzError::Query(_)),
+                    "unexpected missing-table subscription error: {error}"
+                );
+
+                client
+                    .shutdown()
+                    .await
+                    .expect("close failed admission client");
+                let restarted = JazzClient::connect(context)
+                    .await
+                    .expect("reopen persistent directory after failed admission");
+                restarted
+                    .shutdown()
+                    .await
+                    .expect("close reopened persistent client");
+            })
+            .await;
+    }
+
+    /// Shutdown must cancel and wait for the admission interval between the
+    /// facade accepting alice's subscription and core creating its stream.
+    ///
+    /// This is a narrow internal receipt because the public offline adapter
+    /// completes core admission synchronously; the registry is the exact
+    /// observable-to-shutdown boundary that makes the concurrent interleaving
+    /// deterministic without mocking storage or transport.
+    ///
+    /// ```text
+    /// alice ──admit subscription──► core subscribe is in flight
+    /// alice ──shutdown────────────► cancellation ──► wait for admission exit
+    /// ```
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_cancels_and_waits_for_in_flight_subscription_admission() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let data_dir = TempDir::new().expect("temp client dir");
+                let app_id = AppId::from_name("in-flight-subscription-admission-shutdown");
+                let context = make_offline_context_with_storage(
+                    app_id,
+                    data_dir.path().to_path_buf(),
+                    declared_todo_schema(),
+                    ClientStorage::Persistent,
+                );
+                let client = JazzClient::connect(context.clone())
+                    .await
+                    .expect("connect offline client");
+                let (mut cancellation, completion) = client
+                    .db
+                    .inner
+                    .borrow_mut()
+                    .admit_subscription()
+                    .expect("admit in-flight subscription");
+
+                let shutdown = tokio::task::spawn_local(client.shutdown());
+                tokio::time::timeout(Duration::from_secs(1), &mut cancellation)
+                    .await
+                    .expect("shutdown must cancel in-flight admission")
+                    .expect("shutdown cancellation sender must stay alive");
+                assert!(
+                    !shutdown.is_finished(),
+                    "shutdown must wait for the in-flight admission completion"
+                );
+
+                drop(completion);
+                shutdown
+                    .await
+                    .expect("shutdown task must not panic")
+                    .expect("shutdown after admitted subscription");
+
+                let restarted = JazzClient::connect(context)
+                    .await
+                    .expect("reopen persistent directory after in-flight admission");
+                restarted
+                    .shutdown()
+                    .await
+                    .expect("close reopened persistent client");
+            })
+            .await;
     }
 
     // The successful core close boundary is not visible through the public
