@@ -3509,12 +3509,16 @@ mod result_member_storage_codec_tests {
     }
 
     fn ordinary_row() -> RealRowMemberEntry {
-        RealRowMemberEntry::current_content((
+        let mut row = RealRowMemberEntry::current_content((
             "todos".to_owned().into(),
             RowUuid::from_bytes([0x11; 16]),
             tx(7, 0x22),
         ))
-        .with_settle_position(Some(GlobalTime(9)))
+        .with_settle_position(Some(GlobalTime(9)));
+        row.read_view = ReadViewKey {
+            id: uuid::Uuid::from_bytes([0x19; 16]),
+        };
+        row
     }
 
     // These stay internal because exact physical key bytes and malformed
@@ -3575,10 +3579,10 @@ mod result_member_storage_codec_tests {
                 .map(|bytes| blake3::hash(bytes).to_hex().to_string())
                 .collect::<Vec<_>>(),
             [
-                "49a580d7789b017e57a6da20f6c2e108f16856dae95e3ef238f166d0b545b37a",
+                "0e1d541c58211d93e04f7f53eff924c639ce7640989384430236be315222072b",
                 "ea51cdbe5077c2236ddb62f192dc50a5e9b9e5306d4d1ec8a5935b73cc016de6",
                 "67b1049e3ab2654cac0076a2894e16f97667cee5bd9defa51f86dd4dd890fb49",
-                "6daf118722916f9cdc3490ac024dff175995a06326664650b98fa98cd4f3f9c5",
+                "64d9489980bb8678717621a02b7518748e019a2a55104cbb9a0614498d7ed01f",
             ]
         );
     }
@@ -3628,5 +3632,87 @@ mod result_member_storage_codec_tests {
         let mut trailing = encoded;
         trailing.push(0);
         assert!(result_member_from_storage_bytes(&trailing).is_err());
+    }
+
+    #[test]
+    fn result_row_source_storage_codec_has_permanent_tags_and_golden_bytes() {
+        let sources = [
+            (0_u32, ResultRowSource::Current),
+            (
+                1_u32,
+                ResultRowSource::Snapshot {
+                    snapshot: SnapshotRef {
+                        owner: NodeUuid::from_bytes([0x61; 16]),
+                        global_base: GlobalTime(21),
+                        local_base: TxTime(22),
+                        dots: vec![tx(23, 0x62)],
+                    },
+                },
+            ),
+            (
+                2_u32,
+                ResultRowSource::HistoryCut {
+                    global_time: GlobalTime(24),
+                },
+            ),
+            (
+                3_u32,
+                ResultRowSource::Merge {
+                    inputs: vec![ResultRowSource::Current],
+                },
+            ),
+            (
+                4_u32,
+                ResultRowSource::LensProjection {
+                    schema_version: SchemaVersionId::from_bytes([0x63; 16]),
+                    base: Box::new(ResultRowSource::Current),
+                },
+            ),
+            (
+                5_u32,
+                ResultRowSource::Overlay {
+                    tx: tx(25, 0x64),
+                    base: Box::new(ResultRowSource::Current),
+                },
+            ),
+        ];
+        let encoded = sources
+            .iter()
+            .map(|(_, source)| result_row_source_storage_bytes(source, 0).unwrap())
+            .collect::<Vec<_>>();
+        for ((expected_tag, source), encoded) in sources.iter().zip(&encoded) {
+            assert_eq!(&encoded[..4], RESULT_ROW_SOURCE_STORAGE_MAGIC);
+            assert_eq!(encoded[4], RESULT_ROW_SOURCE_STORAGE_VERSION);
+            assert_eq!(
+                decode_result_member_envelope(
+                    encoded,
+                    RESULT_ROW_SOURCE_STORAGE_MAGIC,
+                    RESULT_ROW_SOURCE_STORAGE_VERSION,
+                    result_member_storage_layout().source_envelope,
+                    "test source",
+                )
+                .unwrap()
+                .tag(),
+                *expected_tag
+            );
+            assert_eq!(
+                result_row_source_from_storage_bytes(encoded, 0).unwrap(),
+                *source
+            );
+        }
+        assert_eq!(
+            encoded
+                .iter()
+                .map(|bytes| blake3::hash(bytes).to_hex().to_string())
+                .collect::<Vec<_>>(),
+            [
+                "c3615f39f699ab18ffe7c4290ae9b4f8e030c68c51b79745fa3b53960d4f74d7",
+                "b2cd10a88cae72fb030756f53633cd03ecd1a5d624275d4c4aeb5dc6dcc5c425",
+                "7d10fac91f6c2a8a9a340ed5e79cec1fc09552790ab7d60dad91a5e01dc369c7",
+                "26c05aa7fabf7867acfbdfc37e3c27dc9c4fc64b2757a11b42800fe32fe1e54f",
+                "fa9739e0513bdf9accde5901ddcf1a9a7beabd2f61a491cc2c627dfd30ad739d",
+                "d07b06377c81e1dadee1cc2a148bf988f2fbdbcab79931016683e91a60eb252d",
+            ],
+        );
     }
 }
