@@ -960,7 +960,7 @@ impl Database {
                 operations.push(OwnedWriteOperation::Set {
                     cf: LARGE_VALUE_METADATA_CF.to_owned(),
                     key: large_value_reclaim_key(&node_ref)?,
-                    value: postcard::to_allocvec(&node_ref).map_err(|error| {
+                    value: crate::large_values::encode_node_ref(&node_ref).map_err(|error| {
                         Error::InvalidLargeValueMetadata(format!(
                             "cannot encode reclaim entry: {error}"
                         ))
@@ -1233,8 +1233,8 @@ impl Database {
                 if reclaimed >= limit {
                     break 'batches;
                 }
-                let node_ref: crate::large_values::NodeRef = postcard::from_bytes(&encoded_ref)
-                    .map_err(|error| {
+                let node_ref =
+                    crate::large_values::decode_node_ref(&encoded_ref).map_err(|error| {
                         Error::InvalidLargeValueMetadata(format!(
                             "cannot decode reclaim entry: {error}"
                         ))

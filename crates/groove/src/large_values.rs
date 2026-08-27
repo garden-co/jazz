@@ -2235,6 +2235,67 @@ fn stored_scalar_value_type(kind: LargeValueKind) -> &'static ValueType {
     value_type.get_or_init(|| ValueType::Enum(Box::new(stored_scalar_schema(kind).clone())))
 }
 
+fn node_ref_descriptor() -> RecordDescriptor {
+    static DESCRIPTOR: OnceLock<RecordDescriptor> = OnceLock::new();
+    *DESCRIPTOR.get_or_init(|| {
+        RecordDescriptor::new([
+            ("object_hash", ValueType::raw_bytes()),
+            ("locator", ValueType::raw_bytes()),
+        ])
+    })
+}
+
+fn node_ref_value(node_ref: &NodeRef) -> Value {
+    let descriptor = node_ref_descriptor();
+    Value::Record(crate::records::OwnedRecord::new(
+        encode_node_ref(node_ref).expect("NodeRef fields always match their physical descriptor"),
+        descriptor,
+    ))
+}
+
+fn node_ref_from_value(value: &Value) -> Result<NodeRef, Error> {
+    let Value::Record(record) = value else {
+        return Err(Error::MalformedScalar);
+    };
+    let values = record.to_values().map_err(|_| Error::MalformedScalar)?;
+    node_ref_from_values(&values)
+}
+
+fn node_ref_from_values(values: &[Value]) -> Result<NodeRef, Error> {
+    let [object_hash, locator] = values else {
+        return Err(Error::MalformedScalar);
+    };
+    Ok(NodeRef {
+        object_hash: ContentHash(raw_bytes(object_hash)?),
+        locator: Locator(raw_bytes(locator)?),
+    })
+}
+
+/// Encode a physical chunk identity through the same canonical Groove record
+/// used by indirect scalar roots.
+pub(crate) fn encode_node_ref(node_ref: &NodeRef) -> Result<Vec<u8>, Error> {
+    node_ref_descriptor()
+        .create(&[
+            Value::Bytes(node_ref.object_hash.0.to_vec()),
+            Value::Bytes(node_ref.locator.0.to_vec()),
+        ])
+        .map_err(|_| Error::MalformedScalar)
+}
+
+/// Decode and canonically validate a physical chunk identity.
+pub(crate) fn decode_node_ref(encoded: &[u8]) -> Result<NodeRef, Error> {
+    let descriptor = node_ref_descriptor();
+    let values = descriptor
+        .bind(encoded)
+        .to_values()
+        .map_err(|_| Error::MalformedScalar)?;
+    let node_ref = node_ref_from_values(&values)?;
+    if encode_node_ref(&node_ref)? != encoded {
+        return Err(Error::MalformedScalar);
+    }
+    Ok(node_ref)
+}
+
 fn build_stored_scalar_schema(kind: LargeValueKind) -> EnumSchema {
     let primitive = RecordDescriptor::new([(
         "value",
@@ -2243,10 +2304,6 @@ fn build_stored_scalar_schema(kind: LargeValueKind) -> EnumSchema {
             LargeValueKind::String | LargeValueKind::Json => ValueType::raw_string(),
         },
     )]);
-    let root = RecordDescriptor::new([
-        ("object_hash", ValueType::raw_bytes()),
-        ("locator", ValueType::raw_bytes()),
-    ]);
     let edit = RecordDescriptor::new([
         ("offset", ValueType::U64),
         ("delete_length", ValueType::U64),
@@ -2258,7 +2315,7 @@ fn build_stored_scalar_schema(kind: LargeValueKind) -> EnumSchema {
     let chunked = RecordDescriptor::new([
         ("format_version", ValueType::U8),
         ("logical_hash", ValueType::raw_bytes()),
-        ("root", ValueType::Record(Box::new(root))),
+        ("root", ValueType::Record(Box::new(node_ref_descriptor()))),
         ("byte_length", ValueType::U64),
         (
             "utf16_length",
@@ -2328,10 +2385,6 @@ fn raw_bytes(value: &Value) -> Result<[u8; 32], Error> {
 }
 
 fn chunked_values(value: &LargeValueRef) -> Vec<Value> {
-    let root = RecordDescriptor::new([
-        ("object_hash", ValueType::raw_bytes()),
-        ("locator", ValueType::raw_bytes()),
-    ]);
     let edit = RecordDescriptor::new([
         ("offset", ValueType::U64),
         ("delete_length", ValueType::U64),
@@ -2343,14 +2396,7 @@ fn chunked_values(value: &LargeValueRef) -> Vec<Value> {
     vec![
         Value::U8(value.format_version),
         Value::Bytes(value.logical_hash.0.to_vec()),
-        Value::Record(crate::records::OwnedRecord::new(
-            root.create(&[
-                Value::Bytes(value.root.object_hash.0.to_vec()),
-                Value::Bytes(value.root.locator.0.to_vec()),
-            ])
-            .expect("internal root record"),
-            root,
-        )),
+        node_ref_value(&value.root),
         Value::U64(value.byte_length),
         Value::Nullable(value.utf16_length.map(|value| Box::new(Value::U64(value)))),
         Value::Array(
@@ -2380,16 +2426,12 @@ fn decode_chunked_values(kind: LargeValueKind, values: &[Value]) -> Result<Large
     let [
         Value::U8(format_version),
         logical_hash,
-        Value::Record(root),
+        root,
         Value::U64(byte_length),
         Value::Nullable(utf16_length),
         Value::Array(edits),
     ] = values
     else {
-        return Err(Error::MalformedScalar);
-    };
-    let root_values = root.to_values().map_err(|_| Error::MalformedScalar)?;
-    let [object_hash, locator] = root_values.as_slice() else {
         return Err(Error::MalformedScalar);
     };
     let utf16_length = match utf16_length.as_deref() {
@@ -2427,10 +2469,7 @@ fn decode_chunked_values(kind: LargeValueKind, values: &[Value]) -> Result<Large
         kind,
         format_version: *format_version,
         logical_hash: ContentHash(raw_bytes(logical_hash)?),
-        root: NodeRef {
-            object_hash: ContentHash(raw_bytes(object_hash)?),
-            locator: Locator(raw_bytes(locator)?),
-        },
+        root: node_ref_from_value(root)?,
         byte_length: *byte_length,
         utf16_length,
         edit_tail,
@@ -4560,6 +4599,36 @@ pub(crate) fn shared_child_dag_fixture() -> PreparedLargeValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_ref_codec_reuses_the_stored_scalar_root_record() {
+        let node_ref = NodeRef {
+            object_hash: ContentHash([7; 32]),
+            locator: Locator::from_seed(b"canonical NodeRef codec"),
+        };
+        let encoded = encode_node_ref(&node_ref).unwrap();
+
+        assert_eq!(decode_node_ref(&encoded).unwrap(), node_ref);
+
+        let value_ref = LargeValueRef {
+            kind: LargeValueKind::Bytes,
+            format_version: FORMAT_VERSION,
+            logical_hash: ContentHash([11; 32]),
+            root: node_ref,
+            byte_length: 0,
+            utf16_length: None,
+            edit_tail: Vec::new(),
+        };
+        let Value::Record(stored_root) = &chunked_values(&value_ref)[2] else {
+            panic!("stored scalar root must be a record");
+        };
+        assert_eq!(stored_root.raw(), encoded);
+
+        let malformed = node_ref_descriptor()
+            .create(&[Value::Bytes(vec![0; 31]), Value::Bytes(vec![0; 32])])
+            .unwrap();
+        assert_eq!(decode_node_ref(&malformed), Err(Error::MalformedScalar));
+    }
 
     struct PreparedProvider {
         chunks: std::collections::BTreeMap<Locator, (ContentHash, bytes::Bytes)>,

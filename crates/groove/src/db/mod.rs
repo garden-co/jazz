@@ -57,9 +57,11 @@ fn pending_large_value_upload_key(id: crate::large_values::StagedLargeValueId) -
 
 fn large_value_root_key(node_ref: &crate::large_values::NodeRef) -> Result<Vec<u8>, Error> {
     let mut key = b"root/".to_vec();
-    key.extend(postcard::to_allocvec(node_ref).map_err(|error| {
-        Error::InvalidLargeValueMetadata(format!("cannot encode root identity: {error}"))
-    })?);
+    key.extend(
+        crate::large_values::encode_node_ref(node_ref).map_err(|error| {
+            Error::InvalidLargeValueMetadata(format!("cannot encode root identity: {error}"))
+        })?,
+    );
     Ok(key)
 }
 
@@ -72,17 +74,21 @@ struct LargeValueRootReferences {
 
 fn large_value_node_key(node_ref: &crate::large_values::NodeRef) -> Result<Vec<u8>, Error> {
     let mut key = b"node/".to_vec();
-    key.extend(postcard::to_allocvec(node_ref).map_err(|error| {
-        Error::InvalidLargeValueMetadata(format!("cannot encode node identity: {error}"))
-    })?);
+    key.extend(
+        crate::large_values::encode_node_ref(node_ref).map_err(|error| {
+            Error::InvalidLargeValueMetadata(format!("cannot encode node identity: {error}"))
+        })?,
+    );
     Ok(key)
 }
 
 fn large_value_reclaim_key(node_ref: &crate::large_values::NodeRef) -> Result<Vec<u8>, Error> {
     let mut key = b"reclaim/".to_vec();
-    key.extend(postcard::to_allocvec(node_ref).map_err(|error| {
-        Error::InvalidLargeValueMetadata(format!("cannot encode reclaim identity: {error}"))
-    })?);
+    key.extend(
+        crate::large_values::encode_node_ref(node_ref).map_err(|error| {
+            Error::InvalidLargeValueMetadata(format!("cannot encode reclaim identity: {error}"))
+        })?,
+    );
     Ok(key)
 }
 
@@ -94,9 +100,13 @@ fn large_value_pending_install_key(
     node_ref: &crate::large_values::NodeRef,
 ) -> Result<Vec<u8>, Error> {
     let mut key = b"install/".to_vec();
-    key.extend(postcard::to_allocvec(node_ref).map_err(|error| {
-        Error::InvalidLargeValueMetadata(format!("cannot encode pending install identity: {error}"))
-    })?);
+    key.extend(
+        crate::large_values::encode_node_ref(node_ref).map_err(|error| {
+            Error::InvalidLargeValueMetadata(format!(
+                "cannot encode pending install identity: {error}"
+            ))
+        })?,
+    );
     Ok(key)
 }
 
@@ -223,7 +233,7 @@ where
             operations.push(OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
                 key: large_value_reclaim_key(&node_ref)?,
-                value: postcard::to_allocvec(&node_ref).map_err(|error| {
+                value: crate::large_values::encode_node_ref(&node_ref).map_err(|error| {
                     Error::InvalidLargeValueMetadata(format!(
                         "cannot encode reclaim entry: {error}"
                     ))

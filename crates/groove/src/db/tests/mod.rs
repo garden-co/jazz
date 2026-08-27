@@ -40,3 +40,33 @@ mod queries;
 mod schema;
 mod subscriptions;
 mod support;
+
+#[test]
+fn large_value_metadata_keys_use_the_canonical_node_ref_record() {
+    let node_ref = crate::large_values::NodeRef {
+        object_hash: crate::large_values::ContentHash([13; 32]),
+        locator: crate::large_values::Locator::from_seed(b"metadata key NodeRef"),
+    };
+    let encoded = crate::large_values::encode_node_ref(&node_ref).unwrap();
+
+    for (prefix, key) in [
+        (
+            b"root/".as_slice(),
+            large_value_root_key(&node_ref).unwrap(),
+        ),
+        (
+            b"node/".as_slice(),
+            large_value_node_key(&node_ref).unwrap(),
+        ),
+        (
+            b"reclaim/".as_slice(),
+            large_value_reclaim_key(&node_ref).unwrap(),
+        ),
+        (
+            b"install/".as_slice(),
+            large_value_pending_install_key(&node_ref).unwrap(),
+        ),
+    ] {
+        assert_eq!(key.strip_prefix(prefix), Some(encoded.as_slice()));
+    }
+}
