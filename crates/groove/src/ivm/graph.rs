@@ -1615,6 +1615,12 @@ impl NodeDescriptor {
                         });
                     }
                 }
+                for &field_idx in &top_by.sort_field_indices {
+                    if !collect_by_ordered_scalar(&input_outputs[0].fields()[field_idx].value_type)
+                    {
+                        return Err(GraphValidationError::TopBySortFieldMustBeOrderable);
+                    }
+                }
                 Ok(())
             }
             OpType::CollectBy(collect_by) => {
@@ -2056,6 +2062,8 @@ pub enum GraphValidationError {
     CollectByOutputDescriptorMismatch,
     #[error("collect_by group, order, and tie fields must be scalar and non-record-valued")]
     CollectByKeyFieldMustBeScalar,
+    #[error("top_by order and tie fields must be orderable scalar values")]
+    TopBySortFieldMustBeOrderable,
     #[error("collect_by is terminal-only and cannot be an input node")]
     CollectByInputIsTerminal,
 }

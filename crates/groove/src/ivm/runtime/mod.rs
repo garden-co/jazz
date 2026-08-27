@@ -35,7 +35,7 @@ use crate::ivm::{
 };
 use crate::records::{
     self, BorrowedRecord, EnumSchema, EnumValue, OwnedRecord, RawProjectionField,
-    RawProjectionScratch, RecordDescriptor, Value, ValueType,
+    RawProjectionScratch, RecordDescriptor, Value, ValueType, collect_by_ordered_scalar,
 };
 use crate::schema::{DatabaseSchema, IndexSchema, TableSchema};
 use crate::storage::{OrderedKvStorage, RecordStore, ScanBounds, ScanDirection, ScanRequest};
@@ -522,6 +522,8 @@ pub enum IvmRuntimeError {
     CollectByMustBeTerminal,
     #[error("invalid collect_by descriptor: {0}")]
     InvalidCollectBy(String),
+    #[error("invalid top_by descriptor: {0}")]
+    InvalidTopBy(String),
     #[error("collect_by expand encountered duplicate output occurrence source ids")]
     DuplicateCollectByOccurrenceId,
     #[error("unsupported operator")]
