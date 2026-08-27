@@ -21,6 +21,7 @@
         "todo-server-ts#build",
         "todo-client-localfirst-react-docs#build",
         "todo-client-localfirst-ts-docs#build",
+        "todo-client-localfirst-solid-docs#build",
         "todo-client-localfirst-svelte-docs#build",
         "todo-client-localfirst-vue-docs#build",
         "todo-client-localfirst-expo-docs#build",
