@@ -65,7 +65,7 @@ export async function startApp(
   // #region context-setup-ts-client
   const db = await createDb(resolvedConfig);
   // #endregion context-setup-ts-client
-  let sessionUserId = db.getAuthState().session?.user_id ?? null;
+  let sessionUserId = db.getAuthState().session?.user ?? null;
 
   // Build DOM
   const h1 = document.createElement("h1");
@@ -163,7 +163,7 @@ export async function startApp(
     list.replaceChildren(items);
   });
   const stopAuthSync = db.onAuthChanged(({ session }) => {
-    syncAuthState(session?.user_id ?? null);
+    syncAuthState(session?.user ?? null);
   });
 
   // Add todo form

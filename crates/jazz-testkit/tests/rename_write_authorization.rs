@@ -70,28 +70,11 @@ fn compile_public_schema(builder: SchemaBuilder) -> JazzSchema {
 }
 
 fn owner_policy() -> PolicyExpr {
-    PolicyExpr::eq_session("owner", vec!["claims".to_owned(), "sub".to_owned()])
+    PolicyExpr::eq_session("owner", vec!["user".to_owned()])
 }
 
 fn install_claims(node: &mut NodeState<MemoryStorage>, author: AuthorSubject) {
-    node.admit_test_session_claims(
-        author,
-        BTreeMap::from([
-            ("iss".to_owned(), Value::String("urn:jazz:test".to_owned())),
-            (
-                "issuer".to_owned(),
-                Value::String("urn:jazz:test".to_owned()),
-            ),
-            (
-                "sub".to_owned(),
-                Value::String(author.test_uuid().to_string()),
-            ),
-            (
-                "user_id".to_owned(),
-                Value::String(author.test_uuid().to_string()),
-            ),
-        ]),
-    );
+    node.admit_test_session_claims(author, BTreeMap::new());
 }
 
 fn owner_write_policies(select: PolicyExpr) -> TablePolicies {
@@ -106,8 +89,12 @@ fn owner_write_policies(select: PolicyExpr) -> TablePolicies {
 fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> NodeState<MemoryStorage> {
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-    block_on(NodeState::new(node_uuid, schema, MemoryStorage::new(&refs)))
-        .expect("open memory node")
+    block_on(NodeState::new(
+        node_uuid,
+        schema,
+        MemoryStorage::new(&refs).expect("valid memory storage families"),
+    ))
+    .expect("open memory node")
 }
 
 fn rename_lens(v1: &SchemaVersion, v2: &SchemaVersion) -> MigrationLens {
@@ -131,7 +118,7 @@ fn cells(id: RowUuid, email: &str, owner: AuthorSubject) -> BTreeMap<String, Val
         ("email".to_string(), Value::String(email.to_string())),
         (
             "owner".to_string(),
-            Value::String(owner.test_uuid().to_string()),
+            Value::String(owner.canonical().to_owned()),
         ),
     ])
 }

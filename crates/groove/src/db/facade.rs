@@ -42,7 +42,7 @@ impl Database {
     /// )
     /// .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// let storage = MemoryStorage::new(&["albums", "indices"]);
+    /// let storage = MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
     ///
     /// let database = Database::new(schema, storage).await?;
     /// assert!(database.last_commit_metrics().is_none());
@@ -64,6 +64,11 @@ impl Database {
     where
         S: ReopenableStorage + 'static,
     {
+        // This must precede `LayoutStorage::new`, whose marker initialization
+        // can otherwise create durable engine state for an invalid schema. The
+        // caller has already opened the backend; this guards Groove's own
+        // marker/mutation path.
+        validate_application_storage_names(&schema)?;
         validate_durable_key_schema(&schema)?;
         let mut ivm_runtime = IvmRuntime::new(schema)?;
         let storage = Rc::new(LayoutStorage::new(storage, storage_layout).await?);
@@ -75,13 +80,16 @@ impl Database {
             Rc::new(crate::chunks::UnavailableChunkResolver);
         let large_value_lifecycle = std::sync::Arc::new(futures::lock::Mutex::new(()));
         ivm_runtime.set_chunk_provider(Rc::new(
-            crate::chunks::StorageChunkProvider::with_resolver_and_observer(
+            crate::chunks::StorageChunkProvider::with_resolver_observer_and_journal(
                 chunk_storage.clone(),
                 chunk_resolver.clone(),
                 Rc::new(MetadataChunkInstallObserver {
                     storage: Rc::downgrade(&storage),
                     lifecycle: std::sync::Arc::downgrade(&large_value_lifecycle),
                     resident_install: None,
+                }),
+                Rc::new(MetadataChunkInstallJournal {
+                    storage: Rc::downgrade(&storage),
                 }),
             ),
         ));
@@ -189,13 +197,16 @@ impl Database {
     /// evaluation reads directly through it.
     pub fn set_chunk_storage(&mut self, storage: Rc<dyn crate::chunks::ChunkStorage>) {
         self.ivm_runtime.set_chunk_provider(Rc::new(
-            crate::chunks::StorageChunkProvider::with_resolver_and_observer(
+            crate::chunks::StorageChunkProvider::with_resolver_observer_and_journal(
                 storage.clone(),
                 self.chunk_resolver.clone(),
                 Rc::new(MetadataChunkInstallObserver {
                     storage: Rc::downgrade(&self.storage),
                     lifecycle: std::sync::Arc::downgrade(&self.large_value_lifecycle),
                     resident_install: None,
+                }),
+                Rc::new(MetadataChunkInstallJournal {
+                    storage: Rc::downgrade(&self.storage),
                 }),
             ),
         ));
@@ -207,13 +218,16 @@ impl Database {
         resolver: Rc<dyn crate::chunks::MissingChunkResolver>,
     ) {
         self.ivm_runtime.set_chunk_provider(Rc::new(
-            crate::chunks::StorageChunkProvider::with_resolver_and_observer(
+            crate::chunks::StorageChunkProvider::with_resolver_observer_and_journal(
                 self.chunk_storage.clone(),
                 resolver.clone(),
                 Rc::new(MetadataChunkInstallObserver {
                     storage: Rc::downgrade(&self.storage),
                     lifecycle: std::sync::Arc::downgrade(&self.large_value_lifecycle),
                     resident_install: None,
+                }),
+                Rc::new(MetadataChunkInstallJournal {
+                    storage: Rc::downgrade(&self.storage),
                 }),
             ),
         ));
@@ -1542,6 +1556,37 @@ impl Database {
         }
     }
 
+    /// Resolve a final logical UTF-16 position to its byte position. This uses
+    /// the same edit-aware, chunk-demanding UTF-16 cursor as range reads, so
+    /// callers can lower a UTF-16 splice into the canonical byte edit tail.
+    pub async fn large_text_utf16_offset_to_byte(
+        &self,
+        value: &crate::large_values::LargeValueRef,
+        offset: u64,
+    ) -> Result<u64, Error> {
+        let mut inputs = crate::ivm::runtime::evaluation_session::EvaluationInputs::default();
+        let provider = self.ivm_runtime.chunk_provider();
+        loop {
+            match crate::large_values::utf16_offset_to_byte_attempt(value, offset, &mut inputs) {
+                Ok(byte_offset) => return Ok(byte_offset),
+                Err(crate::ivm::runtime::IvmRuntimeError::EvaluationBlocked) => {
+                    let requests = inputs.take_missing_chunks();
+                    if requests.is_empty() {
+                        return Err(crate::ivm::runtime::IvmRuntimeError::EvaluationBlocked.into());
+                    }
+                    for request in requests {
+                        let bytes = provider
+                            .get(request.clone())
+                            .await
+                            .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
+                        inputs.install_chunk_from_provider(request, bytes);
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
     /// Resolve a JSON Pointer against literal validated JSON source. The
     /// returned value is an ordinary owned JSON value; the physical tree and
     /// locators remain private.
@@ -1665,7 +1710,7 @@ impl Database {
     ///     ),
     /// );
     /// let column_families = schema.column_families();
-    /// let storage = MemoryStorage::new(&column_families);
+    /// let storage = MemoryStorage::new(&column_families).expect("valid memory storage families");
     /// let database = Database::new(schema, storage).await?;
     ///
     /// let art = database.direct_record_store("album_art")?;

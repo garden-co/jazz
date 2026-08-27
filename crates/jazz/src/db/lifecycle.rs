@@ -25,7 +25,7 @@ where
     /// let schema = schema();
     /// let column_families = schema.column_families();
     /// let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
-    /// let storage = MemoryStorage::new(&refs);
+    /// let storage = MemoryStorage::new(&refs).expect("valid memory storage families");
     ///
     /// let db = block_on(Db::open(DbConfig {
     ///     schema,

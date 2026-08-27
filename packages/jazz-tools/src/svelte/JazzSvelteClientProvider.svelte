@@ -46,7 +46,7 @@ The caller remains responsible for shutting the client down.
 				ctx.subscriptionStore = getSubscriptionStore(resolvedClient);
 				stopSessionSync = resolvedClient.db.onAuthChanged(({ session }) => {
 					if (!cancelled) {
-						ctx.session = session ?? null;
+						ctx.session = session;
 					}
 				});
 

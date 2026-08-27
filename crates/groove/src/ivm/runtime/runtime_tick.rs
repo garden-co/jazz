@@ -162,6 +162,12 @@ impl std::fmt::Debug for PendingIncrementalEvaluation {
     }
 }
 
+impl PendingIncrementalEvaluation {
+    pub(super) fn is_pending(&self) -> bool {
+        !self.0.borrow().order.is_empty()
+    }
+}
+
 /// Discovers request-producing leaves for all reachable siblings without recursively
 /// evaluating through the first blocked branch. Hash-consed nodes enter the
 /// queue once, so discovery is linear in the reachable graph slice.
@@ -1638,6 +1644,10 @@ impl IvmRuntime {
         } else {
             Poll::Pending
         }
+    }
+
+    pub(crate) fn has_pending_incremental(&self) -> bool {
+        self.pending_incremental.is_pending()
     }
 
     /// Drop an uninstalled hydration when its subscription is cancelled.

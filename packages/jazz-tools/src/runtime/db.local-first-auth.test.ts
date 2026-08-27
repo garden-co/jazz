@@ -52,6 +52,7 @@ describe("DbConfig auth validation", () => {
     expect(db).toBeDefined();
     expect(db.getConfig()).toMatchObject({ jwtToken: expect.any(String) });
     expect(db.getConfig().secret).toBeUndefined();
+    expect(db.getConfig()).not.toHaveProperty("trustedReservedSession");
     await db.shutdown();
   });
 });

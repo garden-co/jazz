@@ -6,6 +6,7 @@ import type { DbConfig } from "../db.js";
 import type { RuntimeSource } from "../runtime-source.js";
 import { resolveTelemetryCollectorUrlFromEnv } from "../sync-telemetry.js";
 import type { AuthFailureReason } from "../auth-state.js";
+import { getTrustedReservedSession, setTrustedReservedSession } from "../db-internal-session.js";
 
 function shouldBypassLocalPolicies(config: DbConfig): boolean {
   return !!config.adminSecret;
@@ -83,8 +84,14 @@ export abstract class ConnectionManager {
     }
 
     this.installRuntimeTelemetry();
+    const runtimeConfig = { ...config };
+    // Reserved local-first/anonymous sessions are carried by a package-private
+    // capability sidecar, not an enumerable config property. Preserve that
+    // capability when isolating the runtime's config object so native opens
+    // retain the verified session author used by persistence and transport.
+    setTrustedReservedSession(runtimeConfig, getTrustedReservedSession(config));
     const client = runtimeSource.createClient({
-      config: { ...config },
+      config: runtimeConfig,
       schema: runtimeSchema,
       onAuthFailure: (reason) => this.host.markUnauthenticated(reason),
     });
@@ -123,6 +130,16 @@ export abstract class ConnectionManager {
   abstract isExplicitlyOffline(): boolean;
   /** Resolves when that explicit offline state is cleared. */
   abstract waitForReconnect(signal?: AbortSignal): Promise<void>;
+
+  /**
+   * Browser worker followers learn the namespace-wide explicit-offline state
+   * during their initial handshake. Other runtimes already have a synchronous
+   * state snapshot, so they deliberately return `null`: tier choice must not
+   * gain an asynchronous gap after an operation has started.
+   */
+  initialExplicitOfflineState(): Promise<void> | null {
+    return null;
+  }
 
   openInspectorControlPort(): Promise<MessagePort> {
     return Promise.reject(new Error("This runtime has no shared browser worker"));

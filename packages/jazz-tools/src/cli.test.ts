@@ -138,8 +138,16 @@ async function typecheckGeneratedMigration(migrationPath: string): Promise<void>
       "--project",
       tsconfigPath,
     ],
-    { cwd: dirname(packageRoot), encoding: "utf8" },
+    // This intentionally invokes a real TypeScript compiler to validate the
+    // generated public API.  Bound the child separately so a compiler hang is
+    // reported as such instead of relying only on Vitest's worker timeout.
+    { cwd: dirname(packageRoot), encoding: "utf8", timeout: 20_000 },
   );
+  if (result.error) {
+    throw new Error(
+      `Generated migration typecheck could not run: ${result.error.message}\n${result.stdout}\n${result.stderr}`,
+    );
+  }
   if (result.status !== 0) {
     throw new Error(`Generated migration failed to typecheck:\n${result.stdout}\n${result.stderr}`);
   }
@@ -332,7 +340,7 @@ import { schema as s } from ${JSON.stringify(importPath)};
 import { app } from ${JSON.stringify(appImportPath)};
 
 export default s.definePermissions(app, ({ policy, session }) => [
-  policy.todos.allowRead.where({ ownerId: session.user_id }),
+  policy.todos.allowRead.where({ ownerId: session.user }),
 ]);
 `;
 }
@@ -393,11 +401,11 @@ import { schema as s } from ${JSON.stringify(importPath)};
 import { app } from ${JSON.stringify(appImportPath)};
 
 export default s.definePermissions(app, ({ policy, session }) => [
-  policy.todos.allowRead.where({ ownerId: session.user_id }),
-  policy.todos.allowInsert.where({ ownerId: session.user_id }),
+  policy.todos.allowRead.where({ ownerId: session.user }),
+  policy.todos.allowInsert.where({ ownerId: session.user }),
   policy.todos.allowUpdate
-    .whereOld({ ownerId: session.user_id })
-    .whereNew({ ownerId: session.user_id }),
+    .whereOld({ ownerId: session.user })
+    .whereNew({ ownerId: session.user }),
 ]);
 `;
 }
@@ -429,7 +437,7 @@ import { schema as s } from ${JSON.stringify(importPath)};
 import { app } from ${JSON.stringify(appImportPath)};
 
 export const permissions = s.definePermissions(app, ({ policy, session }) => [
-  policy.todos.allowRead.where({ ownerId: session.user_id }),
+  policy.todos.allowRead.where({ ownerId: session.user }),
 ]);
 `;
 }
@@ -1556,6 +1564,9 @@ describe("cli migrations", () => {
     );
   });
 
+  // The assertion intentionally launches `tsc`. On a contended CI worker the
+  // compiler startup can exceed Vitest's normal 5s unit-test budget, while the
+  // child process itself remains bounded above.
   it("renders a type-valid BIGINT counter migration", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
@@ -1626,7 +1637,7 @@ describe("cli migrations", () => {
     expect(generated).toContain('"removedValue": s.drop.bigint({ backwardsDefault: null }),');
     expect(generated).toContain('"value": s.bigint().merge("counter"),');
     await typecheckGeneratedMigration(filePath);
-  });
+  }, 30_000);
 
   it("still creates a migration file for nullability-only schema changes", async () => {
     const { root } = await createWorkspace();

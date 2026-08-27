@@ -44,7 +44,12 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     private readonly dbName: string | null,
     private readonly callbacks: Pick<
       BrowserFollowerConnectionContext,
-      "onAuthFailure" | "onAuthRestored" | "onFailure" | "onStorageReset" | "onStorageInvalidated"
+      | "onAuthFailure"
+      | "onAuthRestored"
+      | "onExplicitOfflineChange"
+      | "onFailure"
+      | "onStorageReset"
+      | "onStorageInvalidated"
     >,
     private readonly traceRelay = false,
   ) {
@@ -193,6 +198,10 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     }
     if (message.type === "auth-restored") {
       this.callbacks.onAuthRestored();
+      return;
+    }
+    if (message.type === "transport-state") {
+      this.callbacks.onExplicitOfflineChange?.(message.explicitlyDisconnected);
       return;
     }
     if (message.type === "mutation-error") {

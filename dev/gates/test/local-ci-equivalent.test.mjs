@@ -153,6 +153,25 @@ test("CI invokes only shared partitions and rejects a direct correctness bypass"
   );
 });
 
+test("crate publication selector tests are a reachable lint partition contract", () => {
+  const lint = planFor({ partition: "lint" });
+  const selectorTest = lint.find(({ label }) => label === "crate publication selector contract");
+  assert.deepEqual(selectorTest, {
+    label: "crate publication selector contract",
+    executable: "bash",
+    args: ["dev/scripts/publish-crates-alpha.test.sh"],
+  });
+
+  const withoutSelectorTest = lint.filter(
+    ({ label }) => label !== "crate publication selector contract",
+  );
+  assert.equal(
+    withoutSelectorTest.some(({ args }) => args.includes("publish-crates-alpha.test.sh")),
+    false,
+    "a removed selector test would leave the lint CI partition without its publish admission receipt",
+  );
+});
+
 test("focused mode is explicitly smaller and cannot be mistaken for CI-equivalent", () => {
   const focused = planFor({ mode: "focused" });
   const complete = planFor({ mode: "ci-equivalent" });

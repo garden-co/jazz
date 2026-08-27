@@ -148,4 +148,83 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
     expect(connection.reconnect).toHaveBeenCalledOnce();
     expect(manager.isExplicitlyOffline()).toBe(false);
   });
+
+  it("adopts explicit offline state broadcast by another tab in the worker namespace", async () => {
+    const connection = {
+      ready: vi.fn(async () => undefined),
+      disconnect: vi.fn(async () => undefined),
+      reconnect: vi.fn(async () => undefined),
+      openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
+    } as unknown as BrowserWorkerConnection;
+    let callbacks:
+      | {
+          onExplicitOfflineChange?: (offline: boolean) => void;
+        }
+      | undefined;
+    const host = {
+      config: { serverUrl: "https://example.test" },
+      isShuttingDown: false,
+      runtimeSource: {
+        createBrowserWorkerConnection: vi.fn((input) => {
+          callbacks = input;
+          return connection;
+        }),
+      },
+      markUnauthenticated: vi.fn(),
+      clearAuthError: vi.fn(),
+    } as unknown as DbForConnection;
+    const manager = new BrowserConnectionManager(host);
+    (
+      manager as unknown as {
+        onClientCreated(input: {
+          schemaKey: string;
+          schema: Record<string, never>;
+          client: JazzClient;
+        }): void;
+      }
+    ).onClientCreated({ schemaKey: "empty", schema: {}, client: {} as JazzClient });
+
+    callbacks?.onExplicitOfflineChange?.(true);
+    expect(manager.isExplicitlyOffline()).toBe(true);
+
+    const reconnected = manager.waitForReconnect();
+    callbacks?.onExplicitOfflineChange?.(false);
+    await reconnected;
+    expect(manager.isExplicitlyOffline()).toBe(false);
+  });
+
+  it("waits for worker transport state only while a follower is attaching", async () => {
+    const ready = deferred();
+    const connection = {
+      ready: vi.fn(() => ready.promise),
+      disconnect: vi.fn(async () => undefined),
+      reconnect: vi.fn(async () => undefined),
+      openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
+    } as unknown as BrowserWorkerConnection;
+    const host = {
+      config: { serverUrl: "https://example.test" },
+      isShuttingDown: false,
+      runtimeSource: {
+        createBrowserWorkerConnection: vi.fn(() => connection),
+      },
+      markUnauthenticated: vi.fn(),
+      clearAuthError: vi.fn(),
+    } as unknown as DbForConnection;
+    const manager = new BrowserConnectionManager(host);
+    (
+      manager as unknown as {
+        onClientCreated(input: {
+          schemaKey: string;
+          schema: Record<string, never>;
+          client: JazzClient;
+        }): void;
+      }
+    ).onClientCreated({ schemaKey: "empty", schema: {}, client: {} as JazzClient });
+
+    const initial = manager.initialExplicitOfflineState();
+    expect(initial).not.toBeNull();
+    ready.resolve();
+    await initial;
+    expect(manager.initialExplicitOfflineState()).toBeNull();
+  });
 });

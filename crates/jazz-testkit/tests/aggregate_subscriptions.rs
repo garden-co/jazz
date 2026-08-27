@@ -130,7 +130,7 @@ fn policy_metrics_schema() -> Schema {
                 .policies(
                     TablePolicies::new()
                         .with_insert(PolicyExpr::True)
-                        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
+                        .with_select(PolicyExpr::eq_session("owner_id", vec!["user".to_owned()]))
                         .with_delete(PolicyExpr::True),
                 ),
         )

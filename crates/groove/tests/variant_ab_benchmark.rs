@@ -77,7 +77,8 @@ async fn repeated_release_write_ivm_and_cold_scan_receipt() -> Result<(), Box<dy
     let mut scans = Vec::with_capacity(REPS);
     for _ in 0..REPS {
         let database_schema = schema();
-        let storage = MemoryStorage::new(&database_schema.column_families());
+        let storage = MemoryStorage::new(&database_schema.column_families())
+            .expect("valid memory storage families");
         let mut database = Database::new(database_schema, storage).await?;
         register_projection(&mut database)?;
         let subscription = database

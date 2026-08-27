@@ -639,68 +639,69 @@ impl CatalogueStore for StoredCatalogue {
         permissions: HashMap<TableName, TablePolicies>,
         expected_parent_bundle_object_id: Option<ObjectId>,
     ) -> Result<Option<ObjectId>, CatalogueError> {
-        let (head, bundle_entry, head_entry) = {
-            let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
-            let current_parent_bundle_object_id =
-                index.permissions_head.map(|head| head.bundle_object_id);
-            if current_parent_bundle_object_id != expected_parent_bundle_object_id {
-                return Err(CatalogueError::WriteError(format!(
-                    "stale permissions parent: expected {:?}, current {:?}",
-                    expected_parent_bundle_object_id, current_parent_bundle_object_id
-                )));
-            }
+        // Catalogue mutations take storage before the in-memory index. Holding
+        // both locks makes parent validation and head advancement linearizable
+        // for callers sharing this StoredCatalogue. The two storage writes
+        // remain bundle-first/head-second; this is not a crash-atomic
+        // transaction or a cross-process compare-and-swap.
+        let mut storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
+        let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
+        let current_parent_bundle_object_id =
+            index.permissions_head.map(|head| head.bundle_object_id);
+        if current_parent_bundle_object_id != expected_parent_bundle_object_id {
+            return Err(CatalogueError::WriteError(format!(
+                "stale permissions parent: expected {:?}, current {:?}",
+                expected_parent_bundle_object_id, current_parent_bundle_object_id
+            )));
+        }
 
-            if let Some(current) = index.current_permissions()
-                && current.head.schema_hash == schema_hash
-                && current.permissions == permissions
-            {
-                return Ok(Some(permissions_head_object_id(self.app_id)));
-            }
+        if let Some(current) = index.current_permissions()
+            && current.head.schema_hash == schema_hash
+            && current.permissions == permissions
+        {
+            return Ok(Some(permissions_head_object_id(self.app_id)));
+        }
 
-            let version = index
-                .permissions_head
-                .map(|head| head.version + 1)
-                .unwrap_or(1);
-            let bundle_object_id = permissions_bundle_object_id(
-                self.app_id,
+        let version = index
+            .permissions_head
+            .map(|head| head.version + 1)
+            .unwrap_or(1);
+        let bundle_object_id = permissions_bundle_object_id(
+            self.app_id,
+            schema_hash,
+            version,
+            current_parent_bundle_object_id,
+            &permissions,
+        );
+        let head = PermissionsHeadSummary {
+            schema_hash,
+            version,
+            parent_bundle_object_id: current_parent_bundle_object_id,
+            bundle_object_id,
+        };
+        let bundle_entry = CatalogueEntry {
+            object_id: bundle_object_id,
+            metadata: catalogue_metadata(self.app_id, ObjectType::CataloguePermissionsBundle),
+            content: encode_permissions_bundle(
                 schema_hash,
                 version,
                 current_parent_bundle_object_id,
                 &permissions,
-            );
-            let head = PermissionsHeadSummary {
+            ),
+        };
+        let head_entry = CatalogueEntry {
+            object_id: permissions_head_object_id(self.app_id),
+            metadata: catalogue_metadata(self.app_id, ObjectType::CataloguePermissionsHead),
+            content: encode_permissions_head(
                 schema_hash,
                 version,
-                parent_bundle_object_id: current_parent_bundle_object_id,
+                current_parent_bundle_object_id,
                 bundle_object_id,
-            };
-            let bundle_entry = CatalogueEntry {
-                object_id: bundle_object_id,
-                metadata: catalogue_metadata(self.app_id, ObjectType::CataloguePermissionsBundle),
-                content: encode_permissions_bundle(
-                    schema_hash,
-                    version,
-                    current_parent_bundle_object_id,
-                    &permissions,
-                ),
-            };
-            let head_entry = CatalogueEntry {
-                object_id: permissions_head_object_id(self.app_id),
-                metadata: catalogue_metadata(self.app_id, ObjectType::CataloguePermissionsHead),
-                content: encode_permissions_head(
-                    schema_hash,
-                    version,
-                    current_parent_bundle_object_id,
-                    bundle_object_id,
-                ),
-            };
-            (head, bundle_entry, head_entry)
+            ),
         };
 
-        let mut storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
         storage.upsert_catalogue_entry(&bundle_entry)?;
         storage.upsert_catalogue_entry(&head_entry)?;
-        let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         index.apply_entry(&bundle_entry)?;
         index.permissions_head = Some(head);
         Ok(Some(head_entry.object_id))
@@ -815,5 +816,72 @@ impl ServerCatalogue {
 
     pub(crate) fn close(&self, store: &impl CatalogueStore) -> Result<(), CatalogueError> {
         store.close()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Barrier};
+    use std::time::Duration;
+
+    use jazz::tools::public_schema::{SchemaBuilder, TablePolicies};
+
+    use super::{CatalogueStore, StoredCatalogue};
+    use crate::server::catalogue_storage::CatalogueMemoryStorage;
+
+    #[test]
+    fn concurrent_permissions_publications_compare_and_swap_the_parent() {
+        const PUBLISHERS: usize = 8;
+        let schema = SchemaBuilder::new().build();
+        let schema_hash = jazz::tools::public_schema::SchemaHash::compute(&schema);
+        let store = Arc::new(
+            StoredCatalogue::new(
+                jazz::tools::AppId::from_name("permissions-publication-race"),
+                Some(schema),
+                Box::new(CatalogueMemoryStorage::new()),
+            )
+            .expect("catalogue"),
+        );
+        let storage_guard = store.storage.lock().expect("storage lock");
+        let start = Arc::new(Barrier::new(PUBLISHERS + 1));
+        let mut publishers = Vec::new();
+        for _ in 0..PUBLISHERS {
+            let store = Arc::clone(&store);
+            let start = Arc::clone(&start);
+            publishers.push(std::thread::spawn(move || {
+                start.wait();
+                store.publish_permissions_bundle(
+                    schema_hash,
+                    std::collections::HashMap::from([(
+                        jazz::tools::public_schema::TableName::new("todos"),
+                        TablePolicies::default(),
+                    )]),
+                    None,
+                )
+            }));
+        }
+
+        start.wait();
+        std::thread::sleep(Duration::from_millis(50));
+        drop(storage_guard);
+
+        let results = publishers
+            .into_iter()
+            .map(|publisher| publisher.join().expect("publisher thread"))
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| {
+                    matches!(
+                        result,
+                        Err(super::CatalogueError::WriteError(message))
+                            if message.starts_with("stale permissions parent")
+                    )
+                })
+                .count(),
+            PUBLISHERS - 1
+        );
     }
 }

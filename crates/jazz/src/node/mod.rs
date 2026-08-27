@@ -573,6 +573,10 @@ pub struct NodeState<S> {
     sync_metrics: SyncMetrics,
     /// Runtime counters for query-engine read authorization paths.
     query_engine_read_metrics: QueryEngineReadMetrics,
+    /// Test-only observer for one node's merge-head graph walks. This must be
+    /// node-scoped so unrelated parallel test nodes cannot contaminate it.
+    #[cfg(any(test, feature = "testing"))]
+    merge_head_reachability_walks: usize,
     /// Process-local claims attached to authenticated subscriber sessions.
     session_claims: BTreeMap<AuthorSubject, BTreeMap<String, Value>>,
     /// Monotone revision for each identity's process-local session claims.
@@ -725,6 +729,14 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    pub(super) fn reset_merge_head_reachability_walks_for_test(&mut self) {
+        self.merge_head_reachability_walks = 0;
+    }
+
+    pub(super) fn merge_head_reachability_walks_for_test(&self) -> usize {
+        self.merge_head_reachability_walks
+    }
+
     fn allocate_global_time_for_test(&mut self) -> GlobalTime {
         self.clock
             .allocate_global_time(self.clock.tx_time.physical_ms())

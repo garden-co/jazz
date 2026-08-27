@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { userIdentity } from "jazz-tools";
 import { createPolicyTestApp, type PolicyTestApp } from "jazz-tools/testing";
 import { app } from "../schema.js";
 import permissions from "../permissions.js";
@@ -6,24 +7,27 @@ import permissions from "../permissions.js";
 let testApp: PolicyTestApp | undefined;
 afterEach(async () => await testApp?.shutdown());
 
+const issuer = "https://identity.big-label.test";
+const authorFor = (subject: string) => userIdentity(issuer, subject);
+
 describe("BigLabel deployed tenant authority", () => {
   it("admits client mutations only after the trusted backend bootstrap", async () => {
     testApp = await createPolicyTestApp(app, permissions, expect);
     const seeded = await seed(testApp);
     const admin = testApp.as({
-      issuer: "https://identity.big-label.test",
+      issuer,
       user_id: "admin",
       claims: {},
       authMode: "local-first",
     });
     const member = testApp.as({
-      issuer: "https://identity.big-label.test",
+      issuer,
       user_id: "member",
       claims: {},
       authMode: "local-first",
     });
     const outsider = testApp.as({
-      issuer: "https://identity.big-label.test",
+      issuer,
       user_id: "outsider",
       claims: {},
       authMode: "local-first",
@@ -32,13 +36,13 @@ describe("BigLabel deployed tenant authority", () => {
     // First-tenant admission belongs only to the backend bootstrap route. No
     // client claim can create an organization, a person, or its first admin.
     await outsider.expectDenied((db) =>
-      db.insert(app.people, { userId: "outsider", name: "Forged profile" }),
+      db.insert(app.people, { userId: authorFor("outsider"), name: "Forged profile" }),
     );
     await outsider.expectDenied((db) =>
       db.insert(app.memberships, {
         organizationId: seeded.foreignOrg.id,
         personId: seeded.outsider.id,
-        userId: "outsider",
+        userId: authorFor("outsider"),
         role: "admin",
       }),
     );
@@ -56,7 +60,7 @@ describe("BigLabel deployed tenant authority", () => {
       .insert(app.memberships, {
         organizationId: seeded.org.id,
         personId: seeded.member.id,
-        userId: "member",
+        userId: authorFor("member"),
         role: "editor",
       })
       .wait({ tier: "edge" });
@@ -119,18 +123,20 @@ async function seed(test: PolicyTestApp) {
   const foreignOrg = await test.seed((db) =>
     db.insert(app.organizations, { name: "Foreign", slug: "foreign" }),
   );
-  const admin = await test.seed((db) => db.insert(app.people, { userId: "admin", name: "Admin" }));
+  const admin = await test.seed((db) =>
+    db.insert(app.people, { userId: authorFor("admin"), name: "Admin" }),
+  );
   const member = await test.seed((db) =>
-    db.insert(app.people, { userId: "member", name: "Member" }),
+    db.insert(app.people, { userId: authorFor("member"), name: "Member" }),
   );
   const outsider = await test.seed((db) =>
-    db.insert(app.people, { userId: "outsider", name: "Outsider" }),
+    db.insert(app.people, { userId: authorFor("outsider"), name: "Outsider" }),
   );
   const adminMembership = await test.seed((db) =>
     db.insert(app.memberships, {
       organizationId: org.id,
       personId: admin.id,
-      userId: "admin",
+      userId: authorFor("admin"),
       role: "admin",
     }),
   );
@@ -138,7 +144,7 @@ async function seed(test: PolicyTestApp) {
     db.insert(app.memberships, {
       organizationId: org.id,
       personId: member.id,
-      userId: "member",
+      userId: authorFor("member"),
       role: "editor",
     }),
   );
@@ -174,7 +180,7 @@ async function seed(test: PolicyTestApp) {
     db.insert(app.memberships, {
       organizationId: foreignOrg.id,
       personId: outsider.id,
-      userId: "outsider",
+      userId: authorFor("outsider"),
       role: "admin",
     }),
   );

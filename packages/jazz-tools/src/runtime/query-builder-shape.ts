@@ -31,6 +31,8 @@ export interface NormalizedIncludeEntry {
   includes: NormalizedIncludeSpec;
   requireIncludes: boolean;
   select: string[];
+  /** Retained to fail closed until partial projections compose through includes. */
+  partialSelect: Record<string, LargeValueSelectDescriptor>;
   orderBy: Array<[string, "asc" | "desc"]>;
   limit?: number;
   offset?: number;
@@ -48,6 +50,7 @@ export interface NormalizedBuiltQuery {
   includes: NormalizedIncludeSpec;
   requireIncludes: boolean;
   select: string[];
+  partialSelect: Record<string, LargeValueSelectDescriptor>;
   orderBy: Array<[string, "asc" | "desc"]>;
   limit?: number;
   offset?: number;
@@ -55,6 +58,11 @@ export interface NormalizedBuiltQuery {
   hops: string[];
   gather?: BuiltGather;
 }
+
+export type LargeValueSelectDescriptor =
+  | { from: number; to: number }
+  | { fromUtf8: number; toUtf8: number }
+  | { at: string };
 
 type BuiltQueryShape = {
   table?: unknown;
@@ -107,6 +115,39 @@ function normalizeSelect(value: unknown): string[] {
   }
 
   return value.filter((column): column is string => typeof column === "string");
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function normalizePartialSelect(value: unknown): Record<string, LargeValueSelectDescriptor> {
+  if (!isPlainObject(value)) return {};
+  const result: Record<string, LargeValueSelectDescriptor> = {};
+  for (const [column, descriptor] of Object.entries(value)) {
+    if (!column || !isPlainObject(descriptor)) {
+      throw new Error(`Invalid large-value selection for column "${column}".`);
+    }
+    const keys = Object.keys(descriptor);
+    if (typeof descriptor.at === "string" && keys.length === 1) {
+      result[column] = { at: descriptor.at };
+    } else if (
+      isNonNegativeSafeInteger(descriptor.from) &&
+      isNonNegativeSafeInteger(descriptor.to) &&
+      keys.length === 2
+    ) {
+      result[column] = { from: descriptor.from, to: descriptor.to };
+    } else if (
+      isNonNegativeSafeInteger(descriptor.fromUtf8) &&
+      isNonNegativeSafeInteger(descriptor.toUtf8) &&
+      keys.length === 2
+    ) {
+      result[column] = { fromUtf8: descriptor.fromUtf8, toUtf8: descriptor.toUtf8 };
+    } else {
+      throw new Error(`Invalid large-value selection for column "${column}".`);
+    }
+  }
+  return result;
 }
 
 function normalizeGather(value: unknown): BuiltGather | undefined {
@@ -163,6 +204,7 @@ function createEmptyIncludeEntry(): NormalizedIncludeEntry {
     includes: {},
     requireIncludes: false,
     select: [],
+    partialSelect: {},
     orderBy: [],
     hops: [],
   };
@@ -199,6 +241,7 @@ function normalizeIncludeEntry(raw: unknown): NormalizedIncludeEntry | null {
       includes: normalized.includes,
       requireIncludes: normalized.requireIncludes,
       select: normalized.select,
+      partialSelect: normalized.partialSelect,
       orderBy: normalized.orderBy,
       limit: normalized.limit,
       offset: normalized.offset,
@@ -214,6 +257,7 @@ function normalizeIncludeEntry(raw: unknown): NormalizedIncludeEntry | null {
       includes: normalizeIncludeEntries(raw.includes),
       requireIncludes: raw[INTERNAL_REQUIRE_INCLUDES_KEY] === true,
       select: normalizeSelect(raw.select),
+      partialSelect: normalizePartialSelect(raw.select),
       orderBy: normalizeOrderBy(raw.orderBy),
       limit: typeof raw.limit === "number" ? raw.limit : undefined,
       offset: typeof raw.offset === "number" ? raw.offset : undefined,
@@ -255,12 +299,19 @@ export function normalizeBuiltQuery(raw: unknown): NormalizedBuiltQuery {
     throw new Error("QueryBuilder._build() must include a non-empty table.");
   }
 
+  const partialSelect = normalizePartialSelect(value.select);
   return {
     table: value.table,
     conditions: normalizeConditions(value.conditions),
     includes: normalizeIncludeEntries(value.includes),
     requireIncludes: value[INTERNAL_REQUIRE_INCLUDES_KEY] === true,
-    select: normalizeSelect(value.select),
+    // The core's current row projection is column-oriented. Preserve the
+    // public partial projection as a separate descriptor while selecting its
+    // carrier columns so the binding can return a correct sliced primitive.
+    select: Array.isArray(value.select)
+      ? normalizeSelect(value.select)
+      : Object.keys(partialSelect),
+    partialSelect,
     orderBy: normalizeOrderBy(value.orderBy),
     limit: typeof value.limit === "number" ? value.limit : undefined,
     offset: typeof value.offset === "number" ? value.offset : undefined,

@@ -38,6 +38,67 @@ pub type Key = [u8];
 pub type Value = Vec<u8>;
 pub type KeyValue = (Vec<u8>, Vec<u8>);
 
+/// Maximum UTF-8 byte length of an application-owned storage name.
+///
+/// The bound is part of the cross-backend storage contract: IndexedDB frames
+/// a column-family name with an unsigned 16-bit length, while the native
+/// backends store the same logical names directly. Keeping one smaller-layer
+/// bound here makes schema admission portable across those backends.
+pub const MAX_APPLICATION_STORAGE_NAME_BYTES: usize = u16::MAX as usize;
+
+/// Validate a physical column-family name accepted by a storage backend.
+///
+/// This is deliberately narrower than [`validate_application_storage_name`]:
+/// engine-owned families also pass through backend open calls. It captures the
+/// portable framing/FFI requirements that every backend must enforce before it
+/// opens, reopens, or mutates its storage.
+pub fn validate_physical_storage_name(name: &str) -> Result<(), Error> {
+    if name.len() > MAX_APPLICATION_STORAGE_NAME_BYTES {
+        return Err(Error::InvalidStorageLayout(format!(
+            "storage name exceeds the {MAX_APPLICATION_STORAGE_NAME_BYTES}-byte limit: {} bytes",
+            name.len()
+        )));
+    }
+    if name.contains('\0') {
+        return Err(Error::InvalidStorageLayout(
+            "storage name contains an embedded NUL".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a complete backend-open family set before the backend has touched
+/// its durable state.
+pub fn validate_physical_storage_names(
+    names: impl IntoIterator<Item = impl AsRef<str>>,
+) -> Result<(), Error> {
+    for name in names {
+        validate_physical_storage_name(name.as_ref())?;
+    }
+    Ok(())
+}
+
+/// Validate a table or direct-record-store name supplied by an application.
+///
+/// Names are case-sensitive, matching every supported backend. The lowercase
+/// `__groove_` plane belongs to Groove (including the class layout and
+/// large-value metadata); `indices` and RocksDB's `default` family are also
+/// engine-owned. Reserving them here, rather than independently in backends,
+/// prevents a schema from opening successfully on one backend while aliasing
+/// engine state on another. Embedded NUL is rejected because RocksDB passes
+/// family names through C strings.
+pub fn validate_application_storage_name(name: &str) -> Result<(), Error> {
+    validate_physical_storage_name(name)?;
+
+    if name.starts_with("__groove_") || matches!(name, "indices" | "default") {
+        return Err(Error::InvalidStorageLayout(format!(
+            "application storage name is reserved by Groove: {name:?}"
+        )));
+    }
+
+    Ok(())
+}
+
 /// The key interval for an ordered scan.
 ///
 /// `Prefix` includes every key beginning with the supplied bytes. `Range` is
@@ -1986,6 +2047,16 @@ pub(crate) mod conformance {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn physical_storage_names_reject_nonportable_forms() {
+        assert!(validate_physical_storage_name("rows").is_ok());
+        assert!(validate_physical_storage_name("rows\0evil").is_err());
+        assert!(
+            validate_physical_storage_name(&"a".repeat(MAX_APPLICATION_STORAGE_NAME_BYTES + 1))
+                .is_err()
+        );
+    }
     use crate::records::{ScalarEnumSchema, Value, ValueType};
     use std::cell::Cell;
     use std::error::Error as _;
@@ -2020,7 +2091,7 @@ mod tests {
     // observe whether a backend obeys the hard cursor bound.
     #[futures_test::test]
     async fn explicit_scan_request_preserves_bounds_direction_and_hard_limit() {
-        let storage = MemoryStorage::new(&["records"]);
+        let storage = MemoryStorage::new(&["records"]).expect("valid memory storage families");
         for key in [
             b"a/1".as_slice(),
             b"a/2".as_slice(),
@@ -2184,7 +2255,7 @@ mod tests {
 
     #[futures_test::test]
     async fn record_store_round_trips_exhaustive_record_descriptor() {
-        let storage = MemoryStorage::new(&["records"]);
+        let storage = MemoryStorage::new(&["records"]).expect("valid memory storage families");
         let (descriptor, values) = complex_record_descriptor_and_values();
         let raw = descriptor.create(&values).unwrap();
         storage
@@ -2211,9 +2282,12 @@ mod tests {
             "jazz_albums_register",
         ]);
         let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = LayoutStorage::new(MemoryStorage::new(&refs), StorageLayout::jazz_class_v1())
-            .await
-            .unwrap();
+        let storage = LayoutStorage::new(
+            MemoryStorage::new(&refs).expect("valid memory storage families"),
+            StorageLayout::jazz_class_v1(),
+        )
+        .await
+        .unwrap();
 
         storage
             .set(
@@ -2315,9 +2389,12 @@ mod tests {
         let layout = StorageLayout::jazz_class_v1_for(all_logical.iter().copied());
         let physical_cfs = layout.physical_column_families(all_logical.iter().copied());
         let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = LayoutStorage::new(MemoryStorage::new(&refs), layout)
-            .await
-            .unwrap();
+        let storage = LayoutStorage::new(
+            MemoryStorage::new(&refs).expect("valid memory storage families"),
+            layout,
+        )
+        .await
+        .unwrap();
 
         for (left, right) in logical_cfs {
             storage
@@ -2352,7 +2429,8 @@ mod tests {
 
     #[futures_test::test]
     async fn class_layout_rejects_missing_marker_with_legacy_mapped_families() {
-        let storage = MemoryStorage::new(&["__groove_class_meta", "jazz_albums_history"]);
+        let storage = MemoryStorage::new(&["__groove_class_meta", "jazz_albums_history"])
+            .expect("valid memory storage families");
         assert!(matches!(
             LayoutStorage::new(storage, StorageLayout::jazz_class_v1()).await,
             Err(Error::InvalidStorageLayout(_))
@@ -2361,7 +2439,8 @@ mod tests {
 
     #[futures_test::test]
     async fn class_layout_accepts_truly_empty_store_and_writes_marker() {
-        let storage = MemoryStorage::new(&["__groove_class_meta", "__groove_class_history"]);
+        let storage = MemoryStorage::new(&["__groove_class_meta", "__groove_class_history"])
+            .expect("valid memory storage families");
         let storage = LayoutStorage::new(storage, StorageLayout::jazz_class_v1())
             .await
             .unwrap();
@@ -2383,9 +2462,12 @@ mod tests {
         let layout = StorageLayout::jazz_class_v1_for(["jazz_albums_history"]);
         let physical_cfs = layout.physical_column_families(["jazz_albums_history"]);
         let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = LayoutStorage::new(MemoryStorage::new(&refs), layout)
-            .await
-            .unwrap();
+        let storage = LayoutStorage::new(
+            MemoryStorage::new(&refs).expect("valid memory storage families"),
+            layout,
+        )
+        .await
+        .unwrap();
 
         storage
             .set(
@@ -2405,7 +2487,7 @@ mod tests {
 
     #[futures_test::test]
     async fn get_set_and_delete_values() {
-        let storage = MemoryStorage::new(&["records"]);
+        let storage = MemoryStorage::new(&["records"]).expect("valid memory storage families");
 
         storage
             .set("records".into(), b"a".to_vec(), b"one".to_vec())
@@ -2428,7 +2510,7 @@ mod tests {
 
     #[futures_test::test]
     async fn memory_test_store_keeps_writes_enabled() {
-        let storage = MemoryStorage::new(&["records"]);
+        let storage = MemoryStorage::new(&["records"]).expect("valid memory storage families");
 
         storage
             .set("records".into(), b"a".to_vec(), b"one".to_vec())
@@ -2443,7 +2525,7 @@ mod tests {
 
     #[futures_test::test]
     async fn range_returns_ordered_values_between_start_and_end() {
-        let storage = MemoryStorage::new(&["records"]);
+        let storage = MemoryStorage::new(&["records"]).expect("valid memory storage families");
 
         storage
             .set("records".into(), b"a".to_vec(), b"one".to_vec())
@@ -2472,7 +2554,7 @@ mod tests {
 
     #[futures_test::test]
     async fn prefix_returns_ordered_values_with_matching_prefix() {
-        let storage = MemoryStorage::new(&["records"]);
+        let storage = MemoryStorage::new(&["records"]).expect("valid memory storage families");
 
         storage
             .set("records".into(), b"user:1".to_vec(), b"a".to_vec())
@@ -2501,7 +2583,7 @@ mod tests {
 
     #[futures_test::test]
     async fn prefix_handles_prefixes_without_a_finite_upper_bound() {
-        let storage = MemoryStorage::new(&["records"]);
+        let storage = MemoryStorage::new(&["records"]).expect("valid memory storage families");
 
         storage
             .set("records".into(), vec![0xfe], b"before".to_vec())
@@ -2527,7 +2609,7 @@ mod tests {
 
     #[futures_test::test]
     async fn direct_operations_report_missing_column_families() {
-        let storage = MemoryStorage::new(&["records"]);
+        let storage = MemoryStorage::new(&["records"]).expect("valid memory storage families");
 
         assert!(matches!(
             storage.get("missing".into(), b"a".to_vec()).await,
@@ -2561,7 +2643,7 @@ mod tests {
 
     #[futures_test::test]
     async fn scans_visit_ordered_values_without_materializing_in_storage_api() {
-        let storage = MemoryStorage::new(&["records"]);
+        let storage = MemoryStorage::new(&["records"]).expect("valid memory storage families");
 
         storage
             .set("records".into(), b"a".to_vec(), b"one".to_vec())
@@ -2600,7 +2682,8 @@ mod tests {
 
     #[futures_test::test]
     async fn write_many_writes_all_operations_atomically() {
-        let storage = MemoryStorage::new(&["records", "indices"]);
+        let storage =
+            MemoryStorage::new(&["records", "indices"]).expect("valid memory storage families");
 
         storage
             .write_many(vec![
@@ -2625,7 +2708,7 @@ mod tests {
 
     #[futures_test::test]
     async fn staged_overlay_reads_staged_sets_and_deletes_before_base_storage() {
-        let storage = MemoryStorage::new(&["indices"]);
+        let storage = MemoryStorage::new(&["indices"]).expect("valid memory storage families");
         storage
             .set("indices".into(), b"a".to_vec(), b"base-a".to_vec())
             .await
@@ -2729,7 +2812,7 @@ mod tests {
 
     #[futures_test::test]
     async fn overlay_limit_caps_physical_memory_entries_after_staged_deletes() {
-        let storage = MemoryStorage::new(&["records"]);
+        let storage = MemoryStorage::new(&["records"]).expect("valid memory storage families");
         for index in 0..300 {
             let key = format!("row:{index:03}").into_bytes();
             storage
@@ -2801,7 +2884,7 @@ mod tests {
         const UNRELATED_ROWS: usize = 20_000;
         const REPETITIONS: usize = 20;
 
-        let storage = MemoryStorage::new(&["records"]);
+        let storage = MemoryStorage::new(&["records"]).expect("valid memory storage families");
         let transaction = StorageTransaction::new(&storage);
         let payload = vec![7; 512];
         transaction.stage_owned_operations((0..UNRELATED_ROWS).map(|index| {
@@ -2894,7 +2977,7 @@ mod tests {
 
     #[futures_test::test]
     async fn storage_transaction_reads_own_writes_and_commits_atomically() {
-        let storage = MemoryStorage::new(&["records"]);
+        let storage = MemoryStorage::new(&["records"]).expect("valid memory storage families");
         storage
             .set("records".into(), b"a".to_vec(), b"base-a".to_vec())
             .await
@@ -2964,7 +3047,7 @@ mod tests {
 
     #[futures_test::test]
     async fn write_many_fails_without_writing_when_column_family_is_missing() {
-        let storage = MemoryStorage::new(&["records"]);
+        let storage = MemoryStorage::new(&["records"]).expect("valid memory storage families");
 
         let error = storage
             .write_many(vec![
@@ -2983,7 +3066,7 @@ mod tests {
 
     #[futures_test::test]
     async fn write_many_can_mix_sets_and_deletes_atomically() {
-        let storage = MemoryStorage::new(&["records"]);
+        let storage = MemoryStorage::new(&["records"]).expect("valid memory storage families");
 
         storage
             .set("records".into(), b"old".to_vec(), b"value".to_vec())
@@ -3015,7 +3098,7 @@ mod tests {
 
     #[futures_test::test]
     async fn memory_storage_orders_scans_and_errors_on_missing_column_families() {
-        let storage = MemoryStorage::new(&["records"]);
+        let storage = MemoryStorage::new(&["records"]).expect("valid memory storage families");
         storage
             .set("records".into(), b"b".to_vec(), b"two".to_vec())
             .await
@@ -3146,7 +3229,7 @@ mod tests {
             prefix: &[u8],
             expected: Vec<KeyValue>,
         ) {
-            let storage = MemoryStorage::new(&["indices"]);
+            let storage = MemoryStorage::new(&["indices"]).expect("valid memory storage families");
             for (key, value) in base_rows {
                 storage
                     .set("indices".into(), key.to_vec(), value.to_vec())
@@ -3374,7 +3457,9 @@ mod tests {
             }
         }
 
-        let storage = CountingStorage::new(MemoryStorage::new(&["indices"]));
+        let storage = CountingStorage::new(
+            MemoryStorage::new(&["indices"]).expect("valid memory storage families"),
+        );
         storage
             .set("indices".into(), b"user:1".to_vec(), b"base-1".to_vec())
             .await
@@ -3409,7 +3494,7 @@ mod tests {
 
     #[futures_test::test]
     async fn memory_storage_write_many_validates_column_families_before_writing() {
-        let storage = MemoryStorage::new(&["records"]);
+        let storage = MemoryStorage::new(&["records"]).expect("valid memory storage families");
         let error = storage
             .write_many(vec![
                 OwnedWriteOperation::set("records", b"1", b"record"),
@@ -3427,27 +3512,27 @@ mod tests {
 
     #[futures_test::test]
     async fn memory_storage_conforms_to_order_and_atomic_batch_contract() {
-        let storage = MemoryStorage::new(&["records"]);
+        let storage = MemoryStorage::new(&["records"]).expect("valid memory storage families");
         conformance::persistence_order_and_batch_atomicity(storage).await;
     }
 
     #[futures_test::test]
     async fn memory_storage_reopen_adds_column_families_without_losing_data() {
-        let storage = MemoryStorage::new(&["records"]);
+        let storage = MemoryStorage::new(&["records"]).expect("valid memory storage families");
         conformance::reopen_preserves_data_and_adds_families(storage).await;
     }
 
     #[futures_test::test]
     async fn memory_storage_conditionals_are_atomic_and_aba_safe() {
         conformance::atomic_conditionals_preserve_winners_and_reject_stale_deletes(
-            MemoryStorage::new(&["records"]),
+            MemoryStorage::new(&["records"]).expect("valid memory storage families"),
         )
         .await;
     }
 
     #[futures_test::test]
     async fn record_store_writes_and_reads_typed_records() {
-        let storage = MemoryStorage::new(&["records"]);
+        let storage = MemoryStorage::new(&["records"]).expect("valid memory storage families");
         let descriptor = RecordDescriptor::new([("id", ValueType::U64)]);
         let store = RecordStore::new(&storage, "records", &descriptor);
         let key = b"1".as_slice();

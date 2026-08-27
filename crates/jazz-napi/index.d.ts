@@ -14,6 +14,12 @@ export declare class JazzServer {
 export declare class NapiDb {
   insertEncoded(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Write
   updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, options?: UpdateOptions | undefined | null): Write
+  /**
+   * Binding-only entrypoint for typed partial-value updates. The public
+   * TypeScript API validates column-kind-specific descriptors before they
+   * reach this encoded boundary.
+   */
+  updateLargeValuesEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, mutations: JsonValue, updatedAtMs?: number | undefined | null): Write
   upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions | undefined | null): Write
   deleteEncoded(table: string, rowId: Uint8Array, options?: DeleteOptions | undefined | null): Write
   restoreEncoded(table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): Write

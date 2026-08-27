@@ -43,7 +43,7 @@ impl Database {
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families")).await?;
     /// # let mut batch = database.open_batch();
     /// # batch.insert("albums", vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)]);
     /// # batch.insert("albums", vec![Value::U64(2), Value::String("Blue Train".into()), Value::U64(1957)]);
@@ -94,7 +94,7 @@ impl Database {
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families")).await?;
     /// # let mut batch = database.open_batch();
     /// # batch.insert("albums", vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)]);
     /// # batch.insert("albums", vec![Value::U64(2), Value::String("Blue Train".into()), Value::U64(1957)]);

@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
+import { userIdentity } from "jazz-tools";
 import { startTestJwtIssuer, type TestJwtIssuerHandle } from "jazz-tools/testing";
 import {
   createServer,
@@ -14,6 +15,7 @@ const EXTERNAL_ISSUER = "https://todo-server.example.test";
 type Identity = {
   token: string;
   userId: string;
+  user: string;
 };
 
 type OwnedTodo = Todo & {
@@ -24,7 +26,7 @@ function createIdentity(jwtIssuer: TestJwtIssuerHandle, userId: string): Identit
   const token = jwtIssuer.jwtForUser(userId, {}, { issuer: EXTERNAL_ISSUER });
   const payload = JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString("utf8"));
   expect(payload).toMatchObject({ iss: EXTERNAL_ISSUER, sub: userId });
-  return { token, userId };
+  return { token, userId, user: userIdentity(EXTERNAL_ISSUER, userId) };
 }
 
 function authorization(identity: Identity): Record<string, string> {
@@ -110,7 +112,7 @@ describe("Todo Server request authentication", () => {
     });
     expect(createResponse.status).toBe(201);
     const created = (await createResponse.json()) as OwnedTodo;
-    expect(created.owner_id).toBe(alice.userId);
+    expect(created.owner_id).toBe(alice.user);
 
     const aliceListResponse = await fetch(`${baseUrl}/todos`, {
       headers: authorization(alice),

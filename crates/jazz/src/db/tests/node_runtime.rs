@@ -1125,7 +1125,7 @@ fn prepared_server_read_binds_text_session_user_id_per_session() {
     // this exercises the disjunctive policy plan rather than only the
     // scalar-equality fast path.
     let read_policy = PublicPolicyExpr::or(vec![
-        public_session_eq("ownerId", &["user_id"]),
+        public_session_eq("ownerId", &["claims", "sub"]),
         PublicPolicyExpr::IsNull {
             column: "ownerId".to_owned(),
         },
@@ -1144,13 +1144,19 @@ fn prepared_server_read_binds_text_session_user_id_per_session() {
     let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
     let alice_subject = "alice-session-subject";
     let bob_subject = "bob-session-subject";
-    server.set_identity_claims(
+    server.set_test_provider_claims(
         alice,
-        BTreeMap::from([(String::from("user_id"), Value::String(alice_subject.into()))]),
+        BTreeMap::from([(
+            crate::query::provider_claim_key("sub"),
+            Value::String(alice_subject.into()),
+        )]),
     );
-    server.set_identity_claims(
+    server.set_test_provider_claims(
         bob,
-        BTreeMap::from([(String::from("user_id"), Value::String(bob_subject.into()))]),
+        BTreeMap::from([(
+            crate::query::provider_claim_key("sub"),
+            Value::String(bob_subject.into()),
+        )]),
     );
 
     let seeded = server
@@ -1233,7 +1239,7 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
         server_writer_transport,
         alice,
         BTreeMap::from([(
-            "user_id".to_owned(),
+            crate::query::provider_claim_key("sub"),
             Value::String(alice.test_uuid().to_string()),
         )]),
     );
@@ -1259,7 +1265,7 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
         server_alice_transport,
         alice,
         BTreeMap::from([(
-            "user_id".to_owned(),
+            crate::query::provider_claim_key("sub"),
             Value::String(alice.test_uuid().to_string()),
         )]),
     );
@@ -1289,7 +1295,7 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
         server_reader_transport,
         bob,
         BTreeMap::from([(
-            "user_id".to_owned(),
+            crate::query::provider_claim_key("sub"),
             Value::String(bob.test_uuid().to_string()),
         )]),
     );
@@ -1643,9 +1649,8 @@ fn repeated_identical_session_claims_emit_once_on_a_live_connection() {
     let (client_transport, mut upstream_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let claims = BTreeMap::from([("role".to_owned(), Value::String("reader".to_owned()))]);
-
-    client.set_identity_claims(client_author, claims.clone());
-    client.set_identity_claims(client_author, claims);
+    client.set_test_provider_claims(client_author, claims.clone());
+    client.set_test_provider_claims(client_author, claims);
     client.tick().unwrap();
 
     assert!(matches!(
@@ -1667,19 +1672,23 @@ fn current_session_claims_reach_late_and_reconnected_upstreams() {
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     let claims = BTreeMap::from([("role".to_owned(), Value::String("reader".to_owned()))]);
+    let admitted_claims = BTreeMap::from([(
+        crate::query::provider_claim_key("role"),
+        Value::String("reader".to_owned()),
+    )]);
 
-    client.set_identity_claims(client_author, claims.clone());
+    client.set_test_provider_claims(client_author, claims.clone());
     let (first_transport, mut first_upstream_transport) = duplex();
     let first_upstream = crate::db::block_on(client.connect_upstream(first_transport));
     client.tick().unwrap();
     assert!(matches!(
         first_upstream_transport.try_recv(),
         Some(SyncMessage::SessionClaims { identity, claims: received })
-            if identity == client_author && received == claims
+            if identity == client_author && received == admitted_claims
     ));
     assert!(first_upstream_transport.try_recv().is_none());
 
-    client.set_identity_claims(client_author, claims.clone());
+    client.set_test_provider_claims(client_author, claims.clone());
     assert!(client.detach_connection(&first_upstream));
 
     let (reconnected_transport, mut reconnected_upstream_transport) = duplex();
@@ -1688,7 +1697,7 @@ fn current_session_claims_reach_late_and_reconnected_upstreams() {
     assert!(matches!(
         reconnected_upstream_transport.try_recv(),
         Some(SyncMessage::SessionClaims { identity, claims: received })
-            if identity == client_author && received == claims
+            if identity == client_author && received == admitted_claims
     ));
     assert!(reconnected_upstream_transport.try_recv().is_none());
 }
@@ -1702,24 +1711,32 @@ fn changed_session_claims_advance_delivery_after_an_identical_call() {
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let reader = BTreeMap::from([("role".to_owned(), Value::String("reader".to_owned()))]);
     let writer = BTreeMap::from([("role".to_owned(), Value::String("writer".to_owned()))]);
+    let reader_admitted = BTreeMap::from([(
+        crate::query::provider_claim_key("role"),
+        Value::String("reader".to_owned()),
+    )]);
+    let writer_admitted = BTreeMap::from([(
+        crate::query::provider_claim_key("role"),
+        Value::String("writer".to_owned()),
+    )]);
 
-    client.set_identity_claims(client_author, reader.clone());
+    client.set_test_provider_claims(client_author, reader.clone());
     client.tick().unwrap();
     assert!(matches!(
         upstream_transport.try_recv(),
-        Some(SyncMessage::SessionClaims { claims, .. }) if claims == reader
+        Some(SyncMessage::SessionClaims { claims, .. }) if claims == reader_admitted
     ));
 
-    client.set_identity_claims(client_author, reader);
+    client.set_test_provider_claims(client_author, reader);
     client.tick().unwrap();
     assert!(upstream_transport.try_recv().is_none());
 
-    client.set_identity_claims(client_author, writer.clone());
+    client.set_test_provider_claims(client_author, writer.clone());
     client.tick().unwrap();
     assert!(matches!(
         upstream_transport.try_recv(),
         Some(SyncMessage::SessionClaims { identity, claims })
-            if identity == client_author && claims == writer
+            if identity == client_author && claims == writer_admitted
     ));
     assert!(upstream_transport.try_recv().is_none());
 }
