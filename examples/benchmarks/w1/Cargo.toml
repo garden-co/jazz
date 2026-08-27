@@ -1,0 +1,17 @@
+[package]
+name = "jazz-example-benchmark-w1"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+jazz = { workspace = true, features = ["testing"] }
+jazz-storage-rocksdb.workspace = true
+tempfile = "3.27.0"
+
+[dev-dependencies]
+divan = { workspace = true }
+
+[[bench]]
+name = "ahead_current"
+harness = false

@@ -326,6 +326,7 @@ pub struct StorageReadMetrics {
     pub total: StorageReadBucket,
     pub history_rows: StorageReadBucket,
     pub history_indexes: StorageReadBucket,
+    pub ahead_current_rows: StorageReadBucket,
     pub global_current_rows: StorageReadBucket,
     pub global_current_indexes: StorageReadBucket,
     pub register_global_current_rows: StorageReadBucket,
@@ -359,6 +360,9 @@ impl StorageReadMetrics {
         match destination {
             StorageReadDestination::HistoryRows => self.history_rows.record(reads, ranges),
             StorageReadDestination::HistoryIndexes => self.history_indexes.record(reads, ranges),
+            StorageReadDestination::AheadCurrentRows => {
+                self.ahead_current_rows.record(reads, ranges)
+            }
             StorageReadDestination::GlobalCurrentRows => {
                 self.global_current_rows.record(reads, ranges)
             }
@@ -683,6 +687,7 @@ pub(super) enum StorageWriteDestination {
 pub(super) enum StorageReadDestination {
     HistoryRows,
     HistoryIndexes,
+    AheadCurrentRows,
     GlobalCurrentRows,
     GlobalCurrentIndexes,
     RegisterGlobalCurrentRows,
@@ -764,6 +769,11 @@ pub(super) fn storage_read_destination(cf: &str, key: &[u8]) -> StorageReadDesti
 }
 
 pub(super) fn storage_table_read_destination(table: &str) -> StorageReadDestination {
+    if table.starts_with("jazz_")
+        && (table.ends_with("_ahead_current") || table.ends_with("_register_ahead_current"))
+    {
+        return StorageReadDestination::AheadCurrentRows;
+    }
     match storage_table_write_destination(table) {
         StorageWriteDestination::HistoryRows => StorageReadDestination::HistoryRows,
         StorageWriteDestination::GlobalCurrentRows => StorageReadDestination::GlobalCurrentRows,

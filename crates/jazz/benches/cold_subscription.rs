@@ -37,18 +37,6 @@ fn main() {
             bench.emit_result(depth, ahead, DurabilityTier::Local, local);
         }
     }
-
-    // Periodic-status workloads retain many versions of a fixed current row
-    // set while disconnected or only Edge-accepted. Keep this curve separate
-    // from `pending_sizes`, which deliberately models distinct pending rows.
-    for depth in hot_pending_depths() {
-        for tier in [DurabilityTier::Local, DurabilityTier::Edge] {
-            let mut bench = ColdSubscriptionBench::new();
-            bench.seed_hot_pending_history(depth, tier);
-            let elapsed = bench.current_rows_elapsed(tier);
-            bench.emit_hot_pending_result(depth, tier, elapsed);
-        }
-    }
 }
 
 #[allow(dead_code)]
@@ -59,17 +47,6 @@ pub(crate) fn correctness_smoke() {
     let _ = bench.current_rows_update_elapsed(DurabilityTier::Global);
     let _ = bench.current_rows_update_elapsed(DurabilityTier::Local);
     current_state_history_depth_contract();
-    hot_pending_history_contract();
-}
-
-fn hot_pending_history_contract() {
-    for tier in [DurabilityTier::Local, DurabilityTier::Edge] {
-        let mut bench = ColdSubscriptionBench::new();
-        bench.seed_hot_pending_history(3, tier);
-        let rows =
-            block_on(bench.core_mut().current_rows(TABLE, tier)).expect("hot pending current rows");
-        assert_eq!(rows.len(), 1, "{tier:?} hot pending winner count");
-    }
 }
 
 /// An ordinary current-state subscriber must receive and materialize only the
@@ -333,58 +310,6 @@ impl ColdSubscriptionBench {
         assert_eq!(rows.len(), ahead + 1);
     }
 
-    fn seed_hot_pending_history(&mut self, depth: usize, tier: DurabilityTier) {
-        let mut parent = None;
-        for idx in 0..depth {
-            let mut commit =
-                MergeableCommit::new(TABLE, row(), 20_000_000 + idx as u64).cells(cells(idx));
-            if let Some(parent_tx_id) = parent {
-                commit = commit.parents(vec![parent_tx_id]);
-            }
-            let publication =
-                block_on(self.core_mut().commit_mergeable(commit)).expect("hot pending commit");
-            let tx_id = publication.tx_id();
-            block_on(self.core_mut().persist_and_settle_transaction(publication))
-                .expect("persist hot pending commit");
-            if tier == DurabilityTier::Edge {
-                block_on(self.core_mut().apply_fate_update(
-                    tx_id,
-                    Fate::Accepted,
-                    None,
-                    Some(DurabilityTier::Edge),
-                ))
-                .expect("edge-accept hot pending commit");
-            }
-            parent = Some(tx_id);
-        }
-
-        let rows =
-            block_on(self.core_mut().current_rows(TABLE, tier)).expect("hot pending current rows");
-        assert_eq!(rows.len(), 1);
-    }
-
-    fn current_rows_elapsed(&mut self, tier: DurabilityTier) -> std::time::Duration {
-        reset_phase_counters(&mut [self.core_mut()]);
-        let start = Instant::now();
-        let rows =
-            block_on(self.core_mut().current_rows(TABLE, tier)).expect("hot pending current rows");
-        assert_eq!(rows.len(), 1);
-        start.elapsed()
-    }
-
-    fn emit_hot_pending_result(
-        &self,
-        depth: usize,
-        tier: DurabilityTier,
-        elapsed: std::time::Duration,
-    ) {
-        let mut fields = phase_fields("hot_pending_current_rows", elapsed.as_micros());
-        fields.insert("hot_pending_depth".to_owned(), serde_json::json!(depth));
-        insert_durability_tier(&mut fields, tier);
-        insert_node_metrics(&mut fields, "core", self.core());
-        emit_json_line("cold_subscription", fields);
-    }
-
     fn current_rows_update_elapsed(&mut self, tier: DurabilityTier) -> std::time::Duration {
         reset_phase_counters(&mut [self.core_mut()]);
         let mut peer = PeerState::new();
@@ -451,10 +376,6 @@ fn depths() -> Vec<usize> {
 
 fn pending_sizes() -> Vec<usize> {
     csv_usizes("JAZZ_PENDING_SIZES", "0,10,100")
-}
-
-fn hot_pending_depths() -> Vec<usize> {
-    csv_usizes("JAZZ_HOT_PENDING_DEPTHS", "100,1000,10000")
 }
 
 fn schema() -> JazzSchema {
