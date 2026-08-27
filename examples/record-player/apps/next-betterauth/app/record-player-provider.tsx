@@ -12,18 +12,29 @@ export function RecordPlayerProvider({ children }: { children: React.ReactNode }
   const { data: session, isPending } = authClient.useSession();
   const principal = session?.user.id;
   const [jwt, setJwt] = useState<string | null>(null);
+  const [tokenError, setTokenError] = useState<string | null>(null);
+  const [tokenAttempt, setTokenAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     setJwt(null);
+    setTokenError(null);
     if (!principal) return;
-    void getJwtFromBetterAuth().then((token) => {
-      if (!cancelled) setJwt(token ?? null);
-    });
+    void getJwtFromBetterAuth()
+      .then((token) => {
+        if (cancelled) return;
+        if (token) setJwt(token);
+        else setTokenError("Better Auth did not provide a Jazz session token.");
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setTokenError(error instanceof Error ? error.message : "Could not start Jazz.");
+        }
+      });
     return () => {
       cancelled = true;
     };
-  }, [principal]);
+  }, [principal, tokenAttempt]);
 
   const config = useMemo<DbConfig | null>(
     () => (jwt ? { appId, env: "dev", serverUrl, jwtToken: jwt } : null),
@@ -32,6 +43,14 @@ export function RecordPlayerProvider({ children }: { children: React.ReactNode }
 
   if (isPending) return <p>Preparing your RecordPlayer…</p>;
   if (!principal) return <SignIn />;
+  if (tokenError) {
+    return (
+      <section>
+        <p role="alert">Could not connect RecordPlayer: {tokenError}</p>
+        <button onClick={() => setTokenAttempt((attempt) => attempt + 1)}>Retry</button>
+      </section>
+    );
+  }
   if (!config) return <p>Connecting RecordPlayer…</p>;
 
   return (

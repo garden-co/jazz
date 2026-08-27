@@ -137,4 +137,35 @@ describe("RecordPlayer Better Auth bridge", () => {
     expect(container.querySelector("[data-jazz-jwt]")).toBeNull();
     expect(container.textContent).toContain("Sign in to RecordPlayer");
   });
+
+  it("surfaces a missing token and retries rather than connecting forever", async () => {
+    auth.token
+      .mockImplementationOnce(async () => null)
+      .mockImplementationOnce(async () => "jazz-jwt");
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <RecordPlayerProvider>
+          <RecordPlayerClient />
+        </RecordPlayerProvider>,
+      );
+    });
+
+    await waitFor(
+      () =>
+        container?.textContent?.includes("Better Auth did not provide a Jazz session token.") ??
+        false,
+      "expected a missing-token error instead of a permanent connecting state",
+    );
+    await act(async () => {
+      container?.querySelector("button")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await waitFor(
+      () => container?.querySelector("[data-jazz-jwt='jazz-jwt']") !== null,
+      "expected retry to mount Jazz after a token becomes available",
+    );
+  });
 });

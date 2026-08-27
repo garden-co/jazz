@@ -84,9 +84,9 @@ describe("RecordPlayer scenario receipt", () => {
       { column: "ordinal", kind: "full" },
       { column: "duration_ms", kind: "full" },
     ]);
-    expect(runtimeQuery.select_columns.map((selection) => selection.column)).not.toContain(
-      "audio_bytes",
-    );
+    expect(
+      runtimeQuery.select_columns.map((selection: { column: string }) => selection.column),
+    ).not.toContain("audio_bytes");
     expect(runtimeQuery.order_by).toEqual([{ column: "ordinal", direction: "Asc" }]);
     expect(runtimeQuery.limit).toBe(ALBUM_TRACK_LIMIT);
   });

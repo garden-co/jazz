@@ -2160,6 +2160,7 @@ version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
  "jazz",
+ "serde_json",
 ]
 
 [[package]]

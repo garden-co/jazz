@@ -16,6 +16,7 @@ type BenchDb = Db<MemoryStorage>;
 pub struct Fixture {
     db: BenchDb,
     coverflow: PreparedQuery,
+    track_metadata: PreparedQuery,
     playlist_window: PreparedQuery,
 }
 
@@ -58,17 +59,22 @@ impl Fixture {
                 );
             }
             let track = row_id(3, index);
-            insert(
-                &db,
-                "tracks",
-                track,
-                BTreeMap::from([
-                    ("album_id".into(), Value::Uuid(album.0)),
-                    ("title".into(), Value::String(format!("Track {index:05}"))),
-                    ("ordinal".into(), Value::I32((index % 8) as i32)),
-                    ("duration_ms".into(), Value::I32(180_000)),
-                ]),
-            );
+            let mut track_cells = BTreeMap::from([
+                ("album_id".into(), Value::Uuid(album.0)),
+                ("title".into(), Value::String(format!("Track {index:05}"))),
+                ("ordinal".into(), Value::I32((index % 8) as i32)),
+                ("duration_ms".into(), Value::I32(180_000)),
+            ]);
+            // The metadata workload must not accidentally depend on a small
+            // scalar fixture: the first album carries realistic nullable audio
+            // bytes while its query projects only metadata.
+            if index < 8 {
+                track_cells.insert(
+                    "audio_bytes".into(),
+                    Value::Nullable(Some(Box::new(Value::Bytes(vec![0x52; 64 * 1024])))),
+                );
+            }
+            insert(&db, "tracks", track, track_cells);
             insert(
                 &db,
                 "playlist_entries",
@@ -96,9 +102,19 @@ impl Fixture {
                     .limit(16),
             )
             .expect("prepare playlist window");
+        let track_metadata = db
+            .prepare_query(
+                &Query::from("tracks")
+                    .filter(eq(col("album_id"), lit(row_id(2, 0).0)))
+                    .order_by("ordinal", OrderDirection::Asc)
+                    .limit(32)
+                    .select(["album_id", "title", "ordinal", "duration_ms"]),
+            )
+            .expect("prepare metadata-only track query");
         Self {
             db,
             coverflow,
+            track_metadata,
             playlist_window,
         }
     }
@@ -110,6 +126,40 @@ impl Fixture {
             .read(&self.playlist_window)
             .expect("read playlist window")
             .len()
+    }
+
+    pub fn track_metadata_count(&self) -> usize {
+        self.db
+            .read(&self.track_metadata)
+            .expect("read track metadata")
+            .len()
+    }
+
+    pub fn track_metadata_projection(&self) -> &[String] {
+        self.track_metadata
+            .shape()
+            .query()
+            .select
+            .as_deref()
+            .expect("metadata query is projected")
+    }
+
+    pub fn indexed_access_paths() -> BTreeMap<String, Vec<String>> {
+        schema()
+            .public_schema()
+            .iter()
+            .filter_map(|(name, table)| {
+                table.indexed_columns.as_ref().map(|columns| {
+                    (
+                        name.as_str().to_owned(),
+                        columns
+                            .iter()
+                            .map(|column| column.as_str().to_owned())
+                            .collect(),
+                    )
+                })
+            })
+            .collect()
     }
 }
 
@@ -128,6 +178,7 @@ fn schema() -> JazzSchema {
                     .column("title", ColumnType::Text)
                     .column("ordinal", ColumnType::Integer)
                     .column("duration_ms", ColumnType::Integer)
+                    .nullable_column("audio_bytes", ColumnType::Bytea)
                     .index_only(["album_id", "ordinal"]),
             )
             .table(TableSchemaBuilder::new("playlists").column("name", ColumnType::Text))

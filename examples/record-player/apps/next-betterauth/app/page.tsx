@@ -13,7 +13,7 @@ export default function Home() {
       <ul>
         <li>CoverFlow-style album browsing</li>
         <li>Ordered, collaboratively edited playlists</li>
-        <li>Partial audio buffering and durable playback position</li>
+        <li>Streaming audio uploads with metadata-first browsing</li>
       </ul>
       <RecordPlayerProvider>
         <RecordPlayerClient />
