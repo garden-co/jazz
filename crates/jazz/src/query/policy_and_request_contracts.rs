@@ -614,7 +614,9 @@ pub enum Operand {
 /// Public policy paths remain `session.claims[<name>]`.
 pub(crate) const PROVIDER_CLAIM_PREFIX: &str = "\0claims:";
 
-pub(crate) fn provider_claim_key(name: &str) -> String {
+/// Collision-proof storage key for a raw provider claim exposed as
+/// `session.claims[name]` in public policies.
+pub fn provider_claim_key(name: &str) -> String {
     provider_claim_operand_key(name)
 }
 

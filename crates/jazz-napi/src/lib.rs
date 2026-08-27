@@ -3686,7 +3686,16 @@ fn core_claims_from_json(
         None | Some(JsonValue::Null) => BTreeMap::new(),
         Some(JsonValue::Object(map)) => map
             .into_iter()
-            .map(|(key, value)| Ok((key, core_claim_value_from_json(value)?)))
+            .map(|(key, value)| {
+                Ok((
+                    if key == "authMode" {
+                        key
+                    } else {
+                        jazz::query::provider_claim_key(&key)
+                    },
+                    core_claim_value_from_json(value)?,
+                ))
+            })
             .collect::<napi::Result<BTreeMap<_, _>>>()?,
         Some(_) => {
             return Err(napi::Error::from_reason(

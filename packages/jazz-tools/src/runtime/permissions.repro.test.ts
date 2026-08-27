@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it, onTestFinished } from "vitest";
 import { schema as s } from "../index.js";
 import { definePermissions } from "../permissions/index.js";
+import { canonicalAuthorSubject } from "./author-id.js";
 import { deploy } from "../dev/catalogue.js";
 import { startLocalJazzServer } from "../testing/index.js";
 
@@ -43,6 +44,7 @@ const doubleRefReproApp = s.defineApp({
   team_entry: s.table({
     team_id: s.ref("teams"),
     target_id: s.ref("teams"),
+    user_id: s.string(),
     administrator: s.boolean(),
   }),
   dropdowns: s.table({
@@ -58,6 +60,9 @@ const doubleRefReproApp = s.defineApp({
 
 type ReproPermissions = Parameters<typeof definePermissions<typeof reproApp>>[1];
 
+const REPRO_ISSUER = "https://issuer.example";
+const reproUser = (subject: string) => canonicalAuthorSubject(REPRO_ISSUER, subject);
+
 function seedScenario(context: JazzContext): void {
   const db = context.db(reproApp);
 
@@ -66,7 +71,7 @@ function seedScenario(context: JazzContext): void {
     route_key: "base-direct",
     corporation_id: "corp",
     kind: "individual",
-    identity_key: "alice",
+    identity_key: reproUser("alice"),
     system_owned: false,
     archived: false,
   });
@@ -112,17 +117,17 @@ function seedScenario(context: JazzContext): void {
   });
 
   db.insert(reproApp.user_team_edges, {
-    user_id: "alice",
+    user_id: reproUser("alice"),
     team: directTeam.id,
     administrator: false,
   });
   db.insert(reproApp.user_team_edges, {
-    user_id: "alice",
+    user_id: reproUser("alice"),
     team: relationTeam.id,
     administrator: false,
   });
   db.insert(reproApp.user_team_edges, {
-    user_id: "alice",
+    user_id: reproUser("alice"),
     team: qualifiedTeam.id,
     administrator: false,
   });
@@ -261,7 +266,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
         route_key: "bob",
         corporation_id: "corp",
         kind: "individual",
-        identity_key: "bob",
+        identity_key: reproUser("bob"),
         system_owned: false,
         archived: false,
       })
@@ -285,12 +290,12 @@ describe("runtime permission repros for recursive gather and qualified predicate
 
     const bobDb = context.forSession(
       {
-        user_id: "bob",
+        user_id: reproUser("bob"),
         claims: {
           team_ids: [bobTeam.id],
           admin_team_ids: [],
         },
-        issuer: "https://issuer.example",
+        issuer: REPRO_ISSUER,
         authMode: "external",
       },
       reproApp,
@@ -398,7 +403,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
     const dataRoot = await mkdtemp(join(tmpdir(), "jazz-double-ref-permissions-repro-"));
     const dataPath = join(dataRoot, "runtime.db");
     const permissions = definePermissions(doubleRefReproApp, ({ policy, session }) => {
-      const directTeams = policy.team_entry.where({ team_id: session.user }).hopTo("target");
+      const directTeams = policy.team_entry.where({ user_id: session.user }).hopTo("target");
       const reachableTeams = policy.teams.gather({
         start: directTeams,
         step: ({ current }) =>
@@ -446,11 +451,13 @@ describe("runtime permission repros for recursive gather and qualified predicate
     db.insert(doubleRefReproApp.team_entry, {
       team_id: userTeam.id,
       target_id: directTeam.id,
+      user_id: reproUser(userTeam.id),
       administrator: false,
     });
     db.insert(doubleRefReproApp.team_entry, {
       team_id: directTeam.id,
       target_id: nestedTeam.id,
+      user_id: reproUser("unused"),
       administrator: false,
     });
     db.insert(doubleRefReproApp.dropdowns_access_edges, {
@@ -518,7 +525,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
       route_key: "alice",
       corporation_id: "corp",
       kind: "individual",
-      identity_key: "alice",
+      identity_key: reproUser("alice"),
       system_owned: false,
       archived: false,
     });
@@ -527,7 +534,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
       route_key: "bob",
       corporation_id: "corp",
       kind: "individual",
-      identity_key: "bob",
+      identity_key: reproUser("bob"),
       system_owned: false,
       archived: false,
     });
@@ -536,7 +543,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
       route_key: "intern",
       corporation_id: "corp",
       kind: "individual",
-      identity_key: "intern",
+      identity_key: reproUser("intern"),
       system_owned: false,
       archived: false,
     });
@@ -598,7 +605,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
           team_ids: [aliceTeam.id, opsTeam.id, regionalTeam.id, internTeam.id],
           admin_team_ids: [],
         },
-        issuer: "https://issuer.example",
+        issuer: REPRO_ISSUER,
         authMode: "external",
       },
       bob: {
@@ -607,7 +614,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
           team_ids: [bobTeam.id],
           admin_team_ids: [],
         },
-        issuer: "https://issuer.example",
+        issuer: REPRO_ISSUER,
         authMode: "external",
       },
       intern: {
@@ -616,7 +623,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
           team_ids: [internTeam.id, regionalTeam.id, aliceTeam.id, opsTeam.id],
           admin_team_ids: [],
         },
-        issuer: "https://issuer.example",
+        issuer: REPRO_ISSUER,
         authMode: "external",
       },
     } as const;
