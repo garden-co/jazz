@@ -2347,11 +2347,8 @@ mod tests {
         // this read, later pump calls with no client work would never observe
         // that already-queued response.
         if sent == 0 {
-            // On a current-thread runtime the test-side pump can be re-polled
-            // before the route task that queued the response. Yield once so
-            // an idle read observes the already-scheduled server work.
-            tokio::task::yield_now().await;
-            received += receive_core_websocket_transport_push_once(client, ws).await;
+            received +=
+                receive_core_websocket_transport_push_until_deadline(client, ws).await;
         }
         (sent, received)
     }
@@ -2405,6 +2402,21 @@ mod tests {
             }
         }
         received
+    }
+
+    async fn receive_core_websocket_transport_push_until_deadline(
+        client: &TestClient,
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> usize {
+        let deadline = tokio::time::Instant::now() + WS_PUMP_DEADLINE;
+        loop {
+            let received = receive_core_websocket_transport_push_once(client, ws).await;
+            if received > 0 || tokio::time::Instant::now() >= deadline {
+                return received;
+            }
+        }
     }
 
     /// Complete the protocol's catalogue/session setup before a route test
