@@ -20,12 +20,15 @@ env:
 
 jobs:
   build:
+    # `preview-build` publishes a package preview using OIDC in the downstream
+    # job. Labels do not make fork code trusted, so every path through this
+    # reusable build is restricted to same-repository pull requests.
     if: >-
       ${{
-        contains(github.event.pull_request.labels.*.name, 'preview-build') ||
+        github.event.pull_request.head.repo.full_name == github.repository &&
         (
-          contains(github.event.pull_request.labels.*.name, 'rn-preview-release') &&
-          github.event.pull_request.head.repo.full_name == github.repository
+          contains(github.event.pull_request.labels.*.name, 'preview-build') ||
+          contains(github.event.pull_request.labels.*.name, 'rn-preview-release')
         )
       }}
     uses: ./.github/workflows/build-jazz-packages.yml
@@ -45,12 +48,10 @@ jobs:
       ${{
         always() &&
         needs.build.result == 'success' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
         (
           contains(github.event.pull_request.labels.*.name, 'preview-build') ||
-          (
-            contains(github.event.pull_request.labels.*.name, 'rn-preview-release') &&
-            github.event.pull_request.head.repo.full_name == github.repository
-          )
+          contains(github.event.pull_request.labels.*.name, 'rn-preview-release')
         )
       }}
     needs: [build]
