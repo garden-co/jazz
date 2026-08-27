@@ -30,7 +30,7 @@ api.post("/api/todos", async (c) => {
   const { value: todo } = db.insert(schemaApp.todos, {
     title,
     done: false,
-    owner_id: session.user_id,
+    owner_id: session.user,
   });
 
   return c.json(todo, 201);

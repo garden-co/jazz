@@ -1346,7 +1346,7 @@ impl RelayWorker {
             .collect::<Vec<_>>();
         let db = block_on(Db::open(DbConfig {
             schema: self.schema.clone(),
-            storage: MemoryStorage::new(&refs),
+            storage: MemoryStorage::new(&refs).expect("valid memory storage families"),
             identity,
             id_source: None,
         }))

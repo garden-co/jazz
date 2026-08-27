@@ -45,7 +45,7 @@ jobs:
         run: cargo install cargo-codspeed --version 5.0.1 --locked
 
       - name: Build example benchmark suites
-        run: cargo codspeed build --package jazz-example-benchmark-smoke --package jazz-example-benchmark-w1 --package jazz-example-big-label-benchmark --package jazz-example-band-chat-benchmark --package jazz-example-world-tour-benchmark --bench fixture --bench ahead_current --bench loads --bench queries
+        run: cargo codspeed build --package jazz-example-benchmark-smoke --package jazz-example-benchmark-w1 --package jazz-example-big-label-benchmark --package jazz-example-band-chat-benchmark --package jazz-example-world-tour-benchmark --bench fixture --bench ahead_current --bench loads --bench queries --bench fast_resume
 
       - name: Run example benchmark suites
         uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3

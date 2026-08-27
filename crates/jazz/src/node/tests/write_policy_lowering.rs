@@ -31,7 +31,7 @@ fn assert_lowered_write_policy_case(
         claims
             .entry("sub".to_owned())
             .or_insert_with(|| Value::Uuid(identity.test_uuid()));
-        core.set_session_claims(identity, claims);
+        core.set_test_provider_claims(identity, claims);
     }
     let (cells, insert_candidate) = match operation {
         WritePolicyOperation::Insert => (
@@ -115,7 +115,7 @@ fn lowered_write_policies_normalize_integer_widths_for_equality_in_and_contains(
     ));
     let table = schema.tables[0].clone();
     let (_dir, mut core) = open_node_with_schema(node(0x72), schema);
-    core.set_session_claims(
+    core.set_test_provider_claims(
         identity,
         BTreeMap::from([
             ("signed_seven".to_owned(), Value::I64(7)),
@@ -131,14 +131,14 @@ fn lowered_write_policies_normalize_integer_widths_for_equality_in_and_contains(
     for (label, policy, expected) in [
         (
             "equality matches I64 claim against U64 candidate",
-            Query::from("numbers").filter(eq(col("number"), claim("signed_seven"))),
+            Query::from("numbers").filter(eq(col("number"), claim(crate::query::provider_claim_key("signed_seven")))),
             true,
         ),
         (
             "IN matches I64 claim against U64 candidate",
             Query::from("numbers").filter(crate::query::Predicate::In(
                 col("number"),
-                vec![claim("signed_seven")],
+                vec![claim(crate::query::provider_claim_key("signed_seven"))],
             )),
             true,
         ),
@@ -146,13 +146,13 @@ fn lowered_write_policies_normalize_integer_widths_for_equality_in_and_contains(
             "contains matches I64 claim against I32 array member",
             Query::from("numbers").filter(crate::query::contains(
                 col("allowed"),
-                claim("signed_seven"),
+                claim(crate::query::provider_claim_key("signed_seven")),
             )),
             true,
         ),
         (
             "float and integer remain type-exact",
-            Query::from("numbers").filter(eq(col("floating"), claim("signed_seven"))),
+            Query::from("numbers").filter(eq(col("floating"), claim(crate::query::provider_claim_key("signed_seven")))),
             false,
         ),
     ] {
@@ -180,7 +180,7 @@ fn lowered_write_policies_normalize_integer_widths_for_equality_in_and_contains(
         "U64 above i64::MAX remains exact",
         WritePolicyOperation::Insert,
         &table,
-        &Query::from("numbers").filter(eq(col("number"), claim("large"))),
+        &Query::from("numbers").filter(eq(col("number"), claim(crate::query::provider_claim_key("large")))),
         row(0x74),
         Some(&large_candidate),
         None,
@@ -294,7 +294,7 @@ fn lowered_write_policy_operation_matrix() {
         "marker".to_owned(),
         Value::String("changed".to_owned()),
     )]);
-    let owner_policy = Query::from("children").filter(eq(col("owner"), claim("sub")));
+    let owner_policy = Query::from("children").filter(eq(col("owner"), claim(crate::query::provider_claim_key("sub"))));
     for (label, operation, candidate, old_row, identity, expected) in [
         (
             "filter insert allowed",
@@ -384,7 +384,7 @@ fn lowered_write_policy_operation_matrix() {
     }
 
     let optional_owner_policy =
-        Query::from("children").filter(eq(col("optional_owner"), claim("sub")));
+        Query::from("children").filter(eq(col("optional_owner"), claim(crate::query::provider_claim_key("sub"))));
     let mut optional_owner = allowed.clone();
     optional_owner.insert(
         "optional_owner".to_owned(),
@@ -411,15 +411,15 @@ fn lowered_write_policy_operation_matrix() {
         );
     }
 
-    core.set_session_claims(
+    core.set_test_provider_claims(
         owner,
         BTreeMap::from([("role".to_owned(), Value::String("writer".to_owned()))]),
     );
-    core.set_session_claims(
+    core.set_test_provider_claims(
         other,
         BTreeMap::from([("role".to_owned(), Value::String("reader".to_owned()))]),
     );
-    let session_policy = Query::from("children").filter(eq(col("marker"), claim("role")));
+    let session_policy = Query::from("children").filter(eq(col("marker"), claim(crate::query::provider_claim_key("role"))));
     let session_candidate = write_policy_child_cells(owner, parent, access, "writer");
     for (label, identity, expected) in [
         ("session claim allowed", owner, true),
@@ -443,7 +443,7 @@ fn lowered_write_policy_operation_matrix() {
         "access",
         "id",
         "access_id",
-        [eq(col("member"), claim("sub"))],
+        [eq(col("member"), claim(crate::query::provider_claim_key("sub")))],
     );
     for (label, identity, expected) in [
         ("join allowed", owner, true),
@@ -466,7 +466,7 @@ fn lowered_write_policy_operation_matrix() {
     let branch_policy = Query::from("children")
         .filter(crate::query::Predicate::Any(Vec::new()))
         .policy_branch(crate::query::PolicyBranch::single_alternative_from_query(
-            Query::from("children").filter(eq(col("owner"), claim("sub"))),
+            Query::from("children").filter(eq(col("owner"), claim(crate::query::provider_claim_key("sub")))),
         ));
     for (label, candidate, expected) in [
         ("policy branch allowed", &allowed, true),

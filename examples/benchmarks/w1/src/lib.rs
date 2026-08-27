@@ -57,7 +57,7 @@ impl Fixture<MemoryStorage> {
             comments,
             activity_events,
             schema,
-            MemoryStorage::new(&family_refs),
+            MemoryStorage::new(&family_refs).expect("valid memory storage families"),
             WriteIdentity::Database,
         )
     }
@@ -79,7 +79,7 @@ impl Fixture<MemoryStorage> {
             comments,
             activity_events,
             schema,
-            MemoryStorage::new(&family_refs),
+            MemoryStorage::new(&family_refs).expect("valid memory storage families"),
             WriteIdentity::Session(policy_bench_identity()),
         )
     }

@@ -395,21 +395,74 @@ version containing descriptors.
 ## 19.8 Binding and public API consequences
 
 Schemas continue to declare ordinary string, bytes and JSON columns. Small and
-large values use the same idiomatic full-value API. Query options may request
-byte slices, UTF-16 text slices or JSON pointers. Mutation options may express
-append or splice operations; complete primitives replace complete values.
+large values use the same idiomatic full-value API. The TypeScript public
+surface is the typed query and mutation DSL; it MUST NOT expose imperative
+large-value read, append, or splice helpers on `Db` or `JazzClient`.
 
-The first high-level surface addresses partial operations by ordinary
-`(table, row, column)` identity: Rust `Db` exposes `read_value_range`,
-`read_text_utf16_range`, `read_json_pointer`, `append_value`, and
-`splice_value`; NAPI, WASM, the native runtime adapter, and `JazzClient` expose
-the corresponding camel-case methods. These methods authorize the row before
-resolving its private physical cell. Updating another column inherits the exact
-existing descriptor rather than hydrating and re-preparing it.
+A `select` object may request one partial scalar per selected field:
 
-Rust exposes explicit byte and UTF-16 text coordinates. TypeScript exposes
-UTF-16 text coordinates and byte coordinates for bytes. Invalid UTF-8 boundaries
-and UTF-16 positions splitting surrogate pairs fail rather than round.
+```ts
+app.things.where({ id: thingId }).select({
+  byteField: { from: 1_000_000, to: 2_000_000 },
+  textField: { from: 4, to: 124 },
+  textFieldUtf8: { fromUtf8: 4, toUtf8: 67 },
+  jsonField: { at: "/someKey/11/otherKey" },
+});
+```
+
+Ranges are half-open `[from, to)`. Byte ranges apply only to bytes; `{from,to}`
+on text is in UTF-16 code units; `{fromUtf8,toUtf8}` opts into UTF-8 bytes.
+`{at}` applies only to JSON and is an RFC 6901 JSON Pointer. Results remain an
+ordinary `Uint8Array`, `string`, or decoded JSON subtree. Selecting a field by
+name (or omitting `select`) materializes the complete primitive as before.
+The query IR retains the descriptor now, and the binding validates and applies
+its public coordinate/pointer contract. Until exact per-terminal demand
+propagation is completed, the binding may obtain the selected carrier column
+and slice that value at the binding boundary; it must not resolve unrelated
+columns or treat that fallback as a chunk-demand model. Issue #2090 tracks
+replacing that temporary carrier fallback with exact terminal demand into
+Groove. It does not gate the executability or correctness of this public API.
+
+`Db.update` accepts ordinary replacements and an `applyDiffs` option. Both are
+one atomic mutation, but the same column MUST NOT appear in both inputs:
+
+```ts
+db.update(
+  app.things,
+  thingId,
+  { name: "renamed" },
+  {
+    applyDiffs: {
+      byteField: { within: bytePage, splices: [{ at: 4, delete: 3, insert: bytes }] },
+      textField: { within: textPage, splices: [{ at: 3, delete: 1, insert: "x" }] },
+      textFieldUtf8: { within: utf8Page, splices: [{ atUtf8: 3, deleteUtf8: 1, insert: "x" }] },
+      jsonField: { edits: [{ op: "set", at: "/someKey/11", value: next }] },
+    },
+  },
+);
+```
+
+`within` is the same range descriptor used by the read and makes splice
+coordinates relative to its beginning. Splices are applied sequentially, so
+each later coordinate addresses the result of previous splices. A deletion
+MUST stay within the selected page; insertion at its end is allowed. Text
+defaults to UTF-16; UTF-8 splice fields opt in explicitly. Bounds, integer
+overflow, UTF-8 boundaries, and UTF-16 surrogate splits fail rather than round.
+JSON edits use RFC 6901 pointer escaping, fail for a missing path or incompatible
+schema/kind/nullability, and lower to Groove's ordinary binary edit-tail model;
+they do not create a JSON-specific storage model. All fields in one `update`
+call, including `applyDiffs`, commit atomically. There is deliberately no page staleness/CAS promise in this
+API revision.
+
+Object-form partial selections apply to the root query only in this revision.
+Included relations may project complete fields by name, but object-form partial
+selections in an include builder fail explicitly until per-terminal demand
+propagation reaches structured relation outputs (#2090). They MUST NOT silently
+fall back to returning the complete primitive.
+
+The Rust/Jazz binding layer may retain internal primitives at its translation
+boundary, but authorization occurs before resolving a private physical cell and
+unmodified columns inherit their exact descriptor without hydration.
 
 Native Rust additionally exposes `Db::insert_streaming_value`. The caller
 supplies the ordinary non-streamed row cells, the target column, and a

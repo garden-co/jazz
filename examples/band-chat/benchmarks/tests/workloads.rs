@@ -1,4 +1,16 @@
-use jazz_example_band_chat_benchmark::{Fixture, expected_counts};
+use jazz_example_band_chat_benchmark::{FastResumeFixture, Fixture, expected_counts};
+
+#[test]
+fn caught_up_fast_resume_emits_no_membership_or_version_payload() {
+    for message_count in [100, 1_000] {
+        let mut fixture = FastResumeFixture::new(message_count);
+        let receipt = fixture.caught_up_fast_resume();
+        assert!(
+            receipt.is_caught_up_noop(),
+            "{message_count} messages leaked a caught-up resume payload: {receipt:?}"
+        );
+    }
+}
 
 #[test]
 fn representative_loads_have_exact_cardinality_and_order() {

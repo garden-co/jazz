@@ -336,13 +336,10 @@ export function encodeWebSocketPrelude(authJson: string, peerIdentity: Uint8Arra
 /**
  * Pick the logical author asserted by a client WebSocket connection.
  *
- * `peerIdentity` on a native runtime is also the identity that opened its
- * raw-core storage handle. Reserved first-party sessions intentionally cannot
- * use that public raw-core ingress, so that handle may instead have a private
- * runtime-host identity. A WebSocket is different: the server authenticates
- * its credential and compares the asserted identity with the resulting session
- * author. Derive that assertion from the credential's full issuer and subject
- * pair, never from a bare `sub` or the raw-core fallback.
+ * `peerIdentity` on a native runtime is the verified logical author that
+ * opened its raw-core storage handle. A WebSocket still derives the assertion
+ * from the credential's full issuer and subject pair: that makes the wire
+ * contract explicit and never relies on a bare `sub` or unrelated fallback.
  *
  * A credential without a usable session subject (for example an admin-only
  * connection) retains the caller's transport identity. It cannot accidentally

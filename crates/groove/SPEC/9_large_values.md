@@ -317,6 +317,21 @@ JSON pointer / structural parse demand
 sequential logical-byte cursor
 ```
 
+The Jazz query DSL maps its page descriptors directly to this vocabulary:
+byte `[from,to)` ranges, UTF-16 `[from,to)` text ranges, UTF-8 byte ranges for
+text, and RFC 6901 JSON-pointer demand. A range descriptor is a demand, not a
+materialized value or a storage API. Its coordinate system is validated before
+evaluation; text UTF-8 endpoints MUST be code-point boundaries and UTF-16
+endpoints MUST NOT split a surrogate pair. The result is exactly the requested
+logical primitive/subtree and exposes neither descriptor nor chunk details.
+
+For partial updates, Jazz lowers a page-relative sequential splice list into
+the ordinary bounded edit tail. Each splice is interpreted against the result
+of previous splices, and a deletion is valid only when it remains within the
+original selected page after translating that sequential coordinate. JSON
+pointer edits are likewise lowered to the same logical bytes/edit tail after
+RFC 6901 resolution; there is no JSON-specific mutable representation.
+
 Operators request only evidence needed to decide their own output:
 
 - equality first checks kind and authenticated metrics, then compares successive

@@ -61,7 +61,7 @@ fn sorted(mut values: Vec<(Vec<Value>, i64)>) -> Vec<(Vec<Value>, i64)> {
 
 #[futures_test::test]
 async fn incremental_ticks_converge_on_cycles() {
-    let storage = MemoryStorage::new(&["edges"]);
+    let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
     let mut db = Database::new(edges_schema(), storage).await.unwrap();
     let sub = db.subscribe_one_sink(reachability_graph()).await.unwrap();
     let _initial = sub.recv().unwrap();
@@ -91,7 +91,7 @@ async fn incremental_ticks_converge_on_cycles() {
 
 #[futures_test::test]
 async fn recompute_converges_on_cycles_at_subscribe() {
-    let storage = MemoryStorage::new(&["edges"]);
+    let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
     let mut db = Database::new(edges_schema(), storage).await.unwrap();
 
     let mut batch = db.open_batch();
@@ -113,7 +113,7 @@ async fn recompute_converges_on_cycles_at_subscribe() {
 
 #[futures_test::test]
 async fn retraction_recompute_converges_while_a_cycle_exists() {
-    let storage = MemoryStorage::new(&["edges"]);
+    let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
     let mut db = Database::new(edges_schema(), storage).await.unwrap();
     let sub = db.subscribe_one_sink(reachability_graph()).await.unwrap();
     let _initial = sub.recv().unwrap();

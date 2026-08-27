@@ -117,7 +117,5 @@ dependencies {
 if (isNewArchitectureEnabled()) {
   react {
     jsRootDir = file("../src/")
-    libraryName = "JazzRelaySpec"
-    codegenJavaPackageName = "com.jazzrn"
   }
 }

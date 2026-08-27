@@ -1,17 +1,10 @@
-use super::Error;
+use super::{Error, validate_physical_storage_name};
 
 const KEY_VERSION: u8 = 1;
-const MAX_COLUMN_FAMILY_LEN: usize = u16::MAX as usize;
 
 pub fn encode_column_family_key(cf: &str, key: &[u8]) -> Result<Vec<u8>, Error> {
+    validate_physical_storage_name(cf)?;
     let cf_bytes = cf.as_bytes();
-    if cf_bytes.len() > MAX_COLUMN_FAMILY_LEN {
-        return Err(Error::InvalidStorageKey(format!(
-            "column family name is too long: {} bytes",
-            cf_bytes.len()
-        )));
-    }
-
     let mut encoded = Vec::with_capacity(1 + 2 + cf_bytes.len() + key.len());
     encoded.push(KEY_VERSION);
     encoded.extend_from_slice(&(cf_bytes.len() as u16).to_be_bytes());

@@ -16,7 +16,7 @@ Invariant digest:
 - `INV-BVIEW-18`: Read and write policy MUST use ordinary branch columns and the same effective branch view as the operation; missing reference/policy evidence fails closed, and Jazz MUST NOT impose a built-in branch-row existence or lifecycle gate.
 - `INV-RLS-1`: A non-system commit unit MUST be rejected with Fate::Rejected(RejectionReason::AuthorizationDenied) and MUST NOT ingest accepted version rows when any version in the u...
 - `INV-RLS-2`: AuthorSubject::SYSTEM MUST bypass both read and write policy checks.
-- `INV-RLS-3`: Policy::owneronly(table, column) MUST compare the named column to claim("author"), where claim("author") is bound from the authenticated AuthorSubject, not from caller-provided q...
+- `INV-RLS-3`: Policy::owneronly(table, column) MUST compare the named column to claim("user"), where claim("user") is bound from the authenticated AuthorSubject, not from caller-provided q...
 - `INV-RLS-4`: A table policy MUST validate as a query shape rooted at the table that carries the policy.
 - `INV-RLS-5`: Downstream view emission for a non-system peer MUST only add result members, program facts, and version bundles whose relevant content/deletion versions pass that peer...
 - `INV-RLS-6`: Read-policy revocation MUST remove rows from future settled subscription result sets and MUST NOT redact previously delivered local copies from the receiving node.
@@ -45,10 +45,11 @@ Invariant digest:
   MUST resolve its stable physical table lineage back to the logical
   table/schema at the relevant frontier; shared deletion storage MUST NOT widen
   authority across tables.
-- `INV-RLS-23`: Jazz derives the reserved logical `session.author` and user
+- `INV-RLS-23`: Jazz derives the reserved logical `session.user` and user
   authorship from the exact trusted JWT subject pair `(iss, sub)`, represented
-  portably as canonical JSON `[iss,sub]`. Admitted provider claims including
-  `session.iss`, `session.sub`, and `session.user_id` retain their raw values.
+  portably as canonical JSON `[iss,sub]`. Raw provider claims remain exclusively
+  under `session.claims[<name>]`, including `session.claims["iss"]`,
+  `session.claims["sub"]`, and a provider claim named `user`.
   Jazz MUST NOT normalize either component, hash the pair into a UUID, or admit
   the reserved system issuer. Local intern handles MUST never become wire,
   storage, query, equality, or ordering values.
@@ -78,8 +79,8 @@ including after schema migration or lens projection (`INV-RLS-15`).
 An owner-only policy is the canonical single-subject policy: it selects rows
 whose ownership column equals the authenticated subject
 (`Policy::owner_only(table, column)` is exactly
-`Query::from(table).filter(eq(col(column), claim("author")))`). The
-`claim("author")` operand is the canonical authenticated `AuthorSubject`, not
+`Query::from(table).filter(eq(col(column), claim("user")))`). The
+`claim("user")` operand is the canonical authenticated `AuthorSubject`, not
 the provider's raw `sub` alone and not a caller-supplied parameter
 (`INV-RLS-3`). A policy must validate as a shape rooted at the table that carries
 it (`INV-RLS-4`), and `AuthorSubject::SYSTEM` bypasses both read and write checks
@@ -95,9 +96,10 @@ their key-derived subject. The portable `AuthorSubject` is the canonical JSON
 encoding of the two-string array `[iss,sub]`, with no whitespace or
 normalization. The same `sub` from two issuers therefore denotes two authors.
 
-That canonical string is the logical `session.author` value in transactions,
+That canonical string is the logical `session.user` value in transactions,
 provenance, policy claims, storage, and sync. It does not replace the admitted
-provider `sub` or `user_id` claims. Implementations may intern it in memory, but the
+provider claims. A provider's `user` claim is `session.claims["user"]` and can
+never shadow or spoof `session.user`. Implementations may intern it in memory, but the
 intern handle is process-local and has no observable meaning. Provenance
 supports equality, inequality, grouping, and equality-index lookup. It is not
 orderable: applications sort authors by joining the subject through their own
@@ -121,8 +123,8 @@ which refuses an unresolved claim rather than binding it as an allowance. The
 compiler currently lowers equality and inequality, membership/containment,
 boolean composition, columns, literals, and authenticated,
 admission-controlled claims: `Eq`/`Ne`/`In`/`Contains`/`All`/`Any`/`Not` over
-column / literal / `claim(...)`. `claim("author")` resolves to the authenticated
-`AuthorSubject`; `claim("sub")` remains the admitted provider subject. Additional claim names are session claims supplied by the trusted
+column / literal / `claim(...)`. `claim("user")` resolves to the authenticated
+`AuthorSubject`; raw claim names are supplied by the trusted
 admission/session layer and must not be client-supplied query bindings. Predicate
 forms the compiler cannot authorize, such as range and null checks, deny until
 explicitly supported.
@@ -132,9 +134,9 @@ same claim predicate subset. `session.where({ "claims.role": "admin" })` lowers
 to claim/literal equality, and `SessionInList { path: ["claims", "role"],
 values: [...] }` lowers to a scalar claim membership check equivalent to an
 `OR` of claim/literal equality predicates. The core server shell accepts
-`session.user_id` / `session.userId` and one-level `session.claims.<name>` paths
-for these predicates; deeper claim paths and non-scalar session predicates remain
-unsupported at this boundary.
+`session.user`, `session.authMode`, and one-level `session.claims["name"]` paths
+for these predicates. Flat `session.someClaim` paths and deeper claim paths are
+rejected; non-scalar session predicates remain unsupported at this boundary.
 
 ### 7.2 Write authorization
 
@@ -396,7 +398,7 @@ must not widen those facts.
 ### Detailed issue context
 
 - **Session/auth model for bindings.** `AuthorSubject` is the runtime
-  permission subject and reserved `claim("author")` value, but the product boundary needs
+  permission subject and reserved `claim("user")` value, but the product boundary needs
   explicit account/user/session/default identity terminology. Define how
   anonymous/local sessions, authenticated users, trusted backends, system links,
   and attribution-only writes map to `AuthorSubject`, claims, and link roles.
@@ -404,7 +406,7 @@ must not widen those facts.
   connection credentials into a link identity, claims, role, expiry, and optional
   backend trust. This hook must be the only source for policy claim bindings;
   client-supplied query bindings must never widen claims (ch. 8, ch. 13).
-- **Admission-controlled claim vocabulary.** `claim("author")` is reserved, and
+- **Admission-controlled claim vocabulary.** `claim("user")` is reserved, and
   arbitrary runtime session claims are supported, but the product boundary still
   needs to define which claims are minted by first-party auth integrations,
   custom admission hooks, trusted backend assertions, and local-only sessions.
@@ -441,15 +443,14 @@ must not widen those facts.
   to `SubscribeRejected` on the read path) so denied writes fail fast. Exposed
   by the auth example denial tests (both auth examples excluded from CI until
   this lands; see `dev/CI_NOTES.md` 2026-07-19).
-- **Non-claims session references (`session.authMode`).** Policy conversion
-  supports only `session.user_id` and `session.claims.*`; the betterauth
-  example references `session.authMode`. Decide: promote to a first-class
-  session attribute, or migrate such policies to claims.
+- ✅ **Session references are explicit.** Policy conversion supports the canonical
+  `session.user`, the reserved `session.authMode`, and raw provider values only
+  under `session.claims.*`. Former flat identity aliases are not retained.
 - **String claim validation.** String claim type mismatches in seeded lookups
   should become loud validation errors instead of depending on runtime
   empty-result behavior.
 - **Uncorrelated policy `EXISTS`.** Server-shell policy conversion currently
-  rejects `policy.<table>.exists.where({ userId: session.user_id })` when the
+  rejects an uncorrelated membership predicate when the
   predicate is used from another table and has no equality against the outer row
   (`__jazz_outer_row`). Decide whether intentionally uncorrelated membership
   checks are valid policy atoms, how to bound them, and how to lower them

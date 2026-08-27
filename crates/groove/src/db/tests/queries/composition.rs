@@ -4,7 +4,8 @@ use super::*;
 
 #[futures_test::test]
 async fn arg_max_by_feeds_join_and_anti_join() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
 
     let visible = database
@@ -66,7 +67,8 @@ async fn arg_max_by_feeds_join_and_anti_join() {
 
 #[futures_test::test]
 async fn arg_max_by_routes_through_prepared_bindings() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let params = RecordDescriptor::new([("row", ColumnType::U64.clone())]);
     let shape = database
@@ -119,7 +121,8 @@ async fn arg_max_by_matches_naive_oracle_across_seeded_mutations() {
             self.next() % max
         }
     }
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let mut rng = Lcg(0x0bad_cafe_1234_5678);
     let mut model = std::collections::BTreeMap::<(u64, u64, u64), String>::new();
@@ -180,7 +183,8 @@ async fn arg_max_by_matches_naive_oracle_across_seeded_mutations() {
 
 #[futures_test::test]
 async fn arg_max_by_tracks_union_of_filtered_sources() {
-    let storage = MemoryStorage::new(&["history", "history_shadow"]);
+    let storage =
+        MemoryStorage::new(&["history", "history_shadow"]).expect("valid memory storage families");
     let mut database = Database::new(two_history_tables_schema(), storage)
         .await
         .unwrap();
@@ -241,7 +245,8 @@ async fn arg_max_by_tracks_union_of_filtered_sources() {
 
 #[futures_test::test]
 async fn arg_max_by_tracks_join_filter_input() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let joined_history = GraphBuilder::join(
         GraphBuilder::table("history"),
@@ -306,7 +311,7 @@ async fn arg_max_by_tracks_join_filter_input() {
 
 #[futures_test::test]
 async fn predicate_or_filter_matches_either_branch() {
-    let storage = MemoryStorage::new(&["albums"]);
+    let storage = MemoryStorage::new(&["albums"]).expect("valid memory storage families");
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let graph = GraphBuilder::table("albums").filter(
         PredicateExpr::Or(vec![
@@ -358,7 +363,8 @@ async fn predicate_or_filter_matches_either_branch() {
 
 #[futures_test::test]
 async fn arg_max_by_rejects_unsupported_inputs_and_bad_primary_keys() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
 
     let err = database
@@ -390,7 +396,8 @@ async fn arg_max_by_rejects_unsupported_inputs_and_bad_primary_keys() {
 
 #[futures_test::test]
 async fn unwrap_nullable_can_feed_join_key() {
-    let storage = MemoryStorage::new(&["tracks", "albums", "indices"]);
+    let storage = MemoryStorage::new(&["tracks", "albums", "indices"])
+        .expect("valid memory storage families");
     let mut tracks_schema = indexed_tracks_schema();
     let mut albums_schema = albums_schema();
     let mut database = Database::new(
@@ -449,7 +456,8 @@ async fn unwrap_nullable_can_feed_join_key() {
 
 #[futures_test::test]
 async fn unwrap_nullable_can_feed_prepared_binding_join_key() {
-    let storage = MemoryStorage::new(&["tracks", "indices"]);
+    let storage =
+        MemoryStorage::new(&["tracks", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(indexed_tracks_schema(), storage)
         .await
         .unwrap();
@@ -491,7 +499,8 @@ async fn unwrap_nullable_can_feed_prepared_binding_join_key() {
 
 #[futures_test::test]
 async fn prepared_binding_join_hydrates_anti_join_input() {
-    let storage = MemoryStorage::new(&["tracks", "blockers", "indices"]);
+    let storage = MemoryStorage::new(&["tracks", "blockers", "indices"])
+        .expect("valid memory storage families");
     let schema = DatabaseSchema::new([
         indexed_tracks_schema().tables.remove(0),
         TableSchema::new("blockers", [ColumnSchema::new("id", ColumnType::U64)])
@@ -541,7 +550,8 @@ async fn prepared_binding_join_hydrates_anti_join_input() {
 
 #[futures_test::test]
 async fn prepared_binding_join_hydrates_filtered_unwrapped_anti_join_input() {
-    let storage = MemoryStorage::new(&["items", "blockers", "indices"]);
+    let storage = MemoryStorage::new(&["items", "blockers", "indices"])
+        .expect("valid memory storage families");
     let schema = DatabaseSchema::new([
         TableSchema::new(
             "items",

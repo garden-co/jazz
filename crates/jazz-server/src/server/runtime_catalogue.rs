@@ -22,6 +22,13 @@ pub(crate) async fn publish_runtime_catalogue(
     schemas: &[Schema],
     lenses: &[Lens],
 ) -> Result<(), String> {
+    #[cfg(test)]
+    state.run_runtime_catalogue_before_publication_hook_for_test();
+    // A bridge re-reads the durable permissions head before queueing the shell
+    // update. Keep the read and queued update ordered with every other bridge:
+    // otherwise a later head can install first and then be overwritten by this
+    // older bridge.
+    let _publication = state.runtime_catalogue_publication.lock().await;
     if state.runtime().is_none() && state.core_server_shell_storage_config.is_none() {
         return Ok(());
     }
@@ -75,6 +82,8 @@ pub(crate) async fn publish_runtime_catalogue(
         .catalogue
         .current_permissions(&state.catalogue_store)
         .map_err(|error| format!("read permissions head for runtime: {error}"))?;
+    #[cfg(test)]
+    state.run_runtime_catalogue_after_permissions_read_hook_for_test();
     let Some(permissions) = permissions else {
         return Ok(());
     };

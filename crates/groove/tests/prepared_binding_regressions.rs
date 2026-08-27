@@ -40,7 +40,7 @@ fn edges_by_src_shape_graph() -> GraphBuilder {
 }
 
 async fn open_db() -> Database {
-    let storage = MemoryStorage::new(&["edges"]);
+    let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
     let db = Database::new(edges_schema(), storage).await.unwrap();
     db
 }

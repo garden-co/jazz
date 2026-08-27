@@ -1371,6 +1371,17 @@ test("CodSpeed builds and runs the BandChat benchmark variant", () => {
   );
 });
 
+test("CodSpeed builds the BandChat caught-up fast-resume receipt", () => {
+  assert.match(
+    codspeedWorkflow,
+    /cargo codspeed build [^\n]*--package jazz-example-band-chat-benchmark[^\n]*--bench fast_resume/,
+  );
+  assert.throws(
+    () => assert.match(codspeedWorkflow.replace(" --bench fast_resume", ""), /--bench fast_resume/),
+    /fast_resume/,
+  );
+});
+
 test("Windows NAPI release builds provision libclang for RocksDB bindgen", () => {
   const windowsNapiSetup =
     /name: Install libclang for Windows bindgen[\s\S]*if: matrix\.platform == 'win32-x64-msvc'[\s\S]*choco install llvm --version=21\.1\.8 --yes --no-progress --limit-output[\s\S]*Test-Path \(Join-Path \$libclangPath "libclang\.dll"\)[\s\S]*LIBCLANG_PATH=\$libclangPath[\s\S]*\$env:GITHUB_PATH/;

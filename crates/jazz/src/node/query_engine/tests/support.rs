@@ -917,8 +917,11 @@ pub(super) fn collector_request(policy: PolicyContext) -> QueryProgramRequest {
 }
 
 pub(super) fn run_collector_graph(graph: GraphBuilder) -> Vec<(Vec<Value>, i64)> {
-    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
-        .expect("inline collector database");
+    let mut database = Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).expect("valid memory storage families"),
+    )
+    .expect("inline collector database");
     database
         .query_graph(graph)
         .expect("execute collector graph")
