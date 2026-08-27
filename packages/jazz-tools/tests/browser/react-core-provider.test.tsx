@@ -92,11 +92,11 @@ function publicSession(
   subject: string,
   claims: Record<string, unknown> = {},
 ): PublicSession {
-  return {
+  return Object.freeze({
     user: canonicalAuthorSubject(issuer, subject),
     claims: Object.freeze({ ...claims, iss: issuer, sub: subject }),
     authMode: "external",
-  };
+  });
 }
 
 const BASE_QUERY: QueryBuilder<Todo> = {
