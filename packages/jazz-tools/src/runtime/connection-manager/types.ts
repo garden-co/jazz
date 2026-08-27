@@ -87,10 +87,8 @@ export abstract class ConnectionManager {
     const runtimeConfig = { ...config };
     // Reserved local-first/anonymous sessions are carried by a package-private
     // capability sidecar, not an enumerable config property. Preserve that
-    // capability when isolating the runtime's config object; otherwise the
-    // in-memory client opens as `runtime-host` while its persistent worker and
-    // WebSocket authenticate as the real session author, and the authority
-    // correctly rejects every uploaded transaction as forged provenance.
+    // capability when isolating the runtime's config object so native opens
+    // retain the verified session author used by persistence and transport.
     setTrustedReservedSession(runtimeConfig, getTrustedReservedSession(config));
     const client = runtimeSource.createClient({
       config: runtimeConfig,
