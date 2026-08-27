@@ -162,7 +162,9 @@ test("crate publication selector tests are a reachable lint partition contract",
     args: ["dev/scripts/publish-crates-alpha.test.sh"],
   });
 
-  const withoutSelectorTest = lint.filter(({ label }) => label !== "crate publication selector contract");
+  const withoutSelectorTest = lint.filter(
+    ({ label }) => label !== "crate publication selector contract",
+  );
   assert.equal(
     withoutSelectorTest.some(({ args }) => args.includes("publish-crates-alpha.test.sh")),
     false,
