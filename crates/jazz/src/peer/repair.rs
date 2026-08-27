@@ -32,7 +32,21 @@ impl PeerState {
         )
         .await?
         {
-            if !self.deferred_edge_fates.contains_key(&tx.tx_id) {
+            if let Some(existing) = self.deferred_edge_fates.get(&tx.tx_id) {
+                // The durable ingest path rejects two different commit units
+                // for one transaction id.  Deferred admission sits before that
+                // path, so retain the same conflict boundary here rather than
+                // silently treating a conflicting upload as a retransmit.
+                // Version order is transport-insignificant and is normalized
+                // by NodeState on eventual admission.
+                let mut existing_versions = existing.versions.clone();
+                existing_versions.sort();
+                let mut incoming_versions = versions;
+                incoming_versions.sort();
+                if existing.tx != tx || existing_versions != incoming_versions {
+                    return Err(Error::ConflictingCommitUnit(tx.tx_id));
+                }
+            } else {
                 for subscription in &scope_subscriptions {
                     self.retain_edge_scope_subscription(*subscription);
                 }
