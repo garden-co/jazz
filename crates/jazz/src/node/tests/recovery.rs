@@ -54,25 +54,7 @@ fn contribution_merge_provenance_survives_reopen() {
     let schema = schema();
     let temp_dir = tempfile::tempdir().unwrap();
     let tx_id = TxId::new(TxTime::from(10), node(1));
-    let coordinate = ContributionCoordinate {
-        branch_key: BranchKey::default(),
-        table: "todos".to_owned(),
-        row_uuid: row(9),
-        layer: MergeAspect::Content,
-        component: ContributionComponent::Column("title".to_owned()),
-    };
-    let provenance = ContributionMergeProvenance::canonical(
-        BranchKey::default(),
-        BranchKey::default(),
-        vec![ContributionSubstitution {
-            target: coordinate.clone(),
-            sources: vec![ContributionDot {
-                tx_id,
-                coordinate,
-            }],
-        }],
-    )
-    .unwrap();
+    let provenance = canonical_contribution_provenance(tx_id);
     {
         let mut core = open_node_at(&temp_dir, schema.clone());
         core.ingest_commit_unit_settled(
@@ -107,6 +89,137 @@ fn contribution_merge_provenance_survives_reopen() {
             .contribution_merge,
         Some(provenance)
     );
+}
+
+fn canonical_contribution_provenance(tx_id: TxId) -> ContributionMergeProvenance {
+    let coordinate = ContributionCoordinate {
+        branch_key: BranchKey::default(),
+        table: "todos".to_owned(),
+        row_uuid: row(9),
+        layer: MergeAspect::Content,
+        component: ContributionComponent::Column("title".to_owned()),
+    };
+    ContributionMergeProvenance::canonical(
+        BranchKey::default(),
+        BranchKey::default(),
+        vec![ContributionSubstitution {
+            target: coordinate.clone(),
+            sources: vec![ContributionDot {
+                tx_id,
+                coordinate,
+            }],
+        }],
+    )
+    .unwrap()
+}
+
+/// Persist a structurally valid, but semantically non-canonical, contribution
+/// record through the system-table encoder. Opening must reject it before a
+/// node becomes resident; normal public commit APIs cannot construct it.
+fn reopen_with_noncanonical_contribution_provenance(
+    mutate: impl FnOnce(&mut ContributionMergeProvenance),
+) -> Error {
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let tx_id = TxId::new(TxTime::from(10), node(1));
+    {
+        let mut core = open_node_at(&temp_dir, schema.clone());
+        core.ingest_commit_unit_settled(
+            Transaction {
+                tx_id,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: AuthorSubject::SYSTEM,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: Some(canonical_contribution_provenance(tx_id)),
+            },
+            vec![version_record(row(9), Vec::new(), title_cells("merged"), None)],
+            u64::MAX - SKEW_TOLERANCE_MS,
+        )
+        .unwrap();
+
+        let mut stored = core.query_transaction(tx_id).unwrap().unwrap();
+        mutate(
+            stored
+                .tx
+                .contribution_merge
+                .as_mut()
+                .expect("fixture stores provenance"),
+        );
+        let mut batch = core.database.open_batch();
+        batch.update(
+            "jazz_transactions",
+            transaction_values(
+                stored.node_alias,
+                &stored.tx,
+                stored.fate,
+                stored.global_time,
+                stored.durability,
+            ),
+        );
+        let applied = crate::db::block_on(core.database.apply_batch(batch)).unwrap();
+        let persisted = crate::db::block_on(applied.persist());
+        core.database.finish_persistence(persisted).unwrap();
+    }
+
+    let column_families = schema.column_families();
+    let references = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &references).unwrap();
+    match NodeState::new(node(1), schema, storage).resolve() {
+        Ok(_) => panic!("opening non-canonical contribution provenance must fail"),
+        Err(error) => error,
+    }
+}
+
+#[test]
+fn reopen_rejects_noncanonical_contribution_source_dots() {
+    // alice's persisted provenance has a valid record shape, but an unsorted
+    // source-dot array.  This must not silently become canonical on recovery.
+    let error = reopen_with_noncanonical_contribution_provenance(|provenance| {
+        let source = provenance.substitutions[0].sources[0].clone();
+        provenance.substitutions[0].sources.push(ContributionDot {
+            tx_id: TxId::new(TxTime::from(9), source.tx_id.node),
+            coordinate: source.coordinate,
+        });
+    });
+    assert!(matches!(
+        error,
+        Error::InvalidStoredValue("transaction contribution provenance must be canonical")
+    ));
+}
+
+#[test]
+fn reopen_rejects_duplicate_contribution_source_dots() {
+    // A duplicate source is also structurally valid, but provenance identity
+    // must be set-like so downstream expansion cannot double-count it.
+    let error = reopen_with_noncanonical_contribution_provenance(|provenance| {
+        let source = provenance.substitutions[0].sources[0].clone();
+        provenance.substitutions[0].sources.push(source);
+    });
+    assert!(matches!(
+        error,
+        Error::InvalidStoredValue("transaction contribution provenance must be canonical")
+    ));
+}
+
+#[test]
+fn reopen_rejects_duplicate_contribution_substitution_targets() {
+    // alice's on-disk record is structurally decodable, but maps one derived
+    // target twice.  Recovery must fail before rebuilding any resident state.
+    let error = reopen_with_noncanonical_contribution_provenance(|provenance| {
+        provenance
+            .substitutions
+            .push(provenance.substitutions[0].clone());
+    });
+    assert!(matches!(
+        error,
+        Error::InvalidStoredValue("transaction contribution provenance must be canonical")
+    ));
 }
 
 #[cfg(feature = "testing")]
