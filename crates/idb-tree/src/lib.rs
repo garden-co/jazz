@@ -109,6 +109,14 @@ struct TreeCore<S> {
     commit_in_flight: bool,
 }
 
+/// A write only appends fresh COW page ids and advances root/allocation
+/// metadata. Remember that small frontier instead of cloning the resident page
+/// cache for every operation.
+struct WriteCheckpoint {
+    metadata: Metadata,
+    deleted: Vec<PageId>,
+}
+
 #[derive(Debug)]
 pub struct PreparedCommit {
     commit: Commit,
@@ -163,7 +171,10 @@ impl<S: PageStore + Clone> IdbTree<S> {
 
     pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), Error> {
         loop {
-            let attempt = self.inner.borrow_mut().try_put(&key, &value)?;
+            let attempt = self
+                .inner
+                .borrow_mut()
+                .with_write_attempt_checkpoint(|tree| tree.try_put(&key, &value))?;
             match attempt {
                 Attempt::Ready(()) => return Ok(()),
                 Attempt::Missing(page_id) => self.hydrate(page_id).await?,
@@ -173,7 +184,10 @@ impl<S: PageStore + Clone> IdbTree<S> {
 
     pub async fn delete(&self, key: &[u8]) -> Result<bool, Error> {
         loop {
-            let attempt = self.inner.borrow_mut().try_delete(key)?;
+            let attempt = self
+                .inner
+                .borrow_mut()
+                .with_write_attempt_checkpoint(|tree| tree.try_delete(key))?;
             match attempt {
                 Attempt::Ready(deleted) => return Ok(deleted),
                 Attempt::Missing(page_id) => self.hydrate(page_id).await?,
@@ -195,19 +209,9 @@ impl<S: PageStore + Clone> IdbTree<S> {
             }
         }
 
-        let mut tree = self.inner.borrow_mut();
-        for operation in operations {
-            let attempt = match operation {
-                WriteOperation::Set { key, value } => tree.try_put(&key, &value)?,
-                WriteOperation::Delete { key } => tree.try_delete(&key)?.map(|_| ()),
-            };
-            if let Attempt::Missing(page_id) = attempt {
-                return Err(Error::InvalidPage(format!(
-                    "prepared batch unexpectedly missed page {page_id}"
-                )));
-            }
-        }
-        Ok(())
+        self.inner
+            .borrow_mut()
+            .with_write_checkpoint(|tree| tree.apply_write_many(operations))
     }
 
     pub async fn range(&self, start: &[u8], end: &[u8]) -> Result<Vec<KeyValue>, Error> {
@@ -288,6 +292,72 @@ impl PreparedCommit {
 }
 
 impl<S: PageStore> TreeCore<S> {
+    fn apply_write_many(&mut self, operations: Vec<WriteOperation>) -> Result<(), Error> {
+        for operation in operations {
+            let attempt = match operation {
+                WriteOperation::Set { key, value } => self.try_put(&key, &value)?,
+                WriteOperation::Delete { key } => self.try_delete(&key)?.map(|_| ()),
+            };
+            if let Attempt::Missing(page_id) = attempt {
+                return Err(Error::InvalidPage(format!(
+                    "prepared batch unexpectedly missed page {page_id}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn write_checkpoint(&self) -> WriteCheckpoint {
+        WriteCheckpoint {
+            metadata: self.metadata.clone(),
+            deleted: self.deleted.clone(),
+        }
+    }
+
+    fn with_write_checkpoint<T>(
+        &mut self,
+        write: impl FnOnce(&mut Self) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let checkpoint = self.write_checkpoint();
+        match write(self) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                self.rollback_write(checkpoint);
+                Err(error)
+            }
+        }
+    }
+
+    fn with_write_attempt_checkpoint<T>(
+        &mut self,
+        write: impl FnOnce(&mut Self) -> Result<Attempt<T>, Error>,
+    ) -> Result<Attempt<T>, Error> {
+        let checkpoint = self.write_checkpoint();
+        match write(self) {
+            Ok(Attempt::Ready(value)) => Ok(Attempt::Ready(value)),
+            Ok(Attempt::Missing(page_id)) => {
+                self.rollback_write(checkpoint);
+                Ok(Attempt::Missing(page_id))
+            }
+            Err(error) => {
+                self.rollback_write(checkpoint);
+                Err(error)
+            }
+        }
+    }
+
+    fn rollback_write(&mut self, checkpoint: WriteCheckpoint) {
+        let allocated_start = checkpoint.metadata.next_page_id;
+        let allocated_end = self.metadata.next_page_id;
+        debug_assert!(allocated_end >= allocated_start);
+        for page_id in allocated_start..allocated_end {
+            self.pages.remove(&page_id);
+            self.dirty.remove(&page_id);
+        }
+        self.deleted = checkpoint.deleted;
+        self.metadata = checkpoint.metadata;
+    }
+
     pub async fn open(store: S, options: Options) -> Result<Self, Error> {
         let options = options.validate()?;
         let metadata = store.load_metadata().await.map_err(Error::Store)?;
@@ -707,6 +777,17 @@ impl<S: PageStore> TreeCore<S> {
                 "IDBTree page id space exceeds JavaScript's safe integer range".to_owned(),
             ));
         }
+        if self.pages.contains_key(&page_id) || self.dirty.contains_key(&page_id) {
+            return Err(Error::InvalidPage(
+                "IDBTree next page id already exists".to_owned(),
+            ));
+        }
+        if encode_page(&page).map_err(Error::InvalidPage)?.len() > self.options.page_size {
+            return Err(Error::PageTooLarge {
+                page_id,
+                page_size: self.options.page_size,
+            });
+        }
         self.metadata.next_page_id = page_id + 1;
         self.pages.insert(page_id, page.clone());
         self.dirty.insert(page_id, page);
@@ -1077,6 +1158,73 @@ mod tests {
                 after_publish.get(b"key").await.unwrap(),
                 Some(b"after".to_vec())
             );
+        });
+    }
+
+    #[test]
+    fn failed_oversized_put_leaves_no_local_or_durable_orphans() {
+        futures::executor::block_on(async {
+            let store = MemoryPageStore::default();
+            let options = Options { page_size: 1024 };
+            let tree = IdbTree::open(store.clone(), options).await.unwrap();
+            tree.flush().await.unwrap();
+            let before = tree.metadata();
+            let dirty_before = tree.dirty_page_count();
+            let key = vec![b'k'; 1100];
+
+            assert!(matches!(
+                tree.put(key.clone(), vec![7; 2000]).await,
+                Err(Error::PageTooLarge { .. })
+            ));
+            assert_eq!(tree.metadata(), before);
+            assert_eq!(tree.dirty_page_count(), dirty_before);
+
+            tree.flush().await.unwrap();
+            drop(tree);
+            let reopened = IdbTree::open(store.clone(), options).await.unwrap();
+            assert_eq!(reopened.metadata(), before);
+            assert_eq!(reopened.get(&key).await.unwrap(), None);
+            for page_id in before.next_page_id..before.next_page_id + 8 {
+                assert_eq!(store.read_page(page_id).await.unwrap(), None);
+            }
+        });
+    }
+
+    #[test]
+    fn failed_write_many_rolls_back_earlier_operations_and_allocations() {
+        futures::executor::block_on(async {
+            let store = MemoryPageStore::default();
+            let options = Options { page_size: 1024 };
+            let tree = IdbTree::open(store.clone(), options).await.unwrap();
+            tree.flush().await.unwrap();
+            let before = tree.metadata();
+            let oversized_key = vec![b'z'; 1100];
+
+            assert!(matches!(
+                tree.write_many(vec![
+                    WriteOperation::Set {
+                        key: b"first".to_vec(),
+                        value: b"must roll back".to_vec(),
+                    },
+                    WriteOperation::Set {
+                        key: oversized_key.clone(),
+                        value: vec![9; 2000],
+                    },
+                ])
+                .await,
+                Err(Error::PageTooLarge { .. })
+            ));
+            assert_eq!(tree.metadata(), before);
+            assert_eq!(tree.dirty_page_count(), 0);
+
+            tree.flush().await.unwrap();
+            drop(tree);
+            let reopened = IdbTree::open(store.clone(), options).await.unwrap();
+            assert_eq!(reopened.get(b"first").await.unwrap(), None);
+            assert_eq!(reopened.get(&oversized_key).await.unwrap(), None);
+            for page_id in before.next_page_id..before.next_page_id + 8 {
+                assert_eq!(store.read_page(page_id).await.unwrap(), None);
+            }
         });
     }
 

@@ -217,6 +217,11 @@ a torn or missing child. Reclamation is a separate reachability operation and
 may delete only pages proven unreachable from the published root, never pages
 merely replaced by an in-flight write. Reopening observes either the old root
 and complete closure or the new root and complete closure.
+Before persistence, one logical write—including every operation in a
+`write_many` call—is also locally atomic. If page construction or validation
+fails, the tree restores its prior root and allocation frontier and discards
+every newly staged page; a later successful flush cannot publish those orphans
+or an earlier operation from the failed batch.
 
 ### 2.2 Records: logical fields, physical bytes
 
