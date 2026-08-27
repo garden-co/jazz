@@ -191,7 +191,7 @@ fn seed_policy_graph_known_global(
 fn open_policy_graph_memory_node(node_uuid: NodeUuid, schema: JazzSchema) -> NodeState<MemoryStorage> {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    NodeState::new(node_uuid, schema, MemoryStorage::new(&refs)).unwrap()
+    NodeState::new(node_uuid, schema, MemoryStorage::new(&refs).expect("valid memory storage families")).unwrap()
 }
 
 fn apply_policy_graph_reset_receipt<S>(

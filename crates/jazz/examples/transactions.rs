@@ -44,7 +44,7 @@ fn open_db() -> Result<Db<MemoryStorage>, Box<dyn std::error::Error>> {
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let storage = MemoryStorage::new(&column_family_refs);
+    let storage = MemoryStorage::new(&column_family_refs).expect("valid memory storage families");
 
     Ok(block_on(Db::open(DbConfig {
         schema,
@@ -71,7 +71,7 @@ fn open_core() -> Result<CoreDb, Box<dyn std::error::Error>> {
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let storage = MemoryStorage::new(&column_family_refs);
+    let storage = MemoryStorage::new(&column_family_refs).expect("valid memory storage families");
     let node = block_on(NodeState::new_history_complete(
         NodeUuid::from_bytes([0x22; 16]),
         schema.clone(),

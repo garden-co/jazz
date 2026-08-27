@@ -12,7 +12,10 @@ fn open(dir: &tempfile::TempDir) -> SqliteStorage {
 fn open_rejects_nul_column_family_before_creating_database() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("must-not-exist.sqlite");
-    assert!(SqliteStorage::open(&path, &["records\0evil"]).is_err());
+    let too_long = "a".repeat(groove::storage::MAX_APPLICATION_STORAGE_NAME_BYTES + 1);
+    for invalid in ["records\0evil", too_long.as_str()] {
+        assert!(SqliteStorage::open(&path, &[invalid]).is_err());
+    }
     assert!(!path.exists());
 }
 

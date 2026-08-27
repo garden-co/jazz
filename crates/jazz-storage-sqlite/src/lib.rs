@@ -390,6 +390,7 @@ fn validate_table_columns(
 impl ReopenableStorage for SqliteStorage {
     fn reopen(self, column_families: Vec<String>) -> StorageFuture<'static, Result<Self, Error>> {
         Box::pin(async move {
+            validate_physical_storage_names(&column_families)?;
             if column_families
                 .iter()
                 .all(|name| self.column_families.borrow().contains_key(name))
@@ -738,6 +739,7 @@ fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
     use futures::executor::block_on;
+    use groove::storage::ReopenableStorage;
     use std::sync::{Arc, Barrier};
 
     #[test]
@@ -757,5 +759,29 @@ mod tests {
         });
         let outcomes = handles.map(|handle| handle.join().unwrap());
         assert_ne!(outcomes[0].is_none(), outcomes[1].is_none());
+    }
+
+    #[test]
+    fn reopen_fast_path_rejects_invalid_existing_family_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fast-path.sqlite");
+        let invalid = "records\0evil";
+        let storage = SqliteStorage::open(&path, &["records"]).unwrap();
+        // Simulate a legacy/injected in-memory family catalogue: this used to
+        // take the all-existing early return before physical-name validation.
+        storage
+            .column_families
+            .borrow_mut()
+            .insert(invalid.to_owned(), 99);
+        assert!(block_on(storage.reopen(vec![invalid.to_owned()])).is_err());
+        let connection = Connection::open(path).unwrap();
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM column_families WHERE name = ?1",
+                [invalid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "reopen must reject before inserting the family");
     }
 }

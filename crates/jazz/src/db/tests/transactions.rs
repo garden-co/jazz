@@ -206,7 +206,7 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
     let owner = block_on(Db::open_history_complete(DbConfig {
         schema: empty,
-        storage: doctest_support::MemoryStorage::new(&refs),
+        storage: doctest_support::MemoryStorage::new(&refs).expect("valid memory storage families"),
         identity: DbIdentity {
             node: NodeUuid::from_bytes([0x91; 16]),
             author: AuthorSubject::SYSTEM,

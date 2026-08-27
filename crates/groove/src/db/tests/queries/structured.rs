@@ -4,7 +4,8 @@ use super::*;
 
 #[futures_test::test]
 async fn collect_by_round_trips_ordered_explicit_child_ids() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_collect_by(3))
@@ -30,7 +31,8 @@ async fn collect_by_round_trips_ordered_explicit_child_ids() {
 
 #[futures_test::test]
 async fn collect_by_expand_renders_selected_tuples_in_source_order() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_collect_by_expand(0, 3))
@@ -78,7 +80,8 @@ async fn collect_by_expand_renders_selected_tuples_in_source_order() {
 }
 #[futures_test::test]
 async fn collect_by_expand_diffs_only_selected_tuple_occurrences() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_collect_by_expand(0, 2))
@@ -120,7 +123,8 @@ async fn collect_by_expand_diffs_only_selected_tuple_occurrences() {
 
 #[futures_test::test]
 async fn collect_by_expand_suppresses_byte_equal_selected_tuples() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_collect_by_expand(0, 2))
@@ -142,7 +146,8 @@ async fn collect_by_expand_suppresses_byte_equal_selected_tuples() {
 
 #[futures_test::test]
 async fn collect_by_expand_honors_order_tie_offset_and_limit() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_collect_by_expand(1, 2))
@@ -181,7 +186,8 @@ async fn collect_by_expand_honors_order_tie_offset_and_limit() {
 
 #[futures_test::test]
 async fn collect_by_expand_rejects_duplicate_occurrence_source_ids() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let mut batch = database.open_batch();
     batch.insert("history", history_values(1, 10, 7, "first"));
@@ -205,7 +211,8 @@ async fn collect_by_expand_rejects_duplicate_occurrence_source_ids() {
 
 #[futures_test::test]
 async fn collect_by_rejects_join_and_nested_collector_consumers() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let collector = history_collect_by(2);
     let relational_consumers = [
@@ -237,7 +244,8 @@ async fn collect_by_rejects_join_and_nested_collector_consumers() {
 
 #[futures_test::test]
 async fn collect_by_rejects_filter_consumer() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let graph = history_collect_by(2).filter(PredicateExpr::gt("row", Value::U64(0)));
 
@@ -249,7 +257,8 @@ async fn collect_by_rejects_filter_consumer() {
 
 #[futures_test::test]
 async fn collect_by_rejects_project_consumer() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let graph = history_collect_by(2).project(["row"]);
 
@@ -261,7 +270,8 @@ async fn collect_by_rejects_project_consumer() {
 
 #[futures_test::test]
 async fn collect_by_suppresses_unchanged_rendered_group_and_replaces_once_at_boundary() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_collect_by(2))
@@ -297,7 +307,8 @@ async fn collect_by_suppresses_unchanged_rendered_group_and_replaces_once_at_bou
 
 #[futures_test::test]
 async fn collect_by_multisink_emits_descendant_terminal_operations() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe([("rows", history_collect_by(2))])
@@ -346,7 +357,8 @@ async fn collect_by_multisink_emits_descendant_terminal_operations() {
 
 #[futures_test::test]
 async fn one_shot_query_does_not_discard_live_collect_by_arrangement() {
-    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"])
+        .expect("valid memory storage families");
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let mut batch = database.open_batch();
     batch.insert("history", history_values(1, 10, 10, "first"));
@@ -383,7 +395,7 @@ async fn one_shot_query_does_not_discard_live_collect_by_arrangement() {
 
 #[futures_test::test]
 async fn collect_by_tree_renders_sibling_slots_and_grandchildren_with_independent_windows() {
-    let storage = MemoryStorage::new(&["tree"]);
+    let storage = MemoryStorage::new(&["tree"]).expect("valid memory storage families");
     let mut database = Database::new(collect_tree_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(collect_tree_graph())
@@ -461,7 +473,7 @@ async fn collect_by_tree_renders_sibling_slots_and_grandchildren_with_independen
 
 #[futures_test::test]
 async fn collect_by_tree_keeps_routed_owner_keys_internal_and_isolated() {
-    let storage = MemoryStorage::new(&["routed_tree"]);
+    let storage = MemoryStorage::new(&["routed_tree"]).expect("valid memory storage families");
     let mut database = Database::new(routed_collect_tree_schema(), storage)
         .await
         .unwrap();
@@ -550,7 +562,7 @@ async fn collect_by_tree_rejects_non_grouping_internal_owner_key() {
         // become an implicit hidden channel.
         .with_owner_key_cols(["grandchild"])],
     );
-    let storage = MemoryStorage::new(&["routed_tree"]);
+    let storage = MemoryStorage::new(&["routed_tree"]).expect("valid memory storage families");
     let mut database = Database::new(routed_collect_tree_schema(), storage)
         .await
         .unwrap();
@@ -564,7 +576,7 @@ async fn collect_by_tree_rejects_non_grouping_internal_owner_key() {
 #[futures_test::test]
 async fn collect_by_tree_grandchild_change_replaces_one_whole_parent_and_suppresses_unrendered_change()
  {
-    let storage = MemoryStorage::new(&["tree"]);
+    let storage = MemoryStorage::new(&["tree"]).expect("valid memory storage families");
     let mut database = Database::new(collect_tree_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(collect_tree_graph())
@@ -658,7 +670,7 @@ async fn collect_by_tree_rejects_depth_beyond_descriptor_bound() {
             TopByLimit::Finite(1),
         )],
     );
-    let storage = MemoryStorage::new(&["tree"]);
+    let storage = MemoryStorage::new(&["tree"]).expect("valid memory storage families");
     let mut database = Database::new(collect_tree_schema(), storage).await.unwrap();
     assert!(matches!(
         database.subscribe_one_sink(graph).await,
@@ -669,7 +681,7 @@ async fn collect_by_tree_rejects_depth_beyond_descriptor_bound() {
 #[futures_test::test]
 async fn collect_by_after_recursive_closure_keeps_recursive_state_outside_limit() {
     async fn run(chain_len: u64) -> (usize, usize, Vec<(Vec<Value>, i64)>) {
-        let storage = MemoryStorage::new(&["edges"]);
+        let storage = MemoryStorage::new(&["edges"]).expect("valid memory storage families");
         let mut database = Database::new(edges_schema(), storage).await.unwrap();
         database.set_tick_runtime_stats_enabled(true);
         let subscription = database

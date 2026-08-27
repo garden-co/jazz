@@ -42,7 +42,7 @@ impl Database {
     /// )
     /// .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// let storage = MemoryStorage::new(&["albums", "indices"]);
+    /// let storage = MemoryStorage::new(&["albums", "indices"]).expect("valid memory storage families");
     ///
     /// let database = Database::new(schema, storage).await?;
     /// assert!(database.last_commit_metrics().is_none());
@@ -1710,7 +1710,7 @@ impl Database {
     ///     ),
     /// );
     /// let column_families = schema.column_families();
-    /// let storage = MemoryStorage::new(&column_families);
+    /// let storage = MemoryStorage::new(&column_families).expect("valid memory storage families");
     /// let database = Database::new(schema, storage).await?;
     ///
     /// let art = database.direct_record_store("album_art")?;

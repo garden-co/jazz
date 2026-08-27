@@ -186,7 +186,7 @@ fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> NodeState<MemoryStorage
     block_on(NodeState::new(
         node_uuid,
         schema,
-        MemoryStorage::new(&family_refs),
+        MemoryStorage::new(&family_refs).expect("valid memory storage families"),
     ))
     .expect("open BandChat fast-resume fixture node")
 }

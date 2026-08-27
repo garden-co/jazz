@@ -72,7 +72,12 @@ async fn reserved_application_storage_names_fail_before_durable_open() {
 async fn application_storage_names_reject_duplicates_and_are_case_sensitive() {
     let duplicate = DatabaseSchema::new([storage_name_table("records")])
         .with_direct_record_store(storage_name_direct_store("records"));
-    let error = match Database::new(duplicate, MemoryStorage::new(&["records"])).await {
+    let error = match Database::new(
+        duplicate,
+        MemoryStorage::new(&["records"]).expect("valid memory storage families"),
+    )
+    .await
+    {
         Ok(_) => panic!("duplicate application storage name must fail"),
         Err(error) => error,
     };
@@ -85,7 +90,8 @@ async fn application_storage_names_reject_duplicates_and_are_case_sensitive() {
     // engine namespace rather than silently folding app names differently by
     // backend.
     let schema = DatabaseSchema::new([storage_name_table("__GROOVE_large_values")]);
-    let storage = MemoryStorage::new(&["__GROOVE_large_values", LARGE_VALUE_METADATA_CF]);
+    let storage = MemoryStorage::new(&["__GROOVE_large_values", LARGE_VALUE_METADATA_CF])
+        .expect("valid memory storage families");
     Database::new(schema, storage)
         .await
         .expect("case-distinct application name is valid");
@@ -167,7 +173,8 @@ async fn live_variant_table_evolves_direct_payload_enum_registry_before_new_layo
     )
     .nullable();
     let schema = DatabaseSchema::new([live_variant_enum_table(old_state)]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let mut database = Database::new(schema, storage).await.unwrap();
 
     database
@@ -269,7 +276,8 @@ async fn live_table_evolves_nested_payload_and_scalar_enum_registries() {
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let mut database = Database::new(schema, storage).await.unwrap();
 
     database
@@ -320,7 +328,8 @@ async fn live_table_evolves_nested_payload_and_scalar_enum_registries() {
 async fn live_table_rejects_non_additive_enum_registry_mutations() {
     let old_payload = payload_enum_type(44, [("draft", ValueType::U64)]).nullable();
     let schema = DatabaseSchema::new([live_variant_enum_table(old_payload.clone())]);
-    let storage = MemoryStorage::new(&schema.column_families());
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let mut database = Database::new(schema, storage).await.unwrap();
     let incompatible = [
         payload_enum_type(44, [("renamed", ValueType::U64)]).nullable(),

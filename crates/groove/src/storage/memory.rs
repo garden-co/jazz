@@ -175,21 +175,12 @@ pub struct MemoryStorage {
 }
 
 impl MemoryStorage {
-    /// Construct storage with the supplied column families.
-    ///
-    /// For fallible construction with the portable physical-name contract, use
-    /// [`Self::try_new`]. This infallible convenience constructor predates that
-    /// contract and remains for lightweight tests and examples.
-    pub fn new(column_families: &[&str]) -> Self {
+    /// Construct storage with the supplied portable column-family names.
+    pub fn new(column_families: &[&str]) -> Result<Self, Error> {
+        super::validate_physical_storage_names(column_families)?;
         let storage = Self::default();
         storage.ensure_column_families(column_families);
-        storage
-    }
-
-    /// Construct storage after validating portable physical family names.
-    pub fn try_new(column_families: &[&str]) -> Result<Self, Error> {
-        super::validate_physical_storage_names(column_families)?;
-        Ok(Self::new(column_families))
+        Ok(storage)
     }
 
     fn ensure_column_families(&self, column_families: &[&str]) {
@@ -458,13 +449,15 @@ mod tests {
 
     #[test]
     fn fallible_open_uses_portable_physical_name_contract() {
-        assert!(MemoryStorage::try_new(&["records"]).is_ok());
-        assert!(MemoryStorage::try_new(&["records\0evil"]).is_err());
+        assert!(MemoryStorage::new(&["records"]).is_ok());
+        assert!(MemoryStorage::new(&["records\0evil"]).is_err());
+        let too_long = "a".repeat(super::super::MAX_APPLICATION_STORAGE_NAME_BYTES + 1);
+        assert!(MemoryStorage::new(&[too_long.as_str()]).is_err());
     }
 
     #[futures_test::test]
     async fn lazy_reverse_prefix_scan_keeps_its_prefix_across_batches() {
-        let storage = MemoryStorage::new(&["rows"]);
+        let storage = MemoryStorage::new(&["rows"]).expect("valid memory storage families");
         for index in 0..300 {
             let key = format!("a/{index:03}").into_bytes();
             storage.set("rows".into(), key.clone(), key).await.unwrap();
@@ -497,7 +490,7 @@ mod tests {
 
     #[futures_test::test]
     async fn lazy_scan_observes_a_later_committed_value_in_its_next_batch() {
-        let storage = MemoryStorage::new(&["rows"]);
+        let storage = MemoryStorage::new(&["rows"]).expect("valid memory storage families");
         for index in 0..257 {
             let key = format!("row:{index:03}").into_bytes();
             storage
@@ -524,7 +517,7 @@ mod tests {
 
     #[futures_test::test]
     async fn snapshot_round_trip_preserves_column_families_and_values() {
-        let storage = MemoryStorage::new(&["rows", "meta"]);
+        let storage = MemoryStorage::new(&["rows", "meta"]).expect("valid memory storage families");
         storage
             .set("rows".into(), b"a".to_vec(), b"one".to_vec())
             .await
@@ -561,14 +554,14 @@ mod tests {
 
     #[futures_test::test]
     async fn import_snapshot_replaces_existing_contents() {
-        let source = MemoryStorage::new(&["rows"]);
+        let source = MemoryStorage::new(&["rows"]).expect("valid memory storage families");
         source
             .set("rows".into(), b"a".to_vec(), b"one".to_vec())
             .await
             .unwrap();
         let snapshot = source.export_snapshot().unwrap();
 
-        let target = MemoryStorage::new(&["other"]);
+        let target = MemoryStorage::new(&["other"]).expect("valid memory storage families");
         target
             .set("other".into(), b"stale".to_vec(), b"value".to_vec())
             .await
@@ -587,7 +580,7 @@ mod tests {
 
     #[futures_test::test]
     async fn approximate_class_bytes_sums_keys_and_values_exactly() {
-        let storage = MemoryStorage::new(&["rows"]);
+        let storage = MemoryStorage::new(&["rows"]).expect("valid memory storage families");
         storage
             .set("rows".into(), b"a".to_vec(), b"one".to_vec())
             .await
