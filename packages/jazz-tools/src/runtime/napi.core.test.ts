@@ -483,6 +483,71 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     db.close?.();
   });
 
+  it("delivers mutation errors as exactly one event argument through NAPI", async () => {
+    globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
+
+    const { NapiDb } = await loadNapiModule();
+    const appId = "00000000-0000-0000-0000-00000000d005";
+    const node = deterministicBytes("jazz-napi-mutation-error-shape:node");
+    const author = testAuthorBytes("jazz-napi-mutation-error-shape:author");
+    server = await startLocalJazzServer({
+      appId,
+      inMemory: true,
+      backendSecret: "core-napi-mutation-error-shape-backend",
+      adminSecret: "core-napi-mutation-error-shape-admin",
+      schema: encodeSchema(OWNED_TODOS_SCHEMA),
+    });
+
+    const nativeDb = NapiDb.openMemory(
+      encodeSchema(OWNED_TODOS_SCHEMA),
+      openConfig(node, author, 1, true),
+    );
+    let callbackArgs: unknown[] | undefined;
+    nativeDb.onMutationError((...args: unknown[]) => {
+      callbackArgs = args;
+    });
+    const runtime = NativeRuntimeAdapter.fromDb(
+      nativeDb as never,
+      OWNED_TODOS_SCHEMA,
+      node,
+      author,
+      1,
+      true,
+    );
+    runtimes.push(runtime);
+    runtime.connect(
+      webSocketUrl(server.url, appId),
+      JSON.stringify({ backend_secret: server.backendSecret }),
+    );
+
+    const aliceSession = JSON.stringify({
+      issuer: "https://issuer.example",
+      user_id: ALICE_ID,
+    });
+    const inserted = runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "rejected mutation callback row" },
+        done: { type: "Boolean", value: false },
+        owner_id: { type: "Text", value: ALICE_ID },
+      },
+      aliceSession,
+    );
+    const transactionId = await committedBatchId(inserted);
+
+    const args = await waitFor(
+      async () => callbackArgs,
+      "NAPI mutation error callback did not receive the rejected write",
+      10_000,
+    );
+    expect(args).toHaveLength(1);
+    expect(args[0]).toMatchObject({
+      code: "permission_denied",
+      reason: "Write rejected by server authorization",
+      transaction: { transactionId },
+    });
+  }, 15_000);
+
   it("opens, mutates one row, and queries it through the native runtime payload shape", async () => {
     const { NapiDb } = await loadNapiModule();
     const runtime = new NativeRuntimeAdapter(
