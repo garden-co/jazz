@@ -525,7 +525,21 @@ where
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         let now_ms = self.reassembly_now_ms();
         self.reassembler.expire(now_ms);
-        self.flush_pending_outbound()?;
+        // `send_encoded_frames` accepts a logical message once encoding has
+        // advanced the connection stream, retaining any frame that a full
+        // socket could not accept.  Preserve that same contract when an
+        // earlier retained message is still blocked: a later fate or view
+        // update must queue behind it, not be discarded by a failed pre-flush.
+        //
+        // This is particularly important for an edge's immediate receipt. A
+        // bounded view can leave a prior frame pending; the receipt still
+        // settles the already-ingested transaction and therefore cannot rely
+        // on the client replaying its upload after transport capacity returns.
+        let pending_outbound_blocked = match self.flush_pending_outbound() {
+            Ok(()) => false,
+            Err(TransportError::Backpressure) => true,
+            Err(error) => return Err(error),
+        };
         let payload = match encode_sync_message_for_features(&message, self.features) {
             Ok(payload) => payload,
             Err(error) => {
@@ -547,14 +561,14 @@ where
         if let Some(session) = self.session.clone() {
             envelope = envelope.with_session(session);
         }
-        match encode_frame(&WireFrame::Message(envelope.clone())) {
+        let frames = match encode_frame(&WireFrame::Message(envelope.clone())) {
             Ok(frame) if frame.len() <= WIRE_FRAGMENT_PAYLOAD_BYTES => {
-                self.send_encoded_frames(vec![frame])
+                vec![frame]
             }
             Ok(_) if self.features & FEATURE_MESSAGE_FRAGMENTATION == 0 => {
-                Err(TransportError::Failed(
+                return Err(TransportError::Failed(
                     "peer did not negotiate logical-message fragmentation".to_owned(),
-                ))
+                ));
             }
             Ok(_) => {
                 let message_digest = *blake3::hash(&envelope.payload).as_bytes();
@@ -595,7 +609,7 @@ where
                     validate_wire_frame_len(frame.len()).map_err(TransportError::Failed)?;
                     frames.push(frame);
                 }
-                self.send_encoded_frames(frames)
+                frames
             }
             Err(err) => {
                 self.send_wire_error(WireError::new(
@@ -603,8 +617,14 @@ where
                     WireRetry::Never,
                     format!("failed to encode wire frame: {err}"),
                 ));
-                Ok(())
+                return Ok(());
             }
+        };
+        if pending_outbound_blocked {
+            self.pending_outbound_frames.extend(frames);
+            Ok(())
+        } else {
+            self.send_encoded_frames(frames)
         }
     }
 
