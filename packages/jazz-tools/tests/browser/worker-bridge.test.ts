@@ -39,8 +39,50 @@ import {
 } from "./remote-browser-db.js";
 import { CompiledPermissions, schema as s } from "../../src/";
 import { deploy } from "../../src/dev/catalogue.js";
+import type {
+  BrowserInspectorContext,
+  BrowserInspectorControlEvent,
+  BrowserInspectorControlRequest,
+} from "../../src/runtime/native-runtime/browser-worker-protocol.js";
 
 declare const __JAZZ_BROWSER_SOAK__: string;
+
+let nextInspectorRequestId = 1;
+
+async function listWorkerContexts(port: MessagePort): Promise<BrowserInspectorContext[]> {
+  const id = nextInspectorRequestId++;
+  return new Promise((resolve) => {
+    const onMessage = (event: MessageEvent<BrowserInspectorControlEvent>) => {
+      if (event.data.type !== "contexts" || event.data.id !== id) return;
+      port.removeEventListener("message", onMessage);
+      resolve(event.data.contexts);
+    };
+    port.addEventListener("message", onMessage);
+    port.postMessage({ type: "list-contexts", id } satisfies BrowserInspectorControlRequest);
+  });
+}
+
+async function waitForWorkerContextRelease(port: MessagePort, dbName: string): Promise<void> {
+  await waitForCondition(
+    async () => !(await listWorkerContexts(port)).some((context) => context.dbName === dbName),
+    5000,
+    `SharedWorker context ${dbName} should be destroyed before restart`,
+  );
+}
+
+async function terminateWorker(port: MessagePort): Promise<void> {
+  const id = nextInspectorRequestId++;
+  await new Promise<void>((resolve, reject) => {
+    const onMessage = (event: MessageEvent<BrowserInspectorControlEvent>) => {
+      if (event.data.type !== "result" || event.data.id !== id) return;
+      port.removeEventListener("message", onMessage);
+      if (event.data.error) reject(new Error(event.data.error));
+      else resolve();
+    };
+    port.addEventListener("message", onMessage);
+    port.postMessage({ type: "terminate-worker", id } satisfies BrowserInspectorControlRequest);
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Test schema — a simple "todos" table
@@ -757,8 +799,8 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const received: Todo[][] = [];
 
     const unsub = trackSubscription(
-      db.subscribeAll(allTodos, (delta) => {
-        received.push([...(delta.all ?? [])]);
+      db.subscribe(allTodos, (rows) => {
+        received.push(rows);
       }),
     );
 
@@ -792,8 +834,8 @@ describe("SharedWorker bridge with IndexedDB", () => {
       value: { id: projectId },
     } = db.insert(projects, { name: "Observed Project" });
     const unsub = trackSubscription(
-      db.subscribeAll(todosByProject(projectId), (delta) => {
-        received.push([...(delta.all ?? [])]);
+      db.subscribe(todosByProject(projectId), (rows) => {
+        received.push(rows);
       }),
     );
 
@@ -863,10 +905,10 @@ describe("SharedWorker bridge with IndexedDB", () => {
     );
     const snapshots: Todo[][] = [];
     const unsubscribe = trackSubscription(
-      fresh.subscribeAll(
+      fresh.subscribe(
         todosByProject(projectId),
-        (delta) => {
-          snapshots.push([...(delta.all ?? [])]);
+        (rows) => {
+          snapshots.push(rows);
         },
         { tier: "global" },
       ),
@@ -906,8 +948,8 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const targetId = insertedIds[0];
     const received: Todo[][] = [];
     const unsub = trackSubscription(
-      db.subscribeAll(todos.where({ id: targetId }), (delta) => {
-        received.push([...(delta.all ?? [])]);
+      db.subscribe(todos.where({ id: targetId }), (rows) => {
+        received.push(rows);
       }),
     );
 
@@ -953,8 +995,8 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const targetId = insertedIds[0];
     const received: Todo[][] = [];
     const unsub = trackSubscription(
-      db.subscribeAll(todos.where({ id: targetId }), (delta) => {
-        received.push([...(delta.all ?? [])]);
+      db.subscribe(todos.where({ id: targetId }), (rows) => {
+        received.push(rows);
       }),
     );
 
@@ -1172,20 +1214,26 @@ describe("SharedWorker bridge with IndexedDB", () => {
   it("does not send a live rejection to a runtime attached after its originating peer closes", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions(
       "sync-on-mutation-error-restart",
-      readOnlyPermissions,
     );
 
     const sharedLocalAuthToken = generateAuthSecret();
     const dbName = uniqueDbName("sync-on-mutation-error-restart");
-    const createPersistentDb = () =>
+    const createPersistentDb = (serverUrl?: string) =>
       createDb({
         appId: syncServer.appId,
         driver: { type: "persistent" as const, dbName },
-        serverUrl: syncServer.serverUrl,
+        serverUrl,
         secret: sharedLocalAuthToken,
       });
 
-    const dbBeforeRestart = track(await createPersistentDb());
+    const dbBeforeRestart = track(await createPersistentDb(syncServer.serverUrl));
+    const durableControl = dbBeforeRestart.insert(todos, {
+      title: "Durable control across rejection restart",
+      done: false,
+    });
+    await durableControl.wait({ tier: "edge" });
+    await publishPermissionsForServer(syncServer, readOnlyPermissions);
+
     const mutationErrorSpy = vi.fn();
     dbBeforeRestart.onMutationError(mutationErrorSpy);
 
@@ -1216,18 +1264,56 @@ describe("SharedWorker bridge with IndexedDB", () => {
       },
     });
 
-    await dbBeforeRestart.shutdown();
-    untrack(dbBeforeRestart);
+    const inspectorControl = await dbBeforeRestart.openInspectorControlPort();
+    inspectorControl.start();
+    const [initialContext] = (await listWorkerContexts(inspectorControl)).filter(
+      (context) => context.dbName === dbName,
+    );
+    expect(initialContext).toBeDefined();
+    try {
+      await dbBeforeRestart.shutdown();
+      untrack(dbBeforeRestart);
+      await waitForWorkerContextRelease(inspectorControl, dbName);
+      await terminateWorker(inspectorControl);
 
-    const dbAfterAcknowledgement = track(await createPersistentDb());
-    const replayAfterAckSpy = vi.fn();
-    dbAfterAcknowledgement.onMutationError(replayAfterAckSpy);
-    await dbAfterAcknowledgement.all(allTodos, { tier: "local" });
-    // The durable worker can outlive its tabs. Reconciliation remains durable,
-    // but the original tab's application notification is not a worker backlog
-    // for a later tab (or a reconnecting replacement runtime).
-    await sleep(500);
-    expect(replayAfterAckSpy).not.toHaveBeenCalled();
+      const dbAfterAcknowledgement = track(await createPersistentDb(undefined));
+      const replayAfterAckSpy = vi.fn();
+      dbAfterAcknowledgement.onMutationError(replayAfterAckSpy);
+      expect(await dbAfterAcknowledgement.all(allTodos, { tier: "local" })).toEqual([
+        durableControl.value,
+      ]);
+      const secondInspectorControl = await dbAfterAcknowledgement.openInspectorControlPort();
+      secondInspectorControl.start();
+      const [secondContext] = (await listWorkerContexts(secondInspectorControl)).filter(
+        (context) => context.dbName === dbName,
+      );
+      expect(secondContext?.workerRealmId).not.toBe(initialContext?.workerRealmId);
+      // The destroyed worker context rehydrated the settled local view, but the
+      // original tab's application notification is not a backlog for a later tab.
+      await sleep(500);
+      expect(replayAfterAckSpy).not.toHaveBeenCalled();
+
+      await dbAfterAcknowledgement.shutdown();
+      untrack(dbAfterAcknowledgement);
+      await waitForWorkerContextRelease(secondInspectorControl, dbName);
+      await terminateWorker(secondInspectorControl);
+
+      const dbAfterSecondRestart = track(await createPersistentDb(undefined));
+      expect(await dbAfterSecondRestart.all(allTodos, { tier: "local" })).toEqual([
+        durableControl.value,
+      ]);
+      const thirdInspectorControl = await dbAfterSecondRestart.openInspectorControlPort();
+      thirdInspectorControl.start();
+      const [thirdContext] = (await listWorkerContexts(thirdInspectorControl)).filter(
+        (context) => context.dbName === dbName,
+      );
+      expect(thirdContext?.workerRealmId).not.toBe(secondContext?.workerRealmId);
+      thirdInspectorControl.postMessage({
+        type: "close",
+      } satisfies BrowserInspectorControlRequest);
+    } finally {
+      inspectorControl.postMessage({ type: "close" } satisfies BrowserInspectorControlRequest);
+    }
   });
 
   it("rehydrates rejected worker batches without replaying an absent runtime's notification", async () => {
@@ -1257,8 +1343,15 @@ describe("SharedWorker bridge with IndexedDB", () => {
       "pending rejected insert should be durably recorded locally before restart",
     );
 
+    const inspectorBeforeRestart = await dbBeforeRestart.openInspectorControlPort();
+    inspectorBeforeRestart.start();
+    const [contextBeforeRestart] = (await listWorkerContexts(inspectorBeforeRestart)).filter(
+      (context) => context.dbName === dbName,
+    );
     await dbBeforeRestart.shutdown();
     untrack(dbBeforeRestart);
+    await waitForWorkerContextRelease(inspectorBeforeRestart, dbName);
+    await terminateWorker(inspectorBeforeRestart);
 
     const dbAfterRestart = track(await createPersistentDb(syncServer.serverUrl));
     const replayAfterRestartSpy = vi.fn();
@@ -1266,6 +1359,12 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     // Run a query to set up the runtime
     await dbAfterRestart.all(allTodos, { tier: "edge" });
+    const inspectorAfterRestart = await dbAfterRestart.openInspectorControlPort();
+    inspectorAfterRestart.start();
+    const [contextAfterRestart] = (await listWorkerContexts(inspectorAfterRestart)).filter(
+      (context) => context.dbName === dbName,
+    );
+    expect(contextAfterRestart?.workerRealmId).not.toBe(contextBeforeRestart?.workerRealmId);
 
     await waitForCondition(
       async () => (await dbAfterRestart.all(allTodos, { tier: "local" })).length === 0,
@@ -1274,6 +1373,23 @@ describe("SharedWorker bridge with IndexedDB", () => {
     );
     await sleep(500);
     expect(replayAfterRestartSpy).not.toHaveBeenCalled();
+
+    await dbAfterRestart.shutdown();
+    untrack(dbAfterRestart);
+    await waitForWorkerContextRelease(inspectorAfterRestart, dbName);
+    await terminateWorker(inspectorAfterRestart);
+
+    const dbAfterSecondRestart = track(await createPersistentDb(undefined));
+    expect(await dbAfterSecondRestart.all(allTodos, { tier: "local" })).toEqual([]);
+    const inspectorAfterSecondRestart = await dbAfterSecondRestart.openInspectorControlPort();
+    inspectorAfterSecondRestart.start();
+    const [contextAfterSecondRestart] = (
+      await listWorkerContexts(inspectorAfterSecondRestart)
+    ).filter((context) => context.dbName === dbName);
+    expect(contextAfterSecondRestart?.workerRealmId).not.toBe(contextAfterRestart?.workerRealmId);
+    inspectorAfterSecondRestart.postMessage({
+      type: "close",
+    } satisfies BrowserInspectorControlRequest);
   });
 
   describe("optimistic writes are reverted on server rejection", () => {
@@ -1382,19 +1498,14 @@ describe("SharedWorker bridge with IndexedDB", () => {
         untrack(dbBeforeRestart);
 
         const dbAfterRestart = track(await createPersistentDb(syncServer.serverUrl));
-        // Run a query to set up the runtime
-        await dbAfterRestart.all(allTodos, { tier: "edge" });
+        expect(await dbAfterRestart.all(allTodos, { tier: "edge" })).toEqual([]);
+        await dbAfterRestart.shutdown();
+        untrack(dbAfterRestart);
 
-        await waitForCondition(
-          async () => {
-            const todosAfterRevert = await dbAfterRestart.all(allTodos, {
-              tier: "local",
-            });
-            return todosAfterRevert.length === 0;
-          },
-          5000,
-          "restarted rejected insert should remove the previous local row",
-        );
+        // Reopen offline to prove the accepted server state crossed the public
+        // runtime lifecycle boundary and was durably settled in the worker.
+        const dbAfterSettlement = track(await createPersistentDb(undefined));
+        expect(await dbAfterSettlement.all(allTodos, { tier: "local" })).toEqual([]);
       });
 
       it("update", async () => {
@@ -1441,18 +1552,12 @@ describe("SharedWorker bridge with IndexedDB", () => {
         untrack(dbBeforeRestart);
 
         const dbAfterRestart = track(await createPersistentDb(syncServer.serverUrl));
-        await dbAfterRestart.all(allTodos, { tier: "edge" });
+        expect(await dbAfterRestart.all(allTodos, { tier: "edge" })).toEqual([todo]);
+        await dbAfterRestart.shutdown();
+        untrack(dbAfterRestart);
 
-        await waitForCondition(
-          async () => {
-            const todosAfterRevert = await dbAfterRestart.all(allTodos, {
-              tier: "local",
-            });
-            return todosAfterRevert.length === 1 && todosAfterRevert[0]?.title === todo.title;
-          },
-          5000,
-          "restarted rejected update should restore the previous local row",
-        );
+        const dbAfterSettlement = track(await createPersistentDb(undefined));
+        expect(await dbAfterSettlement.all(allTodos, { tier: "local" })).toEqual([todo]);
       });
 
       it("delete", async () => {
@@ -1497,19 +1602,12 @@ describe("SharedWorker bridge with IndexedDB", () => {
         untrack(dbBeforeRestart);
 
         const dbAfterRestart = track(await createPersistentDb(syncServer.serverUrl));
-        await dbAfterRestart.all(allTodos, { tier: "edge" });
+        expect(await dbAfterRestart.all(allTodos, { tier: "edge" })).toEqual([todo]);
+        await dbAfterRestart.shutdown();
+        untrack(dbAfterRestart);
 
-        await waitForCondition(
-          async () => {
-            const todosAfterRevert = await dbAfterRestart.all(allTodos, {
-              tier: "local",
-            });
-            return todosAfterRevert.length === 1 && todosAfterRevert[0]?.title === todo.title;
-          },
-          5000,
-          "restarted rejected delete should restore the previous local row",
-        );
-        expect(await dbAfterRestart.all(allTodos, { tier: "local" })).toEqual([todo]);
+        const dbAfterSettlement = track(await createPersistentDb(undefined));
+        expect(await dbAfterSettlement.all(allTodos, { tier: "local" })).toEqual([todo]);
       });
     });
   });
@@ -1760,10 +1858,10 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     const snapshots: Todo[][] = [];
     const unsub = trackSubscription(
-      dbA.subscribeAll(
+      dbA.subscribe(
         allTodos,
-        (delta) => {
-          snapshots.push([...(delta.all ?? [])]);
+        (rows) => {
+          snapshots.push(rows);
         },
         { propagation: "local-only" },
       ),
@@ -1813,10 +1911,10 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     const snapshots: Todo[][] = [];
     const unsub = trackSubscription(
-      dbB.subscribeAll(
+      dbB.subscribe(
         allTodos,
-        (delta) => {
-          snapshots.push([...(delta.all ?? [])]);
+        (rows) => {
+          snapshots.push(rows);
         },
         { propagation: "local-only" },
       ),
@@ -1881,14 +1979,11 @@ describe("SharedWorker bridge with IndexedDB", () => {
     await Promise.all([dbA.all(allTodos, { tier: "local" }), dbB.all(allTodos, { tier: "local" })]);
 
     const receivedByLeader: string[] = [];
-    const unsubscribe = dbA.subscribeAll(
-      allTodos as QueryBuilder<Todo & { id: string }>,
-      (delta) => {
-        for (const todo of delta.all ?? []) {
-          receivedByLeader.push(todo.title);
-        }
-      },
-    );
+    const unsubscribe = dbA.subscribe(allTodos as QueryBuilder<Todo & { id: string }>, (rows) => {
+      for (const todo of rows) {
+        receivedByLeader.push(todo.title);
+      }
+    });
 
     dbB.insert(todos, { title: "Routed through SharedWorker", done: false });
 
@@ -2295,8 +2390,8 @@ describe("SharedWorker bridge with IndexedDB", () => {
     );
     const snapshots: Todo[][] = [];
     const unsubscribe = trackSubscription(
-      second.subscribeAll(allTodos, (delta) => {
-        snapshots.push([...(delta.all ?? [])]);
+      second.subscribe(allTodos, (rows) => {
+        snapshots.push(rows);
       }),
     );
 

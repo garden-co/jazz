@@ -1,7 +1,10 @@
 //! Public-API coverage that a connected persistent client releases its local
 //! storage when it shuts down.
 
-use jazz::tools::{ClientStorage, ColumnType, SchemaBuilder, TableSchema};
+use jazz::{
+    query::Query,
+    tools::{ClientStorage, ColumnType, ReadTier, SchemaBuilder, TableSchema},
+};
 use jazz_server::JazzServer;
 use tempfile::TempDir;
 
@@ -28,12 +31,20 @@ async fn shutdown_releases_persistent_storage_for_reopen_impl() {
     ));
     context.data_dir = data_dir.path().to_path_buf();
 
-    jazz_testkit::connect(context.clone())
+    let client = jazz_testkit::connect(context.clone())
         .await
-        .expect("connect persistent client")
-        .shutdown()
+        .expect("connect persistent client");
+    let retained_clone = client.clone();
+    client.shutdown().await.expect("shutdown persistent client");
+
+    let error = retained_clone
+        .query_with_read_tier(Query::from("todos"), ReadTier::LocalFirst)
         .await
-        .expect("shutdown persistent client");
+        .expect_err("a retained JazzClient clone must not revive a shut-down context");
+    assert!(
+        error.to_string().contains("client is shut down"),
+        "retained clone reported an unexpected shutdown error: {error}"
+    );
 
     jazz_testkit::connect(context)
         .await

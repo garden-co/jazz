@@ -5,7 +5,7 @@ Local-first todo app in vanilla TypeScript + Vite — no UI framework. Anonymous
 ## What it demonstrates
 
 - Anonymous identity from a locally generated secret — no login UI, no auth server.
-- The low-level Jazz client API: `createDb`, `db.subscribeAll`, `db.insert` / `db.update` / `db.delete`, `db.onAuthChanged` — consumed without React, Svelte, or Vue bindings.
+- The low-level Jazz client API: `createDb`, `db.subscribe`, `db.insert` / `db.update` / `db.delete`, `db.onAuthChanged` — consumed without React, Svelte, or Vue bindings.
 - Row-level permissions — `owner_id` enforced by `definePermissions`; mutations on rows you don't own are rejected by the runtime.
 - IndexedDB-backed persistence across reload, plus optional server sync when `VITE_JAZZ_SERVER_URL` is set.
 - The Jazz Vite plugin (`jazzPlugin` in `vite.config.ts`) hosts the dev sync server alongside Vite.

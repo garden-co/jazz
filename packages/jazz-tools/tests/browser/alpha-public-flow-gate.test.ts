@@ -3,12 +3,10 @@ import {
   createDb,
   generateAuthSecret,
   publishStoredPermissions,
-  RowChangeKind,
   schema,
   type CompiledPermissions,
   type Db,
   type Query,
-  type RowDelta,
   type RowOf,
 } from "../../src/index.js";
 import { fetchPermissionsHead, publishStoredSchema } from "../../src/runtime/schema-fetch.js";
@@ -122,8 +120,8 @@ describe("alpha public package flow", () => {
     );
     const snapshots: Todo[][] = [];
     const unsubscribe = ctx.trackSubscription(
-      db.subscribeAll(app.todos.orderBy("title"), (delta) => {
-        snapshots.push([...delta.all]);
+      db.subscribe(app.todos.orderBy("title"), (rows) => {
+        snapshots.push(rows);
       }),
     );
 
@@ -206,11 +204,9 @@ describe("alpha public package flow", () => {
     );
     const openTodos = app.todos.where({ done: false }).orderBy("title");
     const snapshots: Todo[][] = [];
-    const rowChanges: Array<RowDelta<Todo>> = [];
     const unsubscribe = ctx.trackSubscription(
-      db.subscribeAll(openTodos, (delta) => {
-        snapshots.push([...delta.all]);
-        rowChanges.push(...delta.delta);
+      db.subscribe(openTodos, (rows) => {
+        snapshots.push(rows);
       }),
     );
 
@@ -235,11 +231,6 @@ describe("alpha public package flow", () => {
     await db.update(app.todos, startsOpen.id, { done: true }).wait({ tier: "local" });
     await expectTodoSummariesForQuery(db, openTodos, [], "local");
     await waitForSnapshotSummaries(snapshots, [], "row leaves open predicate after update");
-    await waitForRowChange(
-      rowChanges,
-      (change) => change.kind === RowChangeKind.Removed && change.id === startsOpen.id,
-      "removed row after it leaves the open predicate",
-    );
 
     await db.update(app.todos, startsDone.id, { done: false }).wait({ tier: "local" });
     await expectTodoSummariesForQuery(db, openTodos, ["Starts done:open"], "local");
@@ -247,14 +238,6 @@ describe("alpha public package flow", () => {
       snapshots,
       ["Starts done:open"],
       "row enters open predicate after update",
-    );
-    await waitForRowChange(
-      rowChanges,
-      (change) =>
-        change.kind === RowChangeKind.Added &&
-        change.id === startsDone.id &&
-        change.item.title === "Starts done",
-      "added row after it enters the open predicate",
     );
 
     unsubscribe();
@@ -284,8 +267,8 @@ describe("alpha public package flow", () => {
       .orderBy("priority", "desc")
       .limit(1);
     const unsubscribe = ctx.trackSubscription(
-      db.subscribeAll(richQuery, (delta) => {
-        snapshots.push([...delta.all]);
+      db.subscribe(richQuery, (rows) => {
+        snapshots.push(rows);
       }),
     );
 
@@ -325,7 +308,7 @@ describe("alpha public package flow", () => {
             rows[0].payload.length === 4,
         ),
       5_000,
-      "richer local subscribeAll snapshot",
+      "richer local subscribe snapshot",
     );
 
     await db.update(richApp.todos, created.id, { payload: null }).wait({ tier: "local" });
@@ -343,8 +326,8 @@ describe("alpha public package flow", () => {
     const dbB = await openAlphaMemoryDb(appId, serverUrl, adminSecret, sharedSecret);
     const snapshots: Todo[][] = [];
     const unsubscribe = ctx.trackSubscription(
-      dbB.subscribeAll(app.todos.orderBy("title"), (delta) => {
-        snapshots.push([...delta.all]);
+      dbB.subscribe(app.todos.orderBy("title"), (rows) => {
+        snapshots.push(rows);
       }),
     );
 
@@ -419,8 +402,8 @@ describe("alpha public package flow", () => {
 
     const snapshots: RichTodo[][] = [];
     const unsubscribe = ctx.trackSubscription(
-      dbB.subscribeAll(richQuery, (delta) => {
-        snapshots.push([...delta.all]);
+      dbB.subscribe(richQuery, (rows) => {
+        snapshots.push(rows);
       }),
     );
 
@@ -522,8 +505,8 @@ describe("alpha public package flow", () => {
 
       const snapshots: RichTodo[][] = [];
       const unsubscribe = ctx.trackSubscription(
-        reader.subscribeAll(richQuery, (delta) => {
-          snapshots.push([...delta.all]);
+        reader.subscribe(richQuery, (rows) => {
+          snapshots.push(rows);
         }),
       );
 
@@ -671,8 +654,8 @@ describe("alpha public package flow", () => {
     });
     const snapshots: Todo[][] = [];
     const unsubscribe = ctx.trackSubscription(
-      db.subscribeAll(app.todos.orderBy("title"), (delta) => {
-        snapshots.push([...delta.all]);
+      db.subscribe(app.todos.orderBy("title"), (rows) => {
+        snapshots.push(rows);
       }),
     );
 
@@ -991,18 +974,6 @@ async function waitForSnapshotSummaries(
   );
 }
 
-async function waitForRowChange(
-  changes: Array<RowDelta<Todo>>,
-  predicate: (change: RowDelta<Todo>) => boolean,
-  label: string,
-): Promise<void> {
-  await waitForCondition(
-    async () => changes.some(predicate),
-    5_000,
-    `subscription row delta for ${label}`,
-  );
-}
-
 async function waitForSubscribedTodoSummaries(
   db: Db,
   summaries: string[],
@@ -1021,8 +992,8 @@ async function waitForSubscribedTodoSummaries(
       );
     }, 45_000);
     unsubscribe = ctx.trackSubscription(
-      db.subscribeAll(query, (delta) => {
-        lastRows = [...delta.all];
+      db.subscribe(query, (rows) => {
+        lastRows = rows;
         if (summariesEqual([...lastRows].sort(byTitle), summaries)) {
           clearTimeout(timeout);
           unsubscribe();

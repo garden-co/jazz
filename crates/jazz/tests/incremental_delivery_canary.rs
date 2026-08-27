@@ -214,20 +214,34 @@ fn seed_relation_fixture(db: &Db<TestStorage>, child_rows: usize) -> RowUuid {
     ))
     .expect("insert parent");
 
-    for index in 0..child_rows {
-        block_on(db.insert(
-            "children",
-            BTreeMap::from([
-                ("parent_id".to_owned(), Value::Uuid(parent.0)),
-                ("label".to_owned(), Value::String(format!("child-{index}"))),
-                ("ordinal".to_owned(), Value::I32(index as i32)),
-            ]),
-            jazz::db::InsertOptions {
-                row_id: Some(row(1_000 + index as u64)),
-                ..Default::default()
-            },
-        ))
-        .unwrap_or_else(|err| panic!("insert child {index}: {err}"));
+    // The canary measures a change against a large *current relation*, not
+    // admission work for 20,000 independent historical transactions. Seed in
+    // bounded ordinary mergeable transactions so fixture construction does not
+    // consume the CI watchdog before the maintained-view path is exercised.
+    let mut next = 0usize;
+    while next < child_rows {
+        let start = next;
+        let end = (start + 500).min(child_rows);
+        block_on(db.transaction(async |tx| {
+            for index in start..end {
+                tx.insert(
+                    "children",
+                    BTreeMap::from([
+                        ("parent_id".to_owned(), Value::Uuid(parent.0)),
+                        ("label".to_owned(), Value::String(format!("child-{index}"))),
+                        ("ordinal".to_owned(), Value::I32(index as i32)),
+                    ]),
+                    jazz::db::InsertOptions {
+                        row_id: Some(row(1_000 + index as u64)),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            }
+            Ok(())
+        }))
+        .unwrap_or_else(|err| panic!("insert children {start}..{end}: {err}"));
+        next = end;
     }
 
     parent
@@ -351,8 +365,12 @@ fn measure_single_child_insert(scale: usize) -> AllocSnapshot {
 
 #[test]
 fn maintained_relation_include_single_row_changes_are_scale_independent() {
-    let small = measure_single_child_insert(1_000);
-    let large = measure_single_child_insert(20_000);
+    // Preserve the 20x scale gap that exposes accumulated-state work while
+    // keeping initial hydration below the suite watchdog. The only measured
+    // operation is the one-row update below, so a larger fixture merely made
+    // the canary's unmeasured setup compete with unrelated CI work.
+    let small = measure_single_child_insert(250);
+    let large = measure_single_child_insert(5_000);
 
     // This canary is intentionally about mechanism, not observable correctness.
     // A 20x larger accumulated include relation receiving the same one-row

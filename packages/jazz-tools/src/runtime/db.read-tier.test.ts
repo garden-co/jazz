@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ReadTier, type JazzClient } from "./client.js";
 import { createDbWithRuntimeSource, type Db, type DbConfig, type QueryBuilder } from "./db.js";
 import { RuntimeSource, type RuntimeClientContext } from "./runtime-source.js";
-import type { SubscriptionWireDelta, WasmSchema } from "../drivers/types.js";
+import type { RuntimeSubscriptionDelta, WasmSchema } from "../drivers/types.js";
 
 const schema: WasmSchema = {
   todos: {
@@ -31,13 +31,13 @@ class TestRuntimeSource extends RuntimeSource<DbConfig> {
 
 function makeClient() {
   let nextSubscription = 1;
-  const subscriptionCallbacks = new Map<number, (delta: SubscriptionWireDelta) => void>();
+  const subscriptionCallbacks = new Map<number, (delta: RuntimeSubscriptionDelta) => void>();
   return {
     connectTransport: vi.fn(),
     disconnectTransport: vi.fn(async () => undefined),
     onMutationError: vi.fn(),
     query: vi.fn(async () => []),
-    subscribe: vi.fn((_query, callback: (delta: SubscriptionWireDelta) => void) => {
+    subscribe: vi.fn((_query, callback: (delta: RuntimeSubscriptionDelta) => void) => {
       const id = nextSubscription++;
       subscriptionCallbacks.set(id, callback);
       return id;
@@ -51,7 +51,7 @@ function makeClient() {
     query: ReturnType<typeof vi.fn>;
     subscribe: ReturnType<typeof vi.fn>;
     unsubscribe: ReturnType<typeof vi.fn>;
-    subscriptionCallbacks: Map<number, (delta: SubscriptionWireDelta) => void>;
+    subscriptionCallbacks: Map<number, (delta: RuntimeSubscriptionDelta) => void>;
   };
 }
 
@@ -65,20 +65,30 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function added(id: string, title: string): SubscriptionWireDelta {
-  return [
-    {
-      kind: 0,
-      id,
-      index: 0,
-      row: { id, values: [{ type: "Text", value: title }] },
-    },
-  ];
+function added(id: string, title: string): RuntimeSubscriptionDelta {
+  const rowId = new Uint8Array(16);
+  rowId.set(new TextEncoder().encode(id).subarray(0, rowId.length));
+  const hex = Array.from(rowId, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const sourceId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(
+    16,
+    20,
+  )}-${hex.slice(20)}`;
+  return {
+    added: [
+      {
+        sourceId,
+        occurrenceKey: Uint8Array.from([1, ...rowId]),
+        index: 0,
+        row: { id: sourceId, values: [{ type: "Text", value: title }] },
+      },
+    ],
+    removed: [],
+    updated: [],
+  };
 }
 
-function publicationTitles(delta: { all?: Array<{ title: string }> }): string[] {
-  if (!delta.all) throw new Error("expected subscription publication to include complete results");
-  return delta.all.map((row) => row.title);
+function publicationTitles(rows: Array<{ title: string }>): string[] {
+  return rows.map((row) => row.title);
 }
 
 const dbs: Db[] = [];
@@ -147,7 +157,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     dbs.push(db);
     const callback = vi.fn();
 
-    const unsubscribe = db.subscribeAll(query(), callback, {
+    const unsubscribe = db.subscribe(query(), callback, {
       tier: ReadTier.RemoteIfPossible,
     });
     await settle();
@@ -295,7 +305,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     dbs.push(db);
     await db.disconnect();
 
-    const unsubscribe = db.subscribeAll(query(), () => undefined, {
+    const unsubscribe = db.subscribe(query(), () => undefined, {
       tier: ReadTier.RemoteIfPossible,
     });
     const reconnect = db.reconnect();
@@ -329,7 +339,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     dbs.push(db);
 
     await db.disconnect();
-    const unsubscribe = db.subscribeAll(query(), () => undefined, {
+    const unsubscribe = db.subscribe(query(), () => undefined, {
       tier: ReadTier.RemoteIfPossible,
     });
 
@@ -360,7 +370,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     await db.disconnect();
 
     const publications: string[][] = [];
-    const unsubscribe = db.subscribeAll(
+    const unsubscribe = db.subscribe(
       query(),
       (delta) => publications.push(publicationTitles(delta)),
       { tier: ReadTier.RemoteIfPossible },
@@ -409,7 +419,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     dbs.push(db);
     await db.disconnect();
     const publications: string[][] = [];
-    const unsubscribe = db.subscribeAll(
+    const unsubscribe = db.subscribe(
       query(),
       (delta) => publications.push(publicationTitles(delta)),
       { tier: ReadTier.RemoteIfPossible },
@@ -440,7 +450,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     dbs.push(db);
     await db.disconnect();
     const publications: string[][] = [];
-    const unsubscribe = db.subscribeAll(
+    const unsubscribe = db.subscribe(
       query(),
       (delta) => publications.push(publicationTitles(delta)),
       { tier: ReadTier.RemoteIfPossible },
@@ -486,10 +496,10 @@ describe("Db ReadTier.RemoteIfPossible", () => {
 
     for (let cycle = 0; cycle < 3; cycle++) {
       await db.disconnect();
-      const first = db.subscribeAll(query(), () => undefined, {
+      const first = db.subscribe(query(), () => undefined, {
         tier: ReadTier.RemoteIfPossible,
       });
-      const second = db.subscribeAll(query(), () => undefined, {
+      const second = db.subscribe(query(), () => undefined, {
         tier: ReadTier.RemoteIfPossible,
       });
       const firstLocal = cycle * 4 + 1;
@@ -519,7 +529,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     );
     dbs.push(db);
     await db.disconnect();
-    const unsubscribe = db.subscribeAll(query(), () => undefined, {
+    const unsubscribe = db.subscribe(query(), () => undefined, {
       tier: ReadTier.RemoteIfPossible,
     });
 

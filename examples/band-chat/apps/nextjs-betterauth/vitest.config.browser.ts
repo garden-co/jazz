@@ -11,6 +11,15 @@ import {
   unblockJazzServerNetwork,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server-node.js";
 
+function jazzBrowserTopologyLog(
+  _context: unknown,
+  status: "start" | "complete" | "failed",
+  label: string,
+  elapsedMs: number,
+) {
+  console.info(`[jazz-browser-topology] ${status} ${label} (${elapsedMs}ms)`);
+}
+
 export default defineConfig({
   resolve: { alias: { "@": fileURLToPath(new URL(".", import.meta.url)) } },
   define: {
@@ -26,6 +35,7 @@ export default defineConfig({
       provider: playwright(),
       instances: [{ browser: "chromium", headless: true }],
       commands: {
+        jazzBrowserTopologyLog,
         jazzServerInfo: async (_context, appId, schema) => jazzServerInfo(appId, schema),
         jazzServerBlockNetwork: async ({ context }, serverUrl) =>
           blockJazzServerNetwork(context, serverUrl),

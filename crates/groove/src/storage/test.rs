@@ -425,6 +425,45 @@ where
         })
     }
 
+    fn put_if_absent(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+        Box::pin(async move {
+            self.control.before(TestStorageOperation::WriteMany).await?;
+            let installed = value.clone();
+            let existing = self
+                .inner
+                .put_if_absent(cf.clone(), key.clone(), value)
+                .await?;
+            self.resident.borrow_mut().install_point(
+                cf,
+                key,
+                Some(existing.clone().unwrap_or(installed)),
+            );
+            Ok(existing)
+        })
+    }
+
+    fn compare_and_delete(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        expected: Vec<u8>,
+    ) -> StorageFuture<'_, Result<bool, Error>> {
+        Box::pin(async move {
+            self.control.before(TestStorageOperation::WriteMany).await?;
+            let removed = self
+                .inner
+                .compare_and_delete(cf.clone(), key.clone(), expected)
+                .await?;
+            self.resident.borrow_mut().invalidate(&cf, &key);
+            Ok(removed)
+        })
+    }
+
     fn set(
         &self,
         cf: String,
@@ -540,9 +579,6 @@ where
                     }
                     OwnedWriteOperation::Delete { cf, key } => {
                         resident.install_point(cf, key, None);
-                    }
-                    OwnedWriteOperation::Delta { cf, key, .. } => {
-                        resident.invalidate(&cf, &key);
                     }
                 }
             }

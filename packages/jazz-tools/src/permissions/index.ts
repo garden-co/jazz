@@ -7,7 +7,12 @@ import type {
   TablePolicies,
 } from "../schema.js";
 import type { WasmSchema } from "../drivers/types.js";
-import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
+import {
+  AmbiguousRelationNameError,
+  DuplicateColumnNameError,
+  analyzeRelations,
+  type Relation,
+} from "../codegen/relation-analyzer.js";
 import type {
   RelColumnRef,
   RelExpr,
@@ -904,7 +909,10 @@ function collectRelationsByTable(app: AppLike): Map<string, Relation[]> {
   const typedSchema = schema as WasmSchema;
   try {
     return analyzeRelations(typedSchema);
-  } catch {
+  } catch (error) {
+    if (error instanceof AmbiguousRelationNameError || error instanceof DuplicateColumnNameError) {
+      throw error;
+    }
     // Keep permissive behavior for partially-specified schemas used in tests/tooling.
     // hopTo/gather callers still receive explicit unknown-relation errors.
     return new Map();
@@ -1315,8 +1323,9 @@ function resolveNamedRelation(
   table: string,
   relationName: string,
 ): Relation {
-  const relations = relationsByTable.get(table) ?? [];
-  const relation = relations.find((candidate) => candidate.name === relationName);
+  const relation = (relationsByTable.get(table) ?? []).find(
+    (candidate) => candidate.name === relationName,
+  );
   if (!relation) {
     throw new Error(`Unknown relation "${relationName}" on table "${table}".`);
   }

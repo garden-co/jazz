@@ -580,11 +580,7 @@ pub(super) fn validate_collect_by_terminality(graph: &GraphBuilder) -> Result<()
             | GraphBuilder::BindingSource { .. } => false,
         };
 
-        let collect_is_terminal = matches!(
-            node,
-            GraphBuilder::Filter { .. } | GraphBuilder::Project { .. }
-        );
-        if children_contain_collect && !collect_is_terminal {
+        if children_contain_collect {
             return Err(IvmRuntimeError::CollectByMustBeTerminal);
         }
         contains_collect.insert(

@@ -46,90 +46,29 @@ describe("JazzClient runtime helpers", () => {
     expect(executeSubscriptionCalls).toHaveLength(1);
   });
 
-  it("forwards structured RN delta payloads to subscription callbacks", async () => {
+  it("forwards structured runtime deltas to subscription callbacks", async () => {
     const { client, executeSubscriptionCalls } = makeClient();
     const callback = vi.fn();
     client.subscribe('{"table":"todos"}', callback);
     await flushMicrotasks();
 
     const onUpdate = executeSubscriptionCalls[0]![1];
-    onUpdate(
-      JSON.stringify({
-        added: [{ row: { id: "row-a", values: [] }, index: 0 }],
-        removed: [{ row: { id: "row-r", values: [] }, index: 1 }],
-        updated: [
-          {
-            old_row: { id: "row-u", values: [] },
-            new_row: { id: "row-u", values: [] },
-            old_index: 0,
-            new_index: 0,
-          },
-        ],
-        pending: false,
-      }),
-    );
-
-    expect(callback).toHaveBeenCalledTimes(1);
-    expect(callback).toHaveBeenCalledWith({
-      added: [{ row: { id: "row-a", values: [] }, index: 0 }],
-      removed: [{ row: { id: "row-r", values: [] }, index: 1 }],
-      updated: [
+    const delta = {
+      added: [
         {
-          old_row: { id: "row-u", values: [] },
-          new_row: { id: "row-u", values: [] },
-          old_index: 0,
-          new_index: 0,
+          sourceId: "row-a",
+          occurrenceKey: Uint8Array.of(1),
+          index: 0,
+          row: { id: "row-a", values: [] },
         },
       ],
-      pending: false,
-    });
-  });
-
-  it("forwards NAPI error-first delta payloads to subscription callbacks", async () => {
-    const { client, executeSubscriptionCalls } = makeClient();
-    const callback = vi.fn();
-    client.subscribe('{"table":"todos"}', callback);
-    await flushMicrotasks();
-
-    const onUpdate = executeSubscriptionCalls[0]![1];
-    onUpdate(null, [
-      {
-        kind: 0,
-        id: "row-a",
-        index: 0,
-        row: { id: "row-a", values: [] },
-      },
-    ]);
+      removed: [],
+      updated: [],
+    };
+    onUpdate(delta);
 
     expect(callback).toHaveBeenCalledTimes(1);
-    expect(callback).toHaveBeenCalledWith([
-      {
-        kind: 0,
-        id: "row-a",
-        index: 0,
-        row: { id: "row-a", values: [] },
-      },
-    ]);
-  });
-
-  it("forwards partial structured deltas without throwing", async () => {
-    const { client, executeSubscriptionCalls } = makeClient();
-    const callback = vi.fn();
-    client.subscribe('{"table":"todos"}', callback);
-    await flushMicrotasks();
-
-    const onUpdate = executeSubscriptionCalls[0]![1];
-    expect(() =>
-      onUpdate(
-        JSON.stringify({
-          pending: true,
-        }),
-      ),
-    ).not.toThrow();
-
-    expect(callback).toHaveBeenCalledWith({
-      pending: true,
-    });
+    expect(callback).toHaveBeenCalledWith(delta);
   });
 
   it("passes query propagation options to runtime query", async () => {

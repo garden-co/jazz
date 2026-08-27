@@ -1331,11 +1331,11 @@ async function runB4(config: ProfileConfig): Promise<ScenarioResult> {
 
       try {
         for (let i = 0; i < subscriberCount; i += 1) {
-          const unsubscribe = writer.subscribeAll(
+          const unsubscribe = writer.subscribe(
             query<TaskRow>("tasks", [{ column: "id", op: "eq", value: targetTaskId }], [], 1),
-            (delta) => {
+            (rows) => {
               ready[i] = true;
-              const row = delta.all[0];
+              const row = rows[0];
               if (!row) return;
               if (row.priority === targetPriority && seenAt[i] === 0) {
                 seenAt[i] = performance.now();
@@ -1880,33 +1880,33 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
     let initialAllowedVisible: PermissionDocumentRow[] = [];
     let initialDeniedVisible: PermissionDocumentRow[] = [];
     let visibleAllowedFolders: PermissionFolderRow[] = [];
-    unsubscribeAllowed = allowedDb.subscribeAll(
+    unsubscribeAllowed = allowedDb.subscribe(
       visibleDocumentsQuery,
-      (delta) => {
-        initialAllowedVisible = delta.all;
-        warmAllowedVisible = delta.all.length;
+      (rows) => {
+        initialAllowedVisible = rows;
+        warmAllowedVisible = rows.length;
       },
       undefined,
       allowedSession,
     );
-    unsubscribeAllowedFolders = allowedDb.subscribeAll(
+    unsubscribeAllowedFolders = allowedDb.subscribe(
       foldersQuery,
-      (delta) => {
-        visibleAllowedFolders = delta.all;
+      (rows) => {
+        visibleAllowedFolders = rows;
       },
       undefined,
       allowedSession,
     );
-    unsubscribeDenied = deniedDb.subscribeAll(
+    unsubscribeDenied = deniedDb.subscribe(
       visibleDocumentsQuery,
-      (delta) => {
-        initialDeniedVisible = delta.all;
-        warmDeniedVisible = delta.all.length;
+      (rows) => {
+        initialDeniedVisible = rows;
+        warmDeniedVisible = rows.length;
       },
       undefined,
       deniedSession,
     );
-    unsubscribeDeniedFolders = deniedDb.subscribeAll(
+    unsubscribeDeniedFolders = deniedDb.subscribe(
       foldersQuery,
       () => {
         // Keep recursive folder visibility materialized for the denied client too.
@@ -2270,10 +2270,10 @@ describe("realistic browser benchmark harness", () => {
       const targetTaskId = state.taskIds[0];
       const received: TaskRow[][] = [];
 
-      const unsubscribe = db.subscribeAll(
+      const unsubscribe = db.subscribe(
         query<TaskRow>("tasks", [{ column: "id", op: "eq", value: targetTaskId }], [], 1),
-        (delta) => {
-          received.push([...delta.all]);
+        (rows) => {
+          received.push(rows);
         },
       );
 
@@ -2317,10 +2317,10 @@ describe("realistic browser benchmark harness", () => {
       });
 
       const received: TaskRow[][] = [];
-      const unsubscribe = db.subscribeAll(
+      const unsubscribe = db.subscribe(
         query<TaskRow>("tasks", [{ column: "id", op: "eq", value: targetTaskId }], [], 1),
-        (delta) => {
-          received.push([...delta.all]);
+        (rows) => {
+          received.push(rows);
         },
       );
 
@@ -2487,18 +2487,18 @@ describe("realistic browser benchmark harness", () => {
 
       let warmAllowedVisible = 0;
       let warmDeniedVisible = 0;
-      unsubscribeAllowed = allowedDb.subscribeAll(
+      unsubscribeAllowed = allowedDb.subscribe(
         visibleDocumentsQuery,
-        (delta) => {
-          warmAllowedVisible = delta.all.length;
+        (rows) => {
+          warmAllowedVisible = rows.length;
         },
         undefined,
         allowedSession,
       );
-      unsubscribeDenied = deniedDb.subscribeAll(
+      unsubscribeDenied = deniedDb.subscribe(
         visibleDocumentsQuery,
-        (delta) => {
-          warmDeniedVisible = delta.all.length;
+        (rows) => {
+          warmDeniedVisible = rows.length;
         },
         undefined,
         deniedSession,
