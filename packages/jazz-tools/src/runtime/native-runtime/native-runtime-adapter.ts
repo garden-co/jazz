@@ -340,7 +340,7 @@ type NativeDb = {
     patch: Uint8Array,
     descriptors: unknown,
     updatedAtMs?: number | null,
-  ): Write | PendingNativeWrite | Promise<Write | PendingNativeWrite>;
+  ): Write;
   connectUpstream(): Transport;
   connectUpstreamWithSession?(
     protocolVersion: number,
