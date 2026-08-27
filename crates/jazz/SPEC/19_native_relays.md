@@ -100,7 +100,7 @@ unbounded native turn.
 - versioned `meta` format markers;
 - a stable interned-column-family catalog;
 - bytewise ordered `(column_family, key)` primary keys;
-- atomic `write_many`, including ordered storage deltas;
+- atomic `write_many` over ordinary ordered-key/value sets and deletes;
 - explicit close and flush boundaries;
 - reopen that adds requested column families without losing existing contents.
 

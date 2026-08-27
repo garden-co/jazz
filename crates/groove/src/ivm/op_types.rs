@@ -50,6 +50,7 @@ pub enum VariantProjectionTarget {
 pub struct IndexSourceOp {
     pub table: String,
     pub index: String,
+    pub intersections: Vec<(String, StaticScanSpec)>,
     /// Fixed descriptor consumed by `IndexBy` after optional variant
     /// projection. For homogeneous tables this is the ordinary table
     /// descriptor.

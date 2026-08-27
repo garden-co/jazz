@@ -7,6 +7,7 @@ import {
   type PermissionRelation,
 } from "./index.js";
 import type { PolicyExpr } from "../schema.js";
+import { schema as s } from "../index.js";
 import { canonicalAuthorSubject } from "../runtime/author-id.js";
 import {
   toAssertionPolicyExprWithRelForTest,
@@ -378,6 +379,20 @@ const creatorCondition = {
 };
 
 describe("permissions DSL", () => {
+  it("rejects duplicate generated relation names while compiling the schema", () => {
+    expect(() =>
+      s.defineApp({
+        users: s.table({ name: s.string() }),
+        todos: s.table({
+          ownerId: s.ref("users"),
+          owner_id: s.ref("users"),
+        }),
+      }),
+    ).toThrow(
+      /Generated relation name "owner" is ambiguous on table "todos".*"todos.ownerId".*"todos.owner_id"/,
+    );
+  });
+
   it("compiles read/insert/update/delete policies", () => {
     const compiled = definePermissions(app, ({ policy, allOf, allowedTo, session }) => [
       policy.todos.allowRead.where({ ownerId: session.claims["sub"] }),

@@ -89,12 +89,12 @@ fn double_metrics_schema() -> Schema {
         .build()
 }
 
-fn counter_schema() -> Schema {
+fn counter_schema(count_type: ColumnType) -> Schema {
     let mut schema = SchemaBuilder::new()
         .table(
             TableSchema::builder("counters")
                 .column("name", ColumnType::Text)
-                .column("count", ColumnType::Integer),
+                .column("count", count_type),
         )
         .build();
     let table = schema
@@ -1658,7 +1658,7 @@ async fn aggregate_outputs_do_not_collide_with_grouped_public_column_names() {
 async fn integer_counter_columns_merge_signed_public_values() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let schema = counter_schema();
+            let schema = counter_schema(ColumnType::Integer);
             let server = JazzServer::start_with_schema(schema.clone()).await;
             let alice = jazz_testkit::connect(server.make_client_context_for_user(
                 schema.clone(),
@@ -1728,6 +1728,102 @@ async fn integer_counter_columns_merge_signed_public_values() {
                             *id == counter_id
                                 && values
                                     == &vec![Value::Text("shared".to_owned()), Value::Integer(8)]
+                        })
+                        .then_some(())
+                },
+            )
+            .await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn bigint_counter_columns_merge_signed_public_values() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let base = 3_000_000_000_i64;
+            let schema = counter_schema(ColumnType::BigInt);
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let alice = jazz_testkit::connect(server.make_client_context_for_user(
+                schema.clone(),
+                "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbb7",
+            ))
+            .await
+            .expect("connect alice");
+            let bob = jazz_testkit::connect(
+                server.make_client_context_for_user(schema, "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbb8"),
+            )
+            .await
+            .expect("connect bob");
+            let query = jazz::query::Query::from("counters").select(["name", "count"]);
+
+            let (counter_id, _, tx) = alice
+                .insert(
+                    "counters",
+                    row_input!("name" => "shared", "count" => Value::BigInt(base)),
+                )
+                .expect("insert counter");
+            support::wait_for_edge_txs(
+                &alice,
+                &[tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
+            wait_for_query(
+                &bob,
+                query.clone(),
+                Some(DurabilityTier::EdgeServer),
+                QUERY_TIMEOUT,
+                "bob sees bigint counter base",
+                |rows| {
+                    rows.iter()
+                        .any(|(id, values)| {
+                            *id == counter_id
+                                && values
+                                    == &vec![Value::Text("shared".to_owned()), Value::BigInt(base)]
+                        })
+                        .then_some(())
+                },
+            )
+            .await;
+
+            let alice_tx = alice
+                .update(
+                    counter_id,
+                    vec![("count".to_owned(), Value::BigInt(base + 3))],
+                )
+                .expect("alice updates counter");
+            let bob_tx = bob
+                .update(
+                    counter_id,
+                    vec![("count".to_owned(), Value::BigInt(base + 5))],
+                )
+                .expect("bob updates counter");
+            support::wait_for_edge_txs(
+                &alice,
+                &[alice_tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
+            support::wait_for_edge_txs(
+                &bob,
+                &[bob_tx.expect("ordinary mutation commits immediately")],
+            )
+            .await;
+
+            wait_for_query(
+                &alice,
+                query,
+                Some(DurabilityTier::EdgeServer),
+                QUERY_TIMEOUT,
+                "signed bigint counter deltas merge",
+                |rows| {
+                    rows.iter()
+                        .any(|(id, values)| {
+                            *id == counter_id
+                                && values
+                                    == &vec![
+                                        Value::Text("shared".to_owned()),
+                                        Value::BigInt(base + 8),
+                                    ]
                         })
                         .then_some(())
                 },

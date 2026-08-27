@@ -20,7 +20,7 @@ Invariant digest:
 - `INV-DATA-5`: A `TxId` MUST identify a transaction as `(time: TxTime, node: NodeUuid)`; stored transaction rows MUST use primary key `(time, node_id)` where `node_id` is the local alias for the wire `NodeUuid`.
 - `INV-DATA-6`: `SchemaVersionId` MUST be UUIDv5 over `JazzSchema::canonical_bytes()` in namespace `SCHEMA_VERSION_NAMESPACE`.
 - `INV-DATA-7`: Canonical schema identity MUST change when a column's `MergeStrategy` changes.
-- `INV-DATA-9`: A declared `MergeStrategy::Counter` MUST be accepted only on non-nullable integer columns of type `U8`, `U16`, `U32`, or `U64`.
+- `INV-DATA-9`: A declared `MergeStrategy::Counter` MUST be accepted only on non-nullable integer columns. Public `Integer` and `BigInt` columns lower to `I32` and `I64`; internal schemas may use `U8`, `U16`, `U32`, `U64`, `I32`, or `I64`.
 - `INV-DATA-11`: A merge strategy declaration MUST name an existing user column of the containing `TableSchema`.
 - `INV-DATA-12`: A table read or write policy, when present, MUST name the table it is attached to and MUST validate against the complete `JazzSchema`.
 - `INV-DATA-14`: History storage MUST preserve each content version's row identity, transaction identity, schema identity, parent set, and user cells.
@@ -89,13 +89,13 @@ that column.
 
 The default merge strategy is column last-writer-wins by HLC
 (`MergeStrategy::Lww`). A counter declaration is accepted only on a non-nullable
-integer column (`U8`/`U16`/`U32`/`U64`) (`INV-DATA-9`).
+integer column (`INV-DATA-9`). Public `Integer` and `BigInt` columns lower to
+`I32` and `I64`; lower-level runtime schemas also support the unsigned fixed-width
+integer representations.
 
 **Implementation status.** The reference implementation currently provides
-`MergeStrategy::Counter` as its non-LWW built-in strategy. Its declaration
-constraints are covered by
-`schema::counter_merge_strategy_rejects_string_columns`,
-`schema::counter_merge_strategy_rejects_nullable_integer_columns`.
+`MergeStrategy::Counter` as its non-LWW built-in strategy. Public-schema
+conversion validates this constraint before installing the runtime schema.
 
 _Further invariants._ `INV-DATA-11` — a merge-strategy declaration names an
 existing user column. `INV-DATA-12` — a table policy validates against the whole

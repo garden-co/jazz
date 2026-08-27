@@ -319,10 +319,13 @@ describe("NativeRuntimeAdapter server transport", () => {
       "ws://127.0.0.1:4200/apps/app-a/ws",
       JSON.stringify({ jwt_token: "invalid.jwt" }),
     );
+    const rejectedReadiness = runtime.waitForUpstreamServerConnection();
     await waitForFakeWebSocketNegotiation();
     sockets[0]!.emitMessage(encodeWebSocketFrameBatch([encodeWireError(3, 1, "invalid token")]));
     await waitForFakeWebSocketNegotiation();
 
+    await expect(rejectedReadiness).rejects.toThrow("invalid token");
+    await expect(runtime.waitForUpstreamServerConnection()).rejects.toThrow("invalid token");
     expect(authFailures).toEqual(["invalid"]);
     expect(upstreamConnections).toBe(0);
     expect(sockets[0]!.closed).toBe(true);
@@ -333,7 +336,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     allowServerHello = true;
     await runtime.updateAuth(JSON.stringify({ jwt_token: "fresh.jwt" }));
-    await waitForFakeWebSocketNegotiation();
+    await runtime.waitForUpstreamServerConnection();
 
     expect(sockets).toHaveLength(2);
     expect(upstreamConnections).toBe(1);
@@ -379,6 +382,383 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     expect(authFailures).toEqual([]);
     expect(transport.received).toEqual([]);
+    expect(transport.closed).toBe(false);
+    expect(sockets[0]!.closed).toBe(false);
+    await expect(runtime.waitForUpstreamServerConnection()).resolves.toBeUndefined();
+  });
+
+  it("cleans up native admission failure, retains it for late readiness, and reconnects", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const recoveredTransport = new FakeTransport([]);
+    let admissions = 0;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => new FakeTransport([]),
+            connectUpstreamWithSession: () => {
+              admissions += 1;
+              if (admissions === 1) throw new Error("native admission rejected");
+              return recoveredTransport;
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await expect(runtime.waitForUpstreamServerConnection()).rejects.toThrow(
+      "connecting the negotiated upstream transport: native admission rejected",
+    );
+    expect(sockets[0]!.closed).toBe(true);
+    await expect(runtime.waitForUpstreamServerConnection()).rejects.toThrow(
+      "connecting the negotiated upstream transport: native admission rejected",
+    );
+
+    await runtime.disconnect();
+    await expect(runtime.waitForUpstreamServerConnection()).resolves.toBeUndefined();
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await expect(runtime.waitForUpstreamServerConnection()).resolves.toBeUndefined();
+    expect(admissions).toBe(2);
+    expect(recoveredTransport.closed).toBe(false);
+    expect(sockets[1]!.closed).toBe(false);
+  });
+
+  it("retires an upstream admitted after its connection was disconnected", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transport = new FakeTransport([]);
+    let resolveAdmission!: (transport: Transport) => void;
+    const admission = new Promise<Transport>((resolve) => {
+      resolveAdmission = resolve;
+    });
+    const connectUpstreamWithSession = vi.fn(() => admission);
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => new FakeTransport([]),
+            connectUpstreamWithSession,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await waitForFakeWebSocketNegotiation();
+    expect(connectUpstreamWithSession).toHaveBeenCalledOnce();
+
+    await runtime.disconnect();
+    resolveAdmission(transport);
+    await waitForFakeWebSocketNegotiation();
+
+    expect(sockets[0]?.closed).toBe(true);
+    expect(transport.closed).toBe(true);
+    expect(transport.tickCount).toBe(0);
+  });
+
+  it("rejects readiness and retires admission after a physical close", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transport = new FakeTransport([]);
+    let resolveAdmission!: (transport: Transport) => void;
+    const admission = new Promise<Transport>((resolve) => {
+      resolveAdmission = resolve;
+    });
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => new FakeTransport([]),
+            connectUpstreamWithSession: () => admission,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await waitForFakeWebSocketNegotiation();
+    const readiness = runtime.waitForUpstreamServerConnection();
+    sockets[0]!.emitClose();
+
+    await expect(readiness).rejects.toThrow("websocket closed");
+    await expect(runtime.waitForUpstreamServerConnection()).rejects.toThrow("websocket closed");
+    resolveAdmission(transport);
+    await vi.waitFor(() => expect(transport.closed).toBe(true));
+    expect(transport.tickCount).toBe(0);
+  });
+
+  it("retires a pending admission once when physical error is followed by close", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transport = new FakeTransport([]);
+    let resolveAdmission!: (transport: Transport) => void;
+    const admission = new Promise<Transport>((resolve) => {
+      resolveAdmission = resolve;
+    });
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => new FakeTransport([]),
+            connectUpstreamWithSession: () => admission,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await waitForFakeWebSocketNegotiation();
+    const readiness = runtime.waitForUpstreamServerConnection();
+    sockets[0]!.emitError();
+    sockets[0]!.emitClose();
+
+    await expect(readiness).rejects.toThrow("websocket transport error");
+    resolveAdmission(transport);
+    await vi.waitFor(() => expect(transport.closed).toBe(true));
+    expect(transport.closeCount).toBe(1);
+    expect(transport.tickCount).toBe(0);
+  });
+
+  it("keeps the newer admission when the replaced admission resolves last", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const staleTransport = new FakeTransport([]);
+    const currentTransport = new FakeTransport([Uint8Array.from([7])]);
+    const admissionResolvers: Array<(transport: Transport) => void> = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => new FakeTransport([]),
+            connectUpstreamWithSession: () =>
+              new Promise<Transport>((resolve) => admissionResolvers.push(resolve)),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await waitForFakeWebSocketNegotiation();
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await waitForFakeWebSocketNegotiation();
+
+    admissionResolvers[1]!(currentTransport);
+    await runtime.waitForUpstreamServerConnection();
+    expect(currentTransport.tickCount).toBeGreaterThan(0);
+    admissionResolvers[0]!(staleTransport);
+    await vi.waitFor(() => expect(staleTransport.closed).toBe(true));
+
+    // The fake database observes admitted native peers before the adapter's
+    // continuation can retire them. Closure, rather than an incidental fake
+    // tick count, proves that the stale peer never became the JS-owned upstream.
+    expect(staleTransport.closeCount).toBe(1);
+    expect(currentTransport.closed).toBe(false);
+    expect(sockets[0]!.closed).toBe(true);
+    expect(sockets[1]!.closed).toBe(false);
+  });
+
+  it("ignores a replaced admission that rejects after the current admission succeeds", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const currentTransport = new FakeTransport([]);
+    const admissions: Array<{
+      resolve: (transport: Transport) => void;
+      reject: (error: Error) => void;
+    }> = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => new FakeTransport([]),
+            connectUpstreamWithSession: () =>
+              new Promise<Transport>((resolve, reject) => admissions.push({ resolve, reject })),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await waitForFakeWebSocketNegotiation();
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await waitForFakeWebSocketNegotiation();
+    admissions[1]!.resolve(currentTransport);
+    await runtime.waitForUpstreamServerConnection();
+
+    admissions[0]!.reject(new Error("stale admission failed"));
+    await waitForFakeWebSocketNegotiation();
+
+    await expect(runtime.waitForUpstreamServerConnection()).resolves.toBeUndefined();
+    expect(currentTransport.closed).toBe(false);
+    expect(sockets[1]!.closed).toBe(false);
+  });
+
+  it("retires an admission that completes after runtime close", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transport = new FakeTransport([]);
+    let resolveAdmission!: (transport: Transport) => void;
+    const admission = new Promise<Transport>((resolve) => {
+      resolveAdmission = resolve;
+    });
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => new FakeTransport([]),
+            connectUpstreamWithSession: () => admission,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await waitForFakeWebSocketNegotiation();
+    const readiness = runtime.waitForUpstreamServerConnection();
+    await runtime.close();
+
+    await expect(readiness).rejects.toThrow("runtime closed");
+    resolveAdmission(transport);
+    await vi.waitFor(() => expect(transport.closed).toBe(true));
+    expect(transport.tickCount).toBe(0);
+    expect(sockets[0]!.closed).toBe(true);
+  });
+
+  it("retires an attached transport on physical close and reconnects independently", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const firstTransport = new FakeTransport([]);
+    const secondTransport = new FakeTransport([]);
+    const transports = [firstTransport, secondTransport];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => new FakeTransport([]),
+            connectUpstreamWithSession: () => transports.shift()!,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+    sockets[0]!.emitClose();
+    await vi.waitFor(() => expect(firstTransport.closed).toBe(true));
+    expect(firstTransport.closeCount).toBe(1);
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+    sockets[0]!.emitError();
+    sockets[0]!.emitClose();
+
+    expect(secondTransport.closed).toBe(false);
+    expect(sockets[1]!.closed).toBe(false);
   });
 
   it("fails active subscriptions when the websocket reports a fatal wire error", async () => {
@@ -433,6 +813,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(updates.mock.calls[0]![0]).toBeInstanceOf(Error);
     expect((updates.mock.calls[0]![0] as Error).message).toBe("server died");
     expect(updates.mock.calls[0]![1]).toBeNull();
+    expect(transport.closed).toBe(false);
+    expect(sockets[0]!.closed).toBe(false);
+    await expect(runtime.waitForUpstreamServerConnection()).resolves.toBeUndefined();
   });
 
   it("settle-gates global native subscription chunks before app callbacks", () => {
@@ -6305,6 +6688,7 @@ const arraySchema = {
 
 class FakeTransport implements Transport {
   closed = false;
+  closeCount = 0;
   readonly received: Uint8Array[] = [];
   readonly receivedBatches: Uint8Array[][] = [];
   tickCount = 0;
@@ -6312,6 +6696,7 @@ class FakeTransport implements Transport {
   constructor(private readonly outgoing: Uint8Array[]) {}
 
   close(): boolean {
+    this.closeCount += 1;
     this.closed = true;
     return true;
   }
@@ -6336,11 +6721,23 @@ class FakeTransport implements Transport {
   }
 }
 
+type FakeWebSocketEventMap = {
+  message: { data: unknown };
+  error: unknown;
+  close: { code: number; reason: string };
+};
+
 class FakeWebSocket {
   binaryType: "arraybuffer" | "blob" = "arraybuffer";
   readonly readyState = 1;
   readonly sent: Array<Uint8Array | string> = [];
-  private readonly messageListeners: Array<(event: { data: unknown }) => void> = [];
+  private readonly listeners: {
+    [Type in keyof FakeWebSocketEventMap]: Array<(event: FakeWebSocketEventMap[Type]) => void>;
+  } = {
+    message: [],
+    error: [],
+    close: [],
+  };
   closed = false;
 
   private sawClientPrelude = false;
@@ -6366,12 +6763,24 @@ class FakeWebSocket {
     this.closed = true;
   }
 
-  addEventListener(type: string, listener: (event: { data: unknown }) => void): void {
-    if (type === "message") this.messageListeners.push(listener);
+  addEventListener<Type extends keyof FakeWebSocketEventMap>(
+    type: Type,
+    listener: (event: FakeWebSocketEventMap[Type]) => void,
+  ): void {
+    this.listeners[type].push(listener);
   }
 
   emitMessage(data: Uint8Array): void {
-    for (const listener of this.messageListeners) listener({ data });
+    for (const listener of this.listeners.message) listener({ data });
+  }
+
+  emitError(): void {
+    for (const listener of this.listeners.error) listener(new Error("network failed"));
+  }
+
+  emitClose(code = 1006, reason = "network lost"): void {
+    this.closed = true;
+    for (const listener of this.listeners.close) listener({ code, reason });
   }
 }
 
@@ -7130,6 +7539,14 @@ function fakeDb<T extends object>(db: T): T & NativeDbForTest {
   };
   const implementation = db as T & {
     connectUpstream?(): Transport;
+    connectUpstreamWithSession?(
+      protocolVersion: number,
+      features: number,
+      remoteNode: Uint8Array,
+      remoteEpoch: bigint,
+      localNode: Uint8Array,
+      localEpoch: bigint,
+    ): Transport | Promise<Transport>;
     tick?(): void | Promise<void>;
     mergeableTx?(openBatchId: string): TxForTest;
     mergeableTxForIdentity?(openBatchId: string, author: Uint8Array): TxForTest;
@@ -7173,6 +7590,26 @@ function fakeDb<T extends object>(db: T): T & NativeDbForTest {
   if (implementation.connectUpstream) {
     result.connectUpstream = () => {
       upstream = implementation.connectUpstream!();
+      return upstream;
+    };
+  }
+  if (implementation.connectUpstreamWithSession) {
+    result.connectUpstreamWithSession = async (
+      protocolVersion: number,
+      features: number,
+      remoteNode: Uint8Array,
+      remoteEpoch: bigint,
+      localNode: Uint8Array,
+      localEpoch: bigint,
+    ) => {
+      upstream = await implementation.connectUpstreamWithSession!(
+        protocolVersion,
+        features,
+        remoteNode,
+        remoteEpoch,
+        localNode,
+        localEpoch,
+      );
       return upstream;
     };
   }

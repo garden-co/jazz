@@ -333,16 +333,19 @@ pub(super) fn select_current_access_path(
     if !has_declared_id && let Some(value) = equalities.get("id").cloned() {
         return Some(CurrentAccessPath::PrimaryKey(vec![value]));
     }
+    let mut probes = Vec::new();
     for column in table.global_current_indexed_columns() {
         if let Some(value) = equalities.get(&column).cloned() {
-            return Some(CurrentAccessPath::Index {
-                column,
-                prefix: vec![Value::Nullable(Some(Box::new(value)))],
-                source_limit: None,
-            });
+            probes.push((column, vec![Value::Nullable(Some(Box::new(value)))]));
         }
     }
-    None
+    let (column, prefix) = probes.first()?.clone();
+    Some(CurrentAccessPath::Index {
+        column,
+        prefix,
+        intersections: probes.into_iter().skip(1).collect(),
+        source_limit: None,
+    })
 }
 
 pub(super) fn static_scan_for_prefix(prefix: Vec<Value>, full_key_len: usize) -> StaticScanSpec {

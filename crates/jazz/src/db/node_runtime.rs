@@ -1516,6 +1516,14 @@ where
     }
 
     fn prune_settled_outbox_uploads(&self) {
+        // With no peer connection, no transaction in the upload outbox can
+        // advance to Global during this tick. Keep every entry for a future
+        // reconnect without re-reading its unchanged fate from storage. This
+        // also prevents an offline host that ticks after each local write from
+        // turning the outbox into an O(writes²) transaction-state scan.
+        if self.connections.borrow().is_empty() {
+            return;
+        }
         let mut outbox = self.outbox.borrow_mut();
         if outbox.is_empty() {
             return;

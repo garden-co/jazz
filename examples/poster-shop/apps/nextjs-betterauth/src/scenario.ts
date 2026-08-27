@@ -10,12 +10,12 @@ export const posterShopScenario = {
   operations: [
     "invite-editors",
     "concurrent-shape-insert",
-    "publish-cursors",
     "save-checkpoint",
     "offline-replay",
+    "persistent-reopen",
     "revoke-editor",
   ],
-  queries: ["canvas-layers", "ordered-shapes", "asset-metadata", "cursor-fanout", "checkpoints"],
-  faults: ["authorization", "disconnect", "reconnect"],
-  soak: { editors: 8, transformsPerEditor: 40, cursorHz: 20, rounds: 3 },
+  queries: ["canvas-layers", "ordered-shapes", "shape-window", "checkpoints"],
+  faults: ["authorization", "disconnect", "restart", "reconnect"],
+  soak: { editors: 8, transformsPerEditor: 40, rounds: 3 },
 } as const;

@@ -2253,15 +2253,16 @@ where
             .node
             .lock()
             .await
-            .query_rows_for_client(
+            .query_rows_for_client_physical_row(
                 &query.shape,
                 &query.binding,
                 DurabilityTier::Local,
                 identity,
+                row,
             )
             .await?
             .into_iter()
-            .find(|candidate| candidate.row_uuid() == row))
+            .next())
     }
 
     pub(super) async fn local_row_for_trusted_identity(
@@ -2276,16 +2277,16 @@ where
             .node
             .lock()
             .await
-            .query_rows_with_prepared_plan_for_identity(
+            .query_rows_for_link_physical_row(
                 &query.shape,
                 &query.binding,
                 DurabilityTier::Local,
-                None,
                 identity,
+                row,
             )
             .await?
             .into_iter()
-            .find(|candidate| candidate.row_uuid() == row))
+            .next())
     }
 
     pub(super) async fn visible_branch_view_cells_for_identity(
