@@ -378,7 +378,26 @@ impl<'de> serde::Deserialize<'de> for AuthorSubject {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthorSubject, AuthorSubjectError};
+    use super::{AuthorSubject, AuthorSubjectError, NodeUuid, RowUuid, SchemaVersionId};
+
+    #[test]
+    fn uuid_newtypes_preserve_hard_coded_wire_bytes_and_lexicographic_order() {
+        let low = [
+            0x00, 0xff, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x01,
+        ];
+        let high = [
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        assert!(low.as_slice() < high.as_slice());
+        assert_eq!(NodeUuid::from_bytes(low).to_bytes(), low);
+        assert_eq!(RowUuid::from_bytes(low).to_bytes(), low);
+        assert_eq!(SchemaVersionId::from_bytes(low).to_bytes(), low);
+        assert!(NodeUuid::from_bytes(low) < NodeUuid::from_bytes(high));
+        assert!(RowUuid::from_bytes(low) < RowUuid::from_bytes(high));
+        assert!(SchemaVersionId::from_bytes(low) < SchemaVersionId::from_bytes(high));
+    }
 
     #[test]
     fn author_subject_is_canonical_json_and_interned() {
