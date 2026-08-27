@@ -3456,6 +3456,7 @@ where
                             &self.node,
                             &self.subscriptions,
                             &self.active_authority_view_receipts,
+                            progress_waker.as_ref(),
                             outcome,
                             false,
                         )
