@@ -573,6 +573,101 @@ fn parent_validation_scopes_same_table_transactions_to_the_physical_row() {
 }
 
 #[test]
+fn replicated_parent_validation_scopes_wide_transactions_to_the_physical_row() {
+    let schema = branch_view_schema();
+    let (_writer_dir, mut writer) =
+        open_history_complete_node_with_schema(NodeUuid::from_bytes([0x62; 16]), schema.clone());
+    let (_child_writer_dir, mut child_writer) =
+        open_history_complete_node_with_schema(NodeUuid::from_bytes([0x63; 16]), schema.clone());
+    let (_receiver_dir, mut receiver) =
+        open_history_complete_node_with_schema(NodeUuid::from_bytes([0x64; 16]), schema);
+    let target = row(0x65);
+    let sibling = row(0x66);
+    let branch_a = branch_selector(0x67);
+    let branch_b = branch_selector(0x68);
+    let owner = AuthorSubject::for_test_bytes([0x69; 16]);
+    let cells = |title: &str| {
+        BTreeMap::from([
+            ("title".to_owned(), v(title)),
+            ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
+        ])
+    };
+
+    let mut parent_commits = vec![
+        MergeableCommit::new("todos", target, 10)
+            .branch(branch_b)
+            .cells(cells("foreign target parent")),
+        MergeableCommit::new("todos", sibling, 11)
+            .branch(branch_a.clone())
+            .deletion(DeletionEvent::Deleted),
+    ];
+    parent_commits.extend((0..128).map(|index| {
+        MergeableCommit::new("todos", row(0x80 + index), 12 + u64::from(index))
+            .branch(branch_a.clone())
+            .cells(cells("unrelated replicated sibling"))
+    }));
+    let parent = writer.commit_mergeable_many_settled(parent_commits).unwrap();
+    receiver
+        .apply_sync_message_settled(writer.commit_unit_for(parent).unwrap())
+        .unwrap();
+
+    let (_first_child, first_unit) = child_writer
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", target, 200)
+                .branch(branch_a.clone())
+                .parents(vec![parent])
+                .cells(cells("replicated child cache hit")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit {
+        tx: first_tx,
+        versions: first_versions,
+    } = first_unit
+    else {
+        panic!("commit unit expected");
+    };
+    reset_parent_version_lookup_materialized_row_count();
+    let first_error = receiver
+        .ingest_commit_unit_settled(first_tx, first_versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .err()
+        .expect("a remote target parent under another branch must be rejected");
+    assert!(matches!(first_error, Error::InvalidMergeableCommit(_)));
+    assert_eq!(
+        parent_version_lookup_materialized_row_count(),
+        1,
+        "replicated cache-hit validation must materialize only the target parent row"
+    );
+
+    receiver.invalidate_tx_version_tables_cache(parent);
+    let (_second_child, second_unit) = child_writer
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", target, 201)
+                .branch(branch_a)
+                .parents(vec![parent])
+                .cells(cells("replicated child storage fallback")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit {
+        tx: second_tx,
+        versions: second_versions,
+    } = second_unit
+    else {
+        panic!("commit unit expected");
+    };
+    reset_parent_version_lookup_materialized_row_count();
+    let second_error = receiver
+        .ingest_commit_unit_settled(second_tx, second_versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .err()
+        .expect("a storage fallback must reject the remote foreign target parent");
+    assert!(matches!(second_error, Error::InvalidMergeableCommit(_)));
+    assert_eq!(
+        parent_version_lookup_materialized_row_count(),
+        1,
+        "replicated storage validation must materialize only the target parent row"
+    );
+}
+
+#[test]
 fn malformed_branch_key_rejects_multi_key_commit_without_residue() {
     let schema = branch_view_schema();
     let (_dir, mut node) =
