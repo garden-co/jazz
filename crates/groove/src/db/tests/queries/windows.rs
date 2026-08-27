@@ -235,6 +235,67 @@ async fn top_by_hydrates_limit_two() {
 }
 
 #[futures_test::test]
+async fn unbounded_top_by_propagates_payload_replacement_with_stable_order_key() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 1, "before"));
+    batch.insert("history", history_values(1, 20, 1, "second"));
+    database.commit_batch(batch).await.unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(history_top_by_stamp_asc_unbounded())
+        .await
+        .unwrap();
+    let _initial = subscription.recv().unwrap();
+
+    let mut batch = database.open_batch();
+    batch.update("history", history_values(1, 10, 1, "after"));
+    database.commit_batch(batch).await.unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [
+            (history_values(1, 10, 1, "before"), -1),
+            (history_values(1, 10, 1, "after"), 1),
+        ]
+    );
+}
+
+#[futures_test::test]
+async fn finite_top_by_applies_stable_payload_replacement_only_inside_window() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 1, "inside"));
+    batch.insert("history", history_values(1, 20, 1, "outside"));
+    database.commit_batch(batch).await.unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(history_top_by_stamp_asc(1))
+        .await
+        .unwrap();
+    let _initial = subscription.recv().unwrap();
+
+    let mut batch = database.open_batch();
+    batch.update("history", history_values(1, 10, 1, "inside-after"));
+    database.commit_batch(batch).await.unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [
+            (history_values(1, 10, 1, "inside"), -1),
+            (history_values(1, 10, 1, "inside-after"), 1),
+        ]
+    );
+
+    let mut batch = database.open_batch();
+    batch.update("history", history_values(1, 20, 1, "outside-after"));
+    database.commit_batch(batch).await.unwrap();
+    assert!(subscription.try_recv().is_err());
+}
+
+#[futures_test::test]
 async fn top_by_finite_zero_stays_empty() {
     let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
     let mut database = Database::new(history_schema(), storage).await.unwrap();
