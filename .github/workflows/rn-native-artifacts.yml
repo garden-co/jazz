@@ -51,6 +51,7 @@ jobs:
       - run: pnpm --filter jazz-rn build:relay:android
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/27.1.12297006
+      - run: JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" node crates/jazz-rn/scripts/verify-relay-artifacts.mjs android
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-rn-relay-android
@@ -81,6 +82,7 @@ jobs:
           toolchain: 1.93.1
           targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
       - run: pnpm --filter jazz-rn build:relay:ios
+      - run: JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" node crates/jazz-rn/scripts/verify-relay-artifacts.mjs ios
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-rn-relay-ios
@@ -89,3 +91,53 @@ jobs:
             crates/jazz-rn/ios/jazz-native-relay.manifest.json
             crates/jazz-rn/native/include
           if-no-files-found: error
+
+  android-link:
+    name: Android relay linked AAR
+    needs: android
+    if: needs.android.result == 'success'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-toolchain: ""
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-rn-relay-android
+          path: crates/jazz-rn
+      - name: Generate the Expo Android host with the staged relay package
+        run: pnpm --filter todo-client-localfirst-expo verify:expo:android
+      - name: Link the relay through the application AAR
+        run: ./gradlew :app:assembleDebug --no-daemon
+        working-directory: examples/todo-client-localfirst-expo/android
+
+  ios-link:
+    name: iOS relay linked app
+    needs: ios
+    if: needs.ios.result == 'success'
+    runs-on: blacksmith-6vcpu-macos-15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-toolchain: ""
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-rn-relay-ios
+          path: crates/jazz-rn
+      - name: Generate the Expo iOS host with the staged relay package
+        run: pnpm --filter todo-client-localfirst-expo verify:expo:ios
+      - name: Install the staged native pod
+        run: pod install
+        working-directory: examples/todo-client-localfirst-expo/ios
+      - name: Link the relay through an iOS simulator app
+        run: |
+          xcodebuild \
+            -workspace todoclientlocalfirstexpo.xcworkspace \
+            -scheme todoclientlocalfirstexpo \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            build
+        working-directory: examples/todo-client-localfirst-expo/ios
