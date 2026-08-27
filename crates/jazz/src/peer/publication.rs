@@ -898,7 +898,14 @@ impl PeerState {
             // membership as the source, so the child does not reapply a
             // root offset/limit over an already-windowed result.
             RehydratePurpose::Query
-                if self.role == PeerRole::Relay && tier == DurabilityTier::Edge =>
+                if self.role == PeerRole::Relay
+                    && tier == DurabilityTier::Edge
+                    // Reusing a settled source is necessary only when an
+                    // absolute offset would otherwise be applied again by
+                    // the downstream relay. A zero-offset LIMIT is already
+                    // idempotent, while generic relay links must continue to
+                    // evaluate their ordinary Edge view from local state.
+                    && shape.query().offset != 0 =>
             {
                 node.open_seeded_relay_edge_subscription_view(shape, binding, self.identity(), read_view)
                     .await
@@ -923,7 +930,9 @@ impl PeerState {
                 )
                 .await,
         };
-        let source_binding_view = (self.role == PeerRole::Relay && tier == DurabilityTier::Edge)
+        let source_binding_view = (self.role == PeerRole::Relay
+            && tier == DurabilityTier::Edge
+            && shape.query().offset != 0)
             .then(|| {
                 crate::protocol::BindingViewKey::new(
                     shape.shape_id(),
