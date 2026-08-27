@@ -53,6 +53,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures::future::LocalBoxFuture;
 use futures::lock::Mutex as LocalMutex;
+use futures::task::{ArcWake, waker};
 use jazz::db::StreamingMutationKind as CoreStreamingMutationKind;
 use jazz::db::{
     ConnectionSessionContext as CoreConnectionSessionContext, Db as CoreDb,
@@ -225,7 +226,20 @@ struct NapiWireTransport {
 }
 
 struct NapiTickScheduler {
-    callback: ThreadsafeFunction<String, ()>,
+    callback: std::sync::Arc<ThreadsafeFunction<String, ()>>,
+}
+
+struct NapiQueryRuntimeWake {
+    callback: std::sync::Arc<ThreadsafeFunction<String, ()>>,
+}
+
+impl ArcWake for NapiQueryRuntimeWake {
+    fn wake_by_ref(arc_self: &std::sync::Arc<Self>) {
+        let _ = arc_self.callback.call(
+            Ok("immediate".to_owned()),
+            ThreadsafeFunctionCallMode::NonBlocking,
+        );
+    }
 }
 
 impl CoreTickScheduler for NapiTickScheduler {
@@ -245,6 +259,12 @@ impl CoreTickScheduler for NapiTickScheduler {
             Ok(format!("after:{delay_ms}")),
             ThreadsafeFunctionCallMode::NonBlocking,
         );
+    }
+
+    fn query_runtime_waker(&self) -> Option<Waker> {
+        Some(waker(std::sync::Arc::new(NapiQueryRuntimeWake {
+            callback: self.callback.clone(),
+        })))
     }
 }
 
@@ -2229,7 +2249,9 @@ impl NapiDb {
 
     #[napi(js_name = "setTickScheduler")]
     pub fn set_tick_scheduler(&self, callback: ThreadsafeFunction<String, ()>) -> napi::Result<()> {
-        let scheduler = Rc::new(NapiTickScheduler { callback });
+        let scheduler = Rc::new(NapiTickScheduler {
+            callback: std::sync::Arc::new(callback),
+        });
         let db = self.inner.borrow();
         let db = db
             .as_ref()
