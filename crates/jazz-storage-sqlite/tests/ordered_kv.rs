@@ -3,6 +3,9 @@ use groove::storage::{
     Error, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, ScanRequest, collect_scan,
 };
 use jazz_storage_sqlite::SqliteStorage;
+use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::path::Path;
 
 fn open(dir: &tempfile::TempDir) -> SqliteStorage {
     SqliteStorage::open(dir.path().join("jazz.sqlite"), &["records"]).unwrap()
@@ -335,26 +338,42 @@ fn rejects_wrong_sqlite_header_before_changing_foreign_store() {
     );
 }
 
-#[test]
-fn rejects_table_free_foreign_header_without_claiming_it() {
+fn directory_bytes(path: &Path) -> BTreeMap<OsString, Vec<u8>> {
+    std::fs::read_dir(path)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            (entry.file_name(), std::fs::read(entry.path()).unwrap())
+        })
+        .collect()
+}
+
+fn assert_table_free_foreign_header_is_not_claimed(
+    expected_application_id: i64,
+    expected_user_version: i64,
+) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("foreign-empty.sqlite");
     let connection = rusqlite::Connection::open(&path).unwrap();
     connection
-        .pragma_update(None, "application_id", 0x1122_3344i64)
+        .pragma_update(None, "application_id", expected_application_id)
         .unwrap();
     connection
-        .pragma_update(None, "user_version", 7i64)
+        .pragma_update(None, "user_version", expected_user_version)
         .unwrap();
     let before_mode: String = connection
         .pragma_query_value(None, "journal_mode", |row| row.get(0))
         .unwrap();
     drop(connection);
+    let before_bytes = std::fs::read(&path).unwrap();
+    let before_directory = directory_bytes(directory.path());
 
     assert!(matches!(
         SqliteStorage::open(&path, &["records"]),
         Err(Error::InvalidStorageLayout(_))
     ));
+    assert_eq!(std::fs::read(&path).unwrap(), before_bytes);
+    assert_eq!(directory_bytes(directory.path()), before_directory);
 
     let connection = rusqlite::Connection::open(&path).unwrap();
     let application_id: i64 = connection
@@ -363,8 +382,8 @@ fn rejects_table_free_foreign_header_without_claiming_it() {
     let user_version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(application_id, 0x1122_3344);
-    assert_eq!(user_version, 7);
+    assert_eq!(application_id, expected_application_id);
+    assert_eq!(user_version, expected_user_version);
     let after_mode: String = connection
         .pragma_query_value(None, "journal_mode", |row| row.get(0))
         .unwrap();
@@ -377,6 +396,16 @@ fn rejects_table_free_foreign_header_without_claiming_it() {
         0,
         "rejection creates no Jazz tables"
     );
+}
+
+#[test]
+fn rejects_table_free_foreign_application_id_without_claiming_it() {
+    assert_table_free_foreign_header_is_not_claimed(0x1122_3344, 0);
+}
+
+#[test]
+fn rejects_table_free_foreign_user_version_without_claiming_it() {
+    assert_table_free_foreign_header_is_not_claimed(0, 7);
 }
 
 #[test]
