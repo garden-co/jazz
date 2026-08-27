@@ -26,6 +26,7 @@ async fn reserved_application_storage_names_fail_before_durable_open() {
         "__groove_storage_internal_v3",
         "indices",
         "default",
+        "contains\0nul",
     ] {
         let schema = DatabaseSchema::new([storage_name_table(name)]);
         let (storage, control) = TestStorage::controlled(&["__groove_class_meta"]);
@@ -105,6 +106,54 @@ async fn application_storage_name_length_is_portable_before_open() {
     assert!(matches!(
         error,
         Error::InvalidApplicationStorageName { name, .. } if name == too_long
+    ));
+    assert!(control.observed().is_empty());
+}
+
+#[futures_test::test]
+async fn live_table_registration_cannot_bypass_application_storage_namespace_checks() {
+    let too_long = "a".repeat(crate::storage::MAX_APPLICATION_STORAGE_NAME_BYTES + 1);
+    for name in [
+        "__groove_class_meta".to_owned(),
+        "indices".to_owned(),
+        "default".to_owned(),
+        "contains\0nul".to_owned(),
+        too_long,
+    ] {
+        let (storage, control) = TestStorage::controlled(&[LARGE_VALUE_METADATA_CF]);
+        let mut database = Database::new(DatabaseSchema::new([]), storage)
+            .await
+            .expect("empty database opens");
+        control.take_observed();
+
+        let error = database
+            .register_table(storage_name_table(name.clone()))
+            .expect_err("reserved table must not enter the live schema");
+        assert!(matches!(
+            error,
+            Error::InvalidApplicationStorageName { name: rejected, .. } if rejected == name
+        ));
+        assert!(database.table_schema(&name).is_err());
+        assert!(
+            control.observed().is_empty(),
+            "live registration for {name:?} reached durable storage: {:?}",
+            control.observed()
+        );
+    }
+
+    let direct = storage_name_direct_store("already_direct");
+    let schema = DatabaseSchema::new([]).with_direct_record_store(direct);
+    let (storage, control) = TestStorage::controlled(&["already_direct", LARGE_VALUE_METADATA_CF]);
+    let mut database = Database::new(schema, storage)
+        .await
+        .expect("schema with direct store opens");
+    control.take_observed();
+    let error = database
+        .register_table(storage_name_table("already_direct"))
+        .expect_err("table must not alias a direct record store");
+    assert!(matches!(
+        error,
+        Error::DuplicateApplicationStorageName(name) if name == "already_direct"
     ));
     assert!(control.observed().is_empty());
 }

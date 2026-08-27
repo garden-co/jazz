@@ -1,5 +1,30 @@
 use super::*;
 
+/// Validate application-selected physical names before an open or live schema
+/// admission can make a Groove storage mutation. Groove itself adds
+/// metadata/index families afterwards; only schema-provided table and
+/// direct-store names belong here.
+pub(super) fn validate_application_storage_names(schema: &DatabaseSchema) -> Result<(), Error> {
+    let mut seen = BTreeSet::new();
+    for name in schema.tables.iter().map(|table| table.name.as_str()).chain(
+        schema
+            .direct_record_stores
+            .iter()
+            .map(|store| store.name.as_str()),
+    ) {
+        crate::storage::validate_application_storage_name(name).map_err(|error| {
+            Error::InvalidApplicationStorageName {
+                name: name.to_owned(),
+                reason: error.to_string(),
+            }
+        })?;
+        if !seen.insert(name) {
+            return Err(Error::DuplicateApplicationStorageName(name.to_owned()));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn validate_durable_key_schema(schema: &DatabaseSchema) -> Result<(), Error> {
     for store in &schema.direct_record_stores {
         if store
@@ -112,6 +137,7 @@ impl Database {
         }
         let mut updated = self.ivm_runtime.schema().clone();
         updated.tables.push(table.clone());
+        validate_application_storage_names(&updated)?;
         validate_durable_key_schema(&updated)?;
         self.ivm_runtime
             .register_table(table)
