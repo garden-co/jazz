@@ -1204,6 +1204,16 @@ pub trait TickScheduler {
     /// microtask would create a resend hot loop. Every host therefore supplies
     /// a real timer implementation.
     fn schedule_tick_after(&self, delay_ms: u64);
+
+    /// A waker for cold query-runtime storage progress.
+    ///
+    /// A non-blocking database tick deliberately returns while a query waits
+    /// for storage. Hosts that can arrange a later owner turn provide a waker
+    /// which schedules precisely that turn when storage becomes ready. The
+    /// default keeps manually-driven hosts source-compatible.
+    fn query_runtime_waker(&self) -> Option<Waker> {
+        None
+    }
 }
 
 /// A locally-originated transaction rejection that was not consumed by an
