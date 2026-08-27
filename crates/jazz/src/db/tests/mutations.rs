@@ -269,6 +269,129 @@ fn session_branch_updates_require_read_visibility_before_staging() {
     );
 }
 
+/// A policy-free point update uses its known row id, while absent/deleted
+/// targets retain the facade's existing rejection behavior and a read-hidden
+/// target remains undisclosed even when its write policy would otherwise allow
+/// the patch.
+///
+/// authority ──seed──► policy-free / owner-scoped rows
+/// session ──update──► policy-free existing row ──► staged
+/// session ──update──► missing, deleted, or read-hidden row ──► rejected
+#[test]
+fn point_update_preimage_fast_path_preserves_target_and_read_visibility_contracts() {
+    let unscoped_schema = schema();
+    let db = open_db(0x7d, AuthorSubject::SYSTEM, &unscoped_schema);
+    let unscoped_owner = AuthorSubject::for_test_bytes([0x7d; 16]);
+    let live = row(0x7e);
+    let deleted = row(0x7f);
+    let missing = row(0x80);
+
+    for (row_id, title) in [(live, "live"), (deleted, "deleted")] {
+        let write = db
+            .insert(
+                "todos",
+                cells(title, false, unscoped_owner),
+                InsertOptions {
+                    row_id: Some(row_id),
+                    ..Default::default()
+                },
+            )
+            .expect("seed policy-free row");
+        block_on(write.wait(DurabilityTier::Local)).expect("settle policy-free seed");
+    }
+
+    let update = block_on(db.update(
+        "todos",
+        live,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        Default::default(),
+    ))
+    .expect("known policy-free point target updates");
+    block_on(update.wait(DurabilityTier::Local)).expect("settle point update");
+    let rows = prepared_read(&db, &db.table("todos"));
+    assert_eq!(
+        rows.iter()
+            .find(|candidate| candidate.row_uuid() == live)
+            .and_then(|candidate| candidate.cell(&unscoped_schema.tables[0], "done")),
+        Some(Value::Bool(true))
+    );
+
+    let missing_error = match block_on(db.update(
+        "todos",
+        missing,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        Default::default(),
+    )) {
+        Ok(_) => panic!("absent point target stays rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(missing_error.code, crate::db::ErrorCode::WriteRejected);
+    assert!(missing_error.message.contains("UPDATE"));
+
+    let deletion = db
+        .delete("todos", deleted, Default::default())
+        .expect("delete policy-free row");
+    block_on(deletion.wait(DurabilityTier::Local)).expect("settle deletion");
+    let deleted_error = match block_on(db.update(
+        "todos",
+        deleted,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        Default::default(),
+    )) {
+        Ok(_) => panic!("deleted point target stays rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(deleted_error.code, crate::db::ErrorCode::WriteRejected);
+    assert!(deleted_error.message.contains("deleted"));
+
+    let owner = AuthorSubject::for_test_bytes([0x81; 16]);
+    let intruder = AuthorSubject::for_test_bytes([0x82; 16]);
+    let scoped_schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("documents")
+                .column("owner", PublicColumnType::Uuid)
+                .column("body", PublicColumnType::Text)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_session_eq("owner", &["user_id"]))
+                        .with_insert(PublicPolicyExpr::True)
+                        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True),
+                ),
+        ),
+    );
+    let scoped = open_db(0x81, AuthorSubject::SYSTEM, &scoped_schema);
+    scoped.set_identity_claims(intruder, test_provider_claims(intruder));
+    let hidden = row(0x83);
+    let seed = scoped
+        .insert(
+            "documents",
+            BTreeMap::from([
+                ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
+                ("body".to_owned(), Value::String("private".to_owned())),
+            ]),
+            InsertOptions {
+                row_id: Some(hidden),
+                ..Default::default()
+            },
+        )
+        .expect("authority seeds hidden row");
+    block_on(seed.wait(DurabilityTier::Local)).expect("settle hidden seed");
+    let hidden_error = match block_on(scoped.update(
+        "documents",
+        hidden,
+        BTreeMap::from([("body".to_owned(), Value::String("leak".to_owned()))]),
+        UpdateOptions {
+            identity: crate::db::WriteIdentity::Session(intruder),
+            ..Default::default()
+        },
+    )) {
+        Ok(_) => panic!("read-hidden target cannot use the policy-free fast path"),
+        Err(error) => error,
+    };
+    assert_eq!(hidden_error.code, crate::db::ErrorCode::WriteRejected);
+    assert!(hidden_error.message.contains("UPDATE"));
+}
+
 #[test]
 fn db_facade_mutation_lifecycle_writes_reads_deletes_and_restores() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
